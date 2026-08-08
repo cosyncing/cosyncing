@@ -104,6 +104,23 @@ if rg -n \
   exit 1
 fi
 
+# Branch rulesets bind to check-run names, not the workflow/job display shown
+# by the Actions UI. Keep the two aggregate jobs distinct so one passing
+# workflow cannot satisfy both required checks and so the configured contexts
+# actually exist.
+test "$(rg -c '^    name: CI required$' "$workflow_dir/ci.yml")" = 1 || {
+  echo 'ERROR: ci.yml must expose the unique check-run name CI required.' >&2
+  exit 1
+}
+test "$(rg -c '^    name: Broker Release Gate required$' "$workflow_dir/broker-release-gate.yml")" = 1 || {
+  echo 'ERROR: broker-release-gate.yml must expose the unique check-run name Broker Release Gate required.' >&2
+  exit 1
+}
+if rg -n '^    name: required$' "$workflow_dir"; then
+  echo 'ERROR: ambiguous required aggregate check-run name found.' >&2
+  exit 1
+fi
+
 for workflow in ci.yml nightly.yml; do
   hosted="$workflow_dir/$workflow"
   rg -q 'sudo apt-get install -y ripgrep' "$hosted" || {
