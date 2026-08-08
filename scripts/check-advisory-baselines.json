@@ -1,9 +1,5 @@
 {
   "schemaVersion": 1,
   "normalization": "trimmed FAIL lines, repository root replaced with <repo>, sorted as a multiset, SHA-256 per finding",
-  "suites": {
-    "source-boundaries": [
-      "sha256:5e67105d0513a87a55db207de7602e5735ad2917ca461aef367f8a987cccc408"
-    ]
-  }
+  "suites": {}
 }

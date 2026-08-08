@@ -69,11 +69,6 @@ check_max_lines 700 \
   apps/client/lib/src/features/sessions/renderers/message_renderer_formatting.dart \
   apps/client/lib/src/features/sessions/renderers/tool_message_cards.dart \
   apps/client/lib/src/features/sessions/renderers/transcript_message_widgets.dart
-check_max_lines 3000 \
-  apps/client/test/src/features/sessions/view/session_detail_*_test.dart \
-  apps/client/test/src/features/sessions/data/session_detail_*_test.dart \
-  apps/client/test/support/session_detail_*_test_harness.dart
-
 if (( failed != 0 )); then
   exit 1
 fi

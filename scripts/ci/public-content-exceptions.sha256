@@ -1,6 +1,5 @@
 # Exact reviewed files containing synthetic paths/credentials or policy terms.
 fd83fd4814538c435770362841dbda001a69516a117470a756455f41ed661619  apps/client/lib/src/features/broker_profiles/model/url_normalizer.dart
-1c36a4a85bd14c01b3e12cd5b8489c47c7aaaf8d806f85d85a177ce85b1ac7b7  docs/ci/public-ci.md
 132ff619c7f405808c18821c968d18f3872a14fdd151cd815ab5c3b1ed0cbb89  packages/typescript/adapters/claude/src/implementation.ts
 233e425a7f4a2e5c9ae213c94314deca0538d02763d4c3f7b498493d1d6c4eb6  packages/typescript/adapters/pi/src/implementation.ts
 92a378082dfe564befb6cf287c62c029712af0025136a255b2bc013e272ddc9a  scripts/broker/tests/broker/test-update-contract.ts

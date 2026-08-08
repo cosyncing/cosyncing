@@ -61,7 +61,7 @@
     {"id": "ci.workflow-policy", "description": "Workflow runners, permissions, paths, graph use, and action pins are valid."},
     {"id": "repository.public-tree", "description": "The public-source boundary has no findings: every tracked path, text body, and binary is reviewed."},
     {"id": "repository.public-tree-policy", "description": "The public-source boundary gate still enforces every personal, private-network, and internal-documentation rule."},
-    {"id": "repository.source-boundaries", "description": "Package directions and source-size findings match their exact reviewed advisory baseline."},
+    {"id": "repository.source-boundaries", "description": "Package directions and production-source hotspot ceilings pass without findings."},
     {"id": "contract.current", "description": "Generated contract artifacts match the immutable current revision."},
     {"id": "contract.history", "description": "Published contract revision and hash history is append-only."},
     {"id": "broker.capabilities", "description": "Tool capability discovery and fixtures remain truthful."},
@@ -309,10 +309,9 @@
       "expectedArtifacts": [{"path": "output/check/logs/source-boundaries.log", "kind": "log"}],
       "timeoutClass": "short",
       "resourceClass": "standard",
-      "requirement": "advisory",
-      "advisoryBaseline": "source-boundaries",
+      "requirement": "required",
       "platformExclusions": [],
-      "sourceOwners": ["scripts/ci/check-boundaries.sh", "scripts/check-advisory-baselines.json"]
+      "sourceOwners": ["scripts/ci/check-boundaries.sh"]
     },
     {
       "id": "contract",

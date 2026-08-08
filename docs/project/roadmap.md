@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-07-29.
+Last updated: 2026-08-08.
 
 This roadmap contains open work only. Completed predecessor milestones are not
 repeated as future work. Each item must name an owner, an activation condition,
@@ -10,14 +10,10 @@ dispositioned; it is kept outside the public tree.
 
 ## Now: public readiness and first release proof
 
-- Pass every required GitHub-hosted workflow lane and validate workflow syntax.
-- Complete history, secret, private-hostname, personal-path, and binary
-  provenance audits with zero unresolved findings.
-- Apply the branch, tag, environment, fork-approval, and token settings in the
-  maintainers' internal release checklist.
-- Exercise a real fork pull request without secrets.
 - Resolve and record the compiled Bun runtime distribution obligations; keep the
   binary-release legal gate closed until approval.
+- Provision protected release environments and signing material only after that
+  approval. Keep all private key material out of the repository and PR jobs.
 - Run broker prerelease, the real app-triggered upgrade/unhealthy-rollback
   exercise, and stable promotion from hosted infrastructure.
 - Run packaged platform acceptance for every client and broker host included in
@@ -35,8 +31,8 @@ Scope:
 - Render explicit paths from typed filesystem-edit and file-artifact messages as
   links. Add conservative recognition of workspace-relative `path:line:column`
   references in model and tool text.
-- Activate explicit Markdown file references such as
-  `[friendly label](workspace/path)` without hiding the target location.
+- Activate explicit Markdown file references that pair a `friendly label` with
+  a `workspace/path` target without hiding the target location.
   Pre-release transcript rendering keeps these targets visible and copyable but
   deliberately non-actionable; R-01 owns the later click/open behavior.
 - Resolve every link against the selected session's broker-owned workspace and
@@ -127,14 +123,13 @@ item; other adapters remain D-06.
 | D-15: transcript, checkpoint, protocol-journal, migration, crash, and large-session operational evidence | client, broker, and storage maintainers | Before expanding durability claims beyond deterministic bounded tests |
 | D-16: transfer completion ambiguity, background uploads, token-at-rest hardening, retention, expiry, orphan cleanup, and quota policy | broker, client, and security maintainers | Before promising automatic restart/background transfer or deletion behavior |
 | D-17: paired-peer least privilege, roster/revoke/rotate UI, envelope replay defense, and recovery/migration | protocol and security maintainers | Before expanding peer access or encrypted-session claims |
-| D-18: broker host expansion to macOS and native Windows | broker/release maintainer | Packaging, service integration, and clean-host evidence are funded and pass together |
+| D-18: broker host expansion to native Windows | broker/release maintainer | Packaging, service integration, and clean-host evidence are funded and pass together; Linux and Apple Silicon macOS are already supported |
 | D-19: Claude answer-only/true-sync expansion | Claude adapter and security maintainers | A packaged, authenticated command boundary and current-runtime trajectory evidence exist |
 | D-20: macOS/Windows terminal-presence detection and other adapter-host parity | adapter/platform maintainers | The relevant broker host becomes supported |
 | D-21: agent-generated UI beyond display-only artifacts | protocol, client, and security maintainers | A stable structured UI contract and sandboxed interaction authority are approved |
-| D-22: production brand masters and platform icon exports | design/client maintainer | Before public marketing or store submission; current scaffold assets remain until reviewed exports replace them |
 | D-23: candidate-manifest app UI | release maintainer | Protected prerelease acceptance workflow needs it |
 | D-24: published-candidate app-triggered upgrade/unhealthy-rollback evidence | release maintainer | Credential-free hosted topology is available; required before every compiled broker release |
-| D-25: usage and quota-limit visibility: a stable Tokdash integration contract with packaged configuration, consent, and durable persistence, plus native agent usage-window display (Claude/Codex five-hour and weekly limits) | broker and client maintainers | Before usage or quota visibility is claimed as a supported capability, or when packaged setup configures Tokdash |
+| D-25: native agent usage-window parity beyond the packaged, consented Tokdash integration, including Claude/Codex five-hour and weekly limits | broker and client maintainers | A supported adapter exposes stable native quota evidence that can be represented without weakening the existing Tokdash path |
 | D-26: native plan-channel adoption beyond the shipped semantic fallback, starting with Codex `plan\|default` collaboration mode and any real Pi plan channel | adapter and protocol maintainers | Current-runtime evidence proves a native plan approve/revise/exit channel for that agent |
 | D-27: sealed-client follow-ups: terminal fresh-state parity for swipe and tap, goal/command lookup consolidation, shared route constants, unread-badge helper deduplication, real-broker fork-boundary confirmation, and live roster timing | client maintainers | The owning module is next changed; a correctness or advertised-capability gap escalates into the matching release blocker |
 | D-28: multiple concurrent brokers in one client, reframing pairing from a first-run gate into an ongoing broker-add surface: a client served by broker A pairs to broker B and switches between them, with per-broker identity, credential isolation, session-roster attribution, and a defined story for name collisions and offline brokers | client, protocol, and security maintainers | More than one broker must be reachable from a single client, or the pairing surface is redesigned; do not weaken the one-QR-one-device peer model to satisfy it |
