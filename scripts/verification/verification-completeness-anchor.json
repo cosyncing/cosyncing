@@ -208,7 +208,7 @@
     },
     {
       "id": "workflow-policy",
-      "fingerprint": "sha256:78ee566e42bf49df2c86ff291680ae19019a31ec2dd9a8c291d08abc2727fade"
+      "fingerprint": "sha256:b1b6163389f495afb5cdf834c20e4179e0e9d651b9595aa59f0417e35c6b0585"
     }
   ],
   "requiredBrokerSubSuiteBindings": [

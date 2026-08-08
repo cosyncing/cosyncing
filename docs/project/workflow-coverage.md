@@ -2,9 +2,9 @@
 
 The active `.github/workflows` tree uses the public GitHub-hosted profile.
 `.github/workflow-mode` records `public-hosted`, and the workflow audit rejects
-self-hosted runner selection in that mode. The saved copies under
-`scripts/ci/github-hosted-workflows/` remain a review/recovery reference. The
-table below describes the active coverage.
+self-hosted runner selection. The tracked workflows are the canonical profile;
+the retired private profile is preserved only in the private internal-docs
+archive. The table below describes the active coverage.
 
 | Predecessor gate | Consolidated destination | Required | Removal condition |
 |---|---|---:|---|

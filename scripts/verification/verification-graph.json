@@ -257,10 +257,13 @@
       "platformExclusions": [],
       "sourceOwners": [
         "scripts/ci/audit-workflows.sh",
+        ".github/workflow-mode",
+        ".github/workflows/broker-release-gate.yml",
+        ".github/workflows/broker-release-promote.yml",
+        ".github/workflows/broker-release.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/nightly.yml",
-        "scripts/ci/github-hosted-workflows/ci.yml",
-        "scripts/ci/github-hosted-workflows/nightly.yml"
+        ".github/workflows/platform-runtime.yml"
       ]
     },
     {

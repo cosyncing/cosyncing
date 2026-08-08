@@ -929,10 +929,7 @@ async function caseReleaseBuildShapeIsShared(): Promise<void> {
     'the app-level update path never forces waiting-worker activation',
   );
 
-  for (const workflowPath of [
-    '.github/workflows/ci.yml',
-    'scripts/ci/github-hosted-workflows/ci.yml',
-  ]) {
+  for (const workflowPath of ['.github/workflows/ci.yml']) {
     const workflow = await readFile(
       join(REPOSITORY_ROOT, workflowPath),
       'utf8',

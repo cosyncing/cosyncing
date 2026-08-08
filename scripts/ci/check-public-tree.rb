@@ -30,8 +30,7 @@ ALWAYS_DENIED_TEXT = {
   'excluded archived-tree reference' => %r{_archive/}
 }.freeze
 # The internal documentation repository is a gitignored nested checkout. Its
-# existence is legal in both modes and is never a finding; only tracked
-# internal-docs content is rejected, and only in public mode.
+# existence is legal, but tracked internal-docs content is always rejected.
 INTERNAL_DOCS_ROOT = 'docs-internal'
 # Literal synthetic tailnet hostnames the suites already use. Exact strings
 # only: no wildcard here can admit a real MagicDNS name, which always has the
@@ -70,7 +69,7 @@ tracked_paths = {}
 cached.split("\0").reject(&:empty?).each { |entry| tracked_paths[entry] = true }
 failures = []
 workflow_mode = File.read(WORKFLOW_MODE_PATH, encoding: 'UTF-8').strip
-unless %w[private-self-hosted public-hosted].include?(workflow_mode)
+unless workflow_mode == 'public-hosted'
   fail!("unsupported workflow mode: #{workflow_mode}", failures)
 end
 
@@ -94,7 +93,7 @@ seen_binaries = {}
 paths.each do |path|
   parts = path.split('/')
   if parts.first == INTERNAL_DOCS_ROOT
-    if workflow_mode == 'public-hosted' && tracked_paths[path]
+    if tracked_paths[path]
       fail!("tracked internal-docs path in public workflow mode: #{path}", failures)
     end
     next
@@ -151,7 +150,7 @@ paths.each do |path|
   end
   fail!("private tailnet hostname: #{path}", failures) if real_tailnet_hostname?(text)
 
-  if workflow_mode == 'public-hosted' && path.start_with?('.github/workflows/') && text.match?(/self-hosted/)
+  if path.start_with?('.github/workflows/') && text.match?(/self-hosted/)
     fail!("self-hosted runner in public workflow mode: #{path}", failures)
   end
 end

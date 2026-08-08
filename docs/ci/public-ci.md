@@ -4,10 +4,9 @@
 
 The active workflows use standard GitHub-hosted runners, and
 `.github/workflow-mode` is `public-hosted`. The audit rejects executable
-self-hosted jobs in this profile and verifies the public workflow structure.
-The saved workflow copies under `scripts/ci/github-hosted-workflows/` remain a
-review and recovery reference rather than an inactive profile awaiting a
-visibility change.
+self-hosted jobs and verifies the public workflow structure. The former private
+self-hosted profile and one-time restoration tooling are retired from the
+public tree; historical copies live only in the private internal-docs archive.
 
 ## Required workflow profile
 

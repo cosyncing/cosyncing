@@ -91,25 +91,12 @@ def internal_docs_ref(section)
   'docs/' + section + '/notes.md'
 end
 
-# (a) Private mode ignores docs-internal/ but still scans public files.
+# (a) The retired private workflow mode is rejected.
 with_repo('private-self-hosted') do |dir|
-  write(dir, '.gitignore', "docs-internal/\n")
-  write(dir, 'docs-internal/plan.md', "governing plan at #{unix_home('margaret')}\n")
-  write(dir, 'src/clean.txt', "nothing personal here\n")
-  git(dir, 'add', '-f', 'docs-internal/plan.md', 'src/clean.txt')
   output, status = run_gate(dir)
   record(
-    'private mode ignores docs-internal content even when tracked',
-    status.success?, output
-  )
-
-  write(dir, 'src/leaky.txt', "reads #{unix_home('margaret')}\n")
-  output, status = run_gate(dir)
-  record(
-    'private mode still scans public files beside docs-internal',
-    !status.success? &&
-      output.include?('personal Unix path: src/leaky.txt') &&
-      !output.include?('docs-internal'),
+    'retired private workflow mode fails closed',
+    !status.success? && output.include?('unsupported workflow mode: private-self-hosted'),
     output
   )
 end
@@ -178,7 +165,7 @@ POSITIVE_CASES = [
    "see #{internal_docs_ref('20260805-prerelease')}\n"]
 ].freeze
 
-with_repo('private-self-hosted') do |dir|
+with_repo('public-hosted') do |dir|
   POSITIVE_CASES.each { |(_, path, content)| write(dir, path, content) }
   output, status = run_gate(dir)
   missing = POSITIVE_CASES.reject { |(label, path, _)| output.include?("#{label}: #{path}") }
@@ -214,7 +201,7 @@ REJECTED_TAILNET_SAMPLES = %w[
   devbox
 ].freeze
 
-with_repo('private-self-hosted') do |dir|
+with_repo('public-hosted') do |dir|
   ALLOWED_TAILNET_SAMPLES.each_with_index do |host, index|
     write(dir, "src/allowed-#{index}.txt", "#{tailnet_url(host)}/cosy\n")
   end
@@ -227,7 +214,7 @@ with_repo('private-self-hosted') do |dir|
 end
 
 REJECTED_TAILNET_SAMPLES.each_with_index do |host, index|
-  with_repo('private-self-hosted') do |dir|
+  with_repo('public-hosted') do |dir|
     write(dir, 'src/candidate.txt', "#{tailnet_url(host)}/cosy\n")
     output, status = run_gate(dir)
     record(
@@ -236,24 +223,6 @@ REJECTED_TAILNET_SAMPLES.each_with_index do |host, index|
       output
     )
   end
-end
-
-# The private profile's sanctioned workflow content must not become a finding.
-with_repo('private-self-hosted') do |dir|
-  write(
-    dir, '.github/workflows/ci.yml',
-    "jobs:\n  build:\n    runs-on: [self-hosted, Linux, X64]\n"
-  )
-  write(
-    dir, '.github/workflows/release.yml',
-    "jobs:\n  package:\n    runs-on: [self-hosted, macOS, ARM64]\n"
-  )
-  write(dir, 'docs/architecture/monorepo.md', "see docs/2026-roadmap/ later\n")
-  output, status = run_gate(dir)
-  record(
-    'private mode accepts generic self-hosted runner labels and the mode flag',
-    status.success?, output
-  )
 end
 
 with_repo('public-hosted') do |dir|
