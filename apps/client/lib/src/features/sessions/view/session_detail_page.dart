@@ -1905,6 +1905,22 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
             _lastSubmittedPrompt = null;
           }
         },
+      )
+      ..listen<SessionDetailConnectionStatus>(
+        sessionDetailControllerProvider(
+          _key,
+        ).select((detail) => detail.connectionStatus),
+        (previous, next) {
+          if (previous == SessionDetailConnectionStatus.connected ||
+              next != SessionDetailConnectionStatus.connected) {
+            return;
+          }
+          unawaited(
+            ref
+                .read(sessionDetailControllerProvider(_key).notifier)
+                .promoteBackgroundObserveToInteractive(),
+          );
+        },
       );
     // Broker-qualified by (profile, endpoint): a session frame stamped with
     // another broker is dropped here rather than displayed, persisted, or keyed

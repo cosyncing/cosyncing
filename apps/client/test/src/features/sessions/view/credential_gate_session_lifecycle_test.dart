@@ -403,14 +403,7 @@ final class _GatedCloseConnection extends ScriptedSessionDetailConnection {
 
   final String? resolverToken;
   Completer<void>? closeGate;
-  int connectCount = 0;
   int reattachCount = 0;
-
-  @override
-  Future<void> connect() async {
-    connectCount++;
-    await super.connect();
-  }
 
   @override
   Future<void> reattach({String? mode, String? reason}) async {

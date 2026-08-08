@@ -1,13 +1,19 @@
 import 'dart:async';
 
+import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/view/open_session_sync_supervisor.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/session_detail_controller_test_harness.dart';
 import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
@@ -477,6 +483,116 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.widget<TextButton>(retry).onPressed, isNotNull);
     });
+
+    testWidgets(
+      'resident Observe restores visible Drive without a tab remount',
+      (tester) async {
+        _setViewport(tester, const Size(1280, 800));
+        final clientReadyProvider = StateProvider<bool>((ref) => false);
+        final driveIntents = InMemoryControllerDriveIntentStore()
+          ..seedAppCreated('claude', 'session-1');
+        final openSessions = _GatedOpenSessionsStore();
+        final connection = ScriptedSessionDetailConnection(
+          events: [
+            SessionWireEvent(
+              info: SessionInfo.fromJson(const {
+                'id': 'session-1',
+                'tool': 'claude',
+                'title': 'Refresh race',
+                'status': 'idle',
+                'attachMode': 'observe',
+                'control': {
+                  'drive': {'state': 'observing', 'supported': true},
+                  'terminalSync': {
+                    'supported': true,
+                    'syncAvailable': true,
+                    'active': false,
+                  },
+                },
+              }),
+            ),
+          ],
+          reattachEvents: [
+            SessionWireEvent(
+              info: SessionInfo.fromJson(const {
+                'id': 'session-1',
+                'tool': 'claude',
+                'title': 'Refresh race',
+                'status': 'idle',
+                'attachMode': 'resume',
+                'control': {
+                  'drive': {'state': 'driving', 'supported': true},
+                  'terminalSync': {
+                    'supported': false,
+                    'syncAvailable': false,
+                    'active': false,
+                  },
+                },
+              }),
+            ),
+          ],
+        );
+        late ProviderContainer container;
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            driveIntentStore: driveIntents,
+            openSessionsStore: openSessions,
+            brokerClientLoader: (ref) async =>
+                ref.watch(clientReadyProvider) ? FakeBrokerClient() : null,
+            extraOverrides: [
+              sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+                StubBrokerAppLifecycleMonitor(
+                  currentState: BrokerAppLifecycleState.resumed,
+                ),
+              ),
+            ],
+            theme: _theme(Brightness.light),
+            homeBuilder: (page) => Builder(
+              builder: (context) {
+                container = ProviderScope.containerOf(context);
+                return OpenSessionSyncSupervisor(child: page);
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(connection.reattachModes, isEmpty);
+
+        // Reproduce refresh ordering: the page's mount-time request has
+        // settled without a client, then the resident supervisor connects its
+        // background Observe socket after broker and working-set hydration.
+        container.read(clientReadyProvider.notifier).state = true;
+        await tester.pumpAndSettle();
+        openSessions.complete(
+          const OpenSessionsSnapshot(
+            refs: [
+              SessionRef(
+                tool: 'claude',
+                id: 'session-1',
+                title: 'Refresh race',
+                status: SessionStatus.idle,
+              ),
+            ],
+            activeKey: 'claude/session-1',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const key = SessionDetailKey(tool: 'claude', sessionId: 'session-1');
+        expect(connection.connectCount, 1);
+        expect(connection.reattachModes, ['resume']);
+        expect(connection.reattachReasons, ['app-restore']);
+        expect(
+          SessionControlView.fromSessionInfo(
+            container.read(sessionDetailControllerProvider(key)).sessionInfo,
+          ).canMutate,
+          isTrue,
+          reason: 'the visible session must return to Driving without remount',
+        );
+      },
+    );
   });
 }
 
@@ -499,4 +615,16 @@ void _setViewport(WidgetTester tester, Size size) {
 Future<void> _resetApp(WidgetTester tester) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
+}
+
+final class _GatedOpenSessionsStore implements OpenSessionsStore {
+  final Completer<OpenSessionsSnapshot> _load = Completer();
+
+  void complete(OpenSessionsSnapshot snapshot) => _load.complete(snapshot);
+
+  @override
+  Future<OpenSessionsSnapshot> load(String profileId) => _load.future;
+
+  @override
+  Future<void> save(String profileId, OpenSessionsSnapshot snapshot) async {}
 }

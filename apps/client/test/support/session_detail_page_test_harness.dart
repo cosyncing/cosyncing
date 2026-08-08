@@ -1369,6 +1369,7 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   /// hand back). Asserted by drive/take-over tests.
   final List<String?> reattachModes = [];
   final List<String?> reattachReasons = [];
+  int connectCount = 0;
   int disarmDriveAuthorityCount = 0;
   final StreamController<SessionDetailConnectionStatus> _stateController =
       StreamController<SessionDetailConnectionStatus>.broadcast();
@@ -1431,6 +1432,7 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
 
   @override
   Future<void> connect() async {
+    connectCount++;
     if (!autoConnect) {
       return;
     }
