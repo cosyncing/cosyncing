@@ -6,8 +6,7 @@
   <string>{{LABEL}}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{EXECUTABLE}}</string>
-    <string>broker</string>
+{{PROGRAM_ARGUMENTS}}
   </array>
   <key>WorkingDirectory</key>
   <string>{{WORKING_DIRECTORY}}</string>

@@ -1,3 +1,5 @@
+import { applicationLaunchCommand, type ApplicationIdentity } from './application-identity.ts';
+
 export const SERVICE_RESTART_EXIT_CODE = 75;
 
 export type BrokerServiceProvider = 'foreground' | 'systemd' | 'launchd';
@@ -8,16 +10,22 @@ export interface BrokerServiceBoundary {
   restartStrategy: 'self-spawn' | 'service-manager-exit';
 }
 
-/** Packaged restart always re-enters the running executable, never an import.meta-relative source path. */
+/**
+ * Packaged restart always re-enters the running APPLICATION, never an import.meta-relative source path.
+ *
+ * For the JavaScript distribution that means re-entering Bun plus the application bundle. Restarting a
+ * `bun-js` build as `[process.execPath, 'broker']` would exec bare Bun with a `broker` argument — Bun would
+ * look for a file called `broker`, fail, and the broker would simply never come back.
+ */
 export function brokerRelaunchCommand(options: {
-  packaged: boolean;
-  executablePath: string;
+  identity: Readonly<ApplicationIdentity>;
   argv: readonly string[];
-  sourceEntry: string;
 }): string[] {
-  if (options.packaged) return [options.executablePath, 'broker'];
+  if (options.identity.packaged) return applicationLaunchCommand(options.identity, ['broker']);
+  // A contributor checkout re-enters exactly the argv it was started with, which preserves whatever dev
+  // flags and entry module were in play; the identity is the fallback when argv is unavailable.
   if (options.argv.length > 0) return [...options.argv];
-  return [options.executablePath, options.sourceEntry];
+  return applicationLaunchCommand(options.identity);
 }
 
 /**

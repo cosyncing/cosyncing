@@ -1,16 +1,26 @@
 import packageJson from '../../../../package.json';
 import contractRevisions from '../../../../contracts/contract-revisions.json';
+import { isDistributionKind, type DistributionKind } from './application-identity.ts';
 
 declare const COSYNCING_BUILD_VERSION: string | undefined;
 declare const COSYNCING_BUILD_COMMIT: string | undefined;
 declare const COSYNCING_BUILD_DATE: string | undefined;
 declare const COSYNCING_BUILD_TARGET: string | undefined;
-declare const COSYNCING_BUILD_PACKAGED: boolean | undefined;
+declare const COSYNCING_BUILD_DISTRIBUTION: string | undefined;
 declare const COSYNCING_BUILD_DIRTY: boolean | undefined;
 declare const COSYNCING_BUILD_SCHEMA_VERSIONS: string | undefined;
 declare const COSYNCING_BUILD_CONTRACT: string | undefined;
 
-export const BUILD_INFO_SCHEMA_VERSION = 1 as const;
+/**
+ * 2 replaced the single `packaged` boolean with an explicit `distribution` kind.
+ *
+ * The wire contract is untouched: nothing in the broker/client protocol carries BuildInfo, so the protocol
+ * revision does not move. What DOES read this number is the release manifest's provenance and `version
+ * --json`, and both gain the new field. A v1 reader sees `packaged` exactly where it was — it is still
+ * emitted, now derived — so old consumers keep working while new ones can tell a JavaScript distribution
+ * from a compiled one, which `packaged` alone never could.
+ */
+export const BUILD_INFO_SCHEMA_VERSION = 2 as const;
 
 /** Public compatibility versions stamped into every packaged binary and release provenance. */
 export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
@@ -60,7 +70,18 @@ export interface BuildInfo {
   version: string;
   commit: string;
   buildDate: string | null;
+  /**
+   * The ARTIFACT's host target, not the host it happens to be running on.
+   *
+   * A `bun-js` bundle is one universal JavaScript file, so its target is `universal`: stamping the packaging
+   * host's `linux-x64` would claim a machine-code binding the artifact does not have, and would also make it
+   * name a signed native release artifact it must never install. Runtime host information belongs to doctor
+   * and `/api/health`, which report it separately.
+   */
   target: string;
+  /** How the artifact was produced and what may execute it. See {@link DistributionKind}. */
+  distribution: DistributionKind;
+  /** Derived from `distribution`: every distribution except a contributor checkout is an installable product. */
   packaged: boolean;
   dirty: boolean | null;
   schemaVersions: PublishedSchemaVersions;
@@ -124,9 +145,26 @@ export function buildFingerprint(info: Readonly<Omit<BuildInfo, 'schemaVersions'
     info.buildDate ?? 'no-build-date',
     info.dirty === null ? 'dirty-unknown' : info.dirty ? 'dirty' : 'clean',
     info.target,
-    info.packaged ? 'packaged' : 'source',
+    // The distribution kind, not the `packaged` boolean it replaced: a JavaScript bundle and a compiled
+    // executable built from one commit at one instant are different artifacts with different failure modes,
+    // and a fingerprint that could not tell them apart would let one answer the health check for the other.
+    info.distribution,
   ].join('/');
 }
+
+/**
+ * The stamped distribution kind, defaulting to the safest possible answer.
+ *
+ * An absent or unrecognized define means the artifact cannot prove what it is, and the honest reading of
+ * "unknown" is a source checkout: it refuses durable service installation and cannot self-replace. Only the
+ * exact string `native` opens the signed machine-code swap path, so no corruption of this value can steer a
+ * JavaScript install into it.
+ */
+const stampedDistribution: DistributionKind = (() => {
+  const value = typeof COSYNCING_BUILD_DISTRIBUTION === 'undefined' ? undefined : COSYNCING_BUILD_DISTRIBUTION;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return isDistributionKind(trimmed) ? trimmed : 'source';
+})();
 
 /** Build metadata is replaced with immutable values by scripts/broker/build-broker.ts. */
 export const BUILD_INFO: Readonly<BuildInfo> = Object.freeze({
@@ -147,7 +185,8 @@ export const BUILD_INFO: Readonly<BuildInfo> = Object.freeze({
     typeof COSYNCING_BUILD_TARGET === 'undefined' ? undefined : COSYNCING_BUILD_TARGET,
     sourceTarget,
   ),
-  packaged: typeof COSYNCING_BUILD_PACKAGED === 'undefined' ? false : COSYNCING_BUILD_PACKAGED,
+  distribution: stampedDistribution,
+  packaged: stampedDistribution !== 'source',
   dirty: typeof COSYNCING_BUILD_DIRTY === 'undefined' ? null : COSYNCING_BUILD_DIRTY,
   schemaVersions: definedSchemaVersions(
     typeof COSYNCING_BUILD_SCHEMA_VERSIONS === 'undefined' ? undefined : COSYNCING_BUILD_SCHEMA_VERSIONS,

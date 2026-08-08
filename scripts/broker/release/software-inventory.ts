@@ -155,6 +155,36 @@ function pinnedBunLicenseText(): string {
   return text.trim();
 }
 
+/**
+ * Third-party notices for the JavaScript npm distribution.
+ *
+ * Same per-package licence texts as the compiled notices, and deliberately WITHOUT the Bun runtime section:
+ * that package ships no Bun, no JavaScriptCore, and no WebKit, so reproducing Bun's licence in it would
+ * misstate what is being distributed. Removing the embedded runtime does not remove the ordinary obligation
+ * to carry notices for the JavaScript dependencies that ARE bundled, which is what this emits.
+ */
+export function createJavaScriptThirdPartyNotices(inventory: CompiledSoftwareInventory): string {
+  const lines = [
+    `Third-party notices for the cosyncing ${inventory.version} npm package`,
+    '',
+    'This package contains one self-contained JavaScript application bundle. It does not',
+    'contain the Bun runtime, JavaScriptCore, or WebKit; Bun is installed separately by the',
+    'operator and is not redistributed here.',
+    '',
+    'Bundled npm dependency closure',
+    '==============================',
+  ];
+  for (const item of inventory.packages.filter((candidate) => !candidate.internal)) {
+    lines.push(
+      '',
+      `${item.name}@${item.version} (${item.license})`,
+      '-'.repeat(Math.min(78, item.name.length + item.version.length + item.license.length + 4)),
+      packageLicenseText(item.name, item.version),
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 /** Render exact third-party notices for every external package in the compiled closure. */
 export function createThirdPartyNotices(inventory: CompiledSoftwareInventory): string {
   const lines = [

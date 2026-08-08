@@ -5,6 +5,7 @@ import type { BrokerServiceBoundary } from './service-boundary.ts';
 import { settleWithDeadline } from './service-manager.ts';
 import {
   checkReleaseUpdate,
+  packageManagerUpdateGuidance,
   type ReleaseUpdateCheckDependencies,
   type ReleaseUpdateCheckResult,
 } from './release-upgrade.ts';
@@ -72,7 +73,10 @@ export interface BrokerUpdateTriggerResult {
 export interface BrokerUpdateTriggerDependencies {
   buildInfo: Readonly<BuildInfo>;
   service: Readonly<BrokerServiceBoundary>;
+  /** The cosyncing APPLICATION artifact, never the runtime that executes it. */
   executablePath: string;
+  /** The external runtime that must exec `executablePath`. Absent only for a compiled native build. */
+  runtimePath?: string;
   stateHome: string;
   cacheRoot?: string;
   userHome?: string;
@@ -112,6 +116,12 @@ export function brokerUpdateHandoffCommand(dependencies: BrokerUpdateTriggerDepe
   if (dependencies.userHome && isAbsolute(dependencies.userHome)) {
     command.push(`--setenv=HOME=${dependencies.userHome}`);
     command.push(`--working-directory=${dependencies.userHome}`);
+  }
+  // The runtime, when there is one, comes first: `systemd-run ... <bundle> upgrade` would exec a JavaScript
+  // file the kernel can only run through its shebang, and the transient unit carries no PATH to resolve it.
+  if (dependencies.runtimePath) {
+    if (!isAbsolute(dependencies.runtimePath)) return undefined;
+    command.push(dependencies.runtimePath);
   }
   command.push(dependencies.executablePath, 'upgrade', '--yes', '--json');
   if (dependencies.manifestUrl) command.push('--manifest', dependencies.manifestUrl);
@@ -162,6 +172,12 @@ export async function triggerBrokerUpdate(
     fromVersion: dependencies.buildInfo.version,
     toVersion,
   };
+  // Same fence the CLI upgrade applies, for the same reason: the app's update button must never report that
+  // a signed native release was queued on a distribution that cannot install one.
+  const packageManagerOwned = packageManagerUpdateGuidance(dependencies.buildInfo);
+  if (packageManagerOwned) {
+    return { ...base, status: 'blocked', detailCode: packageManagerOwned.detailCode, message: packageManagerOwned.summary };
+  }
   if (!dependencies.buildInfo.packaged) {
     return { ...base, status: 'blocked', detailCode: 'broker-update-source-build', message: 'Source builds cannot replace themselves.' };
   }

@@ -150,6 +150,7 @@ function displayed(path: string, home: string): string {
 interface FakeContextOptions {
   homeDir?: string;
   platform?: string;
+  arch?: string;
   env?: Record<string, string | undefined>;
   executables?: Record<string, string>;
   inspectPath?: SetupDiagnosisContext['inspectPath'];
@@ -165,6 +166,8 @@ function fakeContext(options: FakeContextOptions = {}): SetupDiagnosisContext {
   return {
     effects: 'forbidden',
     platform: options.platform ?? 'linux',
+    // Paired with the platform: a darwin fixture is an Apple Silicon Mac, the host that is supported.
+    arch: options.arch ?? (options.platform === 'darwin' ? 'arm64' : 'x64'),
     homeDir,
     env: options.env ?? {},
     resolveExecutable: (command) => options.executables?.[command],

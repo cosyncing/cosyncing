@@ -7,7 +7,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart={{EXECUTABLE}} broker
+ExecStart={{EXEC_START}}
 WorkingDirectory={{WORKING_DIRECTORY}}
 Environment=COSYNCING_SERVICE_PROVIDER=systemd
 EnvironmentFile={{ENVIRONMENT_FILE}}

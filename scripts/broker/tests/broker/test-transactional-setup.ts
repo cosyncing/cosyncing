@@ -175,6 +175,9 @@ function contextFor(home: string, extraEnv: Record<string, string> = {}, platfor
   const context = createSetupDiagnosisContext({
     homeDir: home,
     platform,
+    // The arch travels with the platform: a darwin fixture is an Apple Silicon Mac, which is the supported
+    // macOS host. Reading it from the test host instead would judge every darwin fixture an Intel Mac.
+    arch: platform === 'darwin' ? 'arm64' : 'x64',
     env: {
       HOME: home,
       PATH: '',
@@ -2119,7 +2122,11 @@ try {
   // and receipting it produced a permanent broker-binary-receipt-invalid blocker. Setup must instead copy the
   // running packaged executable into <home>/bin/cosyncing and receipt THAT.
   {
-    const packagedBuild = { ...BUILD_INFO, packaged: true } as typeof BUILD_INFO;
+    // The distribution the npm channel actually ships. `packaged: true` alone would be incoherent —
+    // it is derived from the kind — and would exercise the native lane rather than this one.
+    const packagedBuild = {
+      ...BUILD_INFO, distribution: 'bun-js' as const, packaged: true,
+    } as typeof BUILD_INFO;
     const npmSetupOptions = (machineRoot: string, presenter: SetupPresenter, npmBinary: string) =>
       setupOptions(machineRoot, presenter, { buildInfo: packagedBuild, executablePath: npmBinary });
     /** Stage a fake npm-owned binary outside the state home, exactly as `npm i -g` would. */
@@ -2598,7 +2605,7 @@ try {
         // helped it along either: `installMetadataMatches` reads version, not commit, so it never reaches
         // `needsServiceReconcile`.) Machine B below owns the identity-binding half.
         const build = {
-          ...BUILD_INFO, packaged: true, version: '9.9.9', commit: 'abc1234',
+          ...BUILD_INFO, distribution: 'bun-js' as const, packaged: true, version: '9.9.9', commit: 'abc1234',
           buildDate: '2026-08-06T00:00:00.000Z', dirty: false,
         } as typeof BUILD_INFO;
         const stub = (marker: string): string => stubSource({
@@ -2657,7 +2664,7 @@ try {
         config.broker.internalUrl = `http://127.0.0.1:${servicePort}`;
         writeBrokerConfig(config, home);
         const sharedIdentity = {
-          ...BUILD_INFO, packaged: true, version: '0.1.0', commit: '1111111',
+          ...BUILD_INFO, distribution: 'bun-js' as const, packaged: true, version: '0.1.0', commit: '1111111',
           buildDate: '2026-08-06T00:00:00.000Z',
         } as typeof BUILD_INFO;
         const previousBuild = { ...sharedIdentity, dirty: true } as typeof BUILD_INFO;

@@ -192,12 +192,166 @@ void main() {
       );
     });
   });
+
+  group('BrokerStatusSettingsSection release status honesty', () {
+    late _FakeManagedRuntimeApi api;
+
+    setUp(() {
+      api = _FakeManagedRuntimeApi();
+    });
+
+    Widget buildSubject({
+      Brightness brightness = Brightness.light,
+      Locale locale = const Locale('en'),
+    }) {
+      final themeSpec = themeSpecById(kDefaultThemeId);
+      final tokens = brightness == Brightness.dark
+          ? themeSpec.dark
+          : themeSpec.light;
+      return ProviderScope(
+        overrides: [
+          managedRuntimeApiProvider.overrideWithValue(api),
+          desktopClientVersionProvider.overrideWithValue('1.4.0'),
+          desktopDownloadLauncherProvider.overrideWithValue((_) async => true),
+        ],
+        child: MaterialApp(
+          key: ValueKey((brightness, locale)),
+          theme: ThemeData(brightness: brightness, extensions: [tokens]),
+          locale: locale,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const Scaffold(
+            body: SingleChildScrollView(child: BrokerStatusSettingsSection()),
+          ),
+        ),
+      );
+    }
+
+    final current = find.byKey(const Key('settings-broker-status-current'));
+    final unchecked = find.byKey(const Key('settings-broker-status-unchecked'));
+    final packageManaged = find.byKey(
+      const Key('settings-broker-status-package-managed'),
+    );
+    final guidance = find.byKey(
+      const Key('settings-broker-package-managed-body'),
+    );
+
+    // The regression this group exists for: an npm broker never consults the
+    // release channel, so reporting it as `Current` is a claim the app has no
+    // evidence for and can never acquire.
+    testWidgets(
+      'an npm-managed broker reads as package-managed, never as current',
+      (tester) async {
+        api
+          ..updateStatus = 'unknown'
+          ..updateDetailCode = 'upgrade-package-manager-owned';
+
+        for (final testCase in const [
+          (Brightness.light, Locale('en'), 'Managed by npm'),
+          (Brightness.dark, Locale('en'), 'Managed by npm'),
+          (Brightness.light, Locale('zh'), '由 npm 管理'),
+          (Brightness.dark, Locale('zh'), '由 npm 管理'),
+        ]) {
+          await tester.pumpWidget(
+            buildSubject(brightness: testCase.$1, locale: testCase.$2),
+          );
+          await tester.pumpAndSettle();
+
+          expect(packageManaged, findsOneWidget);
+          expect(current, findsNothing);
+          expect(find.text(testCase.$3), findsOneWidget);
+          expect(find.text('Current'), findsNothing);
+          expect(find.text('已是最新'), findsNothing);
+        }
+      },
+    );
+
+    // An honest state that does not say what to do next is half a fix.
+    testWidgets(
+      'the package-managed state names the commands that do update it',
+      (
+        tester,
+      ) async {
+        api
+          ..updateStatus = 'unknown'
+          ..updateDetailCode = 'upgrade-package-manager-owned';
+
+        for (final locale in const [Locale('en'), Locale('zh')]) {
+          await tester.pumpWidget(buildSubject(locale: locale));
+          await tester.pumpAndSettle();
+
+          expect(guidance, findsOneWidget);
+          expect(
+            find.textContaining('npm update --global cosyncing'),
+            findsOneWidget,
+          );
+          expect(find.textContaining('cosyncing setup'), findsOneWidget);
+        }
+      },
+    );
+
+    // An unreachable channel is not a channel that reported good news.
+    testWidgets('an unknown status without a reason reads as unchecked', (
+      tester,
+    ) async {
+      api
+        ..updateStatus = 'unknown'
+        ..updateDetailCode = 'release-channel-unconfigured';
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      expect(unchecked, findsOneWidget);
+      expect(current, findsNothing);
+      expect(packageManaged, findsNothing);
+      expect(guidance, findsNothing);
+      expect(find.text('Not checked'), findsOneWidget);
+    });
+
+    // The one state that does support the claim still makes it.
+    testWidgets(
+      'a completed check that found nothing newer still reads as current',
+      (
+        tester,
+      ) async {
+        api
+          ..updateStatus = 'current'
+          ..updateDetailCode = 'current';
+        await tester.pumpWidget(buildSubject());
+        await tester.pumpAndSettle();
+
+        expect(current, findsOneWidget);
+        expect(unchecked, findsNothing);
+        expect(packageManaged, findsNothing);
+        expect(find.text('Current'), findsOneWidget);
+      },
+    );
+
+    testWidgets('an available update still offers the update button', (
+      tester,
+    ) async {
+      api
+        ..updateStatus = 'update-available'
+        ..updateDetailCode = 'update-available';
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('settings-update-broker')), findsOneWidget);
+      expect(current, findsNothing);
+      expect(unchecked, findsNothing);
+      expect(packageManaged, findsNothing);
+    });
+  });
 }
 
 /// Serves one broker version; every other read is the quiet, healthy answer so
 /// only the version drives what the section renders.
 final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   String? brokerVersion = '1.4.0';
+  // The broker's own answer about the release channel. An npm install reports
+  // `unknown` with `upgrade-package-manager-owned`, because it declines to
+  // probe a manifest that describes native artifacts.
+  String updateStatus = 'current';
+  String updateDetailCode = 'current';
 
   @override
   Future<RuntimeUpdatesResponse> getRuntimeUpdates({
@@ -225,10 +379,10 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
       BrokerUpdateResponse(
         ok: true,
         update: BrokerUpdateSnapshot(
-          status: 'current',
+          status: updateStatus,
           currentVersion: brokerVersion ?? 'unknown',
           checkedAt: '2026-08-05T00:00:00Z',
-          detailCode: 'current',
+          detailCode: updateDetailCode,
         ),
       );
 

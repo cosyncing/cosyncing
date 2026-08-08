@@ -66,6 +66,10 @@ function-by-function matrix.
 > [GitHub Releases](https://github.com/cosyncing/cosyncing/releases) page for the first supported
 > package.
 
+The package is one self-contained JavaScript application and does not bundle a runtime. Install
+[Bun](https://bun.sh) 1.3.8 or newer first. Supported broker hosts are Linux x64, Linux arm64, and
+Apple Silicon macOS; on Windows, run the broker inside WSL.
+
 After the first package is published:
 
 ```bash
@@ -75,8 +79,17 @@ cosyncing pair
 ```
 
 `setup` inspects the machine, shows exactly what it will change, and applies the whole plan or none
-of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service, and prints
-your broker URL. The broker refuses to start until setup has committed.
+of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service that runs that
+copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
+committed.
+
+To update, move the package with your package manager and then re-run setup, which re-copies the new
+application and reconciles the service:
+
+```bash
+npm update --global cosyncing
+cosyncing setup
+```
 
 `pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
 `cosyncing devices list` lists paired devices, and `cosyncing devices revoke <id>` revokes one.

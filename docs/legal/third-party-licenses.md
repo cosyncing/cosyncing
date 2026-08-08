@@ -9,10 +9,16 @@ hash-pinned Bun 1.3.8 `LICENSE.md` and the licence file of every external packag
 in the compiled inventory; those generated assets are covered by signed
 checksums.
 
+The npm package is a separate artifact with a separate notice file. It ships one
+JavaScript application bundle and no runtime, so its `THIRD_PARTY_NOTICES.txt`
+carries the licence text of every bundled external package and omits Bun's —
+Bun is not distributed in it. See
+[npm JavaScript distribution readiness](npm-javascript-distribution-readiness.md).
+
 This inventory is not a determination that compiled-binary redistribution
 obligations are satisfied. Bun states that its runtime statically links LGPL-2
-JavaScriptCore/WebKit and identifies a relinking obligation. Compiled broker
-distribution is fail-closed until the conditions in
+JavaScriptCore/WebKit and identifies a relinking obligation. Compiled native
+broker distribution is fail-closed until the conditions in
 [Compiled broker distribution readiness](binary-distribution-readiness.md) are
 met and explicitly approved.
 

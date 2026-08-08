@@ -9,7 +9,11 @@ No Happy Coder source is distributed as a vendored subtree. Retained third-party
 dependencies and any future copied material are documented in
 docs/legal/third-party-licenses.md.
 
-Compiled release artifacts embed the Bun runtime (https://bun.sh, MIT License)
-and the third-party npm packages enumerated in the release software inventory
-(`software-inventory.json`). Their licenses and required notices ship with each
-release.
+Compiled native release artifacts embed the Bun runtime (https://bun.sh, MIT
+License) and the third-party npm packages enumerated in the release software
+inventory (`software-inventory.json`). Their licenses and required notices ship
+with each release.
+
+The npm package embeds no runtime. It ships one JavaScript application bundle
+executed by a separately installed Bun, and carries the licenses and required
+notices of the bundled third-party npm packages in `THIRD_PARTY_NOTICES.txt`.

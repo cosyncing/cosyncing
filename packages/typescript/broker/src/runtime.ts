@@ -171,6 +171,7 @@ import {
 import { ScheduledSendRunner, type ScheduleDeliveryResult } from './schedule-runner.ts';
 import { PRODUCT_IDENTITY } from './product.ts';
 import { BUILD_INFO, buildFingerprint } from './build-info.ts';
+import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from './web-handoff.ts';
 import { APP_MOUNT_PATH, APP_PATH } from './web-routes.ts';
 import {
@@ -345,10 +346,20 @@ const MACHINE_PEER_CONFIG = readMachinePeerConfig();
 // Override with COSYNCING_WEB_DIR to point elsewhere; the apps/client build may simply be absent.
 // Packaged builds instead resolve a
 // versioned directory beside the running executable; they never probe a repository-relative path.
+/**
+ * This broker process's own artifact and runtime.
+ *
+ * Resolved once at module load, because the web sidecar sits beside the APPLICATION and a restart must
+ * re-enter the application — neither of which is `process.execPath` outside the compiled native build.
+ */
+const APPLICATION_IDENTITY = currentApplicationIdentity(
+  BUILD_INFO.distribution,
+  `${import.meta.dir}/main.ts`,
+);
 const COSYNCING_WEB_DIR = resolveFlutterWebRoot({
   override: EFFECTIVE_CONFIGURATION.config.paths?.flutterWebRoot,
   packaged: BUILD_INFO.packaged,
-  executablePath: process.execPath,
+  executablePath: APPLICATION_IDENTITY.applicationPath,
   version: BUILD_INFO.version,
   sourceRoot: `${import.meta.dir}/../../../../apps/client/build/web`,
 });
@@ -3279,10 +3290,8 @@ async function exitForServiceManagerRestart(): Promise<void> {
 
 async function relaunchBrokerForControlMode(): Promise<void> {
   const cmd = brokerRelaunchCommand({
-    packaged: BUILD_INFO.packaged,
-    executablePath: process.execPath,
+    identity: APPLICATION_IDENTITY,
     argv: process.argv,
-    sourceEntry: `${import.meta.dir}/main.ts`,
   });
   // Tear down the broker-owned opencode serve (D20) and WAIT for it to exit BEFORE we stop the listener +
   // spawn the replacement, so the replacement re-launches a fresh one instead of colliding with — or
@@ -4805,7 +4814,8 @@ server = Bun.serve<WsData>({
       const handoff = await triggerBrokerUpdate({
         buildInfo: BUILD_INFO,
         service: SERVICE_BOUNDARY,
-        executablePath: process.execPath,
+        executablePath: APPLICATION_IDENTITY.applicationPath,
+        ...(APPLICATION_IDENTITY.runtimePath ? { runtimePath: APPLICATION_IDENTITY.runtimePath } : {}),
         stateHome: setupStateHome(),
         cacheRoot: artifactCacheRoot(),
         userHome: os.homedir(),

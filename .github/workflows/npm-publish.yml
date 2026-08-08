@@ -1,22 +1,287 @@
-name: npm publish
+# Publish the cosyncing npm package through npm trusted publishing (OIDC).
+#
+# What this publishes is ONE self-contained JavaScript application bundle plus the packaged web client. It
+# contains no Bun runtime, no JavaScriptCore/WebKit, and no compiled broker executable, so
+# docs/legal/binary-distribution-readiness.md — which governs compiled native broker distribution — does not
+# gate it. That document is deliberately not weakened here, and this workflow never builds, stages, or
+# publishes a native artifact.
+#
+# This workflow STAGES; it never makes a version installable on its own.
+#
+# Requirements verified against the official npm documentation (https://docs.npmjs.com/trusted-publishers/
+# and https://docs.npmjs.com/staged-publishing/, plus the staged-publishing GA note at
+# https://github.blog/changelog/2026-05-22-staged-publishing-and-new-install-time-controls-for-npm/):
+#   - the staging job needs `id-token: write`;
+#   - staged publishing needs npm CLI >= 11.15.0 and Node >= 22.14.0;
+#   - provenance is generated automatically and is at parity with a direct publish, so `--provenance` is
+#     NOT passed;
+#   - no stored npm credential is used or needed, which the workflow audit enforces by name;
+#   - the trusted publisher on npmjs.com is configured against this repository and this workflow FILENAME,
+#     so renaming this file breaks publication until the publisher is reconfigured.
+#
+# `npm stage publish` submits the tarball to the staging queue. It becomes installable only when a human
+# maintainer runs `npm stage approve <stage-id>` and answers a 2FA challenge — deliberately outside CI,
+# because a proof of presence that CI could satisfy would not be one. The trusted publisher is configured
+# to allow staging only, so a direct `npm publish` from this workflow is refused by the registry as well.
+#
+# Dispatching this workflow does not stage anything either. Staging additionally requires all of:
+#   1. the canonical repository, at the exact `npm-v<version>` release tag;
+#   2. an exact `version` input matching the committed package.json at that ref;
+#   3. the literal confirmation phrase in `confirm`;
+#   4. approval of the protected `npm-production` environment by its required reviewers.
+# The verify job runs on any ref so a dispatch can prove a candidate without staging it; the ref and
+# repository requirements apply as soon as `confirm` asks for publication.
+name: npm stage publish
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version to publish; must equal package.json at this ref
+        required: true
+        type: string
+      confirm:
+        description: Type PUBLISH to request staging; anything else verifies only
+        required: true
+        default: verify-only
+        type: string
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: 1.3.8
+  FLUTTER_VERSION: 3.44.3
+  # Trusted publishing requires npm >= 11.5.1, but `npm stage publish` requires >= 11.15.0; the higher floor
+  # is the operative one. Node 22.14.0 is the documented floor for both.
+  NODE_VERSION: 22.14.0
+  NPM_VERSION: 11.15.0
 
 jobs:
-  disabled:
-    name: npm publication remains disabled
+  verify:
+    name: build and verify the exact staged package
     runs-on: ubuntu-24.04
-    environment: npm-production
-    timeout-minutes: 5
+    timeout-minutes: 60
     steps:
-      - name: Refuse publication until the release lane is approved
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: bun install --frozen-lockfile
+
+      # A verify-only dispatch is welcome from any branch — it publishes nothing. The moment the dispatch
+      # asks to publish, the ref and repository must be the canonical ones, and failing here means the
+      # environment reviewers are never asked to approve a run that could not have staged anyway.
+      - name: Require the canonical repository and release tag when publication is requested
+        if: ${{ inputs.confirm == 'PUBLISH' }}
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: ./scripts/ci/require-canonical-npm-release.sh
+
+      # The version is an assertion about the tree, never a value that restamps it. A disagreement means the
+      # dispatcher believes they are shipping something other than what is committed here.
+      - name: Require the dispatched version to equal the committed version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
-          echo "npm trusted-publisher identity is reserved, but package publication is not enabled." >&2
-          echo "Resolve docs/legal/binary-distribution-readiness.md and implement the reviewed staging lane first." >&2
-          exit 1
+          COMMITTED="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          test "$REQUESTED_VERSION" = "$COMMITTED" || {
+            echo "dispatched version $REQUESTED_VERSION does not match committed $COMMITTED" >&2
+            exit 1
+          }
+
+      # A published artifact must be reproducible from a committed tree. The builder stamps dirtiness into
+      # the application, so this refuses the input rather than discovering it in the output.
+      - name: Require a clean source tree
+        shell: bash
+        run: |
+          test -z "$(git status --porcelain --untracked-files=normal)" || {
+            git status --porcelain --untracked-files=normal >&2
+            echo "refusing to publish from a dirty checkout" >&2
+            exit 1
+          }
+
+      # The repository's own npm-distribution acceptance: one JavaScript package, no platform packages, no
+      # install script, no machine code, both command names working from a real global install, and the
+      # upgrade command refusing the native swap path.
+      - run: bun run test:broker-application-identity
+      - run: bun run test:broker-npm-package
+
+      - name: Stage the publishable package
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          bun run scripts/release/build-npm-package.ts \
+            --version "$REQUESTED_VERSION" \
+            --commit "$GITHUB_SHA" \
+            --require-clean \
+            --minify \
+            --output-dir output/npm \
+            --keep-stage
+
+      # Fail closed on the exact shape of what is about to be published. Every one of these has a way of
+      # being true of a tarball that still installs cleanly, which is why none of them is left implicit.
+      - name: Refuse any unexpected package layout or artifact
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE=output/npm/package
+          TARBALL="output/npm/cosyncing-$REQUESTED_VERSION.tgz"
+
+          test -f "$TARBALL" || { echo "expected exactly one tarball at $TARBALL" >&2; exit 1; }
+          test "$(find output/npm -maxdepth 1 -name '*.tgz' | wc -l)" -eq 1 \
+            || { echo "more than one tarball was staged; the npm lane publishes one package" >&2; exit 1; }
+
+          NAME="$(bun -e "console.log((await Bun.file('$STAGE/package.json').json()).name)")"
+          VERSION="$(bun -e "console.log((await Bun.file('$STAGE/package.json').json()).version)")"
+          test "$NAME" = cosyncing || { echo "staged package name is $NAME" >&2; exit 1; }
+          test "$VERSION" = "$REQUESTED_VERSION" || { echo "staged version is $VERSION" >&2; exit 1; }
+
+          # No platform packages, no dependency fan-out, and no lifecycle script that could swap a binary in.
+          bun -e "
+            const manifest = await Bun.file('$STAGE/package.json').json();
+            const forbidden = ['dependencies','optionalDependencies','peerDependencies','bundleDependencies','scripts'];
+            const present = forbidden.filter((field) => field in manifest);
+            if (present.length) throw new Error('forbidden manifest fields: ' + present.join(','));
+            if (JSON.stringify(manifest).includes('@cosyncing/broker-')) throw new Error('platform package reference');
+            if (manifest.bin?.cosyncing !== 'bin/cosyncing' || manifest.bin?.cosy !== 'bin/cosyncing') {
+              throw new Error('both command names must resolve to bin/cosyncing');
+            }
+          "
+
+          # The executable entry is JavaScript with a Bun shebang, and nothing anywhere in the tarball is
+          # machine code. This is the assertion that keeps an embedded runtime out of the published artifact.
+          head -c 18 "$STAGE/bin/cosyncing" | grep -qx '#!/usr/bin/env bun' \
+            || { echo "the application entry has no Bun shebang" >&2; exit 1; }
+          rm -rf "$RUNNER_TEMP/inspect" && mkdir -p "$RUNNER_TEMP/inspect"
+          tar -xzf "$TARBALL" -C "$RUNNER_TEMP/inspect"
+          if find "$RUNNER_TEMP/inspect" -type f -exec file --brief {} + \
+              | grep -Ei 'ELF |Mach-O|PE32|executable \(x86|executable \(arm'; then
+            echo "the tarball contains a compiled executable; the npm package ships JavaScript only" >&2
+            exit 1
+          fi
+
+          # The client ships with the broker. A published package that serves no /cosy/ app is a broken one.
+          test -f "$STAGE/bin/cosyncing-web-$REQUESTED_VERSION/index.html" \
+            || { echo "the packaged web client is missing" >&2; exit 1; }
+          for LEGAL in LICENSE NOTICE THIRD_PARTY_NOTICES.txt README.md; do
+            test -f "$STAGE/$LEGAL" || { echo "missing $LEGAL" >&2; exit 1; }
+          done
+
+      - name: Preserve the exact candidate tarball
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: npm-package-${{ inputs.version }}
+          path: output/npm/cosyncing-${{ inputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: stage on npm (owner-approved)
+    needs: verify
+    # The typed confirmation is the first of four independent gates; the protected environment below is the
+    # owner approval boundary, the canonical repository and tag are the third, and the version equality
+    # proven in `verify` is the fourth. A dispatch that merely reaches this workflow stages nothing.
+    if: ${{ inputs.confirm == 'PUBLISH' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: npm-production
+    permissions:
+      contents: read
+      # Required for OIDC. Trusted publishing exchanges this token for staging rights; no npm token exists.
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Re-asserted here rather than inherited from `verify`. This job is the one holding `id-token: write`,
+      # and a guard that only ran in a different job is a guard this job does not have.
+      - name: Require the canonical repository and release tag
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: ./scripts/ci/require-canonical-npm-release.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+      # Pinned exactly, not `>=`: a floor would resolve to whatever npm is newest on the day the workflow
+      # runs, so the release would be staged by an npm nobody reviewed. The version check makes a resolver
+      # surprise fail the job instead of silently substituting another CLI.
+      - name: Install the npm release required by staged trusted publishing
+        shell: bash
+        run: |
+          npm install --global "npm@${NPM_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+
+      # The bytes `verify` proved, not a rebuild. Rebuilding here would stage an artifact nothing checked.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-package-${{ inputs.version }}
+          path: candidate
+
+      - name: Re-verify the candidate identity immediately before staging
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL="candidate/cosyncing-$REQUESTED_VERSION.tgz"
+          test -f "$TARBALL"
+          rm -rf "$RUNNER_TEMP/final" && mkdir -p "$RUNNER_TEMP/final"
+          tar -xzf "$TARBALL" -C "$RUNNER_TEMP/final"
+          NAME="$(node -p "require('$RUNNER_TEMP/final/package/package.json').name")"
+          VERSION="$(node -p "require('$RUNNER_TEMP/final/package/package.json').version")"
+          COMMITTED="$(node -p "require('./package.json').version")"
+          test "$NAME" = cosyncing
+          test "$VERSION" = "$REQUESTED_VERSION"
+          test "$VERSION" = "$COMMITTED"
+          head -c 18 "$RUNNER_TEMP/final/package/bin/cosyncing" | grep -qx '#!/usr/bin/env bun'
+          if find "$RUNNER_TEMP/final" -type f -exec file --brief {} + \
+              | grep -Ei 'ELF |Mach-O|PE32'; then
+            echo "refusing to stage a tarball containing a compiled executable" >&2
+            exit 1
+          fi
+
+      # `npm stage publish` is `npm publish` with staging enabled: same `<package-spec>`, so this submits the
+      # exact tarball `verify` proved rather than repacking the tree. Provenance is generated automatically
+      # under trusted publishing; passing --provenance is unnecessary, and no auth token is configured, so a
+      # misconfigured trusted publisher fails rather than falling back to some other credential.
+      - name: npm stage publish
+        shell: bash
+        run: npm stage publish "candidate/cosyncing-${{ inputs.version }}.tgz" --access public
+
+      # The staged version is NOT installable yet. Saying so in the job summary is the difference between an
+      # owner who completes the release and one who believes a green run already shipped it.
+      - name: Report what remains before the version is installable
+        shell: bash
+        run: |
+          {
+            echo "### Staged, not published"
+            echo
+            echo "\`cosyncing@${{ inputs.version }}\` is in the npm staging queue."
+            echo "It becomes installable only after a maintainer approves it with 2FA:"
+            echo
+            echo '```'
+            echo "npm stage list cosyncing"
+            echo "npm stage view <stage-id>      # inspect what CI submitted"
+            echo "npm stage approve <stage-id>   # requires 2FA; publishes to the registry"
+            echo "npm stage reject <stage-id>    # discards it"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

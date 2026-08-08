@@ -178,6 +178,18 @@ class _DesktopBuildUpdateRow extends ConsumerWidget {
   }
 }
 
+/// Reported when the broker is an npm package rather than a self-replacing
+/// native build.
+///
+/// It arrives as a `status: unknown` snapshot because no release check ran at
+/// all: the signed manifest describes compiled artifacts this build must never
+/// install, so the broker declines to probe it.
+const String _packageManagerOwnedDetail = 'upgrade-package-manager-owned';
+
+/// Update commands, worded as the broker's own guidance words them.
+const String _packageManagerUpdateCommand = 'npm update --global cosyncing';
+const String _packageManagerSetupCommand = 'cosyncing setup';
+
 class _BrokerVersionRow extends StatelessWidget {
   const _BrokerVersionRow({
     required this.health,
@@ -192,8 +204,51 @@ class _BrokerVersionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final contract = health?.contract;
-    final available = update?.updateAvailable ?? false;
+    final snapshot = update;
+    // `Current` claims a check ran and found nothing newer. Only the broker's
+    // own `current` status supports that claim: an npm install never checks at
+    // all, and an unreachable or unconfigured channel reports `unknown`.
+    // Calling either one "Current" tells the operator they are up to date on
+    // the strength of no evidence whatsoever.
+    final packageManaged = snapshot?.detailCode == _packageManagerOwnedDetail;
+    final checked = snapshot?.status == 'current';
+    final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
+
+    Widget trailing() {
+      if (snapshot != null && snapshot.updateAvailable) {
+        return FilledButton.tonal(
+          key: const Key('settings-update-broker'),
+          onPressed: () => unawaited(onUpdate(snapshot)),
+          child: Text(
+            l10n.settingsUpdateToVersion(
+              snapshot.latestVersion ?? l10n.settingsUpdateBrokerLatestFallback,
+            ),
+          ),
+        );
+      }
+      if (packageManaged) {
+        return StatusPill(
+          key: const Key('settings-broker-status-package-managed'),
+          label: l10n.settingsBrokerStatusPackageManaged,
+          color: tokens.statusIdle,
+          icon: Icons.inventory_2_outlined,
+        );
+      }
+      if (checked) {
+        return StatusPill(
+          key: const Key('settings-broker-status-current'),
+          label: l10n.settingsBrokerStatusCurrent,
+          color: tokens.statusWorking,
+        );
+      }
+      return StatusPill(
+        key: const Key('settings-broker-status-unchecked'),
+        label: l10n.settingsBrokerStatusNotChecked,
+        color: tokens.statusIdle,
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -211,22 +266,24 @@ class _BrokerVersionRow extends StatelessWidget {
                 ? l10n.settingsBrokerContractLegacy
                 : l10n.settingsBrokerContractCompatible,
           ),
-          trailing: available
-              ? FilledButton.tonal(
-                  key: const Key('settings-update-broker'),
-                  onPressed: () => unawaited(onUpdate(update!)),
-                  child: Text(
-                    l10n.settingsUpdateToVersion(
-                      update!.latestVersion ??
-                          l10n.settingsUpdateBrokerLatestFallback,
-                    ),
-                  ),
-                )
-              : StatusPill(
-                  label: l10n.settingsBrokerStatusCurrent,
-                  color: context.tokens.statusWorking,
-                ),
+          trailing: trailing(),
         ),
+        // The pill says the broker will not update itself; this says what does.
+        // Without it, the honest state is just a dead end.
+        if (packageManaged)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: SelectableText(
+              key: const Key('settings-broker-package-managed-body'),
+              l10n.settingsBrokerPackageManagedBody(
+                _packageManagerUpdateCommand,
+                _packageManagerSetupCommand,
+              ),
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(color: tokens.textSecondary),
+            ),
+          ),
         if (contract != null)
           ExpansionTile(
             key: const Key('settings-broker-contract-details'),

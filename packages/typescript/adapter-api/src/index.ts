@@ -72,6 +72,14 @@ export interface SetupHttpProbe {
 export interface SetupDiagnosisContext {
   readonly effects: 'forbidden';
   readonly platform: string;
+  /**
+   * The host CPU architecture, alongside the platform it belongs to.
+   *
+   * Paired with `platform` deliberately: a diagnosis that reads the platform from an injected context and the
+   * architecture from `process` describes a machine that does not exist, and a fixture posing as macOS on an
+   * x64 test host would be judged an unsupported Intel Mac. Whoever decides one decides both.
+   */
+  readonly arch: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly homeDir: string;
   resolveExecutable(command: string): string | undefined;

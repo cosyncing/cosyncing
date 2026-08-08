@@ -51,15 +51,24 @@ and renderers; test and harness files are not rejected solely for line count.
 
 ## Release state
 
-Public source publication does not authorize compiled distribution. npm and
-GitHub binary releases remain blocked by
+Public source publication does not authorize compiled distribution. GitHub
+binary releases of the compiled native broker remain blocked by
 [compiled broker distribution readiness](../legal/binary-distribution-readiness.md):
 the embedded Bun runtime's distribution obligations need a recorded resolution,
-and protected signing environments and keys have not been provisioned. The
-public repository has a protected `npm-production` environment and reserves
-`.github/workflows/npm-publish.yml` as the npm trusted-publisher identity, but
-that manual workflow deliberately refuses publication until the reviewed npm
-staging lane replaces its disabled job.
+and protected signing environments and keys have not been provisioned.
+
+The npm package is a different artifact and is no longer inside that gate. It
+ships one self-contained JavaScript application bundle executed by a Bun runtime
+the operator installs separately, with no embedded runtime and no compiled
+executable — see
+[npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
+`.github/workflows/npm-publish.yml` builds, verifies, and can submit that
+package to npm's staging queue, but a dispatch alone stages nothing: it
+additionally requires the canonical repository at an exact `npm-v<version>`
+tag, a matching version input, the literal `PUBLISH` confirmation, and approval
+of the protected `npm-production` environment. Even a staged version is not
+installable until a maintainer approves it on npmjs.com with 2FA. Nothing has
+been published; the npm name still holds a `0.0.1` placeholder.
 
 The release workflows fail closed unless the protected
 `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` variable is exactly `true`. Keep it

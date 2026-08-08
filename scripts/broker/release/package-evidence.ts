@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
+  BUILD_INFO_SCHEMA_VERSION,
   PUBLISHED_SCHEMA_VERSIONS,
   type BuildInfo,
 } from '../../../packages/typescript/broker/src/build-info.ts';
@@ -163,9 +164,12 @@ export async function createPackageEvidence(options: EvidenceOptions): Promise<P
 
   chmodSync(options.artifactPath, 0o755);
   const info = await offlineVersion(options.artifactPath);
-  if (info.schemaVersion !== 1 || info.version !== options.version || info.commit !== options.sourceCommit
+  if (info.schemaVersion !== BUILD_INFO_SCHEMA_VERSION || info.version !== options.version
+      || info.commit !== options.sourceCommit
       || info.buildDate !== options.buildDate || info.target !== options.target
-      || info.packaged !== true || info.dirty !== false
+      // Evidence for a NATIVE release artifact must come from a native build. `packaged` alone would also
+      // accept the JavaScript distribution, which this lane must never attest as a signed binary.
+      || info.distribution !== 'native' || info.packaged !== true || info.dirty !== false
       || JSON.stringify(info.schemaVersions) !== JSON.stringify(PUBLISHED_SCHEMA_VERSIONS)
       || JSON.stringify(info.contract) !== JSON.stringify(BROKER_CONTRACT)) {
     throw new Error('offline version metadata does not match the native package request');

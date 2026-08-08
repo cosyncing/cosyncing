@@ -392,6 +392,44 @@ function currentTarget(buildInfo: Readonly<BuildInfo>): string {
   throw new Error('upgrade-host-unsupported');
 }
 
+export interface PackageManagerUpdateGuidance {
+  detailCode: string;
+  /** The exact command that moves the acquisition package, and the setup that adopts it. */
+  updateCommand: string;
+  setupCommand: string;
+  summary: string;
+}
+
+/**
+ * What "update me" actually means for a distribution cosyncing does not own the acquisition of.
+ *
+ * The JavaScript package is installed, moved, and removed by a package manager. cosyncing replacing that
+ * package from inside itself would fight the tool that owns those files — and the signed-artifact channel it
+ * would have to use ships compiled native binaries this distribution must never install. So the honest
+ * answer is instructions, and every surface that could otherwise imply "an update was applied" returns this
+ * same text: the CLI's `upgrade`, the app-triggered handoff, and the release-channel probe.
+ *
+ * `bun install --global` is not offered as an alternative here for the same reason npm is named exactly:
+ * whichever manager placed the package is the one that must move it, and only the caller's own install
+ * record knows which that was. Naming npm — the published channel — plus `setup` keeps the guidance true
+ * for the documented path without inventing a claim about the operator's machine.
+ */
+export function packageManagerUpdateGuidance(
+  buildInfo: Readonly<Pick<BuildInfo, 'distribution'>>,
+): PackageManagerUpdateGuidance | undefined {
+  if (buildInfo.distribution !== 'bun-js') return undefined;
+  const updateCommand = `npm update --global ${PRODUCT_IDENTITY.productName}`;
+  const setupCommand = `${PRODUCT_IDENTITY.primaryBinary} setup`;
+  return {
+    detailCode: 'upgrade-package-manager-owned',
+    updateCommand,
+    setupCommand,
+    summary: `This ${PRODUCT_IDENTITY.productName} build is a JavaScript package your package manager owns, `
+      + `so it is not replaced from inside the broker. Run \`${updateCommand}\` (or the equivalent for the `
+      + `manager you installed it with), then \`${setupCommand}\` to adopt the new version.`,
+  };
+}
+
 function compareVersions(left: string, right: string): number {
   const parse = (value: string): { core: number[]; prerelease?: string[] } => {
     const [core, prerelease] = value.split('-', 2);
@@ -438,6 +476,11 @@ export async function checkReleaseUpdate(
     checkedAt,
     detailCode,
   });
+  // Before any network call: the signed manifest describes compiled native artifacts, so probing it from a
+  // JavaScript install could only ever produce a version this build must not install. Reporting that as
+  // "update available" is what would make the app's update surface offer a native swap that cannot happen.
+  const guidance = packageManagerUpdateGuidance(dependencies.buildInfo);
+  if (guidance) return unknown(guidance.detailCode);
   const manifestUrl = dependencies.manifestUrl ?? defaultManifestUrl();
   const trustedKeys = dependencies.trustedKeys ?? releaseKeys();
   if (!manifestUrl || Object.keys(trustedKeys).length === 0) {
@@ -702,11 +745,28 @@ function result(
 /** Signed-manifest, checksum-first, rollback-capable binary upgrade. */
 export async function runUpgrade(dependencies: UpgradeDependencies): Promise<UpgradeCommandResult> {
   const fromVersion = dependencies.buildInfo.version;
+  // The distribution fence, ahead of EVERY other consideration and with no injectable escape hatch.
+  //
+  // Downloading a signed compiled artifact and writing it over `~/.cosyncing/bin/cosyncing` is meaningful
+  // for exactly one distribution: the native one. Doing it from a JavaScript install would replace a
+  // Bun-executed bundle with machine code the acquisition package never delivered, leaving the package
+  // manager's record of what is installed permanently false. `runBinary` deliberately cannot override this
+  // — it exists so a source checkout can exercise the native lane in tests, not so this fence can be
+  // bypassed.
+  //
+  // It comes first because for this distribution it is the TERMINAL answer, not one precondition among
+  // several. "Run setup before upgrading" is true but useless here: no amount of setup will ever make this
+  // command replace the package, so the operator would satisfy that instruction only to be told the same
+  // thing afterwards.
+  const packageManagerOwned = packageManagerUpdateGuidance(dependencies.buildInfo);
+  if (packageManagerOwned) {
+    return result('blocked', 1, packageManagerOwned.detailCode, packageManagerOwned.summary, fromVersion, false);
+  }
   const install = inspectInstallState(dependencies.home);
   if (!install.committed) {
     return result('blocked', 1, 'upgrade-installation-uncommitted', 'Run cosyncing setup before upgrading.', fromVersion, false);
   }
-  if (!dependencies.buildInfo.packaged && !dependencies.runBinary) {
+  if (dependencies.buildInfo.distribution !== 'native' && !dependencies.runBinary) {
     return result('blocked', 1, 'upgrade-source-build-unsupported', 'Upgrade applies only to an installed packaged binary.', fromVersion, false);
   }
   let installState = install.state;
@@ -783,8 +843,12 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       const selfCheck = await (dependencies.runBinary ?? defaultRunBinary)(stagingPath, ['version', '--json']);
       let selfCheckBuild: Record<string, unknown> | undefined;
       try { selfCheckBuild = JSON.parse(selfCheck.stdout) as Record<string, unknown>; } catch { /* handled below */ }
+      // `packaged` is true for the npm JavaScript distribution as well, so it can no longer be the whole
+      // test. This lane replaces a native executable in place; a candidate that is a JavaScript bundle
+      // would be written over the running binary and could not start, so the kind is checked exactly.
       if (selfCheck.status !== 'ok' || selfCheckBuild?.version !== toVersion
-          || selfCheckBuild?.target !== verified.artifact.target || selfCheckBuild?.packaged !== true) {
+          || selfCheckBuild?.target !== verified.artifact.target || selfCheckBuild?.packaged !== true
+          || selfCheckBuild?.distribution !== 'native') {
         throw new Error('release-offline-self-check-failed');
       }
     } catch (error) {

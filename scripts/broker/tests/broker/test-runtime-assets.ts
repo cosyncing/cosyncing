@@ -47,7 +47,10 @@ import {
 } from '../../../../packages/typescript/broker/src/runtime-assets.ts';
 import { brokerRelaunchCommand } from '../../../../packages/typescript/broker/src/service-boundary.ts';
 import { browserClientUrl } from '../../../../packages/typescript/broker/src/web-routes.ts';
-import { createDurableServiceProvider } from '../../../../packages/typescript/broker/src/service-manager.ts';
+import {
+  brokerServiceLaunchArgv,
+  createDurableServiceProvider,
+} from '../../../../packages/typescript/broker/src/service-manager.ts';
 import {
   captureProcessOutput,
   reserveLoopbackFixturePort,
@@ -276,19 +279,36 @@ async function withSourceBroker(
   check('v1 manifest has no Claude hook executable or settings asset',
     RUNTIME_ASSET_MANIFEST.every((asset) => !asset.id.toLowerCase().includes('claude-hook')));
 
+  // The templates carry the WHOLE launch command as one placeholder rather than a single executable plus a
+  // hard-coded `broker` argument. A distribution whose launch needs an interpreter in front of the
+  // application cannot be expressed by the old shape at all, and a template that still hard-codes the
+  // argument list would silently drop the runtime from whichever manager still used it.
   const systemd = embeddedRuntimeAsset('service/systemd/cosyncing.service').content!;
   check('systemd template is embedded, parameterized, and keeps credentials out of argv',
     systemd.includes('Description={{PRODUCT_NAME}} broker') &&
-      systemd.includes('ExecStart={{EXECUTABLE}} broker') &&
+      systemd.includes('ExecStart={{EXEC_START}}') && !systemd.includes('{{EXECUTABLE}}') &&
       systemd.includes('EnvironmentFile={{ENVIRONMENT_FILE}}') && !systemd.includes('COSYNCING_TOKEN='));
 
   const launchd = embeddedRuntimeAsset('service/launchd/cosyncing.plist').content!;
   check('launchd template is embedded, parameterized, and keeps credentials out of argv',
     launchd.includes('<string>{{LABEL}}</string>') &&
-      launchd.includes('<string>{{EXECUTABLE}}</string>') &&
+      launchd.includes('{{PROGRAM_ARGUMENTS}}') && !launchd.includes('{{EXECUTABLE}}') &&
       launchd.includes('{{ENVIRONMENT_VARIABLES}}') &&
       launchd.includes('<string>{{STANDARD_OUT_PATH}}</string>') &&
       launchd.includes('<key>RunAtLoad</key>') && !launchd.includes('COSYNCING_TOKEN='));
+
+  // One argv definition, two renderers. If a provider ever built its own command instead of reading this,
+  // a Linux and a macOS install of the same package could launch different things.
+  check('the service launch argv names the runtime first for a JavaScript install and omits it for a native one',
+    JSON.stringify(brokerServiceLaunchArgv({
+      executablePath: '/tmp/install/.cosyncing/bin/cosyncing',
+      distribution: 'bun-js',
+      runtimePath: '/tmp/install/.bun/bin/bun',
+    })) === JSON.stringify(['/tmp/install/.bun/bin/bun', '/tmp/install/.cosyncing/bin/cosyncing', 'broker'])
+      && JSON.stringify(brokerServiceLaunchArgv({
+        executablePath: '/tmp/install/.cosyncing/bin/cosyncing',
+        distribution: 'native',
+      })) === JSON.stringify(['/tmp/install/.cosyncing/bin/cosyncing', 'broker']));
 }
 
 // A source broker refuses the retired PoC mount outright, with no redirect that implies it moved.
@@ -367,7 +387,7 @@ async function withSourceBroker(
   try {
     process.env.COSYNCING_HOME = cliHome;
     doctorCode = await runCli(['doctor'], {
-      buildInfo: { ...BUILD_INFO, packaged: true },
+      buildInfo: { ...BUILD_INFO, distribution: 'native' as const, packaged: true },
       inspectRuntimeAssets: (): RuntimeAssetReport => missingReport,
       stdout: { write: (text) => { output += text; } },
       stderr: { write: () => {} },
@@ -381,13 +401,31 @@ async function withSourceBroker(
     doctorCode === 1 && output.includes('[error]') && output.includes(missingId));
 
   const relaunch = brokerRelaunchCommand({
-    packaged: true,
-    executablePath: '/tmp/release/cosyncing',
+    identity: {
+      distribution: 'native',
+      applicationPath: '/tmp/release/cosyncing',
+      packaged: true,
+    },
     argv: ['/tmp/release/cosyncing', 'broker'],
-    sourceEntry: '/repo/packages/typescript/broker/src/main.ts',
   });
   check('packaged restart targets the same executable instead of a repository entry',
     JSON.stringify(relaunch) === JSON.stringify(['/tmp/release/cosyncing', 'broker']));
+
+  // The JavaScript distribution's restart must re-enter Bun PLUS the application. `[<bundle>, 'broker']`
+  // would leave the kernel to honour the shebang; `[<bun>, 'broker']` would ask Bun to run a file named
+  // `broker`. Either way the broker never comes back, and the failure only shows up on a real restart.
+  const jsRelaunch = brokerRelaunchCommand({
+    identity: {
+      distribution: 'bun-js',
+      applicationPath: '/tmp/install/.cosyncing/bin/cosyncing',
+      runtimePath: '/tmp/install/.bun/bin/bun',
+      packaged: true,
+    },
+    argv: ['/tmp/install/.bun/bin/bun', '/tmp/install/.cosyncing/bin/cosyncing', 'broker'],
+  });
+  check('a JavaScript-distribution restart re-enters Bun plus the application, never bare Bun',
+    JSON.stringify(jsRelaunch)
+      === JSON.stringify(['/tmp/install/.bun/bin/bun', '/tmp/install/.cosyncing/bin/cosyncing', 'broker']));
 }
 
 // Hash ownership is authoritative; legacy markers and unrelated content require confirmation.
@@ -587,6 +625,7 @@ try {
       stateHome: serviceFixture.stateHome,
       cacheRoot: serviceFixture.cache,
       executablePath: serviceTarget,
+      distribution: 'native',
       webDir,
     });
     const environmentFile = provider.expectedEnvironment();

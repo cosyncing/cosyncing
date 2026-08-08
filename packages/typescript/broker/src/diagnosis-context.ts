@@ -241,6 +241,7 @@ async function probeTcp(host: string, port: number, timeoutMs = 1_000): Promise<
 export interface SetupDiagnosisContextOptions {
   env?: Readonly<Record<string, string | undefined>>;
   platform?: string;
+  arch?: string;
   homeDir?: string;
 }
 
@@ -256,6 +257,7 @@ export function createSetupDiagnosisContext(options: SetupDiagnosisContextOption
   return {
     effects: 'forbidden',
     platform: options.platform ?? process.platform,
+    arch: options.arch ?? process.arch,
     env,
     homeDir,
     resolveExecutable: (command) => resolveExecutable(command, env),

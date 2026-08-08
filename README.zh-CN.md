@@ -68,6 +68,10 @@ Claude Code 的会话在接管之前保持只读。逐项能力矩阵见
 > 首个公开发行包尚未发布。npm 上当前的 `cosyncing` 条目只是名称占位包，请勿安装。请关注
 > [GitHub Releases](https://github.com/cosyncing/cosyncing/releases)，等待首个受支持的发行包。
 
+该发行包是一个自包含的 JavaScript 应用，不内置运行时。请先安装 [Bun](https://bun.sh) 1.3.0 或更高
+版本。受支持的 Broker 主机为 Linux x64、Linux arm64 与 Apple Silicon macOS；Windows 上请在 WSL 内
+运行 Broker。
+
 首个发行包发布后：
 
 ```bash
@@ -77,8 +81,15 @@ cosyncing pair
 ```
 
 `setup` 会检查这台机器，展示将要做的全部变更，然后要么整体应用、要么完全不动。它把 Broker
-复制到 `~/.cosyncing/bin/cosyncing`，安装用户服务，并打印你的 Broker 地址。在 setup 提交之前，
-Broker 拒绝启动。
+复制到 `~/.cosyncing/bin/cosyncing`，安装用户服务（由你的 Bun 运行该副本），并打印你的 Broker
+地址。在 setup 提交之前，Broker 拒绝启动。
+
+更新时，先用包管理器更新发行包，再重新运行 setup —— 后者会重新复制新的应用并协调服务：
+
+```bash
+npm update --global cosyncing
+cosyncing setup
+```
 
 `pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
 `cosyncing devices list` 列出已配对设备，`cosyncing devices revoke <id>` 撤销指定设备。
