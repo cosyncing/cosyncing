@@ -110,7 +110,7 @@ jobs:
             --commit "$COMMIT" --version "$VERSION"
 
   required:
-    name: required
+    name: Broker Release Gate required
     if: ${{ always() }}
     needs: [native-package, broker-web-pair]
     runs-on: ubuntu-24.04

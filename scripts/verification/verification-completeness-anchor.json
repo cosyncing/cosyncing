@@ -176,7 +176,7 @@
     },
     {
       "id": "source-boundaries",
-      "fingerprint": "sha256:1d8daacffec546e82acf46da99de398fd1cec99754c6283f5f76f09835849145"
+      "fingerprint": "sha256:1d3c01c869a92ee4ba30a2de66b85e22e7335b202b19459387701b43f8b7c593"
     },
     {
       "id": "source-stability",
@@ -208,7 +208,7 @@
     },
     {
       "id": "workflow-policy",
-      "fingerprint": "sha256:78ee566e42bf49df2c86ff291680ae19019a31ec2dd9a8c291d08abc2727fade"
+      "fingerprint": "sha256:b1b6163389f495afb5cdf834c20e4179e0e9d651b9595aa59f0417e35c6b0585"
     }
   ],
   "requiredBrokerSubSuiteBindings": [

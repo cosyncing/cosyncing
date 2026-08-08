@@ -73,6 +73,10 @@ docs/internal/
 # Internal docs live in the nested private repo cosyncing-docs-internal
 docs-internal/
 
+# Retired dual-profile CI transition artifacts live in the private docs archive
+/scripts/ci/github-hosted-workflows/
+/scripts/ci/restore-github-hosted-workflows.sh
+
 # Generated evidence and local outputs
 screenshots/
 *.map
