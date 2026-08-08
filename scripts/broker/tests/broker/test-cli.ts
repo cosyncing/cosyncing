@@ -27,7 +27,11 @@ import {
   renderUninstallPlan,
   renderUninstallResult,
 } from '../../../../packages/typescript/broker/src/cli-i18n.ts';
-import { BUILD_INFO, type BuildInfo } from '../../../../packages/typescript/broker/src/build-info.ts';
+import {
+  BUILD_INFO,
+  BUILD_INFO_SCHEMA_VERSION,
+  type BuildInfo,
+} from '../../../../packages/typescript/broker/src/build-info.ts';
 import { committedInstallState } from '../../../../packages/typescript/broker/src/install-state.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../../../packages/typescript/broker/src/configuration.ts';
 import { ensureInstallationCredentials } from '../../../../packages/typescript/broker/src/credentials.ts';
@@ -55,11 +59,14 @@ function fail(message: string): never {
 
 function buildInfo(packaged: boolean): Readonly<BuildInfo> {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     version: '1.2.3',
     commit: 'abc123',
     buildDate: '2026-07-16T00:00:00.000Z',
     target: 'bun-linux-x64',
+    // `packaged` is derived from the distribution kind in real builds; the fixture keeps them consistent so
+    // a CLI surface that branches on either one sees the same artifact it would in production.
+    distribution: packaged ? 'native' : 'source',
     packaged,
     dirty: false,
     schemaVersions: BUILD_INFO.schemaVersions,
@@ -118,12 +125,22 @@ process.env.COSYNCING_HOME = pureCliHome;
   const version = await callCli(['version', '--json']);
   const parsed = JSON.parse(version.stdout);
   check('version --json has the stable, redacted schema',
-    version.code === 0 && parsed.schemaVersion === 1 && parsed.product === 'cosyncing' &&
+    version.code === 0 && parsed.schemaVersion === BUILD_INFO_SCHEMA_VERSION && parsed.product === 'cosyncing' &&
       parsed.binary === 'cosyncing' && parsed.alias === 'cosy' && parsed.version === '1.2.3' &&
       parsed.packaged === false && parsed.dirty === false &&
       JSON.stringify(parsed.schemaVersions) === JSON.stringify(BUILD_INFO.schemaVersions) &&
       JSON.stringify(parsed.contract) === JSON.stringify(BUILD_INFO.contract) &&
       !('home' in parsed) && !('environment' in parsed));
+
+  // `packaged` alone cannot answer "may this build install a signed native binary over itself". The
+  // distribution kind is the field that can, so it has to be on the public surface — and it has to stay
+  // consistent with the boolean derived from it, or two callers reading different fields would disagree.
+  const packagedVersion = JSON.parse(
+    (await callCli(['version', '--json'], { buildInfo: buildInfo(true) })).stdout,
+  );
+  check('version --json publishes the distribution kind alongside the derived packaged flag',
+    parsed.distribution === 'source' && parsed.packaged === false
+      && packagedVersion.distribution === 'native' && packagedVersion.packaged === true);
 
   let setupCalls = 0;
   const missingOwnershipAck = await callCli(['setup', '--yes'], {

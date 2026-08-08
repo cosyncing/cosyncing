@@ -136,7 +136,10 @@ export interface LifecycleBaseOptions {
   home?: string;
   cacheRoot?: string;
   buildInfo: Readonly<BuildInfo>;
+  /** The running cosyncing APPLICATION artifact — the JS bundle, the native executable, or a source entry. */
   executablePath: string;
+  /** The external runtime that executes it, for distributions that have one. Absent for a native build. */
+  runtimePath?: string;
   context?: SetupDiagnosisContext;
   systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
   tailscaleProviderFactory?: (options: TailscaleServeProviderOptions) => TailscaleServeRouteProvider;
@@ -317,6 +320,11 @@ export function createLifecycleSystemdProvider(options: LifecycleBaseOptions): D
       home,
       executablePath: options.executablePath,
     }),
+    distribution: options.buildInfo.distribution,
+    // The unit names the interpreter, so status and repair must expect the same one. A Bun that MOVED since
+    // setup therefore reads back as a drifted definition — which is the intended signal, and exactly what
+    // repair converges by rewriting the unit with the runtime that is executing this command now.
+    ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
     agentExecutableDirectories: serviceAgentExecutableDirectories(context),
     agentExecutableOverrides: serviceAgentExecutableOverrides(context),
     // Same reason, same inputs: the service cannot resolve the sidecar from the binary it execs, so status

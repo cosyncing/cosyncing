@@ -73,6 +73,8 @@
     {"id": "broker.codex-permissions", "description": "Codex reviewer state and native permission modes survive resume."},
     {"id": "broker.cli-package-boundary", "description": "CLI, first-run, cleanup, signals, and packaged process boundaries hold."},
     {"id": "broker.compiled-assets", "description": "Compiled runtime assets and packaged hook exclusions are correct."},
+    {"id": "broker.application-identity", "description": "The cosyncing application and the runtime executing it stay distinct across every acquisition path."},
+    {"id": "broker.npm-package", "description": "The npm distribution is one JavaScript package with no embedded runtime and no platform packages."},
     {"id": "broker.web-origin", "description": "Same-origin web serving: the /cosy/ mount, the retired /app path, and no route shadowing."},
     {"id": "broker.state-security", "description": "Durable state, credentials, migration, and Pi route scope stay isolated."},
     {"id": "broker.doctor", "description": "Zero-agent diagnosis, isolated paths, and topology checks remain deterministic."},
@@ -386,7 +388,8 @@
       "releaseDomain": "broker acceptance",
       "claimIds": [
         "broker.typecheck", "broker.conformance", "broker.surface", "broker.codex-permissions",
-        "broker.cli-package-boundary", "broker.compiled-assets", "broker.web-origin", "broker.state-security", "broker.doctor",
+        "broker.cli-package-boundary", "broker.compiled-assets", "broker.application-identity",
+        "broker.npm-package", "broker.web-origin", "broker.state-security", "broker.doctor",
         "broker.transactional-setup", "broker.service-lifecycle", "broker.tailscale-pairing", "broker.lifecycle",
         "broker.opencode-shim-symmetry", "broker.opencode-shim-runtime", "broker.roster-revision",
         "broker.adapter-discovery-bounds", "broker.sync-degraded", "broker.live-session-coherence",
@@ -427,7 +430,7 @@
           "mode": "parallel",
           "resourceClass": "standard",
           "subSuites": [
-            "broker-surface", "codex-permissions", "web-origin", "systemd-fixtures",
+            "broker-surface", "codex-permissions", "web-origin", "systemd-fixtures", "application-identity",
             "opencode-shim-symmetry", "roster-revision", "adapter-discovery-bounds",
             "sync-degraded-integration", "live-session-coherence",
             "roster-publication-qualification", "roster-watcher-publication-live",
@@ -461,7 +464,7 @@
           "id": "broker-heavyweight-serial",
           "mode": "serial",
           "resourceClass": "heavyweight",
-          "subSuites": ["cli-package-boundary", "compiled-assets", "release-supply-chain"]
+          "subSuites": ["cli-package-boundary", "compiled-assets", "npm-package", "release-supply-chain"]
         }
       ],
       "subSuites": [
@@ -471,6 +474,8 @@
         {"id":"codex-permissions","claimId":"broker.codex-permissions","command":["bun","run","scripts/broker/tests/codex/resume-fake.ts"],"sourceOwners":["scripts/broker/tests/codex/resume-fake.ts"]},
         {"id":"cli-package-boundary","claimId":"broker.cli-package-boundary","command":["bun","run","test:broker-cli"],"sourceOwners":["scripts/broker/tests/broker/test-cli.ts"]},
         {"id":"compiled-assets","claimId":"broker.compiled-assets","command":["bun","run","test:broker-assets"],"sourceOwners":["scripts/broker/tests/broker/test-runtime-assets.ts"]},
+        {"id":"application-identity","claimId":"broker.application-identity","command":["bun","run","test:broker-application-identity"],"timeoutClass":"short","sourceOwners":["scripts/broker/tests/broker/test-application-identity.ts","packages/typescript/broker/src/application-identity.ts"]},
+        {"id":"npm-package","claimId":"broker.npm-package","command":["bun","run","test:broker-npm-package"],"timeoutClass":"medium","sourceOwners":["scripts/broker/tests/broker/test-npm-package.ts","scripts/release/build-npm-package.ts","scripts/broker/build-broker-bundle.ts"]},
         {"id":"web-origin","claimId":"broker.web-origin","command":["bun","run","test:broker-web-origin"],"sourceOwners":["scripts/broker/tests/broker/test-web-origin.ts"]},
         {"id":"state-security","claimId":"broker.state-security","command":["bun","run","test:broker-state"],"timeoutClass":"short","sourceOwners":["scripts/broker/tests/broker/test-state-security.ts"]},
         {"id":"zero-agent-doctor","claimId":"broker.doctor","command":["bun","run","test:broker-doctor"],"sourceOwners":["scripts/broker/tests/broker/test-doctor.ts"]},

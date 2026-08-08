@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import type { OpencodeShimSignal } from './setup-presenter.ts';
 import { BUILD_INFO, type BuildInfo } from './build-info.ts';
+import { currentApplicationIdentity, type ApplicationIdentity } from './application-identity.ts';
 import { inspectInstallState, type InstallStateInspection } from './install-state.ts';
 import { PRODUCT_IDENTITY } from './product.ts';
 import {
@@ -139,11 +140,20 @@ function terminalWriter(stream: Pick<NodeJS.WriteStream, 'write'>): CliWriter {
   return { write: (value) => void stream.write(value) };
 }
 
-function invocationName(explicit?: string): string {
+/**
+ * The command name to echo back in help and errors.
+ *
+ * `process.execPath` is deliberately NOT consulted: in the published JavaScript distribution it names Bun,
+ * which is never a cosyncing command name. The application artifact is, so a package whose entry file is
+ * `bin/cosyncing` answers `cosyncing` whichever runtime launched it. `cosy` is recoverable only when the
+ * process was addressed by that name directly; through a bin symlink the runtime resolves it away, and the
+ * primary name is the honest fallback rather than a guess.
+ */
+function invocationName(explicit?: string, applicationPath?: string): string {
   if (explicit === PRODUCT_IDENTITY.aliasBinary || explicit === PRODUCT_IDENTITY.primaryBinary) {
     return explicit;
   }
-  for (const candidate of [process.argv[0], process.execPath]) {
+  for (const candidate of [process.argv[0], applicationPath]) {
     const executable = basename(candidate || '');
     if (executable === PRODUCT_IDENTITY.aliasBinary || executable === PRODUCT_IDENTITY.primaryBinary) {
       return executable;
@@ -193,12 +203,24 @@ The ${PRODUCT_IDENTITY.aliasBinary} command is an installed alias for ${PRODUCT_
 `;
 }
 
+/**
+ * This process's own artifact and runtime, resolved once per command.
+ *
+ * `process.execPath` is the cosyncing executable ONLY in the native distribution; for the published
+ * JavaScript package it is Bun, and the application is the bundle Bun was handed. Every command below reads
+ * `applicationPath` from here so the npm bin link, the `cosy` alias, the receipt-owned copy under
+ * `~/.cosyncing/bin/`, and a contributor checkout all resolve through one rule.
+ */
+function applicationIdentity(buildInfo: Readonly<BuildInfo>): ApplicationIdentity {
+  return currentApplicationIdentity(buildInfo.distribution, `${import.meta.dir}/cli.ts`);
+}
+
 async function defaultInspectRuntimeAssets(buildInfo: Readonly<BuildInfo>): Promise<CliRuntimeAssetReport> {
   const { inspectRuntimeAssets, resolveFlutterWebRoot } = await import('./runtime-assets.ts');
   const flutterWebRoot = resolveFlutterWebRoot({
     override: process.env.COSYNCING_WEB_DIR,
     packaged: buildInfo.packaged,
-    executablePath: process.execPath,
+    executablePath: applicationIdentity(buildInfo).applicationPath,
     version: buildInfo.version,
     sourceRoot: `${import.meta.dir}/../../../../apps/client/build/web`,
   });
@@ -231,6 +253,7 @@ function versionJson(info: Readonly<BuildInfo>): string {
       commit: info.commit,
       buildDate: info.buildDate,
       target: info.target,
+      distribution: info.distribution,
       packaged: info.packaged,
       dirty: info.dirty,
       schemaVersions: info.schemaVersions,
@@ -276,7 +299,7 @@ async function defaultRunSetup(options: {
     : presenters.createClackSetupPresenter();
   return runSetup({
     buildInfo: options.buildInfo,
-    executablePath: options.buildInfo.packaged ? process.execPath : `${import.meta.dir}/cli.ts`,
+    ...applicationLaunchInputs(options.buildInfo),
     presenter,
   });
 }
@@ -316,8 +339,19 @@ async function defaultRunDevicesRevoke(options: {
   return runDevicesRevokeCommand(options);
 }
 
-function executablePath(buildInfo: Readonly<BuildInfo>): string {
-  return buildInfo.packaged ? process.execPath : `${import.meta.dir}/cli.ts`;
+/**
+ * What lifecycle commands must be told about this process: the application artifact, and the runtime that
+ * has to execute it. Both come from the one identity resolver, so setup, status, repair, upgrade, logs, and
+ * uninstall address exactly the same file with exactly the same launch model.
+ */
+function applicationLaunchInputs(
+  buildInfo: Readonly<BuildInfo>,
+): { executablePath: string; runtimePath?: string } {
+  const identity = applicationIdentity(buildInfo);
+  return {
+    executablePath: identity.applicationPath,
+    ...(identity.runtimePath ? { runtimePath: identity.runtimePath } : {}),
+  };
 }
 
 function writeCommandResult<T extends { exitCode: number; summary?: string }>(
@@ -343,7 +377,7 @@ async function defaultRunStatus(options: {
   const lifecycle = await import('./broker-lifecycle.ts');
   const report = await lifecycle.collectLifecycleStatus({
     buildInfo: options.buildInfo,
-    executablePath: executablePath(options.buildInfo),
+    ...applicationLaunchInputs(options.buildInfo),
   });
   if (options.json) options.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   else options.stdout.write(lifecycle.renderLifecycleStatus(report, persistedCliLanguage()));
@@ -361,7 +395,7 @@ async function defaultRunServiceCommand(options: {
   const { runServiceCommand } = await import('./broker-lifecycle.ts');
   const result = await runServiceCommand(options.action, {
     buildInfo: options.buildInfo,
-    executablePath: executablePath(options.buildInfo),
+    ...applicationLaunchInputs(options.buildInfo),
   });
   writeCommandResult(result, options.json, options.stdout, options.stderr);
   return result;
@@ -379,7 +413,7 @@ async function defaultRunLogs(options: {
   const { readServiceLogs } = await import('./broker-lifecycle.ts');
   const { result, output } = await readServiceLogs({
     buildInfo: options.buildInfo,
-    executablePath: executablePath(options.buildInfo),
+    ...applicationLaunchInputs(options.buildInfo),
     lines: options.lines,
     follow: options.follow,
     ...(options.follow ? { onOutput: (text: string) => options.stdout.write(text) } : {}),
@@ -409,7 +443,7 @@ async function defaultRunRepair(options: {
   buildInfo: Readonly<BuildInfo>;
 }): Promise<{ exitCode: number }> {
   const lifecycle = await import('./broker-lifecycle.ts');
-  const base = { buildInfo: options.buildInfo, executablePath: executablePath(options.buildInfo) };
+  const base = { buildInfo: options.buildInfo, ...applicationLaunchInputs(options.buildInfo) };
   const plan = await lifecycle.inspectRepair(base);
   if (!options.json) {
     options.stdout.write(`Repair plan (${plan.actions.length} actions):\n${plan.actions.map((action) => `  - ${action.summary}`).join('\n') || '  - no mutations'}\n`);
@@ -451,7 +485,7 @@ async function defaultRunUpgrade(options: {
         const provider = lifecycle.createLifecycleSystemdProvider({
           home,
           buildInfo: options.buildInfo,
-          executablePath: executablePath(options.buildInfo),
+          ...applicationLaunchInputs(options.buildInfo),
         });
         return {
           inspect: async () => ({ active: (await provider.inspect()).active === 'active' }),
@@ -463,7 +497,7 @@ async function defaultRunUpgrade(options: {
   const result = await runUpgrade({
     home,
     buildInfo: options.buildInfo,
-    executablePath: executablePath(options.buildInfo),
+    ...applicationLaunchInputs(options.buildInfo),
     ...(options.manifestUrl ? { manifestUrl: options.manifestUrl } : {}),
     ...(service ? { service } : {}),
   });
@@ -486,7 +520,7 @@ async function defaultRunUninstall(options: {
   const lifecycle = await import('./broker-lifecycle.ts');
   const language = persistedCliLanguage();
   const text = cliMessages(language).uninstall;
-  const base = { buildInfo: options.buildInfo, executablePath: executablePath(options.buildInfo) };
+  const base = { buildInfo: options.buildInfo, ...applicationLaunchInputs(options.buildInfo) };
   const plan = await lifecycle.inspectUninstall({ ...base, purgeData: options.purgeData });
   if (!options.json) {
     options.stdout.write(renderUninstallPlan(plan, language));
@@ -527,7 +561,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   const stdout = dependencies.stdout ?? terminalWriter(process.stdout);
   const stderr = dependencies.stderr ?? terminalWriter(process.stderr);
   const buildInfo = dependencies.buildInfo ?? BUILD_INFO;
-  const command = invocationName(dependencies.invocation);
+  const command = invocationName(dependencies.invocation, applicationIdentity(buildInfo).applicationPath);
   const [rawRequested = 'help', ...args] = argv;
   const requested = rawRequested === 'update' ? 'upgrade' : rawRequested;
 

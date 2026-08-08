@@ -50,6 +50,8 @@
     "ci:check-boundaries": "bash scripts/ci/check-boundaries.sh",
     "test:broker-cli": "bun run scripts/broker/tests/broker/test-cli.ts",
     "test:broker-assets": "bun run scripts/broker/tests/broker/test-runtime-assets.ts",
+    "test:broker-application-identity": "bun run scripts/broker/tests/broker/test-application-identity.ts",
+    "test:broker-npm-package": "bun run scripts/broker/tests/broker/test-npm-package.ts",
     "test:broker-web-origin": "bun run scripts/broker/tests/broker/test-web-origin.ts",
     "test:broker-state": "bun run scripts/broker/tests/broker/test-state-security.ts",
     "test:broker-doctor": "bun run scripts/broker/tests/broker/test-doctor.ts",
@@ -147,7 +149,7 @@
     "typescript": "^5.6.0"
   },
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.8"
   },
   "dependencies": {
     "@clack/prompts": "1.7.0",

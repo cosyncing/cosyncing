@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { inspectPiBridgeAsset } from '@cosyncing/adapter-pi';
 import type { SetupCheck, SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import type { DistributionKind } from './application-identity.ts';
 import type { BuildInfo } from './build-info.ts';
 import {
   defaultBrokerConfig,
@@ -340,7 +341,10 @@ export interface SetupCommandResult {
 
 export interface SetupDependencies {
   buildInfo: Readonly<BuildInfo>;
+  /** The running cosyncing APPLICATION artifact, which setup copies to `<home>/bin/cosyncing`. */
   executablePath: string;
+  /** The external runtime that must execute it; recorded in the service unit. Absent for a native build. */
+  runtimePath?: string;
   presenter: SetupPresenter;
   /** Injected so fixtures provision Tokdash without pipx, a network, or a real install on the host. */
   tokdashRunner?: TokdashCommandRunner;
@@ -351,6 +355,7 @@ export interface SetupDependencies {
   inspectEnvironment?: (options: {
     buildInfo: Readonly<BuildInfo>;
     executablePath: string;
+    runtimePath?: string;
     home: string;
     context: SetupDiagnosisContext;
     systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
@@ -522,6 +527,7 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
 export async function inspectSetupEnvironment(options: {
   buildInfo: Readonly<BuildInfo>;
   executablePath: string;
+  runtimePath?: string;
   home: string;
   context: SetupDiagnosisContext;
   systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
@@ -636,6 +642,8 @@ export async function inspectSetupEnvironment(options: {
           home: options.home,
           executablePath: options.executablePath,
         }),
+        distribution: options.buildInfo.distribution,
+        ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
         agentExecutableDirectories,
         agentExecutableOverrides,
         webDir: serviceFlutterWebRoot({
@@ -1583,7 +1591,9 @@ function createSystemdProviderForSetup(options: {
   context: SetupDiagnosisContext;
   home: string;
   packaged: boolean;
+  distribution: DistributionKind;
   executablePath: string;
+  runtimePath?: string;
   version: string;
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
@@ -1598,6 +1608,8 @@ function createSystemdProviderForSetup(options: {
     cacheRoot,
     // Must match inspectSetupEnvironment's provider exactly, or the written unit reads back as drifted.
     executablePath: serviceExecutablePath(options),
+    distribution: options.distribution,
+    ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
     agentExecutableDirectories: options.agentExecutableDirectories
       ?? serviceAgentExecutableDirectories(options.context),
     agentExecutableOverrides: options.agentExecutableOverrides
@@ -1668,7 +1680,9 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           context,
           home,
           packaged: dependencies.buildInfo.packaged,
+          distribution: dependencies.buildInfo.distribution,
           executablePath: dependencies.executablePath,
+          ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
           version: dependencies.buildInfo.version,
           agentExecutableDirectories: serviceAgentExecutableDirectories(context),
           agentExecutableOverrides: serviceAgentExecutableOverrides(context),
@@ -1710,6 +1724,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   let inspection = await inspect({
     buildInfo: dependencies.buildInfo,
     executablePath: dependencies.executablePath,
+    ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
     home,
     context,
     systemdProviderFactory: dependencies.systemdProviderFactory,
@@ -1883,6 +1898,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     inspection = await inspect({
       buildInfo: dependencies.buildInfo,
       executablePath: dependencies.executablePath,
+      ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
       home,
       context,
       systemdProviderFactory: dependencies.systemdProviderFactory,
@@ -1925,7 +1941,9 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           context,
           home,
           packaged: dependencies.buildInfo.packaged,
+          distribution: dependencies.buildInfo.distribution,
           executablePath: dependencies.executablePath,
+          ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
           version: dependencies.buildInfo.version,
           agentExecutableDirectories: inspection.agentExecutableDirectories,
           agentExecutableOverrides: inspection.agentExecutableOverrides,

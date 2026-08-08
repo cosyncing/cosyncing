@@ -3,6 +3,24 @@
 Source publication and public pull-request CI do not authorize distribution of
 compiled broker executables.
 
+## What this document governs
+
+This control governs distribution of **compiled native broker executables** —
+artifacts produced by `bun build --compile`, which embed a copy of the Bun
+runtime. Everything below applies to those artifacts and to any distribution
+channel that carries them.
+
+It does not govern the reviewed Bun-JavaScript npm package, which is a different
+artifact: one self-contained JavaScript application bundle, executed by a Bun
+runtime the operator installs separately. That package contains no Bun, no
+JavaScriptCore, and no WebKit, so the static-linking and relinking obligations
+described below are not engaged by it. Its own engineering readiness record is
+[npm JavaScript distribution readiness](npm-javascript-distribution-readiness.md).
+
+Nothing here is narrowed by that distinction. If a compiled native executable is
+ever added back to any channel — including npm — this control applies to that
+channel again in full.
+
 The broker currently uses `bun build --compile`. Bun documents that a standalone
 executable contains a copy of the Bun runtime. The pinned Bun 1.3.8 licence also
 states that Bun statically links JavaScriptCore and WebKit under LGPL-2 and that
@@ -36,6 +54,13 @@ the approval and requires a new review.
 
 Ephemeral CI compilation and local packaging tests may continue. Do not create a
 public prerelease, stable release, package-manager distribution, or other
-permanent compiled-binary distribution while the gate is closed.
+permanent compiled-binary distribution of a native executable while the gate is
+closed.
+
+`scripts/broker/build-broker.ts` remains in the repository and remains buildable
+for ephemeral CI and for a future approved standalone release. The npm lane does
+not call it: `scripts/release/build-npm-package.ts` refuses any staged artifact
+carrying an ELF, Mach-O, or PE header, and `scripts/ci/audit-workflows.sh`
+refuses an npm workflow that references the native builder or `--compile`.
 
 This document is an engineering release control, not legal advice.

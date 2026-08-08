@@ -12,6 +12,7 @@
 - [Predecessor workflow audit](ci/predecessor-workflow-audit.md)
 - [Broker release and signing](release/broker-release-signing.md)
 - [Compiled broker distribution gate](legal/binary-distribution-readiness.md)
+- [npm JavaScript distribution readiness](legal/npm-javascript-distribution-readiness.md)
 - [Consolidation transition](project/consolidation-transition.md)
 - [Workflow coverage map](project/workflow-coverage.md)
 - [Implementation status](project/implementation-status.md)

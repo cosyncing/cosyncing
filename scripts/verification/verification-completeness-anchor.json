@@ -3,6 +3,7 @@
   "acceptedBase": "17ad739baa190a366d34318f1128049f720e34a5",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
+    "broker.application-identity",
     "broker.attach-identity",
     "broker.capabilities",
     "broker.claude-hooks",
@@ -34,6 +35,7 @@
     "broker.live-session-coherence",
     "broker.model-session-creation",
     "broker.notifications-bulk-dismiss",
+    "broker.npm-package",
     "broker.opencode-completion",
     "broker.opencode-file-changes",
     "broker.opencode-identity",
@@ -92,7 +94,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:50b74a82fc20fff91ecd484cf984104a7a5274220ce16fd22c64745f9e03335d"
+      "fingerprint": "sha256:5e87c1cc4bbdecf3f7cb7a55f2995626b464ecf92f8deb51d68449e7a082f194"
     },
     {
       "id": "capabilities",
@@ -219,6 +221,10 @@
     {
       "id": "app-send-echo-correlation",
       "fingerprint": "sha256:83e22d920069cd45f946298d3bb881c1a8d92147a2813f2a95d3868ece453bf9"
+    },
+    {
+      "id": "application-identity",
+      "fingerprint": "sha256:e97a4537e87cfbc76137613332d30b2a8e0f1c6af1933d34f56bc9f04acefaff"
     },
     {
       "id": "attach-message-identity",
@@ -351,6 +357,10 @@
     {
       "id": "model-session-creation",
       "fingerprint": "sha256:983f50989f6ac2d7956049f66c8de514ae600e167ebacdde7961b099f2bed7e2"
+    },
+    {
+      "id": "npm-package",
+      "fingerprint": "sha256:70c388dcfed32f8b10fe13b992d715c80bcfc4c44d0f7817e1fc0afb02e4633a"
     },
     {
       "id": "opencode-completion-fence",

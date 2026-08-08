@@ -190,6 +190,15 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Update cosyncing to a build with complete adapter diagnosis.': '请将 cosyncing 更新到包含完整适配器诊断的版本。',
   'Retry diagnosis after checking the agent installation.': '检查智能体安装后，请重试诊断。',
   'Repair or reinstall the packaged runtime assets.': '请修复或重新安装发行包运行时资源。',
+  'This build embeds its own runtime, so no external interpreter is required.': '此版本自带运行时，无需外部解释器。',
+  'The Bun runtime this build requires is installed and executable.': '此版本所需的 Bun 运行时已安装且可执行。',
+  'cosyncing could not resolve the Bun runtime that must execute it.': '无法解析用于执行 cosyncing 的 Bun 运行时。',
+  'The Bun runtime is older than cosyncing requires.': 'Bun 运行时版本低于 cosyncing 的要求。',
+  'The configured runtime did not identify itself as Bun.': '所配置的运行时未表明自己是 Bun。',
+  'COSYNCING_BUN_BIN does not name a usable Bun runtime.': 'COSYNCING_BUN_BIN 指向的不是可用的 Bun 运行时。',
+  'Install a supported Bun runtime, then rerun `cosyncing setup`.': '请安装受支持的 Bun 运行时，然后重新运行 `cosyncing setup`。',
+  'Rewrite the service definition with the current runtime path.': '请用当前运行时路径重写服务定义。',
+  'Run the broker on a supported host: linux-x64, linux-arm64, or darwin-arm64.': '请在受支持的主机上运行 broker：linux-x64、linux-arm64 或 darwin-arm64。',
   'No legacy cosyncing-hook settings entry is present.': '没有旧版 cosyncing-hook 设置项。',
   'Legacy Claude hook entries are present; their command may contain an embedded shared credential.': '存在旧版 Claude hook 项；其中的命令可能含有嵌入式共享凭据。',
   'Review marker-owned entries and rotate any embedded credential before confirmed removal.': '确认移除前，请检查带归属标记的条目并轮换其中的嵌入式凭据。',
@@ -318,6 +327,16 @@ export function translateDoctorTextToChinese(source: string): string | undefined
   if (exact) return exact;
   const dynamic =
     replaceMatch(source, /^(.*) is present and verified\.$/, (asset) => `${asset} 存在且已验证。`)
+    ?? replaceMatch(
+      source,
+      /^([a-z0-9]+-[a-z0-9]+) is not a supported cosyncing broker host\.$/,
+      (host) => `${host} 不是受支持的 cosyncing broker 主机。`,
+    )
+    ?? replaceMatch(
+      source,
+      /^The installed service runs (.*), but cosyncing is now executed by (.*); the service cannot start until the unit is rewritten\.$/,
+      (recorded, current) => `已安装的服务使用 ${recorded}，但 cosyncing 现在由 ${current} 执行；在重写服务定义前，该服务无法启动。`,
+    )
     ?? replaceMatch(source, /^(.*) failed package verification\.$/, (asset) => `${asset} 未通过软件包验证。`)
     ?? replaceMatch(source, /^(.*) is not part of the required v1 package\.$/, (asset) => `${asset} 不属于 v1 必需的软件包内容。`)
     ?? replaceMatch(source, /^(.*) is valid and owner-only\.$/, (label) => `${zhLabel(label)}有效且仅所有者可访问。`)

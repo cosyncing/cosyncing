@@ -231,6 +231,7 @@ function fakeContext(options: {
   return {
     effects: 'forbidden',
     platform: options.platform ?? 'linux',
+    arch: options.platform === 'darwin' ? 'arm64' : 'x64',
     env: options.wsl ? { WSL_DISTRO_NAME: 'Ubuntu', PATH: '' } : { PATH: '' },
     homeDir: '/home/test',
     resolveExecutable(command) {

@@ -1,20 +1,22 @@
 #!/usr/bin/env bun
 /**
- * Stage and pack the npm install channel for the broker.
+ * Stage and pack the npm distribution: ONE publishable `cosyncing` package.
  *
- * One npm name cannot carry three different binaries at the same version, so this follows the esbuild
- * layout: a per-platform package for each target (`@cosyncing/broker-<os>-<cpu>`, constrained by `os`/`cpu`
- * and carrying only the bare binary), plus the user-facing `cosyncing` package that depends on all three as
- * optionalDependencies. npm installs exactly the one matching the host and silently skips the rest.
+ * The previous design published four packages — a per-platform `@cosyncing/broker-<os>-<cpu>` carrying a
+ * `bun build --compile` executable, plus a main package whose postinstall swapped the matching binary in.
+ * Each of those executables embedded the Bun runtime, and therefore JavaScriptCore/WebKit, which is what
+ * `docs/legal/binary-distribution-readiness.md` governs.
  *
- * Direct execution is preserved. `cosyncing`'s `bin/cosyncing` ships as a Node resolver, and its postinstall
- * REPLACES that file with the platform binary; npm links the global command as a symlink to that path, so
- * after the swap every invocation execs the broker with nothing in between — stdio, TTY ownership, signal
- * delivery, and the CLI's distinct exit codes (0/1/2/3/4) all stay untouched. When the swap cannot run
- * (`--ignore-scripts`), the resolver remains and is a faithful launcher rather than a stub.
+ * This lane ships the application as what it already is: JavaScript. `scripts/broker/build-broker-bundle.ts`
+ * produces one self-contained bundle with a Bun shebang, the operator installs Bun themselves, and the
+ * package carries no interpreter at all. One npm name can hold one universal JavaScript file, so the
+ * platform packages, the resolver, and the postinstall binary swap are all gone with it — along with the
+ * whole class of failure where an install succeeds but resolves no runnable broker.
  *
- * `--local-single-tarball` keeps the previous single self-contained package for physical testing, where
- * publishing is not involved and one installable tarball is the whole point.
+ * What did NOT change: the web sidecar still ships beside the application, `cosyncing` and `cosy` are still
+ * both npm bin entries, the package is still Apache-2.0, and the version still comes from the canonical root
+ * package.json. Compiling a native executable is still possible for CI and a future approved release — it is
+ * simply not reachable from here (see scripts/broker/build-broker.ts).
  */
 import { createHash } from 'node:crypto';
 import {
@@ -31,61 +33,56 @@ import {
 import { join, resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../packages/typescript/broker/src/product.ts';
 import {
+  SUPPORTED_BROKER_PACKAGE_CPU,
+  SUPPORTED_BROKER_PACKAGE_OS,
+  supportedBrokerHostList,
+} from '../../packages/typescript/broker/src/supported-hosts.ts';
+import {
+  createCompiledSoftwareInventory,
+  createJavaScriptThirdPartyNotices,
+} from '../broker/release/software-inventory.ts';
+import {
   stageWebSidecarDirectory,
   validateWebBuildShape,
 } from '../broker/release/package-web-sidecar.ts';
 
 const ROOT = resolve(import.meta.dir, '../..');
-/** One compile target per platform package. `os`/`cpu` in each manifest pin it to its own host. */
-const NPM_TARGETS = Object.freeze({
-  'bun-linux-x64': { target: 'linux-x64', os: 'linux', cpu: 'x64' },
-  'bun-linux-arm64': { target: 'linux-arm64', os: 'linux', cpu: 'arm64' },
-  'bun-darwin-arm64': { target: 'darwin-arm64', os: 'darwin', cpu: 'arm64' },
-} as const);
-type NpmCompileTarget = keyof typeof NPM_TARGETS;
-const ALL_COMPILE_TARGETS = Object.keys(NPM_TARGETS) as NpmCompileTarget[];
-const DEFAULT_COMPILE_TARGET: NpmCompileTarget = 'bun-linux-x64';
-/** Relative to a package root; the binary always lives here in both layouts. */
-const PACKAGED_BINARY = `bin/${PRODUCT_IDENTITY.primaryBinary}`;
+/** Relative to the package root. The command name, the receipt-owned copy, and this file all share it. */
+const PACKAGED_APPLICATION = `bin/${PRODUCT_IDENTITY.primaryBinary}`;
 /** Where the compiled client is served from. Single-sourced in scripts/client/build-web.ts. */
 const CANONICAL_WEB_BUILD = join('apps', 'client', 'build', 'web');
+const THIRD_PARTY_NOTICES = 'THIRD_PARTY_NOTICES.txt';
 /**
- * The web sidecar's directory, relative to a package root.
+ * The Bun floor this package requires, read from the canonical root manifest rather than restated here.
  *
- * A packaged broker resolves its web root as `dirname(<running executable>)/cosyncing-web-<version>`
- * (resolveFlutterWebRoot in packages/typescript/broker/src/runtime-assets.ts), so the sidecar has to sit
- * beside the binary — which in BOTH npm layouts is this package's own `bin/`:
+ * npm does not enforce `engines.bun`, so this is documentation plus a machine-readable declaration — the
+ * enforcement an operator actually experiences is that the shebang finds no `bun` at all, or that Bun refuses
+ * the bundle. Restating the floor in two places is how those two would drift.
+ */
+function requiredBunRange(): string {
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+    engines?: { bun?: unknown };
+  };
+  const range = typeof manifest.engines?.bun === 'string' ? manifest.engines.bun.trim() : '';
+  if (!range) throw new Error('the root package.json must declare engines.bun for the npm package to require it');
+  return range;
+}
+
+/**
+ * The web sidecar's directory, relative to the package root.
  *
- *   --local-single-tarball : `bin/cosyncing` IS the binary, so `bin/cosyncing-web-<version>` is adjacent.
- *   published (default)    : the main package's `bin/cosyncing` ships as a Node resolver, and postinstall
- *                            REPLACES it in place with the platform package's binary. The executable that
- *                            ends up running therefore lives at the main package's `bin/cosyncing` too, so
- *                            one shared sidecar in the main package serves every host — the per-platform
- *                            packages carry nothing but their binary and stay ~15MB smaller each.
- *
- * The one path where the executable is NOT there is the `--ignore-scripts` fallback, where the resolver
- * survives and spawns the platform package's own binary; resolver.cjs closes that by exporting
- * COSYNCING_WEB_DIR, which is the same documented override seam setup uses to tell the durable service
- * where its sidecar is. Nothing forks the resolution rule itself.
+ * A packaged broker resolves its web root as `dirname(<application>)/cosyncing-web-<version>`
+ * (resolveFlutterWebRoot in packages/typescript/broker/src/runtime-assets.ts). The application is this
+ * package's own `bin/cosyncing` — there is no longer a swap that could move it elsewhere — so the sidecar
+ * sits beside it and one directory serves every host.
  */
 function webSidecarDirectory(version: string): string {
   return `bin/${PRODUCT_IDENTITY.releaseAssetPrefix}-web-${version}`;
 }
-/** npm scope for the per-platform packages. Publishing these requires owning the scope on the registry. */
-const PLATFORM_SCOPE = '@cosyncing';
-const NPM_RUNTIME_DIR = join(import.meta.dir, 'npm-runtime');
-
-function platformPackageName(compileTarget: NpmCompileTarget): string {
-  const { os, cpu } = NPM_TARGETS[compileTarget];
-  return `${PLATFORM_SCOPE}/broker-${os}-${cpu}`;
-}
 
 interface Options {
-  compileTarget: NpmCompileTarget;
-  /** False (default) stages the publishable multi-package set; true keeps the old single-tarball layout. */
-  localSingleTarball: boolean;
-  binary?: string;
-  binaryDirectory?: string;
+  /** Reuse a prebuilt JavaScript application bundle instead of building one. */
+  application?: string;
   /** False drops the bundled web app; the package then serves no browser client. Default true. */
   web: boolean;
   /** Reuse an already-built /cosy/ web directory instead of running the canonical client build. */
@@ -108,29 +105,24 @@ interface Options {
 function usage(): never {
   console.error(
     `Usage: bun run scripts/release/build-npm-package.ts [options]\n\n` +
-      `  (default) stage every platform package plus the main resolver package\n` +
-      `  --local-single-tarball          one self-contained package for --target (physical testing)\n` +
-      `  --target ${Object.keys(NPM_TARGETS).join('|')}\n` +
-      `                                  single-tarball compile target (default ${DEFAULT_COMPILE_TARGET})\n` +
-      `  --binary-dir DIR                reuse prebuilt binaries named cosyncing-<target> from DIR\n` +
-      `  --binary PATH                   single-tarball only: prebuilt binary for --target\n` +
-      `                                  (env ${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_BROKER_BINARY)\n` +
+      `  Stages the single publishable ${PRODUCT_IDENTITY.productName} JavaScript package.\n\n` +
+      `  --application PATH              reuse a prebuilt JavaScript application bundle\n` +
+      `                                  (env ${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_BROKER_APPLICATION)\n` +
       `  --web-dir DIR                   reuse a prebuilt /cosy/ web build (default: run\n` +
       `                                  scripts/client/build-web.ts into ${CANONICAL_WEB_BUILD})\n` +
-      `  --no-web                        --local-single-tarball only: do not bundle the web app\n` +
-      `                                  (published packages always ship the client)\n` +
+      `  --no-web                        do not bundle the web app (local and test builds only)\n` +
       `  --output-dir DIR                tarball destination (env ${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_OUTPUT_DIR,\n` +
       `                                  default output/npm)\n` +
       `  --stage-dir DIR                 staged package root (default <output-dir>/package)\n` +
       `  --version X.Y.Z                 override the canonical root package version\n` +
-      `  --build-date ISO-8601           forwarded to build-broker.ts\n` +
-      `  --commit HEX                    forwarded to build-broker.ts\n` +
-      `  --require-clean                 forwarded to build-broker.ts\n` +
-      `  --minify                        forwarded to build-broker.ts\n` +
-      `  --release-manifest-url HTTPS_URL        forwarded to build-broker.ts\n` +
-      `  --release-channel-manifest-url HTTPS_URL forwarded to build-broker.ts\n` +
-      `  --release-key-id ID                      forwarded to build-broker.ts\n` +
-      `  --release-public-key PEM_PATH            forwarded to build-broker.ts\n` +
+      `  --build-date ISO-8601           forwarded to build-broker-bundle.ts\n` +
+      `  --commit HEX                    forwarded to build-broker-bundle.ts\n` +
+      `  --require-clean                 forwarded to build-broker-bundle.ts\n` +
+      `  --minify                        forwarded to build-broker-bundle.ts\n` +
+      `  --release-manifest-url HTTPS_URL         forwarded to build-broker-bundle.ts\n` +
+      `  --release-channel-manifest-url HTTPS_URL forwarded to build-broker-bundle.ts\n` +
+      `  --release-key-id ID                      forwarded to build-broker-bundle.ts\n` +
+      `  --release-public-key PEM_PATH            forwarded to build-broker-bundle.ts\n` +
       `  --keep-stage                    keep the staged package directory after packing\n` +
       `  --no-pack                       stage only; do not run npm pack\n`,
   );
@@ -144,14 +136,11 @@ function nextArg(argv: string[], index: number): string {
 }
 
 function parseArgs(argv: string[]): Options {
-  const environmentBinary = process.env[`${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_BROKER_BINARY`]?.trim();
+  const environmentApplication = process.env[`${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_BROKER_APPLICATION`]?.trim();
   const environmentOutput = process.env[`${PRODUCT_IDENTITY.environmentVariablePrefix}NPM_OUTPUT_DIR`]?.trim();
-  let binary = environmentBinary ? resolve(ROOT, environmentBinary) : undefined;
-  let binaryDirectory: string | undefined;
+  let application = environmentApplication ? resolve(ROOT, environmentApplication) : undefined;
   let web = true;
   let webDirectory: string | undefined;
-  let localSingleTarball = false;
-  let compileTarget: NpmCompileTarget = DEFAULT_COMPILE_TARGET;
   let outputDirectory = resolve(ROOT, environmentOutput || join('output', 'npm'));
   let stageDirectory: string | undefined;
   let version: string | undefined;
@@ -167,15 +156,9 @@ function parseArgs(argv: string[]): Options {
   let releasePublicKeyPath: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--target') {
-      const value = nextArg(argv, index++);
-      if (!(value in NPM_TARGETS)) usage();
-      compileTarget = value as NpmCompileTarget;
-    } else if (arg === '--binary') binary = resolve(ROOT, nextArg(argv, index++));
-    else if (arg === '--binary-dir') binaryDirectory = resolve(ROOT, nextArg(argv, index++));
+    if (arg === '--application') application = resolve(ROOT, nextArg(argv, index++));
     else if (arg === '--web-dir') webDirectory = resolve(ROOT, nextArg(argv, index++));
     else if (arg === '--no-web') web = false;
-    else if (arg === '--local-single-tarball') localSingleTarball = true;
     else if (arg === '--output-dir') outputDirectory = resolve(ROOT, nextArg(argv, index++));
     else if (arg === '--stage-dir') stageDirectory = resolve(ROOT, nextArg(argv, index++));
     else if (arg === '--version') version = nextArg(argv, index++);
@@ -192,10 +175,7 @@ function parseArgs(argv: string[]): Options {
     else usage();
   }
   return {
-    compileTarget,
-    localSingleTarball,
-    ...(binary ? { binary } : {}),
-    ...(binaryDirectory ? { binaryDirectory } : {}),
+    ...(application ? { application } : {}),
     web,
     ...(webDirectory ? { webDirectory } : {}),
     outputDirectory,
@@ -237,12 +217,11 @@ function run(command: string[], cwd: string): string {
 }
 
 /**
- * The commit the broker binaries in this package are (or were) stamped with.
+ * The commit the application in this package is (or was) stamped with.
  *
- * Deliberately the same expression scripts/broker/build-broker.ts:218 evaluates, because that is literally
- * the commit it will stamp when this script invokes it, and the release lane passes the same `--commit`
- * explicitly when it supplies prebuilts. build-broker.ts cannot be imported for it: the module runs a build
- * at top level.
+ * Deliberately the same expression the bundle builder evaluates, because that is literally the commit it
+ * will stamp when this script invokes it; the release lane passes the same `--commit` explicitly when it
+ * supplies a prebuilt.
  */
 function effectiveBrokerCommit(): string {
   if (options.commit?.trim()) return options.commit.trim();
@@ -250,41 +229,46 @@ function effectiveBrokerCommit(): string {
   return (result.success ? result.stdout.toString().trim() : '') || 'unknown';
 }
 
+/** ELF, Mach-O, and PE magic. Any of them in this package means an embedded runtime came back. */
+const EXECUTABLE_MAGIC: ReadonlyArray<{ label: string; bytes: readonly number[] }> = Object.freeze([
+  { label: 'ELF', bytes: [0x7f, 0x45, 0x4c, 0x46] },
+  { label: 'Mach-O 64-bit', bytes: [0xcf, 0xfa, 0xed, 0xfe] },
+  { label: 'Mach-O 64-bit big-endian', bytes: [0xfe, 0xed, 0xfa, 0xcf] },
+  { label: 'Mach-O universal', bytes: [0xca, 0xfe, 0xba, 0xbe] },
+  { label: 'PE', bytes: [0x4d, 0x5a] },
+]);
+
 /**
- * Refuse to ship a tarball whose binary is not the machine code its `os`/`cpu` promise. ELF and Mach-O are
- * checked from their own headers; a mismatch here is the difference between a failed install and a silently
- * unrunnable global command.
+ * Refuse to ship anything but plain JavaScript as the executable entry.
+ *
+ * This is the check that makes the migration irreversible by accident: point the builder back at
+ * `--compile`, or hand `--application` a compiled artifact, and the staged file gains a machine-code header
+ * and this throws. It is the packaging-side twin of the assertion the old script made — which demanded the
+ * file BE an ELF/Mach-O executable — and inverting it is the point.
  */
-function assertBinaryFormat(path: string, compileTarget: NpmCompileTarget): void {
-  const header = readFileSync(path).subarray(0, 20);
-  const { target, os, cpu } = NPM_TARGETS[compileTarget];
-  let ok: boolean;
-  if (os === 'darwin') {
-    // 64-bit Mach-O little-endian magic 0xfeedfacf, then cputype at offset 4: 0x0100000c is arm64.
-    const machO = header[0] === 0xcf && header[1] === 0xfa && header[2] === 0xed && header[3] === 0xfe;
-    ok = machO && header[4] === 0x0c && header[5] === 0x00 && header[6] === 0x00 && header[7] === 0x01;
-  } else {
-    const elf = header[0] === 0x7f && header[1] === 0x45 && header[2] === 0x4c && header[3] === 0x46;
-    // e_machine at offset 18 (little-endian, 64-bit): 0x3e is x86-64, 0xb7 is aarch64.
-    const machine = cpu === 'x64' ? 0x3e : 0xb7;
-    ok = elf && header[4] === 2 && header[18] === machine && header[19] === 0x00;
+function assertJavaScriptApplication(path: string): void {
+  const bytes = readFileSync(path);
+  for (const { label, bytes: magic } of EXECUTABLE_MAGIC) {
+    if (magic.every((byte, index) => bytes[index] === byte)) {
+      throw new Error(
+        `staged application is a ${label} executable, not JavaScript: ${path}. `
+          + 'The npm distribution ships one plain JavaScript bundle and never an embedded runtime.',
+      );
+    }
   }
-  if (!ok) {
-    throw new Error(`staged binary is not a ${os === 'darwin' ? 'Mach-O' : 'ELF'} ${target} executable: ${path}`);
+  const shebang = '#!/usr/bin/env bun';
+  if (!bytes.subarray(0, shebang.length).equals(Buffer.from(shebang))) {
+    throw new Error(`staged application does not begin with ${JSON.stringify(shebang)}: ${path}`);
   }
 }
 
-function buildBroker(options: Options, outfile: string): void {
+function buildApplication(outfile: string): void {
   run([
     'bun',
     'run',
-    join('scripts', 'broker', 'build-broker.ts'),
-    '--target',
-    options.compileTarget,
+    join('scripts', 'broker', 'build-broker-bundle.ts'),
     '--outfile',
     outfile,
-    // The alias is an npm bin entry, not a symlink beside the artifact.
-    '--no-alias',
     ...(options.buildDate ? ['--build-date', options.buildDate] : []),
     ...(options.commit ? ['--commit', options.commit] : []),
     ...(options.requireClean ? ['--require-clean'] : []),
@@ -298,109 +282,52 @@ function buildBroker(options: Options, outfile: string): void {
   ], ROOT);
 }
 
-function stagePrebuiltBinary(source: string, outfile: string): void {
-  if (!existsSync(source)) throw new Error(`prebuilt broker binary is missing: ${source}`);
+function stagePrebuiltApplication(source: string, outfile: string): void {
+  if (!existsSync(source)) throw new Error(`prebuilt application bundle is missing: ${source}`);
   const stat = lstatSync(source);
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new Error(`prebuilt broker binary must be a regular file: ${source}`);
+    throw new Error(`prebuilt application bundle must be a regular file: ${source}`);
   }
   copyFileSync(source, outfile);
 }
 
 /**
- * Provenance for a binary this host cannot execute, read from the evidence the RELEASE lane already emits.
+ * Offline identity check: the staged application must report the version, distribution, and SOURCE the
+ * package advertises.
  *
- * `scripts/broker/release/package-evidence.ts` writes `<artifact>.evidence.json` beside each artifact, on
- * the matching runner, after executing it — so it is the one thing that can bind a cross-compiled binary's
- * bytes to a commit. This reuses that file and that naming rather than inventing a second provenance
- * format; only the subset the npm lane can independently verify is checked, and the sha256 is recomputed
- * from the bytes actually being staged so the evidence must describe THIS file.
- *
- * Missing or mismatched evidence is a refusal, never a skip. A packager that shrugs at unverifiable
- * provenance is exactly how an unattested binary reaches a tarball.
+ * Unlike the compiled lane, this needs no cross-compilation evidence file. One universal JavaScript bundle
+ * runs on the packaging host by definition, so the artifact's own stamped BuildInfo is always available as
+ * ground truth and is always what gets checked. `--commit` remains a claim about what is being packaged,
+ * never a restamp.
  */
-function prebuiltProvenance(
-  stagedPath: string,
-  prebuiltSource: string,
-  version: string,
-  compileTarget: NpmCompileTarget,
-): Record<string, unknown> {
-  const { target } = NPM_TARGETS[compileTarget];
-  const evidencePath = `${prebuiltSource}.evidence.json`;
-  if (!existsSync(evidencePath)) {
-    throw new Error(
-      `no provenance evidence for the ${target} prebuilt this host cannot execute: expected ${evidencePath}. `
-        + 'Release artifacts carry <artifact>.evidence.json from scripts/broker/release/package-evidence.ts; '
-        + 'package from a directory that includes it.',
-    );
-  }
-  let evidence: Record<string, unknown>;
-  try {
-    evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as Record<string, unknown>;
-  } catch {
-    throw new Error(`provenance evidence is not readable JSON: ${evidencePath}`);
-  }
-  const measured = sha256(readFileSync(stagedPath));
-  const brokerCommit = effectiveBrokerCommit();
-  if (evidence.schemaVersion !== 1 || evidence.product !== PRODUCT_IDENTITY.productName
-      || evidence.artifact !== `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`
-      || evidence.version !== version || evidence.target !== target
-      || evidence.packaged !== true || evidence.sha256 !== measured) {
-    throw new Error(
-      `provenance evidence does not describe the staged ${target} binary (${evidencePath}); `
-        + `expected sha256 ${measured}`,
-    );
-  }
-  if (evidence.sourceCommit !== brokerCommit) {
-    throw new Error(
-      `the ${target} prebuilt was built from commit ${JSON.stringify(evidence.sourceCommit)} but this `
-        + `package is being built as ${JSON.stringify(brokerCommit)}`,
-    );
-  }
-  if (options.requireClean && evidence.dirty !== false) {
-    throw new Error(`the ${target} prebuilt was built from a dirty checkout; --require-clean forbids it`);
-  }
-  return evidence;
-}
-
-/**
- * Offline identity check: the packaged binary must report the version, target, and SOURCE the package
- * advertises.
- *
- * `--commit` is a claim about what is being packaged, not proof — and the web build is validated against
- * that same claim, so if nothing checks the binaries themselves a caller can name any commit and ship
- * binaries from another one, with the tarball's own metadata disagreeing with every file in it. The
- * binary's stamped BuildInfo is the ground truth, so where this host can run the artifact it is executed
- * and its own answer is what must match. Where it cannot, accompanying release evidence stands in.
- */
-function verifyStagedBinary(
-  path: string,
-  version: string,
-  compileTarget: NpmCompileTarget,
-  prebuiltSource?: string,
-): Record<string, unknown> | undefined {
-  const { target, os, cpu } = NPM_TARGETS[compileTarget];
-  if (process.platform !== os || process.arch !== cpu) {
-    // A binary this script compiled is bound by construction: buildBroker forwards this same --commit (and
-    // --require-clean) to build-broker.ts, which stamps it. A binary handed to us is bound by evidence.
-    return prebuiltSource ? prebuiltProvenance(path, prebuiltSource, version, compileTarget) : undefined;
-  }
-  const output = run([path, 'version', '--json'], ROOT);
+function verifyStagedApplication(path: string, version: string): Record<string, unknown> {
+  const output = run(['bun', path, 'version', '--json'], ROOT);
   const info = JSON.parse(output) as Record<string, unknown>;
-  if (info.version !== version || info.target !== target || info.packaged !== true
-      || info.product !== PRODUCT_IDENTITY.productName) {
-    throw new Error('staged binary does not report the packaged version, target, and product it is packaged as');
+  if (info.version !== version || info.product !== PRODUCT_IDENTITY.productName) {
+    throw new Error('staged application does not report the version and product it is packaged as');
+  }
+  if (info.distribution !== 'bun-js' || info.packaged !== true) {
+    throw new Error(
+      `staged application reports distribution ${JSON.stringify(info.distribution)}; the npm package ships `
+        + 'the bun-js distribution only, so a native or source build must never be staged here.',
+    );
+  }
+  if (info.target !== 'universal') {
+    throw new Error(
+      `staged application claims build target ${JSON.stringify(info.target)}; one JavaScript bundle has no `
+        + 'machine-code target and must not name the packaging host as one.',
+    );
   }
   const brokerCommit = effectiveBrokerCommit();
   if (info.commit !== brokerCommit) {
     throw new Error(
-      `the staged ${target} binary reports commit ${JSON.stringify(info.commit)} but this package is being `
+      `the staged application reports commit ${JSON.stringify(info.commit)} but this package is being `
         + `built as ${JSON.stringify(brokerCommit)}; --commit names what is packaged, it does not restamp it.`,
     );
   }
   if (options.requireClean && info.dirty !== false) {
     throw new Error(
-      `the staged ${target} binary was built from a dirty checkout; --require-clean forbids shipping it.`,
+      'the staged application was built from a dirty checkout; --require-clean forbids shipping it.',
     );
   }
   return info;
@@ -413,13 +340,16 @@ const PACKAGE_COMMON = Object.freeze({
   bugs: { url: 'https://github.com/cosyncing/cosyncing/issues' },
 });
 
-/** Self-contained package: binary, os/cpu constraint, and both bin entries. Used by --local-single-tarball. */
-function packageManifest(
-  version: string,
-  compileTarget: NpmCompileTarget,
-  web: boolean,
-): Record<string, unknown> {
-  const { os, cpu } = NPM_TARGETS[compileTarget];
+/**
+ * The one published manifest.
+ *
+ * No `optionalDependencies`, no `@cosyncing/broker-*`, and no `scripts` at all — there is nothing left for a
+ * lifecycle script to do, and an install script that can swap an executable is precisely the mechanism this
+ * migration removed. `os`/`cpu` exclude Windows, which npm can express; Intel macOS cannot be excluded by
+ * those fields without also excluding Apple Silicon, so the product refuses it at diagnosis instead (see
+ * packages/typescript/broker/src/supported-hosts.ts).
+ */
+function packageManifest(version: string, web: boolean): Record<string, unknown> {
   return {
     name: PRODUCT_IDENTITY.productName,
     version,
@@ -427,193 +357,113 @@ function packageManifest(
       `View and drive CLI coding-agent sessions through your own ${PRODUCT_IDENTITY.productName} broker.`,
     ...PACKAGE_COMMON,
     keywords: ['cosyncing', 'coding-agent', 'broker', 'cli'],
-    os: [os],
-    cpu: [cpu],
+    engines: { bun: requiredBunRange() },
+    os: [...SUPPORTED_BROKER_PACKAGE_OS],
+    cpu: [...SUPPORTED_BROKER_PACKAGE_CPU],
     bin: {
-      [PRODUCT_IDENTITY.primaryBinary]: PACKAGED_BINARY,
-      [PRODUCT_IDENTITY.aliasBinary]: PACKAGED_BINARY,
+      [PRODUCT_IDENTITY.primaryBinary]: PACKAGED_APPLICATION,
+      [PRODUCT_IDENTITY.aliasBinary]: PACKAGED_APPLICATION,
     },
     files: [
-      PACKAGED_BINARY,
+      PACKAGED_APPLICATION,
       ...(web ? [webSidecarDirectory(version)] : []),
       'README.md',
       'LICENSE',
       'NOTICE',
+      THIRD_PARTY_NOTICES,
     ],
   };
 }
 
-/**
- * One platform package: nothing but the binary and the constraint that keeps it off other hosts. It
- * declares NO `bin` (the main package owns the commands) and NO `exports`, so the main package can
- * `require.resolve` the binary by subpath wherever the package manager placed it.
- */
-function platformPackageManifest(version: string, compileTarget: NpmCompileTarget): Record<string, unknown> {
-  const { target, os, cpu } = NPM_TARGETS[compileTarget];
-  return {
-    name: platformPackageName(compileTarget),
-    version,
-    description: `Compiled ${target} ${PRODUCT_IDENTITY.productName} broker binary.`,
-    ...PACKAGE_COMMON,
-    os: [os],
-    cpu: [cpu],
-    files: [PACKAGED_BINARY, 'LICENSE', 'NOTICE'],
-    preferUnplugged: true,
-  };
-}
-
-/**
- * The package users install. It carries no binary of its own: npm resolves exactly one optional dependency
- * for the host and skips the others, and postinstall swaps that binary in as the command target.
- */
-function mainPackageManifest(version: string, web: boolean): Record<string, unknown> {
-  return {
-    name: PRODUCT_IDENTITY.productName,
-    version,
-    description:
-      `View and drive CLI coding-agent sessions through your own ${PRODUCT_IDENTITY.productName} broker.`,
-    ...PACKAGE_COMMON,
-    keywords: ['cosyncing', 'coding-agent', 'broker', 'cli'],
-    bin: {
-      [PRODUCT_IDENTITY.primaryBinary]: PACKAGED_BINARY,
-      [PRODUCT_IDENTITY.aliasBinary]: PACKAGED_BINARY,
-    },
-    scripts: { postinstall: 'node install.cjs' },
-    optionalDependencies: Object.fromEntries(
-      ALL_COMPILE_TARGETS.map((candidate) => [platformPackageName(candidate), version]),
-    ),
-    files: [
-      PACKAGED_BINARY,
-      ...(web ? [webSidecarDirectory(version)] : []),
-      'install.cjs',
-      'README.md',
-      'LICENSE',
-      'NOTICE',
-    ],
-  };
-}
-
-function readme(version: string, compileTarget?: NpmCompileTarget): string {
+function readme(version: string): string {
   const primary = PRODUCT_IDENTITY.primaryBinary;
-  const single = compileTarget ? NPM_TARGETS[compileTarget] : undefined;
-  const shipsLine = single
-    ? `This package ships one compiled ${single.target} broker binary. It installs two`
-    : 'This package installs two';
-  const hostsLine = single
-    ? `${single.os === 'darwin' ? 'macOS' : 'Linux'} ${single.cpu} only. The package refuses to install elsewhere.`
-    : 'Supported hosts: Linux x64, Linux arm64, and Apple Silicon macOS. The matching\n'
-      + 'broker binary is fetched as an optional dependency; other hosts are refused.';
   return `# ${PRODUCT_IDENTITY.productName}
 
 A self-hosted broker that lets you view and drive local CLI coding-agent sessions
 (Claude Code, Codex, OpenCode, Pi) from your own client.
 
-${shipsLine}
-commands: \`${primary}\` and its alias \`${PRODUCT_IDENTITY.aliasBinary}\`.
+This package is one self-contained JavaScript application. It does **not** bundle a
+runtime: install Bun first, then install this package. It provides two commands,
+\`${primary}\` and its alias \`${PRODUCT_IDENTITY.aliasBinary}\`.
+
+## Requirements
+
+- Bun \`${requiredBunRange()}\` — install it from <https://bun.sh>.
+- A supported broker host: ${supportedBrokerHostList()}.
+
+Windows is not supported; run the broker inside WSL. Intel macOS is not a supported
+broker host — \`${primary} doctor\` says so rather than failing later.
 
 ## Install
 
-    npm install -g ${PRODUCT_IDENTITY.productName}
-
-${hostsLine}
-
-## First command
-
+    npm install --global ${PRODUCT_IDENTITY.productName}
     ${primary} setup
 
-Setup inspects the machine, shows exactly what it will change, and applies the
-whole plan or none of it. The broker refuses to start until setup has committed.
+Setup inspects the machine, shows exactly what it will change, and applies the whole
+plan or none of it. The broker refuses to start until setup has committed.
 
-Among other things, setup copies the broker binary to
-\`\$COSYNCING_HOME/bin/${primary}\` (default \`~/.cosyncing/bin/${primary}\`).
-That copy is the installed broker: the service runs it, \`${primary} upgrade\`
-replaces it, and \`${primary} uninstall\` removes it. The npm package stays a
-plain acquisition artifact and is never modified.
+Among other things, setup copies this application to
+\`\$COSYNCING_HOME/bin/${primary}\` (default \`~/.cosyncing/bin/${primary}\`). That copy is
+the installed broker: the durable service runs it with your Bun, and
+\`${primary} uninstall\` removes it. This npm package stays a plain acquisition
+artifact and is never modified.
 
 Other entry points before setup: \`${primary} doctor\` (read-only diagnosis),
 \`${primary} version\`, \`${primary} help\`.
 
 ## Browser client
 
-The web app ships in this package and is served by your own broker at
-\`/cosy/\` — nothing is downloaded at runtime and no third-party host is
-involved. Setup prints the URL. Android and desktop clients are separate
-downloads.
+The web app ships in this package and is served by your own broker at \`/cosy/\` —
+nothing is downloaded at runtime and no third-party host is involved. Setup prints
+the URL. Android and desktop clients are separate downloads.
 
 ## Update
 
-    ${primary} upgrade     # verified signed release, applied to the installed copy
+    npm update --global ${PRODUCT_IDENTITY.productName}
+    ${primary} setup
 
-\`${primary} upgrade\` updates the installed copy in place; it does not update
-this npm package. To move the package itself, run
-\`npm update -g ${PRODUCT_IDENTITY.productName}\` and then \`${primary} setup\`
-to re-copy the newly acquired binary.
+Your package manager owns this package, so \`${primary} upgrade\` does not replace it;
+it prints exactly the two commands above. The \`setup\` step re-copies the newly
+acquired application and reconciles the service.
 
 ## Uninstall
 
 Both steps are needed — they remove different things:
 
     ${primary} uninstall   # removes what setup created, incl. the installed copy; preserves your data
-    npm uninstall -g ${PRODUCT_IDENTITY.productName}   # removes this package and its \`${primary}\` command
+    npm uninstall --global ${PRODUCT_IDENTITY.productName}   # removes this package and its commands
 
-Version ${version}. Licensed under Apache-2.0; see LICENSE and NOTICE.
+Neither step touches Bun. It was installed separately and stays that way.
+
+Version ${version}. Licensed under Apache-2.0; see LICENSE, NOTICE, and
+${THIRD_PARTY_NOTICES}.
 `;
 }
 
 const options = parseArgs(process.argv.slice(2));
 const version = canonicalVersion(options.version);
 
-interface PackedPackage {
-  name: string;
-  stage: string;
-  tarball?: {
-    path: string;
-    size: number;
-    sha256: string;
-    entries: string[];
-    webSidecarEntries?: number;
-  };
-}
-
-function copyLegalFiles(stage: string): void {
+function copyLegalFiles(stage: string, commit: string): void {
   for (const name of ['LICENSE', 'NOTICE']) {
     copyFileSync(join(ROOT, name), join(stage, name));
     chmodSync(join(stage, name), 0o644);
   }
-}
-
-function prebuiltPathFor(compileTarget: NpmCompileTarget): string | undefined {
-  return options.binaryDirectory
-    ? join(options.binaryDirectory, `${PRODUCT_IDENTITY.productName}-${NPM_TARGETS[compileTarget].target}`)
-    : undefined;
-}
-
-/**
- * Refuse to package unless EVERY expected prebuilt is present.
- *
- * `--binary-dir` means "package exactly these reviewed release artifacts". Falling back to a fresh compile
- * for whichever ones happen to be missing would silently substitute an un-attested binary into a tarball
- * that the operator believes carries the reviewed build — the whole point of pointing at the directory.
- * Missing inputs are a supply-chain error, so name all of them at once and stop.
- */
-function assertPrebuiltsPresent(compileTargets: readonly NpmCompileTarget[]): void {
-  if (!options.binaryDirectory) return;
-  const missing = compileTargets
-    .map((compileTarget) => prebuiltPathFor(compileTarget))
-    .filter((path): path is string => !!path && !existsSync(path));
-  if (missing.length > 0) {
-    throw new Error(
-      `--binary-dir was supplied but these expected prebuilt binaries are missing:\n  ${missing.join('\n  ')}\n`
-        + 'Refusing to substitute a freshly compiled, un-attested binary. Omit --binary-dir to build instead.',
-    );
-  }
+  // Removing the embedded runtime removes Bun's notice obligation from this artifact. It does not remove the
+  // obligation for the JavaScript dependencies that ARE bundled into the application, so their exact licence
+  // texts are emitted from the same inventory the compiled lane uses.
+  const inventory = createCompiledSoftwareInventory({
+    version,
+    sourceCommit: /^[a-f0-9]{40,64}$/.test(commit) ? commit : '0'.repeat(40),
+    generatedAt: '1970-01-01T00:00:00.000Z',
+  });
+  writeFileSync(join(stage, THIRD_PARTY_NOTICES), createJavaScriptThirdPartyNotices(inventory), { mode: 0o644 });
 }
 
 /**
- * The validated `/cosy/` web build, produced once and reused by every staged package.
+ * The validated `/cosy/` web build, produced once and staged beside the application.
  *
- * `--web-dir` mirrors `--binary-dir`: package exactly this reviewed artifact. Otherwise the canonical client
- * build runs, because it is the ONE definition of the release web build — base href, dart-defines and the
+ * `--web-dir` means "package exactly this reviewed artifact". Otherwise the canonical client build runs,
+ * because it is the ONE definition of the release web build — base href, dart-defines, and the
  * service-worker stamp all come from scripts/client/build-web.ts, and a hand-rolled `flutter build web` here
  * would silently produce a differently-shaped bundle. Either way the result goes through the same closed-set
  * validation the signed release sidecar uses, so a non-`/cosy/` shell can never reach an npm tarball.
@@ -641,40 +491,37 @@ function resolveWebBuild(): { directory: string; paths: readonly string[]; sourc
   }
   // The version is not enough to prove the client and the broker are the same software. A whole release
   // cycle shares one semver, so `--web-dir` could hand over a client built from an older (or dirty) tree and
-  // it would ship beside newer broker binaries reporting the identical version — one package, two source
-  // revisions, and nothing in the tarball saying so. `validateWebBuildShape` deliberately does not assert
-  // provenance (a local build legitimately has no clean tree), so the provenance the NPM lane can prove is
-  // asserted here: same commit as the binaries, always.
+  // it would ship beside a newer application reporting the identical version — one package, two source
+  // revisions, and nothing in the tarball saying so.
   const brokerCommit = effectiveBrokerCommit();
   if (validated.identity.sourceCommit !== brokerCommit) {
     throw new Error(
       `web build was built from commit ${JSON.stringify(validated.identity.sourceCommit)} but this package `
-        + `carries broker binaries from ${JSON.stringify(brokerCommit)}; package a web build from the same `
+        + `carries an application from ${JSON.stringify(brokerCommit)}; package a web build from the same `
         + 'commit, or pass --commit to name the commit being packaged.',
     );
   }
   // Dirtiness is the one provenance term a local build may legitimately carry, so it is refused only where
-  // the caller has already declared this is a release: --require-clean is the same gate build-broker.ts
-  // applies to the binary, and it must cover the client shipped beside it.
+  // the caller has already declared this is a release.
   if (options.requireClean && validated.identity.dirty !== false) {
     throw new Error(
       'web build was produced from a dirty checkout; --require-clean forbids shipping it beside a release '
-        + 'binary. Commit or stash the client tree and rebuild the web app.',
+        + 'application. Commit or stash the client tree and rebuild the web app.',
     );
   }
   return { directory, paths: validated.paths, source };
 }
 
-/** Put the target's binary in place: the required prebuilt, or a fresh build when no --binary-dir was given. */
-function stageBinaryFor(compileTarget: NpmCompileTarget, outfile: string): string {
-  const prebuilt = prebuiltPathFor(compileTarget);
-  if (prebuilt) {
-    // Presence was already proven by assertPrebuiltsPresent; stagePrebuiltBinary re-checks it is a safe file.
-    stagePrebuiltBinary(prebuilt, outfile);
-    return prebuilt;
-  }
-  buildBroker({ ...options, compileTarget }, outfile);
-  return 'built by scripts/broker/build-broker.ts';
+interface PackedPackage {
+  name: string;
+  stage: string;
+  tarball?: {
+    path: string;
+    size: number;
+    sha256: string;
+    entries: string[];
+    webSidecarEntries?: number;
+  };
 }
 
 function packStage(name: string, stage: string): PackedPackage {
@@ -710,153 +557,69 @@ function packStage(name: string, stage: string): PackedPackage {
 }
 
 mkdirSync(options.outputDirectory, { recursive: true });
-const summary: Record<string, unknown> = {
-  product: PRODUCT_IDENTITY.productName,
-  version,
-  layout: options.localSingleTarball ? 'single-tarball' : 'multi-platform',
-  bin: [PRODUCT_IDENTITY.primaryBinary, PRODUCT_IDENTITY.aliasBinary],
-  releaseChannel: options.releaseManifestUrl ? 'configured' : 'unconfigured',
-};
 
-assertPrebuiltsPresent(options.localSingleTarball ? [options.compileTarget] : ALL_COMPILE_TARGETS);
-
-// Policy: the web app always ships. A published `cosyncing` that serves no browser client is not a
-// smaller install, it is a broken one — the CLI's whole point is the client at /cosy/, and an operator has
-// no way to add the app afterwards. `--no-web` therefore exists only for local and test builds, which is
-// exactly what --local-single-tarball already means (that layout is never published: one npm name cannot
-// carry three binaries at one version).
-if (!options.web && !options.localSingleTarball) {
-  throw new Error(
-    'refusing to build the publishable multi-platform package set without the web app: the client ships '
-      + 'with every published package. --no-web is available for --local-single-tarball builds only.',
-  );
-}
-
-// The web app ships WITH the broker: a plain `npm i -g cosyncing` must serve the real client at /cosy/.
-// Built once and staged into whichever package the running executable resolves from.
+// The web app ships WITH the broker: a plain `npm i -g cosyncing` must serve the real client at /cosy/. A
+// published package that serves no browser client is not a smaller install, it is a broken one — the CLI's
+// whole point is the client at /cosy/, and an operator has no way to add the app afterwards. `--no-web`
+// therefore exists only for local and test builds, and never produces something intended for publication.
 const webBuild = options.web ? resolveWebBuild() : undefined;
 
-/** Lay the shared sidecar beside this package's `bin/cosyncing`, which is where the broker looks for it. */
-function stageWebSidecar(stage: string): void {
-  if (!webBuild) return;
+rmSync(options.stageDirectory, { recursive: true, force: true });
+mkdirSync(join(options.stageDirectory, 'bin'), { recursive: true });
+const stagedApplication = join(options.stageDirectory, PACKAGED_APPLICATION);
+let applicationSource: string;
+if (options.application) {
+  stagePrebuiltApplication(options.application, stagedApplication);
+  applicationSource = options.application;
+} else {
+  buildApplication(stagedApplication);
+  applicationSource = 'built by scripts/broker/build-broker-bundle.ts';
+}
+chmodSync(stagedApplication, 0o755);
+assertJavaScriptApplication(stagedApplication);
+const buildInfo = verifyStagedApplication(stagedApplication, version);
+
+if (webBuild) {
   stageWebSidecarDirectory({
     buildDirectory: webBuild.directory,
-    targetDirectory: join(stage, webSidecarDirectory(version)),
+    targetDirectory: join(options.stageDirectory, webSidecarDirectory(version)),
     paths: webBuild.paths,
   });
 }
 
-if (webBuild) {
-  summary.web = {
-    directory: webSidecarDirectory(version),
-    files: webBuild.paths.length,
-    source: webBuild.source,
-  };
-} else {
-  summary.web = 'omitted (--no-web): this package serves no browser client';
-}
+writeFileSync(
+  join(options.stageDirectory, 'package.json'),
+  `${JSON.stringify(packageManifest(version, options.web), null, 2)}\n`,
+  { mode: 0o644 },
+);
+writeFileSync(join(options.stageDirectory, 'README.md'), readme(version), { mode: 0o644 });
+copyLegalFiles(options.stageDirectory, effectiveBrokerCommit());
 
-if (options.localSingleTarball) {
-  // Physical-testing layout: one installable tarball carrying its own binary. Never published — a single
-  // npm name cannot hold three different binaries at the same version.
-  rmSync(options.stageDirectory, { recursive: true, force: true });
-  mkdirSync(join(options.stageDirectory, 'bin'), { recursive: true });
-  const stagedBinary = join(options.stageDirectory, PACKAGED_BINARY);
-  let source: string;
-  if (options.binary) {
-    stagePrebuiltBinary(options.binary, stagedBinary);
-    source = options.binary;
-  } else {
-    source = stageBinaryFor(options.compileTarget, stagedBinary);
-  }
-  chmodSync(stagedBinary, 0o755);
-  assertBinaryFormat(stagedBinary, options.compileTarget);
-  // The prebuilt's ORIGINAL path, not the staged copy: its evidence file sits beside it.
-  const prebuiltOrigin = options.binary ?? prebuiltPathFor(options.compileTarget);
-  const buildInfo = verifyStagedBinary(
-    stagedBinary, version, options.compileTarget, ...(prebuiltOrigin ? [prebuiltOrigin] : []),
-  );
-  // `bin/cosyncing` IS the executable here, so the sidecar beside it is exactly what resolveFlutterWebRoot
-  // computes from `dirname(process.execPath)`.
-  stageWebSidecar(options.stageDirectory);
-  writeFileSync(
-    join(options.stageDirectory, 'package.json'),
-    `${JSON.stringify(packageManifest(version, options.compileTarget, options.web), null, 2)}\n`,
-    { mode: 0o644 },
-  );
-  writeFileSync(
-    join(options.stageDirectory, 'README.md'),
-    readme(version, options.compileTarget),
-    { mode: 0o644 },
-  );
-  copyLegalFiles(options.stageDirectory);
-  const binaryBytes = readFileSync(stagedBinary);
-  summary.target = NPM_TARGETS[options.compileTarget].target;
-  summary.binary = {
-    path: stagedBinary,
-    size: binaryBytes.byteLength,
-    sha256: sha256(binaryBytes),
-    source,
-  };
-  if (buildInfo) summary.buildInfo = buildInfo;
-  summary.packages = [packStage(PRODUCT_IDENTITY.productName, options.stageDirectory)];
-} else {
-  const packages: PackedPackage[] = [];
-  const binaries: Record<string, unknown> = {};
-  for (const compileTarget of ALL_COMPILE_TARGETS) {
-    const name = platformPackageName(compileTarget);
-    const stage = join(options.outputDirectory, `platform-${NPM_TARGETS[compileTarget].target}`);
-    rmSync(stage, { recursive: true, force: true });
-    mkdirSync(join(stage, 'bin'), { recursive: true });
-    const stagedBinary = join(stage, PACKAGED_BINARY);
-    const source = stageBinaryFor(compileTarget, stagedBinary);
-    chmodSync(stagedBinary, 0o755);
-    // Every tarball's bytes are format-checked on every host; only the matching host can also execute it.
-    assertBinaryFormat(stagedBinary, compileTarget);
-    const prebuiltOrigin = prebuiltPathFor(compileTarget);
-    const buildInfo = verifyStagedBinary(
-      stagedBinary, version, compileTarget, ...(prebuiltOrigin ? [prebuiltOrigin] : []),
-    );
-    writeFileSync(
-      join(stage, 'package.json'),
-      `${JSON.stringify(platformPackageManifest(version, compileTarget), null, 2)}\n`,
-      { mode: 0o644 },
-    );
-    copyLegalFiles(stage);
-    const binaryBytes = readFileSync(stagedBinary);
-    binaries[NPM_TARGETS[compileTarget].target] = {
-      size: binaryBytes.byteLength,
-      sha256: sha256(binaryBytes),
-      source,
-      ...(buildInfo ? { buildInfo } : {}),
-    };
-    packages.push(packStage(name, stage));
-  }
-
-  // The main package carries no binary of its own: the resolver ships as bin/cosyncing and postinstall
-  // replaces it with whichever platform binary npm resolved for this host.
-  const mainStage = join(options.outputDirectory, 'package');
-  rmSync(mainStage, { recursive: true, force: true });
-  mkdirSync(join(mainStage, 'bin'), { recursive: true });
-  copyFileSync(join(NPM_RUNTIME_DIR, 'resolver.cjs'), join(mainStage, PACKAGED_BINARY));
-  chmodSync(join(mainStage, PACKAGED_BINARY), 0o755);
-  copyFileSync(join(NPM_RUNTIME_DIR, 'install.cjs'), join(mainStage, 'install.cjs'));
-  chmodSync(join(mainStage, 'install.cjs'), 0o644);
-  // One shared sidecar, in the package postinstall swaps the platform binary INTO — never duplicated per
-  // platform package, which would triple the published web bytes for no resolution any host would use.
-  stageWebSidecar(mainStage);
-  writeFileSync(
-    join(mainStage, 'package.json'),
-    `${JSON.stringify(mainPackageManifest(version, options.web), null, 2)}\n`,
-    { mode: 0o644 },
-  );
-  writeFileSync(join(mainStage, 'README.md'), readme(version), { mode: 0o644 });
-  copyLegalFiles(mainStage);
-  packages.push(packStage(PRODUCT_IDENTITY.productName, mainStage));
-
-  summary.binaries = binaries;
-  summary.platformPackages = ALL_COMPILE_TARGETS.map(platformPackageName);
-  summary.packages = packages;
-}
+const applicationBytes = readFileSync(stagedApplication);
+const summary: Record<string, unknown> = {
+  product: PRODUCT_IDENTITY.productName,
+  version,
+  layout: 'single-javascript-package',
+  distribution: 'bun-js',
+  requiredRuntime: { name: 'bun', range: requiredBunRange(), bundled: false },
+  supportedHosts: supportedBrokerHostList(),
+  bin: [PRODUCT_IDENTITY.primaryBinary, PRODUCT_IDENTITY.aliasBinary],
+  releaseChannel: options.releaseManifestUrl ? 'configured' : 'unconfigured',
+  application: {
+    path: stagedApplication,
+    size: applicationBytes.byteLength,
+    sha256: sha256(applicationBytes),
+    source: applicationSource,
+  },
+  buildInfo,
+  web: webBuild
+    ? {
+      directory: webSidecarDirectory(version),
+      files: webBuild.paths.length,
+      source: webBuild.source,
+    }
+    : 'omitted (--no-web): this package serves no browser client',
+  packages: [packStage(PRODUCT_IDENTITY.productName, options.stageDirectory)],
+};
 
 console.log(JSON.stringify(summary, null, 2));

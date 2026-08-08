@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import type { DistributionKind } from './application-identity.ts';
 import { buildFingerprint, type BuildInfo } from './build-info.ts';
 import { PRODUCT_IDENTITY } from './product.ts';
 import { embeddedRuntimeAsset } from './runtime-assets.ts';
@@ -108,7 +109,28 @@ export interface SystemdProviderOptions {
   homeDir: string;
   stateHome: string;
   cacheRoot: string;
+  /**
+   * The cosyncing APPLICATION the unit must run — always the receipt-owned copy at `<home>/bin/cosyncing`,
+   * never the runtime that executes it and never the acquisition artifact.
+   */
   executablePath: string;
+  /**
+   * How that application was built, and therefore whether a runtime is mandatory.
+   *
+   * Required rather than inferred from the presence of `runtimePath`, because inferring it is exactly the
+   * bug: a JavaScript install whose runtime failed validation would look identical to a native one and get
+   * a native-shaped unit written for it.
+   */
+  distribution: DistributionKind;
+  /**
+   * The external runtime that must exec `executablePath`, for distributions that have one.
+   *
+   * Mandatory for every non-native distribution (a validated absolute Bun) and forbidden for a compiled
+   * native build, which embeds its own. It is named explicitly in the unit rather than left to the
+   * application's `#!/usr/bin/env bun` shebang, because the service PATH is deliberately restricted and
+   * resolving the interpreter through it would make the broker's ability to start depend on PATH ordering.
+   */
+  runtimePath?: string;
   /**
    * Parent directories of supported agent executables resolved by setup/repair in the operator's shell.
    * These are the only interactive-PATH entries copied into the durable service environment.
@@ -241,8 +263,15 @@ export function createServiceCommandRunner(
   };
 }
 
+/**
+ * Every path this module writes into a service definition or its environment. `%` is a systemd specifier
+ * marker and `:` is the PATH separator; neither has an escape where these paths land. The identity resolver
+ * refuses both upstream, but the providers are exported and constructible without it, so this boundary
+ * refuses them independently — a runtime like `/tmp/a:b/bin/bun` must fail here, not render a PATH whose
+ * directory silently split into two bogus entries.
+ */
 function cleanAbsolutePath(value: string, label: string): string {
-  if (!isAbsolute(value) || /[\0\r\n%]/.test(value)) throw new Error(`invalid ${label} path`);
+  if (!isAbsolute(value) || /[\0\r\n%:]/.test(value)) throw new Error(`invalid ${label} path`);
   return resolve(value);
 }
 
@@ -279,12 +308,9 @@ function environmentLine(name: string, value: string): string {
 }
 
 function servicePathDirectory(value: string): string {
-  const directory = cleanAbsolutePath(value, 'agent executable directory');
-  // PATH has no escaping for its separator. Refuse an ambiguous entry instead of rendering a different
-  // search path from the one setup inspected. Percent is already rejected by cleanAbsolutePath because it
-  // is a systemd specifier marker.
-  if (directory.includes(':')) throw new Error('invalid agent executable directory');
-  return directory;
+  // The PATH separator and the systemd specifier marker are both refused by cleanAbsolutePath itself, so an
+  // ambiguous entry can never render a different search path from the one setup inspected.
+  return cleanAbsolutePath(value, 'agent executable directory');
 }
 
 export interface ServiceAgentExecutable {
@@ -422,6 +448,7 @@ export function servicePathEntries(
   homeDir: string,
   executablePath: string,
   agentExecutableDirectories: readonly string[],
+  runtimePath?: string,
 ): string[] {
   const entries = [
     ...agentExecutableDirectories.map(servicePathDirectory),
@@ -430,6 +457,11 @@ export function servicePathEntries(
     join(homeDir, '.bun', 'bin'),
     join(homeDir, '.npm-global', 'bin'),
     dirname(executablePath),
+    // The runtime's own directory. Not needed to START the broker — the unit execs Bun by absolute path —
+    // but a version-manager Bun lives outside every fixed entry above, and without this a JavaScript install
+    // would run the broker with a PATH that has no `bun` on it for the subprocesses it spawns. Still one
+    // directory, still enumerated, still nothing like the interactive PATH.
+    ...(runtimePath ? [dirname(runtimePath)] : []),
     '/usr/local/bin',
     '/usr/bin',
     '/bin',
@@ -441,8 +473,9 @@ function minimalServicePath(
   homeDir: string,
   executablePath: string,
   agentExecutableDirectories: readonly string[],
+  runtimePath?: string,
 ): string {
-  return servicePathEntries(homeDir, executablePath, agentExecutableDirectories).join(':');
+  return servicePathEntries(homeDir, executablePath, agentExecutableDirectories, runtimePath).join(':');
 }
 
 function serviceAgentOverrideEntries(
@@ -466,6 +499,7 @@ export function brokerServiceEnvironmentEntries(options: {
   stateHome: string;
   cacheRoot: string;
   executablePath: string;
+  runtimePath?: string;
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
   webDir: string;
@@ -477,6 +511,7 @@ export function brokerServiceEnvironmentEntries(options: {
       options.homeDir,
       options.executablePath,
       options.agentExecutableDirectories ?? [],
+      options.runtimePath,
     )],
     ...serviceAgentOverrideEntries(options.agentExecutableOverrides ?? {}),
     ['COSYNCING_HOME', stateHome],
@@ -493,6 +528,36 @@ export function brokerServiceEnvironmentEntries(options: {
 
 function renderEnvironmentFile(entries: ReadonlyArray<readonly [string, string]>): string {
   return `${entries.map(([name, value]) => environmentLine(name, value)).join('\n')}\n`;
+}
+
+/**
+ * The ONE launch command both durable providers write.
+ *
+ * systemd renders it as an `ExecStart=` argument list and launchd as `ProgramArguments`, but the argv itself
+ * is computed here so a Linux and a macOS install cannot disagree about whether the runtime is part of the
+ * command. Every element is revalidated as an absolute path even though the caller resolved it: this is the
+ * last boundary before the value becomes a file on disk that a service manager will exec.
+ */
+export function brokerServiceLaunchArgv(options: {
+  executablePath: string;
+  distribution: DistributionKind;
+  runtimePath?: string;
+}): string[] {
+  const application = cleanAbsolutePath(options.executablePath, 'executable');
+  if (options.distribution === 'native') {
+    // A compiled build is its own interpreter. Naming a runtime for it would exec Bun against a native
+    // executable, which is not a script, so the unit is refused rather than written.
+    if (options.runtimePath) throw new Error('a native build has no external runtime to record');
+    return [application, 'broker'];
+  }
+  // The fail-closed boundary. Omitting the runtime here does not produce a broken unit that reports an
+  // error — it produces `ExecStart=<application> broker`, which is a VALID unit that resolves the
+  // interpreter through the deliberately restricted service PATH via the `#!/usr/bin/env bun` shebang.
+  // Setup would report success and the service would never start, so the definition is refused instead.
+  if (!options.runtimePath) {
+    throw new Error(`a ${options.distribution} build cannot be installed as a service without a validated Bun runtime`);
+  }
+  return [cleanAbsolutePath(options.runtimePath, 'runtime'), application, 'broker'];
 }
 
 /** XML text escaping for the plist. Control characters are refused rather than encoded. */
@@ -636,12 +701,14 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
     );
     this.runner = options.runner ?? createServiceCommandRunner(options.context.env);
     const executable = cleanAbsolutePath(options.executablePath, 'executable');
+    const launchArgv = brokerServiceLaunchArgv(options);
     const workingDirectory = cleanAbsolutePath(options.workingDirectory ?? options.homeDir, 'working directory');
     this.environment = renderEnvironmentFile(brokerServiceEnvironmentEntries({
       homeDir: options.homeDir,
       stateHome: options.stateHome,
       cacheRoot: options.cacheRoot,
       executablePath: executable,
+      ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
       webDir: options.webDir,
@@ -650,7 +717,9 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
     if (template == null) throw new Error('systemd service template is unavailable');
     this.definition = template
       .replaceAll('{{PRODUCT_NAME}}', PRODUCT_IDENTITY.productName)
-      .replaceAll('{{EXECUTABLE}}', systemdQuote(executable))
+      // ExecStart= is argument-split, so every element is quoted individually; a JavaScript install renders
+      // `"<bun>" "<application>" "broker"` and a native one renders `"<executable>" "broker"`.
+      .replaceAll('{{EXEC_START}}', launchArgv.map(systemdQuote).join(' '))
       .replaceAll('{{WORKING_DIRECTORY}}', systemdBarePath(workingDirectory))
       // Bare, like WorkingDirectory. A quoted EnvironmentFile= is worse than a fatal error: systemd logs
       // "path is not absolute, ignoring" and starts the unit anyway, so the broker would come up with none
@@ -814,12 +883,14 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
     this.persistenceTarget = `launchd-gui-session:${userIdentifier}`;
     this.runner = options.runner ?? createServiceCommandRunner(options.context.env);
     const executable = cleanAbsolutePath(options.executablePath, 'executable');
+    const launchArgv = brokerServiceLaunchArgv(options);
     const workingDirectory = cleanAbsolutePath(options.workingDirectory ?? homeDir, 'working directory');
     const entries = brokerServiceEnvironmentEntries({
       homeDir,
       stateHome,
       cacheRoot: options.cacheRoot,
       executablePath: executable,
+      ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
       webDir: options.webDir,
@@ -832,7 +903,12 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
     if (template == null) throw new Error('launchd service template is unavailable');
     this.definition = template
       .replaceAll('{{LABEL}}', plistText(LAUNCHD_SERVICE_LABEL))
-      .replaceAll('{{EXECUTABLE}}', plistText(executable))
+      // Same argv systemd renders, in launchd's own array form: one <string> per argument, so a path
+      // containing spaces stays one argument here exactly as quoting keeps it one there.
+      .replaceAll(
+        '{{PROGRAM_ARGUMENTS}}',
+        launchArgv.map((argument) => `    <string>${plistText(argument)}</string>`).join('\n'),
+      )
       .replaceAll('{{WORKING_DIRECTORY}}', plistText(workingDirectory))
       .replaceAll('{{ENVIRONMENT_VARIABLES}}', renderPlistEnvironment([
         ...entries,

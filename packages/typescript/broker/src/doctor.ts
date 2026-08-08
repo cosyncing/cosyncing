@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type {
   AgentBackend,
   AgentSetupDiagnosis,
@@ -14,6 +14,12 @@ import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
 import { ClaudeAdapter } from '@cosyncing/adapter-claude';
 import type { BuildInfo } from './build-info.ts';
+import {
+  BUN_RUNTIME_OVERRIDE_VARIABLE,
+  currentApplicationIdentity,
+  MINIMUM_BUN_RUNTIME_VERSION,
+  type ApplicationIdentity,
+} from './application-identity.ts';
 import {
   defaultBrokerConfig,
   inspectBrokerConfig,
@@ -29,6 +35,7 @@ import { durableStateLayout, inspectDurableSchemas } from './durable-state.ts';
 import { inspectInstallState, installedBinaryPath, type InstalledResourceRecord } from './install-state.ts';
 import type { RuntimeAssetReport } from './runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
+import { isSupportedBrokerHost, supportedBrokerHostList } from './supported-hosts.ts';
 import { inspectOwnerOnlyFile } from './secure-files.ts';
 import {
   inspectAgentSkills,
@@ -104,6 +111,11 @@ export interface DoctorDependencies {
   adapters?: readonly AgentBackend[];
   stateHome?: string;
   codexTuiReadiness?: Readonly<CodexTuiReadinessReport>;
+  /**
+   * This process's artifact and runtime. Injected so fixtures can pose as a JavaScript install whose Bun has
+   * moved or vanished — states a test host running a source checkout can never reach on its own.
+   */
+  applicationIdentity?: Readonly<ApplicationIdentity>;
 }
 
 function remediation(command: string, message: string): SetupCheck['remediation'] {
@@ -200,6 +212,129 @@ function assetChecks(report: RuntimeAssetReport): SetupCheck[] {
       remediation: remediation('cosyncing repair', 'Repair or reinstall the packaged runtime assets.'),
     }),
   }));
+}
+
+/**
+ * The interpreter path the INSTALLED service definition actually names, read from the file itself.
+ *
+ * Comparing the whole unit against its expected rendering already detects drift, but it can only say "the
+ * definition changed" — and after a Bun move that message sends an operator looking at the wrong thing. The
+ * launch command is the one field worth naming separately, so it is extracted here and nowhere else.
+ *
+ * Both service managers write the same argv in their own syntax, so both are read: three arguments means a
+ * runtime is named, two means the application is its own runtime. Anything else is left unanswered rather
+ * than guessed.
+ */
+function recordedServiceRuntimePath(definitionPath: string, provider: 'systemd' | 'launchd'): string | undefined {
+  if (inspectOwnerOnlyFile(definitionPath).status !== 'ok') return undefined;
+  let content: string;
+  try {
+    content = readFileSync(definitionPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  if (provider === 'systemd') {
+    const execStart = content.split('\n').find((line) => line.startsWith('ExecStart='));
+    if (!execStart) return undefined;
+    const quoted = [...execStart.slice('ExecStart='.length).matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+      .map((match) => match[1]!.replaceAll('\\"', '"').replaceAll('\\\\', '\\'));
+    return quoted.length === 3 ? quoted[0] : undefined;
+  }
+  const argumentsBlock = content.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  if (!argumentsBlock) return undefined;
+  const entries = [...argumentsBlock[1]!.matchAll(/<string>([\s\S]*?)<\/string>/g)]
+    .map((match) => match[1]!.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
+  return entries.length === 3 ? entries[0] : undefined;
+}
+
+/**
+ * The interpreter this build cannot run without, and the service unit's recorded copy of it.
+ *
+ * The published JavaScript application carries no runtime: Bun is a separate installation the operator owns,
+ * and it can be upgraded in place, moved by a version manager, or removed entirely long after setup wrote a
+ * unit naming an absolute path. Those three outcomes are genuinely different — in place is fine, moved is
+ * repairable, removed is not — so this reports them as three different answers rather than one "service
+ * failed to start", which is all the operator would otherwise see.
+ *
+ * A compiled native build embeds its runtime and legitimately has nothing to check, so it skips.
+ */
+/**
+ * One summary per way the runtime can be unusable.
+ *
+ * These are genuinely different operator actions — install Bun, fix the override variable, upgrade Bun — so
+ * collapsing them into a single "runtime unavailable" would tell an operator with a stale Bun to reinstall
+ * something they already have.
+ */
+function runtimeProblemSummary(detailCode?: string): string {
+  switch (detailCode) {
+    case 'bun-runtime-outdated':
+      return `The Bun runtime is older than ${PRODUCT_IDENTITY.productName} requires.`;
+    case 'bun-runtime-probe-failed':
+    case 'bun-runtime-unrecognized':
+      return 'The configured runtime did not identify itself as Bun.';
+    case 'bun-runtime-override-invalid':
+    case 'bun-runtime-override-unusable':
+      return `${BUN_RUNTIME_OVERRIDE_VARIABLE} does not name a usable Bun runtime.`;
+    default:
+      return `${PRODUCT_IDENTITY.productName} could not resolve the Bun runtime that must execute it.`;
+  }
+}
+
+function applicationRuntimeCheck(options: {
+  identity: Readonly<ApplicationIdentity>;
+  serviceRuntimePath?: string;
+}): SetupCheck {
+  const id = 'package.runtime';
+  if (options.identity.distribution === 'native') {
+    return {
+      id,
+      status: 'skip',
+      detailCode: 'runtime-embedded',
+      summary: 'This build embeds its own runtime, so no external interpreter is required.',
+    };
+  }
+  if (!options.identity.runtimePath) {
+    const problem = options.identity.runtimeProblem;
+    return {
+      id,
+      status: 'fail',
+      detailCode: problem?.detailCode ?? 'runtime-unresolved',
+      // A fixed summary per detail code, with the raw message as evidence. The messages name paths and
+      // versions, so using them directly as the summary would leave the Chinese CLI printing English on
+      // exactly the hosts where something is already wrong.
+      summary: runtimeProblemSummary(problem?.detailCode),
+      ...(problem ? { evidence: { problem: problem.message } } : {}),
+      remediation: {
+        kind: 'manual',
+        message: 'Install a supported Bun runtime, then rerun `cosyncing setup`.',
+      },
+    };
+  }
+  // The unit records an absolute interpreter. If Bun now lives somewhere else, the unit still names the old
+  // path and the service cannot start — but everything is recoverable, because repair rewrites the unit with
+  // the runtime executing this command. Saying so is the whole point of separating this from a bare failure.
+  if (options.serviceRuntimePath && resolve(options.serviceRuntimePath) !== resolve(options.identity.runtimePath)) {
+    return {
+      id,
+      status: 'fail',
+      detailCode: 'runtime-path-drifted',
+      summary: `The installed service runs ${options.serviceRuntimePath}, but ${PRODUCT_IDENTITY.productName} is `
+        + `now executed by ${options.identity.runtimePath}; the service cannot start until the unit is rewritten.`,
+      evidence: { serviceRuntime: options.serviceRuntimePath, currentRuntime: options.identity.runtimePath },
+      remediation: remediation('cosyncing repair', 'Rewrite the service definition with the current runtime path.'),
+    };
+  }
+  return {
+    id,
+    status: 'pass',
+    detailCode: 'runtime-available',
+    summary: 'The Bun runtime this build requires is installed and executable.',
+    evidence: {
+      runtime: options.identity.runtimePath,
+      ...(options.identity.runtimeVersion ? { version: options.identity.runtimeVersion } : {}),
+      minimum: MINIMUM_BUN_RUNTIME_VERSION,
+    },
+  };
 }
 
 function configCheck(inspection: BrokerConfigInspection, context: SetupDiagnosisContext): SetupCheck {
@@ -338,27 +473,45 @@ function isWsl(context: SetupDiagnosisContext): boolean {
   return release.ok && /microsoft|wsl/i.test(release.text);
 }
 
-function hostChecks(context: SetupDiagnosisContext): { checks: SetupCheck[]; wsl: boolean } {
+function hostChecks(context: SetupDiagnosisContext, arch: string): { checks: SetupCheck[]; wsl: boolean } {
   const wsl = isWsl(context);
   let host: SetupCheck;
-  if (context.platform === 'linux') {
-    host = {
-      id: 'host.platform',
-      status: 'pass',
-      detailCode: wsl ? 'linux-wsl-supported' : 'linux-supported',
-      summary: wsl ? 'WSL is supported through the declared Linux subset.' : 'Linux is a supported v1 broker host.',
-      evidence: { platform: wsl ? 'linux-wsl' : 'linux' },
-    };
-  } else if (context.platform === 'darwin') {
-    // Apple Silicon only. The shipped darwin binary is darwin-arm64 and there is no Intel artifact, so an
-    // Intel Mac cannot get this far with a packaged build; nothing here needs to probe the architecture.
-    host = {
-      id: 'host.platform',
-      status: 'pass',
-      detailCode: 'macos-supported',
-      summary: 'macOS on Apple Silicon is a supported broker host.',
-      evidence: { platform: 'darwin' },
-    };
+  if (context.platform === 'linux' || context.platform === 'darwin') {
+    // The architecture is probed now, which it never used to be.
+    //
+    // It did not have to be while every distribution was a compiled per-target binary: an Intel Mac had no
+    // artifact to install, so it could not reach this check with a packaged build at all. One universal
+    // JavaScript bundle runs wherever a supported Bun runs, so the absence of an artifact no longer refuses
+    // anything, and an unverified host would otherwise be told it is supported.
+    if (!isSupportedBrokerHost(context.platform, arch)) {
+      host = {
+        id: 'host.platform',
+        status: 'fail',
+        detailCode: 'host-architecture-unsupported',
+        summary: `${context.platform}-${arch} is not a supported ${PRODUCT_IDENTITY.productName} broker host.`,
+        evidence: { platform: context.platform, arch, supported: supportedBrokerHostList() },
+        remediation: {
+          kind: 'manual',
+          message: 'Run the broker on a supported host: linux-x64, linux-arm64, or darwin-arm64.',
+        },
+      };
+      return { checks: [host], wsl };
+    }
+    host = context.platform === 'linux'
+      ? {
+        id: 'host.platform',
+        status: 'pass',
+        detailCode: wsl ? 'linux-wsl-supported' : 'linux-supported',
+        summary: wsl ? 'WSL is supported through the declared Linux subset.' : 'Linux is a supported v1 broker host.',
+        evidence: { platform: wsl ? 'linux-wsl' : 'linux', arch },
+      }
+      : {
+        id: 'host.platform',
+        status: 'pass',
+        detailCode: 'macos-supported',
+        summary: 'macOS on Apple Silicon is a supported broker host.',
+        evidence: { platform: 'darwin', arch },
+      };
   } else {
     host = {
       id: 'host.platform',
@@ -501,13 +654,20 @@ function parseServiceEnvironment(environment: string): Record<string, string> | 
   return values;
 }
 
-/** Compare the interactive detection result with the receipt-owned PATH the durable service actually uses. */
+/**
+ * Compare the interactive detection result with the receipt-owned PATH the durable service actually uses.
+ *
+ * `runtimePath` is the validated external Bun executing this build, when there is one. Setup writes its
+ * directory into the durable PATH, so reconstructing the expectation without it would call a correct fresh
+ * install "obsolete" — failing doctor while repair finds nothing to change.
+ */
 function serviceAgentPathCheck(
   context: SetupDiagnosisContext,
   home: string,
   resources: readonly InstalledResourceRecord[],
   environment: InstalledResourceRecord | undefined,
   integrity: ReturnType<typeof resourceIntegrity>,
+  runtimePath: string | undefined,
 ): SetupCheck {
   const executables = resolveServiceAgentExecutables(context);
   if (!environment || integrity !== 'ok') {
@@ -535,7 +695,7 @@ function serviceAgentPathCheck(
     ?? installedBinaryPath(home);
   let expectedEntries: string[];
   try {
-    expectedEntries = servicePathEntries(context.homeDir, serviceExecutable, requiredDirectories);
+    expectedEntries = servicePathEntries(context.homeDir, serviceExecutable, requiredDirectories, runtimePath);
   } catch {
     return {
       id: 'service.agent-executable-path',
@@ -707,6 +867,7 @@ async function installedServicePosture(
 async function installedBrokerServiceChecks(
   context: SetupDiagnosisContext,
   home: string,
+  runtimePath: string | undefined,
 ): Promise<SetupCheck[]> {
   const setupState = readSetupState(home);
   const provider = durableServiceProviderId(context.platform);
@@ -726,7 +887,7 @@ async function installedBrokerServiceChecks(
   const environment = resources.find((resource) => resource.id === 'service-environment');
   const definitionIntegrity = resourceIntegrity(definition);
   const environmentIntegrity = resourceIntegrity(environment);
-  const agentPathCheck = serviceAgentPathCheck(context, home, resources, environment, environmentIntegrity);
+  const agentPathCheck = serviceAgentPathCheck(context, home, resources, environment, environmentIntegrity, runtimePath);
   let serviceCheck: SetupCheck;
   if (!manager) {
     serviceCheck = {
@@ -1144,17 +1305,21 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   const config = inspectBrokerConfig(home);
   const brokerToken = inspectBrokerToken(join(home, 'secrets', 'broker-token'));
   const piIntegration = inspectPiIntegration(join(home, 'secrets', 'pi-integration.json'));
-  const host = hostChecks(dependencies.context);
+  const host = hostChecks(dependencies.context, dependencies.context.arch);
   const adapters = dependencies.adapters ?? [
     new OpenCodeAdapter(),
     new PiAdapter(),
     new CodexAdapter(),
     new ClaudeAdapter(),
   ];
+  // Resolved before the service checks because the durable service PATH is derived from it: setup records
+  // the validated runtime's directory there, and the check below must reconstruct the same expectation.
+  const identity = dependencies.applicationIdentity
+    ?? currentApplicationIdentity(dependencies.buildInfo.distribution, `${import.meta.dir}/cli.ts`);
   const [agents, service, installedService, tailscale] = await Promise.all([
     diagnoseAgents(dependencies.context, adapters),
     serviceChecks(dependencies.context, host.wsl),
-    installedBrokerServiceChecks(dependencies.context, home),
+    installedBrokerServiceChecks(dependencies.context, home, identity.runtimePath),
     networkChecks(
       dependencies.context,
       home,
@@ -1171,8 +1336,27 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   const codexReadiness = codexTuiReadinessCheck(
     dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(dependencies.context),
   );
+  // Read from the receipt's own target, so this inspects the file the installer actually wrote rather than
+  // a path recomputed here — the same rule every other receipt-owned resource check follows.
+  const serviceProvider = durableServiceProviderId(dependencies.context.platform);
+  const installedResources = inspectInstallState(home);
+  const serviceDefinitionReceipt = (installedResources.committed ? installedResources.state.resources : [])
+    .find((resource: InstalledResourceRecord) => resource.id === serviceDefinitionResourceId({ id: serviceProvider }));
+  const serviceRuntimePath = serviceDefinitionReceipt
+    ? recordedServiceRuntimePath(serviceDefinitionReceipt.target, serviceProvider)
+    : undefined;
   const sections: DoctorSection[] = [
-    { id: 'package', title: 'Package', checks: assetChecks(dependencies.assetReport) },
+    {
+      id: 'package',
+      title: 'Package',
+      checks: [
+        ...assetChecks(dependencies.assetReport),
+        applicationRuntimeCheck({
+          identity,
+          ...(serviceRuntimePath ? { serviceRuntimePath } : {}),
+        }),
+      ],
+    },
     {
       id: 'state',
       title: 'Configuration and state',

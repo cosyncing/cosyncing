@@ -57,11 +57,12 @@ function check(name: string, ok: boolean, detail?: string): void {
 const cleanup: string[] = [];
 
 const BUILD = Object.freeze({
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   version: '1.0.0',
   commit: '1111111',
   buildDate: '2026-07-17T00:00:00.000Z',
   target: 'linux-x64',
+  distribution: 'native' as const,
   packaged: true,
   dirty: false,
   schemaVersions: BUILD_INFO.schemaVersions,
@@ -72,6 +73,7 @@ function contextFor(userHome: string): SetupDiagnosisContext {
   return {
     effects: 'forbidden',
     platform: 'linux',
+    arch: 'x64',
     env: { HOME: userHome, PATH: '/usr/bin:/bin' },
     homeDir: userHome,
     resolveExecutable: () => undefined, // no tailscale/systemd/codex on this fixture host.

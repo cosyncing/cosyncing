@@ -1,5 +1,13 @@
 #!/usr/bin/env bun
-import { createPublicKey } from 'node:crypto';
+/**
+ * Build the COMPILED NATIVE broker executable: one `bun build --compile` artifact with the Bun runtime
+ * embedded in it.
+ *
+ * This is not the npm distribution. Publishing this artifact is governed by
+ * `docs/legal/binary-distribution-readiness.md` and stays gated; the script remains because ephemeral CI and
+ * a future approved standalone release both need it. The published npm package is built by
+ * `scripts/broker/build-broker-bundle.ts`, which produces plain JavaScript and embeds no runtime.
+ */
 import {
   chmodSync,
   copyFileSync,
@@ -7,17 +15,18 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   symlinkSync,
   unlinkSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import {
-  PUBLISHED_SCHEMA_VERSIONS,
-} from '../../packages/typescript/broker/src/build-info.ts';
 import { PRODUCT_IDENTITY } from '../../packages/typescript/broker/src/product.ts';
-import { BROKER_CONTRACT } from '../../packages/typescript/protocol/src/index.ts';
+import {
+  BROKER_CONTRACT,
+  PUBLISHED_SCHEMA_VERSIONS,
+  buildDefines,
+  resolveBuildIdentity,
+} from './lib/build-metadata.ts';
 
 const COMPILE_TARGETS = Object.freeze({
   'bun-linux-x64': 'linux-x64',
@@ -136,63 +145,6 @@ function parseArgs(argv: string[]): BuildOptions {
   };
 }
 
-function gitValue(args: string[]): string {
-  const result = Bun.spawnSync(['git', ...args], { stdout: 'pipe', stderr: 'ignore' });
-  const value = result.success ? result.stdout.toString().trim() : '';
-  return value;
-}
-
-function gitCommit(): string {
-  return gitValue(['rev-parse', 'HEAD']) || 'unknown';
-}
-
-function gitDirty(): boolean {
-  const result = Bun.spawnSync(['git', 'status', '--porcelain', '--untracked-files=normal'], {
-    stdout: 'pipe',
-    stderr: 'ignore',
-  });
-  return !result.success || result.stdout.toString().trim().length > 0;
-}
-
-function resolvedBuildDate(explicit?: string): string {
-  const epoch = process.env.SOURCE_DATE_EPOCH?.trim();
-  const value = explicit ?? (epoch && /^\d+$/.test(epoch)
-    ? new Date(Number(epoch) * 1_000).toISOString()
-    : new Date().toISOString());
-  if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) {
-    throw new Error(`build date must be a canonical ISO-8601 instant, received ${JSON.stringify(value)}`);
-  }
-  return value;
-}
-
-function safeHttpsUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !/[\0\r\n]/.test(value);
-  } catch {
-    return false;
-  }
-}
-
-function releaseDefines(options: BuildOptions): Record<string, string> {
-  const supplied = [options.releaseManifestUrl, options.releaseChannelManifestUrl, options.releaseKeyId, options.releasePublicKeyPath]
-    .filter((value) => value !== undefined).length;
-  if (supplied === 0) return {};
-  if (supplied !== 4) throw new Error('release manifest URL, stable-channel manifest URL, key id, and public key must be supplied together');
-  if (!safeHttpsUrl(options.releaseManifestUrl!)) throw new Error('release manifest URL must be credential-free HTTPS');
-  if (!safeHttpsUrl(options.releaseChannelManifestUrl!)) throw new Error('release channel manifest URL must be credential-free HTTPS');
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(options.releaseKeyId!)) throw new Error('release key id is invalid');
-  const publicKey = readFileSync(options.releasePublicKeyPath!, 'utf8').trim();
-  const parsed = createPublicKey(publicKey);
-  if (parsed.asymmetricKeyType !== 'ed25519') throw new Error('release public key must be Ed25519');
-  return {
-    COSYNCING_RELEASE_MANIFEST_URL: JSON.stringify(options.releaseManifestUrl),
-    COSYNCING_RELEASE_CHANNEL_MANIFEST_URL: JSON.stringify(options.releaseChannelManifestUrl),
-    COSYNCING_RELEASE_KEY_ID: JSON.stringify(options.releaseKeyId),
-    COSYNCING_RELEASE_PUBLIC_KEY_PEM: JSON.stringify(`${publicKey}\n`),
-  };
-}
-
 function installAlias(outfile: string): string {
   const aliasPath = join(dirname(outfile), PRODUCT_IDENTITY.aliasBinary);
   if (aliasPath === outfile) throw new Error('alias path collides with the primary binary');
@@ -206,19 +158,10 @@ function installAlias(outfile: string): string {
 }
 
 const options = parseArgs(process.argv.slice(2));
-const packageJson = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { version?: unknown };
 // The canonical root version is the default and the only value the release lane uses. An explicit
 // --version exists so a candidate build (e.g. proving a signed 0.1.1 upgrade against a 0.1.0 tree) reports
 // the bumped version from its own offline self-check without mutating package.json to get there.
-const version = (options.version ?? (typeof packageJson.version === 'string' ? packageJson.version : '')).trim();
-if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || version === '0.0.0') {
-  throw new Error(`refusing to package invalid canonical root version ${JSON.stringify(version)}`);
-}
-const buildDate = resolvedBuildDate(options.buildDate);
-const commit = options.commit?.trim() || gitCommit();
-if (commit !== 'unknown' && !/^[a-f0-9]{7,64}$/.test(commit)) throw new Error('build commit must be lowercase hexadecimal');
-const dirty = gitDirty();
-if (options.requireClean && dirty) throw new Error('release build requires a clean checkout');
+const { version, commit, buildDate, dirty } = resolveBuildIdentity(options);
 
 mkdirSync(dirname(options.outfile), { recursive: true });
 // Bun 1.3 can emit a sparse zero-filled executable when compiling directly across filesystems
@@ -230,17 +173,14 @@ try {
   const result = await Bun.build({
     entrypoints: [resolve('packages/typescript/broker/src/cli.ts')],
     compile: { outfile: stagedBinary, target: options.compileTarget as Bun.Build.CompileTarget },
-    define: {
-      COSYNCING_BUILD_VERSION: JSON.stringify(version),
-      COSYNCING_BUILD_COMMIT: JSON.stringify(commit),
-      COSYNCING_BUILD_DATE: JSON.stringify(buildDate),
-      COSYNCING_BUILD_TARGET: JSON.stringify(options.productTarget),
-      COSYNCING_BUILD_PACKAGED: 'true',
-      COSYNCING_BUILD_DIRTY: dirty ? 'true' : 'false',
-      COSYNCING_BUILD_SCHEMA_VERSIONS: JSON.stringify(JSON.stringify(PUBLISHED_SCHEMA_VERSIONS)),
-      COSYNCING_BUILD_CONTRACT: JSON.stringify(JSON.stringify(BROKER_CONTRACT)),
-      ...releaseDefines(options),
-    },
+    define: buildDefines({
+      identity: { version, commit, buildDate, dirty },
+      // The compiled artifact embeds Bun and is bound to one machine-code target, so both terms are true of
+      // this builder alone. The JavaScript bundle stamps `bun-js`/`universal` from the same shared helper.
+      distribution: 'native',
+      target: options.productTarget,
+      release: options,
+    }),
     minify: options.minify,
     sourcemap: 'none',
   });
@@ -262,6 +202,7 @@ console.log(JSON.stringify({
   commit,
   dirty,
   buildDate,
+  distribution: 'native',
   target: options.productTarget,
   compileTarget: options.compileTarget,
   schemaVersions: PUBLISHED_SCHEMA_VERSIONS,

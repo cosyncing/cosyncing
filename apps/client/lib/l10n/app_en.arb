@@ -1281,7 +1281,29 @@
   },
   "settingsBrokerStatusCurrent": "Current",
   "@settingsBrokerStatusCurrent": {
-    "description": "Status pill on the broker version row when no update is available."
+    "description": "Status pill on the broker version row when a release check ran and found nothing newer."
+  },
+  "settingsBrokerStatusNotChecked": "Not checked",
+  "@settingsBrokerStatusNotChecked": {
+    "description": "Status pill on the broker version row when no release check could be performed, so the app cannot claim the broker is current."
+  },
+  "settingsBrokerStatusPackageManaged": "Managed by npm",
+  "@settingsBrokerStatusPackageManaged": {
+    "description": "Status pill on the broker version row when the broker is an npm package that its package manager updates, not the app."
+  },
+  "settingsBrokerPackageManagedBody": "This broker was installed as an npm package, so it does not update itself. Run {updateCommand} (or the equivalent for the manager you installed it with), then {setupCommand}.",
+  "@settingsBrokerPackageManagedBody": {
+    "description": "Guidance shown under the broker version row when the broker is owned by a package manager.",
+    "placeholders": {
+      "updateCommand": {
+        "type": "String",
+        "example": "npm update --global cosyncing"
+      },
+      "setupCommand": {
+        "type": "String",
+        "example": "cosyncing setup"
+      }
+    }
   },
   "settingsDesktopBuildUpdateTitle": "New desktop build available",
   "@settingsDesktopBuildUpdateTitle": {

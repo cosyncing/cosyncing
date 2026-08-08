@@ -109,11 +109,12 @@ function hash(value: string | Uint8Array): string {
 }
 
 const BUILD = Object.freeze({
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   version: '1.0.0',
   commit: '1111111',
   buildDate: '2026-07-17T00:00:00.000Z',
   target: 'linux-x64',
+  distribution: 'native' as const,
   packaged: true,
   dirty: false,
   schemaVersions: BUILD_INFO.schemaVersions,
@@ -149,6 +150,7 @@ function contextFor(options: {
   return {
     effects: 'forbidden',
     platform: 'linux',
+    arch: 'x64',
     env: { HOME: options.userHome, PATH: '/usr/bin:/bin' },
     homeDir: options.userHome,
     resolveExecutable(command) {
@@ -1428,7 +1430,7 @@ try {
     manifestUrl: 'https://releases.example/manifest.json',
     trustedKeys: { [keyId]: publicPem },
     fetch: fetcher(manifest),
-    runBinary: async () => ({ status: 'ok' as const, exitCode: 0, stdout: JSON.stringify({ version: '2.0.0', target: 'linux-x64', packaged: true }), stderr: '' }),
+    runBinary: async () => ({ status: 'ok' as const, exitCode: 0, stdout: JSON.stringify({ version: '2.0.0', target: 'linux-x64', packaged: true, distribution: 'native' }), stderr: '' }),
     service: fixture.service,
     verifyBrokerVersion: async () => true,
     healthAttempts: 1,
@@ -1520,6 +1522,25 @@ try {
     check('offline self-check failure removes staging and never stops the service',
       badSelf.detailCode === 'release-offline-self-check-failed'
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
+  }
+  {
+    // `packaged` is true for the npm JavaScript distribution too, so it can no longer stand in for "this is
+    // a native executable". A misassembled signed manifest offering a JavaScript bundle to the native swap
+    // lane would otherwise be written over the running binary and could not start.
+    const fixture = upgradeMachine();
+    const wrongKind = await runUpgrade({
+      ...upgradeOptions(fixture),
+      runBinary: async () => ({
+        status: 'ok' as const,
+        exitCode: 0,
+        stdout: JSON.stringify({ version: '2.0.0', target: 'linux-x64', packaged: true, distribution: 'bun-js' }),
+        stderr: '',
+      }),
+    });
+    check('a candidate that is packaged but not native is refused by the native upgrade lane',
+      wrongKind.detailCode === 'release-offline-self-check-failed'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active(),
+      wrongKind.detailCode);
   }
   {
     const fixture = upgradeMachine();

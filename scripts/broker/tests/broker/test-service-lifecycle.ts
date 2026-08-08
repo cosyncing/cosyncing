@@ -180,21 +180,32 @@ class FakeServiceProvider implements DurableServiceProvider {
   }
 }
 
+/** The real environment renderer over a fixture machine, so doctor inspects the bytes setup would write. */
+function fixtureServiceEnvironment(root: string, options: {
+  agentDirectories: readonly string[];
+  agentOverrides: Readonly<ServiceAgentExecutableOverrides>;
+  runtimePath?: string | undefined;
+}): string {
+  const entries = brokerServiceEnvironmentEntries({
+    homeDir: root,
+    stateHome: join(root, '.cosyncing'),
+    cacheRoot: join(root, '.cache', 'cosyncing'),
+    executablePath: join(root, '.cosyncing', 'bin', 'cosyncing'),
+    agentExecutableDirectories: options.agentDirectories,
+    agentExecutableOverrides: options.agentOverrides,
+    webDir: join(root, 'cosyncing-web'),
+    ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
+  });
+  return `${entries.map(([name, value]) => `${name}="${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`).join('\n')}\n`;
+}
+
 class AgentPathServiceProvider extends FakeServiceProvider {
   agentDirectories: readonly string[] = [];
   agentOverrides: Readonly<ServiceAgentExecutableOverrides> = {};
+  runtimePath: string | undefined;
 
   override expectedEnvironment(): string {
-    const entries = brokerServiceEnvironmentEntries({
-      homeDir: this.root,
-      stateHome: join(this.root, '.cosyncing'),
-      cacheRoot: join(this.root, '.cache', 'cosyncing'),
-      executablePath: join(this.root, '.cosyncing', 'bin', 'cosyncing'),
-      agentExecutableDirectories: this.agentDirectories,
-      agentExecutableOverrides: this.agentOverrides,
-      webDir: join(this.root, 'cosyncing-web'),
-    });
-    return `${entries.map(([name, value]) => `${name}="${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`).join('\n')}\n`;
+    return fixtureServiceEnvironment(this.root, this);
   }
 }
 
@@ -241,6 +252,17 @@ class FakeLaunchdProvider extends FakeServiceProvider {
   }
   override async enableLingering(): Promise<void> { throw new Error('launchd-lingering-unsupported'); }
   override async disableLingering(): Promise<void> { throw new Error('launchd-lingering-unsupported'); }
+}
+
+/** The launchd twin of AgentPathServiceProvider: the same rendered environment behind launchd receipts. */
+class AgentPathLaunchdProvider extends FakeLaunchdProvider {
+  agentDirectories: readonly string[] = [];
+  agentOverrides: Readonly<ServiceAgentExecutableOverrides> = {};
+  runtimePath: string | undefined;
+
+  override expectedEnvironment(): string {
+    return fixtureServiceEnvironment(this.root, this);
+  }
 }
 
 class FakeTailscaleProvider implements TailscaleServeRouteProvider {
@@ -419,9 +441,13 @@ function contextFor(options: {
     };
   }
   const systemd = options.systemd ?? true;
+  // A darwin fixture stands for an Apple Silicon Mac, which is the supported macOS host; the arch travels
+  // with the platform so a diagnosis never describes a machine that is half fixture and half test host.
+  const platform = options.platform ?? (systemd ? 'linux' : 'darwin');
   const base = createSetupDiagnosisContext({
     homeDir: options.root,
-    platform: 'linux',
+    platform,
+    arch: platform === 'darwin' ? 'arm64' : 'x64',
     env: {
       HOME: options.root,
       PATH: '',
@@ -619,6 +645,7 @@ function darwinContext(root: string): SetupDiagnosisContext {
   const base = createSetupDiagnosisContext({
     homeDir: root,
     platform: 'darwin',
+    arch: 'arm64',
     env: { HOME: root, PATH: '', COSYNCING_HOME: join(root, '.cosyncing') },
   });
   return {
@@ -825,6 +852,7 @@ try {
       stateHome: join(machine, '.cosyncing'),
       cacheRoot: join(machine, '.cache', 'cosyncing'),
       executablePath: join(machine, 'bin with spaces', 'cosyncing'),
+      distribution: 'native',
       agentExecutableDirectories: [nodeAgentBin, opencodeBin, nodeAgentBin],
       // What a packaged install resolves beside the ACQUISITION executable — the path the unit could not
       // work out for itself, which is the whole reason it is carried in the environment.
@@ -840,7 +868,7 @@ try {
     const unit = provider.expectedDefinition();
     const environment = provider.expectedEnvironment();
     check('typed systemd rendering quotes paths and carries no plaintext token or token argument',
-      unit.includes(`ExecStart="${join(machine, 'bin with spaces', 'cosyncing')}" broker`)
+      unit.includes(`ExecStart="${join(machine, 'bin with spaces', 'cosyncing')}" "broker"`)
         && unit.includes('EnvironmentFile=')
         && !`${unit}\n${environment}`.includes('super-secret')
         && !unit.match(/--token|COSYNCING_TOKEN=/));
@@ -906,6 +934,7 @@ try {
         stateHome: join(verifyDir, '.cosyncing'),
         cacheRoot: join(verifyDir, '.cache', 'cosyncing'),
         executablePath: executable,
+        distribution: 'native',
         webDir: join(verifyDir, 'acquisition', 'cosyncing-web-9.9.9'),
         configHome: join(verifyDir, '.config'),
         systemctlPath: '/usr/bin/systemctl',
@@ -928,6 +957,129 @@ try {
         !/not absolute|ignoring|Unknown key|Failed to parse|fatal/i.test(diagnostics),
         diagnostics.slice(0, 220) || 'no diagnostics');
     }
+  }
+
+  // The JavaScript distribution's durable service: an EXTERNAL Bun executing the receipt-owned application.
+  //
+  // This is the case the previous design could not express at all. Its unit named one executable and hard-
+  // coded `broker` after it, so a JavaScript install could only have been launched by leaving the interpreter
+  // to the `#!/usr/bin/env bun` shebang — which resolves through PATH, and the service PATH is deliberately
+  // restricted. Both providers must therefore name Bun explicitly, and must agree on doing so.
+  {
+    const machine = join(root, 'javascript-distribution-service');
+    const userHome = join(machine, 'home');
+    const stateHome = join(userHome, '.cosyncing');
+    // A version-manager layout: Bun lives outside every fixed entry the restricted PATH already carries.
+    const versionManagerBin = join(userHome, '.local', 'share', 'mise', 'installs', 'bun', '1.3.8', 'bin');
+    for (const directory of [join(stateHome, 'bin'), versionManagerBin]) mkdirSync(directory, { recursive: true });
+    const bunRuntime = join(versionManagerBin, 'bun');
+    writeFileSync(bunRuntime, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const application = join(stateHome, 'bin', 'cosyncing');
+    writeFileSync(application, '#!/usr/bin/env bun\n', { mode: 0o700 });
+    const acquisitionWeb = join(userHome, 'npm-global', 'lib', 'node_modules', 'cosyncing', 'bin', 'cosyncing-web-9.9.9');
+    mkdirSync(acquisitionWeb, { recursive: true });
+    const runner = new RecordingRunner();
+    const providerOptions = {
+      context: contextFor({ root: userHome, systemd: true }),
+      runner,
+      homeDir: userHome,
+      stateHome,
+      cacheRoot: join(userHome, '.cache', 'cosyncing'),
+      executablePath: application,
+      distribution: 'bun-js' as const,
+      runtimePath: bunRuntime,
+      webDir: acquisitionWeb,
+      configHome: join(userHome, '.config'),
+      systemctlPath: '/usr/bin/systemctl',
+      journalctlPath: '/usr/bin/journalctl',
+      loginctlPath: '/usr/bin/loginctl',
+      userIdentifier: '1000',
+    };
+    const systemdProvider = new SystemdUserServiceProvider(providerOptions);
+    const systemdUnit = systemdProvider.expectedDefinition();
+    check('the systemd unit execs the external Bun runtime plus the installed application, in that order',
+      systemdUnit.includes(`ExecStart="${bunRuntime}" "${application}" "broker"`)
+        && !systemdUnit.includes(`ExecStart="${application}"`),
+      systemdUnit.split('\n').find((line) => line.startsWith('ExecStart=')));
+
+    const launchdProvider = new LaunchdUserServiceProvider({
+      ...providerOptions,
+      context: contextFor({ root: userHome, systemd: false }),
+      launchAgentsHome: join(userHome, 'Library', 'LaunchAgents'),
+      launchctlPath: '/bin/launchctl',
+      tailPath: '/usr/bin/tail',
+    });
+    const plist = launchdProvider.expectedDefinition();
+    const programArguments = [...plist.matchAll(/<string>([^<]*)<\/string>/g)].map((match) => match[1]);
+    check('the launchd job carries the identical argv as three separate ProgramArguments strings',
+      programArguments.includes(bunRuntime)
+        && programArguments.indexOf(bunRuntime) + 1 === programArguments.indexOf(application)
+        && programArguments.indexOf(application) + 1 === programArguments.indexOf('broker'),
+      programArguments.slice(0, 4).join(' '));
+
+    // Both managers write one receipt-owned environment file, so it must be byte-identical across them —
+    // including the runtime directory that the version-manager layout newly requires.
+    const systemdEnvironment = systemdProvider.expectedEnvironment();
+    check('both providers render the identical service environment for one JavaScript install',
+      systemdEnvironment === launchdProvider.expectedEnvironment());
+    const renderedPath = systemdEnvironment.split('\n').find((line) => line.startsWith('PATH=')) ?? '';
+    check('the restricted PATH gains the version-manager runtime directory and nothing else',
+      renderedPath.includes(versionManagerBin)
+        && !renderedPath.includes('/interactive-only/bin')
+        && renderedPath.replace(/^PATH="|"$/g, '').split(':').length <= 9,
+      renderedPath);
+    // Resolved from the ACQUISITION application, which is where the sidecar actually sits — the installed
+    // copy has no sidecar beside it and never will.
+    check('the service is told the sidecar path beside the acquisition package, not beside the copy it execs',
+      systemdEnvironment.includes(`COSYNCING_WEB_DIR="${acquisitionWeb}"`)
+        && !systemdEnvironment.includes(`COSYNCING_WEB_DIR="${join(stateHome, 'bin')}`));
+
+    // Bun MOVED after setup. The unit still names the old absolute path, so the service cannot start; the
+    // definition reads back as drifted, which is precisely the signal repair acts on. Rewriting with the
+    // runtime executing the command now is the convergence.
+    const movedBin = join(userHome, '.local', 'share', 'mise', 'installs', 'bun', '1.4.0', 'bin');
+    mkdirSync(movedBin, { recursive: true });
+    const movedRuntime = join(movedBin, 'bun');
+    writeFileSync(movedRuntime, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    await systemdProvider.installDefinition();
+    const installedUnit = readFileSync(systemdProvider.definitionPath, 'utf8');
+    const afterMove = new SystemdUserServiceProvider({ ...providerOptions, runtimePath: movedRuntime });
+    check('a Bun that moved after setup makes the installed definition read back as drifted',
+      (await afterMove.inspect()).definition === 'drifted'
+        && (await systemdProvider.inspect()).definition === 'current',
+      installedUnit.split('\n').find((line) => line.startsWith('ExecStart=')));
+    await afterMove.installDefinition();
+    check('repair converges the moved runtime by rewriting the unit with the current one',
+      (await afterMove.inspect()).definition === 'current'
+        && readFileSync(afterMove.definitionPath, 'utf8').includes(`"${movedRuntime}"`),
+      readFileSync(afterMove.definitionPath, 'utf8').split('\n').find((line) => line.startsWith('ExecStart=')));
+
+    // The providers are exported and constructible without the identity resolver that already refuses this
+    // path, so they must refuse it independently: `/tmp/a:b` is a legal directory name, but PATH has no
+    // escape for `:` — rendered anyway, the runtime's directory splits into two bogus search entries.
+    const renderRefused = (render: () => string): boolean => {
+      try { render(); return false; } catch { return true; }
+    };
+    const colonProviderOptions = { ...providerOptions, runtimePath: '/tmp/a:b/bin/bun' };
+    check('both providers refuse a runtime path containing the PATH separator at their own boundary',
+      renderRefused(() => new SystemdUserServiceProvider(colonProviderOptions).expectedDefinition())
+        && renderRefused(() => new SystemdUserServiceProvider(colonProviderOptions).expectedEnvironment())
+        && renderRefused(() => new LaunchdUserServiceProvider({
+          ...colonProviderOptions,
+          context: contextFor({ root: userHome, systemd: false }),
+          launchAgentsHome: join(userHome, 'Library', 'LaunchAgents'),
+          launchctlPath: '/bin/launchctl',
+          tailPath: '/usr/bin/tail',
+        }).expectedDefinition()));
+
+    // Uninstall removes cosyncing-owned service resources and nothing else. Bun was never copied and never
+    // receipted, so there is nothing that could remove it — this proves the absence rather than assuming it.
+    await afterMove.uninstall();
+    check('uninstalling the service preserves the separately installed Bun runtime',
+      !existsSync(afterMove.definitionPath)
+        && existsSync(movedRuntime) && existsSync(bunRuntime)
+        && !readFileSync(application, 'utf8').includes('exit 0'),
+      `${existsSync(bunRuntime)}/${existsSync(movedRuntime)}`);
   }
 
   // Launch a child with the exact environment entries a durable service receives. This crosses the real
@@ -980,6 +1132,7 @@ try {
     const detectionContext = createSetupDiagnosisContext({
       homeDir: userHome,
       platform: 'darwin',
+      arch: 'arm64',
       env: {
         HOME: userHome,
         PATH: `${nodeAgentBin}:${opencodeBin}:${piBin}:${nodeRuntimeBin}:/interactive-only/bin`,
@@ -1075,6 +1228,7 @@ try {
     const overrideContext = createSetupDiagnosisContext({
       homeDir: userHome,
       platform: 'darwin',
+      arch: 'arm64',
       env: {
         HOME: userHome,
         PATH: `${opencodeBin}:/interactive-only/bin`,
@@ -1135,7 +1289,9 @@ try {
   {
     const machine = join(root, 'agent-path-move');
     const provider = new AgentPathServiceProvider(machine);
-    const serviceBuild = { ...BUILD_INFO, packaged: true, target: 'bun-linux-x64' } satisfies BuildInfo;
+    // Native: this fixture's durable environment carries no runtime directory, and only a native identity
+    // legitimately has none. Doctor's runtime-aware PATH reconstruction is exercised by its own fixture.
+    const serviceBuild = { ...BUILD_INFO, packaged: true, target: 'bun-linux-x64', distribution: 'native' } satisfies BuildInfo;
     let codexPath = join(machine, 'releases', '0.144.5-fixture', 'bin', 'codex');
     const makeContext = () => contextFor({
       root: machine,
@@ -1216,7 +1372,7 @@ try {
   {
     const machine = join(root, 'agent-path-removal');
     const provider = new AgentPathServiceProvider(machine);
-    const serviceBuild = { ...BUILD_INFO, packaged: true, target: 'bun-linux-x64' } satisfies BuildInfo;
+    const serviceBuild = { ...BUILD_INFO, packaged: true, target: 'bun-linux-x64', distribution: 'native' } satisfies BuildInfo;
     const agentExecutables: Partial<Record<'codex' | 'opencode' | 'pi' | 'claude', string>> = {
       codex: join(machine, 'node-v22.14.0-linux-x64', 'bin', 'codex'),
       opencode: join(machine, '.opencode', 'bin', 'opencode'),
@@ -1335,6 +1491,93 @@ try {
         && repairedLast.exitCode === 0
         && !afterLast.includes(finalDirectory),
       `${lastRemoved.doctorPath?.status}/${repairedLast.detailCode}/${repairedLast.exitCode}: ${afterLast.trim()}`);
+  }
+
+  // A fresh JavaScript install records the external runtime's directory in the durable service PATH, so
+  // doctor must reconstruct its expectation from the runtime that is executing it. Before doctor was told
+  // the runtime, this exact healthy state read as one "obsolete" directory: doctor failed, recommended
+  // repair, and repair found nothing to change — a permanent loop on every fresh npm installation. Both
+  // service managers share the reconstruction, so both are proven.
+  {
+    for (const flavor of [
+      { id: 'systemd' as const, target: 'bun-linux-x64', makeProvider: (dir: string) => new AgentPathServiceProvider(dir) },
+      { id: 'launchd' as const, target: 'darwin-arm64', makeProvider: (dir: string) => new AgentPathLaunchdProvider(dir) },
+    ]) {
+      const machine = join(root, `runtime-path-doctor-${flavor.id}`);
+      const provider = flavor.makeProvider(machine);
+      const serviceBuild = {
+        ...BUILD_INFO, packaged: true, target: flavor.target, distribution: 'bun-js',
+      } satisfies BuildInfo;
+      const darwin = flavor.id === 'launchd';
+      const makeContext = () => contextFor({
+        root: machine,
+        provider,
+        ...(darwin ? { platform: 'darwin' } : { systemd: true }),
+        healthBuild: serviceBuild,
+      });
+      const providerFactory = (options: SystemdProviderOptions) => {
+        provider.agentDirectories = options.agentExecutableDirectories ?? [];
+        provider.agentOverrides = options.agentExecutableOverrides ?? {};
+        provider.runtimePath = options.runtimePath;
+        return provider;
+      };
+      const installed = await runSetup({
+        ...setupOptions({
+          root: machine,
+          provider,
+          presenter: new ServicePresenter({ service: flavor.id }),
+          ...(darwin ? { platform: 'darwin' } : {}),
+          buildInfo: serviceBuild,
+        }),
+        context: makeContext(),
+        runtimePath: process.execPath,
+        systemdProviderFactory: providerFactory,
+      });
+      const durablePath = readFileSync(provider.environmentPath, 'utf8')
+        .split('\n').find((line) => line.startsWith('PATH=')) ?? '';
+      const inspection = await inspectSetupEnvironment({
+        buildInfo: serviceBuild,
+        executablePath: join(machine, 'bin', 'cosyncing'),
+        runtimePath: process.execPath,
+        home: join(machine, '.cosyncing'),
+        context: makeContext(),
+        systemdProviderFactory: providerFactory,
+      });
+      const doctorPath = inspection.doctor.sections.flatMap((section) => section.checks)
+        .find((candidate) => candidate.id === 'service.agent-executable-path');
+      check(`doctor expects the runtime directory a fresh ${flavor.id} JavaScript install put on the service PATH`,
+        installed.status === 'complete'
+          && durablePath.includes(dirname(process.execPath))
+          && inspection.systemdStatus?.environment === 'current'
+          && doctorPath?.status === 'pass',
+        `${installed.status} env=${inspection.systemdStatus?.environment} `
+          + `${doctorPath?.status}:${doctorPath?.detailCode} ${JSON.stringify(doctorPath?.evidence)}`);
+
+      // The converse: when Bun genuinely moved, the same reconstruction must fail toward a repair that HAS
+      // something to rewrite — a check that passed unconditionally would be worse than the loop it replaces.
+      const movedReport = await collectDoctorReport({
+        buildInfo: serviceBuild,
+        context: makeContext(),
+        assetReport: inspectRuntimeAssets(),
+        adapters: [],
+        stateHome: join(machine, '.cosyncing'),
+        applicationIdentity: {
+          distribution: 'bun-js',
+          applicationPath: join(machine, '.cosyncing', 'bin', 'cosyncing'),
+          runtimePath: join(machine, 'moved-bun', 'bin', 'bun'),
+          packaged: true,
+        },
+        codexTuiReadiness: { status: 'ok', customSocket: false, staleCandidatePids: [], message: 'fixture' },
+      });
+      const movedPath = movedReport.sections.flatMap((section) => section.checks)
+        .find((candidate) => candidate.id === 'service.agent-executable-path');
+      check(`a runtime that moved after ${flavor.id} setup reads as stale service PATH, so repair has work to do`,
+        movedPath?.status === 'fail'
+          && movedPath.detailCode === 'service-agent-path-stale'
+          && movedPath.evidence?.missingDirectories === 1
+          && movedPath.evidence?.obsoleteDirectories === 1,
+        `${movedPath?.status}:${movedPath?.detailCode} ${JSON.stringify(movedPath?.evidence)}`);
+    }
   }
 
   // The unit must exec the bootstrap copy under the state home, never the running executable. An acquisition
@@ -1647,6 +1890,7 @@ try {
       stateHome: join(machine, '.cosyncing'),
       cacheRoot: join(machine, '.cache', 'cosyncing'),
       executablePath: join(machine, 'bin with spaces', 'cosyncing'),
+      distribution: 'native',
       agentExecutableDirectories: [nodeAgentBin, opencodeBin],
       webDir: join(machine, 'acquisition', 'cosyncing-web-9.9.9'),
       workingDirectory: join(machine, 'working tree'),
