@@ -1,0 +1,22 @@
+name: npm publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  disabled:
+    name: npm publication remains disabled
+    runs-on: ubuntu-24.04
+    environment: npm-production
+    timeout-minutes: 5
+    steps:
+      - name: Refuse publication until the release lane is approved
+        shell: bash
+        run: |
+          echo "npm trusted-publisher identity is reserved, but package publication is not enabled." >&2
+          echo "Resolve docs/legal/binary-distribution-readiness.md and implement the reviewed staging lane first." >&2
+          exit 1

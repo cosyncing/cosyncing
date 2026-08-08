@@ -55,7 +55,11 @@ Public source publication does not authorize compiled distribution. npm and
 GitHub binary releases remain blocked by
 [compiled broker distribution readiness](../legal/binary-distribution-readiness.md):
 the embedded Bun runtime's distribution obligations need a recorded resolution,
-and protected signing environments and keys have not been provisioned.
+and protected signing environments and keys have not been provisioned. The
+public repository has a protected `npm-production` environment and reserves
+`.github/workflows/npm-publish.yml` as the npm trusted-publisher identity, but
+that manual workflow deliberately refuses publication until the reviewed npm
+staging lane replaces its disabled job.
 
 The release workflows fail closed unless the protected
 `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` variable is exactly `true`. Keep it

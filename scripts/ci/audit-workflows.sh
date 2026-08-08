@@ -25,6 +25,7 @@ broker-release-promote.yml
 broker-release.yml
 ci.yml
 nightly.yml
+npm-publish.yml
 platform-runtime.yml'
 active_names="$(find "$workflow_dir" -maxdepth 1 -type f -name '*.yml' -printf '%f\n' | sort)"
 test "$active_names" = "$expected_names" || {
@@ -89,6 +90,20 @@ for workflow in broker-release.yml broker-release-promote.yml; do
   rg -q 'COSYNCING_BINARY_RELEASE_LEGAL_APPROVED' "$workflow_dir/$workflow"
   rg -q 'test "\$BINARY_RELEASE_LEGAL_APPROVED" = true' "$workflow_dir/$workflow"
 done
+
+npm_workflow="$workflow_dir/npm-publish.yml"
+rg -q '^  workflow_dispatch:$' "$npm_workflow"
+rg -q '^  id-token: write$' "$npm_workflow"
+rg -q '^    environment: npm-production$' "$npm_workflow"
+rg -q '^          exit 1$' "$npm_workflow"
+if rg -n '^  (push|pull_request|release|schedule):' "$npm_workflow"; then
+  echo 'ERROR: disabled npm publishing must remain manual-only.' >&2
+  exit 1
+fi
+if rg -n 'NODE_AUTH_TOKEN|NPM_TOKEN|npm stage publish|npm publish --' "$npm_workflow"; then
+  echo 'ERROR: npm publishing credentials or commands appeared before the release lane was approved.' >&2
+  exit 1
+fi
 
 for workflow in ci.yml nightly.yml broker-release.yml; do
   test "$(rg -c 'bun run check$' "$workflow_dir/$workflow")" = 1 || {
