@@ -64,7 +64,7 @@ function-by-function matrix.
 > The first public package has not been released yet. The current `cosyncing` entry on npm is a
 > name-reservation placeholder; do not install it. Follow the
 > [GitHub Releases](https://github.com/cosyncing/cosyncing/releases) page for the first supported
-> package.
+> package when it is available.
 
 After the first package is published:
 
