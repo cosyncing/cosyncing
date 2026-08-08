@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "agent": "codex",
+  "version": "0.142.5",
+  "captured_at": "2026-07-08T00:00:00.000Z",
+  "sources": [
+    {
+      "id": "codex-app-server-schema-0.142.5",
+      "source_url": "packages/typescript/adapters/codex/src/generated (ts-rs app-server schema: ClientRequest union + *Params, incl. ThreadForkParams/ThreadRollbackParams/ThreadArchiveParams), verified 2026-07-08",
+      "checksum": "c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
+      "trust_level": "official-schema"
+    },
+    {
+      "id": "codex-rollout-format-0.142.5",
+      "source_url": "installed codex-cli 0.142.5 rollout JSONL format ($CODEX_HOME/sessions/.../rollout-*.jsonl): update_plan, spawn_agent, exec_command_end, apply_patch, verified 2026-07-08",
+      "checksum": "cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+      "trust_level": "source-repo"
+    }
+  ]
+}

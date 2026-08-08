@@ -1,0 +1,1890 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Cross-platform client for Cosyncing brokers">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Cosyncing">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
+
+  <!-- Favicon: SVG for modern browsers, multi-resolution ICO (16 pixel-hinted
+       micro-mark, 32/48 two-tone tile) as the universal fallback. -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg"/>
+  <link rel="icon" type="image/x-icon" href="favicon.ico" sizes="16x16 32x32 48x48"/>
+
+  <!--
+    Browser chrome colour, per scheme. These match the app's default theme
+    canvas (`teal-obsidian`: #F2F5F4 light / #0B0E14 dark), so the URL bar, the
+    startup shell below and Flutter's first painted surface are one colour and
+    the handover never shows an uncoloured frame.
+  -->
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F2F5F4">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0B0E14">
+
+  <title>Cosyncing</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!--
+    N3 startup shell.
+
+    Everything needed to paint is inline: no remote CSS, font, image or script
+    is referenced, so this renders from the first HTML response alone — before
+    flutter_bootstrap.js, CanvasKit/Wasm, Drift, credentials or the broker do
+    anything. `prefers-color-scheme` is resolved by the browser at parse time,
+    so the very first paint is already in the right scheme.
+  -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --cosync-canvas: #F2F5F4;
+      --cosync-text: #1E2927;
+      --cosync-muted: #5F7370;
+      --cosync-accent: #0F766E;
+      --cosync-accent-ink: #FFFFFF;
+      --cosync-track: rgba(15, 118, 110, 0.18);
+      --cosync-mark-a: #0B0E14;
+      --cosync-mark-b: #0F766E;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --cosync-canvas: #0B0E14;
+        --cosync-text: #E2E8F0;
+        --cosync-muted: #94A3B8;
+        --cosync-accent: #2DD4BF;
+        --cosync-accent-ink: #0B0E14;
+        --cosync-track: rgba(45, 212, 191, 0.20);
+        --cosync-mark-a: #F2F5F4;
+        --cosync-mark-b: #2DD4BF;
+      }
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      /* The canvas colour lives on the document itself, so no frame between
+         shell removal and Flutter's composite can be white. */
+      background: var(--cosync-canvas);
+      color: var(--cosync-text);
+    }
+
+    #cosyncing-startup-shell {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      padding: 24px;
+      box-sizing: border-box;
+      background: var(--cosync-canvas);
+      font: 400 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto,
+        "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+      text-align: center;
+      /* Overlay only: it never participates in the app's layout, so removing
+         it cannot reflow anything Flutter has drawn. */
+      transition: opacity 180ms linear;
+      opacity: 1;
+    }
+
+    #cosyncing-startup-shell[data-dismissing="true"] { opacity: 0; }
+
+    .cosyncing-shell-mark {
+      width: 64px;
+      height: 64px;
+      display: block;
+    }
+
+    .cosyncing-shell-mark .mark-a { fill: var(--cosync-mark-a); }
+    .cosyncing-shell-mark .mark-b { fill: var(--cosync-mark-b); }
+
+    .cosyncing-shell-wordmark {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      color: var(--cosync-text);
+    }
+
+    .cosyncing-shell-status {
+      max-width: 34ch;
+      color: var(--cosync-muted);
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .cosyncing-shell-track {
+      width: 176px;
+      max-width: 60vw;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--cosync-track);
+      overflow: hidden;
+    }
+
+    .cosyncing-shell-track::after {
+      content: "";
+      display: block;
+      width: 40%;
+      height: 100%;
+      border-radius: 2px;
+      background: var(--cosync-accent);
+      animation: cosyncing-shell-slide 1.4s ease-in-out infinite;
+    }
+
+    @keyframes cosyncing-shell-slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(250%); }
+    }
+
+    /* Failure state hides the progress track and reveals the action. */
+    #cosyncing-startup-shell[data-state="failed"] .cosyncing-shell-track { display: none; }
+    #cosyncing-startup-shell:not([data-state="failed"]) .cosyncing-shell-actions { display: none; }
+
+    .cosyncing-shell-actions { min-height: 36px; }
+
+    .cosyncing-shell-button {
+      appearance: none;
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 16px;
+      min-height: 36px;
+      font: inherit;
+      font-weight: 600;
+      color: var(--cosync-accent-ink);
+      background: var(--cosync-accent);
+      cursor: pointer;
+    }
+
+    .cosyncing-shell-button:focus-visible {
+      outline: 2px solid var(--cosync-accent);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #cosyncing-startup-shell { transition: none; }
+      .cosyncing-shell-track::after { animation: none; width: 100%; }
+    }
+
+    /* Compact phones: the mark shrinks, nothing wraps off-screen. */
+    @media (max-width: 420px) {
+      .cosyncing-shell-mark { width: 52px; height: 52px; }
+      #cosyncing-startup-shell { gap: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <!--
+    Painted by the HTML response itself. Removed only after Dart reports a
+    rendered frame (see the handshake below) — never on loader completion,
+    engine initialization or runApp() alone, none of which mean a frame exists.
+  -->
+  <div id="cosyncing-startup-shell" data-state="booting" role="status" aria-live="polite" aria-busy="true">
+    <svg class="cosyncing-shell-mark" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <path class="mark-a" d="M86,40 V74 A18,18 0 0 1 74,86 H40 V74 H66 A8,8 0 0 0 74,66 V40 Z"/>
+      <path class="mark-b" d="M14,60 V26 A18,18 0 0 1 26,14 H60 V26 H34 A8,8 0 0 0 26,34 V60 Z"/>
+    </svg>
+    <div class="cosyncing-shell-wordmark">cosyncing</div>
+    <p class="cosyncing-shell-status" id="cosyncing-startup-shell-status">Starting Cosyncing…</p>
+    <div class="cosyncing-shell-track" id="cosyncing-startup-shell-track" aria-hidden="true"></div>
+    <div class="cosyncing-shell-actions" id="cosyncing-startup-shell-actions"></div>
+  </div>
+
+  <!--
+    Browser-native zoom.
+
+    On web the app deliberately does not intercept Ctrl/Cmd +/- or Ctrl/Cmd+wheel
+    (see router.dart `_browserOwnsZoom`); the browser's own zoom owns them and
+    scales the whole page, unbounded. Flutter's engine, however, calls
+    preventDefault on every `wheel` event for its own scrolling, which also
+    cancels the browser's Ctrl+wheel zoom. This capture-phase listener runs
+    before the engine's and, when the zoom modifier is held, calls
+    stopImmediatePropagation so the engine never sees the event and the browser
+    performs its default zoom. It never calls preventDefault (that would cancel
+    the zoom) and leaves unmodified wheel events untouched so normal scrolling
+    still reaches Flutter. Registered before flutter_bootstrap.js so it is in
+    place before the engine attaches its own wheel listeners.
+  -->
+  <script>
+    window.addEventListener('wheel', function (event) {
+      if (event.ctrlKey || event.metaKey) {
+        event.stopImmediatePropagation();
+      }
+    }, { capture: true, passive: false });
+  </script>
+
+  <!--
+    Startup shell controller (N3).
+
+    Contract:
+    * The shell is removed ONLY by `window.cosyncingStartupShellReady()`, which
+      Dart calls from a post-frame callback — i.e. after a frame has actually
+      been rendered. Loader completion / engine init / runApp() are not enough.
+    * Removal fades the overlay out over one transition while the document keeps
+      the same background colour, so no uncovered frame is ever shown and no app
+      layout is disturbed (the shell is `position: fixed`).
+    * If bootstrap errors, or no frame arrives inside the bounded threshold, the
+      shell shows a plain localized retry action. Technical detail goes to the
+      console only.
+    * Retry is bounded per browsing session and is always user-initiated: this
+      script never reloads on its own, so it cannot spin.
+  -->
+  <script>
+    (function () {
+      'use strict';
+
+      var SLOW_MS = 8000;          // "still starting" note
+      var FAIL_MS = 25000;         // offer the retry action
+      var MAX_RELOAD_ATTEMPTS = 2; // reload offers per browsing session
+      var ATTEMPT_KEY = 'cosyncing.startup.attempts';
+
+      // Recovery is scoped to THIS installation, never to the origin. An
+      // origin can host another app, or a second Cosyncing mount, and a /cosy/
+      // reset must not touch either. Both values mirror sw.js exactly.
+      var APP_SCOPE = new URL('./', document.baseURI).href;
+      var CACHE_PREFIX = 'cosyncing-app:' + new URL('./', document.baseURI).pathname + ':';
+
+      var COPY = {
+        en: {
+          loading: 'Starting Cosyncing…',
+          slow: 'Still starting. On a slow connection this can take a moment.',
+          failed: 'Cosyncing didn’t finish loading.',
+          retry: 'Retry',
+          reset: 'Clear cached files and retry',
+          exhausted: 'Reloading didn’t help. Check that your broker is running, then reload this page.'
+        },
+        zh: {
+          loading: '正在启动 Cosyncing…',
+          slow: '仍在启动。网络较慢时可能需要一些时间。',
+          failed: 'Cosyncing 未能完成加载。',
+          retry: '重试',
+          reset: '清除缓存文件并重试',
+          exhausted: '重新加载仍未成功。请确认 broker 正在运行，然后刷新此页面。'
+        }
+      };
+
+      // Minimal static browser-language dictionary. Flutter-side copy still
+      // goes through ARB localization; this covers only the pre-Flutter shell.
+      function pickCopy() {
+        var tags = (navigator.languages && navigator.languages.length)
+          ? navigator.languages
+          : [navigator.language || 'en'];
+        for (var i = 0; i < tags.length; i++) {
+          var primary = String(tags[i] || '').toLowerCase().split('-')[0];
+          if (COPY[primary]) return COPY[primary];
+        }
+        return COPY.en;
+      }
+
+      var copy = pickCopy();
+      var shell = document.getElementById('cosyncing-startup-shell');
+      var statusNode = document.getElementById('cosyncing-startup-shell-status');
+      var actionsNode = document.getElementById('cosyncing-startup-shell-actions');
+      var slowTimer = null;
+      var failTimer = null;
+      var settled = false;
+
+      if (!shell) return;
+
+      statusNode.textContent = copy.loading;
+      document.documentElement.lang = (copy === COPY.zh) ? 'zh' : 'en';
+
+      function attempts() {
+        try {
+          return parseInt(sessionStorage.getItem(ATTEMPT_KEY) || '0', 10) || 0;
+        } catch (error) {
+          return 0; // Storage denied (private mode): treat as a first attempt.
+        }
+      }
+
+      function recordAttempt(next) {
+        try { sessionStorage.setItem(ATTEMPT_KEY, String(next)); } catch (error) { /* ignore */ }
+      }
+
+      function clearAttempts() {
+        try { sessionStorage.removeItem(ATTEMPT_KEY); } catch (error) { /* ignore */ }
+      }
+
+      function clearTimers() {
+        if (slowTimer !== null) { clearTimeout(slowTimer); slowTimer = null; }
+        if (failTimer !== null) { clearTimeout(failTimer); failTimer = null; }
+      }
+
+      // Last-resort recovery for a cached shell that cannot boot: drop THIS
+      // installation's static caches and worker, then reload once. Offered only
+      // on the final attempt, and only from a user click.
+      //
+      // Scope-exact on both halves. Deleting every `cosyncing-app*` cache or
+      // unregistering every worker on the origin would break a co-hosted app,
+      // or a second Cosyncing mount, that this page has no business touching.
+      function resetStaticCaches() {
+        var jobs = [];
+        try {
+          if (window.caches && caches.keys) {
+            jobs.push(caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (key) {
+                return key.indexOf(CACHE_PREFIX) === 0 ? caches.delete(key) : null;
+              }));
+            }));
+          }
+        } catch (error) { /* ignore */ }
+        try {
+          if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            jobs.push(navigator.serviceWorker.getRegistrations().then(function (registrations) {
+              return Promise.all(registrations.map(function (registration) {
+                // Only the registration whose scope IS this app mount. A
+                // broader-scope worker (e.g. one registered at the origin root)
+                // belongs to something else.
+                return registration.scope === APP_SCOPE
+                  ? registration.unregister()
+                  : null;
+              }));
+            }));
+          }
+        } catch (error) { /* ignore */ }
+        return Promise.all(jobs).catch(function () { return null; });
+      }
+
+      function showFailure(reason) {
+        if (settled) return;
+        clearTimers();
+        if (reason) {
+          // Primary copy stays plain; the detail belongs in the console.
+          console.error('[cosyncing] startup shell: ' + reason);
+        }
+        shell.setAttribute('data-state', 'failed');
+        shell.setAttribute('aria-busy', 'false');
+        statusNode.textContent = copy.failed;
+        actionsNode.textContent = '';
+
+        var used = attempts();
+        if (used > MAX_RELOAD_ATTEMPTS) {
+          // Every offered attempt has been spent this session. Stop offering an
+          // action rather than inviting an unbounded reload cycle.
+          statusNode.textContent = copy.exhausted;
+          return;
+        }
+
+        var hardReset = used === MAX_RELOAD_ATTEMPTS;
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'cosyncing-shell-button';
+        button.id = 'cosyncing-startup-shell-retry';
+        button.textContent = hardReset ? copy.reset : copy.retry;
+        button.addEventListener('click', function () {
+          button.disabled = true;
+          recordAttempt(used + 1);
+          if (!hardReset) { window.location.reload(); return; }
+          resetStaticCaches().then(function () { window.location.reload(); });
+        });
+        actionsNode.appendChild(button);
+      }
+
+      function showSlow() {
+        if (settled || shell.getAttribute('data-state') === 'failed') return;
+        shell.setAttribute('data-state', 'slow');
+        statusNode.textContent = copy.slow;
+      }
+
+      slowTimer = setTimeout(showSlow, SLOW_MS);
+      failTimer = setTimeout(function () {
+        showFailure('no rendered frame within ' + FAIL_MS + 'ms');
+      }, FAIL_MS);
+
+      // The one authorised dismissal path. Dart calls this from a post-frame
+      // callback, so by definition a frame has been rendered.
+      window.cosyncingStartupShellReady = function () {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        clearAttempts();
+        // Two animation frames: the first lets the browser composite the frame
+        // Dart just reported, the second starts the fade over painted content.
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            shell.setAttribute('data-state', 'ready');
+            shell.setAttribute('aria-busy', 'false');
+            shell.setAttribute('data-dismissing', 'true');
+            var remove = function () {
+              if (shell.parentNode) shell.parentNode.removeChild(shell);
+            };
+            shell.addEventListener('transitionend', remove, { once: true });
+            // Transitions do not fire in a hidden tab or under reduced motion;
+            // the shell must still go away.
+            setTimeout(remove, 400);
+          });
+        });
+      };
+
+      // A bootstrap script that fails to load can never render a frame, so do
+      // not wait out the full threshold for it.
+      window.addEventListener('error', function (event) {
+        var target = event && event.target;
+        if (!target || target === window || !target.tagName) return;
+        var src = target.src || target.href || '';
+        if (String(src).indexOf('flutter_bootstrap.js') === -1) return;
+        showFailure('flutter_bootstrap.js failed to load');
+      }, true);
+
+      // Exposed for the bootstrap/browser regression tests and for manual
+      // diagnosis; failing the shell never mutates app state.
+      window.cosyncingStartupShellFail = showFailure;
+    })();
+  </script>
+
+  <!--
+    Static-asset service worker (N3 part B).
+
+    Registered here rather than through the Flutter loader: the loader's
+    `serviceWorkerSettings` path is deprecated and registers Flutter's
+    unregister-only stub at this same scope, which would evict this worker and
+    then navigate every client — a reload cycle. `web/flutter_bootstrap.js`
+    therefore calls `_flutter.loader.load()` with no service-worker settings.
+
+    Scope is the app's base href (`/cosy/` in release builds), so the broker's
+    `/api/*`, WebSocket and every other runtime route is outside this worker's
+    scope by construction; sw.js additionally refuses them at runtime.
+  -->
+  <!-- cosyncing-handoff-coordinator -->
+  <script>
+    /*
+     * N3b — automatic verified web-update handoff.
+     *
+     * THE PROBLEM
+     * -----------
+     * sw.js never calls skipWaiting, because activating a replacement over a
+     * live page is how one document ends up executing two builds. So a verified
+     * replacement sits in `waiting` until the previous worker controls no
+     * clients. RG1 exposed that state as a notice asking the user to close every
+     * Cosyncing tab — correct, and unacceptable as a user experience.
+     *
+     * THE MOVE
+     * --------
+     * Nothing about the safety model changes. What changes is WHO closes the
+     * tabs: the tabs do, to a page one path segment above their own scope, and
+     * they come back by themselves.
+     *
+     *   1. Each tab notices `registration.waiting` and asks that worker its
+     *      build identity. An unanswered or identical identity is not an update.
+     *   2. Every tab that saw it broadcasts a claim; the lowest id wins. Exactly
+     *      one coordinator per build, whatever the order of the update checks.
+     *   3. The coordinator asks the ACTIVE worker how many window clients it
+     *      controls. That census is the only trustworthy count of Cosyncing tabs
+     *      — a page cannot enumerate its origin's tabs, a worker can enumerate
+     *      its own controllees.
+     *   4. The coordinator broadcasts `prepare`. Each tab independently
+     *      re-verifies the waiting build, flushes its durable local state
+     *      through the Dart hook, and answers `ack` or `defer`.
+     *   5. Only if acknowledgements EQUAL the census, with no deferral and no
+     *      change in the census, does the coordinator broadcast `go`. A frozen
+     *      tab is counted and cannot answer, so it defers the handoff by
+     *      existing; an actively edited tab defers it deliberately.
+     *   6. Each tab `location.replace`s to the handoff page carrying its own
+     *      exact route. `replace`, not `assign`: it removes the app entry from
+     *      this tab's history, which both keeps the history stack the same shape
+     *      across the swap and guarantees the document is destroyed rather than
+     *      retained in the back/forward cache — a bfcached document is still a
+     *      controllee, and would keep the old worker alive forever.
+     *   7. The old worker retires with no controllees, the browser activates the
+     *      waiting worker, and the handoff page returns each tab to its route.
+     *
+     * WHAT THIS SCRIPT NEVER DOES
+     * ---------------------------
+     * Call skipWaiting, unregister a worker, open or delete a cache, reload the
+     * page, or show anything. Routine updates are silent. Only a handoff that
+     * was actually attempted and did not land, repeatedly, publishes the
+     * recovery state the app renders.
+     */
+    (function () {
+      'use strict';
+
+      /* ---------------- bounds; every loop below is under one ------------- */
+
+      var ELECTION_MS = 400;      // claim window before a coordinator is settled
+      var PREPARE_MS = 3000;      // longest a tab's own durable flush may take
+      // Ceilings only. Successful phases settle as soon as every expected tab
+      // answers, and a refusal settles immediately. The acknowledgement ceiling
+      // includes an initial silent worker query, the peer-local grace, and the
+      // app flush: 1500 + 750 + 3000 = 5250ms, plus scheduling margin.
+      var ACK_MS = 6500;          // hard deadline for peer acknowledgements
+      var COMMIT_MS = 6500;       // hard deadline for final durable commits
+      var LOCK_MS = 12000;        // longest a tab stays frozen without a `go`
+      var WORKER_REPLY_MS = 1500; // longest a worker question may take
+      var RETRY_MS = 60000;       // cooldown between deferred rounds
+      var MAX_DEFER_ROUNDS = 8;   // deferred rounds at the fast cadence
+      var SLOW_RETRY_MS = 900000; // cooldown once the fast cadence is spent
+      var MAX_SLOW_ROUNDS = 8;    // deferred rounds at the slow cadence
+      var READY_HINT_MS = 250;    // debounce on the app's readiness hint
+      /**
+       * How long a peer waits for a worker it has been told to expect.
+       *
+       * A tab that has not finished registering, or whose worker has not
+       * answered yet, is not refusing — it has not looked yet. Deferring on
+       * that costs a whole RETRY_MS cooldown for a race measured in hundreds
+       * of milliseconds.
+       *
+       * The bound is arithmetic, not taste: the peer's WHOLE reply — its first
+       * worker query, this wait, and its own durable flush — has to land inside
+       * the coordinator's acknowledgement deadline. WORKER_REPLY_MS(1500) +
+       * 750 + PREPARE_MS(3000) = 5250, inside ACK_MS(6500).
+       */
+      var PEER_GRACE_MS = 750;
+      var GRACE_POLL_MS = 50;     // backup cadence while waiting for a worker
+      var RECHECK_MS = 2000;      // pause before re-reading an unsettled answer
+      var MAX_RECHECKS = 10;      // bounded: this is not a polling loop
+      var MAX_ATTEMPTS = 3;       // real moves per build before recovery copy
+      var MAX_PEERS = 64;         // retained peer records per round
+      var MAX_ROUTE_CHARS = 512;  // longest route carried across the swap
+      var MAX_VERSION_CHARS = 64;
+      var MAX_ROUND_CHARS = 64;
+      var MAX_DIAGNOSTICS = 64;   // retained observability records
+      var MAX_DETAIL_CHARS = 128; // longest string inside a diagnostic record
+      var MAX_DETAIL_KEYS = 8;    // widest object a diagnostic record may hold
+
+      /* ---------------- identity and scope, resolved locally -------------- */
+
+      var APP_SCOPE = new URL('./', document.baseURI);
+      // Sibling of the scope, never inside it: a document under /cosy/ would be
+      // a controlled client and could not be a destination. Derived rather than
+      // hard-coded so a mounted prefix works without configuration.
+      var HANDOFF_URL = new URL('../cosy-handoff', APP_SCOPE);
+      // Scope-local so two Cosyncing mounts on one origin never coordinate with
+      // each other, exactly like the cache prefix in sw.js.
+      var CHANNEL_NAME = 'cosyncing-handoff:' + APP_SCOPE.pathname;
+      var ATTEMPT_PREFIX = 'cosyncing.handoff.attempts:';
+      var DIAGNOSTICS_KEY = 'cosyncing.handoff.diagnostics';
+      var DEFER_REASONS = ['no-waiting', 'exhausted', 'busy'];
+
+      // An app mounted at the origin root has no sibling path outside its own
+      // scope, so no handoff destination exists. Release builds are /cosy/; this
+      // is the honest degradation rather than a redirect into our own scope.
+      var HANDOFF_SUPPORTED = HANDOFF_URL.href.indexOf(APP_SCOPE.href) !== 0;
+
+      var tabId = (function () {
+        try {
+          if (window.crypto && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+          }
+        } catch (error) { /* fall through */ }
+        return 'tab-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      })();
+
+      /* ---------------- published state (read by Dart) -------------------- */
+
+      // A verified replacement build exists. Not a reason to show anything.
+      window.cosyncingWebUpdateReady = false;
+      // A handoff was really attempted MAX_ATTEMPTS times and never landed.
+      // This is the ONLY state that may surface user-visible recovery copy.
+      window.cosyncingWebUpdateHandoffFailed = false;
+      // Bounded, in-page record of what the protocol did. Diagnosis and tests
+      // read it; nothing depends on it.
+      //
+      // Hydrated, not reset. A handoff destroys this document and loads a
+      // replacement, and the replacement starting from an empty array meant its
+      // very first event overwrote the stored copy — erasing the deferred round
+      // that is the only part worth reading. Every field is re-validated
+      // because sessionStorage is same-origin but not trusted, and the same
+      // bound applies to what is read back as to what is written.
+      /**
+       * Reduce a record's detail to the shapes this protocol actually writes.
+       *
+       * Every `note()` detail is one of: nothing, a version string, or a flat
+       * pair like `{ v: version, attempt: n }`. Copying `d` through unchanged
+       * left the one field nobody checked: sessionStorage is same-origin but
+       * not trusted, so anything on this origin could park a megabyte of string
+       * or a deeply nested object under this key, and it would then be parsed
+       * on load and re-serialized on every note for the life of the tab.
+       * Anything outside the closed set is dropped rather than carried.
+       */
+      function sanitizeDetail(value) {
+        if (value === null || value === undefined) return null;
+        var type = typeof value;
+        if (type === 'number') return isFinite(value) ? value : null;
+        if (type === 'boolean') return value;
+        if (type === 'string') return value.slice(0, MAX_DETAIL_CHARS);
+        if (type !== 'object' || Array.isArray(value)) return null;
+        var keys = Object.keys(value);
+        if (keys.length > MAX_DETAIL_KEYS) return null;
+        var flat = {};
+        for (var k = 0; k < keys.length; k += 1) {
+          var key = keys[k];
+          if (key.length > MAX_DETAIL_CHARS) return null;
+          var item = value[key];
+          var itemType = typeof item;
+          if (itemType === 'string') flat[key] = item.slice(0, MAX_DETAIL_CHARS);
+          else if (itemType === 'number') flat[key] = isFinite(item) ? item : null;
+          else if (itemType === 'boolean') flat[key] = item;
+          else if (item === null || item === undefined) flat[key] = null;
+          // Nesting is not a shape this writes, so a nested value means the
+          // record did not come from here. Drop the whole detail, not the key.
+          else return null;
+        }
+        return flat;
+      }
+
+      window.cosyncingHandoffDiagnostics = (function () {
+        try {
+          var stored = JSON.parse(sessionStorage.getItem(DIAGNOSTICS_KEY) || '[]');
+          if (!Array.isArray(stored)) return [];
+          var restored = [];
+          for (var i = 0; i < stored.length; i += 1) {
+            var entry = stored[i];
+            if (!entry || typeof entry.k !== 'string' || typeof entry.t !== 'number') continue;
+            if (!isFinite(entry.t)) continue;
+            restored.push({
+              k: entry.k.slice(0, MAX_ROUND_CHARS),
+              d: sanitizeDetail(entry.d),
+              t: entry.t,
+            });
+          }
+          return restored.length > MAX_DIAGNOSTICS
+            ? restored.slice(restored.length - MAX_DIAGNOSTICS)
+            : restored;
+        } catch (e) {
+          return [];
+        }
+      })();
+
+      function note(kind, detail) {
+        var log = window.cosyncingHandoffDiagnostics;
+        // Sanitized on the way in as well as out, so the bound holds for the
+        // in-page array too and not only for what survives a reload.
+        log.push({
+          k: String(kind).slice(0, MAX_ROUND_CHARS),
+          d: sanitizeDetail(detail),
+          t: Date.now(),
+        });
+        if (log.length > MAX_DIAGNOSTICS) log.splice(0, log.length - MAX_DIAGNOSTICS);
+        // Mirrored so the record survives the swap. The point of the handoff is
+        // that this document is destroyed and replaced, which also destroys the
+        // in-page log — so anything read afterwards describes only the *new*
+        // document, and why an earlier round deferred is exactly the part that
+        // got thrown away. Session-scoped, bounded, read by diagnosis and tests
+        // only; nothing depends on it.
+        try {
+          sessionStorage.setItem(DIAGNOSTICS_KEY, JSON.stringify(log));
+        } catch (e) {
+          /* full, disabled or partitioned storage is not worth failing over */
+        }
+      }
+
+      function publish() {
+        window.dispatchEvent(new Event('cosyncing-web-update-state'));
+      }
+
+      /* ---------------- bounded session-scoped attempt budget ------------- */
+
+      function attemptKey(version) { return ATTEMPT_PREFIX + version; }
+
+      function attemptsFor(version) {
+        try {
+          return parseInt(sessionStorage.getItem(attemptKey(version)) || '0', 10) || 0;
+        } catch (error) {
+          return 0; // Storage denied (private mode): treat as a first attempt.
+        }
+      }
+
+      /**
+       * Records one real move, and drops every other build's counter.
+       *
+       * Written BEFORE the navigation, so a crash on the handoff page still
+       * costs an attempt and cannot produce an unbounded move loop. The sweep is
+       * what bounds retained records: at most one counter exists per tab.
+       */
+      function recordAttempt(version, value) {
+        try {
+          var stale = [];
+          for (var i = 0; i < sessionStorage.length; i++) {
+            var key = sessionStorage.key(i);
+            if (key && key.indexOf(ATTEMPT_PREFIX) === 0 && key !== attemptKey(version)) {
+              stale.push(key);
+            }
+          }
+          for (var j = 0; j < stale.length; j++) sessionStorage.removeItem(stale[j]);
+          sessionStorage.setItem(attemptKey(version), String(value));
+        } catch (error) { /* ignore */ }
+      }
+
+      /* ---------------- small bounded primitives -------------------------- */
+
+      function sleep(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+      }
+
+      /** Resolves to `fallback` if `promise` has not settled inside `ms`. */
+      function withTimeout(promise, ms, fallback) {
+        return new Promise(function (resolve) {
+          var settled = false;
+          var timer = setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            resolve(fallback);
+          }, ms);
+          Promise.resolve(promise).then(function (value) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+          }, function () {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(fallback);
+          });
+        });
+      }
+
+      /** Asks one worker a read-only question. Never throws, never hangs. */
+      function ask(worker, request) {
+        return new Promise(function (resolve) {
+          if (!worker) return resolve(null);
+          var settled = false;
+          var timer = setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            resolve(null);
+          }, WORKER_REPLY_MS);
+          try {
+            var channel = new MessageChannel();
+            channel.port1.onmessage = function (event) {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve(event.data || null);
+            };
+            worker.postMessage(request, [channel.port2]);
+          } catch (error) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(null);
+          }
+        });
+      }
+
+      function validVersion(value) {
+        return typeof value === 'string'
+          && value.length > 0
+          && value.length <= MAX_VERSION_CHARS
+          && /^[0-9a-z]+$/.test(value);
+      }
+
+      /* ---------------- route capture ------------------------------------- */
+
+      /**
+       * This tab's exact route, or the app root when it cannot be carried.
+       *
+       * A route longer than the bound is NOT truncated: a truncated route is a
+       * different route, and silently reopening the wrong session is worse than
+       * reopening the root.
+       */
+      function currentRoute() {
+        var href = location.href;
+        if (href.indexOf(APP_SCOPE.href) !== 0) return APP_SCOPE.pathname;
+        var route = location.pathname + location.search + location.hash;
+        return route.length > MAX_ROUTE_CHARS ? APP_SCOPE.pathname : route;
+      }
+
+      function handoffHref(version, route) {
+        var url = new URL(HANDOFF_URL.href);
+        url.searchParams.set('v', version);
+        url.searchParams.set('r', route);
+        return url.href;
+      }
+
+      /* ---------------- the app's own readiness --------------------------- */
+
+      /**
+       * Calls one of the app's handoff hooks under a bound.
+       *
+       * Dart installs these only while a surface owns state a handoff could
+       * destroy (see platform/update/web_handoff_participants.dart). Their
+       * absence therefore means this tab has nothing to lose — a pre-Flutter
+       * page, a failed boot, no editor open — and it can move immediately.
+       *
+       * A hung or throwing hook is a refusal, not a hang.
+       */
+      function askApp(name, bound) {
+        var hook = window[name];
+        if (typeof hook !== 'function') return Promise.resolve(true);
+        var invoked;
+        try {
+          invoked = Promise.resolve(hook());
+        } catch (error) {
+          return Promise.resolve(false);
+        }
+        return withTimeout(
+          invoked.then(function (ok) { return ok === true; }, function () { return false; }),
+          bound,
+          false,
+        );
+      }
+
+      /** Phase one: would this tab be willing to move? Flushes what it can. */
+      function prepareThisTab() {
+        return askApp('cosyncingHandoffPrepare', PREPARE_MS);
+      }
+
+      /**
+       * Phase two: freeze this tab and make its FINAL value durable.
+       *
+       * This is what closes the gap phase one cannot. Seconds pass between a tab
+       * acknowledging and being told to go, and the composer stays editable
+       * throughout — so the value flushed at acknowledgement is not necessarily
+       * the value on screen at `go`. The app's commit hook stops accepting input
+       * synchronously, captures what is there, persists it, and verifies nothing
+       * slipped past. Only a tab that answers true is allowed to leave.
+       */
+      function commitThisTab() {
+        return askApp('cosyncingHandoffCommit', PREPARE_MS);
+      }
+
+      /* ---------------- commit-window input guard ------------------------- */
+
+      // The app's own freeze is declarative and lands on the NEXT framework
+      // frame, but the commit snapshot is taken in THIS task — a keystroke,
+      // paste, or tap delivered in between would reach a surface the round
+      // already verified. These capture-phase listeners sit above every
+      // framework handler, so a guarded event is swallowed at the first place
+      // it exists.
+      //
+      // Registered ONCE, here at boot, before flutter_bootstrap.js loads:
+      // capture phase does not outrank listeners already on the SAME target —
+      // same-target listeners run in registration order — so a guard installed
+      // at commit time would run after everything the framework had already
+      // attached to this window. Raising and dropping only toggle the flag,
+      // exactly like the Ctrl+wheel listener above the coordinator.
+      var GUARD_EVENTS = [
+        'keydown', 'keypress', 'keyup', 'beforeinput', 'input', 'paste',
+        'cut', 'drop', 'compositionstart', 'pointerdown', 'pointerup',
+        'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu',
+        'touchstart', 'touchend', 'pointercancel'
+      ];
+      var guardRaised = false;
+      var passingSyntheticCancel = false;
+      // Interactions whose START the framework has already seen. A terminal
+      // event for one of these must not simply vanish behind the guard, or
+      // the framework is left believing a key or pointer is still pressed
+      // after an aborted round.
+      var unguardedKeys = {};
+      var unguardedPointers = {};
+
+      function keyIdOf(event) {
+        return String(event.code || event.key || 'key');
+      }
+
+      function onGuardEvent(event) {
+        if (passingSyntheticCancel) return;
+        var type = event.type;
+        if (!guardRaised) {
+          // Bookkeeping only; everything passes.
+          if (type === 'keydown') unguardedKeys[keyIdOf(event)] = true;
+          else if (type === 'keyup') delete unguardedKeys[keyIdOf(event)];
+          else if (type === 'pointerdown') unguardedPointers[String(event.pointerId)] = event.target || null;
+          else if (type === 'pointerup' || type === 'pointercancel') delete unguardedPointers[String(event.pointerId)];
+          return;
+        }
+        if (type === 'keyup' && unguardedKeys[keyIdOf(event)]) {
+          // Cleanup, not input: the framework saw this key go down before the
+          // guard rose, and a keyup mutates nothing. Swallowing it would
+          // leave the key held forever after an aborted round.
+          delete unguardedKeys[keyIdOf(event)];
+          return;
+        }
+        if (type === 'pointercancel') {
+          // Also pure cleanup; the browser is abandoning the interaction.
+          delete unguardedPointers[String(event.pointerId)];
+          return;
+        }
+        try {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        } catch (error) { /* a non-cancelable event still stops propagating */ }
+      }
+
+      for (var guardIndex = 0; guardIndex < GUARD_EVENTS.length; guardIndex++) {
+        window.addEventListener(GUARD_EVENTS[guardIndex], onGuardEvent, { capture: true, passive: false });
+      }
+
+      /**
+       * A tap or drag that began before the guard rose must neither complete
+       * as an action — its release would land on a page mid-handoff — nor be
+       * left half-pressed by having its terminal event swallowed. Cancelling
+       * it into the framework ends the gesture cleanly, with no action fired
+       * and no stuck pointer.
+       */
+      function cancelUnguardedPointers() {
+        for (var id in unguardedPointers) {
+          if (!Object.prototype.hasOwnProperty.call(unguardedPointers, id)) continue;
+          var target = unguardedPointers[id];
+          delete unguardedPointers[id];
+          if (!target || typeof target.dispatchEvent !== 'function') continue;
+          if (typeof PointerEvent !== 'function') continue;
+          try {
+            passingSyntheticCancel = true;
+            target.dispatchEvent(new PointerEvent('pointercancel', {
+              pointerId: Number(id), bubbles: true, cancelable: false
+            }));
+          } catch (error) { /* the framework's own sanitizer covers the rest */ }
+          passingSyntheticCancel = false;
+        }
+      }
+
+      function raiseInputGuard() {
+        if (guardRaised) return;
+        guardRaised = true;
+        cancelUnguardedPointers();
+      }
+
+      function dropInputGuard() {
+        guardRaised = false;
+      }
+
+      /**
+       * Calls the app's release hook, and cancels any commit still in flight.
+       *
+       * Unconditional on purpose. The freeze happens SYNCHRONOUSLY at the start
+       * of the commit hook and the flush that follows it takes as long as a
+       * durable write takes, so for most of a commit the surface is already
+       * frozen while this page has not yet recorded it. Anything that undoes a
+       * round has to undo that too, and bumping the generation is what makes the
+       * in-flight commit resolve to a refusal instead of re-freezing a surface
+       * nobody is going to move.
+       */
+      function releaseSurface() {
+        dropInputGuard();
+        commitSeq += 1;
+        committed = false;
+        var hook = window.cosyncingHandoffRelease;
+        if (typeof hook !== 'function') return;
+        try { hook(); } catch (error) { /* the surface is gone; nothing to undo */ }
+      }
+
+      /** Undoes a commit — taken or still being taken — for a dead round. */
+      function releaseThisTab() {
+        if (lockTimer !== null) { clearTimeout(lockTimer); lockTimer = null; }
+        if (!committed && !commitInFlight) return;
+        releaseSurface();
+      }
+
+      /**
+       * Freezes this tab, with a deadline.
+       *
+       * A coordinator that dies between `commit` and `go` would otherwise leave
+       * every peer permanently unable to type. The timer is the guarantee that a
+       * freeze is temporary no matter what happens to anyone else.
+       */
+      function commitAndHold(version, round) {
+        if (commitInFlight) return Promise.resolve(false);
+        var generation = commitSeq;
+        commitInFlight = true;
+        // Same task as the Dart freeze, before the hook: nothing the user does
+        // from here on can reach the app until release or navigation.
+        raiseInputGuard();
+        note('commit-hook-start', { v: version, r: round, tab: tabId });
+        return commitThisTab().then(function (ok) {
+          note('commit-hook-finished', {
+            v: version, r: round, tab: tabId, ok: ok
+          });
+          commitInFlight = false;
+          // Either the round was abandoned while the app was still flushing, or
+          // the app refused — including by exceeding the bound, in which case
+          // whether it froze is unknowable from here. Every one of those leaves
+          // a surface that may be frozen with nobody left to unfreeze it, so the
+          // release runs whether or not this tab ever reached `committed`.
+          if (!ok || commitSeq !== generation) {
+            if (commitSeq !== generation) note('commit-cancelled', { v: version, r: round });
+            releaseSurface();
+            return false;
+          }
+          committed = true;
+          if (lockTimer !== null) clearTimeout(lockTimer);
+          lockTimer = setTimeout(function () {
+            lockTimer = null;
+            note('lock-expired', { v: version, r: round });
+            releaseThisTab();
+            abandonRound();
+          }, LOCK_MS);
+          return true;
+        });
+      }
+
+      /* ---------------- peer channel -------------------------------------- */
+
+      var channel = null;
+      try {
+        if (typeof BroadcastChannel === 'function') channel = new BroadcastChannel(CHANNEL_NAME);
+      } catch (error) {
+        channel = null;
+      }
+
+      function post(message) {
+        if (!channel) return;
+        try { channel.postMessage(message); } catch (error) { /* ignore */ }
+      }
+
+      /* ---------------- per-round state ----------------------------------- */
+
+      var moved = false;          // this tab has committed to the handoff page
+      var electionVersion = null; // build this tab is currently claiming for
+      var bids = [];              // claims seen this round, bounded by MAX_PEERS
+      var replies = null;         // Map(tab -> 'ack' | 'defer') while collecting
+      var commits = null;         // Map(tab -> 'done' | 'abort') while committing
+      var repliesChanged = null;  // wakes an event-driven acknowledgement wait
+      var commitsChanged = null;  // wakes an event-driven commit wait
+      var pendingMove = null;     // { version, round } once this tab has acked
+      var busy = false;           // one round at a time in this tab
+      var sentPrepare = false;    // this tab is the acting coordinator
+      var peerCoordinator = null; // a peer broadcast `prepare` first
+      var committed = false;      // this tab is frozen for a commit
+      var commitInFlight = false; // a freeze was taken; its flush has not landed
+      var commitSeq = 0;          // bumped by every release; cancels a commit
+      var lockTimer = null;       // deadline on that freeze
+      var ownRound = null;        // round id this tab is coordinating
+      var roundCounter = 0;       // makes each of this tab's rounds distinct
+      var deferRounds = 0;        // fast-cadence rounds spent
+      var slowRounds = 0;         // slow-cadence rounds spent
+      var retryTimer = null;
+      var recheckTimer = null;
+      var rechecks = 0;
+      var recheckGeneration = 0;
+      var hintTimer = null;
+      var considerAgain = false;
+
+      function resetRound() {
+        electionVersion = null;
+        bids = [];
+        replies = null;
+        commits = null;
+        repliesChanged = null;
+        commitsChanged = null;
+        sentPrepare = false;
+        peerCoordinator = null;
+      }
+
+      /**
+       * Waits until a peer phase is complete or cannot succeed.
+       *
+       * The deadline is only a ceiling. A healthy round advances on the message
+       * that completes its expected set, while one refusal abandons immediately.
+       * This avoids paying ACK_MS and COMMIT_MS as fixed sleeps on every update.
+       */
+      function waitForPeerPhase(map, expected, deadline, refusal, phase) {
+        return new Promise(function (resolve) {
+          var settled = false;
+          var timer = null;
+
+          function finish() {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) clearTimeout(timer);
+            if (phase === 'ack' && repliesChanged === changed) repliesChanged = null;
+            if (phase === 'commit' && commitsChanged === changed) commitsChanged = null;
+            resolve();
+          }
+
+          function changed() {
+            if (settled) return;
+            var refused = false;
+            map.forEach(function (value) {
+              if (refusal(value)) refused = true;
+            });
+            if (refused || map.size >= expected) finish();
+          }
+
+          if (phase === 'ack') repliesChanged = changed;
+          else commitsChanged = changed;
+          timer = setTimeout(finish, deadline);
+          changed();
+        });
+      }
+
+      function waitForReplies(expected) {
+        var observed = replies;
+        if (!observed) return Promise.resolve();
+        return waitForPeerPhase(
+          observed,
+          expected,
+          ACK_MS,
+          function (value) { return value !== 'ack'; },
+          'ack'
+        );
+      }
+
+      function waitForCommits(expected) {
+        var observed = commits;
+        if (!observed) return Promise.resolve();
+        return waitForPeerPhase(
+          observed,
+          expected,
+          COMMIT_MS,
+          function (value) { return value !== 'done'; },
+          'commit'
+        );
+      }
+
+      /**
+       * Ends a round this tab is part of without moving.
+       *
+       * Unfreezing is the load-bearing half: a tab that committed and is then
+       * abandoned must become editable again immediately, or the user is left
+       * staring at a composer that silently refuses input.
+       */
+      function abandonRound() {
+        releaseThisTab();
+        pendingMove = null;
+        resetRound();
+      }
+
+      /**
+       * Commits this tab to the handoff page. Idempotent.
+       *
+       * The route is read HERE, not at acknowledgement time. Up to a few seconds
+       * pass between a tab agreeing to move and being told to go, and a user who
+       * navigates inside that window means the recorded route is no longer the
+       * route they are on. `pendingMove` records that this tab agreed to move
+       * for this build; where it comes back to is whatever it is showing when it
+       * actually leaves.
+       */
+      function moveThisTab(version, round) {
+        if (moved) return;
+        if (!pendingMove || pendingMove.version !== version) return;
+        if (pendingMove.round !== round) return; // a stale round may not move us
+        if (!committed) return; // never leave a surface that was not frozen
+        moved = true;
+        if (lockTimer !== null) { clearTimeout(lockTimer); lockTimer = null; }
+        var next = attemptsFor(version) + 1;
+        recordAttempt(version, next);
+        note('move', { v: version, attempt: next });
+        location.replace(handoffHref(version, currentRoute()));
+      }
+
+      function validRound(value) {
+        return typeof value === 'string'
+          && value.length > 0
+          && value.length <= MAX_ROUND_CHARS;
+      }
+
+      /**
+       * A round identifier, independent of the build it is for.
+       *
+       * Folding the version in would let a long-but-legal build identity push
+       * the id past MAX_ROUND_CHARS, and every peer would then reject every
+       * message in the round through its own validRound — a round that cannot
+       * complete and shows no error. A round id only has to distinguish this
+       * tab's rounds from each other and from a peer's; the build is carried
+       * separately in `v` and re-verified locally anyway. The result is checked
+       * against the bound rather than assumed to fit.
+       */
+      function newRoundId() {
+        var candidate = tabId.slice(0, 32) + ':' + String(++roundCounter);
+        return validRound(candidate) ? candidate : String(roundCounter);
+      }
+
+      /** Whether a message belongs to the round this tab is actually in. */
+      function inThisRound(message) {
+        return pendingMove !== null
+          && pendingMove.version === message.v
+          && pendingMove.round === message.r;
+      }
+
+      if (channel) {
+        channel.onmessage = function (event) {
+          var message = event.data;
+          if (!message || typeof message !== 'object') return;
+          if (!validVersion(message.v)) return;
+          if (typeof message.tab === 'string' && message.tab.length > 64) return;
+          if (message.k === 'claim') {
+            if (message.v !== electionVersion) return;
+            if (bids.length >= MAX_PEERS) return;
+            if (typeof message.tab !== 'string') return;
+            if (bids.indexOf(message.tab) === -1) bids.push(message.tab);
+            return;
+          }
+          // Everything past the election is round-qualified, so a message from a
+          // round this tab already left can never freeze it or move it.
+          if (!validRound(message.r)) return;
+          if (message.k === 'prepare') { onPrepare(message.v, message.r); return; }
+          if (message.k === 'ack' || message.k === 'defer') {
+            if (!replies || replies.size >= MAX_PEERS) return;
+            if (message.r !== ownRound) return;
+            if (typeof message.tab !== 'string') return;
+            // The reason is retained for diagnosis only, and only from a fixed
+            // set: everything on this channel is same-origin but untrusted.
+            replies.set(
+              message.tab,
+              message.k === 'ack'
+                ? 'ack'
+                : DEFER_REASONS.indexOf(message.why) === -1
+                  ? 'defer:unknown'
+                  : 'defer:' + message.why
+            );
+            note('ack-received', { tab: message.tab, k: message.k, r: message.r });
+            if (repliesChanged) repliesChanged();
+            return;
+          }
+          if (message.k === 'commit') { onCommit(message); return; }
+          if (message.k === 'done' || message.k === 'abort') {
+            if (!commits || commits.size >= MAX_PEERS) return;
+            if (message.r !== ownRound) return;
+            if (typeof message.tab !== 'string') return;
+            commits.set(message.tab, message.k);
+            note('commit-reply-received', {
+              tab: message.tab, k: message.k, r: message.r
+            });
+            if (commitsChanged) commitsChanged();
+            return;
+          }
+          if (message.k === 'go') { moveThisTab(message.v, message.r); return; }
+          if (message.k === 'release') {
+            if (inThisRound(message)) abandonRound();
+            return;
+          }
+        };
+      }
+
+      /**
+       * A peer asked this tab to freeze and finalise (phase two).
+       *
+       * Answering `done` means: input is refused from this moment, whatever was
+       * on screen is durable, and this tab is safe to navigate away. Answering
+       * `abort` means the user typed something between acknowledging and now, so
+       * nobody moves.
+       */
+      function onCommit(message) {
+        if (moved) return;
+        if (commitInFlight) return; // one freeze at a time; a repeat is a no-op
+        if (!inThisRound(message)) return;
+        note('commit-received', { v: message.v, r: message.r, tab: tabId });
+        commitAndHold(message.v, message.r).then(function (ok) {
+          if (moved) return;
+          if (!inThisRound(message)) return;
+          post({ k: ok ? 'done' : 'abort', v: message.v, r: message.r, tab: tabId });
+          note('done-sent', {
+            v: message.v, r: message.r, tab: tabId, k: ok ? 'done' : 'abort'
+          });
+          if (!ok) {
+            note('commit-refused', message.v);
+            abandonRound();
+          }
+        });
+      }
+
+      /**
+       * A peer asked this tab to get ready.
+       *
+       * The request is re-verified locally rather than trusted: this tab checks
+       * for itself that a waiting worker with that exact identity really exists.
+       * The channel is same-origin, so this is not a trust boundary — it is what
+       * stops a stale broadcast, or a tab that has already moved on, from
+       * pushing an up-to-date tab out of its route for nothing.
+       */
+      function onPrepare(version, round) {
+        if (moved) return;
+        // Someone else got there first. Recorded before anything async so this
+        // tab's own election, if one is in flight, can stand down rather than
+        // becoming a second coordinator for the same build.
+        if (!sentPrepare) peerCoordinator = version;
+        resolveExpectedWorker(version).then(function (found) {
+          if (moved) return;
+          if (found.version !== version) {
+            note('no-waiting-state', { s: found.state, v: version });
+            post({ k: 'defer', v: version, r: round, tab: tabId, why: 'no-waiting' });
+            return;
+          }
+          if (attemptsFor(version) >= MAX_ATTEMPTS) {
+            post({ k: 'defer', v: version, r: round, tab: tabId, why: 'exhausted' });
+            surfaceFailure(version);
+            return;
+          }
+          return prepareThisTab().then(function (ready) {
+            if (moved) return;
+            if (!ready) {
+              post({ k: 'defer', v: version, r: round, tab: tabId, why: 'busy' });
+              note('defer-local', version);
+              return;
+            }
+            // Joining the round, not agreeing to leave. The composer stays
+            // editable until `commit` freezes it, so what is recorded here is
+            // membership; the value that gets saved is captured later.
+            pendingMove = { version: version, round: round };
+            post({ k: 'ack', v: version, r: round, tab: tabId });
+            note('ack-local', version);
+          });
+        });
+      }
+
+      /* ---------------- observation --------------------------------------- */
+
+      var registrationRef = null;
+
+      /**
+       * The identity of a verified waiting build, or null.
+       *
+       * "Waiting" already means installed: sw.js precaches atomically and hash-
+       * verifies every entry, so a worker only reaches `waiting` if its whole
+       * build is present and belongs together. This adds the one thing that
+       * state does not carry — WHICH build — and refuses a worker that cannot
+       * answer or answers with the identity already in control.
+       */
+      function waitingIdentity() {
+        return inspectWaiting().then(function (found) {
+          return found.version;
+        });
+      }
+
+      /**
+       * The same question, with the reason attached when the answer is null.
+       *
+       * A bare null collapsed five different situations into one, and they do
+       * not want the same treatment. Three are transient — this document has
+       * not been told about the worker yet, or the worker has not answered yet
+       * — and are worth waiting a moment for. Two are settled: a DIFFERENT
+       * build is waiting, or the build in question is already the active one.
+       * Waiting on those achieves nothing, so the caller must be able to tell
+       * them apart.
+       *
+       *   no-registration  the worker registration has not resolved yet
+       *   absent           no waiting worker is visible to this document
+       *   silent           a waiting worker exists and did not answer in time
+       *   invalid          it answered with something that is not a build id
+       *   unknown-active   the ACTIVE worker did not answer, so "different
+       *                    build" cannot be established
+       *   invalid-active   the active worker answered without a valid build id
+       *   superseded       the active worker already reports that identity
+       *   ready            a distinct, verified waiting build
+       */
+      function inspectWaiting() {
+        var registration = registrationRef;
+        if (!registration) {
+          return Promise.resolve({ version: null, state: 'no-registration' });
+        }
+        if (!registration.waiting) {
+          return Promise.resolve({ version: null, state: 'absent' });
+        }
+        return Promise.all([
+          ask(registration.waiting, { type: 'cosyncing-build-identity' }),
+          ask(registration.active, { type: 'cosyncing-build-identity' }),
+        ]).then(function (answers) {
+          var next = answers[0];
+          var current = answers[1];
+          if (!next) return { version: null, state: 'silent' };
+          if (!validVersion(next.version)) {
+            return { version: null, state: 'invalid' };
+          }
+          // An active worker that did not answer proves nothing, and this used
+          // to read as proof. The guard below was `current && ...`, so a null
+          // answer skipped it and a waiting worker was reported as an update
+          // even when it was the build this tab is already running. On first
+          // load the active worker is busy precaching several megabytes and
+          // routinely misses the 1.5s reply window, so a tab would elect
+          // itself coordinator for its OWN build, run a doomed round — every
+          // peer that has not registered yet answers `no-waiting` — and arm
+          // the 60s cooldown that then delays the real update.
+          //
+          // Inconclusive, not negative: `consider()` runs again on
+          // `updatefound`, on `controllerchange`, on the app's readiness hint
+          // and on the retry cadence, so nothing is lost by declining to
+          // decide now.
+          if (!current) return { version: null, state: 'unknown-active' };
+          if (!validVersion(current.version)) {
+            return { version: null, state: 'invalid-active' };
+          }
+          if (current.version === next.version) {
+            return { version: null, state: 'superseded' };
+          }
+          return { version: next.version, state: 'ready' };
+        });
+      }
+
+      /**
+       * States that mean "not yet", as opposed to "no".
+       *
+       * Only these are worth waiting on. A DIFFERENT valid build waiting, an
+       * identity the active worker already reports, or an unreadable answer
+       * are all settled: waiting cannot change them, and pretending otherwise
+       * would just delay an honest deferral.
+       */
+      var UNSETTLED_STATES = {
+        'no-registration': true,
+        absent: true,
+        silent: true,
+        'unknown-active': true,
+      };
+
+      /**
+       * States worth looking at again unprompted.
+       *
+       * A narrower set than the one above, and the difference is who asked. A
+       * peer's `prepare` is evidence that a worker exists, so `absent` there
+       * means "not shown to me yet" and is worth waiting on. Unprompted,
+       * `absent` is just a tab with no update — the overwhelmingly common
+       * state — and re-checking it would turn every idle tab into a poller.
+       * What remains are the answers that say something is there and could not
+       * be read.
+       */
+      var UNREADABLE_STATES = {
+        'no-registration': true,
+        silent: true,
+        'unknown-active': true,
+      };
+
+      /**
+       * Look for the worker a peer says exists, allowing briefly for the fact
+       * that this document may not have been told about it yet.
+       *
+       * Deliberately local. A peer's `prepare` is a claim about the peer, and
+       * the only thing acted on here is what this tab can verify for itself —
+       * so this waits for THE EXACT expected identity and nothing else. It is
+       * also not a reason to retry anything globally: a peer message must
+       * never be able to drive this tab's retry cadence, or a chatty peer
+       * becomes a retry storm.
+       */
+      function resolveExpectedWorker(version) {
+        return inspectWaiting().then(function (found) {
+          if (found.version === version) return found;
+          if (!UNSETTLED_STATES[found.state]) return found;
+          return waitForExpectedWorker(version, found);
+        });
+      }
+
+      function waitForExpectedWorker(version, initial) {
+        return new Promise(function (resolve) {
+          var settled = false;
+          var last = initial;
+          var poll = null;
+          var expiry = null;
+          var detach = [];
+          var checking = false;
+
+          function finish(found) {
+            if (settled) return;
+            settled = true;
+            if (poll !== null) clearTimeout(poll);
+            if (expiry !== null) clearTimeout(expiry);
+            for (var i = 0; i < detach.length; i += 1) detach[i]();
+            resolve(found);
+          }
+
+          function check() {
+            if (settled || checking) return;
+            checking = true;
+            inspectWaiting().then(function (found) {
+              checking = false;
+              last = found;
+              // Only the expected identity ends the wait early. Anything else
+              // — including a different build that arrives meanwhile — leaves
+              // the deadline to decide, so a late surprise cannot be mistaken
+              // for the thing this round asked about.
+              if (found.version === version) finish(found);
+            }, function () {
+              checking = false;
+            });
+          }
+
+          // Lifecycle first: the browser says the moment a worker installs, so
+          // the common case costs one event rather than a poll interval.
+          var registration = registrationRef;
+          if (registration && typeof registration.addEventListener === 'function') {
+            var onUpdateFound = function () {
+              var installing = registration.installing;
+              if (installing && typeof installing.addEventListener === 'function') {
+                var onStateChange = function () {
+                  if (installing.state === 'installed') check();
+                };
+                installing.addEventListener('statechange', onStateChange);
+                detach.push(function () {
+                  if (typeof installing.removeEventListener === 'function') {
+                    installing.removeEventListener('statechange', onStateChange);
+                  }
+                });
+              }
+              check();
+            };
+            registration.addEventListener('updatefound', onUpdateFound);
+            detach.push(function () {
+              if (typeof registration.removeEventListener === 'function') {
+                registration.removeEventListener('updatefound', onUpdateFound);
+              }
+            });
+          }
+
+          // Backup, because the events are not sufficient: this document may
+          // have no registration yet (nothing to listen to), and a worker that
+          // installed before this document existed fires no event at all.
+          //
+          // Self-rescheduling rather than an interval: one timer at a time
+          // cannot overlap its own checks, and `setTimeout` is the only timer
+          // this page needs, which keeps it drivable by a controlled clock.
+          function tick() {
+            if (settled) return;
+            check();
+            if (settled) return;
+            poll = setTimeout(tick, GRACE_POLL_MS);
+          }
+          expiry = setTimeout(function () { finish(last); }, PEER_GRACE_MS);
+          tick();
+        });
+      }
+
+      function surfaceFailure(version) {
+        if (window.cosyncingWebUpdateHandoffFailed) return;
+        window.cosyncingWebUpdateHandoffFailed = true;
+        note('failed', version);
+        publish();
+      }
+
+      /**
+       * Schedules the next attempt after a deferral, on a two-tier cadence.
+       *
+       * The fast tier answers "the user is mid-sentence, try again shortly".
+       * Spending it does not mean giving up: a tab that deferred for eight
+       * minutes and then went quiet must still pick the update up, so the slow
+       * tier keeps checking for two more hours. Beyond that the readiness hint
+       * below is the live path — the app tells the page the moment it stops
+       * being busy — and this stops scheduling rather than polling forever.
+       */
+      /**
+       * Look again shortly, a bounded number of times.
+       *
+       * Separate from `armRetry`, which is the cooldown after a tab REFUSED a
+       * round. This is for a tab that could not tell whether there was a round
+       * to run, so the wait is short and the budget small: the point is to
+       * outlast a worker that is briefly too busy to answer, not to poll.
+       */
+      function armRecheck() {
+        var generation = recheckGeneration;
+        if (recheckTimer !== null) return;
+        if (rechecks >= MAX_RECHECKS) return;
+        rechecks += 1;
+        recheckTimer = setTimeout(function () {
+          recheckTimer = null;
+          if (generation !== recheckGeneration) return;
+          consider();
+        }, RECHECK_MS);
+      }
+
+      function resetRechecks() {
+        rechecks = 0;
+        if (recheckTimer !== null) {
+          clearTimeout(recheckTimer);
+          recheckTimer = null;
+        }
+      }
+
+      /** Starts a fresh bounded observation budget for a newly found worker. */
+      function beginUpdateObservation() {
+        recheckGeneration += 1;
+        resetRechecks();
+      }
+
+      function armRetry() {
+        if (retryTimer !== null) return;
+        var delay;
+        if (deferRounds < MAX_DEFER_ROUNDS) {
+          delay = RETRY_MS;
+        } else if (slowRounds < MAX_SLOW_ROUNDS) {
+          delay = SLOW_RETRY_MS;
+        } else {
+          note('retries-spent', null);
+          return;
+        }
+        retryTimer = setTimeout(function () {
+          retryTimer = null;
+          if (deferRounds >= MAX_DEFER_ROUNDS) slowRounds += 1;
+          consider();
+        }, delay);
+      }
+
+      /**
+       * The app reporting that this tab may have become movable.
+       *
+       * Called when an editor closes or the composer loses focus — the two ways
+       * a deferring tab stops deferring. Without it a user who types for a while
+       * and then stops would wait out the retry cadence for an update that is
+       * already downloaded and verified, or, once the cadence is spent, until
+       * some unrelated navigation.
+       *
+       * Debounced, and it resets the cadence rather than bypassing it: a burst
+       * of registrations cannot turn this into an unbounded retry loop, and the
+       * round it triggers re-verifies everything from scratch.
+       */
+      window.cosyncingHandoffReadyHint = function () {
+        if (moved || busy) return;
+        if (hintTimer !== null) return;
+        hintTimer = setTimeout(function () {
+          hintTimer = null;
+          if (moved || busy) return;
+          if (!window.cosyncingWebUpdateReady) return; // nothing is waiting
+          deferRounds = 0;
+          slowRounds = 0;
+          if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+          note('ready-hint', null);
+          consider();
+        }, READY_HINT_MS);
+      };
+
+      /**
+       * One bounded handoff round, from this tab's point of view.
+       *
+       * Returns without doing anything visible in every path that is not a
+       * completed handoff. A deferral is not a failure and never shows.
+       */
+      function consider() {
+        if (moved) return;
+        if (busy) { considerAgain = true; return; }
+        var registration = registrationRef;
+        if (!registration) return;
+        busy = true;
+        runRound(registration).then(function (outcome) {
+          busy = false;
+          note('round', outcome);
+          if (considerAgain) {
+            considerAgain = false;
+            consider();
+            return;
+          }
+          if (outcome === 'moving' || outcome === 'none') return;
+          if (outcome === 'exhausted') return;
+          deferRounds += 1;
+          armRetry();
+        }, function () {
+          busy = false;
+          if (considerAgain) {
+            considerAgain = false;
+            consider();
+            return;
+          }
+          deferRounds += 1;
+          armRetry();
+        });
+      }
+
+      function runRound(registration) {
+        return inspectWaiting().then(function (found) {
+          var version = found.version;
+          if (!version) {
+            // "Not yet" is not "no". An unsettled answer — no registration, no
+            // visible worker, a worker or an active worker that did not reply
+            // — leaves this tab with nothing scheduled: `updatefound` has
+            // already fired, the readiness hint is gated on a verified build
+            // it has not got, and the retry cadence is only armed by a
+            // deferral. Without a re-check the tab would sit out an update it
+            // simply could not read yet.
+            if (UNREADABLE_STATES[found.state]) armRecheck();
+            else resetRechecks();
+            return 'none';
+          }
+
+          // A settled observation replenishes this generation's transient
+          // query budget. A later updatefound starts a new generation as well.
+          resetRechecks();
+
+          window.cosyncingWebUpdateReady = true;
+          publish();
+
+          if (attemptsFor(version) >= MAX_ATTEMPTS) {
+            surfaceFailure(version);
+            return 'exhausted';
+          }
+          // No destination and no peer channel are both permanent for this page.
+          // Report them as a real failure so the app can say something truthful
+          // instead of retrying a handoff that can never run.
+          if (!HANDOFF_SUPPORTED || !channel) {
+            surfaceFailure(version);
+            return 'exhausted';
+          }
+
+          // 1. Elect. Every tab that has seen this build claims; lowest wins.
+          electionVersion = version;
+          bids = [tabId];
+          peerCoordinator = null;
+          post({ k: 'claim', v: version, tab: tabId });
+          return sleep(ELECTION_MS).then(function () {
+            bids.sort();
+            if (bids[0] !== tabId || peerCoordinator === version) {
+              resetRound();
+              return 'follower'; // a peer coordinates; this tab answers `prepare`
+            }
+            note('coordinator', version);
+
+            // 2. Census from the ACTIVE worker: how many tabs must agree.
+            return ask(navigator.serviceWorker.controller, {
+              type: 'cosyncing-client-census',
+            }).then(function (census) {
+              if (!census || typeof census.windows !== 'number'
+                  || census.windows < 1 || census.windows > MAX_PEERS) {
+                resetRound();
+                return 'no-census';
+              }
+              // A tab whose election started later can still have reached
+              // `prepare` while this one was taking its census. Whoever spoke
+              // first coordinates; standing down here costs one deferred round
+              // and keeps "exactly one coordinator" true rather than merely
+              // likely.
+              if (peerCoordinator === version) {
+                resetRound();
+                return 'follower';
+              }
+
+              // 3. Ask everyone, including this tab, to become safe to move.
+              replies = new Map();
+              sentPrepare = true;
+              ownRound = newRoundId();
+              var round = ownRound;
+              post({ k: 'prepare', v: version, r: round });
+              return prepareThisTab().then(function (ready) {
+                if (!ready) {
+                  resetRound();
+                  return 'coordinator-busy';
+                }
+                pendingMove = { version: version, round: round };
+                replies.set(tabId, 'ack');
+                return waitForReplies(census.windows).then(function () {
+                  var acks = 0;
+                  var defers = 0;
+                  var reasons = [];
+                  replies.forEach(function (value) {
+                    if (value === 'ack') { acks += 1; return; }
+                    defers += 1;
+                    // Which peer reason it was decides whether a deferral is a
+                    // race worth closing or a tab legitimately busy, and the
+                    // round that defers is the one whose record the swap
+                    // destroys. Recording it here is the only place it lasts.
+                    if (reasons.indexOf(value) === -1) reasons.push(value);
+                  });
+                  // A single deferral, or a single tab that never answered,
+                  // stops the round. Moving a subset would leave the old worker
+                  // controlling the rest and strand the movers on a handoff page
+                  // waiting for an activation that cannot happen.
+                  if (defers > 0) {
+                    note('peer-defer-reasons', reasons.join(','));
+                    abandonRound();
+                    return 'peer-deferred';
+                  }
+                  if (acks !== census.windows) { abandonRound(); return 'unresponsive'; }
+
+                  // 4. Re-census: a tab opened during the round would not have
+                  //    been asked, and would keep the old worker alive.
+                  return ask(navigator.serviceWorker.controller, {
+                    type: 'cosyncing-client-census',
+                  }).then(function (again) {
+                    if (!again || again.windows !== census.windows) {
+                      abandonRound();
+                      return 'census-changed';
+                    }
+
+                    // 5. COMMIT. Everyone freezes and finalises before anyone
+                    //    leaves. The acknowledgement above is seconds old by now
+                    //    and the user has been able to type the whole time, so
+                    //    what was flushed then is not necessarily what is on
+                    //    screen now. This is the phase that makes the handoff
+                    //    lossless, and it is why `go` is a separate message: a
+                    //    tab may only be moved after it has stopped accepting
+                    //    input and proved its final value is durable.
+                    commits = new Map();
+                    post({ k: 'commit', v: version, r: round });
+                    note('commit-received', { v: version, r: round, tab: tabId });
+                    return commitAndHold(version, round).then(function (mine) {
+                      if (!mine) {
+                        post({ k: 'release', v: version, r: round });
+                        abandonRound();
+                        return 'coordinator-edited';
+                      }
+                      commits.set(tabId, 'done');
+                      note('done-sent', {
+                        v: version, r: round, tab: tabId, k: 'done'
+                      });
+                      return waitForCommits(census.windows).then(function () {
+                        var done = 0;
+                        var aborted = 0;
+                        commits.forEach(function (value) {
+                          if (value === 'done') done += 1; else aborted += 1;
+                        });
+                        // Anyone still typing, or silent, releases everyone.
+                        // Frozen tabs must never be left frozen.
+                        if (aborted > 0 || done !== census.windows) {
+                          post({ k: 'release', v: version, r: round });
+                          abandonRound();
+                          return aborted > 0 ? 'peer-edited' : 'commit-unresponsive';
+                        }
+                        // 6. Go. Every tab is frozen and durable.
+                        post({ k: 'go', v: version, r: round });
+                        moveThisTab(version, round);
+                        return 'moving';
+                      });
+                    });
+                  });
+                });
+              });
+            });
+          });
+        });
+      }
+
+      /* ---------------- registration ------------------------------------- */
+
+      function watch(registration) {
+        registrationRef = registration;
+        beginUpdateObservation();
+        consider();
+        registration.addEventListener('updatefound', function () {
+          beginUpdateObservation();
+          var installing = registration.installing;
+          if (!installing) return;
+          installing.addEventListener('statechange', function () {
+            if (installing.state === 'installed') consider();
+          });
+        });
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          consider();
+        });
+      }
+
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker
+            .register('sw.js', { scope: './', updateViaCache: 'none' })
+            .then(watch)
+            .catch(function (error) {
+              // Static caching is an optimisation; startup must not depend on it.
+              console.warn('[cosyncing] static cache worker not registered:', error);
+            });
+        });
+      }
+    })();
+  </script>
+
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

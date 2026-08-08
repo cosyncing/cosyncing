@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 116 116">
+  <!-- 900 ms "chase" motion ident (SMIL, plays once and holds): the mark spins
+       360° about its center; the two arcs are 180°-rotation copies, so the spin
+       reads as them chasing each other around the ring. Constant colors, pure
+       spin. Seamless loop (360° = start). Reduced-motion: fade-in over 300 ms.
+       The viewBox margin keeps the rotating mark unclipped at ~45°. -->
+  <g>
+    <animateTransform attributeName="transform" type="rotate" values="0 50 50;360 50 50"
+      dur="0.7s" calcMode="spline" keySplines="0.42 0 0.58 1" fill="freeze" repeatCount="1"/>
+    <path fill="#0B0E14" d="M86,40 V74 A18,18 0 0 1 74,86 H40 V74 H66 A8,8 0 0 0 74,66 V40 Z"/>
+    <path fill="#0F766E" d="M14,60 V26 A18,18 0 0 1 26,14 H60 V26 H34 A8,8 0 0 0 26,34 V60 Z"/>
+  </g>
+</svg>

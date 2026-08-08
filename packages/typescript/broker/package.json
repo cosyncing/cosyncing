@@ -1,0 +1,16 @@
+{
+  "name": "@cosyncing/broker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cosyncing/protocol": "workspace:*",
+    "@cosyncing/adapter-api": "workspace:*",
+    "@cosyncing/adapter-opencode": "workspace:*",
+    "@cosyncing/adapter-pi": "workspace:*",
+    "@cosyncing/adapter-codex": "workspace:*",
+    "@cosyncing/adapter-claude": "workspace:*",
+    "@cosyncing/crypto": "workspace:*",
+    "@cosyncing/transport": "workspace:*",
+    "@cosyncing/transport-wire": "workspace:*"
+  }
+}

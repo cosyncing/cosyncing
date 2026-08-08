@@ -1,0 +1,14 @@
+# Configuration for Flutter's gen_l10n. Run `flutter gen-l10n` (or a normal
+# build/analyze after `flutter pub get`, since `generate: true` is set in
+# pubspec) to produce AppLocalizations. ARB source files live in lib/l10n/.
+#
+# gen_l10n generates into the source tree at a stable import path:
+#   import 'package:cosyncing_client/l10n/app_localizations.dart';
+# The generated app_localizations*.dart files are git-ignored (see .gitignore);
+# regenerate with `flutter gen-l10n`.
+arb-dir: lib/l10n
+output-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+output-class: AppLocalizations
+nullable-getter: false

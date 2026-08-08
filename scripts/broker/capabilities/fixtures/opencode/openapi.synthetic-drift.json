@@ -1,0 +1,85 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenCode trimmed synthetic drift fixture",
+    "version": "1.16.2"
+  },
+  "paths": {
+    "/session": {
+      "get": {},
+      "post": {}
+    },
+    "/session/{sessionID}": {
+      "get": {},
+      "patch": {},
+      "delete": {}
+    },
+    "/session/{sessionID}/message": {
+      "get": {}
+    },
+    "/session/{sessionID}/prompt_async": {
+      "post": {}
+    },
+    "/session/{sessionID}/summarize": {
+      "post": {}
+    },
+    "/session/{sessionID}/revert": {
+      "post": {}
+    },
+    "/session/{sessionID}/unrevert": {
+      "post": {}
+    },
+    "/session/{sessionID}/abort": {
+      "post": {}
+    },
+    "/session/{sessionID}/share": {
+      "post": {},
+      "delete": {}
+    },
+    "/session/{sessionID}/command": {
+      "post": {}
+    },
+    "/session/{sessionID}/fork": {
+      "post": {}
+    },
+    "/project": {
+      "get": {}
+    },
+    "/question": {
+      "get": {}
+    },
+    "/question/{questionID}/reply": {
+      "post": {}
+    },
+    "/question/{questionID}/reject": {
+      "post": {}
+    },
+    "/permission": {
+      "get": {}
+    },
+    "/permission/{permissionID}/reply": {
+      "post": {}
+    },
+    "/agent": {
+      "get": {}
+    },
+    "/command": {
+      "get": {}
+    },
+    "/api/model": {
+      "get": {}
+    },
+    "/global/event": {
+      "get": {}
+    },
+    "/global/health": {
+      "get": {}
+    },
+    "/doc": {
+      "get": {}
+    },
+    "/synthetic/new-endpoint": {
+      "post": {}
+    }
+  }
+}

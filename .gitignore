@@ -1,0 +1,81 @@
+# Generated outputs
+output/*
+!output/.gitkeep
+thirdparty/
+.worktrees/
+
+# Local secrets
+.api_keys/
+
+# Flutter/Dart generated state
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+
+# Generated localizations (run `flutter gen-l10n`; sources are apps/client/lib/l10n/*.arb)
+apps/client/lib/l10n/app_localizations*.dart
+
+# Web worker compiler bookkeeping
+apps/client/web/*.deps
+
+# Platform/editor noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+.metadata
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+bun.lockb
+
+# cosyncing runtime and local source inputs
+.cosyncing/
+*.sqlite
+*.sqlite-*
+/data/
+/*.png
+
+# Playwright + demo artifacts
+.playwright-mcp/
+
+# Secrets / certs — never commit
+*.key
+*.crt
+*.pem
+api_keys/
+.api_key
+.vllm_key
+*.ts.net.crt
+*.ts.net.key
+packages/typescript/adapters/codex/src/generated/*
+.claude/
+
+# Private migration and agent state
+.migration-private/
+.agents/
+.codex/
+.codeany/
+AGENTS.md
+CLAUDE.md
+
+# Local-only generation pipelines (code kept out of the public tree)
+docs/internal/
+
+# Internal docs live in the nested private repo cosyncing-docs-internal
+docs-internal/
+
+# Generated evidence and local outputs
+screenshots/
+*.map
+
+# Tool caches
+.fvm/

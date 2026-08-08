@@ -1,0 +1,12 @@
+{
+  "name": "@cosyncing/adapter-api",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Provider adapter SPI, registry, and bounded setup diagnosis.",
+  "dependencies": {
+    "@cosyncing/protocol": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

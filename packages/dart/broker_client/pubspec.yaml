@@ -1,0 +1,21 @@
+name: broker_client
+description: >
+  Pure-Dart REST, session stream, reconnect, outbox, and profile client
+  for the cosyncing broker. No Flutter dependency.
+version: 0.1.0
+
+publish_to: 'none'
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  broker_contract:
+    path: ../broker_contract
+  dio: ^5.7.0
+  meta: ^1.15.0
+
+dev_dependencies:
+  http_mock_adapter: ^0.6.1
+  test: ^1.25.0
+  very_good_analysis: ^9.0.0

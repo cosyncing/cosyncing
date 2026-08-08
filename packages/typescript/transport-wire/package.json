@@ -1,0 +1,13 @@
+{
+  "name": "@cosyncing/transport-wire",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Wire-protocol schemas (CipherEnvelope, SessionEnvelope) — used once transport/crypto land in v1.",
+  "dependencies": {
+    "@cosyncing/crypto": "workspace:*",
+    "@cosyncing/transport": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

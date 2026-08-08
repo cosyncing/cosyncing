@@ -1,0 +1,377 @@
+#!/usr/bin/env bun
+/** Deterministic version surfaces, compatibility, signed update checks, and auth acceptance. */
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  BROKER_CONTRACT,
+  evaluateBrokerClientCompatibility,
+} from '../../../../packages/typescript/adapter-api/src/index.ts';
+import { parseQrPairingPayload } from '../../../../packages/typescript/crypto/src/index.ts';
+import {
+  isolatedBrokerFixtureEnvironment,
+  reserveLoopbackFixturePort,
+  waitForBrokerHealth,
+} from '../helpers/isolated-broker-fixture.ts';
+import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../../../packages/typescript/broker/src/build-info.ts';
+import {
+  BrokerUpdateChecker,
+  brokerUpdateHandoffCommand,
+  triggerBrokerUpdate,
+} from '../../../../packages/typescript/broker/src/broker-update.ts';
+import {
+  checkReleaseUpdate,
+  releaseManifestForTests,
+  type ReleaseArtifact,
+  type ReleaseManifest,
+} from '../../../../packages/typescript/broker/src/release-upgrade.ts';
+
+const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
+function check(name: string, ok: boolean, detail?: string): void {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+const equal = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision,
+  minimumBrokerRevision: 0,
+  surfaceHash: BROKER_CONTRACT.surfaceHash,
+});
+const clientBehind = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision - 1,
+  minimumBrokerRevision: 0,
+  surfaceHash: 'fnv1a32:revision-1-client',
+});
+const brokerBehind = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision + 1,
+  minimumBrokerRevision: 0,
+});
+const beyondOverlap = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision + 2,
+  minimumBrokerRevision: 0,
+});
+const hardMinimum = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision + 1,
+  minimumBrokerRevision: BROKER_CONTRACT.revision + 1,
+});
+const hardHash = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.revision,
+  minimumBrokerRevision: 0,
+  surfaceHash: 'fnv1a32:00000000',
+});
+const legacy = evaluateBrokerClientCompatibility();
+check('contract surface hash is deterministic and machine-readable', /^fnv1a32:[a-f0-9]{8}$/.test(BROKER_CONTRACT.surfaceHash));
+check('equal revisions are compatible', equal.status === 'compatible' && !equal.readOnly);
+check('one overlap revision behind nudges the client without disabling control', clientBehind.status === 'client-behind' && !clientBehind.readOnly);
+// The literal is a deliberate tripwire, not a duplicate of the constant: every
+// revision bump must land here and re-argue that the new revision is additive
+// before the "previous-revision client stays writable" claim is renewed.
+// Revision 10 adds only optional bounded large-history replay fields, including
+// `suppressStateAuthority`; a released revision-9 client ignores them and keeps
+// working unchanged, so the claim holds.
+check('an installed previous-revision client remains writable against the additive current broker',
+  BROKER_CONTRACT.revision === 10
+    && clientBehind.status === 'client-behind'
+    && !clientBehind.readOnly);
+check('one-revision overlap remains writable despite the older surface hash',
+  clientBehind.status === 'client-behind' && !clientBehind.readOnly);
+check('one overlap revision ahead nudges the broker without disabling control', brokerBehind.status === 'broker-behind' && !brokerBehind.readOnly);
+check('a revision outside the one-version overlap window fails closed',
+  beyondOverlap.status === 'hard-incompatible' && beyondOverlap.readOnly);
+check('a client requiring a newer broker degrades to read-only', hardMinimum.status === 'hard-incompatible' && hardMinimum.readOnly);
+check('same revision with a different public surface fails closed', hardHash.status === 'hard-incompatible' && hardHash.readOnly);
+check('pre-handshake clients remain supported during the overlap window', legacy.status === 'unknown' && !legacy.readOnly);
+
+const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+const keyId = 'update-contract-fixture';
+const publicPem = publicKey.export({ format: 'pem', type: 'spki' }).toString();
+const artifactBytes = Buffer.from('update-contract-candidate');
+const artifact: ReleaseArtifact = {
+  name: 'cosyncing-linux-x64',
+  target: 'linux-x64',
+  platform: 'linux',
+  arch: 'x64',
+  size: artifactBytes.byteLength,
+  sha256: createHash('sha256').update(artifactBytes).digest('hex'),
+  url: 'https://releases.example/cosyncing-linux-x64',
+  provenanceUrl: 'https://releases.example/cosyncing-linux-x64.intoto.jsonl',
+};
+const manifest = (version: string): ReleaseManifest => releaseManifestForTests({
+  version,
+  sourceCommit: '2222222',
+  publishedAt: '2026-07-18T12:00:00.000Z',
+  artifact,
+  keyId,
+  sign: (payload) => sign(null, payload, privateKey),
+});
+const buildInfo: BuildInfo = {
+  ...BUILD_INFO,
+  version: '1.0.0',
+  target: 'linux-x64',
+  packaged: true,
+  dirty: false,
+};
+let manifestFetches = 0;
+const manifestFetcher = (value: ReleaseManifest): typeof fetch => (async () => {
+  manifestFetches += 1;
+  const body = JSON.stringify(value);
+  return new Response(body, { status: 200, headers: { 'content-length': String(Buffer.byteLength(body)) } });
+}) as unknown as typeof fetch;
+const checkDependencies = (value: ReleaseManifest, fetcher = manifestFetcher(value)) => ({
+  buildInfo,
+  manifestUrl: 'https://releases.example/release-manifest.json',
+  trustedKeys: { [keyId]: publicPem },
+  fetch: fetcher,
+  now: () => new Date('2026-07-18T13:00:00.000Z'),
+});
+const available = await checkReleaseUpdate(checkDependencies(manifest('1.1.0')));
+const current = await checkReleaseUpdate(checkDependencies(manifest('1.0.0')));
+const unreachable = await checkReleaseUpdate(checkDependencies(
+  manifest('1.1.0'),
+  (async () => { throw new Error('offline'); }) as unknown as typeof fetch,
+));
+check('signed metadata reports a newer stable release without downloading its artifact',
+  available.status === 'update-available' && available.latestVersion === '1.1.0');
+check('signed metadata reports an equal release as current', current.status === 'current');
+check('an unreachable release channel fails quiet as unknown',
+  unreachable.status === 'unknown' && unreachable.detailCode === 'release-download-unavailable');
+
+manifestFetches = 0;
+let clock = Date.parse('2026-07-18T13:00:00.000Z');
+const checker = new BrokerUpdateChecker(checkDependencies(manifest('1.1.0')), {
+  ttlMs: 60_000,
+  now: () => clock,
+});
+const firstCheck = await checker.inspect();
+const cachedCheck = await checker.inspect();
+clock += 60_001;
+const expiredCheck = await checker.inspect();
+check('daily cache reuses both available and unknown metadata results until expiry',
+  !firstCheck.cached && cachedCheck.cached && !expiredCheck.cached && manifestFetches === 2,
+  `fetches=${manifestFetches}`);
+
+const systemdDependencies = {
+  buildInfo,
+  service: { provider: 'systemd' as const, managed: true, restartStrategy: 'service-manager-exit' as const },
+  executablePath: '/home/test/.cosyncing/bin/cosyncing',
+  stateHome: '/home/test/.cosyncing',
+  cacheRoot: '/home/test/.cache/cosyncing',
+  userHome: '/home/test',
+  systemdRunPath: '/usr/bin/systemd-run',
+};
+const handoffCommand = brokerUpdateHandoffCommand(systemdDependencies);
+const candidateManifestUrl = 'https://releases.example/cosyncing/v1.1.0/release-manifest.json';
+const candidateHandoff = brokerUpdateHandoffCommand({
+  ...systemdDependencies,
+  manifestUrl: candidateManifestUrl,
+});
+let handedOff: readonly string[] = [];
+const accepted = await triggerBrokerUpdate({
+  ...systemdDependencies,
+  run: async (argv) => { handedOff = argv; return { ok: true }; },
+}, '1.1.0');
+const sourceBlocked = await triggerBrokerUpdate({
+  ...systemdDependencies,
+  buildInfo: { ...buildInfo, packaged: false },
+  run: async () => ({ ok: true }),
+}, '1.1.0');
+check('app update handoff is argv-only, delayed, and invokes the existing confirmed CLI upgrader',
+  accepted.status === 'accepted'
+    && handoffCommand?.includes('--on-active=2s') === true
+    && handedOff.slice(-3).join(' ') === 'upgrade --yes --json');
+check('candidate acceptance can hand a pinned signed manifest to the same upgrader',
+  candidateHandoff?.slice(-2).join(' ') === `--manifest ${candidateManifestUrl}`
+    && brokerUpdateHandoffCommand({ ...systemdDependencies, manifestUrl: 'http://127.0.0.1/manifest.json' }) === undefined);
+check('source builds refuse self-replacement', sourceBlocked.status === 'blocked');
+
+// launchd has no systemd-run equivalent, so the handoff degrades to undefined and the trigger must say so
+// plainly — naming the CLI upgrader that DOES work there rather than implying an update was queued.
+const launchdDependencies = {
+  ...systemdDependencies,
+  service: { provider: 'launchd' as const, managed: true, restartStrategy: 'service-manager-exit' as const },
+};
+let launchdRan = false;
+const launchdBlocked = await triggerBrokerUpdate({
+  ...launchdDependencies,
+  run: async () => { launchdRan = true; return { ok: true }; },
+}, '1.1.0');
+check('launchd degrades the app-triggered update to an honest block naming the upgrade command',
+  brokerUpdateHandoffCommand(launchdDependencies) === undefined
+    && launchdBlocked.status === 'blocked'
+    && launchdBlocked.detailCode === 'broker-update-handoff-unavailable'
+    && launchdBlocked.message.includes('cosyncing upgrade')
+    && !launchdRan,
+  `${launchdBlocked.detailCode}: ${launchdBlocked.message}`);
+
+const token = 'update-contract-test-token';
+const home = mkdtempSync(join(tmpdir(), 'cosyncing-update-contract-'));
+// Leased rather than hard-coded: a fixed 18713 is a collision waiting for a
+// second run, and the lease is released just before the broker claims it.
+const portLease = await reserveLoopbackFixturePort();
+const port = portLease.port;
+await portLease.release();
+const broker = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+  cwd: process.cwd(),
+  env: isolatedBrokerFixtureEnvironment(home, {
+    overrides: {
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      COSYNCING_HOME: home,
+      COSYNCING_TOKEN: token,
+      COSYNCING_MACHINE: 'update-contract-fixture',
+      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+    },
+  }),
+  stdin: 'ignore',
+  stdout: 'ignore',
+  stderr: 'ignore',
+});
+const base = `http://127.0.0.1:${port}`;
+// Readiness gets no wall-clock budget of its own: a broker booting beside
+// other suites is slow, not broken, and the fixed 10s here was really a claim
+// about how fast the host is. Losing that bet also left the broker running,
+// because the suite went on to fail somewhere that does not clean it up.
+try {
+  await waitForBrokerHealth(broker, `${base}/api/health`);
+} catch (error) {
+  broker.kill();
+  await broker.exited;
+  throw error;
+}
+
+async function firstWsFrame(sessionId: string, query: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/sessions/pi/${encodeURIComponent(sessionId)}/stream?token=${token}&${query}`);
+    const timer = setTimeout(() => { ws.close(); reject(new Error('websocket hello timeout')); }, 12_000);
+    ws.onmessage = (event) => {
+      clearTimeout(timer);
+      try {
+        const frame = JSON.parse(String(event.data));
+        settled = true;
+        resolve(frame);
+      } catch (error) {
+        settled = true;
+        reject(error);
+      } finally {
+        ws.close();
+      }
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error('websocket failed before hello'));
+    };
+    ws.onclose = (event) => {
+      clearTimeout(timer);
+      if (!settled) reject(new Error(`websocket closed before hello (${event.code}: ${event.reason})`));
+    };
+  });
+}
+
+try {
+  // Reaching here means the readiness wait returned. It throws otherwise,
+  // after killing the broker, so there is no longer a flag to consult.
+  check('update-contract fixture broker starts', true);
+  const health = await (await fetch(`${base}/api/health`)).json() as any;
+  // The commit rides alongside the version because the version alone cannot identify a build: every build
+  // in a release cycle shares one semver, so setup's post-commit check — which must tell a just-installed
+  // build from the previous one still holding the port — has nothing else to bind to.
+  check('health advertises broker version, commit, build fingerprint, and contract identity',
+    health.version === BUILD_INFO.version && health.commit === BUILD_INFO.commit
+      && health.buildFingerprint === buildFingerprint(BUILD_INFO)
+      && health.contract?.surfaceHash === BROKER_CONTRACT.surfaceHash,
+    `${health.buildFingerprint}`);
+
+  const pairingResponse = await fetch(`${base}/api/transport/pairings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: '{}',
+  });
+  const pairing = await pairingResponse.json() as any;
+  const qr = parseQrPairingPayload(pairing.qr);
+  // The descriptor rides the response, not the QR. Carrying it in the payload too cost 154 characters and
+  // took the printed symbol past an 80-column terminal; a client that scans the QR then talks to this same
+  // broker, and learns the version and contract from /api/health, from the accept response, and from the
+  // WebSocket hello checked further down this file.
+  check('the pairing response advertises broker version and contract, and the QR stays free of them',
+    pairingResponse.status === 201
+      && pairing.broker?.version === BUILD_INFO.version
+      && pairing.broker?.contract?.revision === BROKER_CONTRACT.revision
+      && pairing.broker?.contract?.surfaceHash === BROKER_CONTRACT.surfaceHash
+      && qr.broker === undefined);
+
+  const piHelloResponse = await fetch(`${base}/pi/bridge/hello`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: JSON.stringify({
+      sessionFile: join(home, 'update-contract-pi-session.jsonl'),
+      cwd: home,
+      title: 'Update-contract handshake fixture',
+      history: [{ t: 'user', text: 'version handshake', key: 'update-contract-user' }],
+    }),
+  });
+  const piHello = await piHelloResponse.json() as any;
+  check('fake Pi bridge creates a deterministic WebSocket target',
+    piHelloResponse.status === 200 && typeof piHello.id === 'string');
+
+  const hello = await firstWsFrame(piHello.id,
+    `contractRevision=${BROKER_CONTRACT.revision}&minimumBrokerRevision=0&contractSurfaceHash=${encodeURIComponent(BROKER_CONTRACT.surfaceHash)}&clientVersion=1.0.0`,
+  );
+  // The immediately previous revision, whatever it currently is: this is the
+  // overlap window the compatibility matrix promises, so derive it instead of
+  // re-pinning a literal on every contract bump.
+  const previousRevisionHello = await firstWsFrame(piHello.id,
+    `contractRevision=${BROKER_CONTRACT.revision - 1}&minimumBrokerRevision=2`
+    + '&contractSurfaceHash=fnv1a32%3Aeab8e93f&clientVersion=0.9.8',
+  );
+  const hardHello = await firstWsFrame(piHello.id,
+    `contractRevision=${BROKER_CONTRACT.revision + 1}&minimumBrokerRevision=${BROKER_CONTRACT.revision + 1}&clientVersion=2.0.0`,
+  );
+  const legacyHello = await firstWsFrame(piHello.id, 'clientVersion=0.9.0');
+  check('WebSocket hello advertises broker identity and equal compatibility',
+    hello.kind === 'hello' && hello.broker?.version === BUILD_INFO.version
+      && hello.compatibility?.status === 'compatible');
+  check('an installed previous-revision WebSocket client stays writable',
+    previousRevisionHello.kind === 'hello'
+      && previousRevisionHello.compatibility?.status === 'client-behind'
+      && previousRevisionHello.compatibility?.readOnly === false);
+  check('hard WebSocket mismatch explicitly degrades to read-only',
+    hardHello.kind === 'hello' && hardHello.compatibility?.status === 'hard-incompatible'
+      && hardHello.compatibility?.readOnly === true);
+  check('legacy WebSocket clients negotiate unknown without forced read-only',
+    legacyHello.kind === 'hello' && legacyHello.compatibility?.status === 'unknown'
+      && legacyHello.compatibility?.readOnly === false);
+
+  const badContract = await fetch(`${base}/api/sessions/missing/missing/stream?token=${token}&contractRevision=wat`);
+  check('malformed client contract metadata is rejected before WebSocket upgrade', badContract.status === 400);
+
+  const unauthGet = await fetch(`${base}/api/broker/update`);
+  const unauthPost = await fetch(`${base}/api/broker/update`, { method: 'POST' });
+  check('broker update status and trigger both require authentication',
+    unauthGet.status === 401 && unauthPost.status === 401);
+  const authUpdate = await fetch(`${base}/api/broker/update`, {
+    headers: { 'x-cosyncing-token': token },
+  });
+  const authUpdateBody = await authUpdate.json() as any;
+  check('source broker exposes an offline-safe unknown update status',
+    authUpdate.status === 200 && authUpdateBody.update?.status === 'unknown'
+      && authUpdateBody.update?.detailCode === 'release-channel-unconfigured');
+  const badCandidate = await fetch(`${base}/api/broker/update`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: JSON.stringify({ manifestUrl: 'http://127.0.0.1/release-manifest.json' }),
+  });
+  check('candidate manifest override is authenticated and credential-free HTTPS only', badCandidate.status === 400);
+} finally {
+  broker.kill();
+  await broker.exited.catch(() => undefined);
+  rmSync(home, { recursive: true, force: true });
+}
+
+const failed = results.filter((result) => !result.ok);
+if (failed.length) {
+  console.error(`\nFAIL ${failed.length}/${results.length} update-contract checks`);
+  process.exit(1);
+}
+console.log(`\nPASS ${results.length}/${results.length} update-contract checks`);

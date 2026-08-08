@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "agent": "pi",
+  "version": "0.78.1",
+  "captured_at": "2026-07-02T00:00:00.000Z",
+  "sources": [
+    {
+      "id": "pi-rpc-types-0.78.1",
+      "source_url": "installed dist RpcCommand type union, verified 2026-07-02",
+      "checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "trust_level": "source-repo"
+    }
+  ]
+}

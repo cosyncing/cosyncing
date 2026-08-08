@@ -1,0 +1,20 @@
+name: broker_contract
+description: >
+  Pure-Dart protocol models, codecs, and manifests for the cosyncing broker.
+  No Flutter dependency — testable with plain Dart unit tests.
+version: 0.1.0
+
+publish_to: 'none'
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  json_annotation: ^4.9.0
+  meta: ^1.15.0
+
+dev_dependencies:
+  build_runner: ^2.4.0
+  json_serializable: ^6.8.0
+  test: ^1.25.0
+  very_good_analysis: ^9.0.0

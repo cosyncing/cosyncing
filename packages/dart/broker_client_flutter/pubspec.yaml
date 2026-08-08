@@ -1,0 +1,31 @@
+name: broker_client_flutter
+description: >
+  Flutter adapters for the cosyncing broker client — Drift persistence,
+  secure storage, lifecycle hooks, and socket connector.
+version: 0.1.0
+
+publish_to: 'none'
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  broker_client:
+    path: ../broker_client
+  broker_contract:
+    path: ../broker_contract
+  drift: ^2.34.0
+  drift_flutter: ^0.3.0
+  file_selector: ^1.1.0
+  flutter:
+    sdk: flutter
+  flutter_local_notifications: ^22.0.1
+  flutter_secure_storage: ^10.3.1
+  web_socket_channel: ^3.0.3
+
+dev_dependencies:
+  build_runner: ^2.15.0
+  drift_dev: ^2.34.1+1
+  flutter_test:
+    sdk: flutter
+  very_good_analysis: ^9.0.0

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "product": "cosyncing",
+  "revisions": [
+    {
+      "revision": 5,
+      "surfaceHash": "fnv1a32:5c84fbb8",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Bounded backward transcript paging and append-aware native history identity."
+    },
+    {
+      "revision": 6,
+      "surfaceHash": "fnv1a32:095fc995",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Retriable native-source churn, structured interruption, and history-reset semantics."
+    },
+    {
+      "revision": 7,
+      "surfaceHash": "fnv1a32:fcd91f68",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Bounded inline and opaque-staged multi-attachment prompt transactions."
+    },
+    {
+      "revision": 8,
+      "surfaceHash": "fnv1a32:eab8e93f",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Pre-session model catalogs and exact optional model selection for immediate and scheduled creation."
+    },
+    {
+      "revision": 9,
+      "surfaceHash": "fnv1a32:eab8e93f",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Optional normalized tool semantics for command, file-read, search, and web-lookup families."
+    },
+    {
+      "revision": 10,
+      "surfaceHash": "fnv1a32:eab8e93f",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Optional bounded large-history replay fields: shortened-body marking on model-output/thinking/user-message, a bounded-tail-only snapshot sink declaration, skipped-record reporting on a capture, and snapshot-sink state-authority suppression after accepted messages settle."
+    }
+  ]
+}

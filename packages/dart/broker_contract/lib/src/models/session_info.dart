@@ -1,0 +1,394 @@
+import 'package:broker_contract/src/models/agent_info.dart';
+import 'package:json_annotation/json_annotation.dart';
+
+part 'session_info.g.dart';
+
+/// Drive state for a session.
+///
+/// Mirrors `DriveState` from `@cosyncing/protocol`.
+enum DriveState {
+  /// Observing the session (read-only).
+  @JsonValue('observing')
+  observing,
+
+  /// Driving the session (can send prompts).
+  @JsonValue('driving')
+  driving,
+
+  /// Drive unavailable for this session.
+  @JsonValue('unavailable')
+  unavailable,
+
+  /// Unknown drive state.
+  @JsonValue('unknown')
+  unknown,
+}
+
+/// Session status — what the agent is doing right now.
+///
+/// Mirrors the `status` field from `SessionInfo` in `@cosyncing/protocol`.
+enum SessionStatus {
+  /// A turn is actively running.
+  @JsonValue('working')
+  working,
+
+  /// Blocked on the user (pending permission/approval or question).
+  @JsonValue('needs-input')
+  needsInput,
+
+  /// Available, nothing running.
+  @JsonValue('idle')
+  idle,
+}
+
+/// Broker-classified session origin.
+///
+/// An absent value means an ordinary human-started session. Unknown future
+/// values fail open to [unknown] so the roster keeps them visible.
+enum SessionOrigin {
+  /// A session spawned by another agent session.
+  @JsonValue('subagent')
+  subagent,
+
+  /// An automated or non-interactive execution.
+  @JsonValue('exec')
+  exec,
+
+  /// A human-initiated IDE extension session.
+  @JsonValue('vscode')
+  vscode,
+
+  /// A future origin not known to this client.
+  unknown,
+}
+
+enum SessionLaunchSurface {
+  @JsonValue('app')
+  app,
+  @JsonValue('terminal')
+  terminal,
+  @JsonValue('ide')
+  ide,
+  @JsonValue('unknown')
+  unknown,
+}
+
+enum TerminalSyncPresence {
+  @JsonValue('absent')
+  absent,
+  @JsonValue('shared')
+  shared,
+  @JsonValue('private')
+  private,
+  @JsonValue('unknown')
+  unknown,
+}
+
+enum TerminalSyncAction {
+  @JsonValue('join')
+  join,
+  @JsonValue('handoff')
+  handoff,
+  unknown,
+}
+
+/// Drive control for a session.
+///
+/// Mirrors `SessionDriveControl` from `@cosyncing/protocol`.
+@JsonSerializable()
+class SessionDriveControl {
+  /// Creates a [SessionDriveControl].
+  const SessionDriveControl({
+    required this.state,
+    required this.supported,
+    this.reason,
+    this.willFork,
+  });
+
+  /// Creates a [SessionDriveControl] from a JSON map.
+  factory SessionDriveControl.fromJson(Map<String, dynamic> json) =>
+      _$SessionDriveControlFromJson(json);
+
+  /// Current drive state.
+  final DriveState state;
+
+  /// Whether drive is supported for this session.
+  final bool supported;
+
+  /// Optional reason for the current state.
+  final String? reason;
+
+  /// If this session is currently driven, whether the next action will fork.
+  ///
+  /// See `docs/protocol/contract-sync.md`.
+  final bool? willFork;
+
+  /// Converts this [SessionDriveControl] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionDriveControlToJson(this);
+}
+
+/// Terminal sync state for a session.
+///
+/// Mirrors `SessionTerminalSync` from `@cosyncing/protocol`.
+@JsonSerializable()
+class SessionTerminalSync {
+  /// Creates a [SessionTerminalSync].
+  const SessionTerminalSync({
+    required this.supported,
+    required this.syncAvailable,
+    required this.active,
+    this.behind,
+    this.presence,
+    this.action,
+    this.label,
+    this.command,
+    this.note,
+    this.reason,
+    this.input,
+  });
+
+  /// Creates a [SessionTerminalSync] from a JSON map.
+  factory SessionTerminalSync.fromJson(Map<String, dynamic> json) =>
+      _$SessionTerminalSyncFromJson(json);
+
+  /// Whether sync infra exists for this tool/session.
+  final bool supported;
+
+  @JsonKey(unknownEnumValue: TerminalSyncPresence.unknown)
+  final TerminalSyncPresence? presence;
+
+  @JsonKey(unknownEnumValue: TerminalSyncAction.unknown)
+  final TerminalSyncAction? action;
+
+  final bool? behind;
+
+  /// Whether sync is available right now.
+  final bool syncAvailable;
+
+  /// Whether our channel/daemon/bridge socket is connected.
+  final bool active;
+
+  /// Optional label for the sync state.
+  final String? label;
+
+  /// Optional command for terminal sync.
+  final String? command;
+
+  /// Optional note about the sync state.
+  final String? note;
+
+  /// Optional reason for the current state.
+  final String? reason;
+
+  /// What an actively-synced session accepts from the app.
+  ///
+  /// 'full' (default): prompts AND answers.
+  /// 'answer-only': permission/question answers ONLY.
+  final String? input;
+
+  /// Converts this [SessionTerminalSync] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionTerminalSyncToJson(this);
+}
+
+/// Session control state — drive and terminal sync.
+///
+/// Mirrors `SessionControlState` from `@cosyncing/protocol`.
+@JsonSerializable(explicitToJson: true)
+class SessionControlState {
+  /// Creates a [SessionControlState].
+  const SessionControlState({
+    required this.drive,
+    required this.terminalSync,
+  });
+
+  /// Creates a [SessionControlState] from a JSON map.
+  factory SessionControlState.fromJson(Map<String, dynamic> json) =>
+      _$SessionControlStateFromJson(json);
+
+  /// Drive control state.
+  final SessionDriveControl drive;
+
+  /// Terminal sync state.
+  final SessionTerminalSync terminalSync;
+
+  /// Converts this [SessionControlState] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionControlStateToJson(this);
+}
+
+/// Current model information for a session.
+@JsonSerializable()
+class SessionCurrentModel {
+  /// Creates a [SessionCurrentModel].
+  const SessionCurrentModel({
+    required this.providerID,
+    required this.modelID,
+    this.label,
+    this.reasoningEffort,
+    this.variant,
+  });
+
+  /// Creates a [SessionCurrentModel] from a JSON map.
+  factory SessionCurrentModel.fromJson(Map<String, dynamic> json) =>
+      _$SessionCurrentModelFromJson(json);
+
+  /// Provider ID (e.g. 'anthropic').
+  final String providerID;
+
+  /// Model ID (e.g. 'claude-sonnet-4-6').
+  final String modelID;
+
+  /// Optional adapter-authored human display label.
+  final String? label;
+
+  /// Optional reasoning effort level.
+  final String? reasoningEffort;
+
+  /// Optional model variant.
+  final String? variant;
+
+  /// Converts this [SessionCurrentModel] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionCurrentModelToJson(this);
+}
+
+/// Terminal sync hint for mirroring a session in the tool's terminal UI.
+@JsonSerializable()
+class SessionTerminalSyncHint {
+  /// Creates a [SessionTerminalSyncHint].
+  const SessionTerminalSyncHint({
+    required this.label,
+    required this.command,
+    this.note,
+  });
+
+  /// Creates a [SessionTerminalSyncHint] from a JSON map.
+  factory SessionTerminalSyncHint.fromJson(Map<String, dynamic> json) =>
+      _$SessionTerminalSyncHintFromJson(json);
+
+  /// Display label.
+  final String label;
+
+  /// Command to run.
+  final String command;
+
+  /// Optional note.
+  final String? note;
+
+  /// Converts this [SessionTerminalSyncHint] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionTerminalSyncHintToJson(this);
+}
+
+/// Session info from the broker.
+///
+/// Mirrors `SessionInfo` from `@cosyncing/protocol`.
+/// See `docs/protocol/contract-sync.md`.
+@JsonSerializable(explicitToJson: true)
+class SessionInfo {
+  /// Creates a [SessionInfo].
+  const SessionInfo({
+    required this.id,
+    required this.tool,
+    required this.title,
+    required this.status,
+    required this.attachMode,
+    this.launchSurface,
+    this.lineageId,
+    this.liveUuid,
+    this.machine,
+    this.slug,
+    this.cwd,
+    this.projectName,
+    this.origin,
+    this.parentThreadId,
+    this.nativeId,
+    this.model,
+    this.currentModel,
+    this.currentAgent,
+    this.currentMode,
+    this.createdAt,
+    this.updatedAt,
+    this.terminalSyncHint,
+    this.control,
+  });
+
+  /// Creates a [SessionInfo] from a JSON map.
+  factory SessionInfo.fromJson(Map<String, dynamic> json) =>
+      _$SessionInfoFromJson(json);
+
+  /// Stable session id within the tool.
+  final String id;
+
+  /// Stable conversation lineage id across native forks/continues.
+  final String? lineageId;
+
+  /// Live session id when the active owner differs from the saved session id.
+  ///
+  /// Some backends publish this during owner handoff so resume and fork-aware
+  /// flows should use `liveUuid` for in-process operations.
+  final String? liveUuid;
+
+  /// Backend id (e.g. 'opencode', 'pi', 'claude').
+  final String tool;
+
+  @JsonKey(unknownEnumValue: SessionLaunchSurface.unknown)
+  final SessionLaunchSurface? launchSurface;
+
+  /// Set by the broker (machine/tailnet name); undefined locally.
+  final String? machine;
+
+  /// Session title.
+  final String title;
+
+  /// Optional URL slug.
+  final String? slug;
+
+  /// Current working directory.
+  final String? cwd;
+
+  /// User-facing broker/project alias for this cwd group.
+  final String? projectName;
+
+  /// How this session came to exist when it was not directly human-started.
+  ///
+  /// Absent and [SessionOrigin.unknown] values remain visible by default.
+  @JsonKey(unknownEnumValue: SessionOrigin.unknown)
+  final SessionOrigin? origin;
+
+  /// Native parent thread id for a [SessionOrigin.subagent] row.
+  final String? parentThreadId;
+
+  /// Tool-native thread/session id used to resolve parent linkage.
+  final String? nativeId;
+
+  /// Current session status.
+  final SessionStatus status;
+
+  /// Best attach mode available for this session right now.
+  final AttachMode attachMode;
+
+  /// Current model label (legacy).
+  final String? model;
+
+  /// Current model (provider + id), for preselecting the model picker.
+  final SessionCurrentModel? currentModel;
+
+  /// Current agent/mode (e.g. 'build'), for preselecting the agent picker.
+  final String? currentAgent;
+
+  /// Current permission mode, for preselecting the mode picker.
+  final String? currentMode;
+
+  /// Creation timestamp (epoch milliseconds).
+  final int? createdAt;
+
+  /// Last update timestamp (epoch milliseconds).
+  final int? updatedAt;
+
+  /// Optional adapter-provided instruction for mirroring this session.
+  final SessionTerminalSyncHint? terminalSyncHint;
+
+  /// Explicit Observe+Drive and True Sync state.
+  final SessionControlState? control;
+
+  /// Converts this [SessionInfo] to a JSON map.
+  Map<String, dynamic> toJson() => _$SessionInfoToJson(this);
+}

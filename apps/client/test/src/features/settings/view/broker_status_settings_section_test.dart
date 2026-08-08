@@ -1,0 +1,269 @@
+import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
+import 'package:cosyncing_client/src/features/settings/view/broker_status_settings_section.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update.dart';
+import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  group('BrokerStatusSettingsSection desktop build pointer', () {
+    late _FakeManagedRuntimeApi api;
+    late List<Uri> launched;
+
+    setUp(() {
+      api = _FakeManagedRuntimeApi();
+      launched = <Uri>[];
+    });
+
+    // The pointer is a native-desktop affordance, so the surface under test is
+    // pumped on an explicit target platform rather than the host's default.
+    Widget buildSubject({
+      TargetPlatform platform = TargetPlatform.linux,
+      String clientVersion = '1.3.0',
+      bool launcherResult = true,
+      Error? launcherError,
+      Brightness brightness = Brightness.light,
+      Locale locale = const Locale('en'),
+    }) {
+      final themeSpec = themeSpecById(kDefaultThemeId);
+      final tokens = brightness == Brightness.dark
+          ? themeSpec.dark
+          : themeSpec.light;
+      return ProviderScope(
+        overrides: [
+          managedRuntimeApiProvider.overrideWithValue(api),
+          // `flutter test` stamps no version into the build, so the compiled-in
+          // value is the sentinel that fails closed. Pump a stamped build.
+          desktopClientVersionProvider.overrideWithValue(clientVersion),
+          desktopDownloadLauncherProvider.overrideWithValue((url) async {
+            launched.add(url);
+            if (launcherError != null) throw launcherError;
+            return launcherResult;
+          }),
+        ],
+        child: MaterialApp(
+          key: ValueKey((brightness, locale)),
+          theme: ThemeData(
+            brightness: brightness,
+            platform: platform,
+            extensions: [tokens],
+          ),
+          locale: locale,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: const Scaffold(
+            body: SingleChildScrollView(child: BrokerStatusSettingsSection()),
+          ),
+        ),
+      );
+    }
+
+    final pointer = find.byKey(const Key('settings-desktop-build-update'));
+    final download = find.byKey(const Key('settings-desktop-build-download'));
+
+    testWidgets('shows the pointer when the broker release is newer', (
+      tester,
+    ) async {
+      api.brokerVersion = '1.4.0';
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      expect(pointer, findsOneWidget);
+      expect(find.text('New desktop build available'), findsOneWidget);
+      expect(
+        find.textContaining('This broker runs 1.4.0.'),
+        findsOneWidget,
+      );
+      expect(download, findsOneWidget);
+    });
+
+    testWidgets('stays out of the way when the versions match', (tester) async {
+      api.brokerVersion = '1.3.0';
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      expect(pointer, findsNothing);
+      // The broker's own update row is unaffected by the pointer's absence.
+      expect(find.byKey(const Key('settings-broker-version')), findsOneWidget);
+    });
+
+    testWidgets('stays out of the way when the broker version is unknown', (
+      tester,
+    ) async {
+      api.brokerVersion = null;
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      expect(pointer, findsNothing);
+    });
+
+    testWidgets('stays out of the way on an unstamped desktop build', (
+      tester,
+    ) async {
+      api.brokerVersion = '1.4.0';
+      await tester.pumpWidget(buildSubject(clientVersion: '0.0.0-dev'));
+      await tester.pumpAndSettle();
+
+      expect(pointer, findsNothing);
+    });
+
+    testWidgets('never renders on a non-desktop platform', (tester) async {
+      api.brokerVersion = '1.4.0';
+      for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+        await tester.pumpWidget(buildSubject(platform: platform));
+        await tester.pumpAndSettle();
+        expect(pointer, findsNothing, reason: '$platform');
+      }
+    });
+
+    testWidgets('opens the release download page in the system browser', (
+      tester,
+    ) async {
+      api.brokerVersion = '1.4.0';
+      await tester.pumpWidget(buildSubject());
+      await tester.pumpAndSettle();
+
+      await tester.tap(download);
+      await tester.pumpAndSettle();
+
+      expect(launched, [Uri.parse(desktopClientDownloadUrl)]);
+      expect(
+        launched.single.toString(),
+        'https://github.com/cosyncing/cosyncing/releases',
+      );
+    });
+
+    testWidgets('shows localized feedback when the launcher returns false', (
+      tester,
+    ) async {
+      api.brokerVersion = '1.4.0';
+      for (final testCase in const [
+        (
+          Brightness.light,
+          Locale('en'),
+          'Couldn’t open the desktop download page. Check your browser '
+              'settings and try again.',
+        ),
+        (
+          Brightness.dark,
+          Locale('zh'),
+          '无法打开桌面版下载页面。请检查浏览器设置后重试。',
+        ),
+      ]) {
+        await tester.pumpWidget(
+          buildSubject(
+            launcherResult: false,
+            brightness: testCase.$1,
+            locale: testCase.$2,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(download);
+        await tester.pump();
+
+        expect(
+          find.byKey(const Key('settings-desktop-build-download-failure')),
+          findsOneWidget,
+        );
+        expect(find.text(testCase.$3), findsOneWidget);
+      }
+    });
+
+    testWidgets('maps launcher exceptions to the same localized feedback', (
+      tester,
+    ) async {
+      api.brokerVersion = '1.4.0';
+      await tester.pumpWidget(
+        buildSubject(launcherError: StateError('launcher unavailable')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(download);
+      await tester.pump();
+
+      expect(
+        find.byKey(const Key('settings-desktop-build-download-failure')),
+        findsOneWidget,
+      );
+    });
+  });
+}
+
+/// Serves one broker version; every other read is the quiet, healthy answer so
+/// only the version drives what the section renders.
+final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
+  String? brokerVersion = '1.4.0';
+
+  @override
+  Future<RuntimeUpdatesResponse> getRuntimeUpdates({
+    bool fresh = false,
+  }) async => const RuntimeUpdatesResponse(ok: true);
+
+  @override
+  Future<CodexUpdatePolicyResponse> getPolicy() async =>
+      const CodexUpdatePolicyResponse(ok: true, codexUpdatePolicy: 'never');
+
+  @override
+  Future<CodexUpdatePolicyResponse> setPolicy(String value) async =>
+      CodexUpdatePolicyResponse(ok: true, codexUpdatePolicy: value);
+
+  @override
+  Future<BrokerHealthResponse> getHealth() async =>
+      const BrokerHealthResponse(status: 'healthy', checkedAt: 1);
+
+  @override
+  Future<HealthResponse> getProductHealth() async =>
+      HealthResponse(ok: true, version: brokerVersion);
+
+  @override
+  Future<BrokerUpdateResponse> getBrokerUpdate({bool refresh = false}) async =>
+      BrokerUpdateResponse(
+        ok: true,
+        update: BrokerUpdateSnapshot(
+          status: 'current',
+          currentVersion: brokerVersion ?? 'unknown',
+          checkedAt: '2026-08-05T00:00:00Z',
+          detailCode: 'current',
+        ),
+      );
+
+  @override
+  Future<BrokerUpdateTriggerResponse> triggerBrokerUpdate() async =>
+      BrokerUpdateTriggerResponse(
+        ok: true,
+        accepted: false,
+        message: 'Already current',
+        update: BrokerUpdateSnapshot(
+          status: 'current',
+          currentVersion: brokerVersion ?? 'unknown',
+          checkedAt: '2026-08-05T00:00:00Z',
+          detailCode: 'current',
+        ),
+      );
+
+  @override
+  Future<TokdashQuotaPreferenceResponse> getQuotaPreference() async =>
+      const TokdashQuotaPreferenceResponse(ok: true, enabled: false);
+
+  @override
+  Future<TokdashQuotaPreferenceResponse> setQuotaPreference({
+    required bool enabled,
+  }) async => TokdashQuotaPreferenceResponse(ok: true, enabled: enabled);
+
+  @override
+  Future<TokdashQuotaResponse> getQuota() async =>
+      const TokdashQuotaResponse(ok: true);
+
+  @override
+  Future<RuntimeUpdateRestartResponse> restartRuntime(String agent) async =>
+      const RuntimeUpdateRestartResponse(ok: true);
+
+  @override
+  Future<BrokerRestartAllResponse> restartAll() async =>
+      const BrokerRestartAllResponse(ok: true, message: 'scheduled');
+}

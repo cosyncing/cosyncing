@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "agent": "opencode",
+  "version": "1.16.2",
+  "captured_at": "2026-07-01T00:00:00.000Z",
+  "sources": [
+    {
+      "id": "opencode-openapi-1.16.2",
+      "source_url": "http://127.0.0.1:<scratch>/doc",
+      "local_command": "GET /doc from installed opencode 1.16.2 scratch server",
+      "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "trust_level": "local-live-api"
+    },
+    {
+      "id": "opencode-cli-docs-2026-07-01",
+      "source_url": "https://opencode.ai/docs/cli/",
+      "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "trust_level": "official-doc"
+    },
+    {
+      "id": "opencode-tui-docs-2026-07-01",
+      "source_url": "https://opencode.ai/docs/tui/",
+      "checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "trust_level": "official-doc"
+    }
+  ]
+}

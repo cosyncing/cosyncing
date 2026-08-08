@@ -1,0 +1,10 @@
+{
+  "name": "@cosyncing/protocol",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Broker-owned client-facing semantic contracts and compatibility policy.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./product": "./src/product.ts"
+  }
+}

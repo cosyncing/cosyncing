@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d10" />
+    <title>__PRODUCT_NAME__</title>
+    <script>
+      try {
+        const pref = localStorage.getItem('cosyncing.themePreference') || 'dark';
+        const light = pref === 'light' || (pref === 'system' && matchMedia('(prefers-color-scheme: light)').matches);
+        document.documentElement.dataset.theme = light ? 'light' : 'dark';
+      } catch {}
+    </script>
+    <style>
+      :root {
+        --bg: #0b0d10; --panel: #14171c; --panel2: #1b1f26; --line: #262b33;
+        --text: #e6e8eb; --muted: #8a93a0; --accent: #4f9cf9; --accent2: #2dd4a7;
+        --warn: #f7b955; --danger: #f2604f; --radius: 12px;
+        --code-bg: #0d1117; --code-border: #2f3744; --code-keyword: #8fb3ff;
+        --code-string: #8bd49c; --code-comment: #7c8796; --code-number: #f2b36d;
+      }
+      :root[data-theme="light"] {
+        --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef1f5; --line: #d7dde6;
+        --text: #17202b; --muted: #667286; --accent: #2563eb; --accent2: #0f9f7a;
+        --warn: #a15c00; --danger: #c7382b;
+        --code-bg: #f8fafc; --code-border: #cbd5e1; --code-keyword: #1d4ed8;
+        --code-string: #047857; --code-comment: #64748b; --code-number: #b45309;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      body { display: flex; flex-direction: column; height: 100dvh; }
+      header { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+        border-bottom: 1px solid var(--line); background: var(--panel); }
+      header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+      header .dot.on { background: var(--accent2); }
+      header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+      header .machine { color: var(--muted); font-size: 12px; }
+      header .spacer { flex: 1; }
+      header button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+      header label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+      header select { min-width: 132px; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 12px; }
+      .iconbtn { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+      .settingsWrap { position: relative; }
+      /* Default-hidden via INLINE style (like #back), NOT here: app.js reveals with style.display=''
+         which falls back to the stylesheet — a display:none here would keep them hidden forever. */
+      #runtimeUpdateBadge { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); font-size: 11px; font-weight: 700; }
+      #runtimeUpdates { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 5%, transparent); }
+      .runtimeUpdateRow { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+      .runtimeUpdateRow + .runtimeUpdateRow { margin-top: 8px; }
+      .runtimeUpdateText { min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
+      .runtimeUpdateText strong { color: var(--text); }
+      .runtimeUpdateRestart { flex: 0 0 auto; border-color: var(--warn); color: var(--warn); background: var(--panel2); border: 1px solid var(--warn); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+      .managedRuntimeNotice { color: var(--muted); font-size: 11px; line-height: 1.4; }
+      .runtimeStatusList { display: grid; gap: 5px; }
+      .runtimeStatusRow { color: var(--muted); font-size: 11px; line-height: 1.4; }
+      #settingsMenu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 120; width: min(320px, calc(100vw - 24px));
+        display: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 16px 46px rgba(0,0,0,.42); padding: 12px; }
+      #settingsMenu.open { display: block; }
+      .settingsTitle { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
+      .settingsGrid { display: grid; gap: 10px; }
+      .settingRow { display: grid; grid-template-columns: minmax(94px, .8fr) minmax(0, 1.2fr); align-items: center; gap: 10px; }
+      .settingRow label, .settingLabel { color: var(--muted); font-size: 12px; }
+      .settingRow select { width: 100%; min-width: 0; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 12px; }
+      .settingRow input[type="url"] { width: 100%; min-width: 0; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 12px; }
+      .settingRowStack { grid-template-columns: 1fr; align-items: stretch; gap: 6px; }
+      .settingRow textarea { width: 100%; min-width: 0; box-sizing: border-box; resize: vertical; background: var(--panel2); color: var(--text);
+        border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .settingRow button { min-width: 0; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+      .settingRow button:hover { border-color: var(--accent); }
+      .settingNote { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.4; }
+      .settingSection { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 8px; }
+      .settingsSubhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted);
+        font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+      .usageGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+      .usageMetric { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 7px 8px; }
+      .usageMetric b { display: block; color: var(--text); font-size: 13px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .usageMetric span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+      .usageStatus { color: var(--muted); font-size: 11px; min-height: 16px; }
+      .usageStatus.ok { color: var(--accent2); }
+      .usageStatus.warn { color: var(--warn); }
+      .switch { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 12px; justify-self: start; }
+      .switch input { accent-color: var(--accent); }
+      main { flex: 1; min-height: 0; display: flex; }
+      /* roster */
+      #roster { width: 360px; border-right: 1px solid var(--line); overflow-y: auto; background: var(--panel); }
+      #rosterFilter { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 12px; }
+      #sessionSearch { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; }
+      .filterRow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+      .filterRow select, .filterRow input { min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 12px; }
+      #rosterList { min-height: 120px; }
+      .loadingState { display: grid; gap: 12px; place-items: center; padding: 34px 18px; color: var(--muted); font-size: 13px; }
+      .spinner { width: 24px; height: 24px; border: 2px solid var(--line); border-top-color: var(--accent);
+        border-radius: 999px; animation: spin .8s linear infinite; }
+      .skeletonList { width: 100%; display: grid; gap: 8px; }
+      .skeletonList i { display: block; height: 38px; border-radius: 8px; border: 1px solid var(--line);
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.06), transparent); animation: shimmer 1.25s ease-in-out infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes shimmer { 0% { background-position: -160px 0; } 100% { background-position: 160px 0; } }
+      #roster .group { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted);
+        font-size: 10px; text-transform: uppercase; letter-spacing: .08em; padding: 12px 16px 5px 36px; }
+      #roster .group .gcount { color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; font-size: 10px; letter-spacing: 0; }
+      .project { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 92%, var(--bg)); }
+      .project.open { background: var(--panel); }
+      .projectHead { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 14px;
+        background: transparent; color: var(--text); border: none; border-left: 3px solid transparent; cursor: pointer; text-align: left; font: inherit; }
+      .project.open .projectHead { border-left-color: var(--accent); }
+      .project.needs-input .projectHead { border-left-color: var(--warn); }
+      .project.working .projectHead { border-left-color: var(--accent2); }
+      .projectHead:hover { background: var(--panel2); }
+      .projectHead:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+      .projectCaret { color: var(--muted); width: 12px; flex: 0 0 12px; }
+      .projectName { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .projectStatus { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line);
+        color: var(--muted); flex-shrink: 0; }
+      .projectHead.working .projectStatus { color: var(--accent2); border-color: var(--accent2); }
+      .projectHead.needs-input .projectStatus { color: var(--warn); border-color: var(--warn); font-weight: 700; }
+      .projectCount { color: var(--muted); font-size: 11px; margin-left: auto; flex-shrink: 0; }
+      .projectPath { color: var(--muted); font-size: 11px; padding: 0 16px 9px 38px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .syncBadge { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px;
+        border: 1px solid color-mix(in srgb, var(--accent2) 70%, var(--line)); color: var(--accent2); font-size: 10px; font-weight: 700; text-transform: lowercase; flex: 0 0 auto; }
+      /* D4: "sync available" ghost badge — muted vs the solid "synced" badge. */
+      .syncBadge.ghost { border-color: var(--line); color: var(--muted); font-weight: 600; }
+      /* Subagent-display origin chips: what an auto session is (↳ parent link) and a parent's
+         clickable ⚒ children peek; text-transform none so parent TITLES keep their case. */
+      .originChip { text-transform: none; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; line-height: 16px; }
+      .originChip.kids { cursor: pointer; }
+      .originChip.kids.on { border-color: color-mix(in srgb, var(--accent2) 70%, var(--line)); color: var(--accent2); }
+      .originChip.linked { cursor: pointer; }
+      .originToggles { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+      .originToggles .switch { white-space: nowrap; }
+      .reviewDot { display: none; width: 8px; height: 8px; border-radius: 999px; background: var(--danger);
+        box-shadow: 0 0 0 2px rgba(242,96,79,.18); flex: 0 0 8px; }
+      .projectHead.review-ready .reviewDot, .srow.review-ready .reviewDot { display: inline-block; }
+      .srow { padding: 9px 16px 9px 38px; border-bottom: 1px solid var(--line); cursor: pointer; }
+      .srow:hover { background: var(--panel2); }
+      .srow.active { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+      .srow .t { display: flex; align-items: center; gap: 8px; }
+      .srow .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+      .srow .badge.working { color: var(--accent2); border-color: var(--accent2); }
+      .srow .badge.needs-input { color: var(--warn); border-color: var(--warn); font-weight: 700; }
+      .srow .title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+      .srow .meta { color: var(--muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .renameAction { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+        border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted);
+        cursor: pointer; font: inherit; line-height: 1; flex: 0 0 24px; }
+      .renameAction:hover { color: var(--accent); border-color: var(--line); background: var(--panel2); }
+      .srow .renameAction { margin-left: auto; opacity: .7; }
+      .projectHead .renameAction { margin-left: 4px; }
+      .projectHead .projectNew { font-size: 18px; font-weight: 500; }
+      .projectHead .projectNew:disabled { opacity: .35; cursor: default; }
+      /* chat */
+      #chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      #sessionMeta { display: flex; align-items: center; gap: 8px; padding: 8px 16px 0; background: var(--panel); min-height: 36px; }
+      #sessionMeta .sessionTitle { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #sessionMeta .sessionProject { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #sessionMeta .renameAction.project { margin-left: auto; }
+      #thread { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+      .msg { max-width: 760px; }
+      .msg.user { align-self: flex-end; background: var(--accent); color: #04121f; padding: 8px 12px;
+        border-radius: 14px 14px 4px 14px; white-space: pre-wrap; }
+      .pendingSchedules { display: flex; flex-direction: column; gap: 10px; align-items: flex-end; width: 100%; }
+      .pendingSchedule { align-self: flex-end; width: min(760px, 100%); box-sizing: border-box; padding: 10px 12px;
+        border: 1px solid var(--accent); border-radius: 14px 14px 4px 14px; background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+        box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 10%, transparent); }
+      .pendingScheduleHead { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+      .pendingScheduleTime { color: var(--text); font-weight: 500; letter-spacing: 0; text-transform: none; text-align: right; }
+      .pendingScheduleText { margin-top: 7px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); line-height: 1.45; }
+      .pendingScheduleMeta { margin-top: 6px; color: var(--muted); font-size: 12px; }
+      .pendingScheduleActions, .scheduleActions { display: flex; gap: 6px; align-items: center; }
+      .pendingScheduleActions { margin-top: 9px; justify-content: flex-end; }
+      .pendingSchedule button, .scheduleActions button { border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+      .pendingSchedule button.scheduleCancel { color: var(--danger, #e77); }
+      .msg.user .msgtime { display: block; margin-top: 3px; font-size: 10px; line-height: 1.1; opacity: .68; text-align: right; letter-spacing: 0; }
+      /* assistant output is rendered markdown (block elements) — normal flow, tight chat spacing */
+      .msg.assistant { white-space: normal; line-height: 1.5; }
+      .msg.assistant > :first-child { margin-top: 0; }
+      .msg.assistant > :last-child { margin-bottom: 0; }
+      .msg.assistant p { margin: 0 0 8px; white-space: pre-wrap; }
+      .msg.assistant h3, .msg.assistant h4, .msg.assistant h5, .msg.assistant h6 { margin: 12px 0 6px; line-height: 1.3; }
+      .msg.assistant h3 { font-size: 17px; } .msg.assistant h4 { font-size: 15px; }
+      .msg.assistant h5, .msg.assistant h6 { font-size: 13px; color: var(--muted); }
+      .msg.assistant ul, .msg.assistant ol { margin: 4px 0 8px; padding-left: 22px; }
+      .msg.assistant li { margin: 2px 0; }
+      .msg.assistant blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--line); color: var(--muted); white-space: pre-wrap; }
+      .msg.assistant hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+      .msg.assistant a { color: var(--accent); }
+      .msg.assistant strong { font-weight: 700; } .msg.assistant em { font-style: italic; }
+      .msg.assistant .tableWrap { max-width: 100%; overflow-x: auto; margin: 8px 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+      .msg.assistant table.md-table { width: 100%; min-width: 420px; border-collapse: collapse; font-size: 13px; }
+      .msg.assistant .md-table th, .msg.assistant .md-table td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+      .msg.assistant .md-table th { color: var(--text); background: var(--panel2); font-weight: 700; }
+      .msg.assistant .md-table tr:last-child td { border-bottom: none; }
+      .msg.assistant .md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--panel2) 36%, transparent); }
+      .msg.assistant code { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+      .msg.assistant pre.cb { position: relative; margin: 8px 0; padding: 28px 12px 10px; background: var(--code-bg); border: 1px solid var(--code-border);
+        border-radius: 8px; overflow: auto; max-height: 420px; box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }
+      .msg.assistant pre.cb:not([data-lang]) { padding-top: 10px; }
+      .msg.assistant pre.cb[data-lang]::before { content: attr(data-lang); position: absolute; top: 7px; right: 9px;
+        color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+      .msg.assistant pre.cb code { background: none; border: none; padding: 0; display: block; white-space: pre; line-height: 1.45; font-size: 12.5px; }
+      /* syntax tokens (fenced code) */
+      .cb .k { color: var(--code-keyword); font-weight: 600; } .cb .s { color: var(--code-string); } .cb .c { color: var(--code-comment); font-style: italic; } .cb .n { color: var(--code-number); }
+      .msg.cmd { align-self: flex-end; background: var(--panel2); color: var(--accent); border: 1px solid var(--accent);
+        padding: 5px 11px; border-radius: 14px 14px 4px 14px; font-family: ui-monospace, monospace; font-size: 13px; }
+      .msg.thinking { color: var(--muted); font-style: italic; border-left: 2px solid var(--line); padding-left: 10px; white-space: pre-wrap; }
+      .msg.assistant .runmeta { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.4; }
+      .sysnote { align-self: center; color: var(--muted); font-size: 12px; padding: 2px 10px; border: 1px solid var(--line);
+        border-radius: 999px; background: var(--panel); }
+      .tool { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+      .tool .head { display: flex; gap: 8px; align-items: center; cursor: pointer; min-width: 0; }
+      .tool .twisty { width: 10px; flex: 0 0 10px; color: var(--muted); font-size: 11px; }
+      /* min-width:0 + ellipsis so a long bash command (the tool title) can't overflow the flex row on
+         a phone — it truncates; the full command shows in the expandable body. The chips and status
+         must not shrink, so the name is the only thing that gives. */
+      .tool .name { color: var(--accent2); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tool .chips { display: flex; gap: 5px; flex-wrap: wrap; flex-shrink: 0; }
+      .tool .st { flex-shrink: 0; }
+      .tool .chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+      .tool .chip.diffstat { color: var(--accent2); border-color: var(--accent2); }
+      .tool .chip.err { color: var(--danger); border-color: var(--danger); }
+      .tool .chip.muted { color: var(--muted); }
+      .tool .chip.duration { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 65%, var(--line)); }
+      .tool .detail { margin: 8px 0 0; max-height: 320px; overflow: auto; background: var(--bg); padding: 8px; border-radius: 8px;
+        font-size: 12px; }
+      .tool .tool-section + .tool-section, .tool .tool-section + .tool-raw, .tool .tool-raw + .tool-section { margin-top: 8px; }
+      .tool .tool-section-title { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
+      .tool .tool-row { display: grid; grid-template-columns: minmax(74px, 128px) 1fr; gap: 8px; padding: 2px 0; }
+      .tool .tool-key { color: var(--muted); }
+      .tool .tool-value { min-width: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .tool .tool-show-all { display: block; width: fit-content; margin: 6px 0 0; padding: 3px 8px; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--panel2); color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
+      .tool .tool-show-all:hover { border-color: var(--accent); }
+      .tool .tool-empty { color: var(--muted); }
+      .tool .tool-raw summary { color: var(--muted); cursor: pointer; font-size: 11px; }
+      .tool pre { margin: 0; overflow: visible; background: transparent; padding: 0; border-radius: 0;
+        white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+      .tool pre .dl { white-space: pre-wrap; word-break: break-word; }
+      .tool pre .dl.add { background: rgba(45,212,167,.14); color: #9be8d2; }
+      .tool pre .dl.del { background: rgba(242,96,79,.14); color: #f3a99e; }
+      .tool pre .dl.hunk { color: var(--muted); }
+      .tool-group { background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+      .tool-group .lookup-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; cursor: pointer; color: var(--muted); }
+      .tool-group .lookup-twisty { width: 10px; flex: 0 0 10px; font-size: 11px; }
+      .tool-group .lookup-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tool-group .lookup-body { display: grid; gap: 7px; padding: 0 8px 8px; }
+      .tool-group .lookup-body .tool { background: var(--bg); }
+      body.tool-display-final .tool,
+      body.tool-display-final .tool-group,
+      body.tool-display-final .msg.thinking,
+      body.tool-display-final .msg.tool,
+      body.tool-display-final .activity { display: none; }
+      body.tool-display-final .msg.assistant { display: none; }
+      body.tool-display-final .msg.assistant.turn-final { display: block; }
+      /* agent-activity: subagent/workflow progress card. Responsive/Tier-1 modes keep it visible;
+         final-message-only hides it with other work detail. .chip is re-declared because the tool
+         chip rules are scoped. */
+      .activity { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0; font-size: 13px; }
+      .activity .head { display: flex; gap: 8px; align-items: center; cursor: pointer; min-width: 0; padding: 8px 10px; }
+      .activity .aicon { flex-shrink: 0; }
+      .activity .name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+      .activity .sub { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .activity .chips { display: flex; gap: 5px; flex-wrap: wrap; flex-shrink: 0; }
+      .activity .chip { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+      .activity .chip.muted { color: var(--muted); }
+      .activity .st { flex-shrink: 0; }
+      .activity .abody { border-top: 1px solid var(--line); padding: 6px 10px 8px; }
+      .activity .arow { font-size: 12px; padding: 3px 0; color: var(--text); font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+      .artifact { background: var(--panel); border: 1px dashed var(--accent); border-radius: 10px; padding: 10px; }
+      .artifact a { color: var(--accent); }
+      .artifact .art-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .artifact .art-name { font-weight: 700; }
+      .artifact .art-meta, .artifact .art-status { color: var(--muted); font-size: 12px; }
+      .artifact .art-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+      .artifact .art-actions button, .artifact .art-actions a { background: var(--panel2); color: var(--accent);
+        border: 1px solid var(--line); border-radius: 7px; padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; }
+      .artifact .art-actions button:hover, .artifact .art-actions a:hover { border-color: var(--accent); }
+      .artifact .art-actions button:disabled { color: var(--muted); cursor: wait; }
+      /* A push-worthy (proactive) delivery: solid accent border + a small badge, so an away-from-desk
+         file the agent flagged as important stands out from routine auto-surfaced files. */
+      .artifact.proactive { border-style: solid; border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2) inset; }
+      .pushbadge { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--accent2); color: #04201a; font-weight: 700; }
+      /* reusable confirm modal — used by every Drive take-over (and any future destructive/owning action) */
+      .modalback { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.55);
+        display: flex; align-items: center; justify-content: center; padding: 20px; }
+      .modal { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px;
+        max-width: 440px; width: 100%; padding: 18px; box-shadow: 0 12px 44px rgba(0,0,0,.5); }
+      .modal .mtitle { font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+      .modal .mtitle.warn { color: var(--warn); }
+      .modal .mbody { color: var(--text); font-size: 13.5px; line-height: 1.5; margin-bottom: 16px; white-space: pre-line; }
+      .modal .mfield { margin: 10px 0 6px; }
+      .modal .mfield label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+      .modal .mfield input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 8px 10px; font: inherit; }
+      .modal .mhelp { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+      .modal .mbtns { display: flex; gap: 8px; justify-content: flex-end; }
+      .modal .mbtns button { padding: 8px 14px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer;
+        border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+      .modal .mcancel:hover { background: var(--line); }
+      .modal .mok { border-color: var(--accent); background: var(--accent); color: #04121f; font-weight: 600; }
+      .modal .mok.danger { border-color: var(--danger); background: var(--danger); color: #fff; }
+      /* terminal-sync hint */
+      #synchint { border-bottom: 1px solid var(--line); background: var(--panel); padding: 8px 16px; font-size: 12.5px; }
+      #synchint .sh-row { display: flex; align-items: center; gap: 8px; }
+      #synchint .sh-label { color: var(--muted); flex: 1; }
+      #synchint button { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
+      #synchint .sh-body { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+      #synchint code { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; flex: 1; min-width: 0;
+        overflow-x: auto; white-space: nowrap; }
+      #synchint .sh-note { color: var(--muted); flex-basis: 100%; line-height: 1.45; }
+      .perm { background: #2a2113; border: 1px solid var(--warn); border-radius: 10px; padding: 12px; }
+      .perm .q { font-weight: 600; margin-bottom: 8px; }
+      .perm .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+      .perm button { border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer; font-weight: 600; }
+      .perm .ok { background: var(--accent2); color: #04140f; }
+      .perm .session { background: var(--accent); color: #04121f; }
+	      .perm .no { background: var(--danger); color: #2a0b07; }
+	      .perm.done { opacity: .55; }
+	      .perm.readonly .acts { display: none; }
+	      .perm .qblock { margin: 6px 0 2px; }
+      .perm .qtext { margin-bottom: 6px; }
+      .perm .qopt { display: block; width: 100%; text-align: left; background: var(--panel2); color: var(--text);
+        border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; margin: 4px 0; cursor: pointer; font: inherit; }
+      .perm .qopt.on { border-color: var(--accent2); color: var(--accent2); }
+      .perm .qopt .od { color: var(--muted); font-size: 12px; }
+      .perm .qcustom { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 7px 10px; margin: 4px 0; font: inherit; }
+      /* slash-command palette */
+      #palette { border-top: 1px solid var(--line); background: var(--panel2); max-height: 240px; overflow-y: auto; }
+      #palette .pitem { display: flex; gap: 8px; align-items: baseline; padding: 8px 16px; cursor: pointer; border-bottom: 1px solid var(--line); }
+      #palette .pitem.sel, #palette .pitem:hover { background: var(--panel); }
+      #palette .pname { color: var(--accent); font-weight: 600; font-family: ui-monospace, monospace; font-size: 13px; }
+      #palette .pdesc { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #palette .pmore { padding: 6px 16px; color: var(--muted); font-size: 11px; font-style: italic; text-align: center; }
+      #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+      #composer textarea { flex: 1; resize: none; background: var(--panel2); color: var(--text);
+        border: 1px solid var(--line); border-radius: 10px; padding: 10px; font: inherit; max-height: 140px; }
+      #composer button#send { background: var(--accent); color: #04121f; border: none; border-radius: 10px; padding: 0 18px; font-weight: 700; cursor: pointer; }
+      #composer button#attach { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; font-size: 16px; cursor: pointer; }
+      #composer button#stop { background: var(--danger); color: #fff; border: none; border-radius: 10px; padding: 0 14px; font-weight: 700; cursor: pointer; }
+      /* The single auto-routed control button (D1/FU-1). Default = Take over (accent2, like the old Drive). */
+      #composer button#control { background: var(--accent2); color: #04140f; border: none; border-radius: 10px; padding: 0 16px; font-weight: 700; cursor: pointer; }
+      /* Keep the prior visual distinction: Sync (join, no-confirm) reads as a panel/outline action vs the solid Take-over. */
+      #composer button#control[data-kind="sync"] { background: var(--panel2); color: var(--text); border: 1px solid var(--accent); padding: 0 14px; }
+      #composer button#control[data-kind="unavailable"] { background: var(--panel2); color: var(--muted); border: 1px solid var(--line); }
+      #composer button:disabled { opacity: .4; cursor: default; }
+      /* read-only (observe) composer: dim the input so it's clearly a view, with Drive to take over */
+      #composer.readonly textarea { opacity: .5; }
+      .perm.readonly { background: var(--panel); border-color: var(--line); }
+      #controls { display: flex; gap: 8px; padding: 6px 16px 0; }
+      #controls .pill { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 999px;
+        padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; max-width: 33%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #controls .pill:hover { border-color: var(--accent); }
+      #controls .pill:disabled { cursor: default; opacity: .62; border-style: dashed; }
+      .statusline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 16px 0; background: var(--panel); }
+      .statuschip { display: inline-flex; align-items: center; gap: 6px; min-height: 23px; max-width: 260px;
+        border: 1px solid var(--line); border-radius: 999px; background: var(--panel2); color: var(--muted);
+        padding: 2px 8px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .statuschip strong { color: var(--text); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .statuschip.ok strong { color: var(--accent2); }
+      .statuschip.warn strong { color: var(--warn); }
+      .statuschip.mono, .statuschip.tokmeter, .statuschip.runtimemeter, .statuschip.contextmeter {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .ctxBar { width: 58px; height: 5px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+      .ctxBar i { display: block; height: 100%; width: var(--pct, 0%); background: var(--accent2); }
+      .contextmeter.warn .ctxBar i { background: var(--warn); }
+      #optmenu { border-top: 1px solid var(--line); background: var(--panel2); max-height: 300px; overflow-y: auto; }
+      #optmenu .ofilter { width: calc(100% - 32px); margin: 8px 16px; background: var(--bg); color: var(--text);
+        border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; box-sizing: border-box; }
+      #optmenu .oitem { padding: 7px 16px; cursor: pointer; border-bottom: 1px solid var(--line); }
+      #optmenu .oitem:hover { background: var(--panel); }
+      #optmenu .oitem .ol { font-size: 13px; }
+      #optmenu .oitem .od { color: var(--muted); font-size: 11px; }
+      #newSheet, #scheduleSheet, #schedulesSheet { position: fixed; inset: 0; z-index: 80; display: none; align-items: center; justify-content: center;
+        background: rgba(0,0,0,.5); padding: 18px; }
+      #newSheet.open, #scheduleSheet.open, #schedulesSheet.open { display: flex; }
+      .newPanel { width: min(460px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.45); padding: 16px; }
+      .newPanel h2 { margin: 0 0 12px; font-size: 15px; }
+      .newProjectContext { margin: -4px 0 12px; padding: 7px 9px; border: 1px solid var(--line);
+        border-radius: 8px; color: var(--muted); background: var(--panel2); font-size: 12px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .newPanel label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+      .newPanel select, .newPanel input, .newPanel textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+        border-radius: 8px; padding: 8px 10px; font: inherit; }
+      .schedulesList { max-height: min(420px, 60vh); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+      .scheduleRow { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; gap: 8px; align-items: flex-start; }
+      .scheduleRow .scheduleBody { flex: 1; min-width: 0; }
+      .scheduleRow .scheduleWhat { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .scheduleRow .scheduleMeta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+      .scheduleRow.done { opacity: .65; }
+      .scheduleRow > .scheduleActions { flex: none; }
+      .newHint { color: var(--muted); font-size: 12px; margin-top: 8px; min-height: 18px; }
+      .newActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+      .newActs button { border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font: inherit; cursor: pointer; }
+      #newCancel { background: var(--panel2); color: var(--text); }
+      #newCreate { background: var(--accent); color: #04121f; font-weight: 700; }
+      #newCreate:disabled { opacity: .45; cursor: default; }
+      .msg.user.queued { opacity: .65; }
+      .msg .qbadge { font-size: 10px; margin-left: 8px; padding: 1px 6px; border: 1px solid currentColor; border-radius: 999px; opacity: .85; }
+      .artifact img { max-width: 100%; border-radius: 8px; margin-top: 8px; display: block; }
+      #attachRow { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px 0; }
+      #controlState { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 16px 0; background: var(--panel); }
+      .controlpill { display: inline-flex; align-items: center; min-height: 24px; border: 1px solid var(--line);
+        border-radius: 999px; padding: 2px 9px; color: var(--muted); background: var(--panel2); font-size: 12px; }
+      .controlpill.ok { color: var(--accent2); border-color: rgba(45,212,167,.65); }
+      .controlpill.warn { color: var(--warn); border-color: rgba(247,185,85,.65); }
+      #sessionBars { display: flex; flex-direction: column; gap: 6px; padding: 7px 16px 0; background: var(--panel); }
+      .livebar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center;
+        border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 7px 10px; font-size: 12.5px; }
+      .livebar .label { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0; }
+      .livebar .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .livebar .detail { grid-column: 2 / 5; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .livebar .elapsed { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+      .livebar.goal { border-color: rgba(45,212,167,.55); }
+      .livebar.goal.paused { border-color: rgba(247,185,85,.6); }
+      .livebar.goal.paused .label { color: var(--warn); }
+      .livebar.goal.blocked { border-color: rgba(255,122,122,.55); }
+      .livebar.goal.blocked .label { color: var(--bad, #ff7a7a); }
+      .livebar .baractions { display: inline-flex; gap: 4px; }
+      .livebar .baractions button { border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+        color: var(--text); font-size: 11px; padding: 2px 9px; cursor: pointer; }
+      .livebar .baractions button:hover { border-color: var(--accent2); color: var(--accent2); }
+      .livebar .baractions.readonly button { opacity: .55; }
+      .livebar .baractions.readonly button:hover { border-color: var(--warn); color: var(--warn); }
+      .livebar.activity { border-color: rgba(143,179,255,.45); }
+      #thread .sessionLoading { align-self: center; width: min(420px, 100%); margin: auto 0; border: 1px solid var(--line);
+        border-radius: 10px; background: var(--panel); box-shadow: 0 10px 26px rgba(0,0,0,.16); }
+      .sessionLoadingTitle { color: var(--text); font-weight: 700; }
+      .sessionLoadingMeta { color: var(--muted); font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tasklist { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); font-size: 12.5px; overflow: hidden; }
+      .tasklist.done { opacity: .78; }
+      .tasklist summary { list-style: none; }
+      .tasklist summary::-webkit-details-marker { display: none; }
+      .tl-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center;
+        min-height: 32px; padding: 6px 10px; cursor: pointer; }
+      .tl-label { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0; white-space: nowrap; }
+      .tl-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .tl-active { min-width: 0; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+      .tl-source { color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; white-space: nowrap; }
+      .tl-body { border-top: 1px solid var(--line); padding: 7px 10px 9px; display: grid; gap: 8px; }
+      .tl-group { display: grid; gap: 4px; }
+      .tl-group-title { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0; }
+      .tl-item { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 8px; align-items: start; line-height: 1.35; }
+      .tl-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+      .tl-item.in-progress .tl-status { color: var(--accent); }
+      .tl-item.done .tl-text { color: var(--muted); text-decoration: line-through; }
+      .tl-item.cancelled .tl-text { color: var(--muted); }
+      .tl-text { min-width: 0; overflow-wrap: anywhere; }
+      .tl-detail { grid-column: 2; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+      .tl-empty { color: var(--muted); font-size: 12px; }
+      .achip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; background: var(--panel2);
+        border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px 3px 10px; max-width: 220px; }
+      .achip .aname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .achip .ax { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; }
+      .achip .ax:hover { color: var(--danger); }
+      .empty { color: var(--muted); margin: auto; text-align: center; padding: 40px; }
+      #toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: var(--panel2);
+        color: var(--text); border: 1px solid var(--line); padding: 8px 14px; border-radius: 8px; opacity: 0;
+        transition: opacity .2s; pointer-events: none; }
+      #toast.error { background: var(--danger); color: #fff; border-color: var(--danger); }
+      #toast.show { opacity: 1; }
+      @media (max-width: 720px) {
+        #roster { position: absolute; inset: 49px 0 0 0; width: 100%; z-index: 5; }
+        body.attached #roster { display: none; }
+        body:not(.attached) #chat { display: none; }
+      }
+    </style>
+  </head>
+  <body class="">
+    <header>
+      <span class="dot" id="conn"></span>
+      <h1>__PRODUCT_NAME__</h1>
+      <span class="machine" id="machine"></span>
+      <span class="spacer"></span>
+      <button id="back" style="display:none">‹ Sessions</button>
+      <button id="newSession">+ New</button>
+      <button id="refresh">↻</button>
+      <button id="runtimeUpdateBadge" type="button" style="display:none" title="A managed agent runtime update is waiting for a safe restart">update ready</button>
+      <div class="settingsWrap">
+        <button id="settingsButton" class="iconbtn" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settingsMenu">⚙</button>
+        <div id="settingsMenu" role="dialog" aria-label="Settings">
+          <div class="settingsTitle">Settings</div>
+          <div class="settingsGrid">
+            <div class="settingSection" id="runtimeUpdates" style="display:none">
+              <div class="settingsSubhead"><span>Agent runtime updates</span><span>idle-only</span></div>
+            </div>
+            <div class="settingSection" id="managedRuntimeSettings">
+              <div class="settingsSubhead"><span>Managed runtime updates</span><span>automatic</span></div>
+              <div id="managedRuntimeOwnershipNotice" class="managedRuntimeNotice">
+                __PRODUCT_NAME__ manages enabled shared servers. Apply supported server updates and configuration reloads here; restarting only a CLI may leave its managed server on the old version.
+              </div>
+              <div class="settingRow">
+                <label for="codexUpdatePolicy">Codex update timing</label>
+                <select id="codexUpdatePolicy" title="Choose when __PRODUCT_NAME__ may automatically restart an outdated managed Codex daemon">
+                  <option value="when-detached">When none attached</option>
+                  <option value="when-idle">When none working</option>
+                </select>
+              </div>
+              <div id="runtimeStatusList" class="runtimeStatusList">No runtime status yet — press Refresh status.</div>
+              <div class="settingRow">
+                <span class="settingLabel">Status</span>
+                <button id="refreshRuntimeStatus" type="button" title="Force a fresh native probe now (bypasses the 60s status cache)">Refresh status</button>
+              </div>
+            </div>
+            <div class="settingRow">
+              <span class="settingLabel">Codex sync</span>
+              <button id="codexSyncToggle" type="button" title="Enable Codex true terminal sync (managed app-server daemon). Per-agent — no global mode.">Checking…</button>
+            </div>
+            <div class="settingRow">
+              <label for="toolDisplayMode">Tool display</label>
+              <select id="toolDisplayMode" title="Choose how much agent work appears in the transcript">
+                <option value="responsive">Responsive</option>
+                <option value="collapsed">Tier-1 only</option>
+                <option value="final-only">Final messages only</option>
+              </select>
+              <div class="settingNote">Responsive keeps portrait phones collapsed. At 700 px or wider—tablets, unfolded wide screens, and macOS/Windows/Linux desktops—edit and exec details auto-expand; lookups stay collapsed.</div>
+            </div>
+            <div class="settingRow">
+              <label for="themeSelect">Theme</label>
+              <select id="themeSelect" title="Theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </div>
+            <div class="settingRow">
+              <label for="languageSelect">Language</label>
+              <select id="languageSelect" title="Language">
+                <option value="en">English</option>
+                <option value="zh">中文</option>
+              </select>
+            </div>
+            <div class="settingRow">
+              <label for="sessionWindowSelect">Session history</label>
+              <select id="sessionWindowSelect" title="Only load sessions active within this window. Older sessions stay saved and reappear when you widen it — a shorter window loads the list much faster, especially on a phone over the tailnet.">
+                <option value="7d">Last 7 days</option>
+                <option value="1m">Last month</option>
+                <option value="2m">Last 2 months</option>
+                <option value="6m">Last 6 months</option>
+                <option value="all">All sessions</option>
+              </select>
+            </div>
+            <div class="settingRow originRow" title="Auto-started sessions are hidden from the session list by default, so it shows what a human started. Tick a category to show it; a parent session's ⚒ chip can also peek its agent-spawned sessions without changing these.">
+              <span class="settingLabel">Show background sessions</span>
+              <span class="originToggles">
+                <label class="switch"><input type="checkbox" id="showOriginSubagent" /> Agent-spawned</label>
+                <label class="switch"><input type="checkbox" id="showOriginExec" /> Exec runs</label>
+                <label class="switch"><input type="checkbox" id="showOriginVscode" checked /> IDE (VS&nbsp;Code)</label>
+              </span>
+            </div>
+            <div class="settingRow">
+              <span class="settingLabel">Scheduled sends</span>
+              <button id="openSchedules" type="button" title="View and cancel scheduled messages and scheduled sessions">Manage</button>
+            </div>
+            <div class="settingSection" id="usageSettings">
+              <div class="settingsSubhead">
+                <span>Usage</span>
+                <button id="refreshTokdashUsage" type="button">Refresh</button>
+              </div>
+              <div class="settingRow">
+                <label for="tokdashUrl">Tokdash API</label>
+                <input id="tokdashUrl" type="url" value="http://127.0.0.1:55423" autocomplete="off" />
+              </div>
+              <div class="usageGrid" id="tokdashUsageSummary" aria-live="polite">
+                <div class="usageMetric"><b id="tokdashTokens">–</b><span>Tokens</span></div>
+                <div class="usageMetric"><b id="tokdashCost">–</b><span>Cost</span></div>
+                <div class="usageMetric"><b id="tokdashRequests">–</b><span>Runs</span></div>
+              </div>
+              <div class="usageStatus" id="tokdashUsageStatus">Not loaded</div>
+            </div>
+            <div class="settingSection" id="transportDemoSettings">
+              <div class="settingsSubhead">
+                <span>Encrypted transport demo</span>
+                <button id="runTransportDemo" type="button">Run</button>
+              </div>
+              <div class="settingRow">
+                <label for="transportDemoMessage">Payload</label>
+                <input id="transportDemoMessage" type="text" value="hello encrypted transport" autocomplete="off" />
+              </div>
+              <div class="settingRow settingRowStack">
+                <label for="transportContractJson">Client contract</label>
+                <textarea id="transportContractJson" readonly rows="8" spellcheck="false"></textarea>
+              </div>
+              <div class="usageStatus" id="transportDemoStatus">Ready</div>
+            </div>
+            <div class="settingRow">
+              <span class="settingLabel">This session</span>
+              <button id="clearSessionCache" type="button">Clear cache</button>
+            </div>
+            <div class="settingRow">
+              <span class="settingLabel">Local cache</span>
+              <button id="clearAllCache" type="button">Clear all</button>
+            </div>
+            <div class="settingRow">
+              <span class="settingLabel">Recovery</span>
+              <button id="restartEverything" type="button">Restart everything</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <main>
+      <aside id="roster">
+        <div id="rosterFilter">
+          <input id="sessionSearch" placeholder="Search sessions or projects…" autocomplete="off" />
+          <div class="filterRow">
+            <select id="statusFilter" title="Status">
+              <option value="">All status</option>
+              <option value="needs-input">Needs input</option>
+              <option value="working">Working</option>
+              <option value="idle">Idle</option>
+            </select>
+            <select id="agentFilter" title="Agent"><option value="">All agents</option></select>
+            <select id="activityFilter" title="Activity time">
+              <option value="">Any time</option>
+              <option value="today">Active today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="old7">Older than 7 days</option>
+              <option value="old30">Older than 30 days</option>
+            </select>
+            <input id="olderThanDays" type="number" min="0" step="1" placeholder="Older than days" title="Older than N days" />
+          </div>
+        </div>
+        <div id="rosterList">
+          <div class="loadingState" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Loading sessions</span>
+            <div class="skeletonList" aria-hidden="true"><i></i><i></i><i></i></div>
+          </div>
+        </div>
+      </aside>
+      <section id="chat">
+        <div id="sessionMeta" style="display:none"></div>
+        <div id="statusline" class="statusline" style="display:none">
+          <span id="statusActivity" class="statuschip" title="Session activity"></span>
+          <span id="statusModel" class="statuschip" title="Current model"></span>
+          <span id="statusEffort" class="statuschip" title="Reasoning effort"></span>
+          <span id="statusAgent" class="statuschip" title="Agent mode"></span>
+          <span id="statusMode" class="statuschip" title="Permission mode"></span>
+          <span id="runtimeMeter" class="statuschip runtimemeter" title="Runtime reported by the adapter, or observed current attach runtime while a turn is active"></span>
+          <span id="tokmeter" class="statuschip tokmeter" title="Tokens reported by the adapter"></span>
+          <span id="contextMeter" class="statuschip contextmeter" title="Context usage reported by the adapter"></span>
+        </div>
+        <div id="synchint" style="display:none"></div>
+        <div id="controlState" style="display:none"></div>
+        <div id="sessionBars" style="display:none"></div>
+        <div id="thread"><div class="empty">Select a session to attach.</div></div>
+        <div id="palette" style="display:none"></div>
+        <div id="optmenu" style="display:none"></div>
+        <div id="controls" style="display:none">
+          <button id="agentPick" class="pill" title="Agent / mode">🧩 build</button>
+          <button id="modelPick" class="pill" title="Model">🤖 model</button>
+          <button id="effortPick" class="pill" title="Reasoning effort">🧠 effort</button>
+          <button id="modePick" class="pill" title="Permission mode">🛡️ mode</button>
+        </div>
+        <div id="attachRow" style="display:none"></div>
+        <div id="composer">
+          <input type="file" id="fileInput" multiple style="display:none" />
+          <button id="attach" title="Attach files (sent with your next message)" disabled>📎</button>
+          <textarea id="input" rows="1" placeholder="Message the agent…  (type / for commands)" disabled></textarea>
+          <button id="control" style="display:none" title="Session control"></button>
+          <button id="stop" style="display:none" title="Interrupt the current turn (Esc)">⏹</button>
+          <button id="scheduleBtn" title="Send later — deliver this message to this session at a scheduled time" disabled>🕒</button>
+          <button id="send" disabled>Send</button>
+        </div>
+      </section>
+    </main>
+    <div id="newSheet" aria-hidden="true">
+      <div class="newPanel" role="dialog" aria-modal="true" aria-labelledby="newTitle">
+        <h2 id="newTitle">New session</h2>
+        <div id="newProjectContext" class="newProjectContext" style="display:none"></div>
+        <label for="newAgent">Agent</label>
+        <select id="newAgent"></select>
+        <label for="newDirectory">Directory</label>
+        <input id="newDirectory" placeholder="Empty = home, or relative to home" autocomplete="off" />
+        <label for="newSessionTitle">Title</label>
+        <input id="newSessionTitle" placeholder="Optional" autocomplete="off" />
+        <label for="newWhen">Start</label>
+        <select id="newWhen" title="Create the session now, or schedule it — like a calendar event, optionally repeating">
+          <option value="now">Now</option>
+          <option value="once">Later (once)</option>
+          <option value="daily">Repeat daily</option>
+          <option value="weekdays">Repeat weekdays</option>
+        </select>
+        <div id="newScheduleFields" style="display:none">
+          <label for="newAt">First run</label>
+          <input id="newAt" type="datetime-local" />
+          <label for="newPrompt">First message</label>
+          <textarea id="newPrompt" rows="3" placeholder="Sent when the scheduled session starts — required"></textarea>
+        </div>
+        <div class="newHint" id="newHint"></div>
+        <div class="newActs">
+          <button id="newCancel">Cancel</button>
+          <button id="newCreate">Create</button>
+        </div>
+      </div>
+    </div>
+    <div id="scheduleSheet" aria-hidden="true">
+      <div class="newPanel" role="dialog" aria-modal="true" aria-labelledby="scheduleTitle">
+        <h2 id="scheduleTitle">Schedule message</h2>
+        <div class="newHint" id="scheduleTarget"></div>
+        <label for="scheduleText">Message</label>
+        <textarea id="scheduleText" rows="4" placeholder="Message to send"></textarea>
+        <label for="scheduleAt">Send at</label>
+        <input id="scheduleAt" type="datetime-local" />
+        <div class="newHint">Delivers the composer text to this session at the chosen time, with whatever model and permission mode the session has then — exactly like pressing Send, just later.</div>
+        <div class="newActs">
+          <button id="scheduleCancel">Cancel</button>
+          <button id="scheduleConfirm">Schedule</button>
+        </div>
+      </div>
+    </div>
+    <div id="schedulesSheet" aria-hidden="true">
+      <div class="newPanel" role="dialog" aria-modal="true" aria-labelledby="schedulesTitle">
+        <h2 id="schedulesTitle">Scheduled sends</h2>
+        <div id="schedulesList" class="schedulesList">Loading…</div>
+        <div class="newActs">
+          <button id="schedulesClose">Close</button>
+        </div>
+      </div>
+    </div>
+    <div id="toast"></div>
+    <!-- Relative (not "/app.js") so the shell is self-contained under the /poc-ui/ mount:
+         it resolves to /poc-ui/app.js there, and the broker no longer serves the PoC at root. -->
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

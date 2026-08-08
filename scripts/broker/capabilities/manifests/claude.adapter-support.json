@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "agent": "claude",
+  "version": "2.1.203",
+  "_adapterRefs_note": "adapterRefs is a DOCUMENTATION-ONLY field (no gate greps/validates it). These use grep-recoverable symbols/flags/tool-names rather than line numbers so a reader can still find the code after edits shift lines — Fable review 2026-07-08 #3. The older opencode/pi manifests still use line numbers.",
+  "capabilities": [
+    {
+      "schemaVersion": 1,
+      "id": "claude.jsonl.observe",
+      "nativeId": "claude:jsonl:transcript",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (discoverSessions)", "packages/typescript/adapters/claude/src/index.ts (ClaudeObserveConnection)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-jsonl.ts", "scripts/broker/tests/claude/test-claude-observe-renderability.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.hook.pretooluse",
+      "nativeId": "claude:hook:PreToolUse",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L1", "L2"],
+      "adapterRefs": ["packages/typescript/broker/src/claude-hooks.ts (PreToolUse)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-hooks.ts", "scripts/broker/tests/claude/test-claude-questions.ts", "scripts/broker/tests_traces/claude-app-answer-real-tui-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.hook.userpromptsubmit",
+      "nativeId": "claude:hook:UserPromptSubmit",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/broker/src/claude-hooks.ts (setStatus)", "packages/typescript/broker/src/main.ts (UserPromptSubmit)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-hooks.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.hook.stop",
+      "nativeId": "claude:hook:Stop",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/broker/src/claude-hooks.ts (setStatus)", "packages/typescript/broker/src/main.ts (Stop)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-hooks.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.hook.sessionstart",
+      "nativeId": "claude:hook:SessionStart",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "partial",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/broker/src/claude-hooks.ts (SessionStart)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-hooks.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.resume",
+      "nativeId": "claude:cli:--resume",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (resumeArgs, '--resume')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts", "scripts/broker/tests/claude/test-claude-drive-surface.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.session_id",
+      "nativeId": "claude:cli:--session-id",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (resumeArgs, '--session-id')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.fork_session",
+      "nativeId": "claude:cli:--fork-session",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (resumeArgs, '--fork-session')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.model",
+      "nativeId": "claude:cli:--model",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts ('--model')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.effort",
+      "nativeId": "claude:cli:--effort",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts ('--effort')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.permission_mode",
+      "nativeId": "claude:cli:--permission-mode",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts ('--permission-mode')"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.jsonl.tasklist",
+      "nativeId": "claude:jsonl:TodoWrite",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (TodoWrite → task-list-state)", "packages/typescript/adapters/claude/src/index.ts (ClaudeTaskLedger)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-activity.ts", "scripts/broker/tests/app/test-web-ui-components.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.jsonl.subagent",
+      "nativeId": "claude:jsonl:Task",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (subagents/ tree → agent-activity)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-activity.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.jsonl.tool_use",
+      "nativeId": "claude:jsonl:tool_use",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (tool_use → tool-call/tool-result)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-jsonl.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.artifact.outbox",
+      "nativeId": "claude:artifact:outbox",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (outbox → file-artifact)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-artifacts.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.file.inbox",
+      "nativeId": "claude:artifact:inbox",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (inbox file materialization)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-artifacts.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.slash.discovery",
+      "nativeId": "claude:slash:commands",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "partial",
+      "evidencePresent": ["D", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (command discovery from init)"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-jsonl.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.export",
+      "nativeId": "claude:jsonl:export",
+      "agent": "claude",
+      "version": "2.1.203",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (exportTranscript)", "packages/typescript/adapters/claude/src/index.ts (containedClaudePath)", "packages/typescript/broker/src/r2-export.ts", "packages/typescript/broker/src/r2-redactor.ts"],
+      "traceRefs": ["scripts/broker/tests/claude/test-claude-export.ts", "scripts/broker/tests/security-r2/test-r2-export.ts"]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "agent": "claude",
+  "version": "2.1.203",
+  "captured_at": "2026-07-08T00:00:00.000Z",
+  "sources": [
+    {
+      "id": "claude-hooks-schema-2.1.203",
+      "source_url": "Claude Code hooks contract (PreToolUse/UserPromptSubmit/Stop/SessionStart/SessionEnd) — settings.json hooks schema + packages/typescript/broker/src/claude-hooks.ts, verified against claude 2.1.203, 2026-07-08. No single machine-readable registry: docs + installed hook plumbing.",
+      "checksum": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "trust_level": "local-help"
+    },
+    {
+      "id": "claude-cli-help-2.1.203",
+      "source_url": "`claude --help` flag surface (--resume/--fork-session/--session-id/--model/--effort/--permission-mode/--settings/--channels/--mcp-config), verified against claude 2.1.203, 2026-07-08.",
+      "checksum": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "trust_level": "local-help"
+    },
+    {
+      "id": "claude-jsonl-format-2.1.203",
+      "source_url": "Claude session JSONL transcript format (~/.claude projects <uuid>.jsonl + subagents/ sibling tree: tool_use, TodoWrite/TaskCreate/TaskUpdate, Task), verified 2026-07-08.",
+      "checksum": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "trust_level": "source-repo"
+    }
+  ]
+}

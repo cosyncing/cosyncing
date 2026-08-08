@@ -1,0 +1,351 @@
+{
+  "schemaVersion": 1,
+  "agent": "opencode",
+  "version": "1.16.2",
+  "capabilities": [
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.list",
+      "nativeId": "opencode:server:GET:/session",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:309", "packages/typescript/adapters/opencode/src/index.ts:335"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.get",
+      "nativeId": "opencode:server:GET:/session/{sessionID}",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:640", "packages/typescript/adapters/opencode/src/index.ts:1132", "packages/typescript/adapters/opencode/src/index.ts:1258"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.create",
+      "nativeId": "opencode:server:POST:/session",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:666"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.messages",
+      "nativeId": "opencode:server:GET:/session/{sessionID}/message",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1059", "packages/typescript/adapters/opencode/src/index.ts:1659"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.prompt",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/prompt_async",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1531"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.summarize",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/summarize",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1647"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.revert",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/revert",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1674"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.unrevert",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/unrevert",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1680"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.abort",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/abort",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1686"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.share.create",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/share",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1691"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.share.delete",
+      "nativeId": "opencode:server:DELETE:/session/{sessionID}/share",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1702"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.command",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/command",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1709"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.project.list",
+      "nativeId": "opencode:server:GET:/project",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:398"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.question.list",
+      "nativeId": "opencode:server:GET:/question",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:534", "packages/typescript/adapters/opencode/src/index.ts:1144"],
+      "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.question.reply",
+      "nativeId": "opencode:server:POST:/question/{questionID}/reply",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1595"],
+      "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.question.reject",
+      "nativeId": "opencode:server:POST:/question/{questionID}/reject",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1604"],
+      "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.permission.list",
+      "nativeId": "opencode:server:GET:/permission",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:534", "packages/typescript/adapters/opencode/src/index.ts:1164"],
+      "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.permission.reply",
+      "nativeId": "opencode:server:POST:/permission/{permissionID}/reply",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1585"],
+      "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.agent.list",
+      "nativeId": "opencode:server:GET:/agent",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1572"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.command.list",
+      "nativeId": "opencode:server:GET:/command",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1611"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.model.list",
+      "nativeId": "opencode:server:GET:/api/model",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1545"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.global.event",
+      "nativeId": "opencode:server:GET:/global/event",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1208", "packages/typescript/adapters/opencode/src/index.ts:1823"],
+      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts", "scripts/broker/tests_traces/opencode-true-sync-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.global.health",
+      "nativeId": "opencode:server:GET:/global/health",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "not-applicable",
+      "evidencePresent": ["D"],
+      "adapterRefs": ["scripts/broker/capabilities/collect-opencode-live.ts"],
+      "traceRefs": ["scripts/broker/tests/capabilities/test-capabilities.ts"],
+      "deliberateExclusionReason": "collector/version source only, not user-facing app behavior"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.doc",
+      "nativeId": "opencode:server:GET:/doc",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "not-applicable",
+      "evidencePresent": ["D"],
+      "adapterRefs": ["scripts/broker/capabilities/collect-opencode-live.ts", "scripts/broker/capabilities/check-discovery-drift.ts"],
+      "traceRefs": ["scripts/broker/tests/capabilities/test-capabilities.ts"],
+      "deliberateExclusionReason": "discovery source document, not user-facing app behavior"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.rename",
+      "nativeId": "opencode:server:PATCH:/session/{sessionID}",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:696", "packages/typescript/broker/src/main.ts:977"],
+      "traceRefs": [
+        "scripts/broker/tests/opencode/test-opencode-control.ts",
+        "scripts/broker/tests/app/test-web-ui-components.ts",
+        "scripts/broker/tests/app/test-web-ui-static.ts"
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.fork",
+      "nativeId": "opencode:server:POST:/session/{sessionID}/fork",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:716", "packages/typescript/broker/src/main.ts:1108"],
+      "traceRefs": [
+        "scripts/broker/tests/opencode/test-opencode-control.ts"
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.model.variants",
+      "nativeId": "opencode:server:model-variants",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1551", "packages/typescript/adapters/opencode/src/index.ts:2589", "apps/poc-ui/public/app.js:3931"],
+      "traceRefs": [
+        "scripts/broker/tests/opencode/test-opencode-control.ts",
+        "scripts/broker/tests/app/test-web-ui-components.ts",
+        "scripts/broker/tests/app/test-web-ui-static.ts"
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.cli.export",
+      "nativeId": "opencode:cli:export",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:743", "packages/typescript/broker/src/r2-export.ts", "packages/typescript/broker/src/r2-redactor.ts", "packages/typescript/broker/src/main.ts:1160"],
+      "traceRefs": [
+        "scripts/broker/tests/security-r2/test-r2-export.ts",
+        "scripts/broker/tests/security-r2/test-r2-redactor.ts",
+        "scripts/broker/tests/app/test-web-ui-components.ts"
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.delete",
+      "nativeId": "opencode:server:DELETE:/session/{sessionID}",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "excluded",
+      "evidencePresent": ["D"],
+      "deliberateExclusionReason": "destructive session deletion"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.tui.connect",
+      "nativeId": "opencode:tui:/connect",
+      "agent": "opencode",
+      "version": "1.16.2",
+      "mappedStatus": "excluded",
+      "evidencePresent": ["D"],
+      "deliberateExclusionReason": "credential entry / provider auth"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "Synthetic Codex app-server method snapshot for the discovery-drift regression lane. NOT the full ClientRequest surface — a controlled delta from the seed's codex:appserver:* native ids: `skills/list` removed and `thread/unarchive` added, so the drift detector must report exactly one removed + one added. Real drift would be produced by dumping the app-server ClientRequest method set (ts-rs generate-json-schema).",
+  "schemaVersion": 1,
+  "agent": "codex",
+  "methods": [
+    "thread/resume",
+    "thread/loaded/list",
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt",
+    "model/list",
+    "config/read",
+    "thread/compact/start",
+    "item/approval",
+    "thread/start",
+    "thread/name/set",
+    "thread/fork",
+    "thread/rollback",
+    "thread/archive",
+    "thread/unarchive"
+  ]
+}

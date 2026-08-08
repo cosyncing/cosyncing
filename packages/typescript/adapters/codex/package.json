@@ -1,0 +1,17 @@
+{
+  "name": "@cosyncing/adapter-codex",
+  "version": "0.0.0",
+  "type": "module",
+  "files": [
+    "src/index.ts",
+    "src/implementation.ts",
+    "src/tui-presence.ts"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui-presence": "./src/tui-presence.ts"
+  },
+  "dependencies": {
+    "@cosyncing/adapter-api": "workspace:*"
+  }
+}

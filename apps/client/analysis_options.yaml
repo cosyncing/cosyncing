@@ -1,0 +1,20 @@
+include: package:very_good_analysis/analysis_options.yaml
+
+analyzer:
+  exclude:
+    - ".dart_tool/**"
+    - ".git/**"
+    - ".worktrees/**"
+    - "**/*.g.dart"
+    - "android/**"
+    - "build/**"
+    - "contracts/**"
+    - "docs/**"
+    - "ios/**"
+    - "linux/**"
+    - "macos/**"
+    - "output/**"
+    - "packages/**/test/**"
+    - "thirdparty/**"
+    - "web/**"
+    - "windows/**"

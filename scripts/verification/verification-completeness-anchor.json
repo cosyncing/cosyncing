@@ -1,0 +1,460 @@
+{
+  "schemaVersion": 3,
+  "acceptedBase": "ef1a226adbdb7f7b4ee7c2591195aa2bc78bee71",
+  "requiredClaimIds": [
+    "broker.adapter-discovery-bounds",
+    "broker.attach-identity",
+    "broker.capabilities",
+    "broker.claude-hooks",
+    "broker.claude-hooks-surface",
+    "broker.claude-transcript",
+    "broker.cli-package-boundary",
+    "broker.codex-loaded-watch",
+    "broker.codex-loaded-watch-unknown",
+    "broker.codex-permissions",
+    "broker.codex-rollout",
+    "broker.codex-sync-enabler",
+    "broker.codex-terminal-control",
+    "broker.codex-tui-presence",
+    "broker.compiled-assets",
+    "broker.conformance",
+    "broker.control-boundaries",
+    "broker.diff-body-reference",
+    "broker.diff-reference-wire",
+    "broker.doctor",
+    "broker.draft-durability",
+    "broker.draft-sync",
+    "broker.draft-two-client",
+    "broker.drive-restore",
+    "broker.echo-correlation",
+    "broker.fork-agent-owned",
+    "broker.history-cache",
+    "broker.history-paging",
+    "broker.lifecycle",
+    "broker.live-session-coherence",
+    "broker.model-session-creation",
+    "broker.notifications-bulk-dismiss",
+    "broker.opencode-completion",
+    "broker.opencode-file-changes",
+    "broker.opencode-identity",
+    "broker.opencode-retry-detail",
+    "broker.opencode-shim-runtime",
+    "broker.opencode-shim-symmetry",
+    "broker.pi-bridge-reload",
+    "broker.pi-tool-result",
+    "broker.protocol-journal",
+    "broker.request-resolution",
+    "broker.restart-identity",
+    "broker.roster-publication",
+    "broker.roster-revision",
+    "broker.service-lifecycle",
+    "broker.session-truth-conformance",
+    "broker.state-security",
+    "broker.surface",
+    "broker.sync-degraded",
+    "broker.tailscale-pairing",
+    "broker.tool-semantics",
+    "broker.transactional-setup",
+    "broker.typecheck",
+    "broker.update-contract",
+    "broker.web-origin",
+    "browser.cache-model",
+    "browser.startup-cache",
+    "browser.update-handoff",
+    "ci.workflow-policy",
+    "client.complete",
+    "contract.current",
+    "contract.history",
+    "dart.broker-client-flutter.analyze",
+    "dart.broker-client-flutter.dependencies",
+    "dart.broker-client-flutter.test",
+    "dart.broker-client.analyze",
+    "dart.broker-client.dependencies",
+    "dart.broker-client.test",
+    "dart.broker-contract.analyze",
+    "dart.broker-contract.dependencies",
+    "dart.broker-contract.test",
+    "dart.broker-crypto.analyze",
+    "dart.broker-crypto.dependencies",
+    "dart.broker-crypto.test",
+    "evidence.real-host-schema",
+    "evidence.support-matrix",
+    "evidence.trace-manifest",
+    "release.candidate-pair",
+    "release.supply-chain",
+    "repository.diff-hygiene",
+    "repository.public-tree",
+    "repository.public-tree-policy",
+    "repository.source-boundaries",
+    "repository.source-stability",
+    "verification.graph"
+  ],
+  "requiredGateBindings": [
+    {
+      "id": "broker-deterministic",
+      "fingerprint": "sha256:50b74a82fc20fff91ecd484cf984104a7a5274220ce16fd22c64745f9e03335d"
+    },
+    {
+      "id": "capabilities",
+      "fingerprint": "sha256:77ad4dc3ad1cfd92a57fe94aba7b9421466a111f0f6870ceb6ae50d7c988cc34"
+    },
+    {
+      "id": "client",
+      "fingerprint": "sha256:8a571c84033692c4b205a2acbf9bd35bba1abee9116d76a78697e5a576f2b9a1"
+    },
+    {
+      "id": "contract",
+      "fingerprint": "sha256:ab3aada476119353f2f9463e73c594baeccd84d4a500e0711649eebfbb36cc62"
+    },
+    {
+      "id": "contract-history",
+      "fingerprint": "sha256:1e60dfa96a34c4b4ff5036f3c2469a116cd814b2991f08d81b87e55942f69379"
+    },
+    {
+      "id": "dart-broker-client-analyze",
+      "fingerprint": "sha256:75596578cd67ec53ebbbe73275817bfef4393481e853fbc82f8fa24d753aa52a"
+    },
+    {
+      "id": "dart-broker-client-dependencies",
+      "fingerprint": "sha256:cca2c244013ec30dfed34be21bf376d8c0ff36d6459fc19ecf30c1c418517d6a"
+    },
+    {
+      "id": "dart-broker-client-flutter-analyze",
+      "fingerprint": "sha256:bb338618e200223cd986550241603bbadea40af0e440535484277a9d1e166614"
+    },
+    {
+      "id": "dart-broker-client-flutter-dependencies",
+      "fingerprint": "sha256:621886d25e8e1e96acd369188bf206cced3de7971097350b5bf5649c7cba4df3"
+    },
+    {
+      "id": "dart-broker-client-flutter-test",
+      "fingerprint": "sha256:d45fd3637e9278c573a7cd24d6189e2a5e65d85a4bf2ce603191825168567223"
+    },
+    {
+      "id": "dart-broker-client-test",
+      "fingerprint": "sha256:41274e306f37a3df4d4866b1cb89de8423430a02a8c593b8056f87aa7040d1bf"
+    },
+    {
+      "id": "dart-broker-contract-analyze",
+      "fingerprint": "sha256:56b80ac79cb0a3bcd5514561411d0211dc85304e6642e8c454e432503b5b5388"
+    },
+    {
+      "id": "dart-broker-contract-dependencies",
+      "fingerprint": "sha256:03db1f86e0564776d7514455805f5e7c9d36bdda3e53f43a1b7d24df472aff12"
+    },
+    {
+      "id": "dart-broker-contract-test",
+      "fingerprint": "sha256:b450b7f4f1312da9562f5d75600b841f202f79e67c33ebdf55488ff2b6b0f2eb"
+    },
+    {
+      "id": "dart-broker-crypto-analyze",
+      "fingerprint": "sha256:9250b26cbe1bf2ce78b271c030f5f564a4f29604bbe60dfe8b46695d7f0ec3b6"
+    },
+    {
+      "id": "dart-broker-crypto-dependencies",
+      "fingerprint": "sha256:21ca5aec1f0e286a4702ac1fc7817f78477099455b956d216b6fb2c6692e0db8"
+    },
+    {
+      "id": "dart-broker-crypto-test",
+      "fingerprint": "sha256:a4b098a4ea8dda4a03b2b27c145aafe0150f93f0fd498d7766aeff89de3e42b3"
+    },
+    {
+      "id": "diff-hygiene",
+      "fingerprint": "sha256:fe15454e0802f7339e4583b56a11b7a94a77f5212cb055535ed9993451553df9"
+    },
+    {
+      "id": "public-tree",
+      "fingerprint": "sha256:fd7a26c53ea3730a3da652e51e737938ab02413e1197742e955fdf81b8b37198"
+    },
+    {
+      "id": "public-tree-policy",
+      "fingerprint": "sha256:ba63b002ffdd6ca78d05ef420b4d03f3bf14413a21d10753dd9f8c47c95692d3"
+    },
+    {
+      "id": "release-candidate-pair",
+      "fingerprint": "sha256:138f781a80ccb27accbe4da0ccd39c2fe590f2d105ed45f01c0a390874e2304f"
+    },
+    {
+      "id": "source-boundaries",
+      "fingerprint": "sha256:1d8daacffec546e82acf46da99de398fd1cec99754c6283f5f76f09835849145"
+    },
+    {
+      "id": "source-stability",
+      "fingerprint": "sha256:bf1f99a8b1d1de28783431ff79418b140938ca03f0d6a97e4b234750184d37b8"
+    },
+    {
+      "id": "support-matrix",
+      "fingerprint": "sha256:83904b49811ac417456164330bd3ed73f28a2aa95aae6ba0c41755837cb3ed24"
+    },
+    {
+      "id": "trace-manifest",
+      "fingerprint": "sha256:a38ad64760b9162887d20b5662c3e3d43687fa606930b18e6be083aa5cbb34f5"
+    },
+    {
+      "id": "verification-inventory",
+      "fingerprint": "sha256:41db8571737ac0ede141abd9823922dbce29152fbb021e2200a9e851ddc375c4"
+    },
+    {
+      "id": "web-browser",
+      "fingerprint": "sha256:a84ba8bc8fd91e108b9cb7ed723ea01d9999208762cfc16b53115cebcd640547"
+    },
+    {
+      "id": "web-cache",
+      "fingerprint": "sha256:dfb9c416eaf03498177d7a776c32ee7e67c64012f794046fb1570ad1ba723c0d"
+    },
+    {
+      "id": "web-update-handoff",
+      "fingerprint": "sha256:cc2a72b77b5424c278329850e13f5cba37f33aedf95e64962b1f92d5f384dc88"
+    },
+    {
+      "id": "workflow-policy",
+      "fingerprint": "sha256:78ee566e42bf49df2c86ff291680ae19019a31ec2dd9a8c291d08abc2727fade"
+    }
+  ],
+  "requiredBrokerSubSuiteBindings": [
+    {
+      "id": "adapter-discovery-bounds",
+      "fingerprint": "sha256:9c54647fc22e3522adfee7db0be6cda26d48226eb49bac654cff7875de3a8c91"
+    },
+    {
+      "id": "app-send-echo-correlation",
+      "fingerprint": "sha256:83e22d920069cd45f946298d3bb881c1a8d92147a2813f2a95d3868ece453bf9"
+    },
+    {
+      "id": "attach-message-identity",
+      "fingerprint": "sha256:4023fbee37caf2a8acc0b0747ef5bc5c6e9e6ae0a350d6a207c3f28a10804a29"
+    },
+    {
+      "id": "attention-bulk-dismiss",
+      "fingerprint": "sha256:cbb90d63012a426adb27855853b7e917007b4a456e32673d6e761b1110d78687"
+    },
+    {
+      "id": "broker-surface",
+      "fingerprint": "sha256:f146cd6f229a5ee2b8005c71bd52b7ee0b4a4e963bf186bb47c81caa4691757e"
+    },
+    {
+      "id": "broker-update-contract",
+      "fingerprint": "sha256:8729890719ba30da43cb97de59418e3676cc7051b381fede1114b8aedcda0c99"
+    },
+    {
+      "id": "claude-hooks",
+      "fingerprint": "sha256:9bd35e1aa98675375ee87e639a1a12943fd0d90a89707190c2b4984b12251c9a"
+    },
+    {
+      "id": "claude-hooks-surface",
+      "fingerprint": "sha256:375613cada90d0c03aa3cc79678226df76012f15d593d9e3bfb38f29af6e78ca"
+    },
+    {
+      "id": "claude-transcript-mapping",
+      "fingerprint": "sha256:3802a94179dbe2b210b963ffb42683ae8a331291d92c443abf431f5a4b06209f"
+    },
+    {
+      "id": "cli-package-boundary",
+      "fingerprint": "sha256:25e2fcabd1d8960a764da1f0be6f89a93521611d3958545e5ffca80a505b30d4"
+    },
+    {
+      "id": "codex-loaded-watch",
+      "fingerprint": "sha256:8358d989907853d8ab6d899eefe950b4404cd6b4f3aeb128c2cac12f1a8225e9"
+    },
+    {
+      "id": "codex-loaded-watch-unknown",
+      "fingerprint": "sha256:1dbc42744a21e5e6f3b2551d17d7f750057cd19c2966adeed98a316d5e7a0597"
+    },
+    {
+      "id": "codex-permissions",
+      "fingerprint": "sha256:b42e8f778ea37738fd75265ce8e21158463539c679b997c2898918217c47b711"
+    },
+    {
+      "id": "codex-rollout-mapping",
+      "fingerprint": "sha256:c73dc24e6630fcd92ef01e62dcfbf2b56a12500902e59b6d77bdf0e93d00508f"
+    },
+    {
+      "id": "codex-sync-enabler",
+      "fingerprint": "sha256:7cc48c256902a0105a89f428504c80b29be7940744a78644527fee5dd043d684"
+    },
+    {
+      "id": "codex-terminal-control",
+      "fingerprint": "sha256:043cd705fb3c2f9f2c5d56352e577f8fb658d2aefb1b4cf14862ec1b69447f1d"
+    },
+    {
+      "id": "codex-tui-presence",
+      "fingerprint": "sha256:a8b2d676b75e398b9b8fc65a3e1fbfb4e02f19d1cf85710084fe52a10d306bbe"
+    },
+    {
+      "id": "compiled-assets",
+      "fingerprint": "sha256:23b89baaea2776851be3dadf0422dbbabcc0f0225852eca965770b3804f93b64"
+    },
+    {
+      "id": "conformance",
+      "fingerprint": "sha256:96d69048755ea29c3861445aa6bb274903bd5e30d5f52a0b3ae65673a7fc027f"
+    },
+    {
+      "id": "control-boundaries",
+      "fingerprint": "sha256:fd1ca967d7a72c193ee51f3f707a5b8ac1a48f3da22b485aa064381d962c1a4a"
+    },
+    {
+      "id": "diff-body-reference",
+      "fingerprint": "sha256:d24134ca78d9a59e04065b0130e366324759adb297391e84bd92a0379a09dd1e"
+    },
+    {
+      "id": "diff-reference-wire",
+      "fingerprint": "sha256:5c468fc8194eed28a4c57a8f3731da5c4806e41180a0aa700fed06ac48854ea7"
+    },
+    {
+      "id": "draft-durability",
+      "fingerprint": "sha256:0ddb4bc8dd075c8d3153fa0a0bf7c50d95e826079a2c624a0e13b9423c37270c"
+    },
+    {
+      "id": "draft-sync-fanout",
+      "fingerprint": "sha256:bb1ecd231fb55b988eadf39d6d1cc78c7c401ef558d97c76fa1adfd4ad915bd6"
+    },
+    {
+      "id": "draft-two-client-wire",
+      "fingerprint": "sha256:fcf2fe1605a86525eaae3251746a9aa2a3af76e6e974268ddeafea15f2cc0b93"
+    },
+    {
+      "id": "drive-restore-arbitration",
+      "fingerprint": "sha256:03b48d417e38cdea2be03253bcf5f03d5190ac8bc27752c6aa1f88cb6c112327"
+    },
+    {
+      "id": "fork-agent-owned",
+      "fingerprint": "sha256:dcfd8c9dc329a512241cd291301f573de16bed6a78fa18d86f7a660b79acd429"
+    },
+    {
+      "id": "history-capture-liveness",
+      "fingerprint": "sha256:67e5c850ad878fe61771bc2f59d5094393e44b9c9f861ca2b3d60dc976c6a1e4"
+    },
+    {
+      "id": "history-page-cache",
+      "fingerprint": "sha256:f5295ab22cd0321eb445010c3319c8c70b25da8b259f11ee900e2426f52d5fe1"
+    },
+    {
+      "id": "history-paging-wire",
+      "fingerprint": "sha256:ed92e9c2296195ecfd1dd390bd7e0d93ed1ecae0c0a3194979d8b316afea7b7f"
+    },
+    {
+      "id": "history-refusal-tail",
+      "fingerprint": "sha256:603cb800cd338e0e4b754e1439a9d858ac436034841b9540a983a3b17bb1fdf5"
+    },
+    {
+      "id": "history-refusal-wire",
+      "fingerprint": "sha256:ee0b3dce235547217eda5befc915841e886d5e1f2b693f8e9773f49ee6e16925"
+    },
+    {
+      "id": "lifecycle",
+      "fingerprint": "sha256:1a84a2a49f0c2006bff826645c2355d6c19a23398dbce357dd02e2f2448e979d"
+    },
+    {
+      "id": "live-session-coherence",
+      "fingerprint": "sha256:1d55cb80b46cd9786593854505c964a5f00ac477dfe5fe75523dee42d11d3222"
+    },
+    {
+      "id": "model-session-creation",
+      "fingerprint": "sha256:983f50989f6ac2d7956049f66c8de514ae600e167ebacdde7961b099f2bed7e2"
+    },
+    {
+      "id": "opencode-completion-fence",
+      "fingerprint": "sha256:1116dd3a7458ed702f2e36801d1ea240de0ce18378f0d94db9cdf43f9ad6de6b"
+    },
+    {
+      "id": "opencode-file-changes",
+      "fingerprint": "sha256:1587ca8c1e3f36f8696e87103250c25734c112afb933b1a66a87b2c9e60264a7"
+    },
+    {
+      "id": "opencode-message-identity",
+      "fingerprint": "sha256:4ef1ba70ed1b4a68bb1273fdbfca6a17c049c3e13617023e0a832a4e23c2f9f6"
+    },
+    {
+      "id": "opencode-retry-detail",
+      "fingerprint": "sha256:efa5909a340872e61e71e495881b4af7289d25c4b2bee87b19c2d7b4e2141a3c"
+    },
+    {
+      "id": "opencode-shim-runtime",
+      "fingerprint": "sha256:9f2ff42be8a926269a552939871b7a8321a05ae087cf179671cac9d04179a7c3"
+    },
+    {
+      "id": "opencode-shim-symmetry",
+      "fingerprint": "sha256:a081e353467afa3a997df185cf5d537c14c7829f2ac6ca73d7423277bb034d15"
+    },
+    {
+      "id": "pi-bridge-reload",
+      "fingerprint": "sha256:cadb0569129fb1d24d0648e1cb5f8bfed5354b48057af22cb013f8f2c1e5b571"
+    },
+    {
+      "id": "pi-tool-result",
+      "fingerprint": "sha256:16311bf527b669cfe81cb49e3d0c5baeda2aaa2a83fed547ee1de6c86be6da4b"
+    },
+    {
+      "id": "protocol-journal",
+      "fingerprint": "sha256:2644efe8c0c2ba1567e22be0b3abf6aa0e4d4ddfc81ecf5499b6f91b39abdac6"
+    },
+    {
+      "id": "real-evidence-schema",
+      "fingerprint": "sha256:8d865318e1ee922829c0a0515cb51f2d3af1cb0d387dc373c9cc1d7e967e6493"
+    },
+    {
+      "id": "release-supply-chain",
+      "fingerprint": "sha256:8ed06568b115853211779ef45b493f62da6fd7afa39cad638ac5d3965f8a4858"
+    },
+    {
+      "id": "request-resolution-hygiene",
+      "fingerprint": "sha256:775d6d0e65521747ecca1f33a411b89f114e42137f27df67905b64bc181daadc"
+    },
+    {
+      "id": "restart-message-identity",
+      "fingerprint": "sha256:5a61e39d6ca96477e5d8a4615c9863eed1c887408dc11997cc35bda7d2006bb1"
+    },
+    {
+      "id": "roster-publication-qualification",
+      "fingerprint": "sha256:cee1fac6fbbae52dc57e01e1eff0ff45e93c71d79f37d6833f829a19410ff5cf"
+    },
+    {
+      "id": "roster-revision",
+      "fingerprint": "sha256:66150b14142742f3d1d8a5842469bbf442c0fae585dbee71ff59f53765db8bfd"
+    },
+    {
+      "id": "roster-watcher-publication-live",
+      "fingerprint": "sha256:1599cdf40094d5fe608433084ae5a026a93419d59d69c1b71824a07370e09f10"
+    },
+    {
+      "id": "session-truth-conformance",
+      "fingerprint": "sha256:98da6bd3e756275ee2125c36f27dddc955b80c02b7866d6fc002f3160b38726b"
+    },
+    {
+      "id": "state-security",
+      "fingerprint": "sha256:45e97a585a4f66a7961ad5e8bef406f333d21b2ab08805105d467670b0b801ef"
+    },
+    {
+      "id": "sync-degraded-integration",
+      "fingerprint": "sha256:371331b528c259d39524bd287e05f30965cb85526d9bb81992756b6dfe8ba2c4"
+    },
+    {
+      "id": "systemd-fixtures",
+      "fingerprint": "sha256:0bf8a3cfb439db7ea117c3cb55bf05717d2fae9768cd4f70ef53278f839b73bd"
+    },
+    {
+      "id": "tailscale-pairing",
+      "fingerprint": "sha256:5143b829be7d48d95e6b2386e6f6755bdbd03ab192c15cf501c50d1203f9770d"
+    },
+    {
+      "id": "tool-semantics",
+      "fingerprint": "sha256:5891f874ec2c3c8fee19a22586ab1e234402e567d4640ccd798732428d41bb5d"
+    },
+    {
+      "id": "transactional-setup",
+      "fingerprint": "sha256:4a59a620289dd213a2250b308b36ed5f40f93c7065dfceda3c1ae82f1cb64dc4"
+    },
+    {
+      "id": "typecheck",
+      "fingerprint": "sha256:32613ccca59c2b0ea614104858903782db2596154600bbbf464488c7a0ddd5f5"
+    },
+    {
+      "id": "web-origin",
+      "fingerprint": "sha256:6499592506d106ac0a2620aace42b4b77f833a9f19ed2f94aaa2e9961a8af0af"
+    },
+    {
+      "id": "zero-agent-doctor",
+      "fingerprint": "sha256:229ed2a8429afd12c62c1c918482564615e8ed4c205676d70f6f55b24b2ad17f"
+    }
+  ]
+}

@@ -1,0 +1,151 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+            srcset="apps/client/assets/brand/source/cosyncing-lockup-stacked-reverse.svg">
+    <img src="apps/client/assets/brand/source/cosyncing-lockup-stacked.svg"
+         alt="cosyncing" width="280">
+  </picture>
+</p>
+
+<p align="center">
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0F766E">
+  <img alt="Server: macOS, WSL, Linux" src="https://img.shields.io/badge/server-macOS%20%C2%B7%20WSL%20%C2%B7%20Linux-0F766E">
+  <img alt="Clients: Android, iOS, Linux, macOS, Windows, web" src="https://img.shields.io/badge/clients-Android%20%C2%B7%20iOS%20%C2%B7%20Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20web-0F766E">
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#the-web-client">Web client</a> ·
+  <a href="#platform-support">Platforms</a> ·
+  <a href="docs/README.md">Docs</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)"
+            srcset="apps/client/assets/brand/marketing/social-banner-1280x640.png">
+    <img src="apps/client/assets/brand/marketing/social-banner-white-1280x640.png"
+         alt="Code anywhere. Sync everywhere. Your agents keep working. You keep moving."
+         width="830">
+  </picture>
+</p>
+
+---
+
+cosyncing lets you watch and control your coding agents from anywhere on your own network.
+
+The broker runs on the machine where your agents already work. It watches their sessions and serves
+a client that shows each one — grouped by project, with its transcript, diffs, commands, and any
+prompt waiting on you. Read a session, answer a prompt, or take over. No account to create, no
+hosted service between the client and the broker.
+
+## Supported agents
+
+<p>
+  <a href="https://www.claude.com/product/claude-code" title="Claude Code"><img src="docs/assets/agents/pills/claude.png" alt="Claude Code" height="34"></a>
+  <a href="https://openai.com/codex/" title="Codex"><img src="docs/assets/agents/pills/codex.png" alt="Codex" height="34"></a>
+  <a href="https://opencode.ai/" title="OpenCode"><img src="docs/assets/agents/pills/opencode.png" alt="OpenCode" height="34"></a>
+  <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
+</p>
+
+One protocol covers all four. Per-agent control differs, and Claude Code sessions open read-only
+until you take over. See [adapter support and evidence](docs/protocol/adapter-support.md) for the
+function-by-function matrix.
+
+## Install
+
+```bash
+npm install --global cosyncing
+cosyncing setup
+cosyncing pair
+```
+
+`setup` inspects the machine, shows exactly what it will change, and applies the whole plan or none
+of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service, and prints
+your broker URL. The broker refuses to start until setup has committed.
+
+`pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
+`cosyncing devices` lists and revokes them.
+
+Before anything else: `cosyncing doctor` diagnoses the machine without changing it, and
+`cosyncing status` summarizes install, service, agents, and sessions.
+
+## The web client
+
+The Flutter web app ships inside the npm package and is served by your own broker at `/cosy/` —
+nothing is fetched at runtime and no third-party host is involved. Setup prints the URL; open it in
+any browser that can reach the broker. Android and desktop clients are distributed separately from
+the broker package.
+
+## Platform support
+
+**Server** — the broker runs on:
+
+<p>
+  <img alt="macOS on Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
+  <img alt="Windows via WSL" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
+</p>
+
+**Clients** — six platforms:
+
+<p>
+  <img alt="Android" src="https://img.shields.io/badge/Android-3DDC84?logo=android&logoColor=white">
+  <img alt="iOS" src="https://img.shields.io/badge/iOS-0D96F6?logo=apple&logoColor=white">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-6E6E73?logo=apple&logoColor=white">
+  <img alt="Windows" src="https://img.shields.io/badge/Windows-0078D4">
+  <img alt="Web" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
+</p>
+
+Native Windows and Intel macOS server hosting are not supported in this release. On Windows, run
+the broker inside WSL, where it is a supported Linux host; install Tailscale inside WSL too, since
+Windows-host Tailscale cannot proxy WSL loopback.
+
+## Privacy and security
+
+The broker runs on your machine, under your account. Pairing credentials, agent transcripts, and
+session data stay on that machine and travel only over the network you connect through. cosyncing
+operates no hosted service, and none sits in the connection path — there is no telemetry and no
+phone-home. Broker updates are verified signed releases, not registry publications; see
+[broker release and signing](docs/release/broker-release-signing.md).
+
+Report vulnerabilities through GitHub private vulnerability reporting, per [SECURITY.md](SECURITY.md).
+
+## Repository layout
+
+- `packages/typescript/` — broker, wire-contract owner, agent adapters, transport, and crypto.
+- `packages/dart/` — client contract, transport, Flutter adapter, and crypto.
+- `apps/client/` — the Flutter application, including every platform runner, test suite,
+  integration driver, and developer tool.
+- `contracts/generated/` — broker-owned, flattened client contract snapshot.
+- `apps/poc-ui/` — non-production proof-of-concept UI retained for deterministic broker tests.
+
+## Development
+
+The repository pins Flutter 3.44.3 in `.fvmrc` and Bun 1.3.8 in `package.json`. Run commands from
+the repository root.
+
+```bash
+bun install --frozen-lockfile
+bun run client:pub-get
+bun run typecheck
+bun run client:analyze
+bun run client:test
+```
+
+Regenerate broker-owned client contracts with `bun run contract:generate`. CI runs
+`bun run contract:check` and fails on a stale snapshot.
+
+Start with [docs/README.md](docs/README.md) and [build and test](docs/development/build-test.md).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening
+a change; contributions use fork-and-pull-request and require a signed-off commit. Usage questions
+go to GitHub Discussions and reproducible defects to GitHub Issues — see [SUPPORT.md](SUPPORT.md).
+Installs from a predecessor client start fresh; see
+[local data and upgrades](docs/development/data-and-upgrades.md).
+
+## License
+
+First-party source is licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

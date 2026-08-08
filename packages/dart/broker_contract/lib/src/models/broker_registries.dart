@@ -1,0 +1,237 @@
+/// Machine-readable broker contract registries, mirrored from the broker's
+/// `packages/typescript/protocol/src/index.ts` (`BROKER_ROUTES`, `BROKER_ERROR_CODES`,
+/// `BROKER_WIRE_FRAME_KINDS`, `BROKER_CLIENT_MESSAGE_KINDS`).
+///
+/// These constants exist so the client can detect contract drift without
+/// parsing TypeScript at runtime: the contract conformance test asserts that
+/// each Dart list matches the corresponding registry copied into
+/// `contracts/generated/broker-client.snapshot.ts`. When the broker adds a
+/// route, error code, or frame kind, `scripts/contracts/check.sh` flags the snapshot diff
+/// and this file must be updated in lockstep.
+///
+/// The broker exporter and client snapshot are read from the same commit.
+library;
+
+/// Normalized broker HTTP route surface.
+///
+/// Dynamic path segments use `{id}` placeholders, matching the broker's
+/// `BROKER_ROUTES` registry exactly.
+const List<String> brokerRoutes = <String>[
+  '/api/agents',
+  '/api/agents/{id}/models',
+  '/api/agents/codex/sync',
+  '/api/agent-runtime-updates',
+  '/api/agent-runtime-update-policy',
+  '/api/agent-runtime-updates/{id}/restart',
+  '/api/attention-events',
+  '/api/attention-events/dismiss-batch',
+  '/api/attention-events/{id}/ack',
+  '/api/attention-events/{id}/dismiss',
+  '/api/broker/health',
+  '/api/broker/restart',
+  '/api/broker/restart-all',
+  '/api/broker/update',
+  '/api/health',
+  '/api/machines',
+  '/api/machines/resolve',
+  '/api/projects/rename',
+  '/api/push/wake',
+  '/api/push/wake-tokens',
+  '/api/push/wake-tokens/{id}',
+  '/api/schedules',
+  '/api/schedules/{id}',
+  '/api/schedules/{id}/actions',
+  '/api/claude/hooks',
+  '/api/session-roster-deltas',
+  '/api/sessions',
+  '/api/sessions/{id}',
+  '/api/sessions/{id}/{id}/artifact/{id}',
+  '/api/sessions/{id}/{id}/fs',
+  '/api/sessions/{id}/{id}/fs/read',
+  '/api/sessions/{id}/{id}/fs/download',
+  '/api/sessions/{id}/{id}/uploads',
+  '/api/sessions/{id}/{id}/uploads/{id}',
+  '/api/sessions/{id}/{id}/uploads/{id}/complete',
+  '/api/sessions/{id}/{id}/cache',
+  '/api/sessions/{id}/{id}/clone',
+  '/api/sessions/{id}/{id}/export',
+  '/api/sessions/{id}/{id}/export/preflight',
+  '/api/sessions/{id}/{id}/fork',
+  '/api/sessions/{id}/{id}/rename',
+  '/api/sessions/{id}/{id}/stream',
+  '/api/tokdash/usage',
+  '/api/tokdash/quota',
+  '/api/tokdash/quota-preference',
+  '/api/tool/send_file',
+  '/api/transport/envelopes',
+  '/api/transport/peers',
+  '/api/transport/peers/{id}',
+  '/api/transport/pairings',
+  '/api/transport/pairings/{id}',
+  '/api/transport/pairings/{id}/accept',
+  '/api/transport/session-control',
+];
+
+/// Agent-owned local integration routes.
+///
+/// These are intentionally not client API endpoints. Mirroring the broker
+/// registry lets contract tests prove they stay classified as internal rather
+/// than being accidentally adopted as authenticated app routes.
+const List<String> brokerIntegrationRoutes = <String>[
+  '/claude/hook/bye',
+  '/claude/hook/hello',
+  '/claude/hook/request',
+  '/claude/hook/status',
+  '/pi/bridge/bye',
+  '/pi/bridge/commands',
+  '/pi/bridge/events',
+  '/pi/bridge/hello',
+  '/pi/bridge/send-file',
+  '/pi/bridge/status',
+];
+
+/// Stable broker error codes returned in API payloads.
+///
+/// Mirrors the broker's `BROKER_ERROR_CODES` registry. The legacy
+/// `DUPLICATE_CLIENT_MESSAGE_ID` was removed; the broker now distinguishes
+/// malformed (`ACK_INVALID`) from unknown-scope (`ACK_UNKNOWN_TARGET`)
+/// receipts. The registry currently holds 96 codes.
+const List<String> brokerErrorCodes = <String>[
+  'BAD_PARAM',
+  'ACK_UNKNOWN_TARGET',
+  'ACK_CONFLICT',
+  'ACK_INVALID',
+  'BAD_CLIENT_MESSAGE_ID',
+  'AGENT_UNSUPPORTED',
+  'ARTIFACT_INTERACTION_EXPIRED',
+  'ARTIFACT_INTERACTION_INVALID',
+  'ARTIFACT_INTERACTION_NOT_FOUND',
+  'ARTIFACT_INTERACTION_REF_INVALID',
+  'ARTIFACT_INTERACTION_TOO_LARGE',
+  'ARTIFACT_INTERACTION_UNSUPPORTED',
+  'CONFIRMATION_STALE',
+  'R2_DISABLED',
+  'EXPORT_EMPTY',
+  'EXPORT_FAILED',
+  'EXPORT_FORMAT',
+  'EXPORT_MISSING',
+  'EXPORT_TOO_LARGE',
+  'HISTORY_CURSOR_DIVERGED',
+  'HISTORY_CURSOR_GONE',
+  'HISTORY_CURSOR_INVALID',
+  'HISTORY_PAGE_RESOURCE_LIMIT',
+  'HISTORY_PAGE_SOURCE_CHANGED',
+  'HISTORY_PAGE_SOURCE_UNVERSIONED',
+  'FS_DOWNLOAD_TOO_LARGE',
+  'FS_REMOTE_DISABLED',
+  'INGEST_REFUSED',
+  'CLIENT_MESSAGE_FAILED',
+  'CLIENT_MESSAGE_ID_CONFLICT',
+  'CLIENT_MESSAGE_JOURNAL_FULL',
+  'CLIENT_MESSAGE_OUTCOME_UNKNOWN',
+  'ATTACHMENT_DELIVERY_FAILED',
+  'ATTACHMENT_INVALID',
+  'ATTACHMENT_LIMIT_EXCEEDED',
+  'ATTACHMENT_UNSUPPORTED',
+  'STAGED_ATTACHMENT_EXPIRED',
+  'STAGED_ATTACHMENT_NOT_FOUND',
+  'STAGED_ATTACHMENT_SCOPE_MISMATCH',
+  'MACHINE_PEER_BAD_CONFIG',
+  'MACHINE_PEER_BAD_RESPONSE',
+  'MACHINE_PEER_DUPLICATE_MACHINE',
+  'MACHINE_PEER_DUPLICATE_SESSION',
+  'MACHINE_PEER_PARTIAL',
+  'MACHINE_PEER_STALE',
+  'MACHINE_PEER_TIMEOUT',
+  'MACHINE_PEER_UNREACHABLE',
+  'MACHINE_OWNER_UNREACHABLE',
+  'MACHINE_ROUTE_AMBIGUOUS',
+  'MACHINE_ROUTE_NOT_FOUND',
+  'MACHINE_ROUTE_STALE',
+  'MODEL_CATALOG_UNAVAILABLE',
+  'MODEL_SELECTION_UNSUPPORTED',
+  'NOT_SUPPORTED',
+  'NOT_FOUND',
+  'NOT_REGULAR_FILE',
+  'NOT_DIRECTORY',
+  'PERMISSION_MODE_UNSUPPORTED',
+  'PAIRING_ALREADY_ACCEPTED',
+  'PAIRING_EXPIRED',
+  'PAIRING_INVALID_INPUT',
+  'PAIRING_NOT_FOUND',
+  'PAIRING_RATE_LIMITED',
+  'NO_CWD',
+  'PATH_SYMLINK',
+  'PUSH_DELIVERY_FAILED',
+  'PUSH_NOT_CONFIGURED',
+  'PUSH_TOKEN_NOT_FOUND',
+  'PI_INTEGRATION_AUTH_REQUIRED',
+  'PLAN_ACTION_INVALID',
+  'PLAN_ACTION_STALE',
+  'PLAN_ACTION_UNSUPPORTED',
+  'PLAN_NOT_FOUND',
+  'PATH_ESCAPE',
+  'PATH_EXT',
+  'REDACTION_REFUSED',
+  'PERSISTENCE_FAILED',
+  'TEMP_ROOT_MISSING',
+  'RATE_LIMITED',
+  'UPLOAD_NOT_FOUND',
+  'UPLOAD_EXPIRED',
+  'UPLOAD_OFFSET_MISMATCH',
+  'UPLOAD_SIZE_MISMATCH',
+  'UPLOAD_TOO_LARGE',
+  'UPLOAD_SCOPE_MISMATCH',
+  'UPLOAD_CAPACITY',
+  'RESUME_AUTH_REQUIRED',
+  'SESSION_AGENT_OWNED',
+  'DRIVE_OWNERSHIP_CONFLICT',
+  'DRIVE_RESTORE_FAILED',
+  'SCHEDULE_CRON_INVALID',
+  'SCHEDULE_INVALID',
+  'SCHEDULE_INVALID_STATE',
+  'SCHEDULE_NOT_FOUND',
+  'SCHEDULE_QUOTA_RECOVERY_UNAVAILABLE',
+  'SCHEDULE_STALE',
+];
+
+/// WebSocket protocol frame kinds (both client->broker and broker->client).
+///
+/// Mirrors the broker's `BROKER_WIRE_FRAME_KINDS` registry. Every kind the
+/// broker can emit must be a typed `WireEvent` variant so new frames cannot
+/// land silently as `UnknownWireEvent`.
+const List<String> brokerWireFrameKinds = <String>[
+  'hello',
+  'session',
+  'history',
+  'history-page',
+  'message',
+  'commands',
+  'options',
+  'notice',
+  'draft',
+  'ended',
+  'error',
+  'ack',
+  'nack',
+  'attach-conflict',
+];
+
+/// Client->broker message kinds expected on the WS stream.
+///
+/// Mirrors the broker's `BROKER_CLIENT_MESSAGE_KINDS` registry.
+const List<String> brokerClientMessageKinds = <String>[
+  'prompt',
+  'draft',
+  'history-page',
+  'plan-action',
+  'artifact-interaction',
+  'file',
+  'approve',
+  'answer',
+  'reject-question',
+  'command',
+  'set-agent',
+  'ack',
+  'nack',
+];

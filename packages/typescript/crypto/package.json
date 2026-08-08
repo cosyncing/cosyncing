@@ -1,0 +1,9 @@
+{
+  "name": "@cosyncing/crypto",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "E2E crypto primitives for cosyncing pairing and opaque transport envelopes.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

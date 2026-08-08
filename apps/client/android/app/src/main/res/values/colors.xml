@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Native launch background, light scheme: the app's default theme
+         canvas, matching the web startup shell (brand palette, doc 14). -->
+    <color name="launch_background">#F2F5F4</color>
+</resources>

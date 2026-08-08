@@ -1,0 +1,9 @@
+{
+  "name": "@cosyncing/transport",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Pluggable transport interfaces and default direct/relay transports for cosyncing.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

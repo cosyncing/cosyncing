@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "agent": "pi",
+  "version": "0.78.1",
+  "capabilities": [
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.get_state",
+      "nativeId": "pi:rpc:get_state",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:297", "packages/typescript/adapters/pi/src/index.ts:350"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi.ts", "scripts/broker/tests/pi/test-pi-rename.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.get_messages",
+      "nativeId": "pi:rpc:get_messages",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:732"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.prompt",
+      "nativeId": "pi:rpc:prompt",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:777"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.abort",
+      "nativeId": "pi:rpc:abort",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:815"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.compact",
+      "nativeId": "pi:rpc:compact",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:819"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.get_available_models",
+      "nativeId": "pi:rpc:get_available_models",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:834"],
+      "traceRefs": ["scripts/broker/tests/pi/test-tool-result-enrich.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.set_model",
+      "nativeId": "pi:rpc:set_model",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:753"],
+      "traceRefs": ["scripts/broker/tests/pi/test-tool-result-enrich.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.set_thinking_level",
+      "nativeId": "pi:rpc:set_thinking_level",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "partial",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:755"],
+      "traceRefs": ["scripts/broker/tests/pi/test-tool-result-enrich.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.get_commands",
+      "nativeId": "pi:rpc:get_commands",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:858"],
+      "traceRefs": ["scripts/broker/tests/pi/test-tool-result-enrich.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.extension_ui_request",
+      "nativeId": "pi:rpc:extension_ui_request",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:581", "packages/typescript/adapters/pi/src/index.ts:624"],
+      "traceRefs": ["scripts/broker/tests/pi/test-tool-result-enrich.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.set_session_name",
+      "nativeId": "pi:rpc:set_session_name",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:226", "packages/typescript/adapters/pi/src/index.ts:424"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi-rename.ts", "scripts/broker/tests/app/test-web-ui-components.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.get_session_stats",
+      "nativeId": "pi:rpc:get_session_stats",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:735", "packages/typescript/adapters/pi/src/index.ts:1194"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi-stats.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.fork",
+      "nativeId": "pi:rpc:fork",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:260", "packages/typescript/adapters/pi/src/index.ts:491"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi-lifecycle.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.clone",
+      "nativeId": "pi:rpc:clone",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:267", "packages/typescript/adapters/pi/src/index.ts:491"],
+      "traceRefs": ["scripts/broker/tests/pi/test-pi-lifecycle.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.export_html",
+      "nativeId": "pi:rpc:export_html",
+      "agent": "pi",
+      "version": "0.78.1",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/index.ts:272", "packages/typescript/broker/src/r2-export.ts", "packages/typescript/broker/src/r2-redactor.ts", "packages/typescript/broker/src/main.ts:1160"],
+      "traceRefs": [
+        "scripts/broker/tests/security-r2/test-r2-export.ts",
+        "scripts/broker/tests/security-r2/test-r2-redactor.ts",
+        "scripts/broker/tests/app/test-web-ui-components.ts"
+      ]
+    }
+  ]
+}

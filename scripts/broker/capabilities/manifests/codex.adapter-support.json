@@ -1,0 +1,184 @@
+{
+  "schemaVersion": 1,
+  "agent": "codex",
+  "version": "0.142.5",
+  "_adapterRefs_note": "adapterRefs is a DOCUMENTATION-ONLY field (no gate greps/validates it). These use grep-recoverable symbol/RPC-string tokens rather than line numbers so a reader can still find the code after edits shift lines — Fable review 2026-07-08 #3. The older opencode/pi manifests still use line numbers.",
+  "capabilities": [
+    {
+      "schemaVersion": 1,
+      "id": "codex.rollout.observe",
+      "nativeId": "codex:rollout:file",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (discoverSessions)", "packages/typescript/adapters/codex/src/index.ts (rolloutFacts)"],
+      "traceRefs": ["scripts/broker/tests/codex/rollout.ts", "scripts/broker/tests/codex/resume.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_resume",
+      "nativeId": "codex:appserver:thread/resume",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (attach)", "packages/typescript/adapters/codex/src/index.ts (rpc('thread/resume'))"],
+      "traceRefs": ["scripts/broker/tests/codex/resume.ts", "scripts/broker/tests_traces/codex-true-sync-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_loaded_list",
+      "nativeId": "codex:appserver:thread/loaded/list",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('thread/loaded/list'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-true-sync-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.turn_start",
+      "nativeId": "codex:appserver:turn/start",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('turn/start'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.turn_steer",
+      "nativeId": "codex:appserver:turn/steer",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "partial",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('turn/steer'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.turn_interrupt",
+      "nativeId": "codex:appserver:turn/interrupt",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (turn/interrupt)"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.model_list",
+      "nativeId": "codex:appserver:model/list",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('model/list'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-real-native-model-change-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.config_read",
+      "nativeId": "codex:appserver:config/read",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('config/read'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-display-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.skills_list",
+      "nativeId": "codex:appserver:skills/list",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "partial",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('skills/list'))"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-surface-contract-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_compact_start",
+      "nativeId": "codex:appserver:thread/compact/start",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('thread/compact/start'))"],
+      "traceRefs": ["scripts/broker/tests/codex/broker-control-mode.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.rollout.update_plan",
+      "nativeId": "codex:rollout:update_plan",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (case 'turn/plan/updated')"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.rollout.subagent",
+      "nativeId": "codex:rollout:spawn_agent",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (subagentActivity)"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-surface-contract-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.approvals",
+      "nativeId": "codex:appserver:item/approval",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L1", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (ExecCommandApproval / ApplyPatchApproval → permission-request)"],
+      "traceRefs": ["scripts/broker/tests_traces/codex-app-answer-trace.ts", "scripts/broker/tests_traces/codex-app-answer-real-tui-trace.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_start",
+      "nativeId": "codex:appserver:thread/start",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L2"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (createSession)", "packages/typescript/adapters/codex/src/index.ts (createCodexThread)"],
+      "traceRefs": ["scripts/broker/tests/codex/resume.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_name_set",
+      "nativeId": "codex:appserver:thread/name/set",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0", "L1"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (renameSession)", "packages/typescript/adapters/codex/src/index.ts (rpc('thread/name/set'))"],
+      "traceRefs": ["scripts/broker/tests/app/test-web-ui-components.ts"]
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_fork",
+      "nativeId": "codex:appserver:thread/fork",
+      "agent": "codex",
+      "version": "0.142.5",
+      "mappedStatus": "mapped",
+      "evidencePresent": ["D", "L0"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (forkSession)", "packages/typescript/adapters/codex/src/index.ts (forkCodexThread)"],
+      "traceRefs": ["scripts/broker/tests/codex/test-codex-fork.ts"]
+    }
+  ]
+}

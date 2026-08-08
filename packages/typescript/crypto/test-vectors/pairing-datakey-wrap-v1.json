@@ -1,0 +1,15 @@
+{
+  "description": "Cross-language X25519-HKDF-SHA256-AES-256-GCM wrap vector. The recipient private key is a committed test vector, not a secret. Data key byte i is 255 - i. Regenerate with scripts/broker/generate-pairing-vector.ts whenever wrap labels, AAD, or algorithm change, and update the client Dart test to match.",
+  "generator": "scripts/broker/generate-pairing-vector.ts",
+  "recipientPrivateKey": "MC4CAQAwBQYDK2VuBCIEIBDFzu-GkzHl4SBrPrSJ7aESoJObwfWej_XF6PethMV_",
+  "recipientPublicKey": "MCowBQYDK2VuAyEA7dnLM749gqF3xG0gdoEAmA2Y5cZX9yIcfvHjya31FSY",
+  "expectedDataKeyBase64Url": "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA",
+  "wrapped": {
+    "version": 1,
+    "algorithm": "X25519-HKDF-SHA256-AES-256-GCM",
+    "ephemeralPublicKey": "MCowBQYDK2VuAyEAAa4doLKRdQ7wSVpkUJ5aWWH7fU0Q8zUjGOvLkWg5n3o",
+    "nonce": "_cvuDohhG5CTBfNH",
+    "ciphertext": "wC5r0KqXo8fg0U215pn_CUFM2r_7fh_2HjnnKGA2_tg",
+    "tag": "RroQr2D03M0zWiQ7PVmQlA"
+  }
+}

@@ -1,0 +1,560 @@
+/**
+ * Setup wizard string catalog.
+ *
+ * Plain TypeScript objects keyed by message id — no i18n runtime, no message-format parser, no lookup that
+ * can miss. Every catalog implements the same interface, so a missing string is a type error at build time
+ * rather than a `???` on an operator's screen.
+ *
+ * Scope is the WIZARD's own copy: what `cosyncing setup` prompts, titles, and prints. Other human CLI
+ * surfaces reuse the validated language through `cli-i18n.ts`; error/detail codes and machine-readable
+ * output stay English so tooling and quoted bug reports remain stable.
+ *
+ * The English catalog is the reference text. Its strings are what the setup regressions pin, so changing one
+ * is a deliberate copy change, not a translation side effect.
+ *
+ * Chinese copy is written as Chinese, not transliterated English. Terms that name a thing on the machine —
+ * systemd, launchd, Tailscale, Serve, Codex, OpenCode, Claude, Pi, Tokdash, token — stay untranslated,
+ * because those are what the operator will type and what they will search for.
+ */
+import type { SetupAgentSummary, SetupServiceChoice, TokdashProvisionCapability } from './setup.ts';
+import type { TokdashEndpointRejection } from './tokdash-quota.ts';
+
+export type SetupLanguage = 'en' | 'zh-Hans';
+
+/**
+ * One row of the mutation plan, carried as DATA rather than as a finished sentence.
+ *
+ * The plan is the thing the operator consents to, so it has to be readable in the language they picked. The
+ * same rows are also quoted into `--yes` output, the transaction journal, and receipts, where a translated
+ * string would be a moving identifier in a bug report. Keeping the row structured lets the wizard render it
+ * in Chinese while every persisted and machine-facing copy stays the English reference text — the plan
+ * carries both, produced from one source, so they cannot describe different mutations.
+ *
+ * Paths, unit names, URLs, versions, and command names are interpolated verbatim in every language.
+ */
+export type SetupMutationStep =
+  | { kind: 'config'; configPath: string; internalUrl: string; advertisedUrl?: string }
+  | { kind: 'credentials' }
+  | { kind: 'setup-state'; service: SetupServiceChoice }
+  | { kind: 'pi-bridge'; path: string }
+  | { kind: 'agent-skill-install' }
+  | { kind: 'agent-skill-refresh' }
+  | { kind: 'agent-skill-remove' }
+  | { kind: 'opencode-shim' }
+  | { kind: 'service-install'; definitionPath: string }
+  | { kind: 'service-remove'; provider: SetupServiceChoice; product: string }
+  | { kind: 'tailscale-register'; advertisedUrl: string; target: string }
+  | { kind: 'tailscale-reuse' }
+  | { kind: 'tailscale-remove'; advertisedUrl: string }
+  | { kind: 'binary-install'; version: string; path: string }
+  | { kind: 'commit-receipts'; installStatePath: string };
+
+/**
+ * Why the run ended, as a code rather than a sentence. `SetupCommandResult.summary` stays English because it
+ * is the machine-readable line `--yes` prints and a bug report quotes; the interactive footer renders THIS.
+ */
+export type SetupSummaryCode =
+  | 'complete'
+  | 'complete-no-agents'
+  | 'already-configured'
+  | 'blocked-preflight'
+  | 'blocked-committed-dependency'
+  | 'declined-managed-runtime'
+  | 'declined-plan'
+  | 'blocked-unsafe-plan'
+  | 'precondition-changed'
+  | 'cancelled'
+  | 'failed-rolled-back'
+  | 'failed-cleanup-remains';
+
+export const DEFAULT_SETUP_LANGUAGE: SetupLanguage = 'en';
+
+/** Offered in the language-selection step. Each label is written in its own language, never translated. */
+export const SETUP_LANGUAGE_OPTIONS: readonly { value: SetupLanguage; label: string }[] = Object.freeze([
+  { value: 'en', label: 'English' },
+  { value: 'zh-Hans', label: '简体中文' },
+]);
+
+/** Persisted state and env overrides are untrusted input; anything unrecognized falls back to English. */
+export function normalizeSetupLanguage(value: unknown): SetupLanguage | undefined {
+  return SETUP_LANGUAGE_OPTIONS.some((option) => option.value === value) ? value as SetupLanguage : undefined;
+}
+
+/**
+ * `COSYNCING_SETUP_LANG` lets the non-interactive path pick a language without a prompt — the only way
+ * `setup --yes` can run in anything but the persisted choice or English.
+ */
+export function setupLanguageFromEnv(env: Readonly<Record<string, string | undefined>>): SetupLanguage | undefined {
+  return normalizeSetupLanguage(env.COSYNCING_SETUP_LANG?.trim());
+}
+
+export interface SetupMessages {
+  languagePrompt: string;
+  introTitle: (product: string) => string;
+  installationTitle: string;
+  installationBody: (fields: { version: string; install: string; state: string; broker: string }) => string;
+  agentPreflightTitle: string;
+  /** The preflight's own words for a state and for what cosyncing does with each agent. */
+  agentState: (state: SetupAgentSummary['state']) => string;
+  agentBehavior: (id: SetupAgentSummary['id']) => string;
+  unsupportedVersionUnreadable: string;
+  unsupportedDetected: (version: string) => string;
+  unsupportedUpgrade: (command: string) => string;
+  unsupportedReason: (parts: { detected: string; displayName: string; minimumVersion: string; upgrade: string }) => string;
+  codexStandaloneWarning: (command: string) => string;
+  networkTitle: string;
+  networkAuthenticated: (advertisedUrl: string) => string;
+  networkServeAvailable: (advertisedUrl: string) => string;
+  networkLoopback: (summary: string) => string;
+  blocker: (parts: { summary: string; remediation: string }) => string;
+  managedRuntimeTitle: string;
+  managedRuntimeBody: (product: string) => string;
+  managedRuntimeConfirm: (product: string) => string;
+  agentSkillConfirm: string;
+  opencodeShimConfirm: string;
+  serviceQuestion: string;
+  serviceForegroundLabel: string;
+  serviceForegroundHint: (binary: string) => string;
+  serviceDurableLabel: (provider: SetupServiceChoice) => string;
+  serviceDurableHint: (parts: { provider: SetupServiceChoice; available: boolean }) => string;
+  launchdSessionNote: string;
+  tailscaleUnavailableNote: string;
+  /** Takes the real per-host app URL, because "a private Serve route" answers nothing an operator can picture. */
+  tailscaleConfirm: (appUrl: string) => string;
+  /**
+   * Takes the branch provisioning will actually take, because the second half of this note is a promise
+   * about commands that will run. It read only `pipxAvailable` before, which got both ends wrong: a host
+   * with the tokdash CLI installed and no pipx was told nothing could be set up, and a host with both was
+   * promised a `pipx install` that would be skipped.
+   */
+  quotaNote: (baseUrl: string, capability: TokdashProvisionCapability) => string;
+  /**
+   * A refused override. Said out loud, because the endpoint used is not the one asked for — but as a REASON
+   * only. The value is operator-supplied and can carry a credential, so no surface prints it.
+   */
+  quotaUrlRejected: (rejection: TokdashEndpointRejection, baseUrl: string) => string;
+  quotaConfirm: string;
+  /** Post-commit provisioning outcome. Optional work, so every branch reports rather than fails. */
+  quotaReused: (baseUrl: string) => string;
+  /**
+   * Takes whether cosyncing installed the package, so the outcome agrees with whichever prompt case applied:
+   * "installed and started" is a lie about a host where the CLI was already there and only got configured.
+   */
+  quotaProvisioned: (baseUrl: string, installed: boolean) => string;
+  /** An endpoint Tokdash cannot be set up on at all, as opposed to one where setting it up went wrong. */
+  quotaEndpointUnsupported: (baseUrl: string) => string;
+  quotaProvisionFailed: (detail: string) => string;
+  planTitle: string;
+  planEmpty: string;
+  planStep: (step: SetupMutationStep) => string;
+  applyConfirm: string;
+  /** The interactive footer. The English rendering is also the reference text `--yes` and receipts carry. */
+  resultSummary: (code: SetupSummaryCode, parts: { binary: string; stage: string }) => string;
+  recoveredNote: string;
+  outroTitle: (product: string) => string;
+  outroStateDirectory: (path: string) => string;
+  /** Printed instead of an "open it" line when setup could not prove a broker is answering. */
+  outroStartBroker: (binary: string) => string;
+  outroOpenHere: (url: string) => string;
+  outroOpenTailnet: (url: string) => string;
+  outroOpenHereAfterStart: (url: string) => string;
+  outroOpenTailnetAfterStart: (url: string) => string;
+  outroPairInstead: (binary: string) => string;
+  /** The same four lines for a build with no Flutter bundle: `/cosy` there is the pairing-guidance page. */
+  outroPairPageHere: (url: string) => string;
+  outroPairPageTailnet: (url: string) => string;
+  outroPairPageHereAfterStart: (url: string) => string;
+  outroPairPageTailnetAfterStart: (url: string) => string;
+  outroLoopbackOnly: string;
+  outroShortCommand: (alias: string, commands: readonly string[]) => string;
+  outroTokenRead: (path: string) => string;
+  outroTokenSignIn: (appPath: string) => string;
+  outroPreferPairing: (binary: string) => string;
+  cancelledNote: (stage: string) => string;
+  failureTitle: string;
+  failureStep: (value: string) => string;
+  failureReason: (value: string) => string;
+  failureCode: (value: string) => string;
+  failureRollback: (value: string) => string;
+  failureDiagnostic: (value: string) => string;
+  failureAlsoInDoctor: (binary: string) => string;
+}
+
+const en: SetupMessages = {
+  languagePrompt: 'Language',
+  introTitle: (product) => `${product} setup`,
+  installationTitle: 'Installation',
+  installationBody: ({ version, install, state, broker }) =>
+    `Version: ${version}\nInstall: ${install}\nState: ${state}\nBroker: ${broker}`,
+  agentPreflightTitle: 'Agent preflight',
+  agentState: (state) => state,
+  agentBehavior: (id) => ({
+    codex: 'Managed shared app-server; remote terminals may join it.',
+    opencode: 'Managed shared serve; externally managed servers remain untouched.',
+    pi: 'Packaged in-session bridge when Pi is installed.',
+    claude: 'Observe + Take over only; setup never edits Claude settings.',
+  })[id],
+  unsupportedVersionUnreadable: 'the installed version could not be read',
+  unsupportedDetected: (version) => `detected ${version}`,
+  unsupportedUpgrade: (command) => ` Run \`${command}\`.`,
+  unsupportedReason: ({ detected, displayName, minimumVersion, upgrade }) =>
+    `\n  Unsupported: ${detected}; ${displayName} ${minimumVersion} or newer is required.${upgrade}`,
+  codexStandaloneWarning: (command) =>
+    `Warning: app-created sessions remain available, but the broker-managed daemon and terminal sync require `
+      + `the official standalone Codex package. `
+      + `Run \`${command}\`; its installer detects npm-managed Codex and offers to remove it. `
+      + 'Then open a new terminal and rerun `cosy setup`.',
+  networkTitle: 'Network and authentication',
+  networkAuthenticated: (advertisedUrl) => `${advertisedUrl} (authenticated private endpoint)`,
+  networkServeAvailable: (advertisedUrl) =>
+    `Loopback-only now; ${advertisedUrl} is available for confirmed private Serve setup.`,
+  networkLoopback: (summary) => `Loopback-only; ${summary}`,
+  blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
+  managedRuntimeTitle: 'Required managed-runtime acknowledgement',
+  managedRuntimeBody: (product) =>
+    `${product} will manage supported shared Codex/OpenCode runtimes and the packaged Pi bridge. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
+  managedRuntimeConfirm: (product) =>
+    `I understand and want ${product} to manage the supported shared runtimes.`,
+  agentSkillConfirm: 'Install the cosyncing agent skill so agents can deliver files to the app?',
+  opencodeShimConfirm:
+    'Route `opencode` in your terminal to the shared cosyncing serve so its status shows live in the app?',
+  serviceQuestion: 'How should the broker run after setup?',
+  serviceForegroundLabel: 'Foreground',
+  serviceForegroundHint: (binary) => `Run \`${binary} broker\` explicitly after setup.`,
+  serviceDurableLabel: (provider) => provider === 'launchd' ? 'launchd user agent' : 'systemd user service',
+  // Never describe the other platform's manager as "unavailable" — on macOS systemd is not a thing that
+  // could be enabled, and saying so reads as a broken install rather than a host difference.
+  serviceDurableHint: ({ provider, available }) => available
+    ? provider === 'launchd'
+      ? 'Persistent macOS LaunchAgent; runs from GUI login to logout.'
+      : 'Persistent Linux service (installed by the service package).'
+    : provider === 'launchd'
+      ? 'Needs a packaged install and a macOS GUI session; foreground remains supported.'
+      : 'Unavailable on this host; foreground remains supported.',
+  launchdSessionNote: 'The launchd agent runs from GUI login to logout. cosyncing does not install a system-wide '
+    + 'LaunchDaemon, so the broker does not run before you sign in or after you sign out.',
+  tailscaleUnavailableNote: 'Tailscale Serve is unavailable or not logged in; setup will remain loopback-only.',
+  // Name the URL this actually produces. "A private Tailscale Serve route" is the mechanism, not the result,
+  // and an operator cannot consent to a benefit they have to infer. The host is already known at prompt time.
+  tailscaleConfirm: (appUrl) =>
+    `Register a private Tailscale Serve route so the app opens at ${appUrl} from any device on your tailnet?`,
+  // Every case, truthfully. A Tokdash that is already running is reused and never touched; below that, the
+  // note names the commands that will actually run, which is not the same list on every host.
+  quotaNote: (baseUrl, capability) => `Quota comes from Tokdash at ${baseUrl} (override with COSYNCING_TOKDASH_URL). `
+    + 'A Tokdash already running there is reused as-is and never modified. '
+    + {
+      'setup-only': 'If none is running, cosyncing starts the tokdash already installed here: `tokdash setup`, '
+        + 'then quota tracking is turned on. Nothing is installed. Uninstall reverses only the service cosyncing '
+        + 'started.',
+      install: 'If none is running, cosyncing installs and starts one for you: `pipx install tokdash`, then '
+        + '`tokdash setup`, then quota tracking is turned on. Uninstall reverses only what cosyncing installed.',
+      unavailable: 'If none is running, cosyncing cannot set one up here: neither tokdash nor pipx is installed. '
+        + 'Install pipx (it needs Python 3.9+) — `sudo apt install pipx` on Ubuntu, `brew install pipx` on macOS '
+        + '— then run setup again and it will finish this step.',
+    }[capability],
+  // The value is withheld on purpose and the copy says so, or an operator retypes the variable looking for
+  // the typo that was quoted back at them. An override can carry a credential; the reason cannot.
+  quotaUrlRejected: (rejection, baseUrl) =>
+    `COSYNCING_TOKDASH_URL was refused because ${({
+      unparseable: 'it is not a valid URL',
+      'not-http': 'Tokdash serves http(s) only',
+      'not-loopback': 'it does not point at localhost',
+      credentials: 'it embeds credentials',
+    })[rejection]}, so ${baseUrl} is used instead — by setup and by the broker alike. `
+    + 'The value itself is not printed, because an override can carry a secret.',
+  quotaConfirm: 'Enable local token and usage quota tracking via Tokdash?',
+  quotaReused: (baseUrl) => `Using the Tokdash already running at ${baseUrl}; nothing was installed or changed.`,
+  quotaProvisioned: (baseUrl, installed) => installed
+    ? `Installed and started Tokdash at ${baseUrl} with quota tracking enabled.`
+    : `Started the Tokdash already installed here at ${baseUrl}, with quota tracking enabled. Nothing was installed.`,
+  quotaEndpointUnsupported: (baseUrl) =>
+    `cosyncing cannot set up a Tokdash at ${baseUrl}: Tokdash serves plain HTTP from the root of a loopback port. `
+    + 'Setup itself is complete; start Tokdash there yourself, or change COSYNCING_TOKDASH_URL.',
+  // Optional work: say what did not happen and that the install is fine, or this reads as a failed setup.
+  quotaProvisionFailed: (detail) =>
+    `Tokdash could not be set up, so quota warnings are off. Setup itself is complete. ${detail}`,
+  planTitle: 'Exact mutation plan',
+  planEmpty: 'No filesystem or service mutation is required.',
+  // This rendering is the reference text: the plan's `mutationSummary`, the `--yes` `[plan]` lines, and the
+  // journal all quote it, so a change here is a change to what the receipts say.
+  planStep: (step) => {
+    switch (step.kind) {
+      case 'config':
+        return `Write owner-only ${step.configPath} with internal ${step.internalUrl}`
+          + `${step.advertisedUrl ? ` and private advertised ${step.advertisedUrl}` : ''}.`;
+      case 'credentials':
+        return 'Create owner-only broker and Pi-scoped credentials without printing or placing them in '
+          + 'process arguments.';
+      case 'setup-state':
+        return `Record managed-runtime acknowledgement, ${step.service} service choice, separate lingering `
+          + 'consent, independent Tailscale intent, and quota consent.';
+      case 'pi-bridge':
+        return `Write the exact packaged bridge to ${step.path}; unrelated content is never overwritten.`;
+      case 'agent-skill-install':
+        return 'Install the packaged skill into both Claude and shared .agents discovery roots and record '
+          + 'one ownership receipt per target.';
+      case 'agent-skill-refresh':
+        return "Refresh the packaged cosyncing skill to this build's version in both Claude and shared "
+          + '.agents discovery roots and update each ownership receipt.';
+      case 'agent-skill-remove':
+        return 'Remove only exact receipt-owned copies from both native discovery roots.';
+      case 'opencode-shim':
+        return 'Install the cosyncing opencode shim and add a managed source block to detected bash/zsh rc '
+          + 'files; open a new shell or source your rc file (e.g. `source ~/.bashrc`) to activate. Unrelated '
+          + 'rc content is preserved byte-for-byte.';
+      case 'service-install':
+        return `Stop only the owned service when needed, write and enable ${step.definitionPath}, commit `
+          + 'receipts, then start and health-check once.';
+      case 'service-remove':
+        return `Stop and remove only the receipt-owned ${step.provider} service; remove its lingering policy `
+          + `only when ${step.product} enabled it.`;
+      case 'tailscale-register':
+        return `Register ${step.advertisedUrl}/ to proxy ${step.target}; Funnel is never invoked.`;
+      case 'tailscale-reuse':
+        return 'Reuse the matching pre-existing private Serve route without claiming ownership; uninstall '
+          + 'will preserve it.';
+      case 'tailscale-remove':
+        return `Remove only the receipt-owned ${step.advertisedUrl}/ route and preserve every foreign Serve `
+          + 'handler.';
+      case 'binary-install':
+        return `Copy the running ${step.version} executable to owner-only ${step.path} and record its `
+          + 'measured ownership receipt; the acquisition artifact (for example an npm package) is left '
+          + 'untouched.';
+      case 'commit-receipts':
+        return `Commit owner receipts to ${step.installStatePath} only after verification.`;
+    }
+  },
+  applyConfirm: 'Apply and verify this exact plan?',
+  resultSummary: (code, { binary, stage }) => {
+    switch (code) {
+      case 'complete': return 'Setup committed successfully.';
+      case 'complete-no-agents':
+        return 'Setup committed successfully. No supported coding agents were found; install one and rerun doctor.';
+      case 'already-configured':
+        return 'Setup is already committed; health and preflight results were refreshed without mutation.';
+      case 'blocked-preflight': return 'Setup is blocked by preflight findings; no mutation was applied.';
+      case 'blocked-committed-dependency':
+        return 'Committed setup has a newly unsafe or unavailable dependency; no mutation was applied.';
+      case 'declined-managed-runtime':
+        return 'Required managed-runtime acknowledgement was declined; no mutation was applied.';
+      case 'declined-plan': return 'The mutation plan was declined; no mutation was applied.';
+      case 'blocked-unsafe-plan': return 'Setup cannot apply this plan safely; no mutation was applied.';
+      case 'precondition-changed':
+        return 'Setup preconditions changed after confirmation; rerun to review the new plan.';
+      case 'cancelled': return `Setup cancelled during ${stage}; no mutation was applied.`;
+      case 'failed-rolled-back':
+        return 'Setup failed and completed actions were rolled back. Rerun setup for a fresh inspection.';
+      case 'failed-cleanup-remains':
+        return `Setup failed and cleanup remains. Keep the transaction journal and rerun \`${binary} setup\`, `
+          + 'which rolls the remainder back before replanning.';
+    }
+  },
+  recoveredNote: 'Recovered an interrupted setup transaction by rolling it back to its journaled pre-state.',
+  outroTitle: (product) => `Open ${product}`,
+  outroStateDirectory: (path) => `State directory: ${path}`,
+  outroStartBroker: (binary) => `Nothing is listening yet. Start the broker: \`${binary} broker\`.`,
+  outroOpenHere: (url) => `Open the app on this machine: ${url}`,
+  outroOpenTailnet: (url) => `Open it from your tailnet: ${url}`,
+  outroOpenHereAfterStart: (url) => `Then open the app on this machine: ${url}`,
+  outroOpenTailnetAfterStart: (url) => `Then open it from your tailnet: ${url}`,
+  outroPairInstead: (binary) => `Run \`${binary} pair\` and scan the QR to pair a client.`,
+  outroPairPageHere: (url) => `The same steps in a browser: ${url}`,
+  outroPairPageTailnet: (url) => `Or from your tailnet: ${url}`,
+  outroPairPageHereAfterStart: (url) => `Then the same steps in a browser: ${url}`,
+  outroPairPageTailnetAfterStart: (url) => `Or, once it is running, from your tailnet: ${url}`,
+  outroLoopbackOnly: 'Loopback only: no Tailscale Serve route is registered.',
+  outroShortCommand: (alias, commands) =>
+    `Short command: \`${alias}\` is an alias for \`cosyncing\`, for example ${commands.map((value) => `\`${value}\``).join(', ')}.`,
+  outroTokenRead: (path) => `Read authentication token file: cat ${path}`,
+  outroTokenSignIn: (appPath) => `The web app (${appPath}) asks for this token to sign in.`,
+  outroPreferPairing: (binary) =>
+    `Prefer \`${binary} pair\` for phones and tablets. It issues one credential per device, so you can `
+      + 'revoke a single device. The token file above is the master secret: full broker API access, and '
+      + 'the same one for everybody who has it.',
+  cancelledNote: (stage) => `Setup cancelled during ${stage}. No mutation was applied.`,
+  failureTitle: 'Why setup failed',
+  failureStep: (value) => `Failed step: ${value}`,
+  failureReason: (value) => `Reason: ${value}`,
+  failureCode: (value) => `Failure code: ${value}`,
+  failureRollback: (value) => `Rollback: ${value}`,
+  failureDiagnostic: (value) => `Saved diagnostic: ${value}`,
+  failureAlsoInDoctor: (binary) => `Also reported by \`${binary} doctor\`.`,
+};
+
+const zhHans: SetupMessages = {
+  languagePrompt: '选择语言 / Language',
+  introTitle: (product) => `${product} 安装配置`,
+  installationTitle: '安装信息',
+  installationBody: ({ version, install, state, broker }) =>
+    `版本：${version}\n程序位置：${install}\n数据目录：${state}\nBroker 地址：${broker}`,
+  agentPreflightTitle: '编程助手检查',
+  agentState: (state) => ({ missing: '未安装', supported: '已支持', unsupported: '版本过低' })[state],
+  agentBehavior: (id) => ({
+    codex: '由 cosyncing 托管共享 app-server，远程终端可以接入。',
+    opencode: '由 cosyncing 托管共享 serve；你自己启动的 server 不受影响。',
+    pi: '装有 Pi 时，随包提供会话内 bridge。',
+    claude: '只有「观察 + 接管」两种模式；安装过程不会改动 Claude 的配置。',
+  })[id],
+  unsupportedVersionUnreadable: '无法读取已安装的版本',
+  unsupportedDetected: (version) => `检测到 ${version}`,
+  unsupportedUpgrade: (command) => `请执行 \`${command}\` 升级。`,
+  unsupportedReason: ({ detected, displayName, minimumVersion, upgrade }) =>
+    `\n  版本过低：${detected}；${displayName} 需要 ${minimumVersion} 或更新版本。${upgrade}`,
+  codexStandaloneWarning: (command) =>
+    `警告：App 创建会话仍可使用；由 broker 托管的 daemon 和终端同步需要官方独立版 Codex。请执行 \`${command}\`；`
+      + '官方安装器会检测 npm 版 Codex，并询问是否移除。安装完成后，请打开新终端并重新运行 `cosy setup`。',
+  networkTitle: '网络与认证',
+  networkAuthenticated: (advertisedUrl) => `${advertisedUrl}（需认证的私有地址）`,
+  networkServeAvailable: (advertisedUrl) =>
+    `目前仅限本机访问；确认后可通过 Tailscale Serve 启用 ${advertisedUrl}。`,
+  networkLoopback: (summary) => `仅限本机访问；${summary}`,
+  blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
+  managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
+  managedRuntimeBody: (product) =>
+    `${product} 会接管支持的 Codex/OpenCode 共享运行时，以及随包提供的 Pi bridge。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
+  managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
+  agentSkillConfirm: '安装 cosyncing agent skill，让编程助手可以把文件直接送到 App？',
+  opencodeShimConfirm: '把终端里的 `opencode` 指向 cosyncing 的共享 serve，让它的状态实时显示在 App 里？',
+  serviceQuestion: '安装完成后，broker 以哪种方式运行？',
+  serviceForegroundLabel: '前台运行',
+  serviceForegroundHint: (binary) => `每次自己执行 \`${binary} broker\` 启动。`,
+  serviceDurableLabel: (provider) => provider === 'launchd' ? 'launchd 用户代理' : 'systemd 用户服务',
+  serviceDurableHint: ({ provider, available }) => available
+    ? provider === 'launchd'
+      ? '常驻的 macOS LaunchAgent，从图形界面登录起运行到注销为止。'
+      : '常驻的 Linux 服务（由服务包安装）。'
+    : provider === 'launchd'
+      ? '需要打包安装并处于 macOS 图形会话中；前台运行始终可用。'
+      : '此主机不支持；前台运行始终可用。',
+  launchdSessionNote: 'launchd 代理从图形界面登录起运行到注销为止。cosyncing 不会安装系统级 LaunchDaemon，'
+    + '所以登录前和注销后 broker 都不会运行。',
+  tailscaleUnavailableNote: 'Tailscale Serve 不可用或尚未登录，本次安装将仅限本机访问。',
+  tailscaleConfirm: (appUrl) =>
+    `注册一条私有的 Tailscale Serve 路由，让 tailnet 内的任何设备都能通过 ${appUrl} 打开 App？`,
+  quotaNote: (baseUrl, capability) => `配额数据来自 ${baseUrl} 上的 Tokdash（可用 COSYNCING_TOKDASH_URL 覆盖）。`
+    + '如果那里已经有 Tokdash 在运行，就直接复用，不会做任何改动；'
+    + {
+      'setup-only': '如果没有，cosyncing 会直接启动这台机器上已经装好的 tokdash：运行 `tokdash setup`，'
+        + '然后打开配额跟踪。不会安装任何东西。卸载时只会撤销 cosyncing 自己启动的那个服务。',
+      install: '如果没有，cosyncing 会自动帮你装一个并启动：先 `pipx install tokdash`，再 `tokdash setup`，'
+        + '然后打开配额跟踪。卸载时只会撤销 cosyncing 自己装的东西。',
+      unavailable: '如果没有，cosyncing 在这台机器上没法自动安装：系统里既没有 tokdash 也没有 pipx。'
+        + '请先装好 pipx（它需要 Python 3.9+）——Ubuntu 上用 `sudo apt install pipx`，'
+        + 'macOS 上用 `brew install pipx`——然后重新运行 setup，这一步就会自动补上。',
+    }[capability],
+  quotaUrlRejected: (rejection, baseUrl) =>
+    `COSYNCING_TOKDASH_URL 被拒绝了，原因是${({
+      unparseable: '它不是合法的 URL',
+      'not-http': 'Tokdash 只提供 http(s) 服务',
+      'not-loopback': '它指向的不是本机地址',
+      credentials: '它里面带了账号密码',
+    })[rejection]}，因此改用 ${baseUrl}——安装配置和 broker 用的都是它。`
+    + '这个值本身不会被打印出来，因为覆盖值里可能带着密钥。',
+  quotaConfirm: '启用基于 Tokdash 的本地 token 与用量配额跟踪？',
+  quotaReused: (baseUrl) => `直接使用 ${baseUrl} 上已经在运行的 Tokdash，没有安装也没有改动任何东西。`,
+  quotaProvisioned: (baseUrl, installed) => installed
+    ? `已经装好并启动了 Tokdash（${baseUrl}），配额跟踪也已打开。`
+    : `已经把这台机器上原本装好的 Tokdash 启动起来了（${baseUrl}），配额跟踪也已打开，没有安装任何东西。`,
+  quotaEndpointUnsupported: (baseUrl) =>
+    `cosyncing 无法在 ${baseUrl} 上自动安装 Tokdash：Tokdash 只在本机端口的根路径上提供普通 HTTP 服务。`
+    + '安装配置本身已经完成；请自行在该地址启动 Tokdash，或修改 COSYNCING_TOKDASH_URL。',
+  quotaProvisionFailed: (detail) => `Tokdash 没能装好，配额提醒暂时不可用。安装配置本身已经完成。${detail}`,
+  planTitle: '将要执行的改动',
+  planEmpty: '无需改动任何文件或服务。',
+  // 路径、unit 名、URL、版本号、命令名一律保持原样：这些是操作者要输入和搜索的东西。
+  planStep: (step) => {
+    switch (step.kind) {
+      case 'config':
+        return `写入仅本人可读的 ${step.configPath}，内部地址为 ${step.internalUrl}`
+          + `${step.advertisedUrl ? `，对外私有地址为 ${step.advertisedUrl}` : ''}。`;
+      case 'credentials':
+        return '生成仅本人可读的 broker 凭据和 Pi 专用凭据；不会打印出来，也不会出现在进程参数里。';
+      case 'setup-state':
+        return `记录托管运行时的确认结果、${step.service} 运行方式、单独的 lingering 授权、`
+          + '独立的 Tailscale 意向，以及配额跟踪的选择。';
+      case 'pi-bridge':
+        return `把随包提供的 bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
+      case 'agent-skill-install':
+        return '把随包提供的 skill 安装到 Claude 和共享 .agents 两个发现目录，并为每个目标记录一条归属凭证。';
+      case 'agent-skill-refresh':
+        return '把 Claude 和共享 .agents 两个发现目录里的 cosyncing skill 更新到本版本，并刷新各自的归属凭证。';
+      case 'agent-skill-remove':
+        return '只从两个原生发现目录中删除凭证证明属于我们的副本。';
+      case 'opencode-shim':
+        return '安装 cosyncing 的 opencode shim，并在检测到的 bash/zsh rc 文件中加入一段受管理的 source 块；'
+          + '打开新终端或执行 `source ~/.bashrc` 后生效。rc 里的其他内容会逐字节保留。';
+      case 'service-install':
+        return `必要时只停止我们自己的服务，写入并启用 ${step.definitionPath}，提交凭证，然后启动并做一次健康检查。`;
+      case 'service-remove':
+        return `只停止并删除凭证证明属于我们的 ${step.provider} 服务；`
+          + `lingering 策略仅在当初由 ${step.product} 启用时才会一并取消。`;
+      case 'tailscale-register':
+        return `注册 ${step.advertisedUrl}/ 反向代理到 ${step.target}；全程不会启用 Funnel。`;
+      case 'tailscale-reuse':
+        return '直接复用已经存在的同名私有 Serve 路由，不声明归属；卸载时会原样保留它。';
+      case 'tailscale-remove':
+        return `只删除凭证证明属于我们的 ${step.advertisedUrl}/ 路由，其他 Serve 处理器全部保留。`;
+      case 'binary-install':
+        return `把正在运行的 ${step.version} 可执行文件复制到仅本人可读的 ${step.path}，`
+          + '并记录其校验过的归属凭证；获取来源（例如 npm 包）不会被改动。';
+      case 'commit-receipts':
+        return `全部校验通过之后，才把归属凭证提交到 ${step.installStatePath}。`;
+    }
+  },
+  applyConfirm: '按以上清单执行并逐项校验？',
+  resultSummary: (code, { binary, stage }) => {
+    switch (code) {
+      case 'complete': return '安装配置已完成。';
+      case 'complete-no-agents':
+        return '安装配置已完成。没有检测到受支持的编程助手；装好一个之后再跑一次 doctor。';
+      case 'already-configured': return '已经配置过了；这次只刷新了健康检查和环境检查，没有做任何改动。';
+      case 'blocked-preflight': return '环境检查发现阻塞项，安装中止，没有做任何改动。';
+      case 'blocked-committed-dependency':
+        return '已完成的安装出现了新的不安全或不可用的依赖项，没有做任何改动。';
+      case 'declined-managed-runtime': return '必须的托管运行时确认被拒绝，没有做任何改动。';
+      case 'declined-plan': return '改动清单未被确认，没有做任何改动。';
+      case 'blocked-unsafe-plan': return '无法安全地执行这份清单，没有做任何改动。';
+      case 'precondition-changed': return '确认之后前置条件发生了变化；请重新运行以查看新的清单。';
+      case 'cancelled': return `安装已在「${stage}」这一步取消，没有做任何改动。`;
+      case 'failed-rolled-back': return '安装失败，已执行的改动都已回滚。重新运行 setup 会重新检查一遍环境。';
+      case 'failed-cleanup-remains':
+        return `安装失败，且仍有未清理的改动。请保留事务日志并重新执行 \`${binary} setup\`，`
+          + '它会先把剩下的部分回滚，再重新生成清单。';
+    }
+  },
+  recoveredNote: '发现一次中断的安装事务，已按日志回滚到改动前的状态。',
+  outroTitle: (product) => `打开 ${product}`,
+  outroStateDirectory: (path) => `数据目录：${path}`,
+  outroStartBroker: (binary) => `broker 还没有在运行，先启动它：\`${binary} broker\`。`,
+  outroOpenHere: (url) => `在本机打开：${url}`,
+  outroOpenTailnet: (url) => `在 tailnet 内打开：${url}`,
+  outroOpenHereAfterStart: (url) => `启动后在本机打开：${url}`,
+  outroOpenTailnetAfterStart: (url) => `启动后在 tailnet 内打开：${url}`,
+  outroPairInstead: (binary) => `执行 \`${binary} pair\` 并扫描二维码，即可配对一台客户端。`,
+  outroPairPageHere: (url) => `浏览器里也有同样的步骤：${url}`,
+  outroPairPageTailnet: (url) => `或在 tailnet 内打开：${url}`,
+  outroPairPageHereAfterStart: (url) => `启动后，浏览器里也有同样的步骤：${url}`,
+  outroPairPageTailnetAfterStart: (url) => `启动后，也可以在 tailnet 内打开：${url}`,
+  outroLoopbackOnly: '仅限本机访问：没有注册 Tailscale Serve 路由。',
+  outroShortCommand: (alias, commands) =>
+    `快捷命令：\`${alias}\` 是 \`cosyncing\` 的别名，例如 ${commands.map((value) => `\`${value}\``).join('、')}。`,
+  outroTokenRead: (path) => `查看认证令牌文件：cat ${path}`,
+  outroTokenSignIn: (appPath) => `网页版（${appPath}）用这个 token 登录。`,
+  outroPreferPairing: (binary) =>
+    `手机和平板建议用 \`${binary} pair\` 配对：每台设备拿到各自的凭据，可以单独吊销。`
+      + '上面这个 token 文件是主密钥，拥有 broker API 的全部权限，而且所有人拿到的都是同一个。',
+  cancelledNote: (stage) => `安装已在「${stage}」这一步取消，没有做任何改动。`,
+  failureTitle: '安装失败原因',
+  failureStep: (value) => `失败步骤：${value}`,
+  failureReason: (value) => `原因：${value}`,
+  failureCode: (value) => `错误码：${value}`,
+  failureRollback: (value) => `回滚：${value}`,
+  failureDiagnostic: (value) => `已保存的诊断文件：${value}`,
+  failureAlsoInDoctor: (binary) => `\`${binary} doctor\` 也会报告这一项。`,
+};
+
+const CATALOG: Record<SetupLanguage, SetupMessages> = { en, 'zh-Hans': zhHans };
+
+export function setupMessages(language: SetupLanguage | undefined): SetupMessages {
+  return CATALOG[language ?? DEFAULT_SETUP_LANGUAGE];
+}

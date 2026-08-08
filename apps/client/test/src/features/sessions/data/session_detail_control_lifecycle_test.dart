@@ -1,0 +1,1915 @@
+// Behavior files retain a common import set to keep split diffs mechanical.
+// ignore_for_file: unused_import, unnecessary_import
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:broker_client/broker_client.dart';
+import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_launch_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/data/created_session_attach_intents.dart';
+import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/model/session_command_args_codec.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import '../../../../support/session_detail_controller_test_harness.dart';
+
+void main() {
+  late FakeSessionDetailConnection fakeConnection;
+  late FakeControllerArtifactFileService fakeArtifactFileService;
+  late FakeControllerAttachmentPicker fakeAttachmentPicker;
+  late FakeControllerBrokerClient fakeBrokerClient;
+  late RecordingSessionOutboxRepository fakeOutboxRepository;
+  late RecordingSessionTranscriptRepository fakeTranscriptRepository;
+  late InMemoryControllerDriveIntentStore fakeDriveIntentStore;
+  late InMemorySessionListRepository fakeSessionListRepository;
+  late StubSessionListController fakeSessionListController;
+  late ProviderContainer container;
+
+  late List<Override> baseOverrides;
+
+  setUp(() {
+    fakeConnection = FakeSessionDetailConnection();
+    fakeArtifactFileService = FakeControllerArtifactFileService();
+    fakeAttachmentPicker = FakeControllerAttachmentPicker();
+    fakeBrokerClient = FakeControllerBrokerClient();
+    fakeOutboxRepository = RecordingSessionOutboxRepository();
+    fakeTranscriptRepository = RecordingSessionTranscriptRepository();
+    fakeDriveIntentStore = InMemoryControllerDriveIntentStore();
+    fakeSessionListRepository = InMemorySessionListRepository();
+    fakeSessionListController = StubSessionListController();
+    baseOverrides = [
+      ...dr1DurableDraftTestOverrides(),
+      activeBrokerProfileProvider.overrideWith(
+        (ref) => fakeControllerBrokerProfile(),
+      ),
+      brokerClientProvider.overrideWith((ref) async => fakeBrokerClient),
+      sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+        StubBrokerAppLifecycleMonitor(
+          currentState: BrokerAppLifecycleState.paused,
+        ),
+      ),
+      sessionNotificationSinkProvider.overrideWithValue(
+        CollectingNotificationSink(),
+      ),
+      sessionDetailConnectionFactoryProvider.overrideWithValue(
+        ({required resolver, required sessionId, required tool}) {
+          fakeConnection
+            ..sessionId = sessionId
+            ..tool = tool;
+          return fakeConnection;
+        },
+      ),
+      sessionArtifactFileServiceProvider.overrideWithValue(
+        fakeArtifactFileService,
+      ),
+      sessionAttachmentPickerProvider.overrideWithValue(
+        fakeAttachmentPicker,
+      ),
+      sessionArtifactTransferRepositoryProvider.overrideWithValue(
+        InMemorySessionArtifactTransferRepository(),
+      ),
+      sessionOutboxRepositoryProvider.overrideWithValue(
+        fakeOutboxRepository,
+      ),
+      sessionTranscriptRepositoryProvider.overrideWithValue(
+        fakeTranscriptRepository,
+      ),
+      sessionDriveIntentStoreProvider.overrideWithValue(
+        fakeDriveIntentStore,
+      ),
+      sessionListRepositoryProvider.overrideWith(
+        (ref) async => fakeSessionListRepository,
+      ),
+      sessionListControllerProvider.overrideWith(
+        () => fakeSessionListController,
+      ),
+    ];
+    container = ProviderContainer(overrides: baseOverrides);
+  });
+
+  tearDown(() {
+    container.dispose();
+  });
+  group('SessionDetailController', () {
+    const key = SessionDetailKey(tool: 'claude', sessionId: 'session-1');
+
+    test('starts disconnected with selected session identity', () {
+      keepSessionDetailAlive(container, key);
+
+      final state = container.read(sessionDetailControllerProvider(key));
+
+      expect(state.tool, 'claude');
+      expect(state.sessionId, 'session-1');
+      expect(
+        state.connectionStatus,
+        SessionDetailConnectionStatus.disconnected,
+      );
+      expect(state.events, isEmpty);
+    });
+
+    test('coalesces concurrent attach requests for the same profile', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+
+      final first = controller.attach();
+      final second = controller.attach();
+
+      expect(identical(first, second), isTrue);
+      await Future.wait([first, second]);
+      expect(fakeConnection.connectCount, 1);
+      expect(fakeConnection.reattachModes, isEmpty);
+    });
+
+    test('clearing the active profile disposes the old connection', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+
+      container.read(activeBrokerProfileProvider.notifier).state = null;
+      await controller.attach();
+
+      expect(fakeConnection.disposeCount, 1);
+      final state = container.read(sessionDetailControllerProvider(key));
+      expect(
+        state.connectionStatus,
+        SessionDetailConnectionStatus.disconnected,
+      );
+      expect(state.error, contains('Connect to a broker'));
+    });
+
+    test('takeOver re-attaches in resume (Drive) mode', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final takeover = controller.takeOver();
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.reattachModes, ['resume']);
+      expect(fakeConnection.reattachReasons, ['takeover']);
+
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'driving', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      final succeeded = await takeover;
+      await Future<void>.delayed(Duration.zero);
+      expect(succeeded, isTrue);
+      expect(
+        fakeDriveIntentStore.intents['claude/session-1'],
+        SessionDriveProvenanceKind.terminalTakeover,
+      );
+    });
+
+    test('new-session resume instruction is consumed exactly once', () async {
+      container
+          .read(createdSessionAttachIntentsProvider)
+          .rememberResume(fakeControllerBrokerScope(), key);
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+
+      await controller.attach();
+      expect(fakeConnection.reattachModes, ['resume']);
+      expect(fakeConnection.reattachReasons, ['create']);
+
+      await controller.attach();
+      expect(
+        fakeConnection.reattachModes,
+        ['resume'],
+        reason: 'an already-interactive resident attach is a no-op',
+      );
+    });
+
+    test(
+      'new-session Connecting phase establishes Drive before handoff completes',
+      () async {
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberResume(fakeControllerBrokerScope(), key);
+
+        final handoff = await prepareCreatedSessionConnection(
+          container,
+          const SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Created session',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+          ),
+        );
+
+        expect(fakeConnection.reattachModes, ['resume']);
+        expect(fakeConnection.reattachReasons, ['create']);
+        expect(
+          container
+              .read(createdSessionAttachIntentsProvider)
+              .takeResume(fakeControllerBrokerScope(), key),
+          isFalse,
+          reason: 'the launch handoff consumed its one-shot create intent',
+        );
+        handoff.release();
+      },
+    );
+
+    test(
+      'new-session Drive controller stays resident until detail claims it',
+      () async {
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberResume(fakeControllerBrokerScope(), key);
+
+        final handoff = await prepareCreatedSessionConnection(
+          container,
+          const SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Created session',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        expect(
+          fakeConnection.disposeCount,
+          0,
+          reason: 'launch must not release Drive before navigation mounts',
+        );
+
+        final detailLease = container.listen(
+          sessionDetailControllerProvider(key),
+          (previous, next) {},
+          fireImmediately: true,
+        );
+        handoff.release();
+        await drainSessionDetailMicrotasks();
+
+        expect(
+          fakeConnection.disposeCount,
+          0,
+          reason: 'the destination watch owns the same live controller',
+        );
+
+        detailLease.close();
+        await drainSessionDetailMicrotasks();
+        expect(fakeConnection.disposeCount, 1);
+      },
+    );
+
+    test(
+      'background observe never restores Drive and interactive upgrades once',
+      () async {
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, isEmpty);
+        expect(fakeConnection.reattachReasons, isEmpty);
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.appCreated,
+          reason: 'background observation must not consume local authority',
+        );
+
+        await controller.attach();
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, ['resume']);
+        expect(fakeConnection.reattachReasons, ['app-restore']);
+
+        await controller.attach();
+        expect(
+          fakeConnection.reattachModes,
+          ['resume'],
+          reason: 'later tab visibility changes reuse the upgraded attach',
+        );
+      },
+    );
+
+    test(
+      'interactive promotion without Drive provenance keeps the Observe socket',
+      () async {
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        final resetGeneration = container
+            .read(sessionDetailControllerProvider(key))
+            .transcriptResetGeneration;
+
+        await controller.attach();
+
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, isEmpty);
+        expect(fakeConnection.reattachReasons, isEmpty);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .transcriptResetGeneration,
+          resetGeneration,
+          reason: 'promotion must not bootstrap or replay the transcript',
+        );
+      },
+    );
+
+    test('handoffToTerminal re-attaches in Observe mode (null)', () async {
+      fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection.reattachModes.clear();
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'driving', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final succeeded = await controller.handoffToTerminal();
+
+      expect(succeeded, isTrue);
+      expect(fakeConnection.reattachModes, [null]);
+      expect(fakeDriveIntentStore.intents, isNot(contains('claude/session-1')));
+    });
+
+    test(
+      'restore provenance retires stale outbox before the reason attach',
+      () async {
+        fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+        await fakeOutboxRepository.upsert(
+          SessionOutboxMessage.create(
+            sessionKey: key,
+            brokerProfileId: fakeControllerBrokerScope(),
+            clientMessageId: 'ca.retry.auto-resume',
+            kind: SessionOutboxMessageKind.prompt,
+            payload: const {'text': 'must not fork'},
+          ).copyWith(status: SessionOutboxMessageStatus.retryable),
+        );
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, ['resume']);
+        expect(fakeConnection.reattachReasons, ['lease-restore']);
+        // The ownership decision moved into the broker's atomic attach: the
+        // reopen must not fetch a roster (or transcript) to decide.
+        expect(fakeSessionListController.loadCount, 0);
+        expect(fakeSessionListRepository.fetchCount, 0);
+        expect(fakeConnection.sendPromptCount, 0);
+        expect(
+          fakeOutboxRepository.messageById('ca.retry.auto-resume')?.status,
+          SessionOutboxMessageStatus.failed,
+        );
+        expect(
+          fakeOutboxRepository.messageById('ca.retry.auto-resume')?.lastError,
+          contains('ownership change'),
+        );
+      },
+    );
+
+    test(
+      'app-created provenance restores with app-restore and no roster fetch',
+      () async {
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        expect(fakeConnection.connectCount, 0);
+        expect(fakeConnection.reattachModes, ['resume']);
+        expect(fakeConnection.reattachReasons, ['app-restore']);
+        expect(fakeSessionListRepository.fetchCount, 0);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .driveRestorePhase,
+          SessionDriveRestorePhase.restoring,
+        );
+
+        // The broker confirms the reconstructed owner: Restoring settles to
+        // idle and the durable preference is refreshed, not narrowed.
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .driveRestorePhase,
+          SessionDriveRestorePhase.idle,
+        );
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.appCreated,
+        );
+      },
+    );
+
+    test(
+      'attach-conflict ends Restoring honestly and preserves provenance',
+      () async {
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        expect(fakeConnection.reattachReasons, ['app-restore']);
+
+        fakeConnection
+          ..emitEvent(
+            const AttachConflictWireEvent(
+              requestedMode: 'resume',
+              reason: 'app-restore',
+              code: 'DRIVE_OWNERSHIP_CONFLICT',
+              message: 'A terminal is running this session privately.',
+            ),
+          )
+          // The broker continues the socket as Observe; the session frame
+          // that follows must neither erase the durable preference nor blank
+          // the just-surfaced denial note.
+          ..emitSessionControl(const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          });
+        await Future<void>.delayed(Duration.zero);
+
+        final state = container.read(sessionDetailControllerProvider(key));
+        // The denial stays visible through the ordinary Observe fallback
+        // frame — the broker always sends one right after attach-conflict,
+        // so clearing on it would flash the note for a single frame.
+        expect(state.driveRestorePhase, SessionDriveRestorePhase.conflict);
+        expect(
+          state.driveRestoreConflict?.code,
+          'DRIVE_OWNERSHIP_CONFLICT',
+        );
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.appCreated,
+        );
+        // The honest Observe answer still leaves manual Drive reachable.
+        expect(
+          SessionControlView.fromSessionInfo(state.sessionInfo).canTakeOver,
+          isTrue,
+        );
+
+        // Only genuinely restored mutability settles the note: a confirmed
+        // Driving frame clears it and returns the phase to idle.
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+        final restored = container.read(sessionDetailControllerProvider(key));
+        expect(restored.driveRestorePhase, SessionDriveRestorePhase.idle);
+        expect(restored.driveRestoreConflict, isNull);
+      },
+    );
+
+    test(
+      'non-driving arbitration answer preserves provenance for later reopens',
+      () async {
+        // e.g. the broker joined an active shared owner instead of Resume: a
+        // cold Observing/synced frame is not proof against the preference.
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'unavailable', 'supported': false},
+          'terminalSync': {
+            'supported': true,
+            'syncAvailable': true,
+            'active': true,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .driveRestorePhase,
+          SessionDriveRestorePhase.idle,
+        );
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.appCreated,
+        );
+      },
+    );
+
+    test(
+      'unreadable provenance storage attaches bare and preserves records',
+      () async {
+        fakeDriveIntentStore
+          ..seedTakeover('claude', 'session-1')
+          ..failRead = true;
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, isEmpty);
+        expect(fakeDriveIntentStore.intents, contains('claude/session-1'));
+      },
+    );
+
+    test(
+      'transient automatic restore failure preserves app-created provenance',
+      () async {
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        fakeConnection.failNextReattach = true;
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(state.bootstrapState.hasFailed, isTrue);
+        expect(state.driveRestorePhase, SessionDriveRestorePhase.idle);
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.appCreated,
+        );
+      },
+    );
+
+    test('real app mutation slides an existing takeover lease', () async {
+      fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'driving', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeDriveIntentStore.takeoverRefreshCount, 1);
+
+      expect(await controller.sendPrompt('slide the lease'), isTrue);
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeDriveIntentStore.takeoverRefreshCount, 2);
+    });
+
+    test('a session-ended frame clears Drive provenance', () async {
+      fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+
+      fakeConnection.emitEvent(const EndedWireEvent(reason: 'quit'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fakeDriveIntentStore.intents, isNot(contains('claude/session-1')));
+      fakeConnection.reattachModes.clear();
+      fakeConnection.reattachReasons.clear();
+      await controller.attach();
+      expect(fakeConnection.reattachModes, [null]);
+      expect(fakeConnection.reattachReasons, [null]);
+    });
+
+    test(
+      'after explicit handoff a reopen is Observe-first (no auto-restore)',
+      () async {
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        expect(await controller.handoffToTerminal(), isTrue);
+        expect(
+          fakeDriveIntentStore.intents,
+          isNot(contains('claude/session-1')),
+        );
+
+        // A later reopen must not silently re-claim Drive: the reused
+        // connection resets to a bare Observe attach with no drive reason.
+        fakeConnection.reattachModes.clear();
+        fakeConnection.reattachReasons.clear();
+        await controller.attach();
+        expect(fakeConnection.reattachModes, [null]);
+        expect(fakeConnection.reattachReasons, [null]);
+      },
+    );
+
+    test('explicit disconnect clears Drive intent', () async {
+      fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+
+      await controller.disconnect();
+
+      expect(fakeDriveIntentStore.intents, isNot(contains('claude/session-1')));
+    });
+
+    test(
+      'disconnect clears Drive intent even before transport creation',
+      () async {
+        fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .disconnect();
+
+        expect(fakeConnection.closeCount, 0);
+        expect(
+          fakeDriveIntentStore.intents,
+          isNot(contains('claude/session-1')),
+        );
+      },
+    );
+
+    test('handoff proceeds when Drive-intent storage is unavailable', () async {
+      fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection.reattachModes.clear();
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'driving', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+      fakeDriveIntentStore.failClear = true;
+
+      final succeeded = await controller.handoffToTerminal();
+
+      expect(succeeded, isTrue);
+      expect(fakeConnection.reattachModes, [null]);
+    });
+
+    test('takeOver is a no-op before attach', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+
+      final succeeded = await controller.takeOver();
+
+      expect(succeeded, isFalse);
+      expect(fakeConnection.reattachModes, isEmpty);
+    });
+
+    test('takeOver refuses to arm during reconnect', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection
+        ..emitSessionControl(const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        })
+        ..emitState(SessionDetailConnectionStatus.reconnecting);
+      await Future<void>.delayed(Duration.zero);
+
+      final succeeded = await controller.takeOver();
+
+      expect(succeeded, isFalse);
+      expect(fakeConnection.reattachModes, isEmpty);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        contains('Reconnect before taking over'),
+      );
+    });
+
+    test('takeOver surfaces a failed reattach', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection
+        ..emitSessionControl(const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        })
+        ..failNextReattach = true;
+      await Future<void>.delayed(Duration.zero);
+
+      final succeeded = await controller.takeOver();
+
+      expect(succeeded, isFalse);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        contains("Couldn't take over this session."),
+      );
+      // The one-shot takeover request must not survive on the transport,
+      // where a later automatic reconnect would silently retry it.
+      expect(fakeConnection.disarmDriveAuthorityCount, 1);
+    });
+
+    test(
+      'unconfirmed takeover disarms the transport and keeps the note',
+      () async {
+        final container = ProviderContainer(
+          overrides: [
+            ...dr1DurableDraftTestOverrides(),
+            ...baseOverrides,
+            sessionTakeoverConfirmTimeoutProvider.overrideWithValue(
+              const Duration(milliseconds: 50),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        // The broker never answers with driving or attach-conflict.
+        final succeeded = await controller.takeOver();
+
+        expect(succeeded, isFalse);
+        // The timeout is definitive: disarming shapes the NEXT reconnect,
+        // but the armed resume socket is also actively replaced with a bare
+        // Observe attach so a late grant cannot land half-applied.
+        expect(fakeConnection.reattachModes, ['resume', null]);
+        expect(fakeConnection.reattachReasons, ['takeover', null]);
+        expect(fakeConnection.disarmDriveAuthorityCount, 1);
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(state.driveRestorePhase, SessionDriveRestorePhase.conflict);
+        expect(state.driveRestoreConflict?.code, 'DRIVE_RESTORE_TIMEOUT');
+
+        // Delayed-Driving regression: a Driving frame straggling in after
+        // the timeout (a slow Codex resume can outlive the window) must not
+        // persist a takeover lease — the settled attempt is over, and the
+        // user was already told the session stays in Observe.
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          fakeDriveIntentStore.intents,
+          isNot(contains('claude/session-1')),
+        );
+
+        // A fresh explicit attempt from Observe still works normally and
+        // persists its lease only on a broker-confirmed Driving frame.
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+        final retry = controller.takeOver();
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .driveRestoreConflict,
+          isNull,
+        );
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        expect(await retry, isTrue);
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.terminalTakeover,
+        );
+      },
+    );
+
+    test('takeOver fails when the broker denies the takeover', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      fakeConnection.emitSessionControl(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final takeover = controller.takeOver();
+      await Future<void>.delayed(Duration.zero);
+      fakeConnection
+        ..emitEvent(
+          const AttachConflictWireEvent(
+            requestedMode: 'resume',
+            reason: 'takeover',
+            code: 'DRIVE_OWNERSHIP_CONFLICT',
+            message: 'A terminal owns this session.',
+          ),
+        )
+        ..emitSessionControl(const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': true,
+            'syncAvailable': true,
+            'active': true,
+          },
+        });
+
+      expect(await takeover, isFalse);
+      await Future<void>.delayed(Duration.zero);
+      final state = container.read(sessionDetailControllerProvider(key));
+      expect(state.sessionInfo?.control?.drive.state, DriveState.observing);
+      expect(state.driveRestoreConflict, isNull);
+    });
+
+    test('attach opens the connection and mirrors connection state', () async {
+      keepSessionDetailAlive(container, key);
+
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      expect(fakeConnection.connectCount, 1);
+      expect(fakeConnection.tool, 'claude');
+      expect(fakeConnection.sessionId, 'session-1');
+      expect(
+        container.read(sessionDetailControllerProvider(key)).connectionStatus,
+        SessionDetailConnectionStatus.connected,
+      );
+      expect(
+        container
+            .read(sessionDetailControllerProvider(key))
+            .agentActions
+            ?.canTranscriptExport,
+        isTrue,
+      );
+    });
+
+    test('transcript export preflight stores confirmation state', () async {
+      keepSessionDetailAlive(container, key);
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      final preflight = await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .prepareTranscriptExport();
+
+      expect(preflight?.nonce, 'nonce-1');
+      expect(fakeBrokerClient.prepareTranscriptExportCount, 1);
+      final exportState = container
+          .read(sessionDetailControllerProvider(key))
+          .transcriptExportActionState;
+      expect(
+        exportState.phase,
+        TranscriptExportActionPhase.awaitingConfirmation,
+      );
+      expect(exportState.preflight?.confirm.format, 'html');
+    });
+
+    test(
+      'transcript export appends returned artifact to session messages',
+      () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final exported = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .exportTranscript(nonce: ' nonce-1 ');
+
+        expect(exported, isTrue);
+        expect(fakeBrokerClient.exportTranscriptCount, 1);
+        expect(fakeBrokerClient.lastExportNonce, 'nonce-1');
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(
+          state.transcriptExportActionState.phase,
+          TranscriptExportActionPhase.exported,
+        );
+        expect(state.fileArtifactDescriptors, hasLength(1));
+        expect(
+          state.fileArtifactDescriptors.single.deliveryClass,
+          SessionArtifactDeliveryClass.exportAttachment,
+        );
+        expect(state.fileArtifactDescriptors.single.format, 'html');
+      },
+    );
+
+    test(
+      'transcript export maps stale confirmation error distinctly',
+      () async {
+        fakeBrokerClient.exportError = const BrokerException(
+          message: 'Export failed',
+          statusCode: 409,
+          error: BrokerError(
+            error: 'confirmation nonce expired',
+            code: 'CONFIRMATION_STALE',
+          ),
+        );
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final exported = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .exportTranscript(nonce: 'nonce-1');
+
+        expect(exported, isFalse);
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(
+          state.transcriptExportActionState.errorCode,
+          'CONFIRMATION_STALE',
+        );
+        expect(
+          state.error,
+          contains('confirmation expired or changed'),
+        );
+      },
+    );
+
+    test(
+      'forkSession passes the message boundary and stores action state',
+      () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession(messageId: 'message-42');
+
+        expect(created, isNotNull);
+        expect(fakeBrokerClient.forkSessionCount, 1);
+        expect(fakeBrokerClient.lastForkMessageId, 'message-42');
+        expect(created?.id, 'session-1-fork');
+        final actionState = container
+            .read(sessionDetailControllerProvider(key))
+            .forkSessionActionState;
+        expect(actionState.phase, SessionActionPhase.success);
+        expect(actionState.createdSessionId, 'session-1-fork');
+        expect(actionState.createdSessionTitle, 'Forked Session');
+        expect(actionState.message, contains('Forked session'));
+      },
+    );
+
+    test(
+      'forkSession refuses an agent-owned session without reaching the broker',
+      () async {
+        // CR4 backstop, at the coordinator. Both affordances are already
+        // withheld for this shape (status-panel tile disabled, message-context
+        // "Fork from here" absent), so this covers what those cannot: a
+        // programmatic caller — a restored intent, a deep link, a stale widget
+        // — invoking the action anyway.
+        //
+        // The TOOL capability deliberately says YES here (the default fake
+        // agent has `canFork: true`), so the only thing that can refuse is the
+        // per-SESSION fact `origin == subagent`. Without that separation this
+        // test would pass against the pre-existing "not available for this
+        // agent" gate and prove nothing.
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Spawned by a parent run',
+              'status': 'idle',
+              'attachMode': 'observe',
+              'origin': 'subagent',
+              'parentThreadId': 'parent-thread',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .agentActions
+              ?.canFork,
+          isTrue,
+          reason: 'the global capability must still say fork is available',
+        );
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession();
+
+        // Asserted FIRST because it is the claim the backstop exists to make:
+        // no request the broker would only answer with 409 SESSION_AGENT_OWNED
+        // is ever posted. A later position would be masked by the return-value
+        // check below whenever the gate regresses.
+        expect(fakeBrokerClient.forkSessionCount, 0);
+        expect(fakeBrokerClient.lastForkSessionId, isNull);
+        expect(created, isNull);
+        final actionState = container
+            .read(sessionDetailControllerProvider(key))
+            .forkSessionActionState;
+        expect(actionState.phase, SessionActionPhase.failed);
+        // Typed, not a sentence: the copy is resolved by the view in the user's
+        // language (`AppLocalizations.sessionForkAgentOwnedRefusal`), so state
+        // must carry the reason rather than the words.
+        expect(actionState.refusal, SessionActionRefusal.agentOwnedSession);
+        expect(actionState.message, isNull);
+      },
+    );
+
+    test(
+      'forkSession still forks an exec-origin session',
+      () async {
+        // Narrowness control for the refusal above. `exec` is an automated
+        // LAUNCH with no owning parent session, so it stays forkable — without
+        // this, a gate that refused every non-human origin would pass.
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Started by codex exec',
+              'status': 'idle',
+              'attachMode': 'observe',
+              'origin': 'exec',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession();
+
+        expect(created?.id, 'session-1-fork');
+        expect(fakeBrokerClient.forkSessionCount, 1);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .forkSessionActionState
+              .refusal,
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'forkSession converts the broker 409 SESSION_AGENT_OWNED into the typed '
+      'refusal',
+      () async {
+        // CR4 / the SECOND refuser. The local `origin` gate cannot fire here on
+        // purpose: this session frame carries no `origin` at all, which is the
+        // shape of a roster row that is stale, absent, or served by a peer. The
+        // broker is then the only refuser, and its 409 used to fall into the
+        // generic catch — writing the broker's English sentence into
+        // `state.error` as primary UI copy, in a client that ships two
+        // languages.
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Lineage this client never learned',
+              'status': 'idle',
+              'attachMode': 'observe',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        // Preconditions. Without these the test could pass against the
+        // pre-existing local gate (or a missing capability) and prove nothing
+        // about the broker path.
+        final before = container.read(sessionDetailControllerProvider(key));
+        expect(
+          before.isAgentOwnedSession,
+          isFalse,
+          reason:
+              'the LOCAL origin gate must be inert for this to test the '
+              'broker path',
+        );
+        expect(before.agentActions?.canFork, isTrue);
+
+        // An ordinary transport failure first: it leaves a generic English
+        // sentence in `state.error`, rendered as a page-level banner. The
+        // refusal must clear it rather than sit under stale, unrelated copy.
+        fakeBrokerClient.forkError = const BrokerException(
+          message: 'Broker unreachable.',
+          statusCode: 503,
+        );
+        expect(
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .forkSession(),
+          isNull,
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          isNotNull,
+        );
+
+        // Now the broker answers with the typed refusal.
+        fakeBrokerClient.forkError = const BrokerException(
+          message: 'Broker rejected the fork.',
+          statusCode: 409,
+          error: BrokerError(
+            error:
+                'This session was spawned by another agent session; fork '
+                'its parent instead.',
+            code: 'SESSION_AGENT_OWNED',
+          ),
+        );
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession();
+
+        expect(created, isNull);
+        expect(fakeBrokerClient.forkSessionCount, 2);
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(
+          state.forkSessionActionState.refusal,
+          SessionActionRefusal.agentOwnedSession,
+        );
+        // The broker's English sentence must never become primary UI copy: the
+        // view resolves the typed refusal in the user's own language. A
+        // non-null `message` here would be exactly that leak, because the view
+        // falls back to it whenever there is no refusal.
+        expect(state.forkSessionActionState.message, isNull);
+        expect(state.error, isNull);
+
+        // The refusal stands until an authoritative frame invalidates it, so a
+        // retry must not re-post a request the broker can only answer 409.
+        expect(
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .forkSession(),
+          isNull,
+        );
+        expect(fakeBrokerClient.forkSessionCount, 2);
+      },
+    );
+
+    test(
+      'a newer authoritative session frame clears a standing agent-owned fork '
+      'refusal',
+      () async {
+        // CR4. `sessionInfo` is replaced wholesale on every session frame, so a
+        // session later reclassified as ordinary re-enables the Fork tile (the
+        // chrome reads `isAgentOwnedSession`) while the refusal underneath it
+        // survived — an enabled control above a status line saying it is
+        // impossible. Worse, the coordinator's standing-refusal gate would keep
+        // refusing locally a session the broker would now happily fork.
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Spawned by a parent run',
+              'status': 'idle',
+              'attachMode': 'observe',
+              'origin': 'subagent',
+              'parentThreadId': 'parent-thread',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        // An unrelated earlier failure leaves an English sentence in
+        // `state.error`, rendered as a page-level banner. The LOCAL gate below
+        // returns before the in-progress write that would otherwise clear it,
+        // so recording the refusal has to clear it itself — otherwise the
+        // localized refusal renders directly under stale, unlocalized copy
+        // about a different action.
+        fakeBrokerClient.cloneError = const BrokerException(
+          message: 'Clone failed.',
+          statusCode: 500,
+        );
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .cloneSession();
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          isNotNull,
+        );
+
+        expect(
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .forkSession(),
+          isNull,
+        );
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .forkSessionActionState
+              .refusal,
+          SessionActionRefusal.agentOwnedSession,
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          isNull,
+        );
+        expect(fakeBrokerClient.forkSessionCount, 0);
+
+        // A NEWER authoritative frame that no longer classifies the session as
+        // `subagent`.
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Reclassified by the broker',
+              'status': 'idle',
+              'attachMode': 'observe',
+              'origin': 'exec',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        final state = container.read(sessionDetailControllerProvider(key));
+        expect(state.isAgentOwnedSession, isFalse);
+        expect(state.forkSessionActionState.refusal, isNull);
+        expect(state.forkSessionActionState.phase, SessionActionPhase.idle);
+
+        // And the action genuinely works again — the standing-refusal gate is
+        // released, not merely hidden.
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession();
+        expect(created?.id, 'session-1-fork');
+        expect(fakeBrokerClient.forkSessionCount, 1);
+      },
+    );
+
+    test('renameSession updates title from the broker response', () async {
+      keepSessionDetailAlive(container, key);
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+      fakeConnection.emitEvent(
+        SessionWireEvent(
+          info: SessionInfo.fromJson(const {
+            'id': 'session-1',
+            'tool': 'claude',
+            'title': 'Before',
+            'status': 'idle',
+            'attachMode': 'observe',
+          }),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final renamed = await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .renameSession('  After  ');
+
+      expect(renamed, isTrue);
+      expect(fakeBrokerClient.renameSessionCount, 1);
+      expect(fakeBrokerClient.lastRenameTitle, 'After');
+      final current = container.read(sessionDetailControllerProvider(key));
+      expect(current.sessionInfo?.title, 'After');
+      expect(
+        current.renameSessionActionState.phase,
+        SessionActionPhase.success,
+      );
+    });
+
+    test('renameSession sends null to clear the native title', () async {
+      keepSessionDetailAlive(container, key);
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+      fakeConnection.emitEvent(
+        SessionWireEvent(
+          info: SessionInfo.fromJson(const {
+            'id': 'session-1',
+            'tool': 'claude',
+            'title': 'Before',
+            'status': 'idle',
+            'attachMode': 'observe',
+          }),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final renamed = await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .renameSession('   ');
+
+      expect(renamed, isTrue);
+      expect(fakeBrokerClient.lastRenameTitle, isNull);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).sessionInfo?.title,
+        isEmpty,
+      );
+    });
+
+    test(
+      'cloneSession creates a cloned session and stores action state',
+      () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .cloneSession();
+
+        expect(created, isNotNull);
+        expect(fakeBrokerClient.cloneSessionCount, 1);
+        expect(created?.id, 'session-1-clone');
+        final actionState = container
+            .read(sessionDetailControllerProvider(key))
+            .cloneSessionActionState;
+        expect(actionState.phase, SessionActionPhase.success);
+        expect(actionState.createdSessionId, 'session-1-clone');
+        expect(actionState.createdSessionTitle, 'Cloned Session');
+        expect(actionState.message, contains('Cloned session'));
+      },
+    );
+
+    test(
+      'forkSession reports unavailable capability as action failure',
+      () async {
+        container = ProviderContainer(
+          overrides: [
+            ...dr1DurableDraftTestOverrides(),
+            activeBrokerProfileProvider.overrideWith(
+              (ref) => fakeControllerBrokerProfile(),
+            ),
+            brokerClientProvider.overrideWith((ref) async => fakeBrokerClient),
+            sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+              StubBrokerAppLifecycleMonitor(
+                currentState: BrokerAppLifecycleState.paused,
+              ),
+            ),
+            sessionNotificationSinkProvider.overrideWithValue(
+              CollectingNotificationSink(),
+            ),
+            sessionDetailConnectionFactoryProvider.overrideWithValue(
+              ({required resolver, required sessionId, required tool}) {
+                fakeConnection
+                  ..sessionId = sessionId
+                  ..tool = tool;
+                return fakeConnection;
+              },
+            ),
+            sessionArtifactFileServiceProvider.overrideWithValue(
+              fakeArtifactFileService,
+            ),
+            sessionAttachmentPickerProvider.overrideWithValue(
+              fakeAttachmentPicker,
+            ),
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+            sessionOutboxRepositoryProvider.overrideWithValue(
+              RecordingSessionOutboxRepository(),
+            ),
+            sessionTranscriptRepositoryProvider.overrideWithValue(
+              RecordingSessionTranscriptRepository(),
+            ),
+            sessionDriveIntentStoreProvider.overrideWithValue(
+              InMemoryControllerDriveIntentStore(),
+            ),
+          ],
+        );
+        fakeBrokerClient.agents = [fakeControllerAgentInfo(canFork: false)];
+        addTearDown(container.dispose);
+
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .forkSession();
+
+        expect(created, isNull);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .forkSessionActionState
+              .phase,
+          SessionActionPhase.failed,
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          contains('not available for this agent'),
+        );
+      },
+    );
+
+    test(
+      'cloneSession reports unavailable capability as action failure',
+      () async {
+        container = ProviderContainer(
+          overrides: [
+            ...dr1DurableDraftTestOverrides(),
+            activeBrokerProfileProvider.overrideWith(
+              (ref) => fakeControllerBrokerProfile(),
+            ),
+            brokerClientProvider.overrideWith((ref) async => fakeBrokerClient),
+            sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+              StubBrokerAppLifecycleMonitor(
+                currentState: BrokerAppLifecycleState.paused,
+              ),
+            ),
+            sessionNotificationSinkProvider.overrideWithValue(
+              CollectingNotificationSink(),
+            ),
+            sessionDetailConnectionFactoryProvider.overrideWithValue(
+              ({required resolver, required sessionId, required tool}) {
+                fakeConnection
+                  ..sessionId = sessionId
+                  ..tool = tool;
+                return fakeConnection;
+              },
+            ),
+            sessionArtifactFileServiceProvider.overrideWithValue(
+              fakeArtifactFileService,
+            ),
+            sessionAttachmentPickerProvider.overrideWithValue(
+              fakeAttachmentPicker,
+            ),
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+            sessionOutboxRepositoryProvider.overrideWithValue(
+              RecordingSessionOutboxRepository(),
+            ),
+            sessionTranscriptRepositoryProvider.overrideWithValue(
+              RecordingSessionTranscriptRepository(),
+            ),
+            sessionDriveIntentStoreProvider.overrideWithValue(
+              InMemoryControllerDriveIntentStore(),
+            ),
+          ],
+        );
+        fakeBrokerClient.agents = [fakeControllerAgentInfo(canClone: false)];
+        addTearDown(container.dispose);
+
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final created = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .cloneSession();
+
+        expect(created, isNull);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .cloneSessionActionState
+              .phase,
+          SessionActionPhase.failed,
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          contains('not available for this agent'),
+        );
+      },
+    );
+
+    test('forkSession requires an active broker client', () async {
+      final disconnectedContainer = ProviderContainer(
+        overrides: [
+          ...dr1DurableDraftTestOverrides(),
+          activeBrokerProfileProvider.overrideWith((ref) => null),
+          brokerClientProvider.overrideWith((ref) async => null),
+          sessionNotificationLifecycleMonitorProvider.overrideWithValue(
+            StubBrokerAppLifecycleMonitor(
+              currentState: BrokerAppLifecycleState.paused,
+            ),
+          ),
+          sessionNotificationSinkProvider.overrideWithValue(
+            CollectingNotificationSink(),
+          ),
+          sessionDetailConnectionFactoryProvider.overrideWithValue(
+            ({required resolver, required sessionId, required tool}) {
+              fakeConnection
+                ..sessionId = sessionId
+                ..tool = tool;
+              return fakeConnection;
+            },
+          ),
+          sessionArtifactFileServiceProvider.overrideWithValue(
+            fakeArtifactFileService,
+          ),
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+          sessionOutboxRepositoryProvider.overrideWithValue(
+            RecordingSessionOutboxRepository(),
+          ),
+          sessionTranscriptRepositoryProvider.overrideWithValue(
+            RecordingSessionTranscriptRepository(),
+          ),
+          sessionAttachmentPickerProvider.overrideWithValue(
+            fakeAttachmentPicker,
+          ),
+          sessionDriveIntentStoreProvider.overrideWithValue(
+            InMemoryControllerDriveIntentStore(),
+          ),
+        ],
+      );
+      addTearDown(disconnectedContainer.dispose);
+      keepSessionDetailAlive(disconnectedContainer, key);
+
+      await disconnectedContainer
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      final created = await disconnectedContainer
+          .read(sessionDetailControllerProvider(key).notifier)
+          .forkSession();
+
+      expect(created, isNull);
+      expect(
+        disconnectedContainer
+            .read(sessionDetailControllerProvider(key))
+            .forkSessionActionState
+            .phase,
+        SessionActionPhase.failed,
+      );
+      expect(
+        disconnectedContainer.read(sessionDetailControllerProvider(key)).error,
+        contains('Connect to a broker before forking'),
+      );
+    });
+
+    test('forkSession surfaces broker errors in action state', () async {
+      fakeBrokerClient.forkError = const BrokerException(
+        message: 'Fork blocked',
+        statusCode: 500,
+      );
+      keepSessionDetailAlive(container, key);
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      final created = await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .forkSession();
+
+      expect(created, isNull);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        contains("Couldn't fork this session."),
+      );
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        isNot(contains('Fork blocked')),
+      );
+      expect(fakeBrokerClient.forkSessionCount, 1);
+    });
+
+    test('cloneSession surfaces broker errors in action state', () async {
+      fakeBrokerClient.cloneError = const BrokerException(
+        message: 'Clone blocked',
+        statusCode: 500,
+      );
+      keepSessionDetailAlive(container, key);
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      final created = await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .cloneSession();
+
+      expect(created, isNull);
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        contains("Couldn't clone this session."),
+      );
+      expect(
+        container.read(sessionDetailControllerProvider(key)).error,
+        isNot(contains('Clone blocked')),
+      );
+      expect(fakeBrokerClient.cloneSessionCount, 1);
+    });
+
+    test('records typed wire events in arrival order', () async {
+      keepSessionDetailAlive(container, key);
+
+      await container
+          .read(sessionDetailControllerProvider(key).notifier)
+          .attach();
+
+      fakeConnection
+        ..emitEvent(
+          const NoticeWireEvent(message: 'attached'),
+        )
+        ..emitEvent(
+          const HistoryWireEvent(
+            messages: [
+              AgentMessage(
+                type: AgentMessageType.userMessage,
+                raw: {'type': 'user-message'},
+              ),
+            ],
+            reset: true,
+            cursor: 'cursor-1',
+          ),
+        );
+      await Future<void>.delayed(Duration.zero);
+
+      final state = container.read(sessionDetailControllerProvider(key));
+      expect(state.events, hasLength(2));
+      expect(state.eventSummaries, ['notice: attached', 'history: 1 message']);
+    });
+
+    test(
+      'invokes notification hook for actionable live events and ignores replay/history',
+      () async {
+        final localConnection = FakeSessionDetailConnection();
+        final fakeSink = CollectingNotificationSink();
+        final localContainer = buildControllerContainerWithNotificationHooks(
+          key: key,
+          connection: localConnection,
+          picker: FakeControllerAttachmentPicker(),
+          sink: fakeSink,
+        );
+        addTearDown(localContainer.dispose);
+        keepSessionDetailAlive(localContainer, key);
+
+        await localContainer
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        localConnection
+          ..emitEvent(
+            const MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {'type': 'permission-request'},
+              ),
+            ),
+          )
+          ..emitEvent(
+            const MessageWireEvent(
+              seq: 0,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {'type': 'permission-request'},
+              ),
+            ),
+          )
+          ..emitEvent(
+            const MessageWireEvent(
+              seq: 2,
+              message: AgentMessage(
+                type: AgentMessageType.modelOutput,
+                raw: {'type': 'model-output'},
+              ),
+            ),
+          )
+          ..emitEvent(
+            const NoticeWireEvent(message: 'status update'),
+          )
+          ..emitEvent(
+            const HistoryWireEvent(
+              messages: [
+                AgentMessage(
+                  type: AgentMessageType.userMessage,
+                  raw: {'type': 'user-message'},
+                ),
+              ],
+              reset: true,
+            ),
+          );
+        await Future<void>.delayed(Duration.zero);
+
+        final state = localContainer.read(sessionDetailControllerProvider(key));
+        expect(state.events, hasLength(5));
+        expect(fakeSink.requests, hasLength(1));
+        expect(
+          fakeSink.requests.single.category,
+          BrokerNotificationCategory.actionRequired,
+        );
+      },
+    );
+
+    test(
+      'does not block event recording when notification sink throws',
+      () async {
+        final localConnection = FakeSessionDetailConnection();
+        final failingSink = CollectingNotificationSink(
+          shouldThrowOnShow: true,
+        );
+        final localContainer = buildControllerContainerWithNotificationHooks(
+          key: key,
+          connection: localConnection,
+          picker: FakeControllerAttachmentPicker(),
+          sink: failingSink,
+        );
+        addTearDown(localContainer.dispose);
+        keepSessionDetailAlive(localContainer, key);
+
+        await localContainer
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        localConnection.emitEvent(
+          const MessageWireEvent(
+            seq: 3,
+            message: AgentMessage(
+              type: AgentMessageType.permissionRequest,
+              raw: {'type': 'permission-request'},
+            ),
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        final state = localContainer.read(sessionDetailControllerProvider(key));
+        expect(state.events, hasLength(1));
+        expect(state.eventSummaries, ['message: permission-request']);
+        expect(failingSink.requests, hasLength(1));
+        expect(
+          failingSink.requests.single.title,
+          'Session requires your response',
+        );
+      },
+    );
+
+    test(
+      'suppresses legacy live notifications while durable feed delivery is '
+      'active',
+      () async {
+        final localConnection = FakeSessionDetailConnection();
+        final fakeSink = CollectingNotificationSink();
+        final localContainer = buildControllerContainerWithNotificationHooks(
+          key: key,
+          connection: localConnection,
+          picker: FakeControllerAttachmentPicker(),
+          sink: fakeSink,
+        );
+        addTearDown(localContainer.dispose);
+        localContainer
+            .read(attentionFeedDeliveryActiveProvider.notifier)
+            .state = const {
+          'local',
+        };
+        keepSessionDetailAlive(localContainer, key);
+
+        await localContainer
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        localConnection.emitEvent(
+          const MessageWireEvent(
+            seq: 1,
+            message: AgentMessage(
+              type: AgentMessageType.permissionRequest,
+              raw: {'type': 'permission-request'},
+            ),
+          ),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          localContainer.read(sessionDetailControllerProvider(key)).events,
+          hasLength(1),
+        );
+        expect(fakeSink.requests, isEmpty);
+      },
+    );
+  });
+}

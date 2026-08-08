@@ -1,0 +1,42 @@
+name: pasteboard
+description: >-
+  Vendored fork of pasteboard with caller-supplied bounds applied in native
+  code, so an oversized clipboard list or image is refused before additional
+  encoding or transport allocation. The toolkit's own decode happens first and
+  is not ours to prevent. See README-fork.md.
+version: 0.5.0+cosyncing.6
+homepage: https://github.com/MixinNetwork/flutter-plugins/tree/main/packages/pasteboard
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  web: ^1.0.0
+  uuid: ^4.0.0
+  path: ^1.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: "^2.0.0"
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: one.mixin.pasteboard
+        pluginClass: PasteboardPlugin
+      macos:
+        pluginClass: PasteboardPlugin
+      windows:
+        pluginClass: PasteboardPlugin
+      linux:
+        pluginClass: PasteboardPlugin
+      ios:
+        pluginClass: PasteboardPlugin
+      web:

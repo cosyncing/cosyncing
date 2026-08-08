@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "policies": [
+    {
+      "schemaVersion": 1,
+      "id": "opencode.server.session.delete",
+      "agent": "opencode",
+      "nativeId": "opencode:server:DELETE:/session/{sessionID}",
+      "decision": "unsafe",
+      "risk": "high",
+      "riskClass": "R2",
+      "reviewRequired": true,
+      "reason": "destructive session deletion",
+      "reviewedAt": "2026-07-01",
+      "reviewer": "maintainer"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "opencode.tui.connect",
+      "agent": "opencode",
+      "nativeId": "opencode:tui:/connect",
+      "decision": "unsafe",
+      "risk": "critical",
+      "riskClass": "R3",
+      "reviewRequired": true,
+      "reason": "credential entry / provider auth",
+      "reviewedAt": "2026-07-01",
+      "reviewer": "maintainer"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.import",
+      "agent": "pi",
+      "nativeId": "pi:rpc:import",
+      "decision": "unsafe",
+      "risk": "critical",
+      "riskClass": "R3",
+      "reviewRequired": true,
+      "reason": "arbitrary-path session import crosses filesystem/content trust boundaries until validation and redaction policy exists",
+      "reviewedAt": "2026-07-02",
+      "reviewer": "maintainer"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "pi.rpc.switch_session",
+      "agent": "pi",
+      "nativeId": "pi:rpc:switch_session",
+      "decision": "not-productized",
+      "risk": "medium",
+      "riskClass": "R1",
+      "reviewRequired": true,
+      "reason": "app attach already provides session switching at the product layer",
+      "reviewedAt": "2026-07-03",
+      "reviewer": "maintainer"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_archive",
+      "agent": "codex",
+      "nativeId": "codex:appserver:thread/archive",
+      "decision": "not-productized",
+      "risk": "medium",
+      "riskClass": "R1",
+      "reviewRequired": true,
+      "reason": "thread archive/unarchive is session visibility management already handled at the app/roster layer (parallels pi switch_session)",
+      "reviewedAt": "2026-07-08",
+      "reviewer": "maintainer (default, pending confirmation)"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.appserver.thread_rollback",
+      "agent": "codex",
+      "nativeId": "codex:appserver:thread/rollback",
+      "decision": "not-productized",
+      "risk": "high",
+      "riskClass": "R2",
+      "reviewRequired": true,
+      "reason": "DEFER (revisitable): thread/rollback irreversibly drops the last N turns in place, is lossy, and does NOT revert the agent's file changes (transcript/working-tree divergence). Fork covers the safe non-destructive 'go back' case. Revisit requires content-derived revision machinery, a file-revert/divergence story, T1-only gating, and an explicit destructive-confirm UX. See docs/project/roadmap.md.",
+      "reviewedAt": "2026-07-08",
+      "reviewer": "Claude review → maintainer (pending confirmation)"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "codex.auth.login",
+      "agent": "codex",
+      "nativeId": "codex:auth:account/login",
+      "decision": "unsafe",
+      "risk": "critical",
+      "riskClass": "R3",
+      "reviewRequired": true,
+      "reason": "app-server account login / credential entry is an R3 trust-boundary action not exposed to remote clients (parallels opencode /connect)",
+      "reviewedAt": "2026-07-08",
+      "reviewer": "maintainer (default, pending confirmation)"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.channel.sync",
+      "agent": "claude",
+      "nativeId": "claude:channel:mcp",
+      "decision": "not-productized",
+      "risk": "medium",
+      "riskClass": "R1",
+      "reviewRequired": true,
+      "reason": "Claude channel true-sync (--channels MCP bridge) is architecturally dead: claude.ai only honors permission replies from channels on Anthropic's curated allowlist, so the channel can display but not control. Reviewed out until Anthropic allowlists it; Claude sync stays Observe + Drive + PreToolUse hooks.",
+      "reviewedAt": "2026-07-08",
+      "reviewer": "maintainer (archived 2026-06-22; discovery-recorded 2026-07-08)"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  body { margin:0; }
+  html, body { height:100%; background:#0B0E14; }
+  .hero { position:relative; width:100vw; height:100vh; overflow:hidden; background:#0B0E14;
+          font-family:'Inter','DejaVu Sans',sans-serif; }
+  .plane-a { position:absolute; right:-220px; top:-280px; width:920px; height:920px;
+             background:rgba(15,118,110,0.14); border-radius:150px; transform:rotate(10deg); }
+  .plane-b { position:absolute; left:-280px; bottom:-320px; width:720px; height:720px;
+             background:#161C26; border-radius:120px; transform:rotate(-8deg); }
+  .focal { position:absolute; left:650px; top:230px; width:620px; height:620px; }
+  .stream { position:absolute; background:rgba(45,212,191,0.45); }
+  .hstream { height:8px; border-radius:4px; }
+  .vstream { width:8px; border-radius:4px; }
+  .mini { position:absolute; width:92px; height:92px; }
+</style></head><body>
+<div class="hero">
+  <div class="plane-a"></div>
+  <div class="plane-b"></div>
+
+  <!-- three sessions converging toward the shared channel (position only, no lines) -->
+  <img class="mini" src="../source/cosyncing-mark-two-tone-dark-teal-leads.svg" style="left:120px;top:180px;width:76px;height:76px">
+  <img class="mini" src="../source/cosyncing-mark-two-tone-dark-teal-leads.svg" style="left:250px;top:420px;width:92px;height:92px">
+  <img class="mini" src="../source/cosyncing-mark-two-tone-dark-teal-leads.svg" style="left:150px;top:680px;width:68px;height:68px">
+
+  <img class="focal" src="../source/cosyncing-mark-two-tone-dark-teal-leads.svg">
+</div>
+</body></html>
