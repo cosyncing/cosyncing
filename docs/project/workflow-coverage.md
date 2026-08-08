@@ -26,5 +26,5 @@ No predecessor coverage was retired merely because a runner disappeared.
 Each hosted replacement passed before the private workflow profile was removed
 from the public lineage.
 
-Repository rulesets require only `CI / required` and `Broker Release Gate /
+Repository rulesets require only `CI required` and `Broker Release Gate
 required`. Their always-running dependency checks cover the matrix rows above.

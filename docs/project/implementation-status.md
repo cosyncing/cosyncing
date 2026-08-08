@@ -15,7 +15,7 @@ private repository checked out locally as the ignored `docs-internal/` tree.
 They are not part of the public source lineage.
 
 The public repository uses the `public-hosted` workflow profile. The required
-`CI / required` and `Broker Release Gate / required` checks have passed on a
+`CI required` and `Broker Release Gate required` checks have passed on a
 fork pull request without repository secrets. Branch rules, Discussions, and
 private vulnerability reporting are enabled.
 

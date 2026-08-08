@@ -16,8 +16,8 @@ macOS, iOS simulator, Windows, and reusable Dart-package gates.
 `nightly.yml` repeats extended deterministic checks on the protected default
 branch.
 
-Branch protection requires only the stable `CI / required` and
-`Broker Release Gate / required` aggregate jobs. Each uses `if: always()` and
+Branch protection requires only the stable `CI required` and
+`Broker Release Gate required` aggregate jobs. Each uses `if: always()` and
 fails unless every dependency result is `success`; matrix child names are not
 repository settings. The broker/contract lane also runs the workflow audit,
 the fail-closed tracked-tree/path/content/binary policy, capability coverage,
