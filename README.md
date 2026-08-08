@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://cosyncing.github.io/">Website</a> ·
   <a href="#install">Install</a> ·
   <a href="#the-web-client">Web client</a> ·
   <a href="#platform-support">Platforms</a> ·
@@ -34,7 +35,10 @@
 
 ---
 
-cosyncing lets you watch and control your coding agents from anywhere on your own network.
+**Code anywhere. Sync everywhere.**
+
+Synchronize your agents — from CLI to GUI, from desktop to phone. Pick up right where you left
+off, anywhere. cosyncing keeps your coding agents in sync across your own network.
 
 The broker runs on the machine where your agents already work. It watches their sessions and serves
 a client that shows each one — grouped by project, with its transcript, diffs, commands, and any
@@ -56,6 +60,14 @@ function-by-function matrix.
 
 ## Install
 
+> [!IMPORTANT]
+> The first public package has not been released yet. The current `cosyncing` entry on npm is a
+> name-reservation placeholder; do not install it. Follow the
+> [GitHub Releases](https://github.com/cosyncing/cosyncing/releases) page for the first supported
+> package.
+
+After the first package is published:
+
 ```bash
 npm install --global cosyncing
 cosyncing setup
@@ -67,17 +79,16 @@ of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user ser
 your broker URL. The broker refuses to start until setup has committed.
 
 `pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
-`cosyncing devices` lists and revokes them.
+`cosyncing devices list` lists paired devices, and `cosyncing devices revoke <id>` revokes one.
 
 Before anything else: `cosyncing doctor` diagnoses the machine without changing it, and
 `cosyncing status` summarizes install, service, agents, and sessions.
 
 ## The web client
 
-The Flutter web app ships inside the npm package and is served by your own broker at `/cosy/` —
-nothing is fetched at runtime and no third-party host is involved. Setup prints the URL; open it in
-any browser that can reach the broker. Android and desktop clients are distributed separately from
-the broker package.
+The packaged Flutter web app is served by your own broker at `/cosy/`; it does not fetch application
+code from a third-party host at runtime. Setup prints the URL; open it in any browser that can reach
+the broker. The first packaged Android and desktop client downloads are still being prepared.
 
 ## Platform support
 
@@ -89,7 +100,7 @@ the broker package.
   <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
-**Clients** — six platforms:
+**Clients** — the source tree and CI cover six platforms:
 
 <p>
   <img alt="Android" src="https://img.shields.io/badge/Android-3DDC84?logo=android&logoColor=white">
@@ -106,10 +117,11 @@ Windows-host Tailscale cannot proxy WSL loopback.
 
 ## Privacy and security
 
-The broker runs on your machine, under your account. Pairing credentials, agent transcripts, and
-session data stay on that machine and travel only over the network you connect through. cosyncing
-operates no hosted service, and none sits in the connection path — there is no telemetry and no
-phone-home. Broker updates are verified signed releases, not registry publications; see
+The broker runs on your machine, under your account. Broker state is stored there; session content
+is sent only to authenticated clients over the network you choose. cosyncing operates no hosted
+service in that connection path and includes no analytics or advertising telemetry. Optional
+features contact only the services they name, such as Tailscale Serve, local Tokdash quota data, and
+the signed release channel. Packaged broker updates accept only verified signed manifests; see
 [broker release and signing](docs/release/broker-release-signing.md).
 
 Report vulnerabilities through GitHub private vulnerability reporting, per [SECURITY.md](SECURITY.md).

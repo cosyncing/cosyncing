@@ -19,6 +19,7 @@
 </p>
 
 <p align="center">
+  <a href="https://cosyncing.github.io/zh/">官网</a> ·
   <a href="#安装">安装</a> ·
   <a href="#网页客户端">网页客户端</a> ·
   <a href="#平台支持">平台支持</a> ·
@@ -39,7 +40,10 @@
 
 ---
 
-cosyncing 让你在自己的网络里随时查看并控制编码智能体的会话。
+**代码随处。同步无界。**
+
+让智能体从 CLI 到 GUI、从桌面到手机保持同步。无论身在何处，都能从上次停下的地方继续。
+cosyncing 让编码智能体通过你自己的网络保持同步。
 
 Broker 运行在智能体所在的那台机器上，负责观察它们的会话，并提供一个客户端：会话按项目归组，
 各自带着完整的对话记录、diff、命令，以及智能体正在等待你回应的提问。你可以阅读会话、回答提问，
@@ -60,6 +64,12 @@ Claude Code 的会话在接管之前保持只读。逐项能力矩阵见
 
 ## 安装
 
+> [!IMPORTANT]
+> 首个公开发行包尚未发布。npm 上当前的 `cosyncing` 条目只是名称占位包，请勿安装。请关注
+> [GitHub Releases](https://github.com/cosyncing/cosyncing/releases)，等待首个受支持的发行包。
+
+首个发行包发布后：
+
 ```bash
 npm install --global cosyncing
 cosyncing setup
@@ -71,16 +81,16 @@ cosyncing pair
 Broker 拒绝启动。
 
 `pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
-`cosyncing devices` 列出已配对设备，也可以随时撤销。
+`cosyncing devices list` 列出已配对设备，`cosyncing devices revoke <id>` 撤销指定设备。
 
 动手之前还有两个有用的命令：`cosyncing doctor` 只诊断、不改动机器；`cosyncing status`
 汇总安装、服务、智能体与会话的状态。
 
 ## 网页客户端
 
-Flutter 网页应用随 npm 包一同分发，由你自己的 Broker 在 `/cosy/` 提供——运行时不会从网上
-拉取任何内容，也没有任何第三方主机参与。setup 会打印访问地址；任何能连到 Broker 的浏览器
-都可以打开。Android 与桌面客户端与 Broker 包分开发布。
+发行包内的 Flutter 网页应用由你自己的 Broker 在 `/cosy/` 提供；运行时不会从第三方主机
+拉取应用代码。setup 会打印访问地址；任何能连到 Broker 的浏览器都可以打开。首批 Android
+与桌面客户端发行包仍在准备中。
 
 ## 平台支持
 
@@ -91,7 +101,7 @@ Flutter 网页应用随 npm 包一同分发，由你自己的 Broker 在 `/cosy/
   <img alt="Apple 芯片 macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
 </p>
 
-**客户端**
+**客户端** — 源码与 CI 覆盖六个平台：
 
 <p>
   <img alt="Android" src="https://img.shields.io/badge/Android-3DDC84?logo=android&logoColor=white">
@@ -108,9 +118,10 @@ Tailscale 无法代理 WSL 的回环地址。
 
 ## 隐私与安全
 
-Broker 由你运行，跑在你自己的机器和账号下。配对凭据、智能体对话记录与会话数据都留在那台
-机器上，只经过你自己选择的网络。cosyncing 不运营任何托管服务，连接路径中也不存在这样的
-服务——没有遥测，没有回传。Broker 更新通过经过验证的签名发布完成，而不是包仓库发布；见
+Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储在那台机器上；会话内容只会通过
+你选择的网络发送给已认证的客户端。cosyncing 不在连接路径中运营托管服务，也不含分析或广告
+遥测。可选功能只会联系其明确说明的服务，例如 Tailscale Serve、本机 Tokdash 配额数据与签名
+发行通道。发行版 Broker 只接受经过验证的签名清单；见
 [broker release and signing](docs/release/broker-release-signing.md)（英文）。
 
 安全漏洞请通过 GitHub 私密漏洞报告提交，流程见 [SECURITY.md](SECURITY.md)。
