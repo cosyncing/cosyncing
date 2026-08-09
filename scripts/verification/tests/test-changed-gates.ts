@@ -85,8 +85,8 @@ function checkPolicy(
   }
 }
 
-checkPolicy('browser may join broker', true, 'web-browser', ['broker-deterministic']);
-checkPolicy('broker may join browser', true, 'broker-deterministic', ['web-browser']);
+checkPolicy('browser may not join broker', false, 'web-browser', ['broker-deterministic']);
+checkPolicy('broker may not join browser', false, 'broker-deterministic', ['web-browser']);
 checkPolicy('a third gate may not join broker', false, 'web-cache', ['broker-deterministic']);
 checkPolicy('a third gate may not join browser', false, 'client', ['web-browser']);
 checkPolicy(
@@ -123,10 +123,10 @@ checks += 1;
       running.add(candidate);
     },
   );
-  if (new Set(launched).size !== 2
-      || !launched.includes('broker-deterministic')
-      || !launched.includes('web-browser')) {
-    throw new Error(`one scheduling batch did not launch broker+browser: ${launched.join(', ')}`);
+  if (launched.length !== 1 || launched[0] !== 'broker-deterministic') {
+    throw new Error(
+      `one scheduling batch did not serialize browser behind broker: ${launched.join(', ')}`,
+    );
   }
 }
 

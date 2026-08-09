@@ -83,6 +83,101 @@ void main() {
     });
   });
 
+  group('BrowserSessionArtifactFileService transfer bounds', () {
+    test('signed artifacts use the bounded backend before retention', () async {
+      final backend = _FakeBrowserBoundedDownloadBackend(
+        artifactBytes: utf8.encode('bounded artifact'),
+        artifactKey: 'artifact-key',
+        contentHash: 'content-version',
+      );
+      final service = BrowserSessionArtifactFileService(backend);
+
+      final cached = await service.cacheArtifact(
+        const SessionArtifactDescriptor(
+          name: 'artifact.txt',
+          artifactKey: 'artifact-key',
+          contentHash: 'content-version',
+          fetchUrl: 'https://broker/artifact/artifact-key',
+        ),
+      );
+
+      expect(cached.byteLength, utf8.encode('bounded artifact').length);
+      expect(backend.boundedArtifactCalls, 1);
+      expect(backend.unboundedArtifactCalls, 0);
+      expect(backend.artifactLimits, [64 * 1024 * 1024]);
+    });
+
+    test(
+      'advertised over-limit artifact fails before browser retention',
+      () async {
+        final backend = _FakeBrowserBoundedDownloadBackend(
+          artifactBytes: const [1],
+          artifactAdvertisedLength: 64 * 1024 * 1024 + 1,
+        );
+        final service = BrowserSessionArtifactFileService(backend);
+
+        await expectLater(
+          service.cacheArtifact(
+            const SessionArtifactDescriptor(
+              name: 'oversized.bin',
+              fetchUrl: 'https://broker/artifact/oversized',
+            ),
+          ),
+          throwsA(isA<ArtifactTooLargeException>()),
+        );
+        expect(backend.unboundedArtifactCalls, 0);
+      },
+    );
+
+    test('workspace files use bounded authenticated ranges only', () async {
+      final fileBytes = List<int>.generate(
+        1024 * 1024 + 17,
+        (index) => index % 251,
+      );
+      final backend = _FakeBrowserBoundedDownloadBackend(
+        sessionBytes: fileBytes,
+      );
+      final service = BrowserSessionArtifactFileService(backend);
+
+      final cached = await service.cacheSessionFile(
+        tool: 'pi',
+        sessionId: 'owner',
+        path: 'results.bin',
+        fileName: 'results.bin',
+      );
+
+      expect(cached.byteLength, fileBytes.length);
+      expect(backend.fullSessionCalls, 0);
+      expect(backend.unboundedRangeCalls, 0);
+      expect(backend.boundedRangeCalls, 2);
+      expect(
+        backend.rangeLimits.every((limit) => limit <= 1024 * 1024),
+        isTrue,
+      );
+    });
+
+    test('workspace total wins over misleading small content-length', () async {
+      final backend = _FakeBrowserBoundedDownloadBackend(
+        sessionBytes: const [1, 2, 3, 4],
+        sessionAdvertisedTotal: 64 * 1024 * 1024 + 1,
+        rangeContentLength: 1,
+      );
+      final service = BrowserSessionArtifactFileService(backend);
+
+      await expectLater(
+        service.cacheSessionFile(
+          tool: 'pi',
+          sessionId: 'owner',
+          path: 'misleading.bin',
+          fileName: 'misleading.bin',
+        ),
+        throwsA(isA<ArtifactTooLargeException>()),
+      );
+      expect(backend.fullSessionCalls, 0);
+      expect(backend.boundedRangeCalls, 1);
+    });
+  });
+
   group('SessionArtifactFileService cache/export behavior', () {
     test(
       'cacheArtifact writes bytes to temporary cache with atomic rename',
@@ -100,6 +195,8 @@ void main() {
         final backend = _FakeArtifactDownloadBackend(
           bytes: downloadedBytes,
           contentType: 'text/plain',
+          artifactKey: 'artifact-fixture',
+          contentHash: 'version-fixture',
         );
         final cacheProvider = _FakeArtifactCacheDirectoryProvider(
           Directory('${workDir.path}/cache'),
@@ -113,6 +210,8 @@ void main() {
         final cached = await service.cacheArtifact(
           const SessionArtifactDescriptor(
             name: 'fixture.txt',
+            artifactKey: 'artifact-fixture',
+            contentHash: 'version-fixture',
             fetchUrl: 'https://broker/sessions/unit/artifact/fixture',
             mimeType: 'text/plain',
           ),
@@ -127,6 +226,76 @@ void main() {
           backend.requestUrl,
           'https://broker/sessions/unit/artifact/fixture',
         );
+      },
+    );
+
+    test(
+      'cacheArtifact rejects a response for another artifact identity',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-identity-mismatch',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: _FakeArtifactDownloadBackend(
+            bytes: utf8.encode('wrong artifact'),
+            artifactKey: 'artifact-other',
+            contentHash: 'version-expected',
+          ),
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        await expectLater(
+          service.cacheArtifact(
+            const SessionArtifactDescriptor(
+              name: 'fixture.txt',
+              artifactKey: 'artifact-expected',
+              contentHash: 'version-expected',
+              fetchUrl:
+                  'https://broker/sessions/tool/session/artifact/expected',
+            ),
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(workDir.listSync(), isEmpty);
+      },
+    );
+
+    test(
+      'cacheArtifact rejects a response for another artifact version',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-version-mismatch',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: _FakeArtifactDownloadBackend(
+            bytes: utf8.encode('wrong version'),
+            artifactKey: 'artifact-expected',
+            contentHash: 'version-other',
+          ),
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        await expectLater(
+          service.cacheArtifact(
+            const SessionArtifactDescriptor(
+              name: 'fixture.txt',
+              artifactKey: 'artifact-expected',
+              contentHash: 'version-expected',
+              fetchUrl:
+                  'https://broker/sessions/tool/session/artifact/expected',
+            ),
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(workDir.listSync(), isEmpty);
       },
     );
 
@@ -451,14 +620,139 @@ void main() {
   });
 }
 
+class _FakeBrowserBoundedDownloadBackend
+    implements
+        ArtifactDownloadBackend,
+        BoundedArtifactDownloadBackend,
+        ResumableArtifactDownloadBackend,
+        BoundedResumableArtifactDownloadBackend {
+  _FakeBrowserBoundedDownloadBackend({
+    this.artifactBytes = const [],
+    this.artifactKey,
+    this.contentHash,
+    this.artifactAdvertisedLength,
+    this.sessionBytes = const [],
+    this.sessionAdvertisedTotal,
+    this.rangeContentLength,
+  });
+
+  final List<int> artifactBytes;
+  final String? artifactKey;
+  final String? contentHash;
+  final int? artifactAdvertisedLength;
+  final List<int> sessionBytes;
+  final int? sessionAdvertisedTotal;
+  final int? rangeContentLength;
+  final List<int> artifactLimits = [];
+  final List<int> rangeLimits = [];
+  int boundedArtifactCalls = 0;
+  int unboundedArtifactCalls = 0;
+  int fullSessionCalls = 0;
+  int boundedRangeCalls = 0;
+  int unboundedRangeCalls = 0;
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrl(String url) {
+    unboundedArtifactCalls += 1;
+    throw StateError('unbounded artifact fetch must not be used on web');
+  }
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrlBounded(
+    String url, {
+    required int maxBytes,
+  }) async {
+    boundedArtifactCalls += 1;
+    artifactLimits.add(maxBytes);
+    if ((artifactAdvertisedLength ?? artifactBytes.length) > maxBytes ||
+        artifactBytes.length > maxBytes) {
+      throw ArtifactTooLargeException(
+        limit: maxBytes,
+        advertised: artifactAdvertisedLength,
+      );
+    }
+    return ArtifactDownload(
+      bytes: artifactBytes,
+      contentLength: artifactAdvertisedLength,
+      artifactKey: artifactKey,
+      contentHash: contentHash,
+    );
+  }
+
+  @override
+  Future<ArtifactDownload> fetchSessionFile(
+    String tool,
+    String sessionId,
+    String path,
+  ) {
+    fullSessionCalls += 1;
+    throw StateError('full workspace fetch must not be used on web');
+  }
+
+  @override
+  Future<ArtifactDownload> fetchSessionFileRange(
+    String tool,
+    String sessionId,
+    String path, {
+    required int rangeStart,
+    required int rangeEnd,
+    String? ifRange,
+  }) {
+    unboundedRangeCalls += 1;
+    throw StateError('unbounded range fetch must not be used on web');
+  }
+
+  @override
+  Future<ArtifactDownload> fetchSessionFileRangeBounded(
+    String tool,
+    String sessionId,
+    String path, {
+    required int rangeStart,
+    required int rangeEnd,
+    required int maxBytes,
+    String? ifRange,
+  }) async {
+    boundedRangeCalls += 1;
+    rangeLimits.add(maxBytes);
+    final total = sessionAdvertisedTotal ?? sessionBytes.length;
+    if (rangeStart >= sessionBytes.length) {
+      return ArtifactDownload(
+        bytes: const [],
+        statusCode: 416,
+        contentRange: 'bytes */$total',
+      );
+    }
+    final end = rangeEnd < sessionBytes.length - 1
+        ? rangeEnd
+        : sessionBytes.length - 1;
+    final chunk = sessionBytes.sublist(rangeStart, end + 1);
+    if (chunk.length > maxBytes) {
+      throw ArtifactTooLargeException(limit: maxBytes);
+    }
+    return ArtifactDownload(
+      bytes: chunk,
+      statusCode: 206,
+      contentLength: rangeContentLength ?? chunk.length,
+      contentType: 'application/octet-stream',
+      etag: '"browser-v1"',
+      acceptRanges: 'bytes',
+      contentRange: 'bytes $rangeStart-$end/$total',
+    );
+  }
+}
+
 class _FakeArtifactDownloadBackend implements ArtifactDownloadBackend {
   _FakeArtifactDownloadBackend({
     required List<int> bytes,
     this.contentType,
+    this.artifactKey,
+    this.contentHash,
   }) : _bytes = List<int>.unmodifiable(bytes);
 
   final List<int> _bytes;
   final String? contentType;
+  final String? artifactKey;
+  final String? contentHash;
   String? requestUrl;
 
   @override
@@ -467,6 +761,8 @@ class _FakeArtifactDownloadBackend implements ArtifactDownloadBackend {
     return ArtifactDownload(
       bytes: _bytes,
       contentType: contentType,
+      artifactKey: artifactKey,
+      contentHash: contentHash,
     );
   }
 

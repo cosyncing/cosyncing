@@ -482,6 +482,7 @@ class _TranscriptSurface extends ConsumerStatefulWidget {
     required this.state,
     required this.controller,
     required this.isConnected,
+    required this.hasActiveBrokerClient,
     required this.canFork,
     required this.toolDisplayMode,
     required this.onForkFromMessage,
@@ -495,6 +496,7 @@ class _TranscriptSurface extends ConsumerStatefulWidget {
   final SessionDetailState state;
   final SessionDetailController controller;
   final bool isConnected;
+  final bool hasActiveBrokerClient;
   final bool canFork;
   final ToolDisplayMode toolDisplayMode;
   final ValueChanged<String> onForkFromMessage;
@@ -2001,6 +2003,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                     message: message,
                     controller: widget.controller,
                     isConnected: widget.isConnected,
+                    hasActiveBrokerClient: widget.hasActiveBrokerClient,
                     canFork: widget.canFork,
                     canMutate: canMutate,
                     onExtractRequestId: extractRequestIdFromMessage,
@@ -2008,6 +2011,10 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
                     resolvedRequestIds: resolvedRequestIds,
                     resolvedRequestDecisions: resolvedRequestDecisions,
                     onForkFromMessage: widget.onForkFromMessage,
+                    artifactActionState: _artifactActionStateForMessage(
+                      widget.state,
+                      message,
+                    ),
                   ),
                 },
               ToolTranscriptDisplayEntry(:final primaryMessage) =>
@@ -2453,6 +2460,18 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
       ),
     );
   }
+}
+
+SessionArtifactActionState _artifactActionStateForMessage(
+  SessionDetailState state,
+  AgentMessage message,
+) {
+  final descriptor = SessionArtifactDescriptor.fromMessage(message);
+  return descriptor == null
+      ? const SessionArtifactActionState(
+          phase: SessionArtifactActionPhase.idle,
+        )
+      : state.actionStateFor(descriptor.actionStateKey);
 }
 
 /// Registers one transcript row's [BuildContext] while it is mounted, so the

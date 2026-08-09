@@ -30,7 +30,10 @@ void main() {
       name: 'report.html',
       mimeType: 'text/html',
       artifactKey: 'artifact-1',
-      fetchUrl: '/artifact/artifact-1',
+      contentHash: 'version-1',
+      fetchUrl:
+          'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+          'artifact/artifact-1?expires=1&sig=exact',
     );
     const previewDescriptor = SessionArtifactDescriptor(
       name: 'preview.html',
@@ -215,6 +218,7 @@ void main() {
 
       final retryWorker = SessionArtifactTransferWorker(
         brokerProfileId: 'profile-a',
+        brokerClient: brokerClient,
         fileService: fileService,
         transferController: retryController,
       );
@@ -238,6 +242,53 @@ void main() {
       expect(transfer.cachedFilePath, '/tmp/retry-report.html');
       expect(transfer.exportedPath, '/workspace/retry-report.html');
       expect(transfer.error, isNull);
+    });
+
+    test('downloadArtifact rejects a reference for another session', () async {
+      const descriptor = SessionArtifactDescriptor(
+        name: 'other.txt',
+        artifactKey: 'artifact-other',
+        contentHash: 'version-other',
+        fetchUrl:
+            'http://127.0.0.1:7734/api/sessions/claude/session-2/'
+            'artifact/artifact-other?expires=1&sig=exact',
+      );
+
+      final result = await worker.downloadArtifact(
+        sessionKey: sessionKey,
+        descriptor: descriptor,
+        hasActiveBrokerClient: true,
+      );
+
+      expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
+      expect(
+        result.message,
+        'Artifact reference is not bound to this broker, session, and version.',
+      );
+      expect(fileService.cacheCallCount, 0);
+      expect(fileService.exportCallCount, 0);
+    });
+
+    test('downloadArtifact rejects a reference for another broker', () async {
+      const descriptor = SessionArtifactDescriptor(
+        name: 'other.txt',
+        artifactKey: 'artifact-other',
+        contentHash: 'version-other',
+        fetchUrl:
+            'https://other-broker.test/api/sessions/claude/session-1/'
+            'artifact/artifact-other?expires=1&sig=exact',
+      );
+
+      final result = await worker.downloadArtifact(
+        sessionKey: sessionKey,
+        descriptor: descriptor,
+        hasActiveBrokerClient: true,
+      );
+
+      expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
+      expect(fileService.cacheCallCount, 0);
+      expect(fileService.exportCallCount, 0);
+      expect(result.message, isNot(contains('other-broker.test')));
     });
 
     test(

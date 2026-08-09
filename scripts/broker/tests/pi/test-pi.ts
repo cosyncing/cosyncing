@@ -7,7 +7,7 @@
  *   3. Drive/resume user-message echo for a LIVE prompt (Pi emits no echo event → adapter does it)
  *   3. token streaming (model-output deltas) + working→idle status
  *   4. file upload → <cwd>/.cosyncing/inbox (byte-exact)
- *   5. agent→user outbox file → file-artifact (universal Hub watcher)
+ *   5. agent→user file delivery is covered by the session-qualified bridge suite
  *   6. detach evicts + kills the spawned `pi` process (no leak)
  *
  *   BROKER=http://127.0.0.1:7734 bun run scripts/broker/test-pi.ts
@@ -137,17 +137,6 @@ try {
     a.close();
     const content = ok ? await Bun.file(join(s.dir, '.cosyncing', 'inbox', 'note.txt')).text() : '';
     return [ok && content === 'PI-UPLOAD-CONTENT-42', ok ? `inbox written, content matches=${content === 'PI-UPLOAD-CONTENT-42'}` : 'no inbox file'];
-  });
-
-  await test('agent→user outbox file → artifact', async () => {
-    const a = await attach(s.id);
-    await sleep(1500);
-    const ob = join(s.dir, '.cosyncing', 'outbox');
-    mkdirSync(ob, { recursive: true });
-    writeFileSync(join(ob, 'out.txt'), 'from pi');
-    const art = await a.waitMsg((m) => m.type === 'file-artifact' && /out\.txt/.test(m.name || ''), 8000);
-    a.close();
-    return [!!art && !!art.url, art ? `artifact ${art.name} inline=${!!art.url}` : 'no artifact'];
   });
 
   await test('multi-turn streaming keys are distinct (no bubble collapse)', async () => {

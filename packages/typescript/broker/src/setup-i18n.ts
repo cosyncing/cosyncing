@@ -219,7 +219,7 @@ const en: SetupMessages = {
     `${product} will manage supported shared Codex/OpenCode runtimes and the packaged Pi bridge. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
-  agentSkillConfirm: 'Install the cosyncing agent skill so agents can deliver files to the app?',
+  agentSkillConfirm: 'Install the cosyncing agent skill so agents with a supported session-bound tool can deliver files to the app?',
   opencodeShimConfirm:
     'Route `opencode` in your terminal to the shared cosyncing serve so its status shows live in the app?',
   serviceQuestion: 'How should the broker run after setup?',
@@ -425,7 +425,7 @@ const zhHans: SetupMessages = {
   managedRuntimeBody: (product) =>
     `${product} 会接管支持的 Codex/OpenCode 共享运行时，以及随包提供的 Pi bridge。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
-  agentSkillConfirm: '安装 cosyncing agent skill，让编程助手可以把文件直接送到 App？',
+  agentSkillConfirm: '安装 cosyncing agent skill，让具备安全会话工具的编程助手可以把文件直接送到 App？',
   opencodeShimConfirm: '把终端里的 `opencode` 指向 cosyncing 的共享 serve，让它的状态实时显示在 App 里？',
   serviceQuestion: '安装完成后，broker 以哪种方式运行？',
   serviceForegroundLabel: '前台运行',

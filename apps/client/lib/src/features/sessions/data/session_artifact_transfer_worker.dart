@@ -26,6 +26,8 @@ const _uploadResumeUnavailableMessage =
     'Start a new upload from Session Detail.';
 const _uploadResumeAlreadyInProgressMessage =
     'Upload resume is already in progress for this transfer.';
+const _artifactReferenceMismatchMessage =
+    'Artifact reference is not bound to this broker, session, and version.';
 
 /// Maximum original byte size sent through the legacy WebSocket `file` frame.
 ///
@@ -215,6 +217,7 @@ class SessionArtifactTransferWorker {
     );
     return _runDownload(
       transferId: transferId,
+      sessionKey: sessionKey,
       descriptor: descriptor,
       hasActiveBrokerClient: hasActiveBrokerClient,
     );
@@ -568,6 +571,7 @@ class SessionArtifactTransferWorker {
         return _sessionFilePathFromTransfer(transfer) == null
             ? _runDownload(
                 transferId: transferId,
+                sessionKey: transfer.sessionKey,
                 descriptor: descriptor,
                 hasActiveBrokerClient: hasActiveBrokerClient,
               )
@@ -586,6 +590,7 @@ class SessionArtifactTransferWorker {
         }
         return _runPreview(
           transferId: transferId,
+          sessionKey: transfer.sessionKey,
           descriptor: descriptor,
           hasActiveBrokerClient: hasActiveBrokerClient,
         );
@@ -1212,6 +1217,7 @@ class SessionArtifactTransferWorker {
 
   Future<SessionArtifactTransferWorkerResult> _runDownload({
     required String transferId,
+    required SessionDetailKey sessionKey,
     required SessionArtifactDescriptor descriptor,
     required bool hasActiveBrokerClient,
   }) async {
@@ -1226,6 +1232,17 @@ class SessionArtifactTransferWorker {
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+      );
+    }
+
+    final referenceError = _artifactReferenceError(sessionKey, descriptor);
+    if (referenceError != null) {
+      transferController.markFailed(transferId, referenceError);
+      _unregisterCancellationToken(transferId, cancellationToken);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: referenceError,
       );
     }
 
@@ -1316,6 +1333,7 @@ class SessionArtifactTransferWorker {
     );
     return _runPreview(
       transferId: transferId,
+      sessionKey: sessionKey,
       descriptor: descriptor,
       hasActiveBrokerClient: hasActiveBrokerClient,
     );
@@ -1323,6 +1341,7 @@ class SessionArtifactTransferWorker {
 
   Future<SessionArtifactTransferWorkerResult> _runPreview({
     required String transferId,
+    required SessionDetailKey sessionKey,
     required SessionArtifactDescriptor descriptor,
     required bool hasActiveBrokerClient,
   }) async {
@@ -1348,6 +1367,17 @@ class SessionArtifactTransferWorker {
         transferId: transferId,
         outcome: SessionArtifactTransferWorkerOutcome.failed,
         message: message,
+      );
+    }
+
+    final referenceError = _artifactReferenceError(sessionKey, descriptor);
+    if (referenceError != null) {
+      transferController.markFailed(transferId, referenceError);
+      _unregisterCancellationToken(transferId, cancellationToken);
+      return SessionArtifactTransferWorkerResult(
+        transferId: transferId,
+        outcome: SessionArtifactTransferWorkerOutcome.failed,
+        message: referenceError,
       );
     }
 
@@ -1395,6 +1425,53 @@ class SessionArtifactTransferWorker {
     } finally {
       _unregisterCancellationToken(transferId, cancellationToken);
     }
+  }
+
+  String? _artifactReferenceError(
+    SessionDetailKey sessionKey,
+    SessionArtifactDescriptor descriptor,
+  ) {
+    if (descriptor.isInlineDataUrl) return null;
+    final client = brokerClient;
+    final source = Uri.tryParse(descriptor.downloadSourceUrl ?? '');
+    final broker = client == null ? null : Uri.tryParse(client.baseUrl);
+    final artifactKey = descriptor.artifactKey?.trim() ?? '';
+    final contentHash = descriptor.contentHash?.trim() ?? '';
+    if (source == null ||
+        broker == null ||
+        !source.hasScheme ||
+        source.userInfo.isNotEmpty ||
+        !_sameOrigin(source, broker) ||
+        artifactKey.isEmpty ||
+        contentHash.isEmpty ||
+        source.queryParameters['expires']?.isNotEmpty != true ||
+        source.queryParameters['sig']?.isNotEmpty != true) {
+      return _artifactReferenceMismatchMessage;
+    }
+    final segments = source.pathSegments;
+    if (segments.length != 6 ||
+        segments[0] != 'api' ||
+        segments[1] != 'sessions' ||
+        segments[2] != sessionKey.tool ||
+        segments[3] != sessionKey.sessionId ||
+        segments[4] != 'artifact' ||
+        segments[5] != artifactKey) {
+      return _artifactReferenceMismatchMessage;
+    }
+    return null;
+  }
+
+  bool _sameOrigin(Uri left, Uri right) {
+    int effectivePort(Uri uri) => uri.hasPort
+        ? uri.port
+        : switch (uri.scheme.toLowerCase()) {
+            'https' => 443,
+            'http' => 80,
+            _ => -1,
+          };
+    return left.scheme.toLowerCase() == right.scheme.toLowerCase() &&
+        left.host.toLowerCase() == right.host.toLowerCase() &&
+        effectivePort(left) == effectivePort(right);
   }
 
   SessionArtifactCancellationToken _registerCancellationToken(

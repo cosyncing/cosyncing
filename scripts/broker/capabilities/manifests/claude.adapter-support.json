@@ -160,13 +160,13 @@
     },
     {
       "schemaVersion": 1,
-      "id": "claude.artifact.outbox",
-      "nativeId": "claude:artifact:outbox",
+      "id": "claude.jsonl.send_user_file",
+      "nativeId": "claude:jsonl:SendUserFile",
       "agent": "claude",
       "version": "2.1.203",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (outbox → file-artifact)"],
+      "adapterRefs": ["packages/typescript/adapters/claude/src/index.ts (SendUserFile → file-artifact)"],
       "traceRefs": ["scripts/broker/tests/claude/test-claude-artifacts.ts"]
     },
     {

@@ -306,8 +306,15 @@ void main() {
             SessionArtifactActionPhase.error,
           );
           expect(
-            offlineContainer.read(sessionDetailControllerProvider(key)).error,
+            offlineContainer
+                .read(sessionDetailControllerProvider(key))
+                .actionStateFor('file-123')
+                .message,
             contains('No active broker client for artifact download.'),
+          );
+          expect(
+            offlineContainer.read(sessionDetailControllerProvider(key)).error,
+            isNull,
           );
           final transfer = offlineContainer
               .read(sessionArtifactTransferControllerProvider)
@@ -346,8 +353,15 @@ void main() {
             SessionArtifactActionPhase.error,
           );
           expect(
-            container.read(sessionDetailControllerProvider(key)).error,
+            container
+                .read(sessionDetailControllerProvider(key))
+                .actionStateFor('inline-artifact.bin')
+                .message,
             contains("Couldn't save this artifact."),
+          );
+          expect(
+            container.read(sessionDetailControllerProvider(key)).error,
+            isNull,
           );
         },
       );
@@ -465,8 +479,15 @@ void main() {
         expect(cached, isNull);
         expect(fakeArtifactFileService.cacheCallCount, 0);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
+          container
+              .read(sessionDetailControllerProvider(key))
+              .actionStateFor('notes.txt')
+              .message,
           contains('Only HTML artifacts can be previewed.'),
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          isNull,
         );
       });
 
@@ -508,8 +529,15 @@ void main() {
           expect(cached, isNull);
           expect(fakeArtifactFileService.cacheCallCount, 0);
           expect(
-            offlineContainer.read(sessionDetailControllerProvider(key)).error,
+            offlineContainer
+                .read(sessionDetailControllerProvider(key))
+                .actionStateFor('html-1')
+                .message,
             contains('No active broker client for artifact preview.'),
+          );
+          expect(
+            offlineContainer.read(sessionDetailControllerProvider(key)).error,
+            isNull,
           );
         },
       );
@@ -531,8 +559,15 @@ void main() {
         expect(cached, isNull);
         expect(fakeArtifactFileService.cacheCallCount, 1);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
+          container
+              .read(sessionDetailControllerProvider(key))
+              .actionStateFor('preview.html')
+              .message,
           contains("Couldn't prepare this artifact preview."),
+        );
+        expect(
+          container.read(sessionDetailControllerProvider(key)).error,
+          isNull,
         );
       });
 

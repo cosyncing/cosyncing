@@ -535,19 +535,20 @@ await test('file upload reaches the agent', async () => {
   return [!!got, got ? 'file delivered (caption echoed)' : 'no file echo'];
 });
 
-// 8i) agent→user file pipeline: a file dropped in <cwd>/.cosyncing/outbox surfaces as a file-artifact
-await test('outbox file surfaces as artifact', async () => {
-  const dir = '/tmp/cany-outbox';
+// 8i) agent→user file pipeline: the session-qualified send_file route surfaces an artifact.
+await test('session-qualified send_file surfaces artifact', async () => {
+  const dir = '/tmp/cany-send-file';
   const id = await createSession(dir);
+  writeFileSync(`${dir}/report.txt`, 'hello from the agent');
   const a = await attach(id);
-  await sleep(1200); // let the broker create + watch <cwd>/.cosyncing/outbox
-  const outbox = `${dir}/.cosyncing/outbox`;
-  mkdirSync(outbox, { recursive: true });
-  writeFileSync(`${outbox}/report.txt`, 'hello from the agent');
+  const response = await fetch(`${BROKER}/api/tool/send_file`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionID: id, tool: 'opencode', path: 'report.txt' }),
+  });
   const art = await a.waitMsg((m) => m.type === 'file-artifact' && /report\.txt/.test(m.name || ''), 8000);
   a.close();
   await delSession(id, dir);
-  return [!!art && !!art.url, art ? `artifact ${art.name} (${art.mimeType}), inline=${!!art.url}` : 'no artifact surfaced'];
+  return [response.ok && !!art && !!(art.fetchUrl || art.url), art ? `artifact ${art.name} (${art.mimeType})` : 'no artifact surfaced'];
 });
 
 // 8i-1b) received files survive a reattach (refresh / switch-away-and-back). Broker-injected
@@ -556,11 +557,12 @@ await test('outbox file surfaces as artifact', async () => {
 await test('received artifact survives reattach', async () => {
   const dir = '/tmp/cany-reattach';
   const id = await createSession(dir);
+  writeFileSync(`${dir}/keepme.txt`, 'persist across reattach');
   const a1 = await attach(id);
-  await sleep(1200);
-  const outbox = `${dir}/.cosyncing/outbox`;
-  mkdirSync(outbox, { recursive: true });
-  writeFileSync(`${outbox}/keepme.txt`, 'persist across reattach');
+  await fetch(`${BROKER}/api/tool/send_file`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionID: id, tool: 'opencode', path: 'keepme.txt' }),
+  });
   const live = await a1.waitMsg((m) => m.type === 'file-artifact' && /keepme\.txt/.test(m.name || ''), 8000);
   a1.close();
   await sleep(500); // reattach within the 15s grace → same ManagedConn reused (the refresh case)
@@ -568,33 +570,41 @@ await test('received artifact survives reattach', async () => {
   const replayed = await a2.waitMsg((m) => m.type === 'file-artifact' && /keepme\.txt/.test(m.name || ''), 6000);
   a2.close();
   await delSession(id, dir);
-  return [!!live && !!replayed && !!replayed.url, `live=${!!live} afterReattach=${!!replayed}`];
+  return [!!live && !!replayed && !!(replayed.fetchUrl || replayed.url), `live=${!!live} afterReattach=${!!replayed}`];
 });
 
-// 8i-2) outbox is hardened: a symlink is NOT followed (no external leak), and a rewrite of the
-// SAME filename re-surfaces the updated content (no permanent dedup), and the path is relative.
-await test('outbox hardening (symlink skip + rewrite re-surface)', async () => {
-  const dir = '/tmp/cany-outbox2';
+// 8i-2) send_file is hardened: a symlink is NOT followed, and a rewrite of the
+// SAME filename remains a distinct version for this exact session.
+await test('send_file hardening (symlink reject + rewrite versioning)', async () => {
+  const dir = '/tmp/cany-send-file2';
   const id = await createSession(dir);
   const a = await attach(id);
-  await sleep(1300);
-  const outbox = `${dir}/.cosyncing/outbox`;
-  mkdirSync(outbox, { recursive: true });
   writeFileSync('/tmp/cany-secret-leak.txt', 'SECRET-LEAK-XYZ');
-  try { symlinkSync('/tmp/cany-secret-leak.txt', `${outbox}/link.txt`); } catch { /* symlink may be unsupported */ }
-  writeFileSync(`${outbox}/doc.txt`, 'v1');
-  await sleep(1600);
-  writeFileSync(`${outbox}/doc.txt`, 'v2-updated'); // same name, new content → must re-surface
-  await sleep(2600);
+  try { symlinkSync('/tmp/cany-secret-leak.txt', `${dir}/link.txt`); } catch { /* symlink may be unsupported */ }
+  const symlinkResponse = await fetch(`${BROKER}/api/tool/send_file`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionID: id, tool: 'opencode', path: 'link.txt' }),
+  });
+  writeFileSync(`${dir}/doc.txt`, 'v1');
+  await fetch(`${BROKER}/api/tool/send_file`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionID: id, tool: 'opencode', path: 'doc.txt' }),
+  });
+  await sleep(300);
+  writeFileSync(`${dir}/doc.txt`, 'v2-updated');
+  await fetch(`${BROKER}/api/tool/send_file`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionID: id, tool: 'opencode', path: 'doc.txt' }),
+  });
+  await sleep(500);
   const arts = a.msgs().filter((m) => m.type === 'file-artifact');
-  const decode = (u: string) => { try { return Buffer.from((u || '').split(',')[1] || '', 'base64').toString(); } catch { return ''; } };
-  const leaked = arts.some((m) => decode(m.url || '').includes('SECRET-LEAK'));
-  const docVersions = arts.filter((m) => m.name === 'doc.txt').map((m) => decode(m.url || ''));
+  const docArtifacts = arts.filter((m) => m.name === 'doc.txt');
+  const versions = new Set(docArtifacts.map((m) => m.artifactKey || m.contentHash || m.url));
   const absPathLeak = arts.some((m) => typeof m.path === 'string' && m.path.startsWith('/'));
   a.close();
   await delSession(id, dir);
-  const ok = !leaked && docVersions.includes('v1') && docVersions.includes('v2-updated') && !absPathLeak;
-  return [ok, `symlinkLeak=${leaked} docVersions=${JSON.stringify(docVersions)} absPath=${absPathLeak}`];
+  const ok = !symlinkResponse.ok && docArtifacts.length >= 2 && versions.size >= 2 && !absPathLeak;
+  return [ok, `symlinkRejected=${!symlinkResponse.ok} versions=${versions.size} absPath=${absPathLeak}`];
 });
 
 // 8j) /compact is fire-and-forget: its notice arrives fast, never blocking the socket ~47s

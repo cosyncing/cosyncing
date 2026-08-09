@@ -62,7 +62,18 @@ final Map<AgentMessageType, AgentMessageRenderer> agentMessageRendererRegistry =
     };
 
 /// Builds a renderer for one [AgentMessage].
-Widget buildAgentMessageRenderer(BuildContext context, AgentMessage message) {
+Widget buildAgentMessageRenderer(
+  BuildContext context,
+  AgentMessage message, {
+  Widget? fileArtifactAction,
+}) {
+  if (message.type == AgentMessageType.fileArtifact) {
+    return _fileArtifactMessageRenderer(
+      context,
+      message,
+      action: fileArtifactAction,
+    );
+  }
   return (agentMessageRendererRegistry[message.type] ??
       _unknownMessageRenderer)(
     context,

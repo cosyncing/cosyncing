@@ -63,7 +63,12 @@ void main() {
               direction: SessionArtifactTransferDirection.download,
               status: SessionArtifactTransferStatus.failed,
               artifactKey: 'failed.html',
-              sourceUrl: '/artifact/failed.html',
+              contentHash:
+                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              sourceUrl:
+                  'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+                  'artifact/failed.html?expires=9999999999999&sig=test',
               contentType: 'text/html',
               message: 'Network failed',
               createdAt: DateTime(2026, 6, 30),

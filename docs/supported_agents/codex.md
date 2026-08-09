@@ -25,4 +25,9 @@ cosyncing setup
 cosyncing doctor
 ```
 
+Direct agent-to-user file delivery is not currently available in Codex. The
+installed skill leaves generated files in the workspace because Codex has no
+safe exact-session delivery tool. Do not use a shared `.cosyncing/outbox`
+directory.
+
 See the [official Codex CLI documentation](https://developers.openai.com/codex/cli/).

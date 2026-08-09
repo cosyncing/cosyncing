@@ -784,6 +784,102 @@ class BrokerClient {
     }
   }
 
+  /// Downloads one authenticated workspace-file response with a hard byte
+  /// ceiling enforced while bytes are arriving. Range fields have the same
+  /// semantics as [downloadSessionFile]; unlike that native filesystem path,
+  /// this method is safe for the browser's in-memory cache.
+  Future<ArtifactDownload> downloadSessionFileBounded(
+    String tool,
+    String id, {
+    required String path,
+    required int maxBytes,
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
+  }) async {
+    if (maxBytes <= 0) {
+      throw ArgumentError.value(maxBytes, 'maxBytes', 'Must be > 0.');
+    }
+    if (rangeStart != null && rangeStart < 0) {
+      throw ArgumentError.value(rangeStart, 'rangeStart', 'Must be >= 0.');
+    }
+    if (rangeEnd != null && (rangeStart == null || rangeEnd < rangeStart)) {
+      throw ArgumentError.value(
+        rangeEnd,
+        'rangeEnd',
+        'Requires rangeStart and must be >= rangeStart.',
+      );
+    }
+    final cancelToken = CancelToken();
+    var overLimit = false;
+    try {
+      final response = await _dio.get<List<int>>(
+        _appendQuery(
+          _resolver.fsDownloadEndpoint(tool, id),
+          {'path': path},
+        ),
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: {
+            ..._resolver.authHeaders,
+            if (rangeStart != null)
+              'range': 'bytes=$rangeStart-${rangeEnd ?? ''}',
+            if (ifRange != null && ifRange.trim().isNotEmpty)
+              'if-range': ifRange.trim(),
+          },
+          validateStatus: (status) =>
+              status == 200 || status == 206 || status == 416,
+        ),
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (!overLimit &&
+              ((total > 0 && total > maxBytes) || received > maxBytes)) {
+            overLimit = true;
+            cancelToken.cancel('workspace file exceeds client byte ceiling');
+          }
+        },
+      );
+      final headers = response.headers;
+      final advertised = _parseContentLength(
+        headers.value('content-length'),
+      );
+      final bytes = response.data ?? <int>[];
+      if ((advertised != null && advertised > maxBytes) ||
+          bytes.length > maxBytes) {
+        throw ArtifactTooLargeException(
+          limit: maxBytes,
+          advertised: advertised,
+        );
+      }
+      final mime =
+          _firstAvailableHeader(
+            headers,
+            const ['x-cosyncing-mime-type'],
+          ) ??
+          headers.value('content-type');
+      return ArtifactDownload(
+        bytes: bytes,
+        contentType: mime,
+        contentLength: advertised,
+        sourceUrl: response.requestOptions.uri.toString(),
+        statusCode: response.statusCode ?? 200,
+        etag: headers.value('etag'),
+        lastModified: headers.value('last-modified'),
+        acceptRanges: headers.value('accept-ranges'),
+        contentRange: headers.value('content-range'),
+      );
+    } on DioException catch (e) {
+      if (overLimit || e.type == DioExceptionType.cancel) {
+        throw ArtifactTooLargeException(limit: maxBytes);
+      }
+      throw BrokerException(
+        message: 'File download failed',
+        statusCode: e.response?.statusCode,
+        error: _parseBytesBrokerError(e),
+      );
+    }
+  }
+
   /// Initializes a chunked upload.
   ///
   /// `POST /api/sessions/:tool/:id/uploads`
@@ -992,6 +1088,16 @@ class BrokerClient {
         bytes: bytes,
         contentType: headers.value('content-type'),
         contentLength: advertised,
+        artifactKey:
+            _firstAvailableHeader(
+              headers,
+              const [
+                'x-artifact-key',
+                'x-cosyncing-artifact-key',
+                'x-broker-artifact-key',
+              ],
+            ) ??
+            _artifactKeyFromUrl(response.requestOptions.uri),
         contentHash: _firstAvailableHeader(
           headers,
           const [

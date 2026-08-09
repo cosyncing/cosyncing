@@ -190,11 +190,15 @@ await run('opening Observe leaves the workspace byte-for-byte unchanged', async 
     assert.deepEqual(snapshotTree(workspace), before);
     assert.equal(existsSync(join(workspace, '.cosyncing')), false);
 
-    // A write-requiring producer may create outbox later; the already-open wrapper adopts it.
-    const outbox = join(workspace, '.cosyncing', 'outbox');
-    mkdirSync(outbox, { recursive: true });
-    writeFileSync(join(outbox, 'result.txt'), 'explicit output');
-    await delay(2_250);
+    // Workspace writes do not become artifacts without an exact producer route.
+    writeFileSync(join(workspace, 'unclaimed.txt'), 'not an artifact');
+    await delay(100);
+    assert(!frames.some((message) => message.type === 'file-artifact'));
+
+    // The same exact ManagedConn can surface a file through its qualified
+    // send_file route without relying on cwd observation.
+    writeFileSync(join(workspace, 'result.txt'), 'explicit output');
+    assert.equal(managed.surfaceExplicit('result.txt').ok, true);
     assert(frames.some((message) => message.type === 'file-artifact' && message.name === 'result.txt'));
     managed.removeClient(client);
     await managed.dispose();

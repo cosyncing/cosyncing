@@ -37,6 +37,64 @@ import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   group('SessionDetailPage artifact surfaces', () {
+    for (final themeCase in <({String name, ThemeData theme})>[
+      (
+        name: 'light',
+        theme: buildAppTheme(
+          themeSpecById(kDefaultThemeId).light,
+          Brightness.light,
+        ),
+      ),
+      (
+        name: 'dark',
+        theme: buildAppTheme(
+          themeSpecById(kDefaultThemeId).dark,
+          Brightness.dark,
+        ),
+      ),
+    ]) {
+      testWidgets('Chat Download action lays out in ${themeCase.name} theme', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            theme: themeCase.theme,
+            events: const [
+              MessageWireEvent(
+                seq: 1,
+                message: AgentMessage(
+                  type: AgentMessageType.fileArtifact,
+                  id: 'artifact-theme',
+                  raw: {
+                    'type': 'file-artifact',
+                    'name': 'theme.txt',
+                    'artifactKey': 'theme-artifact',
+                    'fetchUrl':
+                        'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+                        'artifact/theme-artifact?expires=1&sig=exact',
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final download = find.byKey(
+          const Key(
+            'session-detail-chat-artifact-download-theme-artifact',
+          ),
+        );
+        expect(download, findsOneWidget);
+        expect(
+          find.ancestor(of: download, matching: find.byType(Card)),
+          findsOneWidget,
+          reason: 'Download belongs to the file-artifact card action region',
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
+
     testWidgets(
       'disables fork/clone actions when broker capabilities are unavailable',
       (tester) async {
@@ -503,6 +561,221 @@ void main() {
         expect(artifactSurface, findsOneWidget);
       },
     );
+
+    testWidgets(
+      'Chat artifact card exposes Download and saves exact reference',
+      (
+        tester,
+      ) async {
+        final fileService = FakeSessionArtifactFileService()
+          ..mockCachedFile = const SessionArtifactCachedFile(
+            cachedFilePath: '/tmp/cache/chat-report.txt',
+            fileName: 'chat-report.txt',
+            contentType: 'text/plain',
+            byteLength: 11,
+            artifactKey: 'chat-artifact-key',
+            contentHash: 'chat-version',
+          )
+          ..exportedPath = '/tmp/exported/chat-report.txt';
+
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            artifactFileService: fileService,
+            events: const [
+              MessageWireEvent(
+                seq: 1,
+                message: AgentMessage(
+                  type: AgentMessageType.fileArtifact,
+                  id: 'artifact-chat-download',
+                  raw: {
+                    'type': 'file-artifact',
+                    'name': 'chat-report.txt',
+                    'mimeType': 'text/plain',
+                    'artifactKey': 'chat-artifact-key',
+                    'contentHash': 'chat-version',
+                    'fetchUrl':
+                        'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+                        'artifact/chat-artifact-key?expires=1&sig=exact',
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const actionKey = Key(
+          'session-detail-chat-artifact-download-chat-artifact-key',
+        );
+        final action = tester.widget<TextButton>(find.byKey(actionKey));
+        expect(action.onPressed, isNotNull);
+        expect(
+          find.descendant(
+            of: find.byKey(actionKey),
+            matching: find.text('Download'),
+          ),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.byKey(actionKey));
+        await tester.pumpAndSettle();
+        expect(fileService.cacheCallCount, 1);
+        expect(fileService.exportCallCount, 1);
+        expect(find.text('Saved'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'inline Chat artifact stays downloadable without network fetch',
+      (
+        tester,
+      ) async {
+        final fileService = FakeSessionArtifactFileService()
+          ..exportedPath = '/tmp/exported/inline.txt';
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            artifactFileService: fileService,
+            events: const [
+              MessageWireEvent(
+                seq: 1,
+                message: AgentMessage(
+                  type: AgentMessageType.fileArtifact,
+                  id: 'artifact-chat-inline',
+                  raw: {
+                    'type': 'file-artifact',
+                    'name': 'inline.txt',
+                    'url': 'data:text/plain;base64,aW5saW5l',
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const actionKey = Key(
+          'session-detail-chat-artifact-download-inline.txt',
+        );
+        expect(
+          tester.widget<TextButton>(find.byKey(actionKey)).onPressed,
+          isNotNull,
+        );
+        await tester.tap(find.byKey(actionKey));
+        await tester.pumpAndSettle();
+        expect(fileService.cacheCallCount, 1);
+        expect(fileService.exportCallCount, 1);
+      },
+    );
+
+    testWidgets(
+      'workspace browser failure leaves Chat download enabled and retryable',
+      (tester) async {
+        final brokerClient = FakeBrokerClient()
+          ..fsListError = const BrokerException(
+            message: 'Workspace listing failed',
+            statusCode: 503,
+          );
+        final fileService = FakeSessionArtifactFileService()
+          ..remainingCacheFailures = 1
+          ..exportedPath = '/tmp/exported/retry.txt';
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            brokerClient: brokerClient,
+            artifactFileService: fileService,
+            events: const [
+              MessageWireEvent(
+                seq: 1,
+                message: AgentMessage(
+                  type: AgentMessageType.fileArtifact,
+                  id: 'artifact-chat-retry',
+                  raw: {
+                    'type': 'file-artifact',
+                    'name': 'retry.txt',
+                    'artifactKey': 'retry-artifact',
+                    'contentHash': 'retry-version',
+                    'fetchUrl':
+                        'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+                        'artifact/retry-artifact?expires=1&sig=exact',
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await openSessionDetailTestTab(tester, 'session-detail-tab-files');
+        expect(
+          find.byKey(const Key('session-detail-files-error-state')),
+          findsOneWidget,
+        );
+        await openSessionDetailTestTab(tester, 'session-detail-tab-chat');
+
+        const actionKey = Key(
+          'session-detail-chat-artifact-download-retry-artifact',
+        );
+        expect(
+          tester.widget<TextButton>(find.byKey(actionKey)).onPressed,
+          isNotNull,
+        );
+        await tester.tap(find.byKey(actionKey));
+        await tester.pumpAndSettle();
+        expect(find.text('The file action failed. Try again.'), findsOneWidget);
+        expect(
+          find.text(
+            "The session couldn't update. "
+            'Check the Broker connection and try again.',
+          ),
+          findsNothing,
+        );
+
+        // The same exact action is the retry surface. The transient backend
+        // failure is gone, so it completes without changing broker/session.
+        await tester.tap(find.byKey(actionKey));
+        await tester.pumpAndSettle();
+        expect(fileService.cacheCallCount, 2);
+        expect(fileService.exportCallCount, 1);
+        expect(find.text('Saved'), findsOneWidget);
+      },
+    );
+
+    testWidgets('Chat artifact action and error are localized in Chinese', (
+      tester,
+    ) async {
+      final fileService = FakeSessionArtifactFileService()
+        ..remainingCacheFailures = 1;
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          locale: const Locale('zh'),
+          artifactFileService: fileService,
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.fileArtifact,
+                id: 'artifact-chat-zh',
+                raw: {
+                  'type': 'file-artifact',
+                  'name': 'zh.txt',
+                  'url': 'data:text/plain;base64,emg=',
+                },
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      const actionKey = Key('session-detail-chat-artifact-download-zh.txt');
+      expect(
+        find.descendant(of: find.byKey(actionKey), matching: find.text('下载')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(actionKey));
+      await tester.pumpAndSettle();
+      expect(find.text('文件操作失败。请重试。'), findsOneWidget);
+      expect(find.text('技术详情'), findsOneWidget);
+    });
 
     testWidgets(
       'shows export-attachment metadata and keeps download-only behavior',

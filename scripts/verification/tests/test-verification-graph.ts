@@ -174,6 +174,36 @@ expectMutation(
   },
   /completeness anchor binding mismatch.*pi-tool-result/i,
 );
+expectMutation(
+  'artifact isolation suite registration removal',
+  (value) => {
+    const broker = value.gates.find(
+      (gate) => gate.id === 'broker-deterministic',
+    )!;
+    broker.subSuites = broker.subSuites!.filter(
+      (suite) => suite.id !== 'artifact-session-isolation',
+    );
+    for (const group of broker.subSuiteGroups!) {
+      group.subSuites = group.subSuites.filter(
+        (id) => id !== 'artifact-session-isolation',
+      );
+    }
+  },
+  /completeness anchor.*artifact-session-isolation/i,
+);
+expectMutation(
+  'web artifact production-path registration removal',
+  (value) => {
+    const browser = value.gates.find((gate) => gate.id === 'web-browser')!;
+    browser.claimIds = browser.claimIds.filter(
+      (claimId) => claimId !== 'browser.artifact-session-isolation',
+    );
+    browser.sourceOwners = browser.sourceOwners.filter(
+      (owner) => owner !== 'scripts/client/tests/test-web-artifact-session-isolation.ts',
+    );
+  },
+  /completeness anchor.*web-browser/i,
+);
 
 // A gate's requirement decides whether its red blocks the release, so it is
 // part of the anchored binding. Demoting a required gate to advisory leaves

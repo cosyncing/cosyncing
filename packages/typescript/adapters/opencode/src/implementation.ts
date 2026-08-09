@@ -964,13 +964,11 @@ export class OpenCodeAdapter implements AgentBackend {
     const q = opts.directory ? `?directory=${encodeURIComponent(opts.directory)}` : '';
     const body: Record<string, unknown> = {};
     if (opts.title) body.title = opts.title;
-    if (opts.model) {
-      body.model = {
-        providerID: opts.model.providerID,
-        modelID: opts.model.modelID,
-      };
-      if (opts.model.variant) body.variant = opts.model.variant;
-    }
+    // OpenCode selects models per prompt, not while creating the session.
+    // Sending the prompt-only `model` / `variant` fields to POST /session is
+    // rejected by current OpenCode releases with BadRequest. Keep the chosen
+    // model in the returned session projection so the composer sends it on
+    // the first prompt through prompt_async, where those fields are valid.
     const res = await fetch(this.url(`/session${q}`), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

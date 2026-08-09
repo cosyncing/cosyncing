@@ -37,6 +37,9 @@
     "test:web-update-handoff": "bun run scripts/client/tests/test-web-update-handoff.ts",
     "test:web-startup-shell": "bun run client:build:web && node scripts/client/tests/test-startup-shell-browser.mjs",
     "test:web-startup-shell:built": "node scripts/client/tests/test-startup-shell-browser.mjs",
+    "test:web-artifact-session-isolation": "bun run client:build:web && bun run test:web-artifact-session-isolation:built",
+    "test:web-artifact-session-isolation:built": "bun run scripts/client/tests/test-web-artifact-session-isolation.ts",
+    "test:web-browser:built": "bun run test:web-startup-shell:built && bun run test:web-artifact-session-isolation:built",
     "test:web-client-upgrade": "bun run scripts/client/tests/test-web-client-upgrade-browser.ts",
     "build:broker": "bun run scripts/broker/build-broker.ts",
     "contract:export": "bun run scripts/broker/export-client-contract.ts",
@@ -73,6 +76,7 @@
     "test:broker-adapter-discovery-bounds": "bun run scripts/broker/tests/broker/test-adapter-discovery-bounds.ts",
     "test:broker-sync-degraded-integration": "bun run scripts/broker/tests/broker/test-sync-degraded-integration.ts",
     "test:broker-control-boundaries": "bun run scripts/broker/tests/broker/test-control-boundaries.ts",
+    "test:broker-artifact-session-isolation": "bun run scripts/broker/tests/broker/test-artifact-session-isolation.ts",
     "test:release-supply-chain": "bun run scripts/broker/tests/broker/test-release-supply-chain.ts && bun run test:release-checkpoint-lifecycle && bun run test:release-web-sidecar && bun run test:release-candidate-verifier",
     "test:release-checkpoint-lifecycle": "bun run scripts/release/tests/test-release-checkpoint-lifecycle.ts",
     "test:release-web-sidecar": "bun run scripts/broker/tests/broker/test-release-web-sidecar.ts",
@@ -149,6 +153,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/qrcode": "1.5.6",
+    "playwright-core": "1.61.1",
     "typescript": "^5.6.0"
   },
   "engines": {

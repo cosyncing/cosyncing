@@ -361,6 +361,12 @@ try {
       skillTargets.every((target) => existsSync(target.path))
         && install.committed
         && skillTargets.every((target) => install.state.resources.some((item) => item.id === target.resourceId)));
+    check('packaged skill advertises only callable exact-session delivery routes',
+      AGENT_SKILL_SOURCE.includes('- OpenCode: `send_file`')
+        && AGENT_SKILL_SOURCE.includes('- Pi: the cosyncing bridge `send_file` action')
+        && !AGENT_SKILL_SOURCE.includes('- Claude Code: `SendUserFile`')
+        && AGENT_SKILL_SOURCE.includes('including Claude Code and Codex')
+        && AGENT_SKILL_SOURCE.includes('Do not place files in `<cwd>/.cosyncing/outbox/`'));
     check('setup never edits Claude settings', readFileSync(claudeSettings, 'utf8') === '{"preserve":true}\n');
     check('successful setup removes the pending transaction journal', !readSetupTransactionJournal(home));
 
@@ -1870,7 +1876,7 @@ try {
         && english.applyConfirm === 'Apply and verify this exact plan?'
         && english.planTitle === 'Exact mutation plan'
         && english.planEmpty === 'No filesystem or service mutation is required.'
-        && english.agentSkillConfirm === 'Install the cosyncing agent skill so agents can deliver files to the app?'
+        && english.agentSkillConfirm === 'Install the cosyncing agent skill so agents with a supported session-bound tool can deliver files to the app?'
         && english.quotaConfirm === 'Enable local token and usage quota tracking via Tokdash?'
         // The Serve prompt names the URL the route produces, with the host interpolated from the inspection.
         && english.tailscaleConfirm('https://devbox.tailnet.ts.net/cosy')

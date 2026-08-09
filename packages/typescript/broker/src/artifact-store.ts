@@ -40,6 +40,9 @@ export interface AuthorizedArtifactInteraction {
 
 interface ArtifactRecord {
   key: string;
+  /** Stable configured broker origin that accepted the bytes. Tool/session
+   *  ids are native and can legitimately collide across broker sources. */
+  brokerSource?: string;
   tool: string;
   sessionId: string;
   artifactKey: string;
@@ -58,6 +61,10 @@ interface ArtifactRecord {
   /** Export format + redaction summary shown on the file-artifact card (no secret content). */
   format?: string;
   redactionSummary?: string;
+  /** Present only when the broker received this artifact through a source that
+   *  already proved the exact tool + native session. Legacy cwd-outbox records
+   *  intentionally lack this marker and are never replayed after restart. */
+  qualifiedSource?: 'managed-connection-v1';
 }
 
 /** Metadata for an R2 `export-attachment` ingestion (bytes come from a verified broker temp file). */
@@ -79,6 +86,12 @@ export interface ArtifactStorePersistenceResult {
 
 export interface ArtifactStoreOptions {
   onPersistenceResult?: (result: ArtifactStorePersistenceResult) => void;
+  /** Test/embedding override. Always clamped to the production hard ceiling. */
+  maxRecords?: number;
+  /** Test/embedding override. Always clamped to the production hard ceiling. */
+  sessionReplayLimit?: number;
+  /** Test/embedding override. Always clamped to the production hard ceiling. */
+  maxIndexBytes?: number;
 }
 
 interface ArtifactIndex {
@@ -88,6 +101,12 @@ interface ArtifactIndex {
 
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_AGE_DAYS = 30;
+const DEFAULT_MAX_RECORDS = 4_096;
+const HARD_MAX_RECORDS = 16_384;
+export const DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT = 128;
+const HARD_SESSION_ARTIFACT_REPLAY_LIMIT = 512;
+const DEFAULT_MAX_INDEX_BYTES = 32 * 1024 * 1024;
+const HARD_MAX_INDEX_BYTES = 64 * 1024 * 1024;
 const SIGNATURE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INTERACTION_SIGNATURE_TTL_MS = 30 * 60 * 1000;
 const MAX_INTERACTION_BYTES = 16 * 1024;
@@ -97,11 +116,33 @@ const FORBIDDEN_INTERACTION_FIELD = /^(?:prompt|text|message|credential|credenti
 
 const sha256 = (buf: Buffer): string => createHash('sha256').update(buf).digest('hex');
 const safePart = (s: string): string => encodeURIComponent(s);
-const recordKey = (tool: string, sessionId: string, artifactKey: string): string => `${tool}\0${sessionId}\0${artifactKey}`;
+const recordKey = (brokerSource: string, tool: string, sessionId: string, artifactKey: string): string =>
+  `${brokerSource}\0${tool}\0${sessionId}\0${artifactKey}`;
+const normalizeBrokerSource = (raw: string): string => {
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString();
+  } catch {
+    return raw.trim();
+  }
+};
 const isHtmlMime = (mimeType: string): boolean => /\bhtml\b/i.test(mimeType);
 const positiveNumber = (raw: string | undefined, fallback: number): number => {
   const n = raw == null || raw.trim() === '' ? Number.NaN : Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+const boundedPositiveInteger = (
+  raw: number | string | undefined,
+  fallback: number,
+  hardMaximum: number,
+): number => {
+  const n = raw == null || String(raw).trim() === '' ? Number.NaN : Number(raw);
+  return Number.isSafeInteger(n) && n > 0
+    ? Math.min(n, hardMaximum)
+    : fallback;
 };
 
 export const artifactKeyFor = (path: string, fingerprint: string): string =>
@@ -280,20 +321,55 @@ export class ArtifactStore {
   private readonly secretFile: string;
   private readonly maxBytes: number;
   private readonly maxAgeMs: number;
+  private readonly maxRecords: number;
+  private readonly maxIndexBytes: number;
   private readonly secret: Buffer;
+  private readonly brokerSource: string;
+  readonly replayLimit: number;
   private readonly records = new Map<string, ArtifactRecord>();
+  /** Strictly increasing LRU clock. Wall-clock milliseconds alone can collide,
+   *  which must never let key ordering evict the record a successful call is
+   *  about to acknowledge. Seeded from disk so restart preserves ordering. */
+  private lastRecency = 0;
 
   constructor(private readonly brokerUrl: string, root = artifactCacheRoot(), private readonly options: ArtifactStoreOptions = {}) {
     this.root = root;
     this.blobDir = join(root, 'artifacts', 'blobs');
     this.indexFile = join(root, 'artifacts', 'index.json');
     this.secretFile = join(root, 'artifact-url-secret');
+    this.brokerSource = normalizeBrokerSource(brokerUrl);
     this.maxBytes = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MAX_BYTES);
     this.maxAgeMs = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_AGE_DAYS, DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
+    this.maxRecords = boundedPositiveInteger(
+      options.maxRecords ?? process.env.COSYNCING_ARTIFACT_CACHE_MAX_RECORDS,
+      DEFAULT_MAX_RECORDS,
+      HARD_MAX_RECORDS,
+    );
+    this.replayLimit = boundedPositiveInteger(
+      options.sessionReplayLimit ?? process.env.COSYNCING_ARTIFACT_SESSION_REPLAY_LIMIT,
+      DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
+      HARD_SESSION_ARTIFACT_REPLAY_LIMIT,
+    );
+    this.maxIndexBytes = boundedPositiveInteger(
+      options.maxIndexBytes ?? process.env.COSYNCING_ARTIFACT_CACHE_MAX_INDEX_BYTES,
+      DEFAULT_MAX_INDEX_BYTES,
+      HARD_MAX_INDEX_BYTES,
+    );
     mkdirSync(this.blobDir, { recursive: true });
     this.secret = this.loadSecret();
     const idx = this.loadIndex();
-    for (const r of idx.records || []) this.records.set(r.key, r);
+    const loaded = idx.records || [];
+    const retained = loaded.length <= this.maxRecords
+      ? loaded
+      : [...loaded]
+        .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt || b.createdAt - a.createdAt)
+        .slice(0, this.maxRecords)
+        .reverse();
+    for (const r of retained) {
+      this.records.set(r.key, r);
+      this.lastRecency = Math.max(this.lastRecency, r.createdAt, r.lastAccessedAt);
+    }
+    if (retained.length !== loaded.length) this.persist('sweep');
   }
 
   toReference(session: ArtifactSession, message: AgentMessage, brokerUrl?: string): AgentMessage {
@@ -304,7 +380,7 @@ export class ArtifactStore {
     }
     const key = message.artifactKey;
     if (!key) return this.displayOnly(message);
-    const record = this.records.get(recordKey(session.tool, session.id, key));
+    const record = this.lookupRecord(session.tool, session.id, key);
     if (!record) {
       const { fetchUrl: _fetchUrl, interactionPolicy: _interactionPolicy, ...rest } = message;
       return this.displayOnly(rest as ArtifactMessage);
@@ -328,7 +404,7 @@ export class ArtifactStore {
     if (typeof artifactKey !== 'string' || !artifactKey || artifactKey.length > 512) {
       throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_INVALID', 'artifactKey is invalid');
     }
-    const record = this.records.get(recordKey(session.tool, session.id, artifactKey));
+    const record = this.lookupRecord(session.tool, session.id, artifactKey);
     if (!record || !existsSync(record.filePath)) {
       throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_NOT_FOUND', 'artifact interaction target was not found');
     }
@@ -378,6 +454,7 @@ export class ArtifactStore {
     bytes: Buffer,
     fallbackMimeType = 'application/octet-stream',
     brokerUrl?: string,
+    options: { sessionQualified?: boolean } = {},
   ): AgentMessage & { type: 'file-artifact' } {
     const contentHash = sha256(bytes);
     const rel = message.path || message.name || contentHash;
@@ -386,9 +463,10 @@ export class ArtifactStore {
     mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
     if (createdBlob) writeFileSync(filePath, bytes);
-    const now = Date.now();
+    const now = this.nextRecency();
     const rec: ArtifactRecord = {
-      key: recordKey(session.tool, session.id, artifactKey),
+      key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
+      brokerSource: this.brokerSource,
       tool: session.tool,
       sessionId: session.id,
       artifactKey,
@@ -400,9 +478,9 @@ export class ArtifactStore {
       size: bytes.byteLength,
       createdAt: now,
       lastAccessedAt: now,
+      ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
     };
     this.commitRecord(rec, createdBlob);
-    this.sweep();
     return this.asMessage(session, message, rec, brokerUrl);
   }
 
@@ -428,9 +506,10 @@ export class ArtifactStore {
     mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
     if (createdBlob) writeFileSync(filePath, bytes);
-    const now = Date.now();
+    const now = this.nextRecency();
     const rec: ArtifactRecord = {
-      key: recordKey(tool, sessionId, artifactKey),
+      key: recordKey(this.brokerSource, tool, sessionId, artifactKey),
+      brokerSource: this.brokerSource,
       tool,
       sessionId,
       artifactKey,
@@ -444,7 +523,6 @@ export class ArtifactStore {
       lastAccessedAt: now,
     };
     this.commitRecord(rec, createdBlob);
-    this.sweep();
     return {
       fetchUrl: this.signedUrl(tool, sessionId, artifactKey, brokerUrl),
       contentHash,
@@ -457,6 +535,7 @@ export class ArtifactStore {
     message: AgentMessage & { type: 'file-artifact' },
     fullPath: string,
     brokerUrl?: string,
+    options: { sessionQualified?: boolean } = {},
   ): AgentMessage & { type: 'file-artifact' } {
     const bytes = readFileSync(fullPath);
     const contentHash = sha256(bytes);
@@ -466,9 +545,10 @@ export class ArtifactStore {
     mkdirSync(dirname(filePath), { recursive: true });
     const createdBlob = !existsSync(filePath);
     if (createdBlob) copyFileSync(fullPath, filePath);
-    const now = Date.now();
+    const now = this.nextRecency();
     const rec: ArtifactRecord = {
-      key: recordKey(session.tool, session.id, artifactKey),
+      key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
+      brokerSource: this.brokerSource,
       tool: session.tool,
       sessionId: session.id,
       artifactKey,
@@ -480,10 +560,50 @@ export class ArtifactStore {
       size: bytes.byteLength,
       createdAt: now,
       lastAccessedAt: now,
+      ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
     };
     this.commitRecord(rec, createdBlob);
-    this.sweep();
     return this.asMessage(session, message, rec, brokerUrl);
+  }
+
+  /** Durable broker-injected artifacts whose producer proved this exact
+   *  broker-owned tool/session connection. This is the only restart replay
+   *  path for artifacts absent from native history. Records written before
+   *  session-qualified delivery was introduced fail closed here. */
+  sessionQualifiedArtifacts(
+    session: ArtifactSession,
+    brokerUrl?: string,
+  ): Array<AgentMessage & { type: 'file-artifact' }> {
+    const now = Date.now();
+    const matching = [...this.records.values()]
+      .filter((record) =>
+        record.tool === session.tool &&
+        record.sessionId === session.id &&
+        record.brokerSource === this.brokerSource &&
+        record.qualifiedSource === 'managed-connection-v1' &&
+        existsSync(record.filePath) &&
+        (!record.expiresAt || now <= record.expiresAt)
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-this.replayLimit);
+    return matching
+      .map((record) => this.asMessage(
+        session,
+        {
+          type: 'file-artifact',
+          path: record.path,
+          name: record.name,
+          mimeType: record.mimeType,
+          size: record.size,
+          proactive: true,
+          ...(record.deliveryClass ? { deliveryClass: record.deliveryClass } : {}),
+          ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
+          ...(record.format ? { format: record.format } : {}),
+          ...(record.redactionSummary ? { redactionSummary: record.redactionSummary } : {}),
+        },
+        record,
+        brokerUrl,
+      ));
   }
 
   /**
@@ -516,9 +636,11 @@ export class ArtifactStore {
     const createdBlob = !existsSync(blob);
     if (createdBlob) writeFileSync(blob, bytes);
     const now = Date.now();
+    const recency = this.nextRecency();
     const safeName = exportFileName(meta.name, meta.format);
     const rec: ArtifactRecord = {
-      key: recordKey(session.tool, session.id, artifactKey),
+      key: recordKey(this.brokerSource, session.tool, session.id, artifactKey),
+      brokerSource: this.brokerSource,
       tool: session.tool,
       sessionId: session.id,
       artifactKey,
@@ -528,15 +650,14 @@ export class ArtifactStore {
       name: safeName,
       mimeType: 'application/octet-stream',
       size: bytes.byteLength,
-      createdAt: now,
-      lastAccessedAt: now,
+      createdAt: recency,
+      lastAccessedAt: recency,
       deliveryClass: 'export-attachment',
       expiresAt: now + meta.retentionMs,
       format: meta.format,
       redactionSummary: meta.redactionSummary,
     };
     this.commitRecord(rec, createdBlob);
-    this.sweep();
     return {
       type: 'file-artifact',
       path: safeName,
@@ -560,7 +681,10 @@ export class ArtifactStore {
     const n = this.commitMutation('clear', () => {
       let count = 0;
       for (const [key, rec] of [...this.records.entries()]) {
-        if (rec.deliveryClass !== 'export-attachment') continue;
+        if (
+          rec.deliveryClass !== 'export-attachment' ||
+          (rec.brokerSource && rec.brokerSource !== this.brokerSource)
+        ) continue;
         this.records.delete(key);
         removed.push(rec);
         count++;
@@ -575,13 +699,13 @@ export class ArtifactStore {
     const expires = Number(expiresRaw ?? 0);
     if (!expires || !sigRaw || Date.now() > expires) return new Response('artifact URL expired', { status: 403 });
     if (!this.verify(tool, sessionId, artifactKey, expires, sigRaw)) return new Response('invalid artifact signature', { status: 403 });
-    const rec = this.records.get(recordKey(tool, sessionId, artifactKey));
+    const rec = this.lookupRecord(tool, sessionId, artifactKey);
     if (!rec || !existsSync(rec.filePath)) return new Response('artifact not found', { status: 404 });
     // R2 export-attachment: download-only, never inline-rendered, never bridge-injected. Enforce the
     // absolute retention expiry independently of the URL signature TTL.
     if (rec.deliveryClass === 'export-attachment') {
       if (rec.expiresAt && Date.now() > rec.expiresAt) return new Response('artifact expired', { status: 403 });
-      this.commitMutation('access', () => { rec.lastAccessedAt = Date.now(); });
+      this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
       const h = new Headers();
       h.set('content-type', 'application/octet-stream');
       h.set('content-disposition', `attachment; filename="${exportFileName(rec.name, rec.format || 'bin')}"`);
@@ -593,7 +717,7 @@ export class ArtifactStore {
       h.set('content-length', String(rec.size));
       return new Response(Bun.file(rec.filePath), { headers: h });
     }
-    this.commitMutation('access', () => { rec.lastAccessedAt = Date.now(); });
+    this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
     const headers = new Headers();
     headers.set('content-type', rec.mimeType || 'application/octet-stream');
     headers.set('cache-control', 'private, max-age=604800');
@@ -631,7 +755,11 @@ export class ArtifactStore {
     const n = this.commitMutation('clear', () => {
       let count = 0;
       for (const [key, rec] of [...this.records.entries()]) {
-        if (rec.tool !== tool || rec.sessionId !== sessionId) continue;
+        if (
+          rec.brokerSource !== this.brokerSource ||
+          rec.tool !== tool ||
+          rec.sessionId !== sessionId
+        ) continue;
         this.records.delete(key);
         removed.push(rec);
         count++;
@@ -697,7 +825,7 @@ export class ArtifactStore {
 
   private sign(tool: string, sessionId: string, artifactKey: string, expires: number): string {
     return createHmac('sha256', this.secret)
-      .update(`${tool}\0${sessionId}\0${artifactKey}\0${expires}`)
+      .update(`${this.brokerSource}\0${tool}\0${sessionId}\0${artifactKey}\0${expires}`)
       .digest('base64url');
   }
 
@@ -705,6 +833,7 @@ export class ArtifactStore {
     return createHmac('sha256', this.secret)
       .update([
         'artifact-interaction-v1',
+        this.brokerSource,
         record.tool,
         record.sessionId,
         record.artifactKey,
@@ -729,6 +858,11 @@ export class ArtifactStore {
     return join(this.blobDir, hash.slice(0, 2), hash);
   }
 
+  private lookupRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
+    const record = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
+    return record?.brokerSource === this.brokerSource ? record : undefined;
+  }
+
   private loadSecret(): Buffer {
     try {
       return Buffer.from(readFileSync(this.secretFile, 'utf8').trim(), 'base64');
@@ -743,6 +877,9 @@ export class ArtifactStore {
   private loadIndex(): ArtifactIndex {
     if (!existsSync(this.indexFile)) return { version: 1, records: [] };
     try {
+      if (statSync(this.indexFile).size > this.maxIndexBytes) {
+        throw new Error('artifact index exceeds the bounded load limit');
+      }
       const parsed = JSON.parse(readFileSync(this.indexFile, 'utf8')) as Partial<ArtifactIndex>;
       if (parsed.version !== 1 || !Array.isArray(parsed.records)) throw new Error('unsupported artifact index');
       return parsed as ArtifactIndex;
@@ -756,14 +893,48 @@ export class ArtifactStore {
     }
   }
 
-  private persist(operation: ArtifactStorePersistenceOperation): void {
+  private persist(operation: ArtifactStorePersistenceOperation, requiredKey?: string): void {
     mkdirSync(dirname(this.indexFile), { recursive: true });
-    const idx: ArtifactIndex = { version: 1, records: [...this.records.values()] };
+    const evicted: ArtifactRecord[] = [];
+    let serialized = '';
+    try {
+      for (;;) {
+        const idx: ArtifactIndex = { version: 1, records: [...this.records.values()] };
+        serialized = JSON.stringify(idx);
+        if (Buffer.byteLength(serialized, 'utf8') <= this.maxIndexBytes) break;
+        // Retention is deterministic and agrees with the count/byte sweep:
+        // discard least-recently-used records first, then oldest creation, then
+        // stable record key. Never persist an empty success for a newly accepted
+        // record that cannot fit by itself; reject the surrounding transaction
+        // and leave the last valid index untouched instead.
+        if (this.records.size <= 1) {
+          throw new Error('artifact index record exceeds the bounded persistence limit');
+        }
+        const oldest = [...this.records.values()]
+          .filter((record) => record.key !== requiredKey)
+          .sort((a, b) =>
+            a.lastAccessedAt - b.lastAccessedAt ||
+            a.createdAt - b.createdAt ||
+            (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+          )[0];
+        if (!oldest) {
+          throw new Error('required artifact index record exceeds the bounded persistence limit');
+        }
+        this.records.delete(oldest.key);
+        evicted.push(oldest);
+      }
+      if (requiredKey && !this.records.has(requiredKey)) {
+        throw new Error('required artifact record was lost before persistence');
+      }
+    } catch (error) {
+      this.reportPersistence({ ok: false, operation, at: Date.now() });
+      throw error;
+    }
     const tempFile = join(dirname(this.indexFile), `.index-${process.pid}-${randomBytes(12).toString('hex')}.tmp`);
     let fd: number | undefined;
     try {
       fd = openSync(tempFile, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify(idx, null, 2));
+      writeFileSync(fd, serialized);
       fsyncSync(fd);
       closeSync(fd);
       fd = undefined;
@@ -777,6 +948,10 @@ export class ArtifactStore {
       }
       try { rmSync(tempFile, { force: true }); } catch { /* best-effort temp cleanup */ }
     }
+    if (requiredKey && !this.records.has(requiredKey)) {
+      throw new Error('required artifact record was lost after persistence');
+    }
+    this.removeUnreferenced(evicted);
     this.reportPersistence({ ok: true, operation, at: Date.now() });
   }
 
@@ -788,12 +963,19 @@ export class ArtifactStore {
     }
   }
 
-  private commitMutation<T>(operation: ArtifactStorePersistenceOperation, mutate: () => T): T {
+  private commitMutation<T>(
+    operation: ArtifactStorePersistenceOperation,
+    mutate: () => T,
+    requiredKey?: string,
+  ): T {
     // Clone record values as well as the Map: access-time updates mutate a record object in place.
     const before = new Map([...this.records].map(([key, record]) => [key, { ...record }]));
     try {
       const result = mutate();
-      this.persist(operation);
+      this.persist(operation, requiredKey);
+      if (requiredKey && !this.records.has(requiredKey)) {
+        throw new Error('required artifact record was not indexed after persistence');
+      }
       return result;
     } catch (error) {
       this.records.clear();
@@ -803,8 +985,15 @@ export class ArtifactStore {
   }
 
   private commitRecord(record: ArtifactRecord, createdBlob: boolean): void {
+    const removed: ArtifactRecord[] = [];
     try {
-      this.commitMutation('put', () => this.records.set(record.key, record));
+      this.commitMutation('put', () => {
+        const replaced = this.records.get(record.key);
+        if (replaced && replaced.contentHash !== record.contentHash) removed.push(replaced);
+        this.records.set(record.key, record);
+        removed.push(...this.applyRetention(record.key));
+      }, record.key);
+      this.removeUnreferenced(removed);
     } catch (error) {
       if (createdBlob) {
         try { rmSync(record.filePath, { force: true }); } catch { /* preserve the index error */ }
@@ -813,31 +1002,58 @@ export class ArtifactStore {
     }
   }
 
-  private sweep(): void {
+  /** Apply every retention boundary inside the insertion transaction. Blob
+   *  removal happens only after the resulting index is durably replaced. */
+  private applyRetention(requiredKey: string): ArtifactRecord[] {
     const removed: ArtifactRecord[] = [];
-    this.commitMutation('sweep', () => {
-      const now = Date.now();
-      for (const [key, rec] of [...this.records.entries()]) {
-        // export-attachment records expire on an absolute retention deadline (rule 18); others age out
-        // by last-access against the cache max age.
-        const expired = rec.expiresAt ? now > rec.expiresAt : now - rec.lastAccessedAt > this.maxAgeMs;
-        if (!expired) continue;
-        this.records.delete(key);
-        removed.push(rec);
+    const now = Date.now();
+    for (const [key, rec] of [...this.records.entries()]) {
+      // Export attachments expire on an absolute retention deadline; other
+      // records age out by last access. The inserted record is never eligible.
+      const expired = rec.expiresAt ? now > rec.expiresAt : now - rec.lastAccessedAt > this.maxAgeMs;
+      if (!expired || key === requiredKey) continue;
+      this.records.delete(key);
+      removed.push(rec);
+    }
+    let records = [...this.records.values()];
+    if (records.length > this.maxRecords) {
+      const candidates = records
+        .filter((candidate) => candidate.key !== requiredKey)
+        .sort((a, b) =>
+          a.lastAccessedAt - b.lastAccessedAt ||
+          a.createdAt - b.createdAt ||
+          (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+        );
+      for (const candidate of candidates.slice(0, records.length - this.maxRecords)) {
+        this.records.delete(candidate.key);
+        removed.push(candidate);
       }
-      let records = [...this.records.values()];
-      let total = records.reduce((sum, r) => sum + r.size, 0);
-      if (total > this.maxBytes) {
-        records = records.sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
-        for (const rec of records) {
-          if (total <= this.maxBytes * 0.8) break;
-          this.records.delete(rec.key);
-          removed.push(rec);
-          total -= rec.size;
-        }
+      records = [...this.records.values()];
+    }
+    let total = records.reduce((sum, record) => sum + record.size, 0);
+    if (total > this.maxBytes) {
+      records = records.sort((a, b) =>
+        a.lastAccessedAt - b.lastAccessedAt ||
+        a.createdAt - b.createdAt ||
+        (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+      );
+      for (const candidate of records) {
+        if (total <= this.maxBytes * 0.8) break;
+        if (candidate.key === requiredKey) continue;
+        this.records.delete(candidate.key);
+        removed.push(candidate);
+        total -= candidate.size;
       }
-    });
-    this.removeUnreferenced(removed);
+      if (total > this.maxBytes * 0.8) {
+        throw new Error('required artifact record exceeds the bounded cache limit');
+      }
+    }
+    return removed;
+  }
+
+  private nextRecency(): number {
+    this.lastRecency = Math.max(Date.now(), this.lastRecency + 1);
+    return this.lastRecency;
   }
 
   private removeUnreferenced(removed: ArtifactRecord[]): void {

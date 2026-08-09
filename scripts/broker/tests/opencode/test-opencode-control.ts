@@ -141,19 +141,15 @@ const server = Bun.serve({
     if (url.pathname === '/session' && req.method === 'POST') {
       const body = await req.json() as any;
       createBodies.push(body);
+      if (body.model != null || body.variant != null) {
+        return Response.json({ _tag: 'BadRequest' }, { status: 400 });
+      }
       return Response.json({
         ...SESSION,
         id: 'ses_created',
         title: body.title || 'Created session',
-        directory: body.directory,
-        model: body.model
-          ? {
-              providerID: body.model.providerID,
-              modelID: body.model.modelID,
-              id: body.model.modelID,
-              ...(body.variant ? { variant: body.variant } : {}),
-            }
-          : undefined,
+        directory: url.searchParams.get('directory') ?? undefined,
+        model: undefined,
       });
     }
     if (url.pathname === `/session/${SESSION.id}` && req.method === 'PATCH') {
@@ -215,10 +211,8 @@ try {
     },
   });
   check(
-    'new OpenCode session sends the exact provider/model/variant selection',
-    createBodies[0]?.model?.providerID === 'minimax-cn-coding-plan' &&
-      createBodies[0]?.model?.modelID === 'MiniMax-M2.5' &&
-      createBodies[0]?.variant === 'fast' &&
+    'new OpenCode session keeps prompt-only model fields out of native create',
+    JSON.stringify(createBodies[0]) === JSON.stringify({ title: 'Exact selected create' }) &&
       created.currentModel?.providerID === 'minimax-cn-coding-plan' &&
       created.currentModel?.modelID === 'MiniMax-M2.5' &&
       created.currentModel?.variant === 'fast',

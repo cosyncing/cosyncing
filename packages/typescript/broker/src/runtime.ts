@@ -4531,6 +4531,10 @@ server = Bun.serve<WsData>({
         id, tool: 'pi', machine: MACHINE,
         title: String(b?.title || sessionFile.split('/').pop() || 'Pi session'),
         cwd: b?.cwd ? String(b.cwd) : undefined,
+        // A bridge hello is exact live-source activity. Publish that observation
+        // time so the default recent-session roster does not hide an otherwise
+        // undated terminal session; it is never used as artifact ownership.
+        updatedAt: Date.now(),
         status: 'idle', attachMode: 'live',
         model: b?.model?.label || b?.model?.name || b?.model?.modelID ? String(b.model.label ?? b.model.name ?? b.model.modelID) : undefined,
         currentModel: bridgeCurrentModel,
