@@ -31,6 +31,7 @@ type RunningBroker = {
   claudeConfigDir: string;
   deliveryMarker: string;
   opencodeServer: ReturnType<typeof Bun.serve>;
+  opencodeCreates: Array<Record<string, unknown>>;
 };
 
 const token = "model-session-creation-token";
@@ -65,11 +66,13 @@ for await (const chunk of Bun.stdin.stream()) {
   );
   chmodSync(fakeClaude, 0o755);
 
+  const opencodeCreates: Array<Record<string, unknown>> = [];
   const opencodeServer = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(request) {
-      const path = new URL(request.url).pathname;
+    async fetch(request) {
+      const url = new URL(request.url);
+      const path = url.pathname;
       if (path === "/provider") {
         return Response.json({
           connected: ["test-provider"],
@@ -85,6 +88,23 @@ for await (const chunk of Bun.stdin.stream()) {
               },
             },
           ],
+        });
+      }
+      if (path === "/session" && request.method === "POST") {
+        const body = (await request.json().catch(() => ({}))) as Record<
+          string,
+          unknown
+        >;
+        opencodeCreates.push(body);
+        if (body.model != null || body.variant != null) {
+          return Response.json({ _tag: "BadRequest" }, { status: 400 });
+        }
+        const now = Date.now();
+        return Response.json({
+          id: `fake-opencode-${opencodeCreates.length}`,
+          title: typeof body.title === "string" ? body.title : "New session",
+          directory: url.searchParams.get("directory") ?? creationDir,
+          time: { created: now, updated: now },
         });
       }
       if (path === "/session") return Response.json([]);
@@ -133,6 +153,7 @@ for await (const chunk of Bun.stdin.stream()) {
       claudeConfigDir: config,
       deliveryMarker,
       opencodeServer,
+      opencodeCreates,
     };
   } catch (error) {
     broker.kill();
@@ -227,6 +248,46 @@ try {
   assert.equal(opus.length, 1, "Claude alias has one selectable identity");
   assert.equal(opus[0].label, "Opus", "Claude alias label is version-neutral");
   assert.equal(typeof catalog.body.refreshedAt, "number");
+
+  const openCodeCatalog = await request(
+    running.base,
+    "/api/agents/opencode/models",
+  );
+  assert.equal(openCodeCatalog.status, 200, "OpenCode model catalog loads");
+  const openCodeModel = openCodeCatalog.body.models.find(
+    (model: any) =>
+      model.providerID === "test-provider" &&
+      model.modelID === "test-model",
+  );
+  assert.ok(openCodeModel, "OpenCode catalog exposes the fake model");
+  const openCodeCreate = await request(
+    running.base,
+    "/api/sessions/opencode",
+    "POST",
+    {
+      directory: running.creationDir,
+      title: "Selected OpenCode model",
+      model: openCodeModel,
+    },
+  );
+  assert.equal(
+    openCodeCreate.status,
+    200,
+    "OpenCode selected-model create omits prompt-only fields from POST /session",
+  );
+  assert.deepEqual(
+    openCodeCreate.body.session.currentModel,
+    {
+      providerID: "test-provider",
+      modelID: "test-model",
+    },
+    "OpenCode selected model remains available for the first prompt",
+  );
+  assert.deepEqual(
+    running.opencodeCreates,
+    [{ title: "Selected OpenCode model" }],
+    "OpenCode native create receives only session-creation fields",
+  );
 
   const selected = {
     providerID: "anthropic",
