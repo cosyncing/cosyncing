@@ -3,7 +3,7 @@
  *
  * Starts a throwaway real `opencode serve`, attaches a real `opencode attach` TUI in tmux,
  * attaches the broker/app socket, then proves the broad surface in one run: live session
- * discovery, model/options, commands, tool activity, outbox artifact surfacing, final response,
+ * discovery, model/options, commands, tool activity, session-qualified artifact delivery, final response,
  * and read-only downgrade when the real serve owner disappears. It records task-list/todo
  * availability honestly but does not claim that surface unless real OpenCode emits it.
  *
@@ -64,9 +64,10 @@ const prompt = [
   `COSYNCING_OPENCODE_BROAD_SURFACE_${short}`,
   'Do these steps exactly:',
   '1. If you have a todo/task tool, record three tasks: inspect broad trace, create artifact, report done.',
-  `2. Use your bash tool to create .cosyncing/outbox/${artifactName} containing exactly ${artifactMarker}.`,
-  `3. Reply exactly ${doneMarker}.`,
-  'Do not skip the bash tool call.',
+  `2. Use your bash tool to create ${artifactName} containing exactly ${artifactMarker}.`,
+  `3. Call the send_file tool with path ${artifactName}.`,
+  `4. Reply exactly ${doneMarker}.`,
+  'Do not skip the bash or send_file tool calls.',
 ].join('\n');
 
 const assertions: Assertion[] = [];
@@ -151,12 +152,12 @@ try {
   const toolActivity = await waitFrame(frames, (f) => frames.indexOf(f) >= mark && f.kind === 'message' && (f.message?.type === 'tool-call' || f.message?.type === 'tool-result'), 120000);
   check(assertions, 'real OpenCode broad turn emits tool activity surface', !!toolActivity, JSON.stringify(toolActivity?.message ?? null));
   const artifact = await waitFrame(frames, (f) => frames.indexOf(f) >= mark && f.kind === 'message' && f.message?.type === 'file-artifact' && JSON.stringify(f.message).includes(artifactName), 120000);
-  check(assertions, 'real OpenCode broad turn surfaces outbox file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
+  check(assertions, 'real OpenCode broad turn surfaces session-qualified send_file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
   const done = await waitForAccumulatedModelText(mark, doneMarker, 120000);
   check(assertions, 'real OpenCode broad turn final response reaches app stream', done, doneMarker);
   const taskList = frames.find((f) => frames.indexOf(f) >= mark && f.kind === 'message' && f.message?.type === 'task-list-state');
   check(assertions, 'real OpenCode broad trace records task-list/todo availability honestly', true, taskList ? 'observed task-list-state' : 'NOT_OBSERVED: real broad turn did not emit task-list-state');
-  const nativeArtifact = join(workspace, '.cosyncing', 'outbox', artifactName);
+  const nativeArtifact = join(workspace, artifactName);
   check(assertions, 'artifact file exists in real workspace with marker', readFileSafe(nativeArtifact).includes(artifactMarker), nativeArtifact);
 
   const capture = await tmuxCapture(tmuxName, 3000);

@@ -5,18 +5,21 @@ class _MessageRow extends StatelessWidget {
     required this.message,
     required this.controller,
     required this.isConnected,
+    required this.hasActiveBrokerClient,
     required this.canFork,
     required this.canMutate,
     required this.onExtractRequestId,
     required this.isNewestEligibleForIdentity,
     required this.resolvedRequestIds,
     required this.onForkFromMessage,
+    required this.artifactActionState,
     this.resolvedRequestDecisions = const {},
   });
 
   final AgentMessage message;
   final SessionDetailController controller;
   final bool isConnected;
+  final bool hasActiveBrokerClient;
   final bool canFork;
 
   /// Whether the app may answer permission/question cards right now (the
@@ -36,9 +39,22 @@ class _MessageRow extends StatelessWidget {
   /// now that resolution frames render no standalone Chat row.
   final Map<String, String?> resolvedRequestDecisions;
   final ValueChanged<String> onForkFromMessage;
+  final SessionArtifactActionState artifactActionState;
 
   @override
   Widget build(BuildContext context) {
+    final artifactDescriptor = SessionArtifactDescriptor.fromMessage(message);
+    final artifactAction =
+        artifactDescriptor != null && artifactDescriptor.isDownloadable
+        ? _TranscriptArtifactDownloadAction(
+            descriptor: artifactDescriptor,
+            actionState: artifactActionState,
+            hasActiveBrokerClient: hasActiveBrokerClient,
+            onDownload: () => controller.downloadArtifact(
+              artifactDescriptor,
+            ),
+          )
+        : null;
     // Action surfaces for request messages are type-driven and stay outside raw
     // renderers, per
     // `docs/architecture/client-ui.md`.
@@ -48,7 +64,11 @@ class _MessageRow extends StatelessWidget {
       onForkFromMessage: onForkFromMessage,
       child: TranscriptMessageMetadataScope(
         timestamp: message.timestamp,
-        child: buildAgentMessageRenderer(context, message),
+        child: buildAgentMessageRenderer(
+          context,
+          message,
+          fileArtifactAction: artifactAction,
+        ),
       ),
     );
     final requestId = onExtractRequestId(message);
@@ -94,7 +114,6 @@ class _MessageRow extends StatelessWidget {
         ),
       _ => null,
     };
-
     // Request actions use the shared 8px gap. ReadAloudAction owns its own
     // top padding so hidden states are truly zero-height (no invisible gap).
     if (requestAction != null) {
@@ -125,6 +144,75 @@ class _MessageRow extends StatelessWidget {
     }
 
     return renderer;
+  }
+}
+
+class _TranscriptArtifactDownloadAction extends StatelessWidget {
+  const _TranscriptArtifactDownloadAction({
+    required this.descriptor,
+    required this.actionState,
+    required this.hasActiveBrokerClient,
+    required this.onDownload,
+  });
+
+  final SessionArtifactDescriptor descriptor;
+  final SessionArtifactActionState actionState;
+  final bool hasActiveBrokerClient;
+  final Future<bool> Function() onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final isBusy = _artifactActionIsBusy(actionState.phase);
+    final canDownload =
+        !isBusy && (descriptor.isInlineDataUrl || hasActiveBrokerClient);
+    final stateLabel = _artifactActionLabel(l10n, actionState.phase);
+    final sourceId = descriptor.actionStateKey;
+
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextButton.icon(
+            key: ValueKey(
+              'session-detail-chat-artifact-download-$sourceId',
+            ),
+            onPressed: canDownload ? () => unawaited(onDownload()) : null,
+            icon: isBusy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.download_outlined, size: 18),
+            label: Text(l10n.download),
+          ),
+          if (stateLabel.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              stateLabel,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: actionState.phase == SessionArtifactActionPhase.error
+                    ? tokens.statusError
+                    : tokens.textSecondary,
+              ),
+            ),
+          ],
+          if (actionState.phase == SessionArtifactActionPhase.error &&
+              actionState.message.trim().isNotEmpty)
+            Material(
+              type: MaterialType.transparency,
+              child: ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(l10n.technicalDetails),
+                children: [SelectableText(actionState.message)],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 

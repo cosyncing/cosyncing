@@ -5,6 +5,7 @@
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
     "broker.application-identity",
+    "broker.artifact-session-isolation",
     "broker.attach-identity",
     "broker.capabilities",
     "broker.claude-hooks",
@@ -62,6 +63,7 @@
     "broker.typecheck",
     "broker.update-contract",
     "broker.web-origin",
+    "browser.artifact-session-isolation",
     "browser.cache-model",
     "browser.startup-cache",
     "browser.update-handoff",
@@ -96,7 +98,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:242c1b4321f5a95c6593981b9ed7f9c8a95f06eade0de1c3f21b374e5d25a53b"
+      "fingerprint": "sha256:203f1c75ac7b394993f80519a7c6ef03d295bdc3df41111b5121bdff61ebc772"
     },
     {
       "id": "capabilities",
@@ -200,7 +202,7 @@
     },
     {
       "id": "web-browser",
-      "fingerprint": "sha256:a84ba8bc8fd91e108b9cb7ed723ea01d9999208762cfc16b53115cebcd640547"
+      "fingerprint": "sha256:ce5ba17cdc345a4e5d96c717e3563b0a741eaf2eea57d7172c33e0534eec2b82"
     },
     {
       "id": "web-cache",
@@ -231,6 +233,10 @@
     {
       "id": "application-identity",
       "fingerprint": "sha256:e97a4537e87cfbc76137613332d30b2a8e0f1c6af1933d34f56bc9f04acefaff"
+    },
+    {
+      "id": "artifact-session-isolation",
+      "fingerprint": "sha256:46cfc11a8f336a8cf194b1b06a924a93af6726824ed5e8677f2ed7a26ea1f53c"
     },
     {
       "id": "attach-message-identity",

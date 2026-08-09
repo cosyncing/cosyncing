@@ -249,7 +249,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
             message: result.message,
           ),
         );
-        state = state.copyWith(error: result.message);
         return false;
     }
   }
@@ -289,7 +288,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         message: result.message,
       ),
     );
-    state = state.copyWith(error: result.message);
     return null;
   }
 
@@ -341,9 +339,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         message: message,
       ),
     );
-    state = opened
-        ? state.copyWith(clearError: true)
-        : state.copyWith(error: message);
+    if (opened) state = state.copyWith(clearError: true);
   }
 
   void _setArtifactActionState(

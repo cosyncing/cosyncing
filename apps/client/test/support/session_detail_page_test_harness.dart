@@ -1132,6 +1132,8 @@ class FakeSessionArtifactFileService implements SessionArtifactFileService {
   SessionArtifactCachedFile? mockCachedFile;
   int cacheCallCount = 0;
   int exportCallCount = 0;
+  int remainingCacheFailures = 0;
+  Exception cacheError = Exception('Transient artifact download failure');
   String? exportedPath;
 
   @override
@@ -1141,6 +1143,10 @@ class FakeSessionArtifactFileService implements SessionArtifactFileService {
     SessionArtifactProgressCallback? onProgress,
   }) async {
     cacheCallCount++;
+    if (remainingCacheFailures > 0) {
+      remainingCacheFailures--;
+      throw cacheError;
+    }
     return mockCachedFile ??
         SessionArtifactCachedFile(
           cachedFilePath: descriptor.name ?? 'artifact.bin',

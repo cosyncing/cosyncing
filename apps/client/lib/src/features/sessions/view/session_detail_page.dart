@@ -2162,6 +2162,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                                 state.sessionInfo?.currentMode,
                             selectedCommand: selectedCommand,
                             isConnected: isConnected,
+                            hasActiveBrokerClient: hasActiveBrokerClient,
                             commandArgsController: _commandArgsController,
                             hasModelOverride: _selectedModelOverride != null,
                             isSendingPrompt: _isSendingPrompt,

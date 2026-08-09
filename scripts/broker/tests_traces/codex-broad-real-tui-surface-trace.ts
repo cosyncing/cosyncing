@@ -2,7 +2,7 @@
  * Codex broad real-TUI surface trace (OPT-IN, real binary + model).
  *
  * Proves Wave 1.1's Codex broad-surface slice against a real `codex app-server` and real tmux TUI:
- * model/effort/status metadata, commands/options, tool execution, file artifact, final response, and
+ * model/effort/status metadata, commands/options, tool execution, workspace-file mutation, final response, and
  * lifecycle downgrade when the app-server owner disappears. It records whether task-list/todo appeared but
  * does not claim that surface unless real Codex emits it.
  *
@@ -57,14 +57,14 @@ const workspace = mkdtempSync(join(tmpdir(), `cosyncing-codex-broad-${short}-`))
 const tmuxName = `cosyncing-codex-broad-${process.pid}-${short}`;
 const model = process.env.COSYNCING_CODEX_BROAD_MODEL ?? 'gpt-5.4-mini';
 const effort = process.env.COSYNCING_CODEX_BROAD_EFFORT ?? 'low';
-const artifactName = `broad-${short}.txt`;
-const artifactMarker = `COSYNCING_BROAD_ARTIFACT_${short}`;
+const traceFileName = `broad-${short}.txt`;
+const traceFileMarker = `COSYNCING_BROAD_FILE_${short}`;
 const doneMarker = `COSYNCING_BROAD_DONE_${short}`;
 const prompt = [
   `COSYNCING_BROAD_SURFACE_${short}`,
   'Do these steps exactly:',
-  '1. Create a native Codex plan/update_plan with three tasks: inspect broad trace, create artifact, report done. Mark the first in_progress.',
-  `2. Run a shell command that creates .cosyncing/outbox/${artifactName} containing exactly ${artifactMarker}.`,
+  '1. Create a native Codex plan/update_plan with three tasks: inspect broad trace, create trace file, report done. Mark the first in_progress.',
+  `2. Run a shell command that creates ${traceFileName} containing exactly ${traceFileMarker}.`,
   `3. Reply exactly ${doneMarker}.`,
   'Do not skip the shell command.',
 ].join('\n');
@@ -170,14 +170,12 @@ try {
   ws.send(JSON.stringify({ kind: 'prompt', text: prompt, model: { providerID: 'openai', modelID: model, reasoningEffort: effort } }));
   const toolActivity = await waitFrame(frames, (f) => frames.indexOf(f) >= mark && f.kind === 'message' && (f.message?.type === 'tool-call' || f.message?.type === 'tool-result'), 120000);
   check(assertions, 'real Codex broad turn emits tool activity surface', !!toolActivity, JSON.stringify(toolActivity?.message ?? null));
-  const artifact = await waitFrame(frames, (f) => frames.indexOf(f) >= mark && f.kind === 'message' && f.message?.type === 'file-artifact' && JSON.stringify(f.message).includes(artifactName), 120000);
-  check(assertions, 'real Codex broad turn surfaces outbox file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
   const done = await waitFrame(frames, (f) => frames.indexOf(f) >= mark && modelFrameText(f).includes(doneMarker), 120000);
   check(assertions, 'real Codex broad turn final response reaches app stream', !!done, doneMarker);
   const taskList = frames.find((f) => frames.indexOf(f) >= mark && f.kind === 'message' && f.message?.type === 'task-list-state');
   check(assertions, 'real Codex broad turn surfaces native/task-list-state plan', !!taskList, JSON.stringify(taskList?.message ?? null));
-  const nativeArtifact = join(workspace, '.cosyncing', 'outbox', artifactName);
-  check(assertions, 'artifact file exists in real workspace with marker', readFileSafe(nativeArtifact).includes(artifactMarker), nativeArtifact);
+  const nativeTraceFile = join(workspace, traceFileName);
+  check(assertions, 'trace file exists in real workspace with marker', readFileSafe(nativeTraceFile).includes(traceFileMarker), nativeTraceFile);
 
   const capture = await tmuxCapture(tmuxName, 3000);
   writeFileSync(tuiPath, capture);
@@ -226,7 +224,7 @@ try {
   const failed = assertions.filter((a) => !a.ok).length;
   writeFileSync(tracePath, JSON.stringify({
     agent: 'codex',
-    scenarioIds: ['ST-01', 'ST-07', 'ST-12', 'ST-13', 'ST-17', 'ST-20', 'ST-32'],
+    scenarioIds: ['ST-01', 'ST-07', 'ST-12', 'ST-13', 'ST-17', 'ST-32'],
     mode: 'broad-real-tui-surface',
     broker: BROKER,
     workspace,

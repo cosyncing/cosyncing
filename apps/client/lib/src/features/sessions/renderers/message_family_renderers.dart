@@ -107,8 +107,9 @@ Widget _fsEditMessageRenderer(BuildContext context, AgentMessage message) {
 
 Widget _fileArtifactMessageRenderer(
   BuildContext context,
-  AgentMessage message,
-) {
+  AgentMessage message, {
+  Widget? action,
+}) {
   final l10n = AppLocalizations.of(context);
   return _TranscriptBubble(
     icon: Icons.insert_drive_file_outlined,
@@ -124,6 +125,7 @@ Widget _fileArtifactMessageRenderer(
       preferredKeys: const ['name', 'path', 'filePath', 'size'],
       maxRows: 4,
     ),
+    detailContent: action,
   );
 }
 

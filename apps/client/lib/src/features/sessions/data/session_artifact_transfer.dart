@@ -533,6 +533,9 @@ class SessionArtifactTransferController
       sourceUrl: descriptor.isInlineDataUrl
           ? 'data:'
           : descriptor.downloadSourceUrl,
+      contentType: descriptor.mimeType,
+      contentHash: descriptor.contentHash,
+      byteLength: descriptor.size,
       bytesTransferred: 0,
       totalBytes: descriptor.size,
       createdAt: now,

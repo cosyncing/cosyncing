@@ -151,7 +151,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     title: 'OpenCode integration suite including file input/output',
     coverage: [
       { fn: 'F12', level: 'L2', agents: ['opencode'], note: 'single and multi-file upload reaches the agent' },
-      { fn: 'F13', level: 'L2', agents: ['opencode'], note: 'outbox and send_file artifact paths' },
+      { fn: 'F13', level: 'L2', agents: ['opencode'], note: 'session-qualified send_file artifact path' },
     ],
   },
   {
@@ -168,7 +168,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['pi'], note: 'Pi JSONL/RPC text/thinking lanes' },
       { fn: 'F12', level: 'L2', agents: ['pi'], note: 'byte-exact inbox upload' },
-      { fn: 'F13', level: 'L2', agents: ['pi'], note: 'outbox file surfaces as file-artifact' },
+      { fn: 'F13', level: 'L2', agents: ['pi'], note: 'session-qualified bridge send-file surfaces as file-artifact' },
     ],
   },
   {
@@ -204,11 +204,10 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
   },
   {
     file: 'scripts/broker/tests/codex/resume.ts',
-    title: 'Codex live resume suite including file input/output',
+    title: 'Codex live resume suite including file input',
     optIn: true,
     coverage: [
       { fn: 'F12', level: 'L2', agents: ['codex'], note: 'inbox path is written and read by Codex' },
-      { fn: 'F13', level: 'L2', agents: ['codex'], note: 'outbox artifact path' },
     ],
   },
   {
@@ -332,7 +331,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F05', level: 'L3', agents: ['opencode'], note: 'real broad turn must emit a tool-call or tool-result surface' },
       { fn: 'F08', level: 'L3', agents: ['opencode'], note: 'real model/options surface and selected trace model' },
       { fn: 'F09', level: 'L3', agents: ['opencode'], note: 'real commands frame exposes lifecycle commands' },
-      { fn: 'F13', level: 'L3', agents: ['opencode'], note: 'real broad turn must create and surface an outbox file artifact' },
+      { fn: 'F13', level: 'L3', agents: ['opencode'], note: 'real broad turn must deliver through the session-qualified send_file tool' },
       { fn: 'F14', level: 'L3', agents: ['opencode'], note: 'real serve owner disappearance downgrades the attached broad socket' },
       { fn: 'F15', level: 'L3', agents: ['opencode'], note: 'real broad trace observes status/model surfaces during a live run' },
       { fn: 'F16', level: 'L3', agents: ['opencode'], note: 'degraded broad socket rejects crafted prompt at broker boundary' },
@@ -361,7 +360,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F06', level: 'L3', agents: ['pi'] },
       { fn: 'F08', level: 'L3', agents: ['pi'], note: 'real bridge session exposes current model metadata' },
       { fn: 'F09', level: 'L3', agents: ['pi'], note: 'real commands frame exposes stop lifecycle command' },
-      { fn: 'F13', level: 'L3', agents: ['pi'], note: 'real broad app turn creates and surfaces an outbox file artifact' },
+      { fn: 'F13', level: 'L3', agents: ['pi'], note: 'real broad app turn delivers through the session-qualified bridge send_file tool' },
       { fn: 'F15', level: 'L3', agents: ['pi'], note: 'real broad app turn observes status/model/output surfaces during live bridge run' },
     ],
   },
@@ -410,7 +409,6 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
       { fn: 'F05', level: 'L3', agents: ['codex'], note: 'real broad turn must emit a tool-call or tool-result surface' },
       { fn: 'F08', level: 'L3', agents: ['codex'], note: 'real model/effort options and target-model broad turn' },
       { fn: 'F09', level: 'L3', agents: ['codex'], note: 'real commands frame exposes lifecycle commands' },
-      { fn: 'F13', level: 'L3', agents: ['codex'], note: 'real broad turn must create and surface an outbox file artifact' },
       { fn: 'F14', level: 'L3', agents: ['codex'], note: 'real app-server owner disappearance downgrades the attached broad socket' },
       { fn: 'F15', level: 'L3', agents: ['codex'], note: 'real broad trace observes status/model/effort surfaces during a live run' },
       { fn: 'F16', level: 'L3', agents: ['codex'], note: 'degraded broad socket rejects crafted prompt at broker boundary' },

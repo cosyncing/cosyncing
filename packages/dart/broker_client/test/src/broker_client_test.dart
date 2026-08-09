@@ -2151,6 +2151,71 @@ void main() {
           reason: 'an advertised oversize must abort before the full body',
         );
       });
+
+      test('ignores a misleading small content-length and cancels on actual '
+          'received bytes', () async {
+        final adapter = _ChunkedHttpAdapter(
+          chunks: List.generate(10, (_) => List<int>.filled(512, 65)),
+          contentLength: 128,
+        );
+        dio.httpClientAdapter = adapter;
+        await expectLater(
+          client.fetchArtifactUrlBounded(
+            'http://127.0.0.1:7734/api/misleading',
+            maxBytes: 1024,
+          ),
+          throwsA(isA<ArtifactTooLargeException>()),
+        );
+        expect(adapter.streamCancelled, isTrue);
+        expect(adapter.chunksEmitted, lessThan(adapter.chunks.length));
+      });
+    });
+
+    group('downloadSessionFileBounded', () {
+      test(
+        'cancels an over-limit workspace response with no content-length',
+        () async {
+          final adapter = _ChunkedHttpAdapter(
+            chunks: List.generate(10, (_) => List<int>.filled(512, 65)),
+          );
+          dio.httpClientAdapter = adapter;
+          await expectLater(
+            client.downloadSessionFileBounded(
+              'pi',
+              'session',
+              path: 'large.bin',
+              maxBytes: 1024,
+              rangeStart: 0,
+              rangeEnd: 1023,
+            ),
+            throwsA(isA<ArtifactTooLargeException>()),
+          );
+          expect(adapter.streamCancelled, isTrue);
+          expect(adapter.chunksEmitted, lessThan(adapter.chunks.length));
+        },
+      );
+
+      test('cancels a workspace response whose content-length understates the '
+          'body', () async {
+        final adapter = _ChunkedHttpAdapter(
+          chunks: List.generate(10, (_) => List<int>.filled(512, 65)),
+          contentLength: 64,
+        );
+        dio.httpClientAdapter = adapter;
+        await expectLater(
+          client.downloadSessionFileBounded(
+            'pi',
+            'session',
+            path: 'misleading.bin',
+            maxBytes: 1024,
+            rangeStart: 0,
+            rangeEnd: 1023,
+          ),
+          throwsA(isA<ArtifactTooLargeException>()),
+        );
+        expect(adapter.streamCancelled, isTrue);
+        expect(adapter.chunksEmitted, lessThan(adapter.chunks.length));
+      });
     });
   });
 }

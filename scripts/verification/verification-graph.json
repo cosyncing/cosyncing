@@ -120,6 +120,7 @@
     {"id": "broker.opencode-identity", "description": "OpenCode live/history identity is stable without equal-text dedupe."},
     {"id": "broker.opencode-completion", "description": "OpenCode completion follows authoritative idle/error and notification fences."},
     {"id": "broker.control-boundaries", "description": "Loopback auth, Observe, direct resume, Pi scope, and corruption boundaries hold."},
+    {"id": "broker.artifact-session-isolation", "description": "Artifact creation, replay, restart, and download stay bound to one exact broker, tool, and session."},
     {"id": "release.supply-chain", "description": "Signed Linux release, provenance, inventory, bootstrap, and reproducibility checks pass."},
     {"id": "broker.update-contract", "description": "Version, compatibility, signed update, and app-handoff contracts pass."},
     {"id": "evidence.real-host-schema", "description": "Real-host evidence skips, architectures, hooks, and credentials fail closed."},
@@ -142,6 +143,7 @@
     {"id": "dart.broker-crypto.analyze", "description": "broker_crypto analyzes independently."},
     {"id": "dart.broker-crypto.test", "description": "broker_crypto tests pass independently."},
     {"id": "browser.startup-cache", "description": "The canonical web build passes real-browser startup and cache handoff."},
+    {"id": "browser.artifact-session-isolation", "description": "Real Flutter-web artifact display, cache, retry, download, reload, and broker switching preserve exact broker, tool, and session ownership."},
     {"id": "browser.cache-model", "description": "The service-worker cache model passes deterministic mutation tests."},
     {"id": "browser.update-handoff", "description": "A verified web update hands every open tab over automatically, or defers silently."},
     {"id": "repository.source-stability", "description": "All cumulative results describe one unchanged source state."},
@@ -403,7 +405,7 @@
         "broker.fork-agent-owned", "broker.draft-sync", "broker.draft-durability", "broker.draft-two-client",
         "broker.protocol-journal", "broker.history-cache", "broker.history-paging", "broker.attach-identity",
         "broker.restart-identity", "broker.codex-rollout", "broker.claude-transcript", "broker.opencode-identity",
-        "broker.opencode-completion", "broker.control-boundaries", "release.supply-chain",
+        "broker.opencode-completion", "broker.control-boundaries", "broker.artifact-session-isolation", "release.supply-chain",
         "broker.update-contract", "evidence.real-host-schema", "broker.pi-tool-result",
         "broker.pi-bridge-reload", "broker.claude-hooks", "broker.claude-hooks-surface",
         "broker.tool-semantics", "broker.codex-loaded-watch",
@@ -460,7 +462,7 @@
             "opencode-message-identity", "opencode-completion-fence", "real-evidence-schema",
             "fork-agent-owned", "restart-message-identity", "draft-two-client-wire", "history-page-cache",
             "codex-loaded-watch", "codex-loaded-watch-unknown", "codex-tui-presence",
-            "agent-create-readiness", "pi-runtime-readiness",
+            "agent-create-readiness", "pi-runtime-readiness", "artifact-session-isolation",
             "session-truth-conformance"
           ]
         },
@@ -523,6 +525,7 @@
         {"id":"opencode-message-identity","claimId":"broker.opencode-identity","command":["bun","run","test:opencode-message-identity"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-message-identity.ts"]},
         {"id":"opencode-completion-fence","claimId":"broker.opencode-completion","command":["bun","run","test:opencode-completion-fence"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-completion-fence.ts"]},
         {"id":"control-boundaries","claimId":"broker.control-boundaries","command":["bun","run","test:broker-control-boundaries"],"sourceOwners":["scripts/broker/tests/broker/test-control-boundaries.ts"]},
+        {"id":"artifact-session-isolation","claimId":"broker.artifact-session-isolation","command":["bun","run","test:broker-artifact-session-isolation"],"timeoutClass":"medium","sourceOwners":["scripts/broker/tests/broker/test-artifact-session-isolation.ts","packages/typescript/broker/src/artifact-store.ts","packages/typescript/broker/src/hub.ts"]},
         {"id":"release-supply-chain","claimId":"release.supply-chain","command":["bun","run","test:release-supply-chain"],"timeoutClass":"long","sourceOwners":["scripts/broker/tests/broker/test-release-supply-chain.ts","scripts/release/tests/test-release-checkpoint-lifecycle.ts","scripts/broker/tests/broker/test-release-web-sidecar.ts","scripts/broker/tests/broker/test-release-candidate-verifier.ts"]},
         {"id":"broker-update-contract","claimId":"broker.update-contract","command":["bun","run","test:broker-update-contract"],"sourceOwners":["scripts/broker/tests/broker/test-update-contract.ts"]},
         {"id":"real-evidence-schema","claimId":"evidence.real-host-schema","command":["bun","run","test:broker-real-host-evidence"],"sourceOwners":["scripts/broker/tests/broker/test-real-host-evidence.ts","scripts/broker/acceptance/real-host-evidence.ts"]},
@@ -555,15 +558,15 @@
     {
       "id": "web-browser",
       "releaseDomain": "web runtime",
-      "claimIds": ["browser.startup-cache"],
-      "command": ["bun","run","test:web-startup-shell:built"],
-      "focusedDiagnostics": [["bun","run","test:web-startup-shell"],["bun","run","test:web-client-upgrade"]],
+      "claimIds": ["browser.startup-cache", "browser.artifact-session-isolation"],
+      "command": ["bun","run","test:web-browser:built"],
+      "focusedDiagnostics": [["bun","run","test:web-startup-shell"],["bun","run","test:web-artifact-session-isolation"],["bun","run","test:web-client-upgrade"]],
       "dependencies": ["client"],
-      "expectedArtifacts": [{"path":"output/check/logs/web-browser.log","kind":"log"}],
+      "expectedArtifacts": [{"path":"output/check/logs/web-browser.log","kind":"log"},{"path":"output/artifact-session-isolation/artifact-card-light.png","kind":"artifact"},{"path":"output/artifact-session-isolation/artifact-card-dark.png","kind":"artifact"}],
       "timeoutClass": "medium",
       "resourceClass": "standard",
       "platformExclusions": ["physical-multi-host-real-agent"],
-      "sourceOwners": ["scripts/client/tests/test-startup-shell-browser.mjs","scripts/client/tests/test-web-client-upgrade-browser.ts"]
+      "sourceOwners": ["scripts/client/tests/test-startup-shell-browser.mjs","scripts/client/tests/test-web-artifact-session-isolation.ts","scripts/client/tests/test-web-client-upgrade-browser.ts"]
     },
     {
       "id": "web-cache",

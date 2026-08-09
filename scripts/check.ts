@@ -540,9 +540,9 @@ function depthOf(id: string): number {
 }
 
 /**
- * The one measured overlap this host admits: the timer/event-heavy browser
- * gate may share the broker aggregate, with an exact ceiling of two gates.
- * The full client and every other heavyweight/standard pairing stay exclusive.
+ * Heavyweight gates own the host. The browser gate also starts and restarts
+ * fixture brokers, so the policy seam currently admits no browser/broker
+ * exception; see check-scheduler-policy.ts.
  */
 function ready(suite: VerificationGate): boolean {
   if (!unblocked(suite)) return false;

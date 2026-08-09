@@ -11,6 +11,7 @@ class _ChatPanel extends ConsumerWidget {
     required this.selectedPermissionMode,
     required this.selectedCommand,
     required this.isConnected,
+    required this.hasActiveBrokerClient,
     required this.commandArgsController,
     required this.hasModelOverride,
     required this.isSendingPrompt,
@@ -56,6 +57,7 @@ class _ChatPanel extends ConsumerWidget {
   /// command args validate.
   final bool hasModelOverride;
   final bool isConnected;
+  final bool hasActiveBrokerClient;
   final bool isSendingPrompt;
   final bool isPickingAttachments;
   final bool isAttachmentIntakeBusy;
@@ -194,6 +196,7 @@ class _ChatPanel extends ConsumerWidget {
       state: state,
       controller: controller,
       isConnected: isConnected,
+      hasActiveBrokerClient: hasActiveBrokerClient,
       // Same per-session gate as the status-panel Fork tile: the transcript's
       // message-context "Fork from here" is a second entry point into the same
       // broker route, so it answers the same shared predicate — including a

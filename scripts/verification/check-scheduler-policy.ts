@@ -1,8 +1,11 @@
-const BROWSER_GATE = 'web-browser';
-const BROKER_GATE = 'broker-deterministic';
-
-/** The package scripts the `web-browser` gate runs; both drive a real chromium. */
-const BROWSER_GATE_SCRIPTS = ['test:web-startup-shell', 'test:web-startup-shell:built'];
+/** Package scripts that own the `web-browser` gate and drive a real Chromium. */
+const BROWSER_GATE_SCRIPTS = [
+  'test:web-startup-shell',
+  'test:web-startup-shell:built',
+  'test:web-artifact-session-isolation',
+  'test:web-artifact-session-isolation:built',
+  'test:web-browser:built',
+];
 
 /**
  * How long a gate's group may keep exiting after its command has returned,
@@ -42,10 +45,8 @@ export function strayGraceMsFor(command: readonly string[]): number {
 /**
  * Fill one scheduling batch, rescanning earlier candidates after every pass.
  *
- * Launching a candidate may change which earlier candidates are admissible.
- * In particular, the browser appears before the broker in check launch order:
- * it first yields to the waiting heavyweight broker, then becomes admissible
- * as soon as that broker is running. A single forward scan misses that pair.
+ * Launching a candidate may change which earlier candidates are admissible,
+ * so a batch is filled to a fixed point rather than with one forward scan.
  */
 export function fillSchedulingBatch<T>(
   launchOrder: readonly T[],
@@ -70,16 +71,19 @@ export function fillSchedulingBatch<T>(
   return launched;
 }
 
-/** The sole gate-level overlap admitted by the complete-check scheduler. */
+/**
+ * Whether the browser and broker aggregates may overlap.
+ *
+ * The browser gate now starts and physically restarts two fixture brokers.
+ * Running it beside the broker aggregate made the artifact restart regression
+ * lose its bounded readiness window. Keep the old decision seam explicit so a
+ * future measured policy change remains mutation-tested; current policy admits
+ * no exclusive-gate overlap.
+ */
 export function allowsBrowserBrokerOverlap(
-  candidateId: string,
-  runningGateIds: Iterable<string>,
-  concurrency: number,
+  _candidateId: string,
+  _runningGateIds: Iterable<string>,
+  _concurrency: number,
 ): boolean {
-  if (concurrency < 2) return false;
-  const running = [...runningGateIds];
-  if (running.length !== 1) return false;
-  const runningId = running[0];
-  return (candidateId === BROWSER_GATE && runningId === BROKER_GATE)
-    || (candidateId === BROKER_GATE && runningId === BROWSER_GATE);
+  return false;
 }

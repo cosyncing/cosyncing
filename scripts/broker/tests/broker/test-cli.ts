@@ -646,7 +646,8 @@ try {
   mkdirSync(exportTemp, { recursive: true });
   const exportPath = join(exportTemp, 'review.json');
   writeFileSync(exportPath, '{"redacted":true}\n');
-  const seededStore = new ArtifactStore('http://127.0.0.1:7734', exitCache);
+  const exitPort = await freePort();
+  const seededStore = new ArtifactStore(`http://127.0.0.1:${exitPort}`, exitCache);
   seededStore.putExportAttachment(
     { tool: 'fixture', id: 'exit-backstop' },
     { name: 'review', format: 'json', retentionMs: 60_000 },
@@ -656,7 +657,6 @@ try {
   const exitIndexPath = join(exitCache, 'artifacts', 'index.json');
   const seededIndex = JSON.parse(readFileSync(exitIndexPath, 'utf8')) as { records: Array<{ filePath: string }> };
   const seededBlob = seededIndex.records[0]?.filePath;
-  const exitPort = await freePort();
   const lastResort = await runProcess([
     'bun',
     '-e',

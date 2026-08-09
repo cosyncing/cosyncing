@@ -140,10 +140,10 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('pi', 'F12', 'full', 'byte-exact inbox upload'),
 
   // F13 agent-to-user artifacts
-  claim('claude', 'F13', 'full', 'outbox plus SendUserFile mapping where present'),
-  claim('codex', 'F13', 'full', 'outbox/app-server writes'),
-  claim('opencode', 'F13', 'partial', 'outbox works; native send_file strict mapping still guarded separately'),
-  claim('pi', 'F13', 'full', 'outbox; native artifact support limited'),
+  claim('claude', 'F13', 'full', 'session-qualified SendUserFile transcript mapping'),
+  claim('codex', 'F13', 'n/a', 'no exact session-qualified delivery route; shared cwd outbox fails closed'),
+  claim('opencode', 'F13', 'full', 'session-qualified send_file plus exact native write events'),
+  claim('pi', 'F13', 'full', 'session-qualified bridge send-file route'),
 
   // F14 lifecycle/history mutation
   claim('claude', 'F14', 'partial', 'resume/Drive/stop; fork/rename/export gaps'),

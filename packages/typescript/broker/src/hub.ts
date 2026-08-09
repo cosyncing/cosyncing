@@ -5,8 +5,8 @@
  * same live session without the "single-owner" conflict (see
  * docs/architecture/monorepo.md).
  */
-import { watch, lstatSync, readFileSync, readdirSync, type FSWatcher } from 'node:fs';
-import { join, basename, extname, relative, dirname, resolve, isAbsolute } from 'node:path';
+import { lstatSync, readFileSync } from 'node:fs';
+import { basename, extname, relative, dirname, resolve, isAbsolute } from 'node:path';
 import type {
   AgentMessage,
   AgentOption,
@@ -22,9 +22,12 @@ import type {
   SlashCommand,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
-import { artifactKeyFor, type ArtifactStore } from './artifact-store.ts';
+import {
+  artifactKeyFor,
+  DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
+  type ArtifactStore,
+} from './artifact-store.ts';
 import type { SharedDraftStore } from './draft-store.ts';
-import { PRODUCT_IDENTITY } from './product.ts';
 import { planSemanticFromMessage } from './client-message-policy.ts';
 import { capHistoryMessages } from './history-delta.ts';
 import type { SessionControlTransition } from './sync-degraded.ts';
@@ -219,20 +222,14 @@ export class ManagedConn {
   private seq = 0;
   private readonly clients = new Set<Client>();
   private unsub: Unsubscribe;
-  /** Universal agent→user file pipeline: files the agent drops in `<cwd>/.cosyncing/outbox`. */
-  private outboxWatcher?: FSWatcher;
-  private outboxDir?: string;
-  private outboxSweepTimer?: ReturnType<typeof setInterval>;
-  /** outbox file path → "<size>:<mtimeMs>" so we re-surface a CHANGED file but not an unchanged one. */
-  private readonly seenOutbox = new Map<string, string>();
-  /** Deliverable files the agent created via its native write tool that we've already surfaced. */
-  private readonly seenWrites = new Map<string, string>();
-  /** Broker-INJECTED file-artifacts (auto-surfaced writes, outbox files, send_file) — kept so they
+  /** Broker-INJECTED file-artifacts (session-owned writes and send_file) — kept so they
    *  survive a reattach AND a history-reset. They are NOT in conn.getHistory() (that's the agent's own
-   *  message parts), so without this they'd vanish whenever the thread is rebuilt from history. Do not
-   *  count-cap this list: user-sent artifacts are durable session record until the planned
-   *  cursor/lazy-artifact cache replaces inline replay. */
+   *  message parts), so without this they'd vanish whenever the thread is rebuilt from history. The
+   *  cache is count-bounded because every entry becomes a replay frame on attach/reset. */
   private readonly artifacts: AgentMessage[] = [];
+  private readonly artifactReplayLimit: number;
+  /** Store-less large-artifact versions still need distinct identities at the same path. */
+  private artifactEmissionSequence = 0;
   /** The session working dir: the trust boundary for artifacts (must stay within it). */
   private readonly cwd?: string;
   /** Per-key accumulated in-flight text (model-output/thinking), so a client attaching mid-stream
@@ -274,6 +271,7 @@ export class ManagedConn {
     private readonly draftStore?: SharedDraftStore,
   ) {
     this.cwd = conn.info.cwd;
+    this.artifactReplayLimit = artifactStore?.replayLimit ?? DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT;
     // Attach/reconnect can already carry an exact active-turn projection before this wrapper has a
     // subscription. Seed the live-owner overlay from that authoritative SessionInfo so replacing an
     // owner or replaying history cannot manufacture an Idle gap while the same turn is active.
@@ -291,8 +289,10 @@ export class ManagedConn {
         ...(persisted.lastUpdateId ? { updateId: persisted.lastUpdateId } : {}),
       };
     }
+    // Only records created by an exact session-qualified producer route are
+    // eligible. Pre-fix cwd-outbox records carry no marker and fail closed.
+    this.artifacts.push(...(this.artifactStore?.sessionQualifiedArtifacts(this.sessionRef()) ?? []));
     this.unsub = conn.subscribe((m) => this.push(m));
-    this.startOutboxWatch();
   }
 
   /** Push the latest SessionInfo to attached clients. This is the low-latency control-state path:
@@ -478,83 +478,11 @@ export class ManagedConn {
     void old.close().catch(() => {});
   }
 
-  /** Watch an EXISTING `<cwd>/.cosyncing/outbox` and surface files the agent writes there.
-   *  Observe attach must never create workspace state, so this only adopts a directory created by an
-   *  explicit write-requiring workflow. A slow poll notices a directory that appears after attach. */
-  private startOutboxWatch(): void {
-    const cwd = this.conn.info.cwd;
-    if (!cwd) return;
-    this.outboxDir = join(cwd, PRODUCT_IDENTITY.repositoryDirectoryName, 'outbox');
-    this.ensureOutboxWatcher();
-    // Backstop for a late-created directory, coalesced bursts, and filesystems without fs.watch.
-    // It performs filesystem reads only while a client is attached and never creates a path.
-    this.outboxSweepTimer = setInterval(() => {
-      if (this.clients.size > 0) {
-        this.ensureOutboxWatcher();
-        this.sweepOutbox();
-      }
-    }, 2000);
-  }
-
-  private ensureOutboxWatcher(): void {
-    const dir = this.outboxDir;
-    if (!dir) return;
-    try {
-      const stat = lstatSync(dir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('outbox is not a real directory');
-    } catch {
-      this.outboxWatcher?.close();
-      this.outboxWatcher = undefined;
-      return;
-    }
-    if (this.outboxWatcher) return;
-    try {
-      const watcher = watch(dir, () => setTimeout(() => {
-        this.ensureOutboxWatcher();
-        this.sweepOutbox();
-      }, 200));
-      watcher.on('error', () => {
-        if (this.outboxWatcher !== watcher) return;
-        watcher.close();
-        this.outboxWatcher = undefined;
-      });
-      this.outboxWatcher = watcher;
-    } catch {
-      /* fs.watch unsupported on this platform/fs → rely on the interval */
-    }
-  }
-
-  private sweepOutbox(): void {
-    const dir = this.outboxDir;
-    if (!dir) return;
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      this.outboxWatcher?.close();
-      this.outboxWatcher = undefined;
-      return;
-    }
-    for (const name of names) {
-      const full = join(dir, name);
-      let st;
-      try {
-        st = lstatSync(full); // lstat, NOT stat: a symlink must not be followed (external-file leak)
-      } catch {
-        continue;
-      }
-      if (st.isSymbolicLink() || !st.isFile()) continue;
-      const key = `${st.size}:${st.mtimeMs}`;
-      if (this.seenOutbox.get(full) === key) continue; // unchanged → already surfaced
-      this.seenOutbox.set(full, key);
-      this.emitArtifact(full, name, st.size, { fingerprint: key });
-    }
-  }
-
   /** Read a workspace file and push it to clients as a file-artifact: inline (data URL) when small,
    *  metadata-only when too big. HTML is bundled (local images/css/js inlined as data-URIs) so it
    *  renders standalone in the app's sandboxed iframe — there are no sibling files on the phone. */
-  private emitArtifact(full: string, name: string, size: number, opts?: { proactive?: boolean; fingerprint?: string }): void {
+  private emitArtifact(full: string, name: string, size: number, opts?: { proactive?: boolean }): boolean {
+    const emissionVersion = ++this.artifactEmissionSequence;
     const mime = mimeFromName(name);
     const rel = this.cwd && isWithin(this.cwd, full) ? relative(this.cwd, full) : basename(name);
     const base: AgentMessage & { type: 'file-artifact' } = {
@@ -570,22 +498,43 @@ export class ManagedConn {
       // content-addressed storage and surface a lazy ref; otherwise fall back to metadata only.
       const fallback: AgentMessage & { type: 'file-artifact' } = {
         ...base,
-        artifactKey: artifactKeyFor(rel, opts?.fingerprint || `${size}:${Date.now()}`),
+        artifactKey: artifactKeyFor(rel, `emission:${emissionVersion}`),
       };
-      try {
-        this.pushArtifact(this.artifactStore?.copyFile(this.sessionRef(), base, full) ?? fallback);
-      } catch {
+      if (!this.artifactStore) {
         this.pushArtifact(fallback);
+        return true;
       }
-      return;
+      try {
+        this.pushArtifact(this.artifactStore.copyFile(
+          this.sessionRef(),
+          base,
+          full,
+          undefined,
+          { sessionQualified: true },
+        ));
+        return true;
+      } catch {
+        return false;
+      }
     }
     try {
       let buf = readFileSync(full);
       if (mime.includes('html')) buf = Buffer.from(this.bundleHtml(full, buf.toString('utf8')), 'utf8');
-      if (this.artifactStore) this.pushArtifact(this.artifactStore.putBytes(this.sessionRef(), base, buf, mime));
-      else this.pushArtifact({ ...base, url: `data:${mime};base64,${buf.toString('base64')}` });
+      if (this.artifactStore) {
+        this.pushArtifact(this.artifactStore.putBytes(
+          this.sessionRef(),
+          base,
+          buf,
+          mime,
+          undefined,
+          { sessionQualified: true },
+        ));
+      } else {
+        this.pushArtifact({ ...base, url: `data:${mime};base64,${buf.toString('base64')}` });
+      }
+      return true;
     } catch {
-      /* unreadable */
+      return false;
     }
   }
 
@@ -602,6 +551,9 @@ export class ManagedConn {
     const i = this.artifacts.findIndex((a) => a.type === 'file-artifact' && artifactIdentity(a) === key);
     if (i >= 0) this.artifacts.splice(i, 1, message);
     else this.artifacts.push(message);
+    if (this.artifacts.length > this.artifactReplayLimit) {
+      this.artifacts.splice(0, this.artifacts.length - this.artifactReplayLimit);
+    }
     this.push(message);
   }
 
@@ -622,14 +574,12 @@ export class ManagedConn {
     if (!DELIVERABLE.has(extname(p).toLowerCase())) return;
     const abs = resolve(this.cwd, p); // p is usually absolute; resolve tolerates relative too
     if (!isWithin(this.cwd, abs)) return; // never surface a write that escaped the workspace
-    if (this.outboxDir && isWithin(this.outboxDir, abs)) return; // the outbox watcher owns those
     try {
       const st = lstatSync(abs);
       if (st.isSymbolicLink() || !st.isFile()) return;
-      const key = `${st.size}:${st.mtimeMs}`;
-      if (this.seenWrites.get(abs) === key) return; // already surfaced this exact version
-      this.seenWrites.set(abs, key);
-      this.emitArtifact(abs, basename(abs), st.size, { proactive: true, fingerprint: key });
+      // The exact session's native write result is the ownership proof. The
+      // artifact store content-addresses repeats and versions changed bytes.
+      this.emitArtifact(abs, basename(abs), st.size, { proactive: true });
     } catch {
       /* gone/unreadable */
     }
@@ -644,9 +594,9 @@ export class ManagedConn {
     try {
       const st = lstatSync(abs);
       if (st.isSymbolicLink() || !st.isFile()) return { ok: false, detail: 'not a regular file' };
-      const key = `${st.size}:${st.mtimeMs}`;
-      this.seenWrites.set(abs, key); // suppress a duplicate auto-surface
-      this.emitArtifact(abs, basename(abs), st.size, { proactive: true, fingerprint: key });
+      if (!this.emitArtifact(abs, basename(abs), st.size, { proactive: true })) {
+        return { ok: false, detail: 'artifact could not be stored within broker limits' };
+      }
       return { ok: true, detail: `sent ${basename(abs)} (${st.size} bytes) to the user` };
     } catch {
       return { ok: false, detail: 'file not found' };
@@ -905,29 +855,23 @@ export class ManagedConn {
     }
   }
 
-  /** Release this wrapper's LOCAL resources — the conn subscription, the outbox fs.watch + sweep interval,
-   *  fan-out clients, and buffers — WITHOUT closing the underlying connection. Used by rekey()'s merge path,
+  /** Release this wrapper's LOCAL resources — the conn subscription, fan-out clients, and buffers —
+   *  WITHOUT closing the underlying connection. Used by rekey()'s merge path,
    *  where `old.conn` has been transferred to another ManagedConn: closing it would kill the live connection
-   *  the surviving wrapper now owns. (Without this, a merged-away wrapper leaks its FSWatcher + 2s sweep
-   *  interval + a second live subscription that ring-buffers every message forever.) */
+   *  the surviving wrapper now owns. A merged-away wrapper must still release its native subscription
+   *  so it cannot ring-buffer every later message forever. */
   detachLocal(): void {
     try {
       this.unsub();
     } catch {
       /* subscription already torn down */
     }
-    this.outboxWatcher?.close();
-    this.outboxWatcher = undefined;
-    this.outboxDir = undefined;
-    if (this.outboxSweepTimer) clearInterval(this.outboxSweepTimer);
-    this.outboxSweepTimer = undefined;
     this.clients.clear(); // never fan out to a stale client after teardown
     this.ring.length = 0;
     this.liveText.clear();
     this.pendingInput.clear();
     this.currentPlans.clear();
     this.clearLiveAttentionEvidence();
-    this.seenWrites.clear();
     this.artifacts.length = 0;
   }
 

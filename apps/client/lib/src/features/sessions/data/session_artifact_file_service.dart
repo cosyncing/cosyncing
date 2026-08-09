@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:broker_client/broker_client.dart';
@@ -161,6 +162,17 @@ abstract interface class ArtifactDownloadBackend {
   );
 }
 
+/// Optional signed-artifact capability that enforces a byte ceiling while the
+/// response is arriving, including on Flutter Web.
+// ignore: one_member_abstracts
+abstract interface class BoundedArtifactDownloadBackend {
+  /// Fetches a signed artifact without accepting more than [maxBytes].
+  Future<ArtifactDownload> fetchArtifactUrlBounded(
+    String url, {
+    required int maxBytes,
+  });
+}
+
 /// Optional backend capability for bounded Range/If-Range requests.
 // ignore: one_member_abstracts
 abstract interface class ResumableArtifactDownloadBackend {
@@ -175,9 +187,29 @@ abstract interface class ResumableArtifactDownloadBackend {
   });
 }
 
+/// Optional web-safe workspace range capability. Each response is cancelled
+/// while receiving if it exceeds its caller-provided byte ceiling.
+// ignore: one_member_abstracts
+abstract interface class BoundedResumableArtifactDownloadBackend {
+  /// Fetches one authenticated, bounded range of a workspace file.
+  Future<ArtifactDownload> fetchSessionFileRangeBounded(
+    String tool,
+    String sessionId,
+    String path, {
+    required int rangeStart,
+    required int rangeEnd,
+    required int maxBytes,
+    String? ifRange,
+  });
+}
+
 /// Production [ArtifactDownloadBackend] adapter built on [BrokerClient].
 final class BrokerArtifactDownloadBackend
-    implements ArtifactDownloadBackend, ResumableArtifactDownloadBackend {
+    implements
+        ArtifactDownloadBackend,
+        BoundedArtifactDownloadBackend,
+        ResumableArtifactDownloadBackend,
+        BoundedResumableArtifactDownloadBackend {
   /// Creates a [BrokerArtifactDownloadBackend].
   const BrokerArtifactDownloadBackend(this._client);
 
@@ -186,6 +218,14 @@ final class BrokerArtifactDownloadBackend
   @override
   Future<ArtifactDownload> fetchArtifactUrl(String url) {
     return _client.fetchArtifactUrl(url);
+  }
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrlBounded(
+    String url, {
+    required int maxBytes,
+  }) {
+    return _client.fetchArtifactUrlBounded(url, maxBytes: maxBytes);
   }
 
   @override
@@ -210,6 +250,27 @@ final class BrokerArtifactDownloadBackend
       tool,
       sessionId,
       path: path,
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      ifRange: ifRange,
+    );
+  }
+
+  @override
+  Future<ArtifactDownload> fetchSessionFileRangeBounded(
+    String tool,
+    String sessionId,
+    String path, {
+    required int rangeStart,
+    required int rangeEnd,
+    required int maxBytes,
+    String? ifRange,
+  }) {
+    return _client.downloadSessionFileBounded(
+      tool,
+      sessionId,
+      path: path,
+      maxBytes: maxBytes,
       rangeStart: rangeStart,
       rangeEnd: rangeEnd,
       ifRange: ifRange,
@@ -437,10 +498,16 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
         .watch(brokerClientProvider)
         .maybeWhen(data: (value) => value, orElse: () => null);
 
+    final downloadBackend = client == null
+        ? null
+        : BrokerArtifactDownloadBackend(client);
+    if (kIsWeb) {
+      return BrowserSessionArtifactFileService(
+        downloadBackend,
+      );
+    }
     return DefaultSessionArtifactFileService(
-      downloadBackend: client == null
-          ? null
-          : BrokerArtifactDownloadBackend(client),
+      downloadBackend: downloadBackend,
       cacheDirectoryProvider: const TemporaryArtifactCacheDirectoryProvider(),
       saveTargetProvider: FileSelectorArtifactSaveTargetProvider(
         typeLabel: artifactSaveTypeLabel(
@@ -451,6 +518,320 @@ final sessionArtifactFileServiceProvider = Provider<SessionArtifactFileService>(
     );
   },
 );
+
+const int _browserArtifactCacheMaxEntries = 16;
+const int _browserArtifactCacheMaxBytes = 64 * 1024 * 1024;
+const int _browserSessionFileRangeBytes = 1024 * 1024;
+
+final class _BrowserArtifactCacheEntry {
+  const _BrowserArtifactCacheEntry(this.bytes);
+
+  final Uint8List bytes;
+}
+
+/// Browser artifact cache/export path.
+///
+/// Web has no `dart:io` temporary directory and `file_selector_web` returns a
+/// dummy save path by design. Retain only a bounded LRU of fetched bytes, then
+/// hand an [XFile] to the browser so its native download behavior owns the
+/// destination. Desktop/mobile continue through
+/// [DefaultSessionArtifactFileService]'s atomic filesystem path.
+final class BrowserSessionArtifactFileService
+    implements SessionArtifactFileService {
+  /// Creates the web implementation bound to the active broker client.
+  BrowserSessionArtifactFileService(this._downloadBackend);
+
+  final ArtifactDownloadBackend? _downloadBackend;
+  final Map<String, _BrowserArtifactCacheEntry> _cache = {};
+  var _cacheBytes = 0;
+  var _sequence = 0;
+
+  @override
+  Future<SessionArtifactCachedFile> cacheArtifact(
+    SessionArtifactDescriptor descriptor, {
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
+    cancellationToken?.throwIfCanceled();
+    final source = descriptor.downloadSourceUrl;
+    if (source == null || source.isEmpty) {
+      throw StateError('Artifact does not provide a download source.');
+    }
+    final fetched = descriptor.isInlineDataUrl
+        ? DefaultSessionArtifactFileService.decodeDataUrl(source)
+        : await _fetchReference(descriptor, source);
+    cancellationToken?.throwIfCanceled();
+    final contentType = fetched.contentType ?? descriptor.mimeType;
+    final fileName = DefaultSessionArtifactFileService.resolveSafeFileName(
+      descriptor,
+      contentType: contentType,
+    );
+    final cacheKey = _retain(
+      fetched.bytes,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+    return SessionArtifactCachedFile(
+      cachedFilePath: cacheKey,
+      fileName: fileName,
+      contentType: contentType,
+      byteLength: fetched.bytes.length,
+      artifactKey: descriptor.artifactKey ?? fetched.artifactKey,
+      contentHash: descriptor.contentHash ?? fetched.contentHash,
+    );
+  }
+
+  @override
+  Future<SessionArtifactCachedFile> cacheSessionFile({
+    required String tool,
+    required String sessionId,
+    required String path,
+    required String fileName,
+    String? mimeType,
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
+    cancellationToken?.throwIfCanceled();
+    final backend = _downloadBackend;
+    if (backend == null) {
+      throw StateError('Connect to an active broker before downloading.');
+    }
+    final download = await _fetchBoundedSessionFile(
+      backend,
+      tool: tool,
+      sessionId: sessionId,
+      path: path,
+    );
+    cancellationToken?.throwIfCanceled();
+    final contentType = download.contentType ?? mimeType;
+    final safeName = DefaultSessionArtifactFileService.resolveSafeFileName(
+      SessionArtifactDescriptor(name: fileName, path: path),
+      contentType: contentType,
+    );
+    final cacheKey = _retain(
+      download.bytes,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+    return SessionArtifactCachedFile(
+      cachedFilePath: cacheKey,
+      fileName: safeName,
+      contentType: contentType,
+      byteLength: download.bytes.length,
+    );
+  }
+
+  @override
+  Future<String?> exportCachedArtifact(
+    SessionArtifactCachedFile artifact, {
+    SessionArtifactCancellationToken? cancellationToken,
+  }) async {
+    cancellationToken?.throwIfCanceled();
+    final entry = _cache.remove(artifact.cachedFilePath);
+    if (entry == null) {
+      throw StateError(
+        'The browser artifact cache entry is no longer available.',
+      );
+    }
+    // Refresh LRU position while the browser begins the export.
+    _cache[artifact.cachedFilePath] = entry;
+    await XFile.fromData(
+      entry.bytes,
+      name: artifact.fileName,
+      mimeType: artifact.contentType,
+    ).saveTo('');
+    cancellationToken?.throwIfCanceled();
+    return artifact.fileName;
+  }
+
+  Future<SessionArtifactFetchData> _fetchReference(
+    SessionArtifactDescriptor descriptor,
+    String source,
+  ) async {
+    final backend = _downloadBackend;
+    if (backend == null) {
+      throw StateError('Connect to an active broker before downloading.');
+    }
+    if (backend is! BoundedArtifactDownloadBackend) {
+      throw StateError(
+        'The active broker client cannot bound browser artifact downloads.',
+      );
+    }
+    final boundedBackend = backend as BoundedArtifactDownloadBackend;
+    final download = await boundedBackend.fetchArtifactUrlBounded(
+      source,
+      maxBytes: _browserArtifactCacheMaxBytes,
+    );
+    final expectedArtifactKey = descriptor.artifactKey?.trim();
+    if (expectedArtifactKey != null &&
+        expectedArtifactKey.isNotEmpty &&
+        download.artifactKey?.trim() != expectedArtifactKey) {
+      throw StateError('Artifact identity did not match the requested file.');
+    }
+    final expectedContentHash = descriptor.contentHash?.trim();
+    if (expectedContentHash != null &&
+        expectedContentHash.isNotEmpty &&
+        download.contentHash?.trim() != expectedContentHash) {
+      throw StateError('Artifact version did not match the requested file.');
+    }
+    return SessionArtifactFetchData(
+      bytes: download.bytes,
+      contentType: download.contentType,
+      artifactKey: download.artifactKey,
+      contentHash: download.contentHash,
+    );
+  }
+
+  Future<ArtifactDownload> _fetchBoundedSessionFile(
+    ArtifactDownloadBackend backend, {
+    required String tool,
+    required String sessionId,
+    required String path,
+  }) async {
+    if (backend is! BoundedResumableArtifactDownloadBackend) {
+      throw StateError(
+        'The active broker client cannot bound browser workspace '
+        'downloads.',
+      );
+    }
+    final boundedBackend = backend as BoundedResumableArtifactDownloadBackend;
+    final bytes = BytesBuilder(copy: false);
+    var offset = 0;
+    int? totalBytes;
+    String? etag;
+    String? lastModified;
+    String? contentType;
+    while (totalBytes == null || offset < totalBytes) {
+      final remaining = _browserArtifactCacheMaxBytes - offset;
+      if (remaining <= 0) {
+        throw ArtifactTooLargeException(
+          limit: _browserArtifactCacheMaxBytes,
+          advertised: totalBytes,
+        );
+      }
+      final requestBytes = remaining < _browserSessionFileRangeBytes
+          ? remaining
+          : _browserSessionFileRangeBytes;
+      final validator = etag ?? lastModified;
+      final download = await boundedBackend.fetchSessionFileRangeBounded(
+        tool,
+        sessionId,
+        path,
+        rangeStart: offset,
+        rangeEnd: offset + requestBytes - 1,
+        maxBytes: requestBytes,
+        ifRange: offset == 0 ? null : validator,
+      );
+      contentType = download.contentType ?? contentType;
+      final range = _parseContentRange(download.contentRange);
+      if (download.statusCode == 416) {
+        if (range?.total == offset) {
+          totalBytes = offset;
+          break;
+        }
+        throw const BrokerException(
+          message: 'Download range is outside the current file.',
+          statusCode: 416,
+        );
+      }
+      if (download.statusCode == 200) {
+        if (offset != 0 ||
+            download.bytes.length > _browserArtifactCacheMaxBytes ||
+            (download.contentLength != null &&
+                download.contentLength != download.bytes.length)) {
+          throw const BrokerException(
+            message: 'Broker returned an invalid full browser download.',
+          );
+        }
+        bytes.add(download.bytes);
+        offset = download.bytes.length;
+        totalBytes = offset;
+        break;
+      }
+      if (download.statusCode != 206 ||
+          range == null ||
+          range.total == null ||
+          range.start != offset ||
+          range.end < range.start ||
+          range.end >= range.total! ||
+          range.end - range.start + 1 != download.bytes.length ||
+          download.bytes.isEmpty) {
+        throw const BrokerException(
+          message: 'Broker returned an invalid browser download range.',
+        );
+      }
+      if (range.total! > _browserArtifactCacheMaxBytes) {
+        throw ArtifactTooLargeException(
+          limit: _browserArtifactCacheMaxBytes,
+          advertised: range.total,
+        );
+      }
+      final representationChanged =
+          (etag != null && download.etag != etag) ||
+          (etag == null &&
+              lastModified != null &&
+              download.lastModified != lastModified);
+      if (representationChanged) {
+        throw const BrokerException(
+          message: 'Download representation changed between browser ranges.',
+        );
+      }
+      final completesFile = range.end + 1 == range.total;
+      if (!completesFile &&
+          validator == null &&
+          download.etag == null &&
+          download.lastModified == null) {
+        throw const BrokerException(
+          message: 'Broker did not provide a browser range validator.',
+        );
+      }
+      bytes.add(download.bytes);
+      offset = offset + download.bytes.length;
+      totalBytes = range.total;
+      etag = download.etag ?? etag;
+      lastModified = download.lastModified ?? lastModified;
+    }
+    if (offset != totalBytes) {
+      throw const BrokerException(
+        message: 'Browser download ended before the complete file arrived.',
+      );
+    }
+    return ArtifactDownload(
+      bytes: bytes.takeBytes(),
+      contentType: contentType,
+      contentLength: totalBytes,
+      etag: etag,
+      lastModified: lastModified,
+    );
+  }
+
+  String _retain(
+    List<int> bytes, {
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) {
+    cancellationToken?.throwIfCanceled();
+    if (bytes.length > _browserArtifactCacheMaxBytes) {
+      throw StateError('Artifact exceeds the browser cache limit.');
+    }
+    onProgress?.call(bytesTransferred: 0, totalBytes: bytes.length);
+    while (_cache.isNotEmpty &&
+        (_cache.length >= _browserArtifactCacheMaxEntries ||
+            _cacheBytes + bytes.length > _browserArtifactCacheMaxBytes)) {
+      final oldestKey = _cache.keys.first;
+      _cacheBytes -= _cache.remove(oldestKey)!.bytes.length;
+    }
+    final cacheKey = 'browser-artifact:${++_sequence}';
+    final retained = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+    _cache[cacheKey] = _BrowserArtifactCacheEntry(retained);
+    _cacheBytes += retained.length;
+    onProgress?.call(
+      bytesTransferred: retained.length,
+      totalBytes: retained.length,
+    );
+    return cacheKey;
+  }
+}
 
 /// Default file service used by the app feature layer.
 final class DefaultSessionArtifactFileService
@@ -1105,6 +1486,20 @@ final class DefaultSessionArtifactFileService
     }
 
     final download = await backend.fetchArtifactUrl(source);
+    final expectedArtifactKey = descriptor.artifactKey?.trim();
+    if (expectedArtifactKey != null && expectedArtifactKey.isNotEmpty) {
+      final receivedArtifactKey = download.artifactKey?.trim();
+      if (receivedArtifactKey != expectedArtifactKey) {
+        throw StateError('Artifact identity did not match the requested file.');
+      }
+    }
+    final expectedContentHash = descriptor.contentHash?.trim();
+    if (expectedContentHash != null && expectedContentHash.isNotEmpty) {
+      final receivedContentHash = download.contentHash?.trim();
+      if (receivedContentHash != expectedContentHash) {
+        throw StateError('Artifact version did not match the requested file.');
+      }
+    }
     return SessionArtifactFetchData(
       bytes: download.bytes,
       contentType: download.contentType,

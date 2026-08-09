@@ -2,8 +2,8 @@
  * Pi real-TUI bridge trace.
  *
  * Starts a real interactive `pi` process in tmux with the cosyncing bridge extension loaded,
- * then proves terminal→app, app→terminal, model/command metadata, tool activity, outbox artifact
- * surfacing, and a real extension-owned approval gate.
+ * then proves terminal→app, app→terminal, model/command metadata, tool activity,
+ * session-qualified artifact delivery, and a real extension-owned approval gate.
  *
  * This is intentionally opt-in because it uses a real model/provider:
  *
@@ -149,9 +149,10 @@ try {
     kind: 'prompt',
     text: [
       `APP_PI_TUI_BROAD_PROMPT_${short}.`,
-      `Use your bash tool to create .cosyncing/outbox/${artifactName} containing exactly ${artifactMarker}.`,
+      `Use your bash tool to create ${artifactName} containing exactly ${artifactMarker}.`,
+      `Then call the send_file tool with path ${artifactName}.`,
       `Then reply exactly ${doneMarker}.`,
-      'Do not skip the bash tool call.',
+      'Do not skip the bash or send_file tool calls.',
     ].join(' '),
   }));
   const appEcho = await waitFrame(frames, (f) => frames.indexOf(f) >= markApp && f.kind === 'message' && f.message?.type === 'user-message' && /APP_PI_TUI_BROAD_PROMPT/.test(f.message.text ?? ''), 20000);
@@ -159,10 +160,10 @@ try {
   const appTool = await waitFrame(frames, (f) => frames.indexOf(f) >= markApp && f.kind === 'message' && (f.message?.type === 'tool-call' || f.message?.type === 'tool-result'), 90000);
   check('real Pi broad app turn emits tool activity surface', !!appTool, JSON.stringify(appTool?.message ?? null));
   const artifact = await waitFrame(frames, (f) => frames.indexOf(f) >= markApp && f.kind === 'message' && f.message?.type === 'file-artifact' && JSON.stringify(f.message).includes(artifactName), 90000);
-  check('real Pi broad app turn surfaces outbox file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
+  check('real Pi broad app turn surfaces session-qualified send_file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
   const done = await waitForAccumulatedModelText(frames, markApp, doneMarker, 90000);
   check('real Pi broad app turn final response reaches app stream', done, doneMarker);
-  const nativeArtifact = join(cwd, '.cosyncing', 'outbox', artifactName);
+  const nativeArtifact = join(cwd, artifactName);
   check('Pi artifact file exists in real workspace with marker', readFileSafe(nativeArtifact).includes(artifactMarker), nativeArtifact);
   await waitFrame(frames, (f) => frames.indexOf(f) >= markApp && f.kind === 'message' && f.message?.type === 'status' && f.message.status === 'idle', 60000);
 

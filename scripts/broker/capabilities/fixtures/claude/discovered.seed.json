@@ -259,8 +259,8 @@
     },
     {
       "schemaVersion": 1,
-      "id": "claude.artifact.outbox",
-      "nativeId": "claude:artifact:outbox",
+      "id": "claude.jsonl.send_user_file",
+      "nativeId": "claude:jsonl:SendUserFile",
       "agent": "claude",
       "version": "2.1.203",
       "nativeKind": "artifact",
@@ -273,7 +273,7 @@
       "risk": "medium",
       "riskClass": "R1",
       "reviewRequired": false,
-      "summary": "Agent-written outbox files + SendUserFile mapping surface as file-artifacts; interactive HTML rides the universal sandboxed-bridge path."
+      "summary": "Session-owned SendUserFile results map to file-artifacts; interactive HTML rides the sandboxed signed-reference path."
     },
     {
       "schemaVersion": 1,

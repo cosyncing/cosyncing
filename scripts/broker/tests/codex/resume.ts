@@ -420,45 +420,6 @@ try {
     return [idle && wroteInbox && replied, `idle=${idle} wroteInbox=${wroteInbox} replied=${replied}`];
   });
 
-  await test('outbox file surfaces as file-artifact', async () => {
-    const a = await attach(seeded.sessionId);
-    await waitFor(() => a.frames.some((f) => f.kind === 'history'), 10000);
-    a.frames.length = 0;
-    const token = `CODEX_FILE_OUTPUT_OK_${rand()}`;
-    const name = `codex-outbox-${rand()}.txt`;
-    const approved = new Set<string>();
-    a.send({
-      kind: 'prompt',
-      text: `Use this exact shell command once: mkdir -p .cosyncing/outbox && printf ${token} > .cosyncing/outbox/${name}. Then reply exactly CODEX_FILE_OUTPUT_DONE.`,
-    });
-    const end = Date.now() + 120000;
-    let artifact: any;
-    let idle = false;
-    while (Date.now() < end) {
-      for (const p of a.msgs().filter((m) => m.type === 'permission-request')) {
-        if (!approved.has(p.requestId)) {
-          approved.add(p.requestId);
-          a.send({ kind: 'approve', requestId: p.requestId, decision: 'approve' });
-        }
-      }
-      artifact = a.msgs().find((m) => m.type === 'file-artifact' && m.name === name);
-      idle = a.msgs().some((m) => m.type === 'status' && m.status === 'idle');
-      if (artifact && idle) break;
-      await sleep(250);
-    }
-    const outboxPath = join(seeded.dir, '.cosyncing', 'outbox', name);
-    const wroteOutbox = existsSync(outboxPath) && readFileSync(outboxPath, 'utf8') === token;
-    let artifactTextOk = false;
-    if (artifact?.url?.startsWith('data:')) {
-      artifactTextOk = Buffer.from(String(artifact.url).split(',')[1] ?? '', 'base64').toString('utf8') === token;
-    }
-    a.close();
-    return [
-      !!artifact && idle && wroteOutbox && artifactTextOk,
-      `artifact=${!!artifact} idle=${idle} approvals=${approved.size} wroteOutbox=${wroteOutbox} artifactText=${artifactTextOk}`,
-    ];
-  });
-
   await test('skills/config/model extension surfaces are queryable', async () => {
     const a = await attach(seeded.sessionId);
     await waitFor(() => a.frames.some((f) => f.kind === 'commands'), 15000);

@@ -132,7 +132,7 @@ try {
   log('✓ browser attached to the session (viewers>0)');
 
   // 5) NOW trigger the gated Write — the hook sees a viewer and relays the permission to the broker → the app card
-  const proofRel = `.cosyncing/outbox/claude-broad-${TOKEN}.txt`;
+  const proofRel = `claude-broad-${TOKEN}.txt`;
   const proofText = `CLAUDE_BROAD_ARTIFACT_${TOKEN}`;
   tmux('send-keys', '-t', SESSION, '--', `Use the Write tool to create ${proofRel} with exactly the text ${proofText}. Do nothing else.`);
   for (let i = 0; i < 6; i++) { tmux('send-keys', '-t', SESSION, 'Enter'); const end = Date.now() + 6000; let blocked = false; while (Date.now() < end) { if (existsSync(RESULT)) { blocked = true; break; } const r = await (await fetch(`${BASE}/api/sessions`)).json().catch(() => ({} as any)); const list: any[] = Array.isArray(r?.sessions) ? r.sessions : Array.isArray(r) ? r : []; if (list.find((s) => s.id === id && s.status === 'needs-input')) { blocked = true; break; } await sleep(500); } if (blocked) break; }
@@ -154,10 +154,8 @@ try {
     } else {
       const noLinger = !PERMIT.test(cap());
       const toolActivity = await waitFrame(frames, (f) => f.kind === 'message' && f.message?.type === 'tool-call', 15000);
-      const artifact = await waitFrame(frames, (f) => f.kind === 'message' && f.message?.type === 'file-artifact' && JSON.stringify(f.message).includes(`claude-broad-${TOKEN}.txt`), 15000);
       check('real Claude broad trace surfaces the hook-originated canonical tool-call', !!toolActivity, JSON.stringify(toolActivity?.message ?? null));
-      check('real Claude broad turn surfaces outbox file artifact', !!artifact, JSON.stringify(artifact?.message ?? null));
-      check('Claude artifact file exists in real workspace with marker', ran && readFileSync(proof, 'utf8') === proofText, proof);
+      check('Claude proof file exists in real workspace with marker', ran && readFileSync(proof, 'utf8') === proofText, proof);
       verdict = res.approved && ran && noLinger && assertions.every((a) => a.ok) ? 'PASS' : 'FAIL';
       console.log(`  ${verdict === 'PASS' ? '✅' : '❌'} cardShown=${res.cardShown} appApproved=${res.approved} fileCreated=${ran} noLingerPrompt=${noLinger} ${res.error ? '(' + res.error + ')' : ''}`);
       console.log(verdict === 'PASS' ? 'PASS claude real-TUI app-answer — a real claude permission was answered by clicking in the REAL app; the tool ran with no human at the terminal.' : 'FAIL claude real-TUI app-answer');
@@ -170,7 +168,7 @@ try {
   try { driver?.kill(); } catch {}
   writeFileSync(TRACE, JSON.stringify({
     agent: 'claude',
-    scenarioIds: ['ST-01', 'ST-14', 'ST-17', 'ST-20'],
+    scenarioIds: ['ST-01', 'ST-14', 'ST-17'],
     mode: 'real-tui-app-answer',
     workspace: WORK,
     output: { frames: FRAMES, screenshot: shot },
