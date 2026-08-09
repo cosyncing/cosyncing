@@ -366,6 +366,21 @@ class SessionDetailController
     return operation;
   }
 
+  /// Promotes a resident background Observe attach when one owns this lane.
+  ///
+  /// A generic interactive attach is intentionally not used by connection
+  /// status listeners: an explicit handoff also reconnects in Observe, and
+  /// must not be mistaken for supervisor bootstrap. Intent is checked here,
+  /// beside the source-aware attach admission state that owns it.
+  Future<void> promoteBackgroundObserveToInteractive() {
+    if (_attachInFlightIntent != SessionDetailAttachIntent.backgroundObserve &&
+        _establishedAttachIntent !=
+            SessionDetailAttachIntent.backgroundObserve) {
+      return Future<void>.value();
+    }
+    return attach();
+  }
+
   /// Recreates this session's transport after the active profile's
   /// credential changes without changing the broker source or draft scope.
   ///
