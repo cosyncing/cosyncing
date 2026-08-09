@@ -56,7 +56,8 @@ hosted service between the client and the broker.
 
 One protocol covers all four. Per-agent control differs, and Claude Code sessions open read-only
 until you take over. See [adapter support and evidence](docs/protocol/adapter-support.md) for the
-function-by-function matrix.
+function-by-function matrix. See [supported-agent setup](docs/supported_agents/README.md) for
+minimum versions, official install methods, and agent-specific runtime requirements.
 
 ## Install
 

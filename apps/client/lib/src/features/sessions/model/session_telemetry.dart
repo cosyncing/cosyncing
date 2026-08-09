@@ -286,6 +286,7 @@ bool isSessionTelemetryMessage(AgentMessage message) {
         'context',
         'runtimeTotals',
         'runtime-totals',
+        'sessionStats',
       }.contains(key);
 }
 

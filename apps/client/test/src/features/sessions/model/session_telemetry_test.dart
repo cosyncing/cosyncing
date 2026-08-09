@@ -125,7 +125,12 @@ void main() {
     });
 
     test('claims context and runtime metadata', () {
-      for (final key in ['contextUsage', 'context-usage', 'runtimeTotals']) {
+      for (final key in [
+        'contextUsage',
+        'context-usage',
+        'runtimeTotals',
+        'sessionStats',
+      ]) {
         expect(
           isSessionTelemetryMessage(
             _message('metadata-update', {'key': key, 'value': 1}),
