@@ -48,6 +48,7 @@ import {
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
   servicePathEntries,
+  servicePathMatchesExpected,
   serviceDefinitionResourceId,
   SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES,
   LAUNCHD_SERVICE_LABEL,
@@ -707,11 +708,14 @@ function serviceAgentPathCheck(
   }
   const missing = expectedEntries.filter((directory) => !entries.includes(directory));
   const obsolete = entries.filter((directory) => !expectedEntries.includes(directory));
+  const orderingMismatch = missing.length === 0
+    && obsolete.length === 0
+    && !servicePathMatchesExpected(entries, expectedEntries);
   const expectedOverrides = serviceAgentExecutableOverrides(context);
   const overrideMismatches = SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES.filter(
     (name) => durableEnvironment[name] !== expectedOverrides[name],
   );
-  if (missing.length === 0 && obsolete.length === 0 && overrideMismatches.length === 0) {
+  if (missing.length === 0 && obsolete.length === 0 && !orderingMismatch && overrideMismatches.length === 0) {
     return {
       id: 'service.agent-executable-path',
       status: 'pass',
@@ -732,6 +736,7 @@ function serviceAgentPathCheck(
       detectedExecutables: executables.length,
       missingDirectories: missing.length,
       obsoleteDirectories: obsolete.length,
+      orderingMismatch,
       overrideMismatches: overrideMismatches.length,
     },
     remediation: remediation('cosyncing repair', 'Reconcile the service PATH with the currently installed agent executables.'),

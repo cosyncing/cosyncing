@@ -164,7 +164,7 @@ export interface OpencodeShimInspection {
 export interface SetupAgentSummary {
   id: 'codex' | 'opencode' | 'pi' | 'claude';
   displayName: string;
-  state: 'missing' | 'supported' | 'unsupported';
+  state: 'missing' | 'supported' | 'unsupported' | 'runtime-unavailable';
   installedVersion?: string;
   minimumVersion: string;
   /** The adapter-owned upgrade command, carried only for an `unsupported` agent so the preflight can name it. */
@@ -173,6 +173,14 @@ export interface SetupAgentSummary {
   managedRuntimeWarning?: {
     detailCode: 'codex-standalone-install-missing' | 'codex-standalone-install-unusable';
     command: string;
+  };
+  /** Optional-agent runtime incompatibility: visible in setup, but never a setup blocker. */
+  runtimeUnavailable?: {
+    detailCode: string;
+    summary: string;
+    remediation: string;
+    installedVersion?: string;
+    minimumVersion?: string;
   };
   managedBehavior: string;
 }
@@ -389,7 +397,7 @@ function installedVersion(report: DoctorReport, id: string): string | undefined 
   return typeof value === 'string' ? value : undefined;
 }
 
-function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
+export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
   const behavior: Record<SetupAgentSummary['id'], string> = {
     codex: 'Managed shared app-server; remote terminals may join it.',
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
@@ -400,9 +408,12 @@ function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
     const binary = check(report, `${id}.binary`);
     const version = check(report, `${id}.version`);
+    const runtime = id === 'pi' ? check(report, 'pi.node-runtime') : undefined;
     const state: SetupAgentSummary['state'] = binary?.status !== 'pass'
       ? 'missing'
-      : version?.status === 'pass' ? 'supported' : 'unsupported';
+      : version?.status !== 'pass'
+        ? 'unsupported'
+        : runtime?.status === 'fail' ? 'runtime-unavailable' : 'supported';
     // The adapter that owns the floor also owns the command that clears it. Carrying it through instead of
     // hardcoding one per agent here is what lets the preflight say `claude update` without this file
     // inventing an upgrade path any adapter could rename.
@@ -419,6 +430,17 @@ function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
           command: standalone.remediation.command,
         }
       : undefined;
+    const runtimeUnavailable = state === 'runtime-unavailable' && runtime
+      ? {
+          detailCode: runtime.detailCode,
+          summary: runtime.summary,
+          remediation: runtime.remediation?.message ?? 'Repair the effective Pi runtime, then rerun setup.',
+          ...(typeof runtime.evidence?.installedVersion === 'string'
+            ? { installedVersion: runtime.evidence.installedVersion } : {}),
+          ...(typeof runtime.evidence?.minimumVersion === 'string'
+            ? { minimumVersion: runtime.evidence.minimumVersion } : {}),
+        }
+      : undefined;
     return {
       id,
       displayName: matrix?.displayName ?? (id === 'claude' ? 'Claude Code' : id),
@@ -427,12 +449,13 @@ function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
       minimumVersion: matrix?.version ?? 'unknown',
       ...(state === 'unsupported' && upgradeCommand ? { upgradeCommand } : {}),
       ...(standaloneWarning ? { managedRuntimeWarning: standaloneWarning } : {}),
+      ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
       managedBehavior: behavior[id],
     };
   });
 }
 
-function doctorBlockers(report: DoctorReport): SetupBlockingIssue[] {
+export function doctorBlockers(report: DoctorReport): SetupBlockingIssue[] {
   const checks = allChecks(report);
   const blockers: SetupBlockingIssue[] = [];
   for (const candidate of checks) {
@@ -509,7 +532,13 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
       rc: input.opencodeShim.rc.map(({ id, state }) => ({ id, state })),
     },
     portStatus: input.portStatus,
-    agents: input.agents.map(({ id, state, installedVersion, minimumVersion }) => ({ id, state, installedVersion, minimumVersion })),
+    agents: input.agents.map(({ id, state, installedVersion, minimumVersion, runtimeUnavailable }) => ({
+      id,
+      state,
+      installedVersion,
+      minimumVersion,
+      ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
+    })),
     agentExecutableDirectories: input.agentExecutableDirectories,
     agentExecutableOverrides: input.agentExecutableOverrides,
     durableServiceProvider: input.durableServiceProvider,

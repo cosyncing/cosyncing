@@ -44,13 +44,13 @@ u_str LISTEN 0 4096 ${SOCK} 1475208987 * 0 users:(("codex",pid=1212851,fd=27))
 `;
 
 const PROBE_REAL_FORMAT = `
-u_str ESTAB 0 0 /home/tester/.codex/app-server-control/app-server-control.sock 1606154843 * 1606198953 users:(("codex",pid=1212851,fd=21))
+u_str ESTAB 0 0 /workspace/tester/.codex/app-server-control/app-server-control.sock 1606154843 * 1606198953 users:(("codex",pid=1212851,fd=21))
 u_str ESTAB 0 0 * 1606198953 * 1606154843 users:(("codex",pid=2562266,fd=30))
-u_str LISTEN 0 4096 /home/tester/.codex/app-server-control/app-server-control.sock 1475208987 * 0 users:(("codex",pid=1212851,fd=27))
+u_str LISTEN 0 4096 /workspace/tester/.codex/app-server-control/app-server-control.sock 1475208987 * 0 users:(("codex",pid=1212851,fd=27))
 `;
 
 const PROBE_SHARED_NOT_DOWNGRADED = `
-u_str ESTAB 0 0 /home/tester/.codex/app-server-control/app-server-control.sock 1606154843 * 1606198954 users:(("codex",pid=2562266,fd=32))
+u_str ESTAB 0 0 /workspace/tester/.codex/app-server-control/app-server-control.sock 1606154843 * 1606198954 users:(("codex",pid=2562266,fd=32))
 u_str LISTEN 0 4096 /tmp/other.sock 1475208999 * 0 users:(("codex",pid=2562266,fd=33))
 u_str ESTAB 0 0 * 1606198953 * 1606198955 users:(("codex",pid=2562266,fd=34))
 `;
@@ -62,7 +62,7 @@ const PROBE_SHARED_NOT_DOWNGRADED_REVERSED = PROBE_SHARED_NOT_DOWNGRADED
   .map((line) => line.trim())
   .join('\n');
 
-const PROBE_LISTEN_ONLY = `u_str LISTEN 0 4096 /home/tester/.codex/app-server-control/app-server-control.sock 1475208987 * 0 users:(("codex",pid=1212851,fd=27))`;
+const PROBE_LISTEN_ONLY = `u_str LISTEN 0 4096 /workspace/tester/.codex/app-server-control/app-server-control.sock 1475208987 * 0 users:(("codex",pid=1212851,fd=27))`;
 
 const PROBE_NO_SOCKET: string[] = [];
 
@@ -146,17 +146,17 @@ const PROBE_NO_SOCKET: string[] = [];
   check('socket-diagnostic parser leaves unmatched sockets unknown, not private', parsed.get(9999) === undefined || parsed.get(9999) === 'unknown');
   check('parser output remains a bounded map keyed by pid', typeof asRecord['101'] === 'string');
 
-  const realParsed = parseCodexSocketOwnership(PROBE_REAL_FORMAT, '/home/tester/.codex/app-server-control/app-server-control.sock');
+  const realParsed = parseCodexSocketOwnership(PROBE_REAL_FORMAT, '/workspace/tester/.codex/app-server-control/app-server-control.sock');
   check('exact-host-format fixture marks reverse peer pid as shared', realParsed.get(2562266) === 'shared');
   check('listener-only socket row does not force non-client shared proof', realParsed.get(1212851) !== 'private');
-  const realParsedListenOnly = parseCodexSocketOwnership(PROBE_LISTEN_ONLY, '/home/tester/.codex/app-server-control/app-server-control.sock');
+  const realParsedListenOnly = parseCodexSocketOwnership(PROBE_LISTEN_ONLY, '/workspace/tester/.codex/app-server-control/app-server-control.sock');
   check('listener-only context cannot prove a reverse shared client', realParsedListenOnly.get(2562266) !== 'shared');
 
-  const realParsedNoDowngrade = parseCodexSocketOwnership(PROBE_SHARED_NOT_DOWNGRADED, '/home/tester/.codex/app-server-control/app-server-control.sock');
+  const realParsedNoDowngrade = parseCodexSocketOwnership(PROBE_SHARED_NOT_DOWNGRADED, '/workspace/tester/.codex/app-server-control/app-server-control.sock');
   check('pid with shared ESTAB followed by unrelated rows remains shared', realParsedNoDowngrade.get(2562266) === 'shared');
   const realParsedNoDowngradeReversed = parseCodexSocketOwnership(
     PROBE_SHARED_NOT_DOWNGRADED_REVERSED,
-    '/home/tester/.codex/app-server-control/app-server-control.sock',
+    '/workspace/tester/.codex/app-server-control/app-server-control.sock',
   );
   check('reverse-row-order mixed rows preserve shared proof without downgrade', realParsedNoDowngradeReversed.get(2562266) === 'shared');
 }
@@ -308,7 +308,8 @@ try {
   check('async socket refresh reuses the completed TTL cache', asyncThird === asyncFirst && asyncProbeCalls === 1);
 
   // ── platform gate ──────────────────────────────────────────────────────────────────────────────
-  check('presence is linux-only (elsewhere the badge under-claims, never lies)', codexTuiPresenceSupported('linux') && !codexTuiPresenceSupported('darwin') && !codexTuiPresenceSupported('win32'));
+  check('presence supports bounded Linux and macOS evidence while other platforms under-claim',
+    codexTuiPresenceSupported('linux') && codexTuiPresenceSupported('darwin') && !codexTuiPresenceSupported('win32'));
   if (!codexTuiPresenceSupported()) {
     const unsupportedScan = codexAttachedTuis(SOCK, procRoot);
     check('unsupported cached presence marks process scan unavailable', unsupportedScan.processScanAvailable === false);

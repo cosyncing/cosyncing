@@ -141,14 +141,17 @@ export function agentPreflightLines(
   return agents.map((agent) => {
     const version = agent.installedVersion ? ` ${agent.installedVersion}` : '';
     const reason = agent.state === 'unsupported' ? unsupportedReason(agent, text) : '';
+    const runtimeReason = agent.runtimeUnavailable
+      ? text.runtimeUnavailableReason(agent.runtimeUnavailable)
+      : '';
     // The state word and the managed-behavior sentence are copy, not identifiers. `agent.managedBehavior`
     // stays on the summary as the English record every machine-readable surface carries; the panel renders
     // the catalog's, or a Chinese wizard printed "○ Codex: missing / Managed shared app-server; …".
-    const marker = agent.state === 'supported' ? '✓' : agent.state === 'unsupported' ? '!' : '○';
+    const marker = agent.state === 'supported' ? '✓' : agent.state === 'missing' ? '○' : '!';
     const warning = agent.managedRuntimeWarning
       ? `\n  ${text.codexStandaloneWarning(agent.managedRuntimeWarning.command)}`
       : '';
-    return `${marker} ${agent.displayName}${version}: ${text.agentState(agent.state)}${reason}`
+    return `${marker} ${agent.displayName}${version}: ${text.agentState(agent.state)}${reason}${runtimeReason}`
       + `\n  ${text.agentBehavior(agent.id)}${warning}`;
   }).join('\n');
 }
@@ -392,6 +395,12 @@ export function createNonInteractiveSetupPresenter(
         if (agent.state === 'unsupported') {
           line(`agent.${agent.id}.unsupported=detected:${agent.installedVersion ?? 'unknown'} `
             + `minimum:${agent.minimumVersion}${agent.upgradeCommand ? ` fix:${agent.upgradeCommand}` : ''}`);
+        }
+        if (agent.runtimeUnavailable) {
+          line(`agent.${agent.id}.runtime-unavailable=${agent.runtimeUnavailable.detailCode} `
+            + `installed-node:${agent.runtimeUnavailable.installedVersion ?? 'unknown'} `
+            + `minimum-node:${agent.runtimeUnavailable.minimumVersion ?? 'unknown'} `
+            + `fix:${agent.runtimeUnavailable.remediation}`);
         }
         if (agent.managedRuntimeWarning) {
           line(`agent.${agent.id}.warning=${agent.managedRuntimeWarning.detailCode} `

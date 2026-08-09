@@ -1032,6 +1032,20 @@ void main() {
             },
           ),
         ),
+        MessageWireEvent(
+          seq: 4,
+          message: AgentMessage(
+            type: AgentMessageType.metadataUpdate,
+            raw: {
+              'type': 'metadata-update',
+              'key': 'sessionStats',
+              'value': {
+                'sessionId': 'pi-session',
+                'tokens': {'input': 4, 'output': 567},
+              },
+            },
+          ),
+        ),
       ],
     );
 
@@ -1050,7 +1064,7 @@ void main() {
     });
 
     test('every raw frame stays in the canonical list for Debug', () {
-      expect(telemetryState.messageEvents, hasLength(3));
+      expect(telemetryState.messageEvents, hasLength(4));
     });
 
     test('a run summary keeps its transcript row', () {

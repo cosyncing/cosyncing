@@ -249,7 +249,34 @@ check('F1 a mode-only resume reaches the adapter without attach options', attach
 check('F2 discovery/history stayed untouched across every arbitration', discoverCalls === 0 && historyCalls === 0,
   `discover=${discoverCalls} history=${historyCalls}`);
 
+// A refresh inside the zero-client grace must rejoin the still-live owner, not create another.
+{
+  const beforeGraceOwner = await hub.ensure('fake', 's-grace', 'resume', 'create');
+  const beforeGraceCount = resumeAttaches;
+  beforeGraceOwner.addClient(noopClient);
+  beforeGraceOwner.removeClient(noopClient);
+  hub.release('fake', 's-grace', 'resume');
+  await sleep(Math.max(1, Math.floor(GRACE_MS / 4)));
+  const withinGrace = await hub.ensure('fake', 's-grace', 'resume', 'app-restore');
+  check('F3 refresh within the eviction grace rejoins the resident owner',
+    withinGrace === beforeGraceOwner && resumeAttaches === beforeGraceCount);
+}
+
 await hub.dispose();
+
+// ── F4: a broker restart has no in-memory owner; durable client intent can reconstruct it ───────
+{
+  const restartedHub = new Hub(registry, GRACE_MS);
+  const beforeRestartRestore = resumeAttaches;
+  const afterRestart = await restartedHub.ensure('fake', 's6', 'resume', 'app-restore');
+  check('F4 a reason-tagged refresh after broker restart creates exactly one Resume owner',
+    resumeAttaches === beforeRestartRestore + 1 && afterRestart.conn.info.control?.drive.state === 'driving',
+    `before=${beforeRestartRestore} after=${resumeAttaches}`);
+  const joinedAfterRestart = await restartedHub.ensure('fake', 's6', 'resume', 'app-restore');
+  check('F5 repeated refresh after broker restart joins that owner instead of duplicating it',
+    joinedAfterRestart === afterRestart && resumeAttaches === beforeRestartRestore + 1);
+  await restartedHub.dispose();
+}
 
 // ── G: the real WebSocket conflict/fallback path (spawned broker, real adapter) ──
 {

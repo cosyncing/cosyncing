@@ -412,8 +412,8 @@ try {
   );
   assert.match(
     unavailableAtDelivery.lastError,
-    /fetch failed|unreachable|catalog|unable to connect/i,
-    "temporary catalog outage fails delivery distinctly from retirement",
+    /fetch failed|unreachable|catalog|unable to connect|temporarily unavailable/i,
+    "temporary readiness/catalog outage fails delivery distinctly from retirement",
   );
   assert.doesNotMatch(
     unavailableAtDelivery.lastError,
@@ -454,15 +454,14 @@ try {
   );
 
   // The immediately previous revision must stay writable through the
-  // one-revision overlap window. Revision 10 added only optional bounded
-  // large-history fields, so a released revision-9 client's request body is
-  // unchanged.
+  // one-revision overlap window. Revision 11 only adds a stable error code, so
+  // a released revision-10 client's request body is unchanged.
   // Both numbers move together on every bump: the query names the revision
   // immediately below the assertion just under it, and a stale query would
   // silently test a client two revisions back, which the overlap window
   // legitimately rejects.
   const previousRevisionQuery =
-    "contractRevision=9&minimumBrokerRevision=2&" +
+    "contractRevision=10&minimumBrokerRevision=2&" +
     "contractSurfaceHash=fnv1a32%3Aeab8e93f&clientVersion=0.9.9";
   const previousRevision = await request(
     running.base,
@@ -470,7 +469,7 @@ try {
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 10);
+  assert.equal(BROKER_CONTRACT.revision, 11);
   assert.equal(
     previousRevision.status,
     200,

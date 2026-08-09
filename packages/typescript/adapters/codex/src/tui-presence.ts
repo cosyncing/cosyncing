@@ -10,8 +10,8 @@
  * unix socket, so terminals are same-host by construction: a synced terminal is an actual live
  * `codex …` process paired to the daemon's accepted socket endpoint.
  *
- * Linux/WSL only. Elsewhere the scan returns empty and the badge under-claims (same host-limit
- * contract as OpenCode): sync itself still works, only the indicator is missing.
+ * Linux/WSL uses /proc plus `ss`. macOS uses bounded fixed-argv `ps`/`lsof` probes and rechecks
+ * pid+start+argv after collecting cwd/socket evidence. Other platforms return unknown.
  *
  * Attribution levels:
  *  - shared: a process we can prove is paired to our daemon socket (explicit `--remote` match or
@@ -23,11 +23,27 @@
  * (`codex resume` and plain `codex` with no explicit remote), explicit socket proof is now required
  * — start time is never accepted as sole proof.
  */
-import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
+import { basename, resolve } from 'node:path';
 
 export const CODEX_TUI_BIRTH_WINDOW_MS = 15 * 60_000;
 const CODEX_SOCKET_DIAG_MAX_BYTES = 1024 * 1024;
+export const CODEX_MAC_SCAN_CANDIDATE_LIMIT = 64;
+const CODEX_MAC_WRAPPER_PREFILTER_LIMIT = 1024;
+export const CODEX_MAC_SCAN_OUTPUT_MAX_BYTES = 1024 * 1024;
+export const CODEX_MAC_SCAN_DEADLINE_MS = 1_500;
+export const CODEX_MAC_SCAN_CACHE_KEY_LIMIT = 32;
+export const CODEX_MAC_PS_PATH = '/bin/ps';
+export const CODEX_MAC_LSOF_PATH = '/usr/sbin/lsof';
 
 export type CodexRemoteMatch = 'missing' | 'ours' | 'other';
 export type CodexSocketProof = 'shared' | 'private' | 'unknown';
@@ -36,6 +52,12 @@ export interface CodexTuiCandidate {
   threadIds?: string[];
   cwd?: string;
   startedAtMs?: number;
+  /** Stable process start identity (macOS ps lstart); paired with pid to defeat reuse. */
+  startToken?: string;
+  /** Exact bounded argv evidence as represented by the trusted scanner. */
+  argv?: string[];
+  /** Bounded Unix-socket names observed for this process. */
+  socketPaths?: string[];
   proof: CodexSocketProof;
 }
 
@@ -63,6 +85,8 @@ export interface CodexTuiScan {
   candidates: CodexTuiCandidate[];
   socketDiagAvailable: boolean;
   processScanAvailable: boolean;
+  /** Scanner that produced the evidence. Additive so Linux classification stays byte-for-byte compatible. */
+  source?: 'linux' | 'darwin';
 }
 
 const EXCLUDED_INTERACTIVE_VERBS = new Set([
@@ -99,7 +123,7 @@ const EXCLUDED_ONE_SHOT_FLAGS = new Set(['--version', '-V', '--help', '-h']);
 const CODEX_TUI_SCAN_CANDIDATE_LIMIT = 1024;
 
 export function codexTuiPresenceSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'linux';
+  return platform === 'linux' || platform === 'darwin';
 }
 
 /** Normalize a `--remote` value / socket path for comparison: strip the unix:// scheme, resolve
@@ -127,24 +151,34 @@ function normalizeSocketAddress(raw: string | undefined): string | undefined {
   }
 }
 
-function isCodexArgvToken(value: string): boolean {
-  return value === 'codex' || value.endsWith('/codex');
+function isCodexArgvToken(
+  value: string,
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  return value === 'codex' || value.endsWith('/codex')
+    || isConfiguredMacCodexToken(value, configured);
 }
 
-function codexInteractiveCommandIndex(argv: string[]): number {
+function codexInteractiveCommandIndex(
+  argv: string[],
+  configured?: CodexMacConfiguredExecutable,
+): number {
   if (argv.length === 0) return -1;
 
   const launcher = argv[0] ?? '';
-  if (isCodexArgvToken(launcher)) return 0;
+  if (isCodexArgvToken(launcher, configured)) return 0;
 
   const base = launcher.split('/').pop() ?? '';
-  if ((base === 'node' || base === 'bun') && isCodexArgvToken(argv[1] ?? '')) return 1;
+  if ((base === 'node' || base === 'bun') && isCodexArgvToken(argv[1] ?? '', configured)) return 1;
 
   return -1;
 }
 
-function isInteractiveCodexInvocation(argv: string[]): boolean {
-  const start = codexInteractiveCommandIndex(argv);
+function isInteractiveCodexInvocation(
+  argv: string[],
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  const start = codexInteractiveCommandIndex(argv, configured);
   if (start < 0) return false;
   for (let i = start + 1; i < argv.length; ) {
     const current = argv[i];
@@ -182,14 +216,18 @@ function isInteractiveCodexInvocation(argv: string[]): boolean {
  *  Returns thread ids for exact `resume` usage even without `--remote`, plus normalized `--remote` match.
  *  Returns undefined if argv is non-interactive or not a codex invocation we can attribute.
  */
-export function codexRemoteArgvFacts(argv: string[], sockPath: string): CodexRemoteArgvFacts | undefined {
-  if (!isInteractiveCodexInvocation(argv)) return undefined;
+export function codexRemoteArgvFacts(
+  argv: string[],
+  sockPath: string,
+  configured?: CodexMacConfiguredExecutable,
+): CodexRemoteArgvFacts | undefined {
+  if (!isInteractiveCodexInvocation(argv, configured)) return undefined;
   const ourSock = normalizeCodexRemote(sockPath);
   let remoteMatch: CodexRemoteMatch = 'missing';
   let cwdOverride: string | undefined;
   const threadIds: string[] = [];
   let sawResume = false;
-  const start = codexInteractiveCommandIndex(argv);
+  const start = codexInteractiveCommandIndex(argv, configured);
   for (let i = start + 1; i < argv.length; ) {
     const a = argv[i];
     if (!a) {
@@ -342,6 +380,494 @@ async function runCodexSocketDiagAsync(): Promise<string | undefined> {
   });
 }
 
+export interface CodexMacCommandResult {
+  exitCode: number | null;
+  stdout: string;
+  timedOut: boolean;
+  outputLimitExceeded: boolean;
+}
+
+/** Canonical process identity for an explicit COSYNCING_CODEX_BIN. The invocation path is retained
+ * because script/symlink argv can preserve it while `ps comm` reports the resolved target. */
+export interface CodexMacConfiguredExecutable {
+  invocationPath: string;
+  resolvedPath: string;
+}
+
+/** Resolve the configured launcher without executing it. `null` means an explicit value exists but
+ * cannot be mapped safely to a regular executable and therefore cannot support positive absence. */
+export function resolveCodexMacConfiguredExecutable(
+  configured: string | undefined,
+  cwd = process.cwd(),
+): CodexMacConfiguredExecutable | null | undefined {
+  const value = configured?.trim();
+  if (!value) return undefined;
+  if (/[\0\r\n]/.test(value)) return null;
+  const invocationPath = resolve(cwd, value);
+  try {
+    if (!statSync(invocationPath).isFile()) return null;
+    accessSync(invocationPath, constants.X_OK);
+    const resolvedPath = realpathSync(invocationPath);
+    if (!resolvedPath.startsWith('/')) return null;
+    return { invocationPath, resolvedPath };
+  } catch {
+    return null;
+  }
+}
+
+export type CodexMacCommandRunner = (
+  executable: string,
+  args: readonly string[],
+  limits: { timeoutMs: number; maxOutputBytes: number },
+) => Promise<CodexMacCommandResult>;
+
+export async function runBoundedMacCommand(
+  executable: string,
+  args: readonly string[],
+  limits: { timeoutMs: number; maxOutputBytes: number },
+): Promise<CodexMacCommandResult> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let settled = false;
+    let terminationRequested = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let exitBackstop: ReturnType<typeof setTimeout> | undefined;
+    const finish = (exitCode: number | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (exitBackstop) clearTimeout(exitBackstop);
+      resolve({
+        exitCode,
+        stdout: Buffer.concat(chunks).toString('utf8'),
+        timedOut,
+        outputLimitExceeded,
+      });
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(executable, [...args], {
+        shell: false,
+        env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      finish(null);
+      return;
+    }
+    const terminate = () => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      try { child.kill('SIGKILL'); } catch { /* close/error or the backstop settles the probe */ }
+      // `close` is the normal completion boundary: Node emits it only after the child exits and its
+      // stdio handles close. The final backstop preserves the caller deadline if the host fails to
+      // deliver that confirmation after SIGKILL; that exceptional result is still unavailable.
+      exitBackstop = setTimeout(() => {
+        child.stdout?.destroy();
+        child.unref();
+        finish(null);
+      }, 250);
+      exitBackstop.unref?.();
+    };
+    child.stdout?.on('data', (chunk) => {
+      if (settled) return;
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      if (bytes + value.length > limits.maxOutputBytes) {
+        outputLimitExceeded = true;
+        terminate();
+        return;
+      }
+      bytes += value.length;
+      chunks.push(value);
+    });
+    child.once('error', () => {
+      if (child.pid) terminate();
+      else finish(null);
+    });
+    child.once('close', (code) => finish(typeof code === 'number' ? code : null));
+    timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, Math.max(50, limits.timeoutMs));
+    timer.unref?.();
+  });
+}
+
+interface MacPsIdentity {
+  pid: number;
+  startToken: string;
+  startedAtMs: number;
+  executable: string;
+}
+
+interface MacPsCandidate extends MacPsIdentity {
+  rawArgs: string;
+  argv: string[];
+  facts: CodexRemoteArgvFacts;
+}
+
+const MAC_PS_IDENTITY_LINE = /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
+const MAC_PS_ARGS_LINE = /^\s*(\d+)\s+(.+)$/;
+
+function configuredMacCodexPaths(configured: CodexMacConfiguredExecutable | undefined): string[] {
+  return configured
+    ? [...new Set([configured.invocationPath, configured.resolvedPath])]
+    : [];
+}
+
+function isConfiguredMacCodexToken(
+  value: string,
+  configured: CodexMacConfiguredExecutable | undefined,
+): boolean {
+  if (!configured) return false;
+  const paths = configuredMacCodexPaths(configured);
+  return paths.includes(value) || paths.some((path) => basename(path) === value);
+}
+
+function possibleMacCodexExecutable(
+  executable: string,
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  const name = basename(executable).toLowerCase();
+  return name === 'codex' || name === 'node' || name === 'bun'
+    || configuredMacCodexPaths(configured).some((path) =>
+      executable === path || name === basename(path).toLowerCase());
+}
+
+function isMacNodeOrBunWrapper(
+  executable: string,
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  const name = basename(executable).toLowerCase();
+  return (name === 'node' || name === 'bun')
+    && !isConfiguredMacCodexToken(executable, configured);
+}
+
+/** Cheap conservative filter for flattened Node/Bun argv. It intentionally runs before strict
+ * argv parsing: unrelated commands may contain quotes/backslashes, while a row that plausibly
+ * names Codex must still pass the strict parser or invalidate positive absence. */
+function possibleMacCodexArgvText(
+  value: string,
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  if (/(?:^|[^a-z0-9_])codex(?:$|[^a-z0-9_])/i.test(value)) return true;
+  return configuredMacCodexPaths(configured).some((path) =>
+    value.includes(path) || value.includes(basename(path)));
+}
+
+function possibleMacCodexIdentityText(
+  value: string,
+  configured?: CodexMacConfiguredExecutable,
+): boolean {
+  const trimmed = value.trim();
+  return /(?:^|[\/\s])(?:codex|node|bun)(?:$|\s)/i.test(trimmed)
+    || configuredMacCodexPaths(configured).some((path) => {
+      const name = basename(path);
+      return trimmed === path || trimmed.endsWith(` ${path}`)
+        || trimmed === name || trimmed.endsWith(` ${name}`);
+    });
+}
+
+function parseMacPsArgv(
+  raw: string,
+  executable: string,
+  configured?: CodexMacConfiguredExecutable,
+): string[] | undefined {
+  if (!raw || /[\0\r\n]/.test(raw) || /["'\\]/.test(raw)) return undefined;
+  const trimmed = raw.trim();
+  let argv: string[];
+  const directPrefixes = [executable, ...configuredMacCodexPaths(configured)]
+    .filter((path, index, paths) => paths.indexOf(path) === index)
+    .filter((path) => basename(executable).toLowerCase() === 'codex'
+      || isConfiguredMacCodexToken(path, configured))
+    .sort((left, right) => right.length - left.length);
+  const directPrefix = directPrefixes.find((path) => trimmed === path || trimmed.startsWith(`${path} `));
+  if (directPrefix) {
+    const remainder = trimmed.slice(directPrefix.length).trim();
+    argv = [directPrefix, ...(remainder ? remainder.split(/\s+/) : [])];
+  } else {
+    argv = trimmed.split(/\s+/).filter(Boolean);
+  }
+  return argv.length > 0 && argv.length <= 256 ? argv : undefined;
+}
+
+function parseMacPsIdentities(
+  output: string,
+  configured?: CodexMacConfiguredExecutable,
+): {
+  identities: MacPsIdentity[];
+  trustworthy: boolean;
+} {
+  const identities: MacPsIdentity[] = [];
+  let trustworthy = true;
+  let sawProcessRow = false;
+  let directCandidateCount = 0;
+  let wrapperPrefilterCount = 0;
+  for (const line of output.split('\n')) {
+    if (!line.trim()) continue;
+    const match = line.match(MAC_PS_IDENTITY_LINE);
+    if (!match) {
+      if (possibleMacCodexIdentityText(line, configured)) trustworthy = false;
+      continue;
+    }
+    const pid = Number(match[1]);
+    const startToken = match[2]!;
+    const executable = match[3]!.trim();
+    const startedAtMs = Date.parse(startToken);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(startedAtMs)) {
+      if (possibleMacCodexExecutable(executable, configured)) trustworthy = false;
+      continue;
+    }
+    sawProcessRow = true;
+    if (!possibleMacCodexExecutable(executable, configured)) continue;
+    identities.push({ pid, startToken, startedAtMs, executable });
+    if (isMacNodeOrBunWrapper(executable, configured)) {
+      wrapperPrefilterCount++;
+      if (wrapperPrefilterCount > CODEX_MAC_WRAPPER_PREFILTER_LIMIT) trustworthy = false;
+    } else {
+      directCandidateCount++;
+      if (directCandidateCount > CODEX_MAC_SCAN_CANDIDATE_LIMIT) trustworthy = false;
+    }
+  }
+  return {
+    identities: identities.slice(
+      0,
+      CODEX_MAC_SCAN_CANDIDATE_LIMIT + CODEX_MAC_WRAPPER_PREFILTER_LIMIT,
+    ),
+    trustworthy: trustworthy && sawProcessRow,
+  };
+}
+
+function parseMacPsArgs(output: string): { argsByPid: Map<number, string>; trustworthy: boolean } {
+  const argsByPid = new Map<number, string>();
+  let trustworthy = true;
+  for (const line of output.split('\n')) {
+    if (!line.trim()) continue;
+    const match = line.match(MAC_PS_ARGS_LINE);
+    const pid = Number(match?.[1]);
+    const rawArgs = match?.[2]?.trim();
+    if (!match || !Number.isSafeInteger(pid) || pid <= 0 || !rawArgs || argsByPid.has(pid)) {
+      trustworthy = false;
+      continue;
+    }
+    argsByPid.set(pid, rawArgs);
+  }
+  return { argsByPid, trustworthy };
+}
+
+function qualifyMacPsCandidates(
+  identities: readonly MacPsIdentity[],
+  argsOutput: string,
+  sockPath: string,
+  configured?: CodexMacConfiguredExecutable,
+): { candidates: MacPsCandidate[]; trustworthy: boolean } {
+  const parsedArgs = parseMacPsArgs(argsOutput);
+  if (!parsedArgs.trustworthy || parsedArgs.argsByPid.size !== identities.length) {
+    return { candidates: [], trustworthy: false };
+  }
+  const candidates: MacPsCandidate[] = [];
+  let relevantCandidateCount = 0;
+  for (const identity of identities) {
+    const rawArgs = parsedArgs.argsByPid.get(identity.pid);
+    if (!rawArgs) return { candidates: [], trustworthy: false };
+    if (isMacNodeOrBunWrapper(identity.executable, configured)
+        && !possibleMacCodexArgvText(rawArgs, configured)) {
+      continue;
+    }
+    relevantCandidateCount++;
+    if (relevantCandidateCount > CODEX_MAC_SCAN_CANDIDATE_LIMIT) {
+      return { candidates: [], trustworthy: false };
+    }
+    const argv = parseMacPsArgv(rawArgs, identity.executable, configured);
+    if (!argv) return { candidates: [], trustworthy: false };
+    const facts = codexRemoteArgvFacts(argv, sockPath, configured);
+    if (!facts) {
+      // Exact direct Codex identity plus a recognized non-interactive verb is irrelevant. Node/Bun
+      // processes whose flattened argv still mentions Codex are not safely distinguishable from a
+      // launcher path containing spaces, so they invalidate absence instead of disappearing.
+      const executableName = basename(identity.executable).toLowerCase();
+      const mentionsConfigured = configuredMacCodexPaths(configured).some((path) =>
+        rawArgs === path || rawArgs.startsWith(`${path} `) || rawArgs.includes(` ${path} `));
+      const identifiedInvocation = codexInteractiveCommandIndex(argv, configured) >= 0;
+      if (!identifiedInvocation &&
+          ((executableName === 'codex' || isConfiguredMacCodexToken(identity.executable, configured))
+            || /\bcodex\b/i.test(rawArgs) || mentionsConfigured)) {
+        return { candidates: [], trustworthy: false };
+      }
+      continue;
+    }
+    candidates.push({ ...identity, rawArgs, argv, facts });
+  }
+  return { candidates, trustworthy: true };
+}
+
+function parseLsofFields(output: string): Map<number, Array<{ fd?: string; name: string }>> {
+  const rows = new Map<number, Array<{ fd?: string; name: string }>>();
+  let pid: number | undefined;
+  let fd: string | undefined;
+  for (const line of output.split('\n')) {
+    if (!line) continue;
+    const field = line[0];
+    const value = line.slice(1);
+    if (field === 'p') {
+      const parsed = Number(value);
+      pid = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+      fd = undefined;
+    } else if (field === 'f') {
+      fd = value;
+    } else if (field === 'n' && pid !== undefined) {
+      const list = rows.get(pid) ?? [];
+      list.push({ ...(fd ? { fd } : {}), name: value });
+      rows.set(pid, list);
+    }
+  }
+  return rows;
+}
+
+function lsofSocketPath(raw: string): string | undefined {
+  const value = raw.trim().replace(/^->/, '');
+  if (!value.startsWith('/')) return undefined;
+  const suffix = value.indexOf(' type=');
+  return normalizeSocketAddress(suffix >= 0 ? value.slice(0, suffix) : value);
+}
+
+function addMacCandidate(scan: CodexTuiScan, candidate: CodexTuiCandidate): void {
+  scan.candidates.push(candidate);
+  const threadIds = candidate.threadIds ?? [];
+  if (threadIds.length) {
+    for (const id of threadIds) {
+      if (candidate.proof === 'shared') scan.attributed.add(id);
+      else if (candidate.proof === 'private') scan.privateThreadIds.add(id);
+      else scan.unknownThreadIds.add(id);
+    }
+    return;
+  }
+  const unattributed = { cwd: candidate.cwd, startedAtMs: candidate.startedAtMs };
+  if (candidate.proof === 'shared') scan.unattributed.push(unattributed);
+  else if (candidate.proof === 'private') scan.privateUnattributed.push(unattributed);
+  else scan.unknownUnattributed.push(unattributed);
+}
+
+/** Conservative macOS scanner. It uses only protected fixed-argv ps/lsof subprocesses (never a shell),
+ * shares one deadline/output budget, re-reads pid+start+executable+argv after lsof to defeat PID reuse, and marks the entire
+ * scan unknown if any candidate evidence is incomplete or contradictory. */
+export async function scanCodexRemoteTuisMac(
+  sockPath: string,
+  opts: {
+    runner?: CodexMacCommandRunner;
+    deadlineMs?: number;
+    outputMaxBytes?: number;
+    /** null means an explicit override exists but could not be mapped safely. */
+    configuredExecutable?: CodexMacConfiguredExecutable | null;
+  } = {},
+): Promise<CodexTuiScan> {
+  const runner = opts.runner ?? runBoundedMacCommand;
+  const deadline = Date.now() + Math.max(100, Math.min(opts.deadlineMs ?? CODEX_MAC_SCAN_DEADLINE_MS, 5_000));
+  let outputRemaining = Math.max(4_096, Math.min(opts.outputMaxBytes ?? CODEX_MAC_SCAN_OUTPUT_MAX_BYTES, 4 * 1024 * 1024));
+  const unavailable = (): CodexTuiScan => ({ ...emptyCodexTuiScan(), source: 'darwin' });
+  if (opts.configuredExecutable === null) return unavailable();
+  const configured = opts.configuredExecutable;
+  const run = async (executable: string, args: readonly string[], cap: number): Promise<CodexMacCommandResult | undefined> => {
+    const timeoutMs = deadline - Date.now();
+    if (timeoutMs < 50 || outputRemaining <= 0) return undefined;
+    const maxOutputBytes = Math.min(cap, outputRemaining);
+    const result = await runner(executable, args, { timeoutMs, maxOutputBytes });
+    outputRemaining -= Buffer.byteLength(result.stdout);
+    if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) return undefined;
+    return result;
+  };
+
+  const initialIdentity = await run(CODEX_MAC_PS_PATH, ['-ww', '-axo', 'pid=,lstart=,comm='], 256 * 1024);
+  if (!initialIdentity) return unavailable();
+  const identities = parseMacPsIdentities(initialIdentity.stdout, configured);
+  if (!identities.trustworthy) return unavailable();
+  if (identities.identities.length === 0) {
+    return {
+      ...emptyCodexTuiScan(),
+      source: 'darwin',
+      processScanAvailable: true,
+      socketDiagAvailable: true,
+    };
+  }
+
+  const possiblePids = identities.identities.map((candidate) => candidate.pid).join(',');
+  const initialArgs = await run(CODEX_MAC_PS_PATH, ['-ww', '-p', possiblePids, '-o', 'pid=,args='], 256 * 1024);
+  if (!initialArgs) return unavailable();
+  const parsed = qualifyMacPsCandidates(identities.identities, initialArgs.stdout, sockPath, configured);
+  if (!parsed.trustworthy) return unavailable();
+  if (parsed.candidates.length === 0) {
+    return {
+      ...emptyCodexTuiScan(),
+      source: 'darwin',
+      processScanAvailable: true,
+      socketDiagAvailable: true,
+    };
+  }
+
+  const pids = parsed.candidates.map((candidate) => candidate.pid).join(',');
+  const [cwdResult, socketResult] = await Promise.all([
+    run(CODEX_MAC_LSOF_PATH, ['-nP', '-a', '-p', pids, '-d', 'cwd', '-F', 'pfn'], 64 * 1024),
+    run(CODEX_MAC_LSOF_PATH, ['-nP', '-a', '-p', pids, '-U', '-F', 'pfn'], 192 * 1024),
+  ]);
+  if (!cwdResult || !socketResult) return unavailable();
+  const finalIdentity = await run(CODEX_MAC_PS_PATH, ['-ww', '-p', pids, '-o', 'pid=,lstart=,comm='], 64 * 1024);
+  const finalArgs = await run(CODEX_MAC_PS_PATH, ['-ww', '-p', pids, '-o', 'pid=,args='], 128 * 1024);
+  if (!finalIdentity || !finalArgs) return unavailable();
+  const finalIdentities = parseMacPsIdentities(finalIdentity.stdout, configured);
+  if (!finalIdentities.trustworthy || finalIdentities.identities.length !== parsed.candidates.length) return unavailable();
+  const finalParsed = qualifyMacPsCandidates(finalIdentities.identities, finalArgs.stdout, sockPath, configured);
+  if (!finalParsed.trustworthy || finalParsed.candidates.length !== parsed.candidates.length) return unavailable();
+  const finalByPid = new Map(finalParsed.candidates.map((candidate) => [candidate.pid, candidate] as const));
+  const cwdByPid = parseLsofFields(cwdResult.stdout);
+  const socketsByPid = parseLsofFields(socketResult.stdout);
+  const ours = normalizeCodexRemote(sockPath);
+
+  const scan: CodexTuiScan = {
+    ...emptyCodexTuiScan(),
+    source: 'darwin',
+    processScanAvailable: true,
+    socketDiagAvailable: true,
+  };
+  for (const candidate of parsed.candidates) {
+    const final = finalByPid.get(candidate.pid);
+    if (!final || final.startToken !== candidate.startToken || final.executable !== candidate.executable
+        || final.rawArgs !== candidate.rawArgs) return unavailable();
+    const cwdRows = cwdByPid.get(candidate.pid)?.filter((row) => row.fd === 'cwd') ?? [];
+    if (cwdRows.length !== 1 || !cwdRows[0]?.name.startsWith('/')) return unavailable();
+    const cwd = normalizeCodexRemote(cwdRows[0]!.name);
+    if (!cwd) return unavailable();
+    const observedSocketPaths = [...new Set(
+      (socketsByPid.get(candidate.pid) ?? [])
+        .map((row) => lsofSocketPath(row.name))
+        .filter((path): path is string => !!path),
+    )];
+    if (observedSocketPaths.length > 32) return unavailable();
+    const socketPaths = observedSocketPaths;
+    const hasOurs = !!ours && socketPaths.includes(ours);
+    const otherCodexSockets = socketPaths.filter((path) => path !== ours && /app-server-control\.sock$/.test(path));
+    let proof: CodexSocketProof = 'unknown';
+    if (hasOurs && otherCodexSockets.length === 0 && candidate.facts.remoteMatch !== 'other') {
+      proof = 'shared';
+    } else if (!hasOurs && otherCodexSockets.length > 0 && candidate.facts.remoteMatch !== 'ours') {
+      proof = 'private';
+    }
+    addMacCandidate(scan, {
+      pid: candidate.pid,
+      ...(candidate.facts.threadIds.length ? { threadIds: candidate.facts.threadIds } : {}),
+      cwd,
+      startedAtMs: candidate.startedAtMs,
+      startToken: candidate.startToken,
+      argv: candidate.argv,
+      socketPaths,
+      proof,
+    });
+  }
+  return scan;
+}
+
 interface ParsedSocketEntry {
   pids: number[];
   state: string;
@@ -467,7 +993,12 @@ export function scanCodexRemoteTuis(
   opts: { socketProbe?: SocketProbe } = {},
 ): CodexTuiScan {
   const socketProbe: SocketProbe = opts.socketProbe ?? runCodexSocketDiag;
-  const socketDiagRaw = codexTuiPresenceSupported() ? socketProbe() : undefined;
+  // The macOS proof is deliberately async and deadline-bound. This legacy synchronous surface is
+  // Linux-only so no caller can accidentally run Linux `ss` or a blocking macOS process scan.
+  if (process.platform !== 'linux') {
+    return { ...emptyCodexTuiScan(), ...(process.platform === 'darwin' ? { source: 'darwin' as const } : {}) };
+  }
+  const socketDiagRaw = socketProbe();
   return scanCodexRemoteTuisWithSocketDiag(sockPath, procRoot, nowMs, socketDiagRaw);
 }
 
@@ -477,15 +1008,32 @@ export async function scanCodexRemoteTuisAsync(
   sockPath: string,
   procRoot = '/proc',
   nowMs = Date.now(),
-  opts: { socketProbe?: AsyncSocketProbe } = {},
+  opts: {
+    socketProbe?: AsyncSocketProbe;
+    platform?: NodeJS.Platform;
+    macRunner?: CodexMacCommandRunner;
+    macConfiguredExecutable?: CodexMacConfiguredExecutable | null;
+    deadlineMs?: number;
+    outputMaxBytes?: number;
+  } = {},
 ): Promise<CodexTuiScan> {
+  const platform = opts.platform ?? process.platform;
+  if (platform === 'darwin') {
+    return scanCodexRemoteTuisMac(sockPath, {
+      ...(opts.macRunner ? { runner: opts.macRunner } : {}),
+      ...(opts.macConfiguredExecutable !== undefined
+        ? { configuredExecutable: opts.macConfiguredExecutable }
+        : {}),
+      ...(opts.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}),
+      ...(opts.outputMaxBytes !== undefined ? { outputMaxBytes: opts.outputMaxBytes } : {}),
+    });
+  }
+  if (platform !== 'linux') return emptyCodexTuiScan();
   let socketDiagRaw: string | undefined;
-  if (codexTuiPresenceSupported()) {
-    try {
-      socketDiagRaw = await (opts.socketProbe ?? runCodexSocketDiagAsync)();
-    } catch {
-      socketDiagRaw = undefined;
-    }
+  try {
+    socketDiagRaw = await (opts.socketProbe ?? runCodexSocketDiagAsync)();
+  } catch {
+    socketDiagRaw = undefined;
   }
   return scanCodexRemoteTuisWithSocketDiag(sockPath, procRoot, nowMs, socketDiagRaw);
 }
@@ -510,10 +1058,8 @@ function scanCodexRemoteTuisWithSocketDiag(
     candidates: [],
     socketDiagAvailable,
     processScanAvailable,
+    source: 'linux',
   };
-  if (!codexTuiPresenceSupported()) {
-    return scan;
-  }
   let pids: string[];
   try {
     pids = readdirSync(procRoot).filter((d) => /^\d+$/.test(d));
@@ -612,6 +1158,24 @@ const asyncRefreshes = new Map<string, Promise<CodexTuiScan>>();
 let cacheGeneration = 0;
 export const CODEX_TUI_PRESENCE_TTL_MS = 2_000;
 
+function cachePresenceScan(
+  key: string,
+  value: { at: number; scan: CodexTuiScan },
+  platform: NodeJS.Platform,
+): void {
+  if (platform === 'darwin' && !cache.has(key)) {
+    let oldestMacKey: string | undefined;
+    let macKeyCount = 0;
+    for (const candidate of cache.keys()) {
+      if (!candidate.startsWith('darwin\0')) continue;
+      oldestMacKey ??= candidate;
+      macKeyCount += 1;
+    }
+    if (macKeyCount >= CODEX_MAC_SCAN_CACHE_KEY_LIMIT && oldestMacKey) cache.delete(oldestMacKey);
+  }
+  cache.set(key, value);
+}
+
 function emptyCodexTuiScan(): CodexTuiScan {
   return {
     attributed: new Set(),
@@ -626,19 +1190,31 @@ function emptyCodexTuiScan(): CodexTuiScan {
   };
 }
 
-function codexTuiCacheKey(sockPath: string, root: string): string {
-  return `${sockPath}\0${root}`;
+function codexTuiCacheKey(
+  sockPath: string,
+  root: string,
+  platform: NodeJS.Platform,
+  macConfiguredExecutable?: CodexMacConfiguredExecutable | null,
+): string {
+  const identity = macConfiguredExecutable === null
+    ? '<unmappable>'
+    : macConfiguredExecutable
+      ? `${macConfiguredExecutable.invocationPath}\0${macConfiguredExecutable.resolvedPath}`
+      : '<default>';
+  return `${platform}\0${sockPath}\0${root}\0${identity}`;
 }
 
 export function codexAttachedTuis(sockPath: string, procRoot?: string): CodexTuiScan {
   const root = procRoot ?? process.env.COSYNCING_CODEX_PROC_ROOT?.trim() ?? '/proc';
-  if (!codexTuiPresenceSupported()) return emptyCodexTuiScan();
-  const key = codexTuiCacheKey(sockPath, root);
+  if (process.platform !== 'linux') {
+    return { ...emptyCodexTuiScan(), ...(process.platform === 'darwin' ? { source: 'darwin' as const } : {}) };
+  }
+  const key = codexTuiCacheKey(sockPath, root, process.platform);
   const hit = cache.get(key);
   const now = Date.now();
   if (hit && now - hit.at < CODEX_TUI_PRESENCE_TTL_MS) return hit.scan;
   const scan = scanCodexRemoteTuis(sockPath, root, now);
-  cache.set(key, { at: now, scan });
+  cachePresenceScan(key, { at: now, scan }, process.platform);
   return scan;
 }
 
@@ -647,21 +1223,37 @@ export function codexAttachedTuis(sockPath: string, procRoot?: string): CodexTui
 export function codexAttachedTuisAsync(
   sockPath: string,
   procRoot?: string,
-  opts: { socketProbe?: AsyncSocketProbe } = {},
+  opts: {
+    socketProbe?: AsyncSocketProbe;
+    platform?: NodeJS.Platform;
+    macRunner?: CodexMacCommandRunner;
+    macConfiguredExecutable?: CodexMacConfiguredExecutable | null;
+    deadlineMs?: number;
+    outputMaxBytes?: number;
+    /** Restore arbitration bypasses cached absence, while still coalescing in-flight work. */
+    fresh?: boolean;
+  } = {},
 ): Promise<CodexTuiScan> {
   const root = procRoot ?? process.env.COSYNCING_CODEX_PROC_ROOT?.trim() ?? '/proc';
-  if (!codexTuiPresenceSupported()) return Promise.resolve(emptyCodexTuiScan());
-  const key = codexTuiCacheKey(sockPath, root);
+  const platform = opts.platform ?? process.platform;
+  if (!codexTuiPresenceSupported(platform)) return Promise.resolve(emptyCodexTuiScan());
+  const key = codexTuiCacheKey(sockPath, root, platform, opts.macConfiguredExecutable);
   const now = Date.now();
   const hit = cache.get(key);
-  if (hit && now - hit.at < CODEX_TUI_PRESENCE_TTL_MS) return Promise.resolve(hit.scan);
+  if (!opts.fresh && hit && now - hit.at < CODEX_TUI_PRESENCE_TTL_MS) return Promise.resolve(hit.scan);
   const inFlight = asyncRefreshes.get(key);
   if (inFlight) return inFlight;
+  if (platform === 'darwin') {
+    const macRefreshCount = [...asyncRefreshes.keys()].filter((candidate) => candidate.startsWith('darwin\0')).length;
+    if (macRefreshCount >= CODEX_MAC_SCAN_CACHE_KEY_LIMIT) {
+      return Promise.resolve({ ...emptyCodexTuiScan(), source: 'darwin' });
+    }
+  }
 
   const generation = cacheGeneration;
   const refresh = (async () => {
     const scan = await scanCodexRemoteTuisAsync(sockPath, root, Date.now(), opts);
-    if (generation === cacheGeneration) cache.set(key, { at: Date.now(), scan });
+    if (generation === cacheGeneration) cachePresenceScan(key, { at: Date.now(), scan }, platform);
     return scan;
   })();
   asyncRefreshes.set(key, refresh);

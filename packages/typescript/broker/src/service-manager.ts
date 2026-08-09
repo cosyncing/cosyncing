@@ -408,7 +408,10 @@ export function serviceAgentExecutableDirectories(
     if (resolvedNode && isAbsolute(resolvedNode) && !/[\0\r\n]/.test(resolvedNode)) {
       try {
         const invocation = executableInvocationPath('node', resolvedNode, context.env);
-        directories.push(servicePathDirectory(dirname(invocation)));
+        // An npm launcher can live beside an older `node` binary after the user upgrades Node through a
+        // different manager. Preserve the interpreter setup actually resolved: /usr/bin/env selects the
+        // first match, so its directory must precede every launcher directory in the durable PATH.
+        directories.unshift(servicePathDirectory(dirname(invocation)));
       } catch {
         // A missing or unsafe interpreter stays absent. Doctor then reports
         // the agent runtime unavailable instead of copying arbitrary PATH.
@@ -467,6 +470,15 @@ export function servicePathEntries(
     '/bin',
   ];
   return [...new Set(entries.map((entry) => cleanAbsolutePath(entry, 'PATH entry')))];
+}
+
+/** PATH is ordered state: equal membership with a different order can select a different interpreter. */
+export function servicePathMatchesExpected(
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean {
+  return actual.length === expected.length
+    && actual.every((entry, index) => entry === expected[index]);
 }
 
 function minimalServicePath(

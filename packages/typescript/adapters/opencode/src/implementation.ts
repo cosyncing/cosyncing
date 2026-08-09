@@ -41,6 +41,7 @@ import type {
 
 import {
   PRODUCT_IDENTITY,
+  SessionCreateTemporarilyUnavailableError,
   boundToolSemantic,
   boundedStream,
   commandSemantic,
@@ -139,6 +140,9 @@ export interface OpenCodeAdapterOptions {
   sseIdleMs?: number;
   /** Test/internal override for bounded reconnect after SSE drops. Defaults to COSYNCING_OPENCODE_SSE_RECONNECT_MS. */
   sseReconnectMs?: number;
+  /** Broker-owned startup/restart boundary. It never creates a session; after it settles the adapter
+   * re-probes once with GET. External users of the adapter may omit it. */
+  waitForManagedCreateReadiness?: () => Promise<void>;
 }
 
 function nativeTimeMs(value: unknown): number | undefined {
@@ -329,6 +333,7 @@ export class OpenCodeAdapter implements AgentBackend {
   private readonly opencodeBin: string | null;
   private readonly sseIdleMs: number;
   private readonly sseReconnectMs: number;
+  private readonly waitForManagedCreateReadiness?: () => Promise<void>;
   /** Real-time working/needs-input/idle for every session, from one global event sub. */
   private readonly tracker: SessionStatusTracker;
   /** Last authoritative model catalog. A transient refresh must not erase a usable picker. */
@@ -344,6 +349,7 @@ export class OpenCodeAdapter implements AgentBackend {
     this.baseUrl = resolveLocalOpencodeBaseUrl(raw);
     this.sseIdleMs = opencodeSseIdleMs(opts.sseIdleMs);
     this.sseReconnectMs = opencodeSseReconnectMs(opts.sseReconnectMs);
+    this.waitForManagedCreateReadiness = opts.waitForManagedCreateReadiness;
     this.tracker = new SessionStatusTracker(this.baseUrl, this.sseIdleMs);
     this.dataDir = this.resolveDataDir(opts.storageDir);
     this.sessionStoreDir = this.dataDir ? join(this.dataDir, 'storage', 'session') : '';
@@ -824,6 +830,42 @@ export class OpenCodeAdapter implements AgentBackend {
 
   async canCreateSession(): Promise<boolean> {
     return this.serverAvailable();
+  }
+
+  /** Prove the shared server is reachable before the broker performs model validation or the one POST.
+   * A connection refusal may be the bounded broker-managed startup/restart window, so only that branch
+   * waits and re-probes. HTTP responses are authoritative application/server answers and are never retried. */
+  async prepareCreateSession(): Promise<void> {
+    const first = await this.createReadinessProbe();
+    if (first.kind === 'ready') return;
+    if (first.kind === 'http-error') {
+      throw new Error(`OpenCode create readiness failed with HTTP ${first.status}.`);
+    }
+
+    if (this.waitForManagedCreateReadiness) {
+      await this.waitForManagedCreateReadiness();
+      const afterStartup = await this.createReadinessProbe();
+      if (afterStartup.kind === 'ready') return;
+      if (afterStartup.kind === 'http-error') {
+        throw new Error(`OpenCode create readiness failed with HTTP ${afterStartup.status}.`);
+      }
+    }
+
+    throw new SessionCreateTemporarilyUnavailableError(
+      'OpenCode shared server is temporarily unavailable. Wait for broker startup to finish, then retry.',
+      'opencode-server-connection-unavailable',
+    );
+  }
+
+  private async createReadinessProbe(): Promise<
+    { kind: 'ready' } | { kind: 'connection-error' } | { kind: 'http-error'; status: number }
+  > {
+    try {
+      const response = await fetch(this.url('/session'), { signal: AbortSignal.timeout(1500) });
+      return response.ok ? { kind: 'ready' } : { kind: 'http-error', status: response.status };
+    } catch {
+      return { kind: 'connection-error' };
+    }
   }
 
   /** Adapter-owned catalog shared by pre-session creation and attached-session pickers. */

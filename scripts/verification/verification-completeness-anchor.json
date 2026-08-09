@@ -3,6 +3,7 @@
   "acceptedBase": "17ad739baa190a366d34318f1128049f720e34a5",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
+    "broker.agent-create-readiness",
     "broker.application-identity",
     "broker.attach-identity",
     "broker.capabilities",
@@ -43,6 +44,7 @@
     "broker.opencode-shim-runtime",
     "broker.opencode-shim-symmetry",
     "broker.pi-bridge-reload",
+    "broker.pi-runtime-readiness",
     "broker.pi-tool-result",
     "broker.protocol-journal",
     "broker.request-resolution",
@@ -94,7 +96,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:5e87c1cc4bbdecf3f7cb7a55f2995626b464ecf92f8deb51d68449e7a082f194"
+      "fingerprint": "sha256:242c1b4321f5a95c6593981b9ed7f9c8a95f06eade0de1c3f21b374e5d25a53b"
     },
     {
       "id": "capabilities",
@@ -219,6 +221,10 @@
       "fingerprint": "sha256:9c54647fc22e3522adfee7db0be6cda26d48226eb49bac654cff7875de3a8c91"
     },
     {
+      "id": "agent-create-readiness",
+      "fingerprint": "sha256:6b13f464eef9a75435055216eda521d628312995b61286a112bc256955bd31fd"
+    },
+    {
       "id": "app-send-echo-correlation",
       "fingerprint": "sha256:83e22d920069cd45f946298d3bb881c1a8d92147a2813f2a95d3868ece453bf9"
     },
@@ -284,7 +290,7 @@
     },
     {
       "id": "codex-tui-presence",
-      "fingerprint": "sha256:a8b2d676b75e398b9b8fc65a3e1fbfb4e02f19d1cf85710084fe52a10d306bbe"
+      "fingerprint": "sha256:d4b6169cd85b7dfdc6e235d9d31a4db072a29f711a65bf8e870732cde2dcde64"
     },
     {
       "id": "compiled-assets",
@@ -389,6 +395,10 @@
     {
       "id": "pi-bridge-reload",
       "fingerprint": "sha256:cadb0569129fb1d24d0648e1cb5f8bfed5354b48057af22cb013f8f2c1e5b571"
+    },
+    {
+      "id": "pi-runtime-readiness",
+      "fingerprint": "sha256:c754a5c3b8f5255740cfba3a2fc89b69d208b5514405e0f4304932d3c4a2ffd1"
     },
     {
       "id": "pi-tool-result",

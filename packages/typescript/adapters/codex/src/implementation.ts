@@ -100,7 +100,9 @@ import {
 import {
   CODEX_TUI_BIRTH_WINDOW_MS,
   type CodexTuiScan,
+  type CodexMacConfiguredExecutable,
   codexAttachedTuisAsync,
+  resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
 import {
@@ -165,7 +167,7 @@ export class CodexAdapter implements AgentBackend {
   constructor(private readonly options: {
     queryLoadedThreadIds?: () => Promise<Set<string>>;
     queryLoadedThreadActivities?: () => Promise<CodexLoadedThreadActivity[]>;
-    scanCodexTuiPresence?: (sockPath: string) => Promise<CodexTuiScan>;
+    scanCodexTuiPresence?: (sockPath: string, fresh?: boolean) => Promise<CodexTuiScan>;
     reportManagedStart?: ManagedRuntimeStartReporter;
     reportDaemonOwnership?: CodexDaemonOwnershipReporter;
   } = {}) {}
@@ -378,7 +380,9 @@ export class CodexAdapter implements AgentBackend {
       if (!sock) return emptyCodexTuiScan();
       return this.options.scanCodexTuiPresence
         ? this.options.scanCodexTuiPresence(sock)
-        : codexAttachedTuisAsync(sock);
+        : codexAttachedTuisAsync(sock, undefined, {
+            macConfiguredExecutable: macConfiguredCodexExecutableIdentity(),
+          });
     };
     // Fingerprint of the TUI presence scan. A terminal join/exit usually changes NOTHING in the
     // loaded list (it is a one-way latch), so presence flips are only visible here. startedAt is
@@ -682,6 +686,7 @@ export class CodexAdapter implements AgentBackend {
     const launchSurface = codexRolloutLaunchSurface(meta);
     const originTag = codexSessionOrigin(meta);
     const agentOwned = codexAgentOwned(originTag.origin);
+    const restorationAttempt = mode === 'resume' && !!opts?.reason && isRestoreDriveAttachReason(opts.reason);
     // A permanent capability boundary, so a plain Error (an OwnershipConflictError would advertise a
     // contended owner the caller could take over from). Refused ABOVE the daemon probe and every
     // resolveBin/spawn path: a driving attach on a child thread must not start a process or reach an
@@ -711,7 +716,9 @@ export class CodexAdapter implements AgentBackend {
     }
     const observe = mode === 'observe' || (!liveEligible && mode !== 'resume');
     const terminalSyncHint = this.syncHint(threadId, cwd, surface.model, agentOwned);
-    const presenceScan = await this.presenceScan();
+    // Restoration is a control decision, not a badge refresh. It must bypass a cached absence so a
+    // terminal that appeared inside the normal 2-second display TTL cannot be overwritten.
+    const presenceScan = await this.presenceScan(restorationAttempt);
     const terminalPresence = classifyCodexTerminalPresence(presenceScan, threadId, cwd, timestampToMs(meta?.timestamp));
     const liveActivities = await this.liveLoadedThreadActivities();
     const parentThreadId = originTag.parentThreadId;
@@ -729,7 +736,7 @@ export class CodexAdapter implements AgentBackend {
         : undefined,
     };
     const qualifiedRolloutStatus = qualifyCodexRolloutStatus(rolloutStatus, qualification);
-    if (mode === 'resume' && opts?.reason && isRestoreDriveAttachReason(opts.reason) && terminalPresence !== 'absent') {
+    if (restorationAttempt && terminalPresence !== 'absent') {
       // An automatic restore must PROVE it is safe. A private terminal writing this rollout,
       // unprovable presence, or shared evidence without a loaded thread are all competing-owner
       // facts; fail closed to Observe and leave the explicit user-confirmed Take over path as
@@ -949,12 +956,12 @@ export class CodexAdapter implements AgentBackend {
 
   /** Attach-time presence evidence. Honors the injected test scanner so restore
    *  arbitration is deterministic under the fake-codex harness. */
-  private async presenceScan(): Promise<CodexTuiScan> {
+  private async presenceScan(fresh = false): Promise<CodexTuiScan> {
     const sock = codexAppServerSock();
     if (this.options.scanCodexTuiPresence) {
-      return sock ? this.options.scanCodexTuiPresence(sock) : emptyCodexTuiScan();
+      return sock ? this.options.scanCodexTuiPresence(sock, fresh) : emptyCodexTuiScan();
     }
-    return codexPresenceScanAsync(sock);
+    return codexPresenceScanAsync(sock, fresh);
   }
 
 }
@@ -1248,9 +1255,20 @@ function emptyCodexTuiScan(): CodexTuiScan {
 /** Async presence scan for discovery/create/open paths: the socket probe must never run a
  *  synchronous `ss` on the broker event loop (same rule as the watch poll). Shares the sync
  *  variant's TTL cache, so cached results stay consistent across both paths. */
-async function codexPresenceScanAsync(sockPath?: string): Promise<CodexTuiScan> {
+async function codexPresenceScanAsync(sockPath?: string, fresh = false): Promise<CodexTuiScan> {
   const sock = sockPath?.trim() ? sockPath : codexAppServerSock();
-  return sock ? codexAttachedTuisAsync(sock) : emptyCodexTuiScan();
+  return sock ? codexAttachedTuisAsync(sock, undefined, {
+    fresh,
+    macConfiguredExecutable: macConfiguredCodexExecutableIdentity(),
+  }) : emptyCodexTuiScan();
+}
+
+/** Resolve an explicit Codex override to both the invocation path and canonical executable target.
+ * `null` is deliberate evidence: an override exists but cannot be mapped safely, so macOS absence
+ * must remain unknown. Linux ignores this identity and retains its existing /proc behavior. */
+function macConfiguredCodexExecutableIdentity(): CodexMacConfiguredExecutable | null | undefined {
+  if (process.platform !== 'darwin') return undefined;
+  return resolveCodexMacConfiguredExecutable(process.env.COSYNCING_CODEX_BIN);
 }
 
 function codexPresenceFingerprint(scan: CodexTuiScan): string {
@@ -1428,6 +1446,28 @@ export function classifyCodexTerminalPresence(
   if (!scan.processScanAvailable) return 'unknown';
   const canonicalThreadId = threadId.toLowerCase();
   const isUnattributedCandidate = (candidate: { threadIds?: string[] }) => !(candidate.threadIds && candidate.threadIds.length);
+
+  if (scan.source === 'darwin') {
+    const targetCwd = canonicalizePathForPresence(cwd);
+    const matchingCandidates = scan.candidates.filter((candidate) => {
+      if (candidate.threadIds?.some((id) => id.toLowerCase() === canonicalThreadId)) return true;
+      if (candidate.threadIds?.length || !targetCwd || createdAtMs === undefined) return false;
+      return candidate.cwd !== undefined &&
+        candidate.startedAtMs !== undefined &&
+        canonicalizePathForPresence(candidate.cwd) === targetCwd &&
+        Math.abs(createdAtMs - candidate.startedAtMs) <= CODEX_TUI_BIRTH_WINDOW_MS;
+    });
+    // One stable process identity is required for positive macOS ownership. Multiple matches could
+    // be duplicate launchers, PID churn, or competing owners, so automatic restore must not guess.
+    if (matchingCandidates.length > 1) return 'unknown';
+    const candidate = matchingCandidates[0];
+    if (candidate && (
+      !candidate.startToken ||
+      !candidate.argv?.length ||
+      !candidate.cwd ||
+      !candidate.socketPaths
+    )) return 'unknown';
+  }
 
   const sharedEvidence =
     scan.attributed.has(canonicalThreadId) ||

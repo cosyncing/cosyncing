@@ -1288,6 +1288,7 @@ export const BROKER_ERROR_CODES = [
   'UPLOAD_CAPACITY',
   'RESUME_AUTH_REQUIRED',
   'SESSION_AGENT_OWNED',
+  'SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
   'DRIVE_OWNERSHIP_CONFLICT',
   'DRIVE_RESTORE_FAILED',
   'SCHEDULE_CRON_INVALID',
@@ -1369,14 +1370,18 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * {@link HistorySnapshotSink.suppressStateAuthority}, which an adapter calls
  * after settling accepted messages when it skipped a native record, so the
  * sink stops asserting latest-wins state it can no longer prove is current.
+ * Revision 11 adds `SESSION_CREATE_TEMPORARILY_UNAVAILABLE` to the stable error
+ * registry so clients can distinguish bounded agent-startup unavailability
+ * from an untyped broker failure and retry deliberately.
  * The registry-derived {@link BROKER_CONTRACT_SURFACE_HASH} does not move for
- * any of them: none adds a route, frame kind, message type or error code, which is
+ * the revision-10 additions: none adds a route, frame kind, message type or
+ * error code, which is
  * exactly why the revision must: a structural DTO change is reviewable only if
- * it is numbered. All revision-5 through revision-10 additions are backward
+ * it is numbered. All revision-5 through revision-11 additions are backward
  * compatible, so the client minimum does not move. Raise the minimum only
  * after every supported store client has crossed the corresponding revision.
  */
-export const BROKER_CONTRACT_REVISION = 10 as const;
+export const BROKER_CONTRACT_REVISION = 11 as const;
 export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 0 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 

@@ -31,6 +31,7 @@ import {
   parseLaunchdPrintState,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
+  servicePathMatchesExpected,
   type DurableServiceProvider,
   type DurableServiceStatus,
   type ServiceCommandResult,
@@ -1107,7 +1108,7 @@ try {
     ].join('\n'), { mode: 0o755 });
     symlinkSync(codexTarget, join(nodeAgentBin, 'codex'));
     writeFileSync(join(nodeAgentBin, 'claude'), `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
-    symlinkSync(process.execPath, join(nodeRuntimeBin, 'node'));
+    symlinkSync(Bun.which('node')!, join(nodeRuntimeBin, 'node'));
     writeFileSync(join(piBin, 'pi'), '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
     writeFileSync(join(opencodeBin, 'opencode'), [
       bunShebang,
@@ -1224,7 +1225,12 @@ try {
     for (const path of [overrideCodex, overrideClaude, overridePi]) mkdirSync(dirname(path), { recursive: true });
     symlinkSync(codexTarget, overrideCodex);
     writeFileSync(overrideClaude, `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
-    writeFileSync(overridePi, `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
+    writeFileSync(overridePi, [
+      bunShebang,
+      `if (process.argv.includes('--version')) console.log('pi 0.84.0');`,
+      `process.exit(0);`,
+      '',
+    ].join('\n'), { mode: 0o755 });
     const overrideContext = createSetupDiagnosisContext({
       homeDir: userHome,
       platform: 'darwin',
@@ -1281,6 +1287,39 @@ try {
         && overrideOutcome.piCreate === true
         && overrideOutcome.piRuns === true,
       `exit=${overrideExit} result=${JSON.stringify(overrideOutcome)} stderr=${overrideStderr.trim().slice(0, 240)}`);
+  }
+
+  // A launcher can remain in an older npm prefix after Node itself moves. The interactive setup process
+  // resolves the new interpreter first; the durable service must preserve that ordering, not merely retain
+  // both directories. Otherwise `#!/usr/bin/env node` silently selects the obsolete runtime.
+  {
+    const machine = join(root, 'env-node-path-order');
+    const launcherDirectory = join(machine, 'node-v22.14.0', 'bin');
+    const interpreterDirectory = join(machine, 'homebrew', 'bin');
+    const pi = join(launcherDirectory, 'pi');
+    const oldNode = join(launcherDirectory, 'node');
+    const currentNode = join(interpreterDirectory, 'node');
+    mkdirSync(launcherDirectory, { recursive: true });
+    mkdirSync(interpreterDirectory, { recursive: true });
+    writeFileSync(pi, '#!/usr/bin/env node\n', { mode: 0o755 });
+    writeFileSync(oldNode, '#!/bin/sh\n', { mode: 0o755 });
+    writeFileSync(currentNode, '#!/bin/sh\n', { mode: 0o755 });
+    const directories = serviceAgentExecutableDirectories({
+      env: { PATH: `${interpreterDirectory}:${launcherDirectory}` },
+      resolveExecutable(command): string | undefined {
+        if (command === 'pi') return pi;
+        if (command === 'node') return currentNode;
+        return undefined;
+      },
+    });
+    check('durable PATH keeps the resolved Node interpreter ahead of an env-node agent launcher',
+      directories[0] === interpreterDirectory && directories[1] === launcherDirectory,
+      directories.join(':'));
+    check('doctor PATH comparison treats equal directory membership in a different order as stale',
+      !servicePathMatchesExpected(
+        [launcherDirectory, interpreterDirectory],
+        [interpreterDirectory, launcherDirectory],
+      ));
   }
 
   // A package-manager upgrade can move an agent from one versioned Node directory to another while leaving

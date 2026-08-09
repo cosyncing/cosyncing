@@ -43,6 +43,13 @@
       "minimumClientRevision": 0,
       "clientMinimumBrokerRevision": 2,
       "change": "Optional bounded large-history replay fields: shortened-body marking on model-output/thinking/user-message, a bounded-tail-only snapshot sink declaration, skipped-record reporting on a capture, and snapshot-sink state-authority suppression after accepted messages settle."
+    },
+    {
+      "revision": 11,
+      "surfaceHash": "fnv1a32:53636b2a",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Stable SESSION_CREATE_TEMPORARILY_UNAVAILABLE error code for bounded agent-startup readiness failures."
     }
   ]
 }

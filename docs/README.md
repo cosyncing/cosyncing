@@ -5,6 +5,7 @@
 - [Attention feed architecture](architecture/attention.md)
 - [Contract synchronization](protocol/contract-sync.md)
 - [Adapter support and evidence](protocol/adapter-support.md)
+- [Supported agents: versions and installation](supported_agents/README.md)
 - [Build and test](development/build-test.md)
 - [Fork-based development](development/fork-workflow.md)
 - [Local data and predecessor upgrades](development/data-and-upgrades.md)

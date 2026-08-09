@@ -603,11 +603,11 @@ exec /usr/bin/openssl "$@"
   const secondPath = join(builds, 'second');
   const first = await run([...buildArgs, '--outfile', firstPath], {
     stage: 'reproducibility-build-first',
-    timeoutMs: 30_000,
+    timeoutMs: 60_000,
   });
   const second = await run([...buildArgs, '--outfile', secondPath], {
     stage: 'reproducibility-build-second',
-    timeoutMs: 30_000,
+    timeoutMs: 60_000,
   });
   if (first.exitCode !== 0 || second.exitCode !== 0 || !existsSync(firstPath) || !existsSync(secondPath)) {
     const detail = [

@@ -214,6 +214,10 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Start Pi once to create its session store.': '请启动一次 Pi，以创建会话存储。',
   'Pi session storage is unreadable or has an unexpected type.': 'Pi 会话存储不可读或类型异常。',
   'Repair the Pi integration paths.': '请修复 Pi 集成路径。',
+  'Pi is installed, but its launcher cannot be inspected safely.': 'Pi 已安装，但无法安全检查其启动器。',
+  'Repair the Pi installation, then rerun doctor.': '请修复 Pi 安装，然后重新运行 doctor。',
+  'Pi launcher runtime could not be verified.': '无法验证 Pi 启动器运行时。',
+  'Pi uses a native executable and does not depend on Node launcher compatibility.': 'Pi 使用原生可执行文件，不依赖 Node 启动器兼容性。',
   'Installed Pi bridge matches the packaged asset.': '已安装的 Pi bridge 与发行包资源一致。',
   'The Pi bridge extension is not installed.': '未安装 Pi bridge 扩展。',
   'Install the packaged Pi bridge through setup.': '请通过 setup 安装发行包中的 Pi bridge。',
@@ -261,8 +265,11 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'The Codex daemon socket exists but no active listener could be verified.': 'Codex daemon 套接字存在，但无法确认活动监听器。',
   'The Codex daemon socket exists, but Linux Unix-listener state is unreadable.': 'Codex daemon 套接字存在，但无法读取 Linux Unix 监听器状态。',
   'Reconcile the managed Codex daemon.': '请修复托管的 Codex daemon。',
-  'Authoritative Codex terminal-presence detection is currently Linux/WSL-only.': '当前仅 Linux/WSL 支持可靠的 Codex 终端存在性检测。',
-  'Use Observe/Drive honestly; the macOS badge check is a fast-follow.': '请如实使用 Observe/Drive；macOS 标记检查将在后续版本提供。',
+  'Authoritative Codex terminal-presence detection is unavailable on this platform.': '此平台不支持可靠的 Codex 终端存在性检测。',
+  'Use Observe or explicit Take over; automatic Drive restoration stays disabled.': '请使用 Observe 或明确执行 Take over；自动恢复 Drive 将保持禁用。',
+  'macOS process identity, cwd, and Unix-socket diagnostics are available.': 'macOS 进程身份、工作目录和 Unix 套接字诊断可用。',
+  'Codex terminal presence cannot be proved on this Mac because ps or lsof is unavailable.': '此 Mac 缺少 ps 或 lsof，因此无法确认 Codex 终端是否存在。',
+  'Restore the standard macOS ps and lsof tools; automatic Drive restoration stays disabled until presence can be proved.': '请恢复标准 macOS ps 和 lsof 工具；在能够确认终端存在性之前，自动恢复 Drive 将保持禁用。',
   'Linux process and Unix-socket diagnostics are available.': 'Linux 进程和 Unix 套接字诊断可用。',
   'Codex terminal presence cannot be proved on this host.': '无法在此主机上确认 Codex 终端是否存在。',
   'Ensure Linux /proc process state is readable.': '请确保 Linux /proc 进程状态可读。',
@@ -356,6 +363,11 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^(.*) version is supported\.$/, (name) => `${name} 版本受支持。`)
     ?? replaceMatch(source, /^Update (.*), then rerun doctor\.$/, (name) => `请更新 ${name}，然后重新运行 doctor。`)
     ?? replaceMatch(source, /^Update (.*) to ([^ ]+) or newer\.$/, (name, minimum) => `请将 ${name} 更新到 ${minimum} 或更高版本。`)
+    ?? replaceMatch(source, /^Install Node ([^ ]+) or newer, ensure the durable broker service PATH selects it, then restart cosyncing\.$/, (minimum) => `请安装 Node ${minimum} 或更高版本，确保持久 broker 服务 PATH 选择该版本，然后重启 cosyncing。`)
+    ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter is unavailable\.$/, (minimum) => `Pi 需要 Node ${minimum} 或更高版本，但其实际解释器不可用。`)
+    ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter is Node ([^ ]+)\.$/, (minimum, installed) => `Pi 需要 Node ${minimum} 或更高版本，但其实际解释器为 Node ${installed}。`)
+    ?? replaceMatch(source, /^Pi requires Node ([^ ]+) or newer, but its effective interpreter version could not be verified\.$/, (minimum) => `Pi 需要 Node ${minimum} 或更高版本，但无法验证实际解释器版本。`)
+    ?? replaceMatch(source, /^Pi effective Node ([^ ]+) satisfies the installed distribution floor\.$/, (installed) => `Pi 的实际 Node ${installed} 满足已安装发行版的最低要求。`)
     ?? replaceMatch(source, /^No (.*) managed-start failure is recorded\.$/, (name) => `没有记录 ${name} 的托管启动失败。`)
     ?? replaceMatch(source, /^The last managed (.*) start failed\.$/, (name) => `上次托管启动 ${name} 失败。`)
     ?? replaceMatch(source, /^(.*) is readable\.$/, (label) => `${zhLabel(label)}可读。`)
@@ -413,7 +425,9 @@ const en: CliMessages = {
         : agent.canCreateSession === false ? 'create unavailable' : 'create unknown';
       const sync = agent.syncEnabled === undefined ? '' : `; sync ${agent.syncEnabled ? 'enabled' : 'disabled'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
-    }).join(', ') : 'broker unavailable'}`,
+    }).join(', ') : 'broker unavailable'}${report.agents.some((agent) => agent.canCreateSession === false)
+      ? `; run ${PRODUCT_IDENTITY.primaryBinary} doctor for creation setup guidance`
+      : ''}`,
     sessions: (report) => `Sessions: ${report.sessions ? `${report.sessions.active} active / ${report.sessions.total} total` : 'broker unavailable'}`,
     updates: (report) => `Updates: ${report.updates ? `${report.updates.pending} pending` : 'broker unavailable'}`,
     fix: (detailCodes) => `Fix: ${detailCodes.join(', ')}; run ${PRODUCT_IDENTITY.primaryBinary} doctor.`,
@@ -540,7 +554,9 @@ const zhHans: CliMessages = {
         : agent.canCreateSession === false ? '无法创建会话' : '创建状态未知';
       const sync = agent.syncEnabled === undefined ? '' : `；同步${agent.syncEnabled ? '已启用' : '已禁用'}`;
       return `${agent.displayName ?? agent.id} [${readiness}${sync}]`;
-    }).join(', ') : 'broker 不可用'}`,
+    }).join(', ') : 'broker 不可用'}${report.agents.some((agent) => agent.canCreateSession === false)
+      ? `；会话创建配置请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor 检查`
+      : ''}`,
     sessions: (report) => `会话：${report.sessions ? `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个` : 'broker 不可用'}`,
     updates: (report) => `更新：${report.updates ? `${report.updates.pending} 个待处理` : 'broker 不可用'}`,
     fix: (detailCodes) => `处理：${detailCodes.join(', ')}；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor。`,

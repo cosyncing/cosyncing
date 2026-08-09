@@ -90,6 +90,8 @@
     {"id": "broker.live-session-coherence", "description": "Live status, prompt identity, footer, and pageable replay stay coherent."},
     {"id": "broker.roster-publication", "description": "Adapter watcher snapshots are owner-qualified before any roster revision; an exact live turn never journals an inferred Idle reversal."},
     {"id": "broker.model-session-creation", "description": "Capability-driven model catalogs reach immediate and scheduled creation."},
+    {"id": "broker.agent-create-readiness", "description": "Managed, restarted, absent, and external agent runtimes expose bounded truthful create readiness."},
+    {"id": "broker.pi-runtime-readiness", "description": "Pi creation qualifies its executable identity and effective Node runtime without blocking setup."},
     {"id": "broker.diff-body-reference", "description": "Oversized diffs become bounded, signed, durable references."},
     {"id": "broker.diff-reference-wire", "description": "WebSocket diff references serve the exact full body."},
     {"id": "broker.opencode-file-changes", "description": "OpenCode diffs map to canonical per-file changes."},
@@ -394,7 +396,8 @@
         "broker.opencode-shim-symmetry", "broker.opencode-shim-runtime", "broker.roster-revision",
         "broker.adapter-discovery-bounds", "broker.sync-degraded", "broker.live-session-coherence",
         "broker.roster-publication",
-        "broker.model-session-creation", "broker.diff-body-reference", "broker.diff-reference-wire",
+        "broker.model-session-creation", "broker.agent-create-readiness", "broker.pi-runtime-readiness",
+        "broker.diff-body-reference", "broker.diff-reference-wire",
         "broker.opencode-file-changes", "broker.opencode-retry-detail", "broker.echo-correlation",
         "broker.drive-restore", "broker.request-resolution", "broker.notifications-bulk-dismiss",
         "broker.fork-agent-owned", "broker.draft-sync", "broker.draft-durability", "broker.draft-two-client",
@@ -457,6 +460,7 @@
             "opencode-message-identity", "opencode-completion-fence", "real-evidence-schema",
             "fork-agent-owned", "restart-message-identity", "draft-two-client-wire", "history-page-cache",
             "codex-loaded-watch", "codex-loaded-watch-unknown", "codex-tui-presence",
+            "agent-create-readiness", "pi-runtime-readiness",
             "session-truth-conformance"
           ]
         },
@@ -492,6 +496,8 @@
         {"id":"roster-publication-qualification","claimId":"broker.roster-publication","command":["bun","run","test:broker-roster-publication"],"sourceOwners":["scripts/broker/tests/broker/test-roster-publication-qualification.ts"]},
         {"id":"roster-watcher-publication-live","claimId":"broker.roster-publication","command":["bun","run","test:broker-roster-watcher-live"],"sourceOwners":["scripts/broker/tests/broker/test-roster-watcher-publication-live.ts","scripts/broker/tests/helpers/isolated-broker-fixture.ts"]},
         {"id":"model-session-creation","claimId":"broker.model-session-creation","command":["bun","run","test:broker-model-session-creation"],"sourceOwners":["scripts/broker/tests/broker/test-model-session-creation.ts"]},
+        {"id":"agent-create-readiness","claimId":"broker.agent-create-readiness","command":["bun","run","test:broker-agent-create-readiness"],"sourceOwners":["scripts/broker/tests/broker/test-agent-create-readiness.ts","scripts/broker/tests/broker/test-opencode-create-readiness-restart.ts"]},
+        {"id":"pi-runtime-readiness","claimId":"broker.pi-runtime-readiness","command":["bun","run","test:pi-runtime-readiness"],"sourceOwners":["scripts/broker/tests/pi/test-pi-runtime-readiness.ts"]},
         {"id":"diff-body-reference","claimId":"broker.diff-body-reference","command":["bun","run","test:broker-diff-body-reference"],"sourceOwners":["scripts/broker/tests/broker/test-diff-body-reference.ts"]},
         {"id":"diff-reference-wire","claimId":"broker.diff-reference-wire","command":["bun","run","test:broker-diff-reference-wire"],"sourceOwners":["scripts/broker/tests/broker/test-diff-reference-wire.ts","scripts/broker/tests/helpers/isolated-broker-fixture.ts"]},
         {"id":"opencode-file-changes","claimId":"broker.opencode-file-changes","command":["bun","run","test:opencode-file-changes"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-file-changes.ts"]},
@@ -517,7 +523,7 @@
         {"id":"opencode-message-identity","claimId":"broker.opencode-identity","command":["bun","run","test:opencode-message-identity"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-message-identity.ts"]},
         {"id":"opencode-completion-fence","claimId":"broker.opencode-completion","command":["bun","run","test:opencode-completion-fence"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-completion-fence.ts"]},
         {"id":"control-boundaries","claimId":"broker.control-boundaries","command":["bun","run","test:broker-control-boundaries"],"sourceOwners":["scripts/broker/tests/broker/test-control-boundaries.ts"]},
-        {"id":"release-supply-chain","claimId":"release.supply-chain","command":["bun","run","test:release-supply-chain"],"timeoutClass":"medium","sourceOwners":["scripts/broker/tests/broker/test-release-supply-chain.ts","scripts/release/tests/test-release-checkpoint-lifecycle.ts","scripts/broker/tests/broker/test-release-web-sidecar.ts","scripts/broker/tests/broker/test-release-candidate-verifier.ts"]},
+        {"id":"release-supply-chain","claimId":"release.supply-chain","command":["bun","run","test:release-supply-chain"],"timeoutClass":"long","sourceOwners":["scripts/broker/tests/broker/test-release-supply-chain.ts","scripts/release/tests/test-release-checkpoint-lifecycle.ts","scripts/broker/tests/broker/test-release-web-sidecar.ts","scripts/broker/tests/broker/test-release-candidate-verifier.ts"]},
         {"id":"broker-update-contract","claimId":"broker.update-contract","command":["bun","run","test:broker-update-contract"],"sourceOwners":["scripts/broker/tests/broker/test-update-contract.ts"]},
         {"id":"real-evidence-schema","claimId":"evidence.real-host-schema","command":["bun","run","test:broker-real-host-evidence"],"sourceOwners":["scripts/broker/tests/broker/test-real-host-evidence.ts","scripts/broker/acceptance/real-host-evidence.ts"]},
         {"id":"pi-tool-result","claimId":"broker.pi-tool-result","command":["bun","run","test:pi-tool-result"],"sourceOwners":["scripts/broker/tests/pi/test-tool-result-enrich.ts"]},
@@ -529,7 +535,7 @@
         {"id":"codex-loaded-watch","claimId":"broker.codex-loaded-watch","command":["bun","run","scripts/broker/tests/codex/test-codex-watch.ts"],"sourceOwners":["scripts/broker/tests/codex/test-codex-watch.ts"]},
         {"id":"codex-loaded-watch-unknown","claimId":"broker.codex-loaded-watch-unknown","command":["bun","run","scripts/broker/tests/codex/test-loaded-watch-unknown.ts"],"sourceOwners":["scripts/broker/tests/codex/test-loaded-watch-unknown.ts"]},
         {"id":"codex-terminal-control","claimId":"broker.codex-terminal-control","command":["bun","run","scripts/broker/tests/codex/test-codex-terminal-control.ts"],"sourceOwners":["scripts/broker/tests/codex/test-codex-terminal-control.ts"]},
-        {"id":"codex-tui-presence","claimId":"broker.codex-tui-presence","command":["bun","run","scripts/broker/tests/codex/test-codex-tui-presence.ts"],"sourceOwners":["scripts/broker/tests/codex/test-codex-tui-presence.ts"]},
+        {"id":"codex-tui-presence","claimId":"broker.codex-tui-presence","command":["bun","run","test:codex-tui-presence"],"sourceOwners":["scripts/broker/tests/codex/test-codex-tui-presence.ts","scripts/broker/tests/codex/test-codex-macos-tui-presence.ts"]},
         {"id":"codex-sync-enabler","claimId":"broker.codex-sync-enabler","command":["bun","run","scripts/broker/tests/codex/broker-control-mode.ts"],"sourceOwners":["scripts/broker/tests/codex/broker-control-mode.ts","scripts/broker/tests/helpers/isolated-broker-fixture.ts"]}
       ]
     },
