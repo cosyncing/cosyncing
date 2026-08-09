@@ -151,7 +151,7 @@ if printf '%s\n' "$npm_commands" | rg -n '(^|[^a-z-])npm publish\b'; then
   echo 'ERROR: the npm lane must use `npm stage publish`, never a direct `npm publish`.' >&2
   exit 1
 fi
-rg -q 'npm stage publish "candidate/cosyncing-' "$npm_workflow" || {
+rg -q 'npm stage publish "\./candidate/cosyncing-' "$npm_workflow" || {
   echo 'ERROR: the npm lane must stage the exact verified tarball with `npm stage publish`.' >&2
   exit 1
 }

@@ -265,7 +265,7 @@ jobs:
       # misconfigured trusted publisher fails rather than falling back to some other credential.
       - name: npm stage publish
         shell: bash
-        run: npm stage publish "candidate/cosyncing-${{ inputs.version }}.tgz" --access public
+        run: npm stage publish "./candidate/cosyncing-${{ inputs.version }}.tgz" --access public
 
       # The staged version is NOT installable yet. Saying so in the job summary is the difference between an
       # owner who completes the release and one who believes a green run already shipped it.
