@@ -62,16 +62,13 @@ minimum versions, official install methods, and agent-specific runtime requireme
 ## Install
 
 > [!IMPORTANT]
-> The first public package has not been released yet. The current `cosyncing` entry on npm is a
-> name-reservation placeholder; do not install it. Follow the
-> [GitHub Releases](https://github.com/cosyncing/cosyncing/releases) page for the first supported
-> package.
+> cosyncing requires [Bun](https://bun.sh) 1.3.8 or newer. The npm package does not bundle Bun;
+> install it before installing cosyncing.
 
-The package is one self-contained JavaScript application and does not bundle a runtime. Install
-[Bun](https://bun.sh) 1.3.8 or newer first. Supported broker hosts are Linux x64, Linux arm64, and
-Apple Silicon macOS; on Windows, run the broker inside WSL.
+The package contains one JavaScript application bundle and the web client. Supported broker hosts
+are Linux x64, Linux arm64, and Apple Silicon macOS; on Windows, run the broker inside WSL.
 
-After the first package is published:
+Install the current release:
 
 ```bash
 npm install --global cosyncing
