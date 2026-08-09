@@ -375,6 +375,32 @@ export function isAgentOwnedSessionError(error: unknown): error is AgentOwnedSes
     || (error instanceof Error && error.name === 'AgentOwnedSessionError' && 'action' in error);
 }
 
+/** A new session cannot be created until an adapter-owned local runtime becomes usable.
+ *
+ * This is deliberately narrower than a generic adapter error. The broker maps it to a
+ * typed 503 so a known startup/runtime prerequisite is never flattened into HTTP 500.
+ * Callers must not use it for model, HTTP application, or other arbitrary failures. */
+export class SessionCreateTemporarilyUnavailableError extends Error {
+  constructor(
+    message: string,
+    /** Stable adapter-owned reason suitable for status/diagnostic correlation. */
+    public readonly detailCode: string,
+  ) {
+    super(message);
+    this.name = 'SessionCreateTemporarilyUnavailableError';
+  }
+}
+
+/** Cross-realm-safe predicate for packaged/link-workspace adapter boundaries. */
+export function isSessionCreateTemporarilyUnavailableError(
+  error: unknown,
+): error is SessionCreateTemporarilyUnavailableError {
+  return error instanceof SessionCreateTemporarilyUnavailableError
+    || (error instanceof Error
+      && error.name === 'SessionCreateTemporarilyUnavailableError'
+      && 'detailCode' in error);
+}
+
 export interface AgentBackend {
   readonly id: string;
   readonly displayName: string;
@@ -396,6 +422,9 @@ export interface AgentBackend {
   attach(sessionId: string, mode?: AttachMode, opts?: AttachOptions): Promise<SessionConnection>;
   /** Optional dynamic availability for createSession, used when create depends on a live daemon. */
   canCreateSession?(): Promise<boolean> | boolean;
+  /** Bounded adapter-owned readiness boundary invoked before model validation and the one create call.
+   * Implementations may wait/re-probe safe prerequisites, but must never create a native session here. */
+  prepareCreateSession?(): Promise<void>;
   /** Adapter-owned pre-session catalog. Absence means model selection is unavailable. */
   listModels?(): Promise<ModelOption[]>;
   /** Create a brand-new session and return it (for tools that support it). */

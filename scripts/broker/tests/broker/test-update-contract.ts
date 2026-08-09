@@ -14,7 +14,13 @@ import {
   reserveLoopbackFixturePort,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
-import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../../../packages/typescript/broker/src/build-info.ts';
+import {
+  BUILD_INFO,
+  PUBLISHED_BROKER_CONTRACT,
+  PUBLISHED_SCHEMA_VERSIONS,
+  buildFingerprint,
+  type BuildInfo,
+} from '../../../../packages/typescript/broker/src/build-info.ts';
 import {
   BrokerUpdateChecker,
   brokerUpdateHandoffCommand,
@@ -62,16 +68,21 @@ const hardHash = evaluateBrokerClientCompatibility({
 });
 const legacy = evaluateBrokerClientCompatibility();
 check('contract surface hash is deterministic and machine-readable', /^fnv1a32:[a-f0-9]{8}$/.test(BROKER_CONTRACT.surfaceHash));
+check('published build/schema metadata carries the exact current contract identity',
+  PUBLISHED_SCHEMA_VERSIONS.brokerContract === BROKER_CONTRACT.revision
+    && PUBLISHED_BROKER_CONTRACT.revision === BROKER_CONTRACT.revision
+    && PUBLISHED_BROKER_CONTRACT.surfaceHash === BROKER_CONTRACT.surfaceHash
+    && PUBLISHED_BROKER_CONTRACT.minimumClientRevision === BROKER_CONTRACT.minimumClientRevision);
 check('equal revisions are compatible', equal.status === 'compatible' && !equal.readOnly);
 check('one overlap revision behind nudges the client without disabling control', clientBehind.status === 'client-behind' && !clientBehind.readOnly);
 // The literal is a deliberate tripwire, not a duplicate of the constant: every
 // revision bump must land here and re-argue that the new revision is additive
 // before the "previous-revision client stays writable" claim is renewed.
-// Revision 10 adds only optional bounded large-history replay fields, including
-// `suppressStateAuthority`; a released revision-9 client ignores them and keeps
-// working unchanged, so the claim holds.
+// Revision 11 only adds a stable typed error code. A released revision-10
+// client can ignore that new code and keeps working unchanged, so the claim
+// holds.
 check('an installed previous-revision client remains writable against the additive current broker',
-  BROKER_CONTRACT.revision === 10
+  BROKER_CONTRACT.revision === 11
     && clientBehind.status === 'client-behind'
     && !clientBehind.readOnly);
 check('one-revision overlap remains writable despite the older surface hash',
@@ -154,10 +165,10 @@ check('daily cache reuses both available and unknown metadata results until expi
 const systemdDependencies = {
   buildInfo,
   service: { provider: 'systemd' as const, managed: true, restartStrategy: 'service-manager-exit' as const },
-  executablePath: '/home/test/.cosyncing/bin/cosyncing',
-  stateHome: '/home/test/.cosyncing',
-  cacheRoot: '/home/test/.cache/cosyncing',
-  userHome: '/home/test',
+  executablePath: '/opt/cosyncing-fixture/.cosyncing/bin/cosyncing',
+  stateHome: '/opt/cosyncing-fixture/.cosyncing',
+  cacheRoot: '/opt/cosyncing-fixture/.cache/cosyncing',
+  userHome: '/opt/cosyncing-fixture',
   systemdRunPath: '/usr/bin/systemd-run',
 };
 const handoffCommand = brokerUpdateHandoffCommand(systemdDependencies);

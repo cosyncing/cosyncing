@@ -589,6 +589,9 @@ try {
     HOME: importHome,
     COSYNCING_HOME: importHome,
     COSYNCING_CACHE_DIR: join(importHome, 'cache'),
+    // This assertion covers application side effects, not Bun's source transpiler cache. A changed
+    // source module is otherwise compiled into HOME/.bun before application code executes.
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
   });
   check('importing the source CLI performs no process, network, or filesystem startup',
     imported.exitCode === 0 && readdirSync(importHome).length === 0,

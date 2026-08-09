@@ -101,6 +101,7 @@ export interface SetupMessages {
   unsupportedDetected: (version: string) => string;
   unsupportedUpgrade: (command: string) => string;
   unsupportedReason: (parts: { detected: string; displayName: string; minimumVersion: string; upgrade: string }) => string;
+  runtimeUnavailableReason: (parts: { installedVersion?: string; minimumVersion?: string; remediation: string }) => string;
   codexStandaloneWarning: (command: string) => string;
   networkTitle: string;
   networkAuthenticated: (advertisedUrl: string) => string;
@@ -199,6 +200,9 @@ const en: SetupMessages = {
   unsupportedUpgrade: (command) => ` Run \`${command}\`.`,
   unsupportedReason: ({ detected, displayName, minimumVersion, upgrade }) =>
     `\n  Unsupported: ${detected}; ${displayName} ${minimumVersion} or newer is required.${upgrade}`,
+  runtimeUnavailableReason: ({ installedVersion, minimumVersion, remediation }) =>
+    `\n  Runtime unavailable: effective Node ${installedVersion ?? 'could not be verified'}; `
+      + `${minimumVersion ? `Node ${minimumVersion} or newer is required. ` : ''}Fix: ${remediation}`,
   codexStandaloneWarning: (command) =>
     `Warning: app-created sessions remain available, but the broker-managed daemon and terminal sync require `
       + `the official standalone Codex package. `
@@ -388,7 +392,12 @@ const zhHans: SetupMessages = {
   installationBody: ({ version, install, state, broker }) =>
     `版本：${version}\n程序位置：${install}\n数据目录：${state}\nBroker 地址：${broker}`,
   agentPreflightTitle: '编程助手检查',
-  agentState: (state) => ({ missing: '未安装', supported: '已支持', unsupported: '版本过低' })[state],
+  agentState: (state) => ({
+    missing: '未安装',
+    supported: '已支持',
+    unsupported: '版本过低',
+    'runtime-unavailable': '运行时不可用',
+  })[state],
   agentBehavior: (id) => ({
     codex: '由 cosyncing 托管共享 app-server，远程终端可以接入。',
     opencode: '由 cosyncing 托管共享 serve；你自己启动的 server 不受影响。',
@@ -400,6 +409,9 @@ const zhHans: SetupMessages = {
   unsupportedUpgrade: (command) => `请执行 \`${command}\` 升级。`,
   unsupportedReason: ({ detected, displayName, minimumVersion, upgrade }) =>
     `\n  版本过低：${detected}；${displayName} 需要 ${minimumVersion} 或更新版本。${upgrade}`,
+  runtimeUnavailableReason: ({ installedVersion, minimumVersion }) =>
+    `\n  运行时不可用：实际 Node ${installedVersion ?? '无法验证'}；`
+      + `${minimumVersion ? `需要 Node ${minimumVersion} 或更新版本。` : ''}请升级实际 Node 运行时，然后重启 cosyncing。`,
   codexStandaloneWarning: (command) =>
     `警告：App 创建会话仍可使用；由 broker 托管的 daemon 和终端同步需要官方独立版 Codex。请执行 \`${command}\`；`
       + '官方安装器会检测 npm 版 Codex，并询问是否移除。安装完成后，请打开新终端并重新运行 `cosy setup`。',

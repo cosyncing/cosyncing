@@ -1107,7 +1107,7 @@ try {
     ].join('\n'), { mode: 0o755 });
     symlinkSync(codexTarget, join(nodeAgentBin, 'codex'));
     writeFileSync(join(nodeAgentBin, 'claude'), `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
-    symlinkSync(process.execPath, join(nodeRuntimeBin, 'node'));
+    symlinkSync(Bun.which('node')!, join(nodeRuntimeBin, 'node'));
     writeFileSync(join(piBin, 'pi'), '#!/usr/bin/env node\nprocess.exit(0);\n', { mode: 0o755 });
     writeFileSync(join(opencodeBin, 'opencode'), [
       bunShebang,
@@ -1224,7 +1224,12 @@ try {
     for (const path of [overrideCodex, overrideClaude, overridePi]) mkdirSync(dirname(path), { recursive: true });
     symlinkSync(codexTarget, overrideCodex);
     writeFileSync(overrideClaude, `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
-    writeFileSync(overridePi, `${bunShebang}\nprocess.exit(0);\n`, { mode: 0o755 });
+    writeFileSync(overridePi, [
+      bunShebang,
+      `if (process.argv.includes('--version')) console.log('pi 0.84.0');`,
+      `process.exit(0);`,
+      '',
+    ].join('\n'), { mode: 0o755 });
     const overrideContext = createSetupDiagnosisContext({
       homeDir: userHome,
       platform: 'darwin',

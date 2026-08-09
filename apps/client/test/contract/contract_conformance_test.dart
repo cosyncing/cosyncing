@@ -525,9 +525,9 @@ void main() {
       );
     });
 
-    test('BROKER_ERROR_CODES has 96 entries and typed receipt failures', () {
+    test('BROKER_ERROR_CODES has 97 entries and typed readiness failures', () {
       final codes = _registryFromSnapshot(snapshotSource, 'BROKER_ERROR_CODES');
-      expect(codes, hasLength(96));
+      expect(codes, hasLength(97));
       expect(codes, isNot(contains('DUPLICATE_CLIENT_MESSAGE_ID')));
       expect(
         codes,
@@ -557,12 +557,13 @@ void main() {
           'UPLOAD_SCOPE_MISMATCH',
           'MODEL_CATALOG_UNAVAILABLE',
           'MODEL_SELECTION_UNSUPPORTED',
+          'SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
           // CR4: a user-initiated fork of an agent-spawned session is a typed
           // 409 refusal, not the generic "native session fork failed" 502.
           'SESSION_AGENT_OWNED',
         ]),
       );
-      expect(brokerErrorCodes, hasLength(96));
+      expect(brokerErrorCodes, hasLength(97));
     });
 
     test('ack and nack are typed wire frame and client message kinds', () {

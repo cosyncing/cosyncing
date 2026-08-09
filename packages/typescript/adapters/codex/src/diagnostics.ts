@@ -7,6 +7,7 @@ import {
   type SetupCheck,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import { CODEX_MAC_LSOF_PATH, CODEX_MAC_PS_PATH } from './tui-presence.ts';
 
 export const CODEX_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.144.5',
@@ -206,13 +207,34 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
   }
   checks.push(diagnoseManagedRuntimeFailure(context, 'codex', 'Codex'));
 
-  if (context.platform !== 'linux') {
+  if (context.platform === 'darwin') {
+    const ps = context.resolveExecutable(CODEX_MAC_PS_PATH);
+    const lsof = context.resolveExecutable(CODEX_MAC_LSOF_PATH);
+    checks.push(ps && lsof
+      ? {
+          id: 'codex.terminal-presence-capability',
+          status: 'pass',
+          detailCode: 'terminal-presence-capable',
+          summary: 'macOS process identity, cwd, and Unix-socket diagnostics are available.',
+          evidence: { ps: context.displayPath(ps), lsof: context.displayPath(lsof) },
+        }
+      : {
+          id: 'codex.terminal-presence-capability',
+          status: 'warn',
+          detailCode: 'terminal-presence-tools-missing',
+          summary: 'Codex terminal presence cannot be proved on this Mac because ps or lsof is unavailable.',
+          remediation: {
+            kind: 'manual',
+            message: 'Restore the standard macOS ps and lsof tools; automatic Drive restoration stays disabled until presence can be proved.',
+          },
+        });
+  } else if (context.platform !== 'linux') {
     checks.push({
       id: 'codex.terminal-presence-capability',
       status: 'warn',
       detailCode: 'terminal-presence-platform-unsupported',
-      summary: 'Authoritative Codex terminal-presence detection is currently Linux/WSL-only.',
-      remediation: { kind: 'manual', message: 'Use Observe/Drive honestly; the macOS badge check is a fast-follow.' },
+      summary: 'Authoritative Codex terminal-presence detection is unavailable on this platform.',
+      remediation: { kind: 'manual', message: 'Use Observe or explicit Take over; automatic Drive restoration stays disabled.' },
     });
   } else {
     const proc = context.inspectPath('/proc');

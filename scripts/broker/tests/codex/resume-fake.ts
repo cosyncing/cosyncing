@@ -2943,16 +2943,21 @@ async function withFakeSock<T>(fn: () => Promise<T>): Promise<T> {
 await test('CR1 restore reason with proven-absent terminal presence starts the Resume owner', async () => {
   return await withFakeCodex(RESUME_ONLY_FAKE, async (rollout) => {
     return await withFakeSock(async () => {
+      const freshFlags: boolean[] = [];
       const adapter = new CodexAdapter({
-        scanCodexTuiPresence: async () => fakeTuiScan(),
+        scanCodexTuiPresence: async (_sock, fresh) => {
+          freshFlags.push(fresh === true);
+          return fakeTuiScan();
+        },
       });
       const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume', { reason: 'app-restore' });
       try {
         return [
           conn.info.attachMode === 'resume' &&
             conn.info.control?.drive.state === 'driving' &&
-            conn.info.control?.drive.supported === true,
-          `attach=${conn.info.attachMode} drive=${conn.info.control?.drive.state}`,
+          conn.info.control?.drive.supported === true &&
+            freshFlags.includes(true),
+          `attach=${conn.info.attachMode} drive=${conn.info.control?.drive.state} fresh=${freshFlags.join(',')}`,
         ];
       } finally {
         await conn.close().catch(() => {});
@@ -2961,7 +2966,7 @@ await test('CR1 restore reason with proven-absent terminal presence starts the R
   });
 });
 
-await test('CR1 restore reason fails closed on private and unknown terminal presence', async () => {
+await test('CR1 restore reason fails closed on shared, private, and unknown terminal presence', async () => {
   return await withFakeCodex(RESUME_ONLY_FAKE, async (rollout) => {
     return await withFakeSock(async () => {
       const id = Buffer.from(rollout, 'utf8').toString('base64url');
@@ -2976,6 +2981,9 @@ await test('CR1 restore reason fails closed on private and unknown terminal pres
         }
       };
       await attempt(new CodexAdapter({
+        scanCodexTuiPresence: async () => fakeTuiScan({ attributed: new Set(['fake-thread']) }),
+      }), 'app-restore');
+      await attempt(new CodexAdapter({
         scanCodexTuiPresence: async () => fakeTuiScan({ privateThreadIds: new Set(['fake-thread']) }),
       }), 'app-restore');
       await attempt(new CodexAdapter({
@@ -2986,9 +2994,10 @@ await test('CR1 restore reason fails closed on private and unknown terminal pres
         scanCodexTuiPresence: async () => fakeTuiScan({ processScanAvailable: false }),
       }), 'app-restore');
       return [
-        outcomes[0] === 'conflict:terminal-private' &&
-          outcomes[1] === 'conflict:terminal-unknown' &&
-          outcomes[2] === 'conflict:terminal-unknown',
+        outcomes[0] === 'conflict:terminal-shared' &&
+          outcomes[1] === 'conflict:terminal-private' &&
+          outcomes[2] === 'conflict:terminal-unknown' &&
+          outcomes[3] === 'conflict:terminal-unknown',
         outcomes.join(' | '),
       ];
     });

@@ -6,9 +6,13 @@ import {
   type SetupCheck,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import {
+  diagnosePiNodeRuntime,
+  PI_MINIMUM_SUPPORTED_VERSION,
+} from './runtime-readiness.ts';
 
 export const PI_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
-  version: '0.78.1',
+  version: PI_MINIMUM_SUPPORTED_VERSION,
   requiredFeature: 'strict JSONL RPC mode plus auto-discovered TypeScript extensions used by Drive and the in-process bridge',
   evidenceUrl: 'https://github.com/earendil-works/pi/releases/tag/v0.78.1',
   evidenceNote: 'Conservative floor: the packaged bridge, RPC fixtures, and real-host lane are verified on Pi 0.78.1; tag-matched RPC and extension docs define the required surfaces.',
@@ -163,6 +167,7 @@ export async function diagnosePiSetup(
     command: context.env.COSYNCING_PI_BIN?.trim() || 'pi',
     packageNames: ['@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent'],
     minimum: PI_MINIMUM_VERSION,
+    versionArgs: ['--version'],
     installMessage: 'Install the supported Pi coding-agent package, then rerun doctor.',
     upgradeCommand: 'pi update self',
   });
@@ -172,6 +177,7 @@ export async function diagnosePiSetup(
     || join(agentDir, 'sessions');
   const checks: SetupCheck[] = [
     ...binary.checks,
+    await diagnosePiNodeRuntime(context, binary.executable),
     sessionStoreCheck(context, sessionRoot, !!binary.executable),
     bridgeCheck(context, options.inspectBridge(agentDir)),
     bridgeConfigCheck(context, agentDir),

@@ -52,8 +52,15 @@ void main() {
   });
 
   group('brokerErrorCodes', () {
-    test('has 96 entries', () {
-      expect(brokerErrorCodes, hasLength(96));
+    test('has 97 entries', () {
+      expect(brokerErrorCodes, hasLength(97));
+    });
+
+    test('includes temporary session creation unavailability', () {
+      expect(
+        brokerErrorCodes,
+        contains('SESSION_CREATE_TEMPORARILY_UNAVAILABLE'),
+      );
     });
 
     test('includes the drive arbitration codes', () {

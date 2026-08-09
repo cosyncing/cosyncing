@@ -37,6 +37,7 @@ import {
 import {
   createJsonlSplitter,
   PRODUCT_IDENTITY,
+  SessionCreateTemporarilyUnavailableError,
   summarizeDiff,
   splitUnifiedDiffFiles,
   type AgentBackend,
@@ -73,6 +74,9 @@ import {
   webSemantic,
 } from '@cosyncing/adapter-api';
 import { diagnosePiSetup } from './diagnostics.ts';
+import {
+  currentPiRuntimeReadiness,
+} from './runtime-readiness.ts';
 
 const CAPS: AgentCapabilities = {
   integrationKind: 'jsonrpc-stdio',
@@ -162,7 +166,7 @@ function canonicalSessionFile(file: string): string {
 }
 const sessionIdForFile = (file: string): string => enc(canonicalSessionFile(file));
 
-/** `--home-tester-Projects-x--` → `/home/tester/Projects/x` (best-effort; dashes are lossy). */
+/** `--workspace-tester-Projects-x--` → `/workspace/tester/Projects/x` (best-effort; dashes are lossy). */
 function decodeCwdDir(dir: string): string | undefined {
   const m = dir.replace(/^--/, '').replace(/--$/, '');
   const guess = '/' + m.replace(/-/g, '/');
@@ -196,10 +200,20 @@ export class PiAdapter implements AgentBackend {
   }
 
   canCreateSession(): boolean {
-    return resolveBin('pi') !== null;
+    return currentPiRuntimeReadiness().ready;
+  }
+
+  async prepareCreateSession(): Promise<void> {
+    const readiness = currentPiRuntimeReadiness();
+    if (readiness.ready) return;
+    throw new SessionCreateTemporarilyUnavailableError(
+      readiness.message,
+      readiness.detailCode,
+    );
   }
 
   async listModels(): Promise<ModelOption[]> {
+    await this.prepareCreateSession();
     const response = await createPiSessionViaRpc(homedir(), {
       catalogOnly: true,
     });
@@ -214,9 +228,9 @@ export class PiAdapter implements AgentBackend {
     title?: string;
     model?: PromptInput['model'];
   } = {}): Promise<SessionInfo> {
+    await this.prepareCreateSession();
     const cwd = opts.directory?.trim() || homedir();
     if (!statSafe(cwd)?.isDirectory()) throw new Error(`Pi createSession directory does not exist: ${cwd}`);
-    if (resolveBin('pi') === null) throw new Error('Pi CLI is not available on PATH; cannot create a Pi session.');
 
     const title = opts.title?.trim() || undefined;
     const state = await createPiSessionViaRpc(cwd, {
@@ -2299,8 +2313,7 @@ function baseDir(p: string): string {
 function resolveBin(bin: string): string | null {
   try {
     if (bin === 'pi') {
-      const override = process.env.COSYNCING_PI_BIN?.trim();
-      if (override) return override;
+      return currentPiRuntimeReadiness().executable ?? null;
     }
     return Bun.which(bin);
   } catch {

@@ -1585,7 +1585,7 @@ try {
     const piBin = join(packageRoot, 'pi');
     mkdirSync(packageRoot, { recursive: true });
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '0.78.1' }));
-    writeFileSync(piBin, '#!/usr/bin/env sh\nexit 0\n');
+    writeFileSync(piBin, `#!${process.execPath}\nconsole.log('Pi 0.78.1');\n`);
     chmodSync(piBin, 0o755);
     const context = contextFor(machine, { PATH: packageRoot });
     const presenter = new ScriptedPresenter();

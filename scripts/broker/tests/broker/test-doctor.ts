@@ -329,7 +329,10 @@ try {
   // perfectly healthy daemon of being dead.
   const codexSocketContext = (platform: string): SetupDiagnosisContext => fakeContext({
     platform,
-    executables: { codex: '/fixture/bin/codex' },
+    executables: {
+      codex: '/fixture/bin/codex',
+      ...(platform === 'darwin' ? { '/bin/ps': '/bin/ps', '/usr/sbin/lsof': '/usr/sbin/lsof' } : {}),
+    },
     inspectPath: (path) => (path.endsWith('.sock') || path.includes('app-server')
       ? { status: 'socket', readable: true, displayPath: path }
       : { status: 'missing', readable: false, displayPath: path }),
@@ -344,10 +347,41 @@ try {
   const linuxCodex = await diagnoseCodexSetup(codexSocketContext('linux'));
   const darwinDaemon = checkById(darwinCodex, 'codex.daemon-status');
   const linuxDaemon = checkById(linuxCodex, 'codex.daemon-status');
+  const darwinPresence = checkById(darwinCodex, 'codex.terminal-presence-capability');
   check('Codex daemon-status degrades to an explicit skip on darwin instead of a false stale verdict',
     darwinDaemon.status === 'skip' && darwinDaemon.detailCode === 'daemon-status-platform-unsupported'
       && linuxDaemon.status === 'fail' && linuxDaemon.detailCode === 'daemon-socket-stale',
     `${darwinDaemon.status}:${darwinDaemon.detailCode} vs ${linuxDaemon.status}:${linuxDaemon.detailCode}`);
+  check('Codex doctor advertises macOS restore evidence only when ps and lsof are both present',
+    darwinPresence.status === 'pass' && darwinPresence.detailCode === 'terminal-presence-capable',
+    `${darwinPresence.status}:${darwinPresence.detailCode}`);
+  const darwinMissingPresence = checkById(
+    await diagnoseCodexSetup(fakeContext({
+      platform: 'darwin',
+      executables: { codex: '/fixture/bin/codex', '/bin/ps': '/bin/ps' },
+    })),
+    'codex.terminal-presence-capability',
+  );
+  check('Codex doctor keeps automatic macOS restoration unavailable when lsof is missing',
+    darwinMissingPresence.status === 'warn' &&
+      darwinMissingPresence.detailCode === 'terminal-presence-tools-missing' &&
+      /automatic Drive restoration stays disabled/i.test(darwinMissingPresence.remediation?.message ?? ''),
+    `${darwinMissingPresence.status}:${darwinMissingPresence.detailCode}`);
+  const darwinShadowedPresence = checkById(
+    await diagnoseCodexSetup(fakeContext({
+      platform: 'darwin',
+      executables: {
+        codex: '/fixture/bin/codex',
+        ps: '/fixture/user-writable/ps',
+        lsof: '/fixture/user-writable/lsof',
+      },
+    })),
+    'codex.terminal-presence-capability',
+  );
+  check('Codex doctor rejects PATH-shadowed macOS inspection tools',
+    darwinShadowedPresence.status === 'warn' &&
+      darwinShadowedPresence.detailCode === 'terminal-presence-tools-missing',
+    `${darwinShadowedPresence.status}:${darwinShadowedPresence.detailCode}`);
 
   const sentinel = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';
   const failureRecord = JSON.stringify({

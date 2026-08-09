@@ -48,6 +48,7 @@ let managed: Bun.Subprocess | null = null;
 let managedStartedAt = 0;
 let managedBaseUrl: string | null = null;
 let managedLifecycleRestart: Promise<void> | null = null;
+let managedStartupInFlight: Promise<void> | null = null;
 let teardownRegistered = false;
 
 function boundedStreamCapture(stream: ReadableStream<Uint8Array>, limit = 8 * 1024): {
@@ -307,6 +308,7 @@ export function classifyServeOwnership(
 /** Test seam: override how the live listener's identity is resolved so the wiring is deterministic without
  *  depending on lsof / `/proc` / `ps` in CI. null → use the real resolver (production path). */
 let liveIdentityOverrideForTest: ((port: number) => ProcessIdentity | null) | null = null;
+let opencodeBinOverrideForTest: string | null = null;
 
 /** Resolve the identity of the process listening on `port` (lsof → pid → OS identity), or the test override. */
 function resolveLiveIdentity(port: number): ProcessIdentity | null {
@@ -395,7 +397,18 @@ function registerTeardown(): void {
  * Launch a broker-owned `opencode serve` if appropriate (see module doc). Best-effort and non-fatal:
  * any failure leaves OpenCode on its observe/resume path. Safe to call once at broker startup.
  */
-export async function ensureManagedOpencodeServe(shouldContinue: () => boolean = () => true): Promise<void> {
+export function ensureManagedOpencodeServe(shouldContinue: () => boolean = () => true): Promise<void> {
+  if (managedStartupInFlight) return managedStartupInFlight;
+  const startup = ensureManagedOpencodeServeInternal(shouldContinue);
+  managedStartupInFlight = startup;
+  void startup.then(
+    () => { if (managedStartupInFlight === startup) managedStartupInFlight = null; },
+    () => { if (managedStartupInFlight === startup) managedStartupInFlight = null; },
+  );
+  return startup;
+}
+
+async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean): Promise<void> {
   if (!shouldContinue()) return;
   const optOut = process.env.COSYNCING_OPENCODE_NO_AUTOSERVE;
   if (optOut && optOut !== '0') return;
@@ -446,7 +459,7 @@ export async function ensureManagedOpencodeServe(shouldContinue: () => boolean =
   }
   if (!shouldContinue()) return;
 
-  const bin = Bun.which('opencode');
+  const bin = opencodeBinOverrideForTest ?? Bun.which('opencode');
   if (!bin) return; // not installed → OpenCode stays observe/resume only
   if (!shouldContinue()) return;
 
@@ -474,7 +487,11 @@ export async function ensureManagedOpencodeServe(shouldContinue: () => boolean =
   }
   registerTeardown();
 
-  const deadline = Date.now() + 8000;
+  const configuredTimeout = Number(process.env.COSYNCING_OPENCODE_STARTUP_TIMEOUT_MS);
+  const startupTimeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout >= 250
+    ? Math.min(configuredTimeout, 30_000)
+    : 8_000;
+  const deadline = Date.now() + startupTimeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 300));
     if (!shouldContinue()) {
@@ -514,7 +531,29 @@ export async function ensureManagedOpencodeServe(shouldContinue: () => boolean =
     'opencode-serve-start-timeout',
     stdout && stderr ? capturedOutput(stdout, stderr) : '',
   );
-  console.error(`${LOG_PREFIX} managed opencode serve not reachable at ${base} after 8s; OpenCode stays observe/resume`);
+  console.error(`${LOG_PREFIX} managed opencode serve not reachable at ${base} after ${startupTimeoutMs}ms; OpenCode stays observe/resume`);
+}
+
+/** Wait only for the broker-owned startup/restart operation currently in flight. The adapter follows
+ * this with one safe GET probe and performs the create POST exactly once. A local startup helper has its
+ * own deadline; this outer cap also covers ownership-reclaim work and guarantees callers never wait
+ * forever if a future startup path regresses. */
+export async function waitForManagedOpencodeCreateReadiness(timeoutMs = 12_000): Promise<void> {
+  const boundary = managedLifecycleRestart ?? managedStartupInFlight;
+  if (!boundary) return;
+  const boundedMs = Math.max(100, Math.min(timeoutMs, 30_000));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      boundary.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, boundedMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function managedOpencodeRunningVersion(): Promise<string | undefined> {
@@ -769,6 +808,11 @@ export function __setLiveIdentityOverrideForTest(fn: ((port: number) => ProcessI
   liveIdentityOverrideForTest = fn;
 }
 
+/** Test-only binary resolver seam; production always uses the service PATH. */
+export function __setOpencodeBinOverrideForTest(path: string | null): void {
+  opencodeBinOverrideForTest = path;
+}
+
 /** Test-only: write a durable ownership record so the take-over path classifies a reachable serve as OWNED. */
 export function __writeOpencodeServeOwnershipForTest(identity: ProcessIdentity, baseUrl: string): void {
   writeOwnershipRecord(identity, baseUrl);
@@ -794,18 +838,21 @@ export async function stopManagedOpencodeServe(graceMs = 2000): Promise<void> {
   // The serve we owned is going away (shutdown or restart). Drop the ownership record so a stale pid is never
   // reclaimed later; the restart path rewrites a fresh record once the replacement serve is ready.
   clearOwnershipRecord();
+  let killer: ReturnType<typeof setTimeout> | undefined;
   try {
     m.kill(); // SIGTERM
-    const killer = setTimeout(() => {
+    killer = setTimeout(() => {
       try {
         m.kill(9); // escalate if it ignores SIGTERM
       } catch {
         /* already gone */
       }
     }, graceMs);
+    killer.unref?.();
     await m.exited;
-    clearTimeout(killer);
   } catch {
     /* already gone */
+  } finally {
+    if (killer) clearTimeout(killer);
   }
 }

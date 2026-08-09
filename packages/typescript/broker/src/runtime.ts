@@ -21,6 +21,8 @@ import {
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
   isOwnershipConflictError,
+  isSessionCreateTemporarilyUnavailableError,
+  SessionCreateTemporarilyUnavailableError,
   type AggregatedMachines,
   type AgentMessage,
   type AttachMode,
@@ -127,6 +129,7 @@ import {
   startOpencodeConfigWatch,
   stopOpencodeConfigWatch,
   stopManagedOpencodeServe,
+  waitForManagedOpencodeCreateReadiness,
 } from './opencode-serve.ts';
 import { RuntimeUpdateCoordinator } from './runtime-update.ts';
 import { createCodexRuntimeUpdateProvider, createOpencodeRuntimeUpdateProvider } from './runtime-update-providers.ts';
@@ -537,7 +540,9 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
 }
 
 const registry = new AgentRegistry();
-registry.register(new OpenCodeAdapter());
+registry.register(new OpenCodeAdapter({
+  waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
+}));
 registry.register(new PiAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.piIntegrationSource === 'file',
@@ -828,6 +833,7 @@ async function deliverScheduledSend(schedule: ScheduleRecord): Promise<ScheduleD
       recordAndBroadcastAppMutation(mutated);
       return { createdSessionId: schedule.pendingSessionId };
     }
+    await prepareBackendSessionCreation(backend);
     await requireSupportedModelSelection(backend, schedule.model);
     const info = await backend.createSession(
       normalizeCreateSessionOptions({
@@ -1328,6 +1334,22 @@ async function requireSupportedModelSelection(
     );
     error.name = 'ModelSelectionUnsupportedError';
     throw error;
+  }
+}
+
+async function prepareBackendSessionCreation(backend: {
+  id: string;
+  displayName: string;
+  prepareCreateSession?: () => Promise<void>;
+  canCreateSession?: () => Promise<boolean> | boolean;
+}): Promise<void> {
+  await backend.prepareCreateSession?.();
+  if (typeof backend.canCreateSession === 'function'
+      && !(await Promise.resolve(backend.canCreateSession()).catch(() => false))) {
+    throw new SessionCreateTemporarilyUnavailableError(
+      `${backend.displayName} is temporarily unavailable for session creation. Run \`cosyncing doctor\` for setup guidance.`,
+      `${backend.id}-create-readiness-unavailable`,
+    );
   }
 }
 
@@ -4267,6 +4289,7 @@ server = Bun.serve<WsData>({
       }
       try {
         const options = normalizeCreateSessionOptions(body ?? {});
+        await prepareBackendSessionCreation(backend);
         await requireSupportedModelSelection(backend, options.model);
         const info = await backend.createSession(options);
         safeRecordMetadata('create', () => {
@@ -4286,6 +4309,14 @@ server = Bun.serve<WsData>({
             { error: 'model catalog refresh failed', code: 'MODEL_CATALOG_UNAVAILABLE' },
             503,
           );
+        }
+        if (isSessionCreateTemporarilyUnavailableError(err)) {
+          return json({
+            error: err.message,
+            code: 'SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
+            detailCode: err.detailCode,
+            retryable: true,
+          }, 503);
         }
         return json({ error: String(err) }, 500);
       }
@@ -5531,8 +5562,9 @@ brokerUpdateTimer.unref?.();
 
 const runtimeUpdatePollMs = Math.max(10_000, Number(process.env.COSYNCING_RUNTIME_UPDATE_POLL_MS ?? 60_000) || 60_000);
 let runtimeUpdateTimer: ReturnType<typeof setInterval> | undefined;
+const managedOpencodeStartup = ensureManagedOpencodeServe(() => !shuttingDown);
 const runtimeStartup = (async () => {
-  await ensureManagedOpencodeServe(() => !shuttingDown);
+  await managedOpencodeStartup;
   if (shuttingDown) return;
   // A broker start/restart is also a freshness checkpoint. Codex updates automatically only when the
   // selected Codex update policy accepts native loaded-thread activity; OpenCode's newly broker-owned

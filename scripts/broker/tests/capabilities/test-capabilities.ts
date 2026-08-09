@@ -441,6 +441,8 @@ try {
   //   runtime.ts b.id === 'codex'      /api/agents attaches `syncEnabled` only for Codex, the one
   //                                    agent with a persisted enable; the capability fields above it
   //                                    are unbranched. Absent field != disabled for the others.
+  //   setup.ts  id === 'pi'            reads the Pi-only Node-runtime readiness check; it changes
+  //                                    setup presentation, not a capability answer.
   //   setup.ts  id === 'codex'         reads the `codex.standalone-install` doctor check, which no
   //                                    other agent emits; only adds a managedRuntimeWarning.
   //   setup.ts  id === 'claude'        display-name fallback when the version matrix has no row.
@@ -450,6 +452,7 @@ try {
   //   setup.ts  agent.id === 'codex'   records `agents.codex` support in persisted setup state.
   const expectedBrokerBranches = [
     "packages/typescript/broker/src/runtime.ts:b.id === 'codex'",
+    "packages/typescript/broker/src/setup.ts:id === 'pi'",
     "packages/typescript/broker/src/setup.ts:id === 'codex'",
     "packages/typescript/broker/src/setup.ts:id === 'claude'",
     'packages/typescript/broker/src/setup.ts:behavior[id]',
