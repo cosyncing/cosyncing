@@ -12,6 +12,14 @@ only cosyncing-owned integration files. It does not install the coding agent.
 | [Claude Code](claude-code.md) | 2.1.207 | Official npm or native installer | Observe and Take over |
 
 These are cosyncing compatibility floors, not the latest upstream releases.
+Direct agent-to-user file delivery currently works through OpenCode's native
+tool and Pi's cosyncing bridge. Claude Code can render existing native
+`SendUserFile` transcript records, but its local CLI/Drive mode does not expose
+that tool for cosyncing to invoke. Codex has no direct delivery tool. Filesystem
+delivery for Claude Code and Codex is deferred until it can be bound to the
+exact broker and native session; the shared `.cosyncing/outbox` path is not
+supported.
+
 After installing or updating an agent, open a new shell and run:
 
 ```bash

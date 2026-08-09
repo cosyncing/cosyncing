@@ -140,7 +140,7 @@ export const SUPPORT_MATRIX_CLAIMS: SupportClaim[] = [
   claim('pi', 'F12', 'full', 'byte-exact inbox upload'),
 
   // F13 agent-to-user artifacts
-  claim('claude', 'F13', 'full', 'session-qualified SendUserFile transcript mapping'),
+  claim('claude', 'F13', 'partial', 'maps native SendUserFile transcript records, but local CLI/Drive exposes no callable delivery tool'),
   claim('codex', 'F13', 'n/a', 'no exact session-qualified delivery route; shared cwd outbox fails closed'),
   claim('opencode', 'F13', 'full', 'session-qualified send_file plus exact native write events'),
   claim('pi', 'F13', 'full', 'session-qualified bridge send-file route'),
