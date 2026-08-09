@@ -65,14 +65,13 @@ Claude Code 的会话在接管之前保持只读。逐项能力矩阵见
 ## 安装
 
 > [!IMPORTANT]
-> 首个公开发行包尚未发布。npm 上当前的 `cosyncing` 条目只是名称占位包，请勿安装。请关注
-> [GitHub Releases](https://github.com/cosyncing/cosyncing/releases)，等待首个受支持的发行包。
+> cosyncing 需要 [Bun](https://bun.sh) 1.3.8 或更高版本。npm 包不内置 Bun；请先安装 Bun，
+> 再安装 cosyncing。
 
-该发行包是一个自包含的 JavaScript 应用，不内置运行时。请先安装 [Bun](https://bun.sh) 1.3.0 或更高
-版本。受支持的 Broker 主机为 Linux x64、Linux arm64 与 Apple Silicon macOS；Windows 上请在 WSL 内
-运行 Broker。
+该发行包包含一个 JavaScript 应用包和网页客户端。受支持的 Broker 主机为 Linux x64、Linux arm64
+与 Apple Silicon macOS；Windows 上请在 WSL 内运行 Broker。
 
-首个发行包发布后：
+安装当前发行版：
 
 ```bash
 npm install --global cosyncing
