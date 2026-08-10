@@ -106,7 +106,7 @@
     },
     {
       "id": "client",
-      "fingerprint": "sha256:8a571c84033692c4b205a2acbf9bd35bba1abee9116d76a78697e5a576f2b9a1"
+      "fingerprint": "sha256:f5166bb7a28ca5d99eb662b1f363a903ceb53271a5bf41038cb7c2c1b2d170a8"
     },
     {
       "id": "contract",
@@ -214,7 +214,7 @@
     },
     {
       "id": "workflow-policy",
-      "fingerprint": "sha256:b1b6163389f495afb5cdf834c20e4179e0e9d651b9595aa59f0417e35c6b0585"
+      "fingerprint": "sha256:e0cdc66c650b5444b0c80191e3ba0e6dc0b3e79c0caa7ef23b9f8a52f3de64dc"
     }
   ],
   "requiredBrokerSubSuiteBindings": [

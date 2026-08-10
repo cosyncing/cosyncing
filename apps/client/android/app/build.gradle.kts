@@ -4,6 +4,25 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseKeystorePath = System.getenv("COSYNCING_ANDROID_KEYSTORE_PATH")
+val releaseKeyAlias = System.getenv("COSYNCING_ANDROID_KEY_ALIAS")
+val releaseStorePassword = System.getenv("COSYNCING_ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyPassword = System.getenv("COSYNCING_ANDROID_KEY_PASSWORD")
+val requireReleaseSigning =
+    System.getenv("COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING") == "true"
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeyAlias,
+    releaseStorePassword,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
+if (requireReleaseSigning && !hasReleaseSigning) {
+    throw GradleException(
+        "Protected Android release signing was required, but one or more COSYNCING_ANDROID_* values are missing.",
+    )
+}
+
 android {
     namespace = "com.cosyncing.client"
     compileSdk = flutter.compileSdkVersion
@@ -26,11 +45,28 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("cosyncingRelease") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Debug signing is only for local release-mode smoke. Public/store
-            // distribution remains blocked until protected release signing is configured.
-            signingConfig = signingConfigs.getByName("debug")
+            // Local release-mode smoke keeps Flutter's debug certificate. The
+            // GitHub release lane sets COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING
+            // and supplies a protected, long-lived project key; it cannot fall
+            // back to debug signing.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("cosyncingRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

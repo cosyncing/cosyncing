@@ -1,0 +1,354 @@
+name: Stage Client Release
+
+on:
+  push:
+    tags: ['client-v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: 1.3.8
+  FLUTTER_VERSION: 3.44.3
+
+jobs:
+  gate:
+    name: client release contract gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install hosted verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
+      - run: bun install --frozen-lockfile
+      - name: Require an exact clean client version tag on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          client_version="$(sed -n 's/^version: \([0-9][0-9.]*\)+[0-9][0-9]*$/\1/p' apps/client/pubspec.yaml)"
+          test -n "$client_version"
+          test "$client_version" = "$version"
+          test "$GITHUB_REF_NAME" = "client-v$version"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test -z "$(git status --porcelain --untracked-files=normal)"
+      - run: bun run check
+
+  prepare-draft:
+    needs: gate
+    name: prepare empty client draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Create or reset the matching draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --json isDraft,tagName > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            test "$(jq -r .isDraft "$RUNNER_TEMP/release.json")" = true
+            test "$(jq -r .tagName "$RUNNER_TEMP/release.json")" = "$GITHUB_REF_NAME"
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' |
+              while IFS= read -r asset; do
+                test -z "$asset" || gh release delete-asset "$GITHUB_REF_NAME" "$asset" --yes
+              done
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --latest=false \
+              --title "cosyncing client ${GITHUB_REF_NAME#client-v} (staging)" \
+              --notes-file docs/release/client-release-notes.md
+          fi
+
+  linux:
+    needs: prepare-draft
+    name: build Linux x64 client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install Linux desktop build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: Build and package Linux x64
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#client-v}"
+          bun run client:build:desktop -- --target linux --mode release
+          bundle="$(find apps/client/build/linux -type d -path '*/release/bundle' -print -quit)"
+          test -n "$bundle"
+          test -x "$bundle/cosyncing"
+          stage="$RUNNER_TEMP/cosyncing-client-$version-linux-x64"
+          mkdir -p "$stage"
+          cp -R "$bundle"/. "$stage"/
+          cp LICENSE "$stage/LICENSE.txt"
+          cp docs/release/client-release-notes.md "$stage/README.md"
+          mkdir -p output/client-release
+          asset="output/client-release/cosyncing-client-$version-linux-x64.tar.gz"
+          tar -czf "$asset" -C "$RUNNER_TEMP" "$(basename "$stage")"
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+
+  macos:
+    needs: prepare-draft
+    name: build unsigned macOS arm64 client
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: Build and package unsigned macOS arm64 app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#client-v}"
+          test "$(uname -m)" = arm64
+          bun run client:build:desktop -- --target macos --mode release
+          app="$(find apps/client/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$app"
+          codesign -dv --verbose=4 "$app" 2> "$RUNNER_TEMP/codesign.txt" || true
+          if grep -q '^Authority=' "$RUNNER_TEMP/codesign.txt"; then
+            echo 'The unsigned macOS lane unexpectedly produced a certificate-signed app.' >&2
+            exit 1
+          fi
+          stage="$RUNNER_TEMP/cosyncing-client-$version-macos-arm64"
+          mkdir -p "$stage"
+          cp -R "$app" "$stage/Cosyncing.app"
+          cp LICENSE "$stage/LICENSE.txt"
+          cp docs/release/client-release-notes.md "$stage/README.md"
+          ln -s /Applications "$stage/Applications"
+          mkdir -p output/client-release
+          asset="output/client-release/cosyncing-client-$version-macos-arm64-unsigned.dmg"
+          hdiutil create -volname "Cosyncing $version" -srcfolder "$stage" -ov -format UDZO "$asset"
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+
+  windows:
+    needs: prepare-draft
+    name: build unsigned Windows x64 client
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: Build and package unsigned Windows x64 app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME -replace '^client-v', ''
+          bun run client:build:desktop -- --target windows --mode release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
+          $bundle = 'apps/client/build/windows/x64/runner/Release'
+          $exe = Join-Path $bundle 'cosyncing.exe'
+          if (-not (Test-Path $exe)) { throw "Missing Windows executable at $exe" }
+          $signature = Get-AuthenticodeSignature $exe
+          if ($signature.Status -ne 'NotSigned') {
+            throw "The unsigned Windows lane produced signature status $($signature.Status)."
+          }
+          $stage = Join-Path $env:RUNNER_TEMP "cosyncing-client-$version-windows-x64"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item "$bundle/*" $stage -Recurse -Force
+          Copy-Item LICENSE (Join-Path $stage 'LICENSE.txt')
+          Copy-Item docs/release/client-release-notes.md (Join-Path $stage 'README.md')
+          New-Item -ItemType Directory -Path output/client-release -Force | Out-Null
+          $asset = "output/client-release/cosyncing-client-$version-windows-x64-unsigned.zip"
+          Compress-Archive -Path $stage -DestinationPath $asset -CompressionLevel Optimal
+          gh release view $env:GITHUB_REF_NAME --json isDraft --jq '.isDraft' | Select-String -Pattern '^true$'
+          if ($LASTEXITCODE -ne 0) { throw 'Matching draft release is unavailable.' }
+          gh release upload $env:GITHUB_REF_NAME $asset --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload $asset" }
+
+  android:
+    needs: prepare-draft
+    name: build signed Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: client-release-candidate
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: Materialize protected Android signing key
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.COSYNCING_ANDROID_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_B64"
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-android-release.jks"
+          chmod 600 "$RUNNER_TEMP/cosyncing-android-release.jks"
+      - name: Build, verify, and upload signed Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING: 'true'
+          COSYNCING_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/cosyncing-android-release.jks
+          COSYNCING_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.COSYNCING_ANDROID_KEYSTORE_PASSWORD }}
+          COSYNCING_ANDROID_KEY_ALIAS: ${{ secrets.COSYNCING_ANDROID_KEY_ALIAS }}
+          COSYNCING_ANDROID_KEY_PASSWORD: ${{ secrets.COSYNCING_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#client-v}"
+          bun run client:build:android -- --mode release
+          source_apk="apps/client/build/app/outputs/flutter-apk/app-release.apk"
+          test -f "$source_apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -1)"
+          test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs "$source_apk" | tee "$RUNNER_TEMP/apksigner.txt"
+          if grep -qi 'android debug' "$RUNNER_TEMP/apksigner.txt"; then
+            echo 'The public Android package was signed with the debug certificate.' >&2
+            exit 1
+          fi
+          mapfile -t signer_digests < <(
+            sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt"
+          )
+          test "${#signer_digests[@]}" -eq 1
+          expected_signer="$(tr -d '[:space:]:' < docs/release/android-signing-certificate.sha256 | tr '[:upper:]' '[:lower:]')"
+          actual_signer="$(printf '%s' "${signer_digests[0]}" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          if test "$actual_signer" != "$expected_signer"; then
+            echo 'The Android package signer does not match the reviewed cosyncing release certificate.' >&2
+            exit 1
+          fi
+          mkdir -p output/client-release
+          asset="output/client-release/cosyncing-client-$version-android.apk"
+          cp "$source_apk" "$asset"
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+
+  publish-candidate:
+    needs: [linux, macos, windows, android]
+    name: publish checksummed client prerelease
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: client-release-candidate
+    permissions:
+      contents: write
+    steps:
+      - name: Download and verify the exact draft asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#client-v}"
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
+          mkdir dist
+          gh release download "$GITHUB_REF_NAME" --dir dist
+          expected="$(cat <<EOF
+          cosyncing-client-$version-android.apk
+          cosyncing-client-$version-linux-x64.tar.gz
+          cosyncing-client-$version-macos-arm64-unsigned.dmg
+          cosyncing-client-$version-windows-x64-unsigned.zip
+          EOF
+          )"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          test "$actual" = "$expected"
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS --clobber
+          mkdir verified
+          gh release download "$GITHUB_REF_NAME" --dir verified
+          verified_expected="$(cat <<EOF
+          SHA256SUMS
+          cosyncing-client-$version-android.apk
+          cosyncing-client-$version-linux-x64.tar.gz
+          cosyncing-client-$version-macos-arm64-unsigned.dmg
+          cosyncing-client-$version-windows-x64-unsigned.zip
+          EOF
+          )"
+          verified_actual="$(find verified -maxdepth 1 -type f -printf '%f\n' | sort)"
+          test "$verified_actual" = "$verified_expected"
+          (cd verified && sha256sum --check SHA256SUMS)
+      - name: Publish immutable assets for owner acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#client-v}"
+          gh release edit "$GITHUB_REF_NAME" --verify-tag --draft=false --prerelease=true --latest=false \
+            --title "cosyncing client $version (acceptance candidate)"
