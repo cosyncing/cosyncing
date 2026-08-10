@@ -302,6 +302,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: client-release-candidate
+    env:
+      GH_REPO: ${{ github.repository }}
     permissions:
       contents: write
     steps:

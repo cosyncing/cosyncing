@@ -158,6 +158,12 @@ check(
   'candidate remains a prerelease until physical acceptance',
 );
 check(
+  /publish-candidate:[\s\S]*?GH_REPO: \$\{\{ github\.repository \}\}/.test(
+    candidate,
+  ),
+  'checkout-free candidate publication binds GitHub CLI to this repository',
+);
+check(
   promotion.includes("inputs.confirm == 'PROMOTE'"),
   'stable promotion requires typed owner confirmation',
 );
