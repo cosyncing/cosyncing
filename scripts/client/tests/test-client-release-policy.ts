@@ -18,13 +18,15 @@ function check(ok: unknown, message: string): void {
 const read = (path: string): Promise<string> =>
   readFile(join(REPOSITORY_ROOT, path), 'utf8');
 
-const [pubspec, gradle, candidate, promotion, notes] = await Promise.all([
-  read('apps/client/pubspec.yaml'),
-  read('apps/client/android/app/build.gradle.kts'),
-  read('.github/workflows/client-release.yml'),
-  read('.github/workflows/client-release-promote.yml'),
-  read('docs/release/client-release-notes.md'),
-]);
+const [pubspec, gradle, candidate, promotion, notes, androidCertificate] =
+  await Promise.all([
+    read('apps/client/pubspec.yaml'),
+    read('apps/client/android/app/build.gradle.kts'),
+    read('.github/workflows/client-release.yml'),
+    read('.github/workflows/client-release-promote.yml'),
+    read('docs/release/client-release-notes.md'),
+    read('docs/release/android-signing-certificate.sha256'),
+  ]);
 
 const pubspecVersion = /^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\+[0-9]+$/m
   .exec(pubspec)?.[1];
@@ -77,6 +79,16 @@ check(
 check(
   candidate.includes('apksigner" verify --verbose --print-certs'),
   'candidate workflow verifies the final Android APK signature',
+);
+check(
+  /^[0-9a-f]{64}\n$/.test(androidCertificate),
+  'reviewed Android signing certificate is one normalized SHA-256 digest',
+);
+check(
+  candidate.includes('docs/release/android-signing-certificate.sha256') &&
+    candidate.includes('actual_signer') &&
+    candidate.includes('expected_signer'),
+  'candidate binds the Android APK to the reviewed signing certificate',
 );
 check(
   candidate.includes('--prerelease=true --latest=false'),

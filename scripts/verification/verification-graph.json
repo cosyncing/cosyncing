@@ -555,7 +555,7 @@
       "timeoutClass": "cumulative",
       "resourceClass": "heavyweight",
       "platformExclusions": ["cross-platform-builds","physical-multi-host-real-agent"],
-      "sourceOwners": ["scripts/client/check.ts","scripts/client/build-web.ts","scripts/client/build-desktop.ts","scripts/client/build-android.ts","scripts/client/tests/test-desktop-build-command.ts","scripts/client/tests/test-client-release-policy.ts","scripts/client/profile-tests.ts"]
+      "sourceOwners": ["scripts/client/check.ts","scripts/client/build-web.ts","scripts/client/build-desktop.ts","scripts/client/build-android.ts","scripts/client/tests/test-desktop-build-command.ts","scripts/client/tests/test-client-release-policy.ts","scripts/client/profile-tests.ts","docs/release/android-signing-certificate.sha256"]
     },
     {
       "id": "web-browser",

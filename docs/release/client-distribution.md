@@ -42,7 +42,10 @@ The `client-release-candidate` environment holds:
 The keystore must be backed up outside GitHub. Losing it prevents Android from
 accepting future updates over the installed app. The workflow materializes it
 only in runner temporary storage and fails closed rather than falling back to
-Flutter's debug certificate.
+Flutter's debug certificate. The final APK signer must also match the reviewed,
+non-secret certificate fingerprint in
+`docs/release/android-signing-certificate.sha256`; replacing the environment
+secret with a different release key therefore fails publication.
 
 The `client-production` environment guards manual stable promotion and contains
 no signing key.

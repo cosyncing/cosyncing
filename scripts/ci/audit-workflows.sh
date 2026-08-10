@@ -247,6 +247,8 @@ for secret in \
 done
 rg -q "COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING: 'true'" "$client_workflow"
 rg -q 'apksigner.*verify --verbose --print-certs' "$client_workflow"
+rg -q 'docs/release/android-signing-certificate\.sha256' "$client_workflow"
+rg -q 'actual_signer.*!=.*expected_signer' "$client_workflow"
 rg -q 'macos-arm64-unsigned\.dmg' "$client_workflow"
 rg -q 'windows-x64-unsigned\.zip' "$client_workflow"
 if rg -n 'flutter build ios|client:build:.*ios|\.ipa\b' "$client_workflow"; then
