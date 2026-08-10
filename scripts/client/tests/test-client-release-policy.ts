@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import packageJson from '../../../package.json';
 import { REPOSITORY_ROOT } from '../run-client-command.ts';
@@ -86,10 +87,72 @@ check(
 );
 check(
   candidate.includes('docs/release/android-signing-certificate.sha256') &&
+    candidate.includes('extract-android-signer-digest.sh') &&
     candidate.includes('actual_signer') &&
     candidate.includes('expected_signer'),
   'candidate binds the Android APK to the reviewed signing certificate',
 );
+
+const signerExtractor = join(
+  REPOSITORY_ROOT,
+  'scripts/client/extract-android-signer-digest.sh',
+);
+const signerFixtureRoot = await mkdtemp(
+  join(tmpdir(), 'cosyncing-android-signer-'),
+);
+try {
+  const digest = 'e999815a834075ce1d358c1e346a8e29f2be7669fe43873bf7bf4dfb0e6aaf56';
+  const cases = [
+    {
+      name: 'current V2 apksigner label',
+      content: `V2 Signer: certificate SHA-256 digest: ${digest}\n`,
+      expected: digest,
+    },
+    {
+      name: 'legacy numbered apksigner label',
+      content: `Signer #1 certificate SHA-256 digest: ${digest.toUpperCase()}\n`,
+      expected: digest,
+    },
+  ];
+  for (const fixture of cases) {
+    const path = join(signerFixtureRoot, `${fixture.name.replaceAll(' ', '-')}.txt`);
+    await writeFile(path, fixture.content);
+    const result = Bun.spawnSync([signerExtractor, path], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    check(
+      result.exitCode === 0 && result.stdout.toString().trim() === fixture.expected,
+      `Android signer extraction accepts the ${fixture.name}`,
+    );
+  }
+
+  for (const fixture of [
+    {
+      name: 'missing certificate digest',
+      content: `V2 Signer: public key SHA-256 digest: ${digest}\n`,
+    },
+    {
+      name: 'multiple certificate digests',
+      content:
+        `V2 Signer: certificate SHA-256 digest: ${digest}\n` +
+        `Signer #2 certificate SHA-256 digest: ${digest}\n`,
+    },
+  ]) {
+    const path = join(signerFixtureRoot, `${fixture.name.replaceAll(' ', '-')}.txt`);
+    await writeFile(path, fixture.content);
+    const result = Bun.spawnSync([signerExtractor, path], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    check(
+      result.exitCode !== 0,
+      `Android signer extraction refuses ${fixture.name}`,
+    );
+  }
+} finally {
+  await rm(signerFixtureRoot, { recursive: true, force: true });
+}
 check(
   candidate.includes('--prerelease=true --latest=false'),
   'candidate remains a prerelease until physical acceptance',

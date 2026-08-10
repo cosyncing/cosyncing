@@ -284,12 +284,8 @@ jobs:
             echo 'The public Android package was signed with the debug certificate.' >&2
             exit 1
           fi
-          mapfile -t signer_digests < <(
-            sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt"
-          )
-          test "${#signer_digests[@]}" -eq 1
           expected_signer="$(tr -d '[:space:]:' < docs/release/android-signing-certificate.sha256 | tr '[:upper:]' '[:lower:]')"
-          actual_signer="$(printf '%s' "${signer_digests[0]}" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          actual_signer="$(scripts/client/extract-android-signer-digest.sh "$RUNNER_TEMP/apksigner.txt")"
           if test "$actual_signer" != "$expected_signer"; then
             echo 'The Android package signer does not match the reviewed cosyncing release certificate.' >&2
             exit 1
