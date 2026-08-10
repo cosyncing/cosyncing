@@ -272,6 +272,10 @@ if rg -n 'flutter build|client:build|gh release upload' "$client_promote"; then
 fi
 rg -q -- '--prerelease=true --latest=false' "$client_workflow"
 rg -q -- '--prerelease=false --latest' "$client_promote"
+test "$(rg -c 'GH_REPO: \$\{\{ github\.repository \}\}' "$client_workflow")" = 1 || {
+  echo 'ERROR: checkout-free candidate publication must bind GitHub CLI to this repository.' >&2
+  exit 1
+}
 
 for workflow in ci.yml nightly.yml broker-release.yml client-release.yml; do
   test "$(rg -c 'bun run check$' "$workflow_dir/$workflow")" = 1 || {
