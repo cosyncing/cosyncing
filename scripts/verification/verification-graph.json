@@ -37,7 +37,7 @@
     {
       "id": "release-publication",
       "description": "Signed-channel publication and promotion require protected CI environments and release credentials.",
-      "owners": [".github/workflows/broker-release.yml", ".github/workflows/broker-release-promote.yml"]
+      "owners": [".github/workflows/broker-release.yml", ".github/workflows/broker-release-promote.yml", ".github/workflows/client-release.yml", ".github/workflows/client-release-promote.yml"]
     },
     {
       "id": "runtime-replacement",
@@ -47,7 +47,7 @@
     {
       "id": "cross-platform-builds",
       "description": "Linux ARM64, Android, macOS, iOS, and Windows builds require their declared CI runners.",
-      "owners": [".github/workflows/ci.yml", ".github/workflows/broker-release-gate.yml"]
+      "owners": [".github/workflows/ci.yml", ".github/workflows/broker-release-gate.yml", ".github/workflows/client-release.yml"]
     },
     {
       "id": "physical-multi-host-real-agent",
@@ -267,6 +267,8 @@
         ".github/workflows/broker-release-gate.yml",
         ".github/workflows/broker-release-promote.yml",
         ".github/workflows/broker-release.yml",
+        ".github/workflows/client-release-promote.yml",
+        ".github/workflows/client-release.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/nightly.yml",
         ".github/workflows/platform-runtime.yml"
@@ -547,13 +549,13 @@
       "releaseDomain": "Flutter client",
       "claimIds": ["client.complete"],
       "command": ["bun", "run", "client:check"],
-      "focusedDiagnostics": [["bun","run","test:desktop-build-command"],["bun","run","client:format"],["bun","run","client:analyze"],["bun","run","client:test"],["bun","run","scripts/client/run-client-command.ts","flutter","test","test/src/features/sessions/data/session_truth_conformance_test.dart"],["bun","run","client:build:web"]],
+      "focusedDiagnostics": [["bun","run","test:desktop-build-command"],["bun","run","test:client-release-policy"],["bun","run","client:format"],["bun","run","client:analyze"],["bun","run","client:test"],["bun","run","scripts/client/run-client-command.ts","flutter","test","test/src/features/sessions/data/session_truth_conformance_test.dart"],["bun","run","client:build:web"]],
       "dependencies": ["contract"],
       "expectedArtifacts": [{"path":"output/check/logs/client.log","kind":"log"},{"path":"apps/client/build/web","kind":"directory"}],
       "timeoutClass": "cumulative",
       "resourceClass": "heavyweight",
       "platformExclusions": ["cross-platform-builds","physical-multi-host-real-agent"],
-      "sourceOwners": ["scripts/client/check.ts","scripts/client/build-web.ts","scripts/client/build-desktop.ts","scripts/client/tests/test-desktop-build-command.ts","scripts/client/profile-tests.ts"]
+      "sourceOwners": ["scripts/client/check.ts","scripts/client/build-web.ts","scripts/client/build-desktop.ts","scripts/client/build-android.ts","scripts/client/tests/test-desktop-build-command.ts","scripts/client/tests/test-client-release-policy.ts","scripts/client/profile-tests.ts"]
     },
     {
       "id": "web-browser",

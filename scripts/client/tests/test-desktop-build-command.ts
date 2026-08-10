@@ -3,6 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import packageJson from '../../../package.json';
 import {
+  ANDROID_BUILD_MODES,
+  androidBuildCommand,
+} from '../build-android.ts';
+import {
   DESKTOP_BUILD_TARGETS,
   desktopBuildCommand,
 } from '../build-desktop.ts';
@@ -43,6 +47,14 @@ for (const target of DESKTOP_BUILD_TARGETS) {
   }
 }
 
+for (const mode of ANDROID_BUILD_MODES) {
+  const command = androidBuildCommand(mode);
+  check(
+    command.includes(versionDefine) === (mode === 'release'),
+    `android ${mode} build ${mode === 'release' ? 'stamps' : 'omits'} the release version`,
+  );
+}
+
 for (const relativePath of [
   'scripts/client/platform_build_smoke.sh',
   'scripts/client/voice_validation.sh',
@@ -64,7 +76,7 @@ const clientCheck = await readFile(
 );
 check(
   clientCheck.includes('tests/test-desktop-build-command.ts'),
-  'client:check executes the desktop build command regression',
+  'client:check executes the release build command regression',
 );
 
 if (failures > 0) process.exit(1);

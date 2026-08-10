@@ -12,6 +12,7 @@
 - [Public CI architecture](ci/public-ci.md)
 - [Predecessor workflow audit](ci/predecessor-workflow-audit.md)
 - [Broker release and signing](release/broker-release-signing.md)
+- [Client distribution](release/client-distribution.md)
 - [Compiled broker distribution gate](legal/binary-distribution-readiness.md)
 - [npm JavaScript distribution readiness](legal/npm-javascript-distribution-readiness.md)
 - [Consolidation transition](project/consolidation-transition.md)

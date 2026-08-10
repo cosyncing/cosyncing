@@ -8,6 +8,7 @@ import { runClientCommand } from './run-client-command.ts';
 const commands = [
   ['flutter', 'pub', 'get'],
   ['bun', 'run', '../../scripts/client/tests/test-desktop-build-command.ts'],
+  ['bun', 'run', '../../scripts/client/tests/test-client-release-policy.ts'],
   [
     'dart', 'format', '--output=none', '--set-exit-if-changed',
     'lib', 'test', 'tool', 'integration_test', 'test_driver', '../../packages/dart',

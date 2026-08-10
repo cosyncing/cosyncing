@@ -24,6 +24,8 @@ expected_names='broker-release-gate.yml
 broker-release-promote.yml
 broker-release.yml
 ci.yml
+client-release-promote.yml
+client-release.yml
 nightly.yml
 npm-publish.yml
 platform-runtime.yml'
@@ -222,7 +224,53 @@ npm_ref_case refuse cosyncing/cosyncing tag npm-v1.2.4 1.2.3         # a tag for
 npm_ref_case refuse cosyncing/cosyncing tag broker-v1.2.3 1.2.3      # the gated native release tag
 npm_ref_case refuse cosyncing/cosyncing tag npm-v1.2.3 ''            # no version to bind the tag to
 
-for workflow in ci.yml nightly.yml broker-release.yml; do
+# Client publication policy. Client packages never contain the broker, and
+# unsigned macOS/Windows status must remain explicit in both asset names and
+# release copy. Android is different: installable APKs require the protected
+# long-lived project key and must fail closed instead of using Flutter's debug
+# certificate.
+client_workflow="$workflow_dir/client-release.yml"
+client_promote="$workflow_dir/client-release-promote.yml"
+rg -q "tags: \['client-v\*\.\*\.\*'\]" "$client_workflow"
+rg -q '^      - run: bun run check$' "$client_workflow"
+rg -q 'git merge-base --is-ancestor "\$GITHUB_SHA" origin/main' "$client_workflow"
+rg -q 'environment: client-release-candidate' "$client_workflow"
+for secret in \
+  COSYNCING_ANDROID_KEYSTORE_B64 \
+  COSYNCING_ANDROID_KEYSTORE_PASSWORD \
+  COSYNCING_ANDROID_KEY_ALIAS \
+  COSYNCING_ANDROID_KEY_PASSWORD; do
+  rg -q "secrets\.${secret}" "$client_workflow" || {
+    echo "ERROR: client release workflow is missing protected secret $secret." >&2
+    exit 1
+  }
+done
+rg -q "COSYNCING_REQUIRE_ANDROID_RELEASE_SIGNING: 'true'" "$client_workflow"
+rg -q 'apksigner.*verify --verbose --print-certs' "$client_workflow"
+rg -q 'macos-arm64-unsigned\.dmg' "$client_workflow"
+rg -q 'windows-x64-unsigned\.zip' "$client_workflow"
+if rg -n 'flutter build ios|client:build:.*ios|\.ipa\b' "$client_workflow"; then
+  echo 'ERROR: iOS distribution is deferred until an Apple Developer Program membership exists.' >&2
+  exit 1
+fi
+if rg -n 'build-broker\.ts|--compile|broker-v' "$client_workflow" "$client_promote"; then
+  echo 'ERROR: client releases must not build or publish the native broker.' >&2
+  exit 1
+fi
+rg -q '^    if: \$\{\{ inputs\.confirm == '\''PROMOTE'\'' \}\}$' "$client_promote" || {
+  echo 'ERROR: stable client promotion must require typed PROMOTE confirmation.' >&2
+  exit 1
+}
+rg -q '^    environment: client-production$' "$client_promote"
+rg -q 'sha256sum --check SHA256SUMS' "$client_promote"
+if rg -n 'flutter build|client:build|gh release upload' "$client_promote"; then
+  echo 'ERROR: stable client promotion must not rebuild or replace candidate assets.' >&2
+  exit 1
+fi
+rg -q -- '--prerelease=true --latest=false' "$client_workflow"
+rg -q -- '--prerelease=false --latest' "$client_promote"
+
+for workflow in ci.yml nightly.yml broker-release.yml client-release.yml; do
   test "$(rg -c 'bun run check$' "$workflow_dir/$workflow")" = 1 || {
     echo "ERROR: $workflow must consume exactly one canonical repository check." >&2
     exit 1
