@@ -162,6 +162,7 @@ async function openRosterSession(
   page: Page,
   origin: string,
   title: string,
+  sessionId: string,
 ): Promise<void> {
   await page.setViewportSize({ width: 800, height: 1000 });
   await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
@@ -194,10 +195,35 @@ async function openRosterSession(
       `${String(error)}\nURL ${page.url()}\nARIA ${JSON.stringify(labels)}\nROLES ${JSON.stringify(roles)}\nTEXT ${text.slice(0, 4_000)}`,
     );
   }
-  await rowTitle.first().click();
-  await page.waitForURL((url) => decodeURIComponent(url.hash).includes('/sessions/pi/'), {
-    timeout: 10_000,
-  });
+  // Flutter can replace a semantics row while a roster refresh is painting.
+  // Treat locating, clicking, and witnessing the exact destination as one
+  // bounded operation instead of retaining a semantic node across the refresh.
+  const expectedRoute = `/sessions/pi/${sessionId}`;
+  const clickDeadline = Date.now() + 30_000;
+  let clickFailure: unknown;
+  while (Date.now() < clickDeadline) {
+    try {
+      await rowTitle.first().click({ force: true, timeout: 5_000 });
+      await page.waitForURL(
+        (url) => decodeURIComponent(url.hash).includes(expectedRoute),
+        { timeout: 5_000 },
+      );
+      clickFailure = undefined;
+      break;
+    } catch (error) {
+      clickFailure = error;
+      if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
+        clickFailure = undefined;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+  }
+  if (clickFailure != null) {
+    throw new Error(
+      `Could not open roster session ${title} (${sessionId}): ${String(clickFailure)}`,
+    );
+  }
   // Session Detail records the compact destination in the durable working set.
   // Returning to Sessions after the resize mounts that exact tab in the real
   // expanded workspace.
@@ -323,13 +349,13 @@ try {
     if (message.type() === 'error') browserErrors.push(message.text());
   });
 
-  await openRosterSession(page, brokerA.origin, 'Artifact owner');
+  await openRosterSession(page, brokerA.origin, 'Artifact owner', ownerId);
   await waitForArtifact(page);
   await page.waitForTimeout(300);
 
   // Opening the peer creates the second working-set tab. It must never display
   // the owner's artifact even though both sessions share one cwd.
-  await openRosterSession(page, brokerA.origin, 'Artifact peer');
+  await openRosterSession(page, brokerA.origin, 'Artifact peer', peerId);
   await page.waitForTimeout(500);
   assert.equal(
     await page.getByRole('button', { name: 'Download', exact: true }).count(),
@@ -455,7 +481,7 @@ try {
   // to another broker's app. Switch through broker B's real /cosy/ mount, as a
   // web user does. Broker B has the identical Pi id but no artifact; the old
   // transcript/card must not cross the physical broker origin.
-  await openRosterSession(page, brokerB.origin, 'Artifact owner');
+  await openRosterSession(page, brokerB.origin, 'Artifact owner', sameOwnerIdOnB);
   await page.waitForTimeout(750);
   assert.equal(await page.locator('[role]').filter({ hasText: 'report.txt' }).count(), 0,
     'broker B displayed broker A transcript artifact');
@@ -467,7 +493,7 @@ try {
   const darkProfile = mkdtempSync(join(root, 'dark-profile-'));
   darkContext = await newBrowserContext(darkProfile, 'dark');
   const darkPage = darkContext.pages()[0] ?? await darkContext.newPage();
-  await openRosterSession(darkPage, brokerA.origin, 'Artifact owner');
+  await openRosterSession(darkPage, brokerA.origin, 'Artifact owner', ownerId);
   await waitForArtifact(darkPage);
   await darkPage.screenshot({
     path: join(OUTPUT, 'artifact-card-dark.png'),
