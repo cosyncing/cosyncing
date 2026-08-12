@@ -55,7 +55,7 @@ final class MachineRosterController
     try {
       final client = await ref.read(brokerClientProvider.future);
       if (client == null) {
-        throw StateError('Connect to a broker to load machine sessions.');
+        throw StateError('Connect to a server to load machine sessions.');
       }
       final response = await client.listMachines();
       if (!_isCurrent(source, generation)) return;

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/connection/controller/broker_gate_controller.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
@@ -18,6 +19,7 @@ import 'package:go_router/go_router.dart';
 /// Renders nothing while connected. Otherwise it explains the blocking
 /// condition and offers only the recovery actions that apply:
 ///
+/// * [BrokerGateStatus.unselected] — offers a single route to add a server.
 /// * [BrokerGateStatus.unreachable] — reports the broker as offline and
 ///   deliberately offers **no** credential entry. Asking for a token when the
 ///   broker is merely down teaches users to re-paste a working secret.
@@ -70,9 +72,35 @@ class BrokerConnectionGate extends ConsumerWidget {
         BrokerGateStatus.connected => const SizedBox.shrink(
           key: Key('broker-gate-connected'),
         ),
+        BrokerGateStatus.unselected => const _UnselectedCard(),
         BrokerGateStatus.unreachable => _UnreachableCard(state: state),
         BrokerGateStatus.unauthorized => _UnauthorizedCard(state: state),
       },
+    );
+  }
+}
+
+/// First-run presentation when no saved server is selected.
+class _UnselectedCard extends StatelessWidget {
+  const _UnselectedCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return _GateCard(
+      key: const Key('broker-gate-unselected'),
+      icon: Icons.dns_outlined,
+      title: l10n.brokerGateUnselectedTitle,
+      body: l10n.brokerGateUnselectedBody,
+      isFailure: false,
+      children: [
+        FilledButton.icon(
+          key: const Key('broker-gate-connect-server'),
+          onPressed: () => context.push(connectionRoute),
+          icon: const Icon(Icons.link),
+          label: Text(l10n.brokerGateConnectServer),
+        ),
+      ],
     );
   }
 }
@@ -87,13 +115,12 @@ class _UnreachableCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final target = state.brokerUrl;
+    final name = state.profileDisplayName ?? target?.host ?? '';
     return _GateCard(
       key: const Key('broker-gate-unreachable'),
       icon: Icons.cloud_off,
-      title: l10n.brokerGateUnreachableTitle,
-      body: target == null
-          ? l10n.brokerGateUnreachableBody
-          : l10n.brokerGateUnreachableBodyAt('$target'),
+      title: l10n.brokerGateUnreachableTitle(name),
+      body: l10n.brokerGateUnreachableBodyAt(target?.toString() ?? ''),
       detail: state.detail,
       children: [
         _RetryButton(
@@ -102,10 +129,16 @@ class _UnreachableCard extends ConsumerWidget {
           ),
         ),
         OutlinedButton.icon(
-          key: const Key('broker-gate-change-url'),
+          key: const Key('broker-gate-switch-server'),
+          onPressed: () => context.push(brokerProfilesRoute),
+          icon: const Icon(Icons.swap_horiz),
+          label: Text(l10n.brokerGateSwitchServer),
+        ),
+        OutlinedButton.icon(
+          key: const Key('broker-gate-add-server'),
           onPressed: () => context.push(connectionRoute),
-          icon: const Icon(Icons.link),
-          label: Text(l10n.brokerGateChangeUrl),
+          icon: const Icon(Icons.add_link),
+          label: Text(l10n.brokerGateAddServer),
         ),
       ],
     );
@@ -257,27 +290,27 @@ class _UnauthorizedCardState extends ConsumerState<_UnauthorizedCard>
 class _TokenHelp extends StatelessWidget {
   const _TokenHelp();
 
-  /// Location of the owner token on the broker host.
-  static const String tokenPath = '~/.cosyncing/secrets/broker-token';
+  /// Command that prints the owner token on the broker host.
+  static const String tokenCommand = 'cat ~/.cosyncing/secrets/broker-token';
 
   /// Command that pairs a device instead of using the owner token.
-  static const String pairCommand = 'cosyncing pair';
+  static const String pairCommand = 'cosy pair';
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
-    final colors = theme.colorScheme;
+    final tokens = context.tokens;
     final labelStyle = theme.textTheme.bodySmall?.copyWith(
-      color: colors.onSurfaceVariant,
+      color: tokens.textSecondary,
     );
 
     return Container(
       key: const Key('broker-gate-token-help'),
       width: double.infinity,
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+        color: tokens.surface2,
+        borderRadius: BorderRadius.circular(tokens.radiusMd),
       ),
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -288,33 +321,20 @@ class _TokenHelp extends StatelessWidget {
             style: theme.textTheme.labelLarge,
           ),
           const SizedBox(height: 8),
-          Text(l10n.brokerGateTokenHelpLocation, style: labelStyle),
-          const SizedBox(height: 4),
-          const _CodeText(tokenPath),
-          const SizedBox(height: 12),
-          Text(l10n.brokerGateTokenHelpPair, style: labelStyle),
-          const SizedBox(height: 4),
-          const _CodeText(pairCommand),
+          Text(l10n.brokerGateTokenHelpGuidance, style: labelStyle),
+          const SizedBox(height: 8),
+          CopyableCodeLine(
+            text: tokenCommand,
+            copyTooltip: l10n.copyCommand,
+            copiedMessage: l10n.copyCommandCopied,
+          ),
+          const SizedBox(height: 8),
+          CopyableCodeLine(
+            text: pairCommand,
+            copyTooltip: l10n.copyCommand,
+            copiedMessage: l10n.copyCommandCopied,
+          ),
         ],
-      ),
-    );
-  }
-}
-
-/// A literal path or command, styled so it reads as something to copy.
-class _CodeText extends StatelessWidget {
-  const _CodeText(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Text(
-      text,
-      style: theme.textTheme.bodySmall?.copyWith(
-        fontFamily: 'monospace',
-        color: theme.colorScheme.onSurface,
       ),
     );
   }
@@ -497,7 +517,12 @@ class _GateCard extends StatelessWidget {
             ),
             if (content.isNotEmpty) ...[
               const SizedBox(height: 16),
-              ...content,
+              SelectionArea(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: content,
+                ),
+              ),
             ],
             if (children.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -549,14 +574,16 @@ class _TechnicalDetails extends StatelessWidget {
           ),
         ),
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              detail,
-              key: const Key('broker-gate-detail'),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontFamily: 'monospace',
+          SelectionArea(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                detail,
+                key: const Key('broker-gate-detail'),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontFamily: 'monospace',
+                ),
               ),
             ),
           ),

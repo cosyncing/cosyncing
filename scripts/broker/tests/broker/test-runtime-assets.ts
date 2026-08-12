@@ -59,6 +59,21 @@ import {
 } from '../helpers/isolated-broker-fixture.ts';
 import { verificationEnvironment } from '../../../verification/verification-graph.ts';
 
+function readFrozenTextFixture(path: string): string {
+  const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  if (asset.schemaVersion !== 1 || asset.release !== '0.1.0'
+    || !Array.isArray(asset.lines) || !asset.lines.every((line) => typeof line === 'string')
+    || typeof asset.trailingNewline !== 'boolean') throw new Error(`invalid frozen text fixture: ${path}`);
+  return `${asset.lines.join('\n')}${asset.trailingNewline ? '\n' : ''}`;
+}
+
+// Read the released predecessor independently from bridge-asset.ts. If production code ever derives the
+// legacy identity from the current bridge again, this fixed fixture will stop matching and fail the test.
+const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
+  import.meta.dir,
+  '../../../../packages/typescript/adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+));
+
 const ROOT = join(import.meta.dir, '../../../..');
 const CLEAN_ENV = verificationEnvironment();
 const results: { name: string; ok: boolean; detail?: string }[] = [];
@@ -436,14 +451,31 @@ try {
   check('Pi bridge inspection reports a missing target without confirmation',
     inspectPiBridgeAsset(agentDir).status === 'missing' && !inspectPiBridgeAsset(agentDir).requiresConfirmation);
   mkdirSync(join(agentDir, 'extensions', 'cosyncing-bridge'), { recursive: true });
+  const releasedImplementationNote = [
+    'See docs',
+    '06-roadmap',
+    '00-Implementation-logs',
+    '2026-06-15-roster-completeness-and-bridge-multiturn.md.',
+  ].join('/');
+  check('the frozen Pi predecessor retains the released paths and resolved state directory',
+    PI_BRIDGE_V010_FIXTURE.includes('See packages/broker/src/pi-bridge.ts.')
+      && PI_BRIDGE_V010_FIXTURE.includes(releasedImplementationNote)
+      && PI_BRIDGE_V010_FIXTURE.includes('See enrichPiToolResult in packages/adapters/pi/src/index.ts.')
+      && PI_BRIDGE_V010_FIXTURE.includes('packages/broker/src/pi-bridge.ts (PiBridgeRegistry.bye)')
+      && PI_BRIDGE_V010_FIXTURE.includes("join(homedir(), '.cosyncing')")
+      && !PI_BRIDGE_V010_FIXTURE.includes('__COSYNCING_STATE_DIRECTORY__'));
   writeFileSync(bridge, PI_BRIDGE_EMBEDDED_SOURCE);
   const owned = inspectPiBridgeAsset(agentDir);
   check('matching Pi package hash proves ownership',
     owned.status === 'owned' && !owned.requiresConfirmation && owned.actualSha256 === PI_BRIDGE_EMBEDDED_SHA256);
-  writeFileSync(bridge, `// ${PI_BRIDGE_LEGACY_MARKER}\n// repo-era local edits\n`);
+  writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE);
   const legacy = inspectPiBridgeAsset(agentDir);
-  check('legacy Pi marker is secondary evidence that requires confirmation',
+  check('the exact known legacy Pi bridge requires confirmation',
     legacy.status === 'legacy-marker' && legacy.requiresConfirmation);
+  writeFileSync(bridge, `${PI_BRIDGE_V010_FIXTURE}\n// local edit with ${PI_BRIDGE_LEGACY_MARKER}\n`);
+  const modifiedLegacy = inspectPiBridgeAsset(agentDir);
+  check('a modified marker-bearing Pi bridge is unowned, not migration-eligible',
+    modifiedLegacy.status === 'unowned' && modifiedLegacy.requiresConfirmation);
   writeFileSync(bridge, '// user-owned extension\n');
   const unrelated = inspectPiBridgeAsset(agentDir);
   check('unrelated Pi content is preserved as unowned and requires confirmation',

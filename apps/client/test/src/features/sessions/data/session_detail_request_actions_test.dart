@@ -447,7 +447,7 @@ void main() {
           .attach();
 
       final state = container.read(sessionDetailControllerProvider(key));
-      expect(state.error, 'Connect to a broker before attaching to a session.');
+      expect(state.error, 'Connect to a server before attaching to a session.');
       expect(
         state.connectionStatus,
         SessionDetailConnectionStatus.disconnected,

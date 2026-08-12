@@ -1,8 +1,13 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/controller/broker_gate_controller.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_auth_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_connection_gate.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,16 +23,30 @@ void main() {
       ProviderScope(
         overrides: [
           brokerAuthProbeProvider.overrideWithValue(_StaticAuthProbe(state)),
-          // The gate reads the active profile to resolve the endpoint; the
-          // static probe short-circuits the real network call.
+          // Keep a different current profile mounted so unreachable tests
+          // prove the completed probe renders only its bound identity.
           brokerGateControllerProvider.overrideWith(
             () => _StubGateController(state),
+          ),
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => state.status == BrokerGateStatus.unselected
+                ? null
+                : BrokerProfile(
+                    id: 'studio',
+                    displayName: 'Studio server',
+                    baseUri: Uri.parse('https://studio.example:9443'),
+                    createdAt: DateTime(2026),
+                  ),
           ),
         ],
         child: MaterialApp(
           locale: locale,
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
+          theme: buildAppTheme(
+            themeSpecById(kDefaultThemeId).light,
+            Brightness.light,
+          ),
           // Mirrors how the gate is actually mounted: the auth barrier wraps it
           // in a SingleChildScrollView and the settings page in a ListView.
           // The card is a tall first-run surface by design.
@@ -62,24 +81,64 @@ void main() {
     });
   });
 
+  group('unselected', () {
+    testWidgets('offers only the connection route', (tester) async {
+      await pumpGate(tester, const BrokerGateState.unselected());
+
+      expect(find.byKey(const Key('broker-gate-unselected')), findsOneWidget);
+      expect(find.text(en.brokerGateUnselectedTitle), findsNWidgets(2));
+      expect(find.text(en.brokerGateUnselectedBody), findsOneWidget);
+      expect(
+        find.byKey(const Key('broker-gate-connect-server')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('broker-gate-retry')), findsNothing);
+      expect(find.byKey(const Key('broker-gate-token-field')), findsNothing);
+      expect(find.byKey(const Key('broker-gate-token-help')), findsNothing);
+      expect(
+        find.byKey(const Key('broker-gate-technical-details')),
+        findsNothing,
+      );
+    });
+  });
+
   group('unreachable', () {
-    testWidgets('shows broker offline', (tester) async {
+    testWidgets('shows the saved server name, address, and recovery routes', (
+      tester,
+    ) async {
       await pumpGate(
         tester,
         BrokerGateState.unreachable(
           detail: 'Connection refused',
           brokerUrl: Uri.parse('http://127.0.0.1:7734'),
+          profileId: 'laptop',
+          profileDisplayName: 'Laptop server',
         ),
       );
 
       expect(find.byKey(const Key('broker-gate-unreachable')), findsOneWidget);
-      expect(find.text(en.brokerGateUnreachableTitle), findsOneWidget);
+      expect(
+        find.text(en.brokerGateUnreachableTitle('Laptop server')),
+        findsOneWidget,
+      );
       expect(find.byKey(const Key('broker-gate-retry')), findsOneWidget);
+      expect(
+        find.byKey(const Key('broker-gate-switch-server')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('broker-gate-add-server')),
+        findsOneWidget,
+      );
       // The address belongs in the copy: it is what the user has to check.
       expect(
         find.textContaining('http://127.0.0.1:7734'),
         findsOneWidget,
       );
+      expect(find.textContaining('https://studio.example:9443'), findsNothing);
+      expect(find.textContaining('server is running'), findsOneWidget);
+      expect(find.textContaining('correct network'), findsOneWidget);
+      expect(find.textContaining('sign-in details'), findsNothing);
     });
 
     testWidgets('never offers credential entry', (tester) async {
@@ -173,11 +232,16 @@ void main() {
 
       // A first-run user cannot guess either of these.
       expect(find.byKey(const Key('broker-gate-token-help')), findsOneWidget);
-      expect(find.text('~/.cosyncing/secrets/broker-token'), findsOneWidget);
-      expect(find.text('cosyncing pair'), findsOneWidget);
+      expect(
+        find.text('cat ~/.cosyncing/secrets/broker-token'),
+        findsOneWidget,
+      );
+      expect(find.text('cosy pair'), findsOneWidget);
+      expect(find.text(en.brokerGateTokenHelpGuidance), findsOneWidget);
+      expect(find.byType(CopyableCodeLine), findsNWidgets(2));
 
       // And the body names both routes in, not just one.
-      expect(find.textContaining('Paste a broker token'), findsOneWidget);
+      expect(find.textContaining('Paste a server token'), findsOneWidget);
       // Body copy plus the button label.
       expect(find.textContaining('pairing QR code'), findsWidgets);
     });
@@ -245,6 +309,13 @@ void main() {
 
       expect(find.byKey(const Key('broker-gate-detail')), findsOneWidget);
       expect(find.textContaining('status code 401'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.byKey(const Key('broker-gate-detail')),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('no disclosure renders when there is no diagnostic', (
@@ -307,6 +378,8 @@ void main() {
         BrokerGateState.unreachable(
           detail: 'Connection refused',
           brokerUrl: Uri.parse('http://127.0.0.1:7734'),
+          profileId: 'support',
+          profileDisplayName: 'Support server',
         ),
       );
 
@@ -315,7 +388,9 @@ void main() {
       expect(
         find.descendant(
           of: find.byType(SelectionArea),
-          matching: find.text(en.brokerGateUnreachableTitle),
+          matching: find.text(
+            en.brokerGateUnreachableTitle('Support server'),
+          ),
         ),
         findsOneWidget,
       );
@@ -356,9 +431,71 @@ void main() {
       );
       expect(tokenField.controller?.text, 'secret-value');
     });
+
+    testWidgets('token guidance and commands are selectable', (tester) async {
+      await pumpGate(
+        tester,
+        const BrokerGateState.unauthorized(
+          credentialIssue: BrokerGateCredentialIssue.missing,
+        ),
+      );
+
+      expect(
+        find.ancestor(
+          of: find.text(en.brokerGateTokenHelpGuidance),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(CopyableCodeLine),
+          matching: find.byType(SelectableText),
+        ),
+        findsNWidgets(2),
+      );
+    });
+
+    testWidgets('credential errors stay selectable without exposing a token', (
+      tester,
+    ) async {
+      await pumpGate(
+        tester,
+        const BrokerGateState.unauthorized(
+          credentialIssue: BrokerGateCredentialIssue.missing,
+        ),
+      );
+      await tester.enterText(
+        find.byKey(const Key('broker-gate-token-field')),
+        '   ',
+      );
+      await tester.tap(find.byKey(const Key('broker-gate-save-token')));
+      await tester.pumpAndSettle();
+
+      final error = find.byKey(const Key('broker-gate-token-error'));
+      expect(error, findsOneWidget);
+      expect(
+        find.ancestor(of: error, matching: find.byType(SelectionArea)),
+        findsOneWidget,
+      );
+      expect(find.textContaining('   '), findsNothing);
+    });
   });
 
   group('localization', () {
+    testWidgets('renders the unselected state in Chinese', (tester) async {
+      final zh = await AppLocalizations.delegate.load(const Locale('zh'));
+      await pumpGate(
+        tester,
+        const BrokerGateState.unselected(),
+        locale: const Locale('zh'),
+      );
+
+      expect(find.text(zh.brokerGateUnselectedTitle), findsNWidgets(2));
+      expect(find.text(zh.brokerGateUnselectedBody), findsOneWidget);
+      expect(find.text(zh.brokerGateConnectServer), findsNWidgets(2));
+    });
+
     testWidgets('renders Chinese copy under a zh locale', (tester) async {
       final zh = await AppLocalizations.delegate.load(const Locale('zh'));
       await pumpGate(
@@ -405,14 +542,9 @@ void main() {
         }
       }
 
-      // The only strings surviving a locale switch are the shell path, the
-      // command, and the product noun "Broker" — all deliberately identical in
-      // both ARB files rather than untranslated literals in Dart.
-      expect(shared, <String>{
-        '~/.cosyncing/secrets/broker-token',
-        'cosyncing pair',
-        'Broker',
-      });
+      // Literal commands render in SelectableText; no ordinary Text copy may
+      // survive a locale switch.
+      expect(shared, isEmpty);
     });
   });
 }

@@ -9,19 +9,56 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+/// Builds the camera viewport used by the production pairing scanner route.
+typedef PairingScannerBuilder =
+    Widget Function(BuildContext context, ValueChanged<String> onDetected);
+
 /// Pairing payload import screen.
 ///
 /// See `docs/architecture/client-ui.md`.
-class PairingPage extends ConsumerStatefulWidget {
+class PairingPage extends StatelessWidget {
   /// Creates the pairing page.
-  const PairingPage({super.key});
+  const PairingPage({this.scannerBuilder = _buildMobileScanner, super.key});
+
+  /// Camera viewport factory. The default is the production mobile scanner.
+  final PairingScannerBuilder scannerBuilder;
 
   @override
-  ConsumerState<PairingPage> createState() => _PairingPageState();
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Scaffold(
+      appBar: AppBar(title: Text(l10n.pairingTitle)),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: PairingForm(scannerBuilder: scannerBuilder),
+        ),
+      ),
+    );
+  }
 }
 
-class _PairingPageState extends ConsumerState<PairingPage>
-    with WebHandoffHold<PairingPage> {
+/// Reusable pairing form shared by the Pairing route and first-run Connection.
+class PairingForm extends ConsumerStatefulWidget {
+  /// Creates a pairing form.
+  const PairingForm({
+    this.showHeader = true,
+    this.scannerBuilder = _buildMobileScanner,
+    super.key,
+  });
+
+  /// Whether to show the explanatory pairing header card.
+  final bool showHeader;
+
+  /// Camera viewport factory. The default is the production mobile scanner.
+  final PairingScannerBuilder scannerBuilder;
+
+  @override
+  ConsumerState<PairingForm> createState() => _PairingFormState();
+}
+
+class _PairingFormState extends ConsumerState<PairingForm>
+    with WebHandoffHold<PairingForm> {
   final _payloadController = TextEditingController();
 
   // A pairing payload is pasted or scanned once and held nowhere else until it
@@ -37,96 +74,107 @@ class _PairingPageState extends ConsumerState<PairingPage>
 
   void _importPayload() {
     final rawPayload = _payloadController.text;
-    _importRawPayload(rawPayload);
+    unawaited(_importRawPayload(rawPayload));
   }
 
-  void _importRawPayload(String rawPayload) {
-    unawaited(
-      ref.read(pairingControllerProvider.notifier).importPayload(rawPayload),
-    );
+  Future<void> _importRawPayload(String rawPayload) async {
+    await ref
+        .read(pairingControllerProvider.notifier)
+        .importPayload(rawPayload);
+    if (!mounted) return;
+    final notice = ref.read(pairingControllerProvider).notice;
+    final succeeded =
+        notice == PairingNotice.paired || notice == PairingNotice.devicePaired;
+    if (succeeded && _payloadController.text == rawPayload) {
+      // Pairing links are one-use secrets. Once accepted, retaining the
+      // populated controller both leaks the payload and indefinitely blocks a
+      // web-update handoff because the Connection route stays mounted.
+      _payloadController.clear();
+    }
   }
 
   Future<void> _scanPayload() async {
     final rawPayload = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(builder: (context) => const _QrScannerPage()),
+      MaterialPageRoute<String>(
+        builder: (context) => _QrScannerPage(
+          scannerBuilder: widget.scannerBuilder,
+        ),
+      ),
     );
     if (rawPayload == null || rawPayload.trim().isEmpty) return;
     _payloadController.text = rawPayload;
-    _importRawPayload(rawPayload);
+    await _importRawPayload(rawPayload);
   }
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final state = ref.watch(pairingControllerProvider);
-    final canScan = _supportsCameraScan();
+    final canScan = _supportsCameraScan(context);
 
-    return Scaffold(
-      appBar: AppBar(title: Text(l10n.pairingTitle)),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.showHeader) ...[
+          const _PairingHeader(),
+          const SizedBox(height: 16),
+        ],
+        TextFormField(
+          controller: _payloadController,
+          key: const Key('pairing-payload-field'),
+          maxLines: 6,
+          minLines: 4,
+          enabled: !state.isBusy,
+          decoration: InputDecoration(
+            labelText: l10n.pairingFieldLabel,
+            border: const OutlineInputBorder(),
+            hintText: l10n.pairingFieldHint,
+            alignLabelWithHint: true,
+          ),
+          keyboardType: TextInputType.text,
+        ),
+        const SizedBox(height: 12),
+        Row(
           children: [
-            const _PairingHeader(),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _payloadController,
-              key: const Key('pairing-payload-field'),
-              maxLines: 6,
-              minLines: 4,
-              decoration: InputDecoration(
-                labelText: l10n.pairingFieldLabel,
-                border: const OutlineInputBorder(),
-                hintText: l10n.pairingFieldHint,
-                alignLabelWithHint: true,
-              ),
-              keyboardType: TextInputType.text,
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    key: const Key('pairing-import-button'),
-                    onPressed: state.isBusy ? null : _importPayload,
-                    icon: state.isBusy
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.link),
-                    label: Text(
-                      state.isBusy ? l10n.pairingImporting : l10n.pairingImport,
-                    ),
-                  ),
+            Expanded(
+              child: FilledButton.icon(
+                key: const Key('pairing-import-button'),
+                onPressed: state.isBusy ? null : _importPayload,
+                icon: state.isBusy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.link),
+                label: Text(
+                  state.isBusy ? l10n.pairingImporting : l10n.pairingImport,
                 ),
-                if (canScan) ...[
-                  const SizedBox(width: 8),
-                  Tooltip(
-                    message: l10n.pairingScanQr,
-                    child: IconButton.filledTonal(
-                      key: const Key('pairing-scan-button'),
-                      onPressed: state.isBusy ? null : _scanPayload,
-                      icon: const Icon(Icons.qr_code_scanner),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 16),
-            if (state.notice != null)
-              _PairingMessage(
-                text: _pairingNoticeText(l10n, state.notice!),
-                icon: state.hasError ? Icons.error : Icons.check_circle,
-                color: state.hasError
-                    ? context.tokens.statusError
-                    : context.tokens.statusWorking,
-                technicalDetail: state.technicalDetail,
               ),
+            ),
+            if (canScan) ...[
+              const SizedBox(width: 8),
+              Tooltip(
+                message: l10n.pairingScanQr,
+                child: IconButton.filledTonal(
+                  key: const Key('pairing-scan-button'),
+                  onPressed: state.isBusy ? null : _scanPayload,
+                  icon: const Icon(Icons.qr_code_scanner),
+                ),
+              ),
+            ],
           ],
         ),
-      ),
+        const SizedBox(height: 16),
+        if (state.notice != null)
+          _PairingMessage(
+            text: _pairingNoticeText(l10n, state.notice!),
+            icon: state.hasError ? Icons.error : Icons.check_circle,
+            color: state.hasError
+                ? context.tokens.statusError
+                : context.tokens.statusWorking,
+          ),
+      ],
     );
   }
 }
@@ -164,7 +212,9 @@ class _PairingHeader extends StatelessWidget {
 }
 
 class _QrScannerPage extends StatefulWidget {
-  const _QrScannerPage();
+  const _QrScannerPage({required this.scannerBuilder});
+
+  final PairingScannerBuilder scannerBuilder;
 
   @override
   State<_QrScannerPage> createState() => _QrScannerPageState();
@@ -178,28 +228,38 @@ class _QrScannerPageState extends State<_QrScannerPage> {
     final l10n = AppLocalizations.of(context);
     return Scaffold(
       appBar: AppBar(title: Text(l10n.pairingScanQr)),
-      body: MobileScanner(
-        key: const Key('pairing-mobile-scanner'),
-        onDetect: (capture) {
-          if (_handled) return;
-          final value = capture.barcodes
-              .map((barcode) => barcode.rawValue)
-              .whereType<String>()
-              .where((raw) => raw.trim().isNotEmpty)
-              .firstOrNull;
-          if (value == null) return;
-          _handled = true;
-          Navigator.of(context).pop(value);
-        },
-      ),
+      body: widget.scannerBuilder(context, _completeScan),
     );
+  }
+
+  void _completeScan(String value) {
+    if (_handled || value.trim().isEmpty) return;
+    _handled = true;
+    Navigator.of(context).pop(value);
   }
 }
 
-bool _supportsCameraScan() {
+Widget _buildMobileScanner(
+  BuildContext _,
+  ValueChanged<String> onDetected,
+) {
+  return MobileScanner(
+    key: const Key('pairing-mobile-scanner'),
+    onDetect: (capture) {
+      final value = capture.barcodes
+          .map((barcode) => barcode.rawValue)
+          .whereType<String>()
+          .where((raw) => raw.trim().isNotEmpty)
+          .firstOrNull;
+      if (value != null) onDetected(value);
+    },
+  );
+}
+
+bool _supportsCameraScan(BuildContext context) {
   if (kIsWeb) return false;
-  return defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+  final platform = Theme.of(context).platform;
+  return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
 }
 
 class _PairingMessage extends StatelessWidget {
@@ -207,41 +267,21 @@ class _PairingMessage extends StatelessWidget {
     required this.text,
     required this.icon,
     required this.color,
-    this.technicalDetail,
   });
 
   final String text;
   final IconData icon;
   final Color color;
-  final String? technicalDetail;
 
   @override
   Widget build(BuildContext context) {
-    final detail = technicalDetail;
-    final l10n = AppLocalizations.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Row(
       children: [
-        Row(
-          children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 8),
-            Expanded(
-              child: SelectableText(text, style: TextStyle(color: color)),
-            ),
-          ],
+        Icon(icon, color: color, size: 20),
+        const SizedBox(width: 8),
+        Expanded(
+          child: SelectableText(text, style: TextStyle(color: color)),
         ),
-        if (detail != null && detail.trim().isNotEmpty)
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            title: Text(l10n.brokerGateTechnicalDetails),
-            children: [
-              Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: SelectableText(detail),
-              ),
-            ],
-          ),
       ],
     );
   }

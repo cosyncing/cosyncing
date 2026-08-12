@@ -33,6 +33,7 @@ const R2_EXPORT_TS = join(ROOT, 'packages/typescript/broker/src/r2-export.ts');
 const HISTORY_DELTA_TS = join(ROOT, 'packages/typescript/broker/src/history-delta.ts');
 const CLIENT_MESSAGE_POLICY_TS = join(ROOT, 'packages/typescript/broker/src/client-message-policy.ts');
 const PROTOCOL_JOURNAL_TS = join(ROOT, 'packages/typescript/broker/src/protocol-journal.ts');
+const DRIVE_ATTACH_REFUSAL_TS = join(ROOT, 'packages/typescript/broker/src/drive-attach-refusal.ts');
 
 function readText(path: string): string {
   return readFileSync(path, 'utf8');
@@ -297,6 +298,11 @@ function main(): void {
     readText(CLIENT_MESSAGE_POLICY_TS),
     CLIENT_MESSAGE_POLICY_TS,
     'ClientMessagePolicyErrorCode',
+  )) requiredCodes.add(code);
+  for (const code of collectStringUnion(
+    readText(DRIVE_ATTACH_REFUSAL_TS),
+    DRIVE_ATTACH_REFUSAL_TS,
+    'DriveAttachRefusalCode',
   )) requiredCodes.add(code);
   const sortedRoutes = [...brokerRoutes].sort();
   const sortedCodes = [...requiredCodes].sort();

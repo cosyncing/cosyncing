@@ -294,18 +294,24 @@ class _LaunchFailure extends StatelessWidget {
           color: context.tokens.statusError,
         ),
         const SizedBox(height: 16),
-        Text(
-          l10n.newSessionLaunchFailedTitle,
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          l10n.failureMessage(l10n.newSessionLaunchFailedLead, advice),
-          key: const Key('new-session-launch-error'),
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: context.tokens.textSecondary,
+        SelectionArea(
+          child: Column(
+            children: [
+              Text(
+                l10n.newSessionLaunchFailedTitle,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                l10n.failureMessage(l10n.newSessionLaunchFailedLead, advice),
+                key: const Key('new-session-launch-error'),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: context.tokens.textSecondary,
+                ),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 24),

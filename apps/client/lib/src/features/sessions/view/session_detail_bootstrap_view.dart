@@ -80,21 +80,27 @@ class _SessionDetailBootstrapSurface extends StatelessWidget {
                   ),
                 ),
               const SizedBox(height: 16),
-              Text(
-                title,
-                key: const Key('session-detail-bootstrap-title'),
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: tokens.textPrimary,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                body,
-                key: const Key('session-detail-bootstrap-message'),
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: tokens.textSecondary,
+              SelectionArea(
+                child: Column(
+                  children: [
+                    Text(
+                      title,
+                      key: const Key('session-detail-bootstrap-title'),
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: tokens.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      body,
+                      key: const Key('session-detail-bootstrap-message'),
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: tokens.textSecondary,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               if (failed) ...[
@@ -154,13 +160,15 @@ class _SessionDetailBootstrapInlineStatus extends StatelessWidget {
               ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                failed
-                    ? _bootstrapStatusMessage(l10n, bootstrap)
-                    : l10n.sessionDetailBootstrapCachedWaiting,
-                key: const Key('session-detail-bootstrap-inline-message'),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: failed ? tokens.statusError : tokens.textSecondary,
+              child: SelectionArea(
+                child: Text(
+                  failed
+                      ? _bootstrapStatusMessage(l10n, bootstrap)
+                      : l10n.sessionDetailBootstrapCachedWaiting,
+                  key: const Key('session-detail-bootstrap-inline-message'),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: failed ? tokens.statusError : tokens.textSecondary,
+                  ),
                 ),
               ),
             ),

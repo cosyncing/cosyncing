@@ -18,7 +18,10 @@ import 'package:go_router/go_router.dart';
 /// See `docs/architecture/client-ui.md`.
 class BrokerProfilesPage extends ConsumerStatefulWidget {
   /// Creates the broker profile management page.
-  const BrokerProfilesPage({super.key});
+  const BrokerProfilesPage({this.embedded = false, super.key});
+
+  /// Renders only the saved-server content for the outer Servers page.
+  final bool embedded;
 
   @override
   ConsumerState<BrokerProfilesPage> createState() => _BrokerProfilesPageState();
@@ -31,42 +34,43 @@ class _BrokerProfilesPageState extends ConsumerState<BrokerProfilesPage> {
     final profileList = ref.watch(brokerProfileListProvider);
     final activeProfile = ref.watch(activeBrokerProfileProvider);
 
-    return Scaffold(
-      appBar: AppBar(title: Text(l10n.brokerProfilesTitle)),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: profileList.when(
-            data: (profiles) => profiles.isEmpty
-                ? _EmptyProfileState(
-                    onOpenConnection: () {
-                      context.push(connectionRoute);
-                    },
-                  )
-                : _ProfileListSection(
-                    profiles: profiles,
-                    activeProfileId: activeProfile?.id,
-                    onActivate: (profile) {
-                      unawaited(_activateProfile(profile));
-                    },
-                    onEdit: (profile) {
-                      unawaited(_openEditDialog(profile));
-                    },
-                    onDelete: (profile) {
-                      unawaited(_confirmDelete(profile));
-                    },
-                  ),
-            error: (error, _) => _ErrorState(
-              message: localizedFailureMessage(
-                l10n,
-                error,
-                lead: l10n.brokerProfilesLoadFailed,
+    final content = Padding(
+      padding: widget.embedded ? EdgeInsets.zero : const EdgeInsets.all(16),
+      child: profileList.when(
+        data: (profiles) => profiles.isEmpty
+            ? _EmptyProfileState(
+                onOpenConnection: () {
+                  context.push(connectionRoute);
+                },
+              )
+            : _ProfileListSection(
+                profiles: profiles,
+                activeProfileId: activeProfile?.id,
+                shrinkWrap: widget.embedded,
+                onActivate: (profile) {
+                  unawaited(_activateProfile(profile));
+                },
+                onEdit: (profile) {
+                  unawaited(_openEditDialog(profile));
+                },
+                onDelete: (profile) {
+                  unawaited(_confirmDelete(profile));
+                },
               ),
-            ),
-            loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => _ErrorState(
+          message: localizedFailureMessage(
+            l10n,
+            error,
+            lead: l10n.brokerProfilesLoadFailed,
           ),
         ),
+        loading: () => const Center(child: CircularProgressIndicator()),
       ),
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: Text(l10n.brokerProfilesTitle)),
+      body: SafeArea(child: content),
     );
   }
 
@@ -177,6 +181,7 @@ class _ProfileListSection extends StatelessWidget {
   const _ProfileListSection({
     required this.profiles,
     required this.activeProfileId,
+    required this.shrinkWrap,
     required this.onActivate,
     required this.onEdit,
     required this.onDelete,
@@ -184,73 +189,88 @@ class _ProfileListSection extends StatelessWidget {
 
   final List<BrokerProfile> profiles;
   final String? activeProfileId;
+  final bool shrinkWrap;
   final ValueChanged<BrokerProfile> onActivate;
   final ValueChanged<BrokerProfile> onEdit;
   final ValueChanged<BrokerProfile> onDelete;
 
   @override
   Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
+    if (shrinkWrap) {
+      return Column(
+        children: [
+          for (final profile in profiles) _buildProfileCard(context, profile),
+        ],
+      );
+    }
     return ListView.builder(
       itemCount: profiles.length,
-      itemBuilder: (context, index) {
-        final profile = profiles[index];
-        final isActive = profile.id == activeProfileId;
+      itemBuilder: (context, index) =>
+          _buildProfileCard(context, profiles[index]),
+    );
+  }
 
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          child: ListTile(
-            key: Key('broker-profile-row-${_sanitizeProfileId(profile.id)}'),
-            title: Text(profile.displayName),
-            subtitle: _ProfileSubtitle(profile: profile),
-            leading: Icon(
-              isActive
-                  ? Icons.radio_button_checked
-                  : Icons.radio_button_unchecked,
-              color: isActive
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.outline,
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (isActive)
-                  Chip(
-                    label: Text(l10n.brokerProfileActive),
-                    visualDensity: VisualDensity.compact,
-                    side: BorderSide.none,
-                  )
-                else
-                  FilledButton(
-                    key: Key(
-                      'broker-profile-activate-'
-                      '${_sanitizeProfileId(profile.id)}',
-                    ),
-                    onPressed: () => onActivate(profile),
-                    child: Text(l10n.brokerProfileUse),
-                  ),
-                const SizedBox(width: 8),
-                IconButton(
-                  key: Key(
-                    'broker-profile-edit-${_sanitizeProfileId(profile.id)}',
-                  ),
-                  icon: const Icon(Icons.edit_outlined),
-                  onPressed: () => onEdit(profile),
-                  tooltip: l10n.brokerProfileEditTooltip,
-                ),
-                IconButton(
-                  key: Key(
-                    'broker-profile-delete-${_sanitizeProfileId(profile.id)}',
-                  ),
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => onDelete(profile),
-                  tooltip: l10n.brokerProfileDeleteTooltip,
-                ),
-              ],
-            ),
+  Widget _buildProfileCard(BuildContext context, BrokerProfile profile) {
+    final l10n = AppLocalizations.of(context);
+    final isActive = profile.id == activeProfileId;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        key: Key('broker-profile-row-${_sanitizeProfileId(profile.id)}'),
+        title: SelectionArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(profile.displayName),
+              const SizedBox(height: 4),
+              _ProfileSubtitle(profile: profile),
+            ],
           ),
-        );
-      },
+        ),
+        leading: Icon(
+          isActive ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+          color: isActive
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.outline,
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isActive)
+              Chip(
+                label: Text(l10n.brokerProfileActive),
+                visualDensity: VisualDensity.compact,
+                side: BorderSide.none,
+              )
+            else
+              FilledButton(
+                key: Key(
+                  'broker-profile-activate-'
+                  '${_sanitizeProfileId(profile.id)}',
+                ),
+                onPressed: () => onActivate(profile),
+                child: Text(l10n.brokerProfileUse),
+              ),
+            const SizedBox(width: 8),
+            IconButton(
+              key: Key(
+                'broker-profile-edit-${_sanitizeProfileId(profile.id)}',
+              ),
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: () => onEdit(profile),
+              tooltip: l10n.brokerProfileEditTooltip,
+            ),
+            IconButton(
+              key: Key(
+                'broker-profile-delete-${_sanitizeProfileId(profile.id)}',
+              ),
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => onDelete(profile),
+              tooltip: l10n.brokerProfileDeleteTooltip,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -273,24 +293,22 @@ class _ProfileSubtitle extends StatelessWidget {
       );
     }
 
-    return SelectionArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            profile.baseUri.toString(),
-            style: Theme.of(context).textTheme.bodySmall,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          profile.baseUri.toString(),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          metadata.join(' · '),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
-          const SizedBox(height: 4),
-          Text(
-            metadata.join(' · '),
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-            maxLines: 2,
-          ),
-        ],
-      ),
+          maxLines: 2,
+        ),
+      ],
     );
   }
 }

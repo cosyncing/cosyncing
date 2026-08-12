@@ -21,8 +21,19 @@ void main() {
     test('output unavailable is all-false', () {
       const caps = SpeechOutputCapabilities.unavailable;
       expect(caps.synthesis, isFalse);
+      expect(caps.canAttemptSynthesis, isFalse);
       expect(caps.pauseResume, isFalse);
       expect(caps.installedLanguageVoiceAvailability, isFalse);
+    });
+
+    test('output unprobed permits one manual synthesis attempt', () {
+      const caps = SpeechOutputCapabilities.unprobed();
+      expect(caps.synthesis, isFalse);
+      expect(caps.canAttemptSynthesis, isTrue);
+      expect(
+        caps.synthesisAvailability,
+        SpeechSynthesisAvailability.unprobed,
+      );
     });
 
     test('input: onDeviceRecognition requires recognition', () {
@@ -314,6 +325,9 @@ class _FakeSpeechOutput implements SpeechOutput {
     queue = List<SpeechUtterance>.of(utterances);
     _emit(SpeechOutputSpeaking(messageKey));
   }
+
+  @override
+  Future<void> setRate(double rate) async {}
 
   @override
   Future<void> pause() async {

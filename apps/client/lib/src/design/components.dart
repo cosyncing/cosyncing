@@ -6,7 +6,10 @@
 /// files. See `lib/src/design/README.md`.
 library;
 
+export 'components/copyable_code_line.dart';
 export 'components/metadata_chip.dart';
 export 'components/section_header.dart';
+export 'components/selectable_tap_region.dart';
 export 'components/status_dot.dart';
 export 'components/status_pill.dart';
+export 'components/transcript_box.dart';

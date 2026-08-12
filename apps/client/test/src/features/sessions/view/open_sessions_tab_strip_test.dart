@@ -1,6 +1,7 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/view/open_sessions_tab_strip.dart';
@@ -8,11 +9,16 @@ import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-SessionRef _ref(String tool, String id, {String title = 'title'}) => SessionRef(
+SessionRef _ref(
+  String tool,
+  String id, {
+  String title = 'title',
+  SessionStatus status = SessionStatus.idle,
+}) => SessionRef(
   tool: tool,
   id: id,
   title: title,
-  status: SessionStatus.idle,
+  status: status,
 );
 
 void main() {
@@ -318,6 +324,50 @@ void main() {
       expect(find.text('Opening session'), findsOneWidget);
       expect(find.text('Untitled session'), findsNothing);
       expect(find.text('ses_deep_link_01'), findsNothing);
+    });
+
+    testWidgets('tabs use pulse and full ring status contracts', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [
+              _ref(
+                'claude',
+                'working',
+                title: 'Working',
+                status: SessionStatus.working,
+              ),
+              _ref(
+                'codex',
+                'needs-input',
+                title: 'Needs input',
+                status: SessionStatus.needsInput,
+              ),
+            ],
+            activeKey: 'claude/working',
+            onSelect: (_) {},
+            onClose: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+
+      StatusDot marker(String key) => tester.widget<StatusDot>(
+        find
+            .descendant(
+              of: find.byKey(Key('open-session-tab-$key')),
+              matching: find.byType(StatusDot),
+            )
+            .first,
+      );
+
+      expect(marker('claude/working').pulse, isTrue);
+      expect(marker('claude/working').ringColor, isNull);
+      expect(marker('codex/needs-input').pulse, isFalse);
+      expect(marker('codex/needs-input').ringColor, isNotNull);
+      expect(marker('codex/needs-input').ringGapColor, isNotNull);
     });
   });
 }

@@ -133,6 +133,17 @@ void main() {
       expect(offline, isNot(unauthorized));
     });
 
+    test('user-facing advice consistently says server', () {
+      for (final kind in FailureKind.values) {
+        final advice = recoveryAdviceEn(kind);
+        expect(advice.toLowerCase(), isNot(contains('broker')));
+      }
+      expect(
+        recoveryAdviceEn(FailureKind.unauthorized),
+        contains('server token'),
+      );
+    });
+
     test('every kind produces advice that tells the user what to do', () {
       for (final kind in FailureKind.values) {
         final advice = recoveryAdviceEn(kind);

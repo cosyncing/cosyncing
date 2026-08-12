@@ -7,6 +7,7 @@ import 'dart:ui' show PointerDeviceKind;
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components/selectable_tap_region.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -147,15 +148,64 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        expect(
+          find.ancestor(
+            of: find.text('Current objective'),
+            matching: find.byType(SelectionArea),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(
+            of: find.text('Launch checklist'),
+            matching: find.byType(SelectionArea),
+          ),
+          findsOneWidget,
+        );
         final taskExpansion = find.byKey(
           const Key('session-task-list-expansion'),
         );
-        final taskTile = tester.widget<ListTile>(
-          find
-              .descendant(of: taskExpansion, matching: find.byType(ListTile))
-              .first,
+        expect(taskExpansion, findsOneWidget);
+        await tester.ensureVisible(find.text('Launch checklist'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Launch checklist'));
+        await tester.pumpAndSettle();
+        expect(find.text('Current task'), findsOneWidget);
+        expect(
+          find.ancestor(
+            of: find.text('Current task'),
+            matching: find.byType(SelectionArea),
+          ),
+          findsOneWidget,
         );
-        taskTile.onTap!();
+        // The card composes its own region: SelectableTapRegion stopped
+        // creating one, and this card sits outside the transcript with no
+        // shared region to join, so it wraps its own header.
+        expect(
+          find.descendant(
+            of: taskExpansion,
+            matching: find.descendant(
+              of: find.byType(SelectionArea),
+              matching: find.byType(SelectableTapRegion),
+            ),
+          ),
+          findsOneWidget,
+          reason:
+              'the task card header must be a tap region inside its own '
+              'selection region',
+        );
+        // And the header toggle fires exactly ONCE per tap. A second handler —
+        // the state this card is one `onTap` away from — toggles twice and
+        // leaves the card exactly where it was, which an expand-only assertion
+        // cannot see. Collapsing and reopening is what makes it visible.
+        await tester.tap(find.text('Launch checklist'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Current task'),
+          findsNothing,
+          reason: 'one tap must collapse the card, not toggle it twice',
+        );
+        await tester.tap(find.text('Launch checklist'));
         await tester.pumpAndSettle();
         expect(find.text('Current task'), findsOneWidget);
         expect(find.text('Old task'), findsNothing);

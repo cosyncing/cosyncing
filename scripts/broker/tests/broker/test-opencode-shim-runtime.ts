@@ -21,12 +21,14 @@
  *   bun run scripts/broker/tests/broker/test-opencode-shim-runtime.ts
  */
 export {};
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const SHIM = join(import.meta.dir, '../../../../packages/typescript/broker/shell/opencode-shim.sh');
 const REBUILD_RESTART = join(import.meta.dir, '../../../dev/rebuild-restart-app.sh');
+const UI_DRIVE = join(import.meta.dir, '../../../dev/ui-drive.mjs');
+const REPO_ROOT = join(import.meta.dir, '../../../..');
 
 interface Assertion { name: string; ok: boolean; detail?: string }
 const assertions: Assertion[] = [];
@@ -55,6 +57,96 @@ function check(name: string, ok: boolean, detail = ''): void {
       && stopBody.indexOf('assert_no_active_opencode_turns') >= 0
       && stopBody.indexOf('assert_no_active_opencode_turns') < stopBody.indexOf('kill -TERM'),
   );
+  check(
+    'review broker defaults cannot collide with a packaged install state, cache, or port',
+    script.includes('COSYNCING_REVIEW_PORT:-17734')
+      && script.includes('COSYNCING_REVIEW_STATE_HOME:-${REPO_ROOT}/output/review/state')
+      && script.includes('COSYNCING_REVIEW_CACHE_DIR:-${REPO_ROOT}/output/review/cache')
+      && !script.includes('COSYNCING_REVIEW_STATE_HOME:-${HOME}/.cosyncing'),
+  );
+  check(
+    'UI driving defaults to the source review broker',
+    readFileSync(UI_DRIVE, 'utf8').includes('arg("base", "http://127.0.0.1:17734/cosy/")'),
+  );
+}
+
+// Execute the real launcher against a live listener on the installed port. The guard must fire before the
+// launcher builds artifacts, stops a review broker, or creates review state: source and package brokers do
+// not have independent ownership of their managed Codex daemon and OpenCode server yet.
+//
+// The precondition is "something is listening on 7734", and the installed broker running normally is the
+// commonest way for that to be true. So the fixture listener is only raised when the port is FREE: binding
+// it unconditionally made a required gate fail on every host where the product was actually running, which
+// is precisely the state this claim is about. When the port is already taken the existing listener supplies
+// the precondition as-is — nothing here probes it, stops it, or touches its state either way.
+{
+  const collisionTmp = mkdtempSync(join(tmpdir(), 'cosyncing-review-collision-'));
+  const reviewState = join(collisionTmp, 'state');
+  const reviewCache = join(collisionTmp, 'cache');
+  // Bind-or-yield rather than check-then-bind: a probe followed by a bind can lose the port in between,
+  // and the failure mode of that race is a fixture that never came up on a port the test believes is busy.
+  //
+  // ONLY `EADDRINUSE` means "something else already holds the port". Any other bind failure — a
+  // descriptor limit, a permission or resource error — says nothing about the port, and swallowing it
+  // would run the launcher under a precondition that was never established, against a port that may
+  // well be free. That fails open on the one thing this claim is about, so it rethrows.
+  let installedListener: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    installedListener = Bun.serve({
+      port: 7734,
+      hostname: '127.0.0.1',
+      fetch: () => new Response('installed fixture'),
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'EADDRINUSE') throw error;
+    installedListener = undefined;
+  }
+  const precondition = installedListener ? 'fixture listener' : 'listener already present';
+  try {
+    const proc = Bun.spawn(['bash', REBUILD_RESTART, '--restart-only'], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        COSYNCING_REVIEW_PORT: '17734',
+        COSYNCING_REVIEW_STATE_HOME: reviewState,
+        COSYNCING_REVIEW_CACHE_DIR: reviewCache,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    check(
+      'review launcher executable refuses a live installed-port collision before mutation',
+      exitCode !== 0
+        && stderr.includes('refusing review startup while port 7734 has an active listener')
+        && !stdout.includes('Build broker')
+        && !stdout.includes('Restart local review broker')
+        && !existsSync(reviewState)
+        && !existsSync(reviewCache),
+      `precondition=${precondition} exit=${exitCode} stdout=${stdout.trim()} stderr=${stderr.trim()}`,
+    );
+    // Refusing is only half the claim: whatever held the port must still hold it. When that is the
+    // operator's own running broker, a launcher that "cleared the collision" would have taken their
+    // product down to run a test. Re-binding is the check — it must still be refused.
+    let stillHeld = false;
+    try {
+      Bun.serve({ port: 7734, hostname: '127.0.0.1', fetch: () => new Response('probe') }).stop(true);
+    } catch {
+      stillHeld = true;
+    }
+    check(
+      'the refused launcher left the listener on the installed port untouched',
+      stillHeld,
+      `precondition=${precondition}`,
+    );
+  } finally {
+    installedListener?.stop(true);
+    rmSync(collisionTmp, { recursive: true, force: true });
+  }
 }
 
 const tmp = mkdtempSync(join(tmpdir(), 'cosyncing-opencode-shim-runtime-'));

@@ -125,7 +125,7 @@ class _SessionTranscriptCopyTile extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     return ListTile(
       key: const Key('session-detail-copy-transcript-button'),
-      leading: const Icon(Icons.copy_all_outlined),
+      leading: const Icon(Icons.copy_all_outlined, size: 18),
       title: Text(l10n.sessionCopyTranscript),
       subtitle: Text(l10n.sessionCopyTranscriptDescription),
       enabled: state.transcriptMessageEvents.isNotEmpty,
@@ -204,7 +204,11 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
             ),
             ListTile(
               key: const Key('session-detail-clear-current-cache-button'),
-              leading: Icon(Icons.delete_sweep_outlined, color: danger),
+              leading: Icon(
+                Icons.delete_sweep_outlined,
+                size: 18,
+                color: danger,
+              ),
               title: Text(
                 l10n.sessionClearCurrentCache,
                 style: TextStyle(color: danger),
@@ -216,7 +220,11 @@ class _SessionLocalDataZoneState extends ConsumerState<_SessionLocalDataZone> {
             const Divider(height: 1),
             ListTile(
               key: const Key('session-detail-clear-all-cache-button'),
-              leading: Icon(Icons.delete_forever_outlined, color: danger),
+              leading: Icon(
+                Icons.delete_forever_outlined,
+                size: 18,
+                color: danger,
+              ),
               title: Text(
                 l10n.sessionClearAllCache,
                 style: TextStyle(color: danger),
@@ -392,10 +400,35 @@ class _SessionActionGroups extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final connected =
         state.connectionStatus == SessionDetailConnectionStatus.connected;
     final compatibleControls = !state.compatibilityReadOnly;
+    // The approved Status-surface hierarchy (session-topbar spec §7.1): action
+    // rows are quiet 40dp list rows with `bodySmall` labels and 18px leading
+    // icons. Without an explicit role the Material ListTile default renders
+    // every row title at `bodyLarge` — visibly larger than the SectionHeader
+    // above it and every explanation around it. One scoped theme keeps all
+    // three groups (and any future row) on the same hierarchy.
+    return ListTileTheme(
+      data: ListTileThemeData(
+        titleTextStyle: theme.textTheme.bodySmall,
+        subtitleTextStyle: theme.textTheme.bodySmall?.copyWith(
+          color: context.tokens.textSecondary,
+        ),
+        minTileHeight: 40,
+      ),
+      child: _buildGroups(context, l10n, connected, compatibleControls),
+    );
+  }
+
+  Widget _buildGroups(
+    BuildContext context,
+    AppLocalizations l10n,
+    bool connected,
+    bool compatibleControls,
+  ) {
     return Column(
       children: [
         Card(
@@ -408,7 +441,7 @@ class _SessionActionGroups extends StatelessWidget {
             children: [
               ListTile(
                 key: const Key('session-detail-detach-button'),
-                leading: const Icon(Icons.link_off),
+                leading: const Icon(Icons.link_off, size: 18),
                 title: Text(l10n.sessionDetach),
                 subtitle: Text(l10n.sessionDetachDescription),
                 enabled: canDetach,
@@ -417,7 +450,7 @@ class _SessionActionGroups extends StatelessWidget {
               const Divider(height: 1),
               ListTile(
                 key: const Key('session-detail-fork-button'),
-                leading: const Icon(Icons.call_split),
+                leading: const Icon(Icons.call_split, size: 18),
                 title: Text(l10n.sessionForkLatest),
                 enabled: canFork,
                 onTap: canFork ? onForkSession : null,
@@ -425,7 +458,7 @@ class _SessionActionGroups extends StatelessWidget {
               const Divider(height: 1),
               ListTile(
                 key: const Key('session-detail-clone-button'),
-                leading: const Icon(Icons.difference_outlined),
+                leading: const Icon(Icons.difference_outlined, size: 18),
                 title: Text(l10n.sessionDuplicate),
                 subtitle: switch (_disabledActionReason(
                   l10n,
@@ -461,7 +494,7 @@ class _SessionActionGroups extends StatelessWidget {
             children: [
               ListTile(
                 key: const Key('session-detail-export-transcript-button'),
-                leading: const Icon(Icons.download_outlined),
+                leading: const Icon(Icons.download_outlined, size: 18),
                 title: Text(l10n.sessionExportTranscript),
                 // `hasActiveBrokerClient` stays at its default: the export
                 // predicate does not gate on it, so it is never export's

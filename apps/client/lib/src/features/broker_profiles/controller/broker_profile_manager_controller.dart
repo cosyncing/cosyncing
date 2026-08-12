@@ -74,11 +74,17 @@ class BrokerProfileManagerController {
     String profileId, {
     BrokerProfile? expectedProfile,
   }) async {
+    // Selecting a saved server is a newer user intent than any direct-connect
+    // health probe still in flight on the retained Connection screen.
+    ref
+        .read(connectionControllerProvider.notifier)
+        .supersedePendingConnection();
+
     Future<void> select(BrokerProfile? profile) async {
       if (profile == null) {
         throw const BrokerProfileManagerException(
-          "Couldn't switch broker — that profile is no longer saved on this "
-          'device. Pick another profile, or add it again.',
+          "Couldn't switch servers — that server is no longer saved on this "
+          'device. Pick another server, or add it again.',
         );
       }
       await ref
@@ -98,8 +104,8 @@ class BrokerProfileManagerController {
       }
     } on BrokerProfileRetiredException {
       throw const BrokerProfileManagerException(
-        "Couldn't switch broker — that profile was replaced while the "
-        'selection was pending. Select the current profile and try again.',
+        "Couldn't switch servers — that saved server was replaced while the "
+        'selection was pending. Select the current server and try again.',
       );
     }
   }
@@ -138,7 +144,7 @@ class BrokerProfileManagerController {
     Future<BrokerProfile> save(BrokerProfile? existing) async {
       if (existing == null) {
         throw const BrokerProfileManagerException(
-          "Couldn't save these changes — that profile is no longer saved on "
+          "Couldn't save these changes — that server is no longer saved on "
           'this device. It may have been deleted on another screen.',
         );
       }
@@ -159,8 +165,8 @@ class BrokerProfileManagerController {
       );
     } on BrokerProfileRetiredException {
       throw const BrokerProfileManagerException(
-        "Couldn't save these changes — that profile was replaced while the "
-        'edit was pending. Reopen the current profile and try again.',
+        "Couldn't save these changes — that saved server was replaced while "
+        'the edit was pending. Reopen the current server and try again.',
       );
     }
   }
@@ -205,7 +211,7 @@ class BrokerProfileManagerController {
         );
       }
       throw BrokerProfileManagerException(
-        "Couldn't save these changes. Check the broker address and try again.",
+        "Couldn't save these changes. Check the server address and try again.",
         detail: failureDetail(error),
       );
     }
@@ -303,7 +309,7 @@ class BrokerProfileManagerController {
       rethrow;
     } on Object catch (error) {
       throw BrokerProfileManagerException(
-        "Couldn't load this broker profile for deletion. "
+        "Couldn't load this saved server for deletion. "
         '${recoveryAdviceEn(classifyFailure(error))}',
         detail: failureDetail(error),
       );
@@ -411,16 +417,16 @@ class BrokerProfileManagerController {
       }
       final lead = switch (stage) {
         _ProfileDeletionStage.profileLookup =>
-          "Couldn't load this broker profile for deletion.",
+          "Couldn't load this saved server for deletion.",
         _ProfileDeletionStage.activeSelection =>
-          "Couldn't revoke this broker as the active profile.",
+          "Couldn't clear this server as the active server.",
         _ProfileDeletionStage.credential =>
-          "Couldn't remove this broker's saved token from the device.",
+          "Couldn't remove this server's saved token from the device.",
         _ProfileDeletionStage.localData =>
-          "Couldn't delete this broker — the data saved for it is still on "
-              'this device, so the profile was kept.',
+          "Couldn't delete this server — the data saved for it is still on "
+              'this device, so the saved server was kept.',
         _ProfileDeletionStage.profileRow =>
-          "Couldn't delete this broker profile. Its saved token was restored.",
+          "Couldn't delete this saved server. Its token was restored.",
       };
       throw BrokerProfileManagerException(
         '$lead ${recoveryAdviceEn(classifyFailure(error))}',
@@ -437,7 +443,7 @@ class BrokerProfileManagerController {
       await _credentialStore.deleteBrokerToken(credentialKey);
     } on Object catch (error) {
       throw BrokerProfileManagerException(
-        "Couldn't remove this broker's saved token from the device. "
+        "Couldn't remove this server's saved token from the device. "
         '${recoveryAdviceEn(classifyFailure(error))}',
         detail: failureDetail(error),
       );
@@ -452,7 +458,7 @@ class BrokerProfileManagerController {
       return await _credentialStore.readBrokerToken(credentialKey);
     } on Object catch (error) {
       throw BrokerProfileManagerException(
-        "Couldn't read this broker's saved token from the device. "
+        "Couldn't read this server's saved token from the device. "
         '${recoveryAdviceEn(classifyFailure(error))}',
         detail: failureDetail(error),
       );
@@ -472,7 +478,7 @@ class BrokerProfileManagerController {
       await _credentialStore.writeBrokerToken(credentialKey, previousToken);
     } on Object catch (error) {
       throw BrokerProfileManagerException(
-        "Couldn't restore this broker's saved token after the change was "
+        "Couldn't restore this server's saved token after the change was "
         'rolled back. You may need to paste the token again.',
         detail: failureDetail(error),
       );

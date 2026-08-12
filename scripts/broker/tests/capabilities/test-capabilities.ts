@@ -447,8 +447,8 @@ try {
   //                                    other agent emits; only adds a managedRuntimeWarning.
   //   setup.ts  id === 'claude'        display-name fallback when the version matrix has no row.
   //   setup.ts  behavior[id]           per-agent managed-behavior prose, one entry per agent.
-  //   setup.ts  agent.id === 'pi'      (x2) Pi bridge blocker + install step; both also require
-  //                                    Pi to be `supported`, and gate only the Pi bridge file.
+  //   setup.ts  agent.id === 'pi'      (x3) Pi bridge blocker + install step + known-legacy migration
+  //                                    prompt; all require Pi to be `supported` and gate only its bridge file.
   //   setup.ts  agent.id === 'codex'   records `agents.codex` support in persisted setup state.
   const expectedBrokerBranches = [
     "packages/typescript/broker/src/runtime.ts:b.id === 'codex'",
@@ -458,6 +458,7 @@ try {
     'packages/typescript/broker/src/setup.ts:behavior[id]',
     "packages/typescript/broker/src/setup.ts:agent.id === 'pi'",
     "packages/typescript/broker/src/setup.ts:agent.id === 'codex'",
+    "packages/typescript/broker/src/setup.ts:agent.id === 'pi'",
     "packages/typescript/broker/src/setup.ts:agent.id === 'pi'",
   ];
   check(

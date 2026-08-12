@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { createSetupDiagnosisContext } from '../../../../packages/typescript/broker/src/diagnosis-context.ts';
 import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../../../packages/typescript/broker/src/build-info.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../../../packages/typescript/broker/src/configuration.ts';
@@ -24,6 +24,10 @@ import {
   inspectPiIntegration,
   readBrokerToken,
 } from '../../../../packages/typescript/broker/src/credentials.ts';
+import {
+  durableStateLayout,
+  planDurableStateMigrations,
+} from '../../../../packages/typescript/broker/src/durable-state.ts';
 import { inspectInstallState, writeInstallState } from '../../../../packages/typescript/broker/src/install-state.ts';
 import { acquireInstallationLock } from '../../../../packages/typescript/broker/src/installation-lock.ts';
 import {
@@ -47,6 +51,7 @@ import {
   SETUP_PROMPT_CANCELLED,
   tokdashProvisionCapability,
   type SetupAccessReport,
+  type SetupBlockingIssue,
   type SetupCommandResult,
   type SetupInspection,
   type SetupPlan,
@@ -94,6 +99,9 @@ import {
   AGENT_SKILL_SOURCE,
 } from '../../../../packages/typescript/broker/src/agent-skill.ts';
 import {
+  PI_BRIDGE_EMBEDDED_SOURCE,
+} from '../../../../packages/typescript/adapters/pi/src/implementation.ts';
+import {
   executeSetupTransaction,
   readSetupFailureDiagnostic,
   readSetupTransactionJournal,
@@ -101,6 +109,25 @@ import {
   type SetupTransactionAction,
   type SetupTransactionPlan,
 } from '../../../../packages/typescript/broker/src/setup-transaction.ts';
+
+function readFrozenTextFixture(path: string): string {
+  const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  if (asset.schemaVersion !== 1 || asset.release !== '0.1.0'
+    || !Array.isArray(asset.lines) || !asset.lines.every((line) => typeof line === 'string')
+    || typeof asset.trailingNewline !== 'boolean') throw new Error(`invalid frozen text fixture: ${path}`);
+  return `${asset.lines.join('\n')}${asset.trailingNewline ? '\n' : ''}`;
+}
+
+// Migration inputs come from immutable released assets, not the production constants under test. This
+// catches any future attempt to redefine a predecessor by editing the current bridge or skill.
+const AGENT_SKILL_V010_FIXTURE = readFileSync(join(
+  import.meta.dir,
+  '../../../../packages/typescript/broker/skills/legacy/cosyncing-v0.1.0.md',
+), 'utf8');
+const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
+  import.meta.dir,
+  '../../../../packages/typescript/adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+));
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -115,9 +142,10 @@ const now = (): Date => new Date(FIXED_DATE);
 class ScriptedPresenter implements SetupPresenter {
   readonly calls: string[] = [];
   lastResult?: SetupCommandResult;
+  lastBlockers?: SetupBlockingIssue[];
 
   constructor(readonly options: {
-    cancelAt?: 'ack' | 'skill' | 'opencodeShim' | 'service' | 'tailscale' | 'quota' | 'confirm';
+    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'tailscale' | 'quota' | 'confirm';
     managed?: boolean;
     service?: SetupServiceChoice;
     lingering?: boolean;
@@ -128,6 +156,8 @@ class ScriptedPresenter implements SetupPresenter {
     opencodeShim?: boolean;
     language?: SetupLanguage;
     cancelLanguage?: boolean;
+    legacyPi?: boolean;
+    legacySkill?: boolean;
   } = {}) {}
 
   async chooseLanguage(): Promise<SetupPromptResult<SetupLanguage>> {
@@ -135,14 +165,25 @@ class ScriptedPresenter implements SetupPresenter {
     return this.options.cancelLanguage ? SETUP_PROMPT_CANCELLED : this.options.language ?? 'en';
   }
   intro(): void { this.calls.push('intro'); }
-  showBlockers(): void { this.calls.push('blockers'); }
+  showBlockers(issues: readonly SetupBlockingIssue[]): void {
+    this.calls.push('blockers');
+    this.lastBlockers = [...issues];
+  }
   async confirmManagedRuntime(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('ack');
     return this.options.cancelAt === 'ack' ? SETUP_PROMPT_CANCELLED : this.options.managed ?? true;
   }
+  async confirmLegacyPiBridge(): Promise<SetupPromptResult<boolean>> {
+    this.calls.push('legacy-pi');
+    return this.options.cancelAt === 'legacyPi' ? SETUP_PROMPT_CANCELLED : this.options.legacyPi ?? false;
+  }
   async confirmAgentSkill(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('skill');
     return this.options.cancelAt === 'skill' ? SETUP_PROMPT_CANCELLED : this.options.skill ?? true;
+  }
+  async confirmLegacyAgentSkill(): Promise<SetupPromptResult<boolean>> {
+    this.calls.push('legacy-skill');
+    return this.options.cancelAt === 'legacySkill' ? SETUP_PROMPT_CANCELLED : this.options.legacySkill ?? false;
   }
   async confirmOpencodeShim(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('opencode-shim');
@@ -209,6 +250,22 @@ function setupOptions(root: string, presenter: SetupPresenter, overrides: Record
     now,
     ...overrides,
   } as Parameters<typeof runSetup>[0];
+}
+
+function supportedPiFixture(machine: string): { context: ReturnType<typeof contextFor>; bridge: string } {
+  const packageRoot = join(machine, 'pi-package');
+  const piBin = join(packageRoot, 'pi');
+  mkdirSync(packageRoot, { recursive: true });
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@earendil-works/pi-coding-agent',
+    version: '0.78.1',
+  }));
+  writeFileSync(piBin, `#!${process.execPath}\nconsole.log('Pi 0.78.1');\n`);
+  chmodSync(piBin, 0o755);
+  return {
+    context: contextFor(machine, { PATH: packageRoot }),
+    bridge: join(machine, '.pi', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts'),
+  };
 }
 
 function treeSnapshot(root: string): string {
@@ -1378,6 +1435,50 @@ try {
 
   // An unowned/modified copy (no receipt proving its content) still blocks setup, fail-closed and preserved.
   {
+    const machine = join(root, 'skill-known-legacy');
+    const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
+    mkdirSync(dirname(agentsSkill), { recursive: true });
+    writeFileSync(agentsSkill, AGENT_SKILL_V010_FIXTURE, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacySkill: true });
+    const upgraded = await zeroAgentSetup(machine, presenter);
+    const targets = agentSkillTargets(contextFor(machine));
+    check('setup identifies and separately confirms the known preceding cosyncing skill',
+      upgraded.status === 'complete'
+        && presenter.calls.indexOf('skill') < presenter.calls.indexOf('legacy-skill')
+        && presenter.calls.indexOf('legacy-skill') < presenter.calls.indexOf('opencode-shim')
+        && targets.every((target) => readFileSync(target.path, 'utf8') === AGENT_SKILL_SOURCE),
+      `${upgraded.status}:${presenter.calls.join(',')}`);
+  }
+  {
+    const machine = join(root, 'skill-known-legacy-declined');
+    const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
+    mkdirSync(dirname(agentsSkill), { recursive: true });
+    writeFileSync(agentsSkill, AGENT_SKILL_V010_FIXTURE, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacySkill: false });
+    const declined = await zeroAgentSetup(machine, presenter);
+    check('declining the known skill upgrade preserves it and commits nothing',
+      declined.status === 'declined'
+        && readFileSync(agentsSkill, 'utf8') === AGENT_SKILL_V010_FIXTURE
+        && !inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${declined.status}:${presenter.calls.join(',')}`);
+  }
+  {
+    const machine = join(root, 'skill-legacy-modified');
+    const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
+    const modified = `${AGENT_SKILL_V010_FIXTURE}\nuser note\n`;
+    mkdirSync(dirname(agentsSkill), { recursive: true });
+    writeFileSync(agentsSkill, modified, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacySkill: true });
+    const blocked = await zeroAgentSetup(machine, presenter);
+    check('an edited older skill remains unknown, blocked, and untouched',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('agent-skill-agents-drifted') === true
+        && !presenter.calls.includes('legacy-skill')
+        && readFileSync(agentsSkill, 'utf8') === modified,
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+
+  {
     const machine = join(root, 'skill-unowned');
     const claudeSkill = join(machine, '.claude', 'skills', 'cosyncing', 'SKILL.md');
     mkdirSync(join(machine, '.claude', 'skills', 'cosyncing'), { recursive: true });
@@ -1584,23 +1685,215 @@ try {
         && !existsSync(join(machine, '.cosyncing')) && presenter.calls.includes('blockers'));
   }
 
-  // Supported Pi gets the exact package-owned bridge; no per-agent question is introduced.
+  // A current-schema legacy state file whose only defect is its mode is safe to tighten inside setup's
+  // transaction. Any content/schema ambiguity remains a preflight blocker, and rollback restores the mode.
+  {
+    const machine = join(root, 'durable-setup-unversioned');
+    const home = join(machine, '.cosyncing');
+    const setupState = join(home, 'setup-state.json');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(setupState, JSON.stringify({ language: 'zh-Hans' }), { mode: 0o600 });
+    const layout = durableStateLayout({
+      stateRoot: home,
+      cacheRoot: join(machine, '.cache', 'cosyncing'),
+    });
+    const migration = planDurableStateMigrations(layout);
+    const before = treeSnapshot(machine);
+    const presenter = new ScriptedPresenter();
+    const blocked = await zeroAgentSetup(machine, presenter);
+    const issue = presenter.lastBlockers?.find((candidate) => candidate.code === 'setup-unversioned');
+    check('a known migratable unversioned store blocks preflight before mutation choices or writes',
+      migration.steps.some((step) => step.store === 'setup')
+        && blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('setup-unversioned') === true
+        && presenter.calls.join(',') === 'language,intro,blockers,failed'
+        && treeSnapshot(machine) === before
+        && issue?.remediation.includes('move the existing setup state file') === true
+        && issue.localized?.['zh-Hans']?.remediation.includes('移出') === true,
+      `${blocked.status}:${presenter.calls.join(',')}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const machine = join(root, 'durable-peers-unversioned');
+    const home = join(machine, '.cosyncing');
+    const peers = join(home, 'transport-peers.json');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(peers, JSON.stringify({ peers: [] }), { mode: 0o600 });
+    const layout = durableStateLayout({
+      stateRoot: home,
+      cacheRoot: join(machine, '.cache', 'cosyncing'),
+    });
+    const migration = planDurableStateMigrations(layout);
+    const before = treeSnapshot(machine);
+    const presenter = new ScriptedPresenter();
+    const blocked = await zeroAgentSetup(machine, presenter);
+    const issue = presenter.lastBlockers?.find((candidate) => candidate.code === 'peers-unversioned');
+    check('a non-migratable unversioned store blocks preflight before mutation choices or writes',
+      migration.blockers.some((item) => item.store === 'peers' && item.detailCode === 'peers-unversioned')
+        && blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('peers-unversioned') === true
+        && presenter.calls.join(',') === 'language,intro,blockers,failed'
+        && treeSnapshot(machine) === before
+        && issue?.remediation.includes('will not guess an unversioned format') === true
+        && issue.localized?.['zh-Hans']?.summary.includes('不支持自动迁移') === true,
+      `${blocked.status}:${presenter.calls.join(',')}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const machine = join(root, 'durable-peers-permissions');
+    const peers = join(machine, '.cosyncing', 'transport-peers.json');
+    mkdirSync(dirname(peers), { recursive: true });
+    writeFileSync(peers, JSON.stringify({ version: 1, peers: [] }), { mode: 0o644 });
+    chmodSync(peers, 0o644);
+    const complete = await zeroAgentSetup(machine, new ScriptedPresenter());
+    const inspection = await inspectSetupEnvironment({
+      buildInfo: BUILD_INFO,
+      executablePath: join(machine, 'bin', 'cosyncing'),
+      home: join(machine, '.cosyncing'),
+      context: contextFor(machine),
+    });
+    const peerDoctor = inspection.doctor.sections.flatMap((section) => section.checks)
+      .find((candidate) => candidate.id === 'state.schema.peers');
+    check('setup transactionally tightens a valid owner-held legacy peers file before committing',
+      complete.status === 'complete'
+        && complete.actions.includes('durable-state.permissions')
+        && (statSync(peers).mode & 0o777) === 0o600
+        && peerDoctor?.status === 'pass'
+        && inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${complete.status}:mode=${(statSync(peers).mode & 0o777).toString(8)} doctor=${peerDoctor?.status}`);
+  }
+  {
+    const machine = join(root, 'durable-peers-malformed');
+    const peers = join(machine, '.cosyncing', 'transport-peers.json');
+    mkdirSync(dirname(peers), { recursive: true });
+    writeFileSync(peers, '{"version":1', { mode: 0o644 });
+    chmodSync(peers, 0o644);
+    const blocked = await zeroAgentSetup(machine, new ScriptedPresenter());
+    check('setup blocks malformed loose-mode durable state instead of laundering it with chmod',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('peers-unsafe') === true
+        && readFileSync(peers, 'utf8') === '{"version":1'
+        && (statSync(peers).mode & 0o777) === 0o644
+        && !inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const machine = join(root, 'durable-peers-rollback');
+    const peers = join(machine, '.cosyncing', 'transport-peers.json');
+    const original = JSON.stringify({ version: 1, peers: [] });
+    mkdirSync(dirname(peers), { recursive: true });
+    writeFileSync(peers, original, { mode: 0o644 });
+    chmodSync(peers, 0o644);
+    const factory = (inputs: SetupActionInputs) => {
+      const catalog = createSetupActionCatalog(inputs);
+      return {
+        ...catalog,
+        actions: catalog.actions.map((action): SetupTransactionAction => action.id !== 'agent-skill.reconcile'
+          ? action
+          : {
+              ...action,
+              async apply(context) {
+                await action.apply(context);
+                throw new Error('fixture failure after durable permission repair');
+              },
+            }),
+      };
+    };
+    const failed = await runSetup(setupOptions(machine, new ScriptedPresenter(), { actionCatalogFactory: factory }));
+    check('a later setup failure restores the legacy peers bytes and permissions',
+      failed.status === 'failed'
+        && readFileSync(peers, 'utf8') === original
+        && (statSync(peers).mode & 0o777) === 0o644
+        && !inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${failed.status}:mode=${(statSync(peers).mode & 0o777).toString(8)}`);
+  }
+
+  // First-install migration owns its own confirmation path. Only the full preceding packaged source is
+  // eligible; a copied marker plus any edit remains foreign and blocks before mutation.
+  {
+    const machine = join(root, 'pi-known-legacy');
+    const { context, bridge } = supportedPiFixture(machine);
+    mkdirSync(dirname(bridge), { recursive: true });
+    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacyPi: true });
+    const migrated = await runSetup(setupOptions(machine, presenter, { context }));
+    check('first-time setup separately confirms and replaces the exact known legacy Pi bridge',
+      migrated.status === 'complete'
+        && migrated.actions.includes('pi-bridge.install')
+        && readFileSync(bridge, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && presenter.calls.indexOf('ack') < presenter.calls.indexOf('legacy-pi')
+        && presenter.calls.indexOf('legacy-pi') < presenter.calls.indexOf('skill')
+        && inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${migrated.status}:${presenter.calls.join(',')}`);
+  }
+  {
+    const machine = join(root, 'pi-known-legacy-declined');
+    const { context, bridge } = supportedPiFixture(machine);
+    mkdirSync(dirname(bridge), { recursive: true });
+    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacyPi: false });
+    const declined = await runSetup(setupOptions(machine, presenter, { context }));
+    check('declining the separate legacy Pi migration preserves the bridge and commits nothing',
+      declined.status === 'declined'
+        && readFileSync(bridge, 'utf8') === PI_BRIDGE_V010_FIXTURE
+        && !inspectInstallState(join(machine, '.cosyncing')).committed,
+      `${declined.status}:${presenter.calls.join(',')}`);
+  }
+  {
+    const machine = join(root, 'pi-known-legacy-rollback');
+    const { context, bridge } = supportedPiFixture(machine);
+    mkdirSync(dirname(bridge), { recursive: true });
+    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    const factory = (inputs: SetupActionInputs) => {
+      const catalog = createSetupActionCatalog(inputs);
+      return {
+        ...catalog,
+        actions: catalog.actions.map((action): SetupTransactionAction => action.id !== 'agent-skill.reconcile'
+          ? action
+          : {
+              ...action,
+              async apply(actionContext) {
+                await action.apply(actionContext);
+                throw new Error('fixture failure after legacy Pi replacement');
+              },
+            }),
+      };
+    };
+    const failed = await runSetup(setupOptions(
+      machine,
+      new ScriptedPresenter({ legacyPi: true }),
+      { context, actionCatalogFactory: factory },
+    ));
+    check('a later setup failure restores the exact legacy Pi bridge bytes',
+      failed.status === 'failed'
+        && readFileSync(bridge, 'utf8') === PI_BRIDGE_V010_FIXTURE
+        && !inspectInstallState(join(machine, '.cosyncing')).committed,
+      failed.status);
+  }
+  {
+    const machine = join(root, 'pi-marker-modified');
+    const { context, bridge } = supportedPiFixture(machine);
+    const modified = `${PI_BRIDGE_V010_FIXTURE}\n// local change\n`;
+    mkdirSync(dirname(bridge), { recursive: true });
+    writeFileSync(bridge, modified, { mode: 0o600 });
+    const presenter = new ScriptedPresenter({ legacyPi: true });
+    const blocked = await runSetup(setupOptions(machine, presenter, { context }));
+    check('a marker-bearing modified Pi bridge remains blocked and is never offered for migration',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('pi-bridge-unowned') === true
+        && !presenter.calls.includes('legacy-pi')
+        && readFileSync(bridge, 'utf8') === modified,
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+
+  // Supported Pi gets the exact package-owned bridge; no migration question is introduced.
   {
     const machine = join(root, 'pi');
-    const packageRoot = join(machine, 'pi-package');
-    const piBin = join(packageRoot, 'pi');
-    mkdirSync(packageRoot, { recursive: true });
-    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@earendil-works/pi-coding-agent', version: '0.78.1' }));
-    writeFileSync(piBin, `#!${process.execPath}\nconsole.log('Pi 0.78.1');\n`);
-    chmodSync(piBin, 0o755);
-    const context = contextFor(machine, { PATH: packageRoot });
+    const { context, bridge } = supportedPiFixture(machine);
     const presenter = new ScriptedPresenter();
     const installed = await runSetup(setupOptions(machine, presenter, { context }));
-    const bridge = join(machine, '.pi', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts');
     check('supported Pi installs the exact packaged bridge under the one global acknowledgement',
       installed.status === 'complete' && existsSync(bridge)
         && presenter.calls.filter((call) => call === 'ack').length === 1
-        && !presenter.calls.some((call) => /pi|mode|claude|hook/.test(call)));
+        && !presenter.calls.some((call) => /legacy|mode|claude|hook/.test(call)));
   }
 
   // The outro: state directory, only the endpoints the applied plan actually produced, and the shared token
@@ -1668,10 +1961,11 @@ try {
       const chineseOutro = renderOutro('zh-Hans');
       check('the no-listener outro says to start the broker before opening the URL, in both languages',
         englishOutro.includes('[access] Nothing is listening yet. Start the broker: `cosyncing broker`.')
-          && englishOutro.includes(`[access] Then open the app on this machine: ${loopbackUrl}/cosy`)
-          && !englishOutro.includes(`[access] Open the app on this machine: ${loopbackUrl}/cosy`)
+          && englishOutro.includes(`[access] Local web app: ${loopbackUrl}/cosy`)
+          && englishOutro.includes(`[access] Local server address: ${loopbackUrl}`)
           && chineseOutro.includes('[access] broker 还没有在运行，先启动它：`cosyncing broker`。')
-          && chineseOutro.includes(`[access] 启动后在本机打开：${loopbackUrl}/cosy`),
+          && chineseOutro.includes(`[access] 本机 Web 应用：${loopbackUrl}/cosy`)
+          && chineseOutro.includes(`[access] 本机服务器地址：${loopbackUrl}`),
         `${englishOutro}\n${chineseOutro}`);
       // The verified durable-service path is the only one that keeps the plain "open it" wording, and it
       // must keep it — a service setup that health-checked its broker should not send anyone to a terminal.
@@ -1679,7 +1973,8 @@ try {
       createNonInteractiveSetupPresenter({ write: (text) => { verified += text; } })
         .complete(resultWith({ ...openAccess, brokerListening: true }));
       check('a health-verified install still tells the operator to just open the app',
-        verified.includes(`[access] Open the app on this machine: ${loopbackUrl}/cosy`)
+        verified.includes(`[access] Local web app: ${loopbackUrl}/cosy`)
+          && verified.includes(`[access] Local server address: ${loopbackUrl}`)
           && !/Nothing is listening/.test(verified),
         verified);
     }
@@ -1690,10 +1985,12 @@ try {
       const nonInteractive = createNonInteractiveSetupPresenter({ write: (text) => { captured += text; } });
       await nonInteractive.intro(inspection);
       await nonInteractive.complete(successResult);
-      check('non-interactive outro prints the state directory, both app URLs, and one token-file instruction',
+      check('non-interactive outro prints tagged web and native-client endpoints plus one token-file instruction',
         captured.includes(`[access] State directory: ${home}`)
-          && captured.includes(`[access] Open the app on this machine: ${loopbackUrl}/cosy`)
-          && captured.includes(`[access] Open it from your tailnet: ${tailscaleUrl}/cosy`)
+          && captured.includes(`[access] Local web app: ${loopbackUrl}/cosy`)
+          && captured.includes(`[access] Local server address: ${loopbackUrl}`)
+          && captured.includes(`[access] Tailnet web app: ${tailscaleUrl}/cosy`)
+          && captured.includes(`[access] Tailnet server address: ${tailscaleUrl}`)
           && captured.includes('[access] Short command: `cosy` is an alias for `cosyncing`, for example `cosy status`, `cosy doctor`, `cosy update`.')
           && captured.includes(`[credential] Read authentication token file: cat ${tokenPath}`)
           && !captured.includes('[credential] Authentication token file:')
@@ -1719,6 +2016,7 @@ try {
       check('an outro for a build with no web client prints the /cosy URL and leads with pairing',
         captured.includes('[access] Run `cosyncing pair` and scan the QR to pair a client.')
           && captured.includes(`[access] The same steps in a browser: ${loopbackUrl}/cosy`)
+          && captured.includes(`[access] Local server address: ${loopbackUrl}`)
           // The wording must not promise an app that is not in this build.
           && !/Open the app on this machine/.test(captured)
           // R10 deleted the "no browser client, so there is no app URL" line: it explained an absence the
@@ -1734,6 +2032,7 @@ try {
       // The line the physical audit flagged: it used to print a bare `https://<host>` with no path.
       check('the no-web tailnet line carries the /cosy path, not a bare host',
         withTailnet.includes(`[access] Or from your tailnet: ${tailscaleUrl}/cosy`)
+          && withTailnet.includes(`[access] Tailnet server address: ${tailscaleUrl}`)
           && !/tailnet: https:\/\/[^\s]*\.ts\.net$/m.test(withTailnet),
         withTailnet);
 
@@ -1749,6 +2048,8 @@ try {
       check('the Chinese no-web outro carries the same two /cosy URLs',
         chineseNoWeb.includes(`[access] 浏览器里也有同样的步骤：${loopbackUrl}/cosy`)
           && chineseNoWeb.includes(`[access] 或在 tailnet 内打开：${tailscaleUrl}/cosy`)
+          && chineseNoWeb.includes(`[access] 本机服务器地址：${loopbackUrl}`)
+          && chineseNoWeb.includes(`[access] Tailnet 服务器地址：${tailscaleUrl}`)
           && chineseNoWeb.includes('[access] 快捷命令：`cosy` 是 `cosyncing` 的别名，例如 `cosy status`、`cosy doctor`、`cosy update`。'),
         chineseNoWeb);
 
@@ -1844,6 +2145,8 @@ try {
       { kind: 'credentials' },
       { kind: 'setup-state', service: 'systemd' },
       { kind: 'pi-bridge', path: '/h/.pi/x.ts' },
+      { kind: 'pi-bridge', path: '/h/.pi/x.ts', replaceLegacy: true },
+      { kind: 'durable-state-permissions', paths: ['/h/transport-peers.json'] },
       { kind: 'agent-skill-install' },
       { kind: 'agent-skill-refresh' },
       { kind: 'agent-skill-remove' },
@@ -1940,6 +2243,17 @@ try {
         // Before the language prompt, exactly as a real recovery run reaches it.
         await clack.recoveredInterruptedTransaction('zh-Hans');
         await clack.intro(inspection);
+        await clack.showBlockers([{
+          code: 'fixture-migration',
+          summary: 'Existing legacy ownership needs explicit confirmation.',
+          remediation: 'Back up the legacy target and rerun setup.',
+          localized: {
+            'zh-Hans': {
+              summary: '现有旧版目标需要单独确认归属。',
+              remediation: '请先备份旧版目标，然后重新运行安装。',
+            },
+          },
+        }]);
         await clack.showPlan(plan, inspection);
         await clack.complete({
           schemaVersion: 1,
@@ -1974,6 +2288,8 @@ try {
       check('the Chinese wizard renders no English sentences in its own copy',
         captured.includes('发现一次中断的安装事务')
           && captured.includes('编程助手检查')
+          && captured.includes('现有旧版目标需要单独确认归属')
+          && !captured.includes('Existing legacy ownership needs explicit confirmation')
           && captured.includes('将要执行的改动')
           && captured.includes('安装配置已完成')
           && englishSentences.length === 0,
@@ -2708,6 +3024,36 @@ try {
   }
 } finally {
   rmSync(root, { recursive: true, force: true });
+}
+
+// The known-legacy skill prompt defaults Yes; every other confirmation keeps its own default. The clack
+// presenter takes no injectable seam and these suites run outside `bun test`, so the default is bound at
+// the source. It is a weaker binding than a behavioural one — it would not catch a change in how clack
+// reads initialValue — but it does catch the flip that matters: this prompt silently reverting to No, or
+// a neighbouring destructive prompt being switched to Yes alongside it.
+{
+  const presenterSource = readFileSync(
+    resolve(import.meta.dir, '../../../../packages/typescript/broker/src/setup-presenter.ts'),
+    'utf8',
+  );
+  const legacyBlock = presenterSource.slice(
+    presenterSource.indexOf('async confirmLegacyAgentSkill('),
+    presenterSource.indexOf('async confirmOpencodeShim('),
+  );
+  check('the exact-known legacy skill prompt defaults to Yes',
+    legacyBlock.includes('initialValue: true') && !legacyBlock.includes('initialValue: false'),
+    legacyBlock.split('\n').find((line) => line.includes('initialValue'))?.trim() ?? '(no initialValue)');
+  // The Pi bridge is the OTHER legacy migration prompt and sits immediately above this one. It must stay
+  // default-No, so this pins that the change was scoped to the skill rather than applied to both.
+  const bridgeBlock = presenterSource.slice(
+    presenterSource.indexOf('async confirmLegacyPiBridge('),
+    presenterSource.indexOf('async confirmAgentSkill('),
+  );
+  check('the adjacent legacy Pi bridge prompt still defaults to No',
+    bridgeBlock.length > 0
+      && bridgeBlock.includes('initialValue: false')
+      && !bridgeBlock.includes('initialValue: true'),
+    bridgeBlock.split('\n').find((line) => line.includes('initialValue'))?.trim() ?? '(no initialValue)');
 }
 
 const failed = results.filter((entry) => !entry.ok);

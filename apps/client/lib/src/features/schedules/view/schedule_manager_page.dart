@@ -766,7 +766,7 @@ class _ScheduleEditorState extends ConsumerState<_ScheduleEditor> {
             ],
             if (_error case final error?) ...[
               const SizedBox(height: 8),
-              Text(
+              SelectableText(
                 _scheduleEditorErrorCopy(l10n, error),
                 key: const Key('schedule-editor-error'),
                 style: TextStyle(color: Theme.of(context).colorScheme.error),

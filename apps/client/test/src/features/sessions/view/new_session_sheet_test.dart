@@ -168,7 +168,7 @@ void main() {
       find.byKey(const Key('new-session-launch-error')),
     );
     expect(error.data, contains("Couldn't start the session."));
-    expect(error.data, contains('The broker ran into a problem on its end.'));
+    expect(error.data, contains('The server ran into a problem on its end.'));
     expect(error.data, isNot(contains('BrokerException')));
     expect(error.data, isNot(contains('broker exploded')));
     // The page stays actionable with retry and back controls.

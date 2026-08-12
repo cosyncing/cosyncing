@@ -16,66 +16,73 @@ bool isAgentOwnedForkRefusal(Object error) =>
 
 extension _SessionDetailSessionActions on SessionDetailController {
   Future<bool> _renameSessionCoordinated(String title) async {
-    final client = await ref.read(brokerClientProvider.future);
-    if (client == null) {
-      const message = 'Connect to a broker before renaming this session.';
-      state = state.copyWith(
-        error: message,
-        renameSessionActionState: const SessionActionState(
-          phase: SessionActionPhase.failed,
-          message: message,
-        ),
-      );
-      return false;
-    }
-
-    if (state.agentActions?.canRenameNative != true) {
-      const message = 'Rename is not available for this agent.';
-      state = state.copyWith(
-        error: message,
-        renameSessionActionState: const SessionActionState(
-          phase: SessionActionPhase.failed,
-          message: message,
-        ),
-      );
-      return false;
-    }
-
-    if (state.renameSessionActionState.isBusy) {
-      return false;
-    }
-
-    state = state.copyWith(
-      renameSessionActionState: const SessionActionState(
-        phase: SessionActionPhase.inProgress,
-        message: 'Renaming session...',
-      ),
-      clearError: true,
-    );
+    final source = _connectionSource;
+    if (!_canPublishRenameFor(source)) return false;
 
     try {
+      final client = await ref.read(brokerClientProvider.future);
+      if (!_canPublishRenameFor(source)) return false;
+      if (client == null) {
+        const message = 'Connect to a server before renaming this session.';
+        state = state.copyWith(
+          error: message,
+          renameSessionActionState: const SessionActionState(
+            phase: SessionActionPhase.failed,
+            message: message,
+          ),
+        );
+        return false;
+      }
+
+      if (state.agentActions?.canRenameNative != true) {
+        const message = 'Rename is not available for this agent.';
+        state = state.copyWith(
+          error: message,
+          renameSessionActionState: const SessionActionState(
+            phase: SessionActionPhase.failed,
+            message: message,
+          ),
+        );
+        return false;
+      }
+
+      if (state.renameSessionActionState.isBusy) {
+        return false;
+      }
+
+      state = state.copyWith(
+        renameSessionActionState: const SessionActionState(
+          phase: SessionActionPhase.inProgress,
+          message: 'Renaming session...',
+        ),
+        clearError: true,
+      );
+
       final normalized = title.trim();
       final response = await client.renameSession(
         arg.tool,
         arg.sessionId,
         normalized.isEmpty ? null : normalized,
       );
+      if (!_canPublishRenameFor(source)) return false;
       if (!response.ok) {
         throw const BrokerException(
-          message: 'Broker rejected the rename.',
+          message: 'Server rejected the rename.',
           statusCode: 400,
         );
       }
 
       final current = state.sessionInfo;
-      final updated =
-          response.session ??
-          (current == null
-              ? null
-              : SessionInfo.fromJson({
-                  ...current.toJson(),
-                  'title': response.title ?? '',
-                }));
+      final acceptedTitle =
+          response.session?.title ??
+          response.title ??
+          (normalized.isEmpty ? '' : null);
+      final updated = current == null
+          ? response.session
+          : SessionInfo.fromJson({
+              ...current.toJson(),
+              'title': acceptedTitle ?? current.title,
+            });
       state = state.copyWith(
         sessionInfo: updated,
         renameSessionActionState: const SessionActionState(
@@ -84,8 +91,35 @@ extension _SessionDetailSessionActions on SessionDetailController {
         ),
         clearError: true,
       );
+      if (acceptedTitle != null) {
+        ref
+            .read(sessionListControllerProvider.notifier)
+            .renameSessionTitle(arg.tool, arg.sessionId, acceptedTitle);
+        // The durable open-tab set may still be hydrating when a compact
+        // detail route accepts the rename. Patch after hydration so a stored
+        // old title cannot win merely because the mutation returned quickly.
+        unawaited(
+          ref
+              .read(openSessionsControllerProvider.future)
+              .then((_) {
+                if (!_canPublishRenameFor(source)) return;
+                ref
+                    .read(openSessionsControllerProvider.notifier)
+                    .renameSessionTitle(
+                      arg.tool,
+                      arg.sessionId,
+                      acceptedTitle,
+                    );
+              })
+              .catchError((Object _) {
+                // Local tab persistence cannot turn a successful native rename
+                // into a failed user action. Roster/native truth heals it.
+              }),
+        );
+      }
       return true;
     } on Object catch (error) {
+      if (!_canPublishRenameFor(source)) return false;
       final message = userFacingMessage(
         error,
         lead: "Couldn't rename this session.",
@@ -101,11 +135,24 @@ extension _SessionDetailSessionActions on SessionDetailController {
     }
   }
 
+  /// Whether a rename owned by the mounted [source] may proceed or publish.
+  ///
+  /// The active profile chooses which client would receive a mutation, while
+  /// [_connectionSource] owns the session frame and capabilities currently on
+  /// screen. Both must name the same exact profile, endpoint and incarnation
+  /// at admission and after every await. This prevents stale facts from broker
+  /// A from authorizing a rename sent to newly active broker B.
+  bool _canPublishRenameFor(RosterSource? source) =>
+      source != null &&
+      !_disposed &&
+      _connectionSource == source &&
+      RosterSource.of(ref.read(activeBrokerProfileProvider)) == source;
+
   /// Forks the current session via the broker capability-gated fork API.
   Future<SessionInfo?> _forkSessionCoordinated({String? messageId}) async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a broker before forking this session.';
+      const message = 'Connect to a server before forking this session.';
       state = state.copyWith(
         error: message,
         forkSessionActionState: const SessionActionState(
@@ -256,7 +303,7 @@ extension _SessionDetailSessionActions on SessionDetailController {
   Future<SessionInfo?> _cloneSessionCoordinated() async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a broker before cloning this session.';
+      const message = 'Connect to a server before cloning this session.';
       state = state.copyWith(
         error: message,
         cloneSessionActionState: const SessionActionState(
@@ -366,8 +413,8 @@ extension _SessionDetailSessionActions on SessionDetailController {
           'Transcript export confirmation expired or changed. Try again.',
         'RATE_LIMITED' => 'Transcript export is rate limited. Try again later.',
         'R2_DISABLED' =>
-          'Transcript export is disabled for this broker or client.',
-        'BAD_PARAM' => 'Transcript export request was rejected by the broker.',
+          'Transcript export is disabled for this server or client.',
+        'BAD_PARAM' => 'Transcript export request was rejected by the server.',
         _ when error.statusCode == 501 =>
           'Transcript export is not available for this agent.',
         _ => userFacingMessage(

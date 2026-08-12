@@ -79,4 +79,33 @@ check(
   'client:check executes the release build command regression',
 );
 
+for (const entitlementsFile of [
+  'apps/client/macos/Runner/DebugProfile.entitlements',
+  'apps/client/macos/Runner/Release.entitlements',
+]) {
+  const entitlements = await readFile(
+    join(REPOSITORY_ROOT, entitlementsFile),
+    'utf8',
+  );
+  check(
+    /<key>com\.apple\.security\.network\.client<\/key>\s*<true\/>/.test(
+      entitlements,
+    ),
+    `${entitlementsFile} permits sandboxed outgoing server connections`,
+  );
+  check(
+    !entitlements.includes('keychain-access-groups'),
+    `${entitlementsFile} remains buildable for unsigned macOS distribution`,
+  );
+}
+
+const macosInfoPlist = await readFile(
+  join(REPOSITORY_ROOT, 'apps/client/macos/Runner/Info.plist'),
+  'utf8',
+);
+check(
+  !macosInfoPlist.includes('NSAllowsArbitraryLoads'),
+  'macOS client does not add broad arbitrary-load permission',
+);
+
 if (failures > 0) process.exit(1);

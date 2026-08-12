@@ -12,14 +12,13 @@
 /// - `FlutterTts()` constructor
 /// - `awaitSpeakCompletion(bool)` so `speak` resolves on completion/cancel/error
 /// - `speak(String)`, `stop()`, `pause()` (no `resume()` in 4.2.5)
+/// - `setSpeechRate(double)` (1.0 normal on web, 0.5 normal on native)
 /// - `setErrorHandler(void Function(dynamic))` (adapted to `Object?`)
 /// - `getLanguages` (`Future<dynamic>`)
 ///
 /// Governing doc: `docs/architecture/client-ui.md`
 /// (section "Flutter Integration Direction").
 library;
-
-import 'dart:async';
 
 import 'package:cosyncing_client/src/platform/speech/flutter_tts_backend.dart';
 import 'package:cosyncing_client/src/platform/speech/flutter_tts_speech_output.dart';
@@ -43,6 +42,19 @@ class FlutterTtsBackendImpl implements FlutterTtsBackend {
   @override
   Future<void> speak(String text) async {
     await _tts.speak(text);
+  }
+
+  @override
+  Future<void> setRate(double multiplier) async {
+    // flutter_tts normalizes native platforms around 0.5 (including Android,
+    // where the plugin doubles the value before calling TextToSpeech) while
+    // Web Speech uses 1.0. Keep that mismatch inside the platform wrapper so
+    // the app-level contract remains an honest multiplier.
+    final pluginRate = flutterTtsPluginRateForMultiplier(
+      multiplier,
+      isWeb: kIsWeb,
+    );
+    await _tts.setSpeechRate(pluginRate);
   }
 
   @override
@@ -77,15 +89,11 @@ class FlutterTtsBackendImpl implements FlutterTtsBackend {
 
 /// Creates a FlutterTts-backed [SpeechOutput] for production use.
 ///
-/// The adapter's [FlutterTtsSpeechOutput.initialize] is called fire-and-forget
-/// so the provider returns synchronously; capabilities are probed
-/// asynchronously and a state refresh is emitted when ready. Initialization
-/// absorbs failures, so the unawaited call never leaks an unhandled error.
+/// Backend construction and capability probing are deferred until the first
+/// manual Read-aloud action. Merely mounting or resizing a session therefore
+/// sends no traffic through the native plugin.
 SpeechOutput createFlutterTtsSpeechOutput() {
-  final backend = FlutterTtsBackendImpl();
-  final output = FlutterTtsSpeechOutput(backend);
-  unawaited(output.initialize());
-  return output;
+  return FlutterTtsSpeechOutput.lazy(FlutterTtsBackendImpl.new);
 }
 
 /// Creates the platform-default [SpeechOutput] for the current platform.

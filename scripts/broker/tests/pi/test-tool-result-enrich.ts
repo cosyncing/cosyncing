@@ -168,6 +168,93 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('bash: exitCode takes the LAST match, not output noise', e.exitCode === 2, `exit=${e.exitCode}`);
 }
 
+// ── 2b. JSONL chronology + run-summary evidence (mapPiJsonlText) ──────────────
+// Pi's native causal order is the FILE order (the parent chain flattened).
+// Nothing may sort by wall clock: an assistant entry's embedded timestamp is
+// its request-creation time and routinely EQUALS — or precedes — the previous
+// entry's clock. And a run summary may only claim completion from evidence.
+{
+  const jsonl = (obj: unknown): string => `${JSON.stringify(obj)}\n`;
+  const fixture = [
+    jsonl({ type: 'session', version: 3, id: 'chrono', timestamp: '2026-06-20T00:00:00.000Z', cwd: '/tmp' }),
+    jsonl({ type: 'message', id: 'cu1', timestamp: '2026-06-20T00:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T00:00:01.000Z') } }),
+    // Equal clocks: the assistant's embedded timestamp EQUALS the user entry's.
+    jsonl({ type: 'message', id: 'ca1', timestamp: '2026-06-20T00:00:03.000Z', message: { role: 'assistant', stopReason: 'toolUse', timestamp: Date.parse('2026-06-20T00:00:01.000Z'), content: [{ type: 'text', text: 'first text' }, { type: 'toolCall', id: 'cc1', name: 'bash', arguments: { command: 'ls' } }] } }),
+    // Older clock than the entry BEFORE it: sorting by time would move it.
+    jsonl({ type: 'message', id: 'cr1', timestamp: '2026-06-20T00:00:02.500Z', message: { role: 'toolResult', toolCallId: 'cc1', toolName: 'bash', content: [{ type: 'text', text: 'listing' }] } }),
+    jsonl({ type: 'message', id: 'ca2', timestamp: '2026-06-20T00:00:05.000Z', message: { role: 'assistant', stopReason: 'stop', timestamp: Date.parse('2026-06-20T00:00:02.500Z'), content: [{ type: 'text', text: 'after tools' }] } }),
+  ].join('');
+  const { mapPiJsonlText } = await import('../../../../packages/typescript/adapters/pi/src/index.ts');
+  const mapped = mapPiJsonlText(fixture);
+  const order = mapped
+    .filter((m) => ['user-message', 'model-output', 'tool-call', 'tool-result'].includes(m.type))
+    .map((m) => (m.type === 'model-output' ? `text:${(m as any).text}` : m.type === 'tool-call' ? `call:${(m as any).callId}` : m.type === 'tool-result' ? `result:${(m as any).callId}` : 'user'));
+  check(
+    'JSONL mapping preserves file order under equal and older clocks',
+    JSON.stringify(order) === JSON.stringify(['user', 'text:first text', 'call:cc1', 'result:cc1', 'text:after tools']),
+    JSON.stringify(order),
+  );
+  const summary = mapped.filter((m) => m.type === 'run-summary');
+  check(
+    'one turn-level summary spans user entry → final assistant entry',
+    summary.length === 1
+      && summary[0]?.status === 'done'
+      && (summary[0] as any)?.key === 'pi:run:u0'
+      && (summary[0] as any)?.turnId === 'u0'
+      && (summary[0] as any)?.userMessageKey === 'cu1'
+      && summary[0]?.startedAt === Date.parse('2026-06-20T00:00:01.000Z')
+      && summary[0]?.completedAt === Date.parse('2026-06-20T00:00:05.000Z')
+      && summary[0]?.totalRuntimeMs === 4000,
+    JSON.stringify(summary),
+  );
+  check(
+    'mapping the same bytes twice is identical (reload convergence)',
+    JSON.stringify(mapPiJsonlText(fixture)) === JSON.stringify(mapped),
+  );
+
+  // A window that ends mid-run (trailing toolUse) must not claim completion.
+  const midRun = fixture.split('\n').filter(Boolean).slice(0, 4).join('\n');
+  const midMapped = mapPiJsonlText(midRun);
+  const midSummary = midMapped.filter((m) => m.type === 'run-summary');
+  check(
+    'a mid-run window reports the trailing turn running with no duration',
+    midSummary.length === 1
+      && midSummary[0]?.status === 'running'
+      && midSummary[0]?.totalRuntimeMs === undefined
+      && midSummary[0]?.completedAt === undefined,
+    JSON.stringify(midSummary),
+  );
+
+  // Contradictory clocks (final entry written "before" the prompt) omit the
+  // duration rather than invent a negative-or-zero one.
+  const contradictory = [
+    jsonl({ type: 'message', id: 'xu1', timestamp: '2026-06-20T01:00:10.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T01:00:10.000Z') } }),
+    jsonl({ type: 'message', id: 'xa1', timestamp: '2026-06-20T01:00:05.000Z', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'time went backwards' }] } }),
+  ].join('');
+  const contradictorySummary = mapPiJsonlText(contradictory).filter((m) => m.type === 'run-summary');
+  check(
+    'contradictory clocks omit the duration',
+    contradictorySummary.length === 1
+      && contradictorySummary[0]?.status === 'done'
+      && contradictorySummary[0]?.totalRuntimeMs === undefined,
+    JSON.stringify(contradictorySummary),
+  );
+
+  // An aborted final entry is terminal evidence: cancelled, with its real span.
+  const aborted = [
+    jsonl({ type: 'message', id: 'bu1', timestamp: '2026-06-20T02:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: Date.parse('2026-06-20T02:00:00.000Z') } }),
+    jsonl({ type: 'message', id: 'ba1', timestamp: '2026-06-20T02:00:07.000Z', message: { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'stopped' }] } }),
+  ].join('');
+  const abortedSummary = mapPiJsonlText(aborted).filter((m) => m.type === 'run-summary');
+  check(
+    'an aborted turn closes as cancelled with its recorded span',
+    abortedSummary.length === 1
+      && abortedSummary[0]?.status === 'cancelled'
+      && abortedSummary[0]?.totalRuntimeMs === 7000,
+    JSON.stringify(abortedSummary),
+  );
+}
+
 // ── 3. Pi bridge command queue ────────────────────────────────────────────────
 {
   const conn = new PiBridgeConnection({ id: 'q-idle', tool: 'pi', title: 'queue', status: 'idle', attachMode: 'live' });

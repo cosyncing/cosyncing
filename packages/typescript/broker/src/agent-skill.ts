@@ -3,10 +3,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 // @ts-expect-error Bun's text loader embeds the Markdown source in source and packaged builds.
 import agentSkillModule from '../skills/cosyncing.md' with { type: 'text' };
+// @ts-expect-error Bun's text loader embeds the frozen Markdown predecessor in source and packaged builds.
+import agentSkillV010LegacyModule from '../skills/legacy/cosyncing-v0.1.0.md' with { type: 'text' };
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { inspectOwnerOnlyFile } from './secure-files.ts';
 
 export const AGENT_SKILL_SOURCE = agentSkillModule as unknown as string;
+/** Exact v0.1.0 predecessor bytes; current-skill edits cannot redefine legacy ownership. */
+export const AGENT_SKILL_KNOWN_LEGACY_SOURCE = agentSkillV010LegacyModule as unknown as string;
 export const AGENT_SKILL_SHA256 = createHash('sha256')
   .update(AGENT_SKILL_SOURCE)
   .digest('hex');
@@ -25,7 +29,7 @@ export interface AgentSkillTarget {
 }
 
 export type AgentSkillInspection = AgentSkillTarget & {
-  status: 'missing' | 'owned' | 'drifted' | 'unsafe' | 'unreadable';
+  status: 'missing' | 'owned' | 'known-legacy' | 'drifted' | 'unsafe' | 'unreadable';
   actualSha256?: string;
 };
 
@@ -53,10 +57,15 @@ export function inspectAgentSkill(target: AgentSkillTarget): AgentSkillInspectio
   const file = inspectOwnerOnlyFile(target.path);
   if (file.status !== 'ok') return { ...target, status: file.status };
   try {
-    const actualSha256 = createHash('sha256').update(readFileSync(target.path)).digest('hex');
+    const content = readFileSync(target.path);
+    const actualSha256 = createHash('sha256').update(content).digest('hex');
     return {
       ...target,
-      status: actualSha256 === AGENT_SKILL_SHA256 ? 'owned' : 'drifted',
+      status: actualSha256 === AGENT_SKILL_SHA256
+        ? 'owned'
+        : content.toString('utf8') === AGENT_SKILL_KNOWN_LEGACY_SOURCE
+          ? 'known-legacy'
+          : 'drifted',
       actualSha256,
     };
   } catch {

@@ -343,13 +343,24 @@ class _CommandProgressCard extends StatefulWidget {
 
 class _CommandProgressCardState extends State<_CommandProgressCard> {
   Timer? _ticker;
+  bool _tickerEnabled = false;
 
   @override
-  void initState() {
-    super.initState();
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerEnabled == enabled) return;
+    _tickerEnabled = enabled;
+    _syncTicker();
+  }
+
+  void _syncTicker() {
+    _ticker?.cancel();
+    _ticker = _tickerEnabled
+        ? Timer.periodic(const Duration(seconds: 1), (_) {
+            if (mounted) setState(() {});
+          })
+        : null;
   }
 
   @override
@@ -430,6 +441,7 @@ class _AgentActivityCard extends StatefulWidget {
 class _AgentActivityCardState extends State<_AgentActivityCard> {
   Timer? _ticker;
   late int _startedAtMs;
+  bool _tickerEnabled = false;
 
   @override
   void initState() {
@@ -447,6 +459,15 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
     }
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerEnabled == enabled) return;
+    _tickerEnabled = enabled;
+    _startTicker();
+  }
+
   void _syncStart() {
     _startedAtMs =
         widget.activity.startedAtMs ??
@@ -455,9 +476,12 @@ class _AgentActivityCardState extends State<_AgentActivityCard> {
   }
 
   void _startTicker() {
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
+    _ticker?.cancel();
+    _ticker = _tickerEnabled
+        ? Timer.periodic(const Duration(seconds: 1), (_) {
+            if (mounted) setState(() {});
+          })
+        : null;
   }
 
   @override
@@ -589,6 +613,7 @@ String _activityChildStatus(
 class _GoalStateCardState extends State<_GoalStateCard> {
   Timer? _ticker;
   bool _isSending = false;
+  bool _tickerEnabled = false;
 
   @override
   void initState() {
@@ -606,6 +631,15 @@ class _GoalStateCardState extends State<_GoalStateCard> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerEnabled == enabled) return;
+    _tickerEnabled = enabled;
+    _syncTicker();
+  }
+
+  @override
   void dispose() {
     _ticker?.cancel();
     super.dispose();
@@ -614,7 +648,8 @@ class _GoalStateCardState extends State<_GoalStateCard> {
   void _syncTicker() {
     _ticker?.cancel();
     _ticker = null;
-    if (widget.goal.status == GoalStateStatus.active &&
+    if (_tickerEnabled &&
+        widget.goal.status == GoalStateStatus.active &&
         widget.goal.startedAt != null) {
       _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() {});
@@ -736,22 +771,29 @@ class _GoalStateCardState extends State<_GoalStateCard> {
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            widget.goal.title ?? l10n.currentGoal,
-            style: theme.textTheme.titleSmall?.copyWith(
-              color: tokens.textPrimary,
-              fontWeight: FontWeight.w600,
+          SelectionArea(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.goal.title ?? l10n.currentGoal,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: tokens.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (widget.goal.detail != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.goal.detail!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: tokens.textSecondary,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
-          if (widget.goal.detail != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              widget.goal.detail!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: tokens.textSecondary,
-              ),
-            ),
-          ],
           const SizedBox(height: 10),
           Tooltip(
             message: blockedReason ?? '',
@@ -866,6 +908,7 @@ class _TaskListStateCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
     final done = taskList.items
         .where((item) => item.status == TaskItemStatus.done)
         .length;
@@ -901,17 +944,46 @@ class _TaskListStateCard extends StatelessWidget {
         key: const Key('session-task-list-expansion'),
         initiallyExpanded: taskList.status == TaskListStateStatus.running,
         leading: Icon(Icons.checklist_rounded, color: color),
-        title: Text(
-          taskList.title ?? (semantic == null ? l10n.tasks : l10n.plan),
-        ),
-        subtitle: Text(
-          running > 0
-              ? l10n.taskSummaryRunning(
-                  taskList.items.length,
-                  done,
-                  running,
-                )
-              : l10n.taskSummary(taskList.items.length, done),
+        // The region is explicit now that SelectableTapRegion no longer creates
+        // one. It stays per-card rather than per-surface, like the sibling
+        // cards above, because these panels sit outside the transcript and have
+        // no shared region to join. Its recognizer still swallows the header's
+        // own tap, so the toggle is still re-supplied below.
+        title: SelectionArea(
+          child: Builder(
+            builder: (context) => SelectableTapRegion(
+              onTap: () {
+                final expansible = ExpansibleController.of(context);
+                if (expansible.isExpanded) {
+                  expansible.collapse();
+                } else {
+                  expansible.expand();
+                }
+              },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    taskList.title ??
+                        (semantic == null ? l10n.tasks : l10n.plan),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    running > 0
+                        ? l10n.taskSummaryRunning(
+                            taskList.items.length,
+                            done,
+                            running,
+                          )
+                        : l10n.taskSummary(taskList.items.length, done),
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: tokens.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
         trailing: StatusPill(
           label: statusLabel,
@@ -993,8 +1065,23 @@ class _TaskStateRow extends StatelessWidget {
       key: Key('session-task-item-$index'),
       dense: true,
       leading: Icon(icon, size: 20, color: color),
-      title: Text(item.title),
-      subtitle: item.detail == null ? null : Text(item.detail!),
+      title: SelectionArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(item.title),
+            if (item.detail case final detail?) ...[
+              const SizedBox(height: 4),
+              Text(
+                detail,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: tokens.textSecondary,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
       trailing: item.priority == null
           ? null
           : Text(

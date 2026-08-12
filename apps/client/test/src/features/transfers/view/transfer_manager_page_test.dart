@@ -72,6 +72,17 @@ void main() {
       expect(find.text('Download: report.html'), findsOneWidget);
       expect(find.text('Preview: preview.html'), findsOneWidget);
       expect(find.text('Download: notes.txt'), findsOneWidget);
+      expect(
+        find.widgetWithText(SelectableText, 'opencode / session-b'),
+        findsOneWidget,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('Preview: preview.html'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets(

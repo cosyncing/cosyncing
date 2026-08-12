@@ -664,7 +664,7 @@ void main() {
       state.connectionStatus,
       SessionDetailConnectionStatus.disconnected,
     );
-    expect(state.error, 'Connect to a broker before attaching to a session.');
+    expect(state.error, 'Connect to a server before attaching to a session.');
     expect(state.messageEvents, hasLength(1));
     expect(
       state.messageEvents.single.raw['type'],

@@ -61,7 +61,11 @@ import {
 } from './codex-tui-readiness.ts';
 import { readSetupFailureDiagnostic, setupFailureDiagnosticPath } from './setup-transaction.ts';
 import {
+  advertisedProbeIsBroker,
   inspectTailscaleServe,
+  probeAdvertisedEndpointOnce,
+  resolveTailscaleFallbackAddresses,
+  type AdvertisedEndpointDirectProbe,
   tailscaleRouteReceiptTarget,
   TAILSCALE_SERVE_OWNERSHIP_MARKER,
   TAILSCALE_SERVE_RESOURCE_ID,
@@ -117,6 +121,8 @@ export interface DoctorDependencies {
    * moved or vanished — states a test host running a source checkout can never reach on its own.
    */
   applicationIdentity?: Readonly<ApplicationIdentity>;
+  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
+  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }
 
 function remediation(command: string, message: string): SetupCheck['remediation'] {
@@ -1089,6 +1095,8 @@ async function endpointAndRuntimeChecks(options: {
   brokerToken: ReturnType<typeof inspectBrokerToken>;
   home: string;
   agentPathCheck?: Readonly<SetupCheck>;
+  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
+  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }): Promise<{ network: SetupCheck[]; runtime: SetupCheck[]; agents: SetupCheck[] }> {
   if (options.config.status !== 'ok') return { network: [], runtime: [], agents: [] };
   const install = installedState(options.home);
@@ -1227,23 +1235,51 @@ async function endpointAndRuntimeChecks(options: {
       remediation: remediation('cosyncing setup', 'Configure Tailscale Serve only if private remote access is wanted.'),
     });
   } else {
-    const advertisedHealth = await options.context.fetchJson(new URL('/api/health', advertised).toString());
-    network.push(advertisedHealth.status === 'ok'
+    // Same DNS-independent primitive setup verifies with, as a single shot. A host whose MagicDNS does not
+    // resolve would otherwise be told its route is broken by the very surface meant to diagnose it.
+    const advertisedHealth = await probeAdvertisedEndpointOnce({
+      context: options.context,
+      advertisedUrl: advertised,
+      fallbackAddresses: await resolveTailscaleFallbackAddresses(options.context),
+      ...(options.advertisedDirectProbe ? { directProbe: options.advertisedDirectProbe } : {}),
+    });
+    // Reachability alone is not health. The advertised name is a route into whatever currently listens on
+    // it, so a stale broker, a different machine's Serve route, or an unrelated HTTPS service all answer
+    // 200 here. Status and pairing already require the full identity; doctor now agrees with them, and
+    // reports "answered as something else" separately from "did not answer at all" because the two have
+    // completely different causes and remedies.
+    const identityMatches = advertisedProbeIsBroker(
+      advertisedHealth,
+      options.config.config.broker.machineLabel,
+    );
+    network.push(identityMatches
       ? {
           id: 'network.advertised-endpoint',
           status: 'pass',
           detailCode: 'advertised-endpoint-reachable',
-          summary: 'The advertised private endpoint is reachable.',
+          summary: 'The advertised private endpoint is reachable and answers as this broker.',
           evidence: { endpoint: 'advertised-private-https' },
         }
-      : {
-          id: 'network.advertised-endpoint',
-          status: 'fail',
-          detailCode: 'advertised-endpoint-unreachable',
-          summary: 'The configured advertised endpoint is unreachable.',
-          evidence: { endpoint: 'advertised-private-https' },
-          remediation: remediation('cosyncing repair', 'Repair the private Serve route or advertised URL.'),
-        });
+      : advertisedHealth.status === 'unreachable'
+        ? {
+            id: 'network.advertised-endpoint',
+            status: 'fail',
+            detailCode: 'advertised-endpoint-unreachable',
+            summary: 'The configured advertised endpoint is unreachable.',
+            evidence: { endpoint: 'advertised-private-https' },
+            remediation: remediation('cosyncing repair', 'Repair the private Serve route or advertised URL.'),
+          }
+        : {
+            id: 'network.advertised-endpoint',
+            status: 'fail',
+            detailCode: 'advertised-endpoint-identity-mismatch',
+            summary: 'The advertised endpoint answered, but not as this cosyncing broker.',
+            evidence: { endpoint: 'advertised-private-https' },
+            remediation: remediation(
+              'cosyncing repair',
+              'Another service or broker answers the advertised route; reconcile it before relying on it.',
+            ),
+          });
   }
   return { network, runtime, agents };
 }
@@ -1337,6 +1373,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     brokerToken,
     home,
     agentPathCheck: installedService.find((candidate) => candidate.id === 'service.agent-executable-path'),
+    ...(dependencies.advertisedDirectProbe ? { advertisedDirectProbe: dependencies.advertisedDirectProbe } : {}),
   });
   const codexReadiness = codexTuiReadinessCheck(
     dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(dependencies.context),

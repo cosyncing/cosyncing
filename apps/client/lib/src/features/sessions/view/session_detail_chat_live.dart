@@ -2,6 +2,7 @@ part of 'session_detail_page.dart';
 
 class _ChatPanel extends ConsumerWidget {
   const _ChatPanel({
+    required this.sessionKey,
     required this.state,
     required this.controller,
     required this.commands,
@@ -43,6 +44,7 @@ class _ChatPanel extends ConsumerWidget {
     super.key,
   });
 
+  final SessionDetailKey sessionKey;
   final SessionDetailState state;
   final SessionDetailController controller;
   final List<SlashCommand> commands;
@@ -85,44 +87,6 @@ class _ChatPanel extends ConsumerWidget {
   final void Function(ModelOption model, String? effort)
   onModelAndEffortSelected;
   final ValueChanged<ModeOption> onPermissionModeSelected;
-
-  /// A one-line reason the composer is read-only, shown only when connected but
-  /// the narrow gate (canPrompt) is closed. Null when the composer is live.
-  ///
-  /// Returns null for the states the header already names, so the banner does
-  /// not restate the status pill. See [_bannerRestatesStatusPill].
-  String? _composerBlockedHint(SessionControlView control) {
-    if (control.answerOnly) {
-      return 'Synced with the terminal (answers only). Respond to permission '
-          'and question cards here; send prompts from the terminal.';
-    }
-    if (_bannerRestatesStatusPill(control.pill)) {
-      return null;
-    }
-    return switch (control.pill) {
-      SessionControlPill.unknown =>
-        'Waiting for the broker to publish session control state.',
-      _ => control.reason ?? 'Observe only — you can watch but not send.',
-    };
-  }
-
-  /// Whether the header's status pill already tells the user what a blocked
-  /// banner would tell them.
-  ///
-  /// The chat tab used to stack a full-width banner above the composer *and*
-  /// show the status pill beside the session title. For `observing` and
-  /// `syncAvailable` the two said the same thing — the pill reads "Observing" /
-  /// "Sync available" and the banner restated it — so the banner cost a
-  /// ~50px band (its own line plus the 12px gap) to duplicate a chip already
-  /// on screen. Those two are dropped.
-  ///
-  /// The remaining states are deliberately kept: `unknown` renders the pill
-  /// with no label at all (the header falls back to bare "Status"), and the
-  /// answer-only and broker-supplied `reason` cases carry detail the pill has
-  /// no room for. Suppressing those would delete information, not duplication.
-  static bool _bannerRestatesStatusPill(SessionControlPill pill) =>
-      pill == SessionControlPill.observing ||
-      pill == SessionControlPill.syncAvailable;
 
   /// Opens the slash-command sheet. Selection, args parsing and send all stay
   /// owned by the page — the sheet only presents them.
@@ -188,10 +152,8 @@ class _ChatPanel extends ConsumerWidget {
         state.sessionInfo?.status == SessionStatus.working &&
         state.interruptCommand != null;
     final compatibilityHint = isConnected ? _compatibilityHint(context) : null;
-    final blockedHint =
-        isConnected && !state.compatibilityReadOnly && !control.canPrompt
-        ? _composerBlockedHint(control)
-        : null;
+    final showControlBar =
+        isConnected && !state.compatibilityReadOnly && !control.canPrompt;
     final transcript = _TranscriptSurface(
       state: state,
       controller: controller,
@@ -244,9 +206,13 @@ class _ChatPanel extends ConsumerWidget {
             _CompatibilityNotice(message: compatibilityHint),
             const SizedBox(height: 12),
           ],
-          if (blockedHint != null) ...[
-            _ComposerBlockedHint(message: blockedHint),
-            const SizedBox(height: 12),
+          if (showControlBar) ...[
+            _ObserveComposerBar(
+              control: control,
+              sessionKey: sessionKey,
+              conflict: state.driveRestoreConflict,
+            ),
+            const SizedBox(height: 8),
           ],
           _PromptComposer(
             commands: commands,

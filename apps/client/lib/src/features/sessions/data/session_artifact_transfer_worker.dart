@@ -27,7 +27,7 @@ const _uploadResumeUnavailableMessage =
 const _uploadResumeAlreadyInProgressMessage =
     'Upload resume is already in progress for this transfer.';
 const _artifactReferenceMismatchMessage =
-    'Artifact reference is not bound to this broker, session, and version.';
+    'Artifact reference is not bound to this server, session, and version.';
 
 /// Maximum original byte size sent through the legacy WebSocket `file` frame.
 ///
@@ -635,7 +635,7 @@ class SessionArtifactTransferWorker {
     transferId: transferId,
     outcome: SessionArtifactTransferWorkerOutcome.failed,
     message:
-        'Switch to the broker profile and endpoint that created this '
+        'Switch to the saved server and address that created this '
         'transfer before retrying it.',
   );
 
@@ -672,7 +672,7 @@ class SessionArtifactTransferWorker {
       );
     }
     if (!hasActiveBrokerClient) {
-      const message = 'No active broker client for upload retry.';
+      const message = 'Connect to the server before retrying this upload.';
       transferController.markFailed(transferId, message);
       return SessionArtifactTransferWorkerResult(
         transferId: transferId,
@@ -724,7 +724,7 @@ class SessionArtifactTransferWorker {
     );
     final client = brokerClient;
     if (client == null) {
-      const message = 'No active broker client for chunked upload.';
+      const message = 'Connect to the server before uploading this file.';
       transferController.markFailed(transferId, message);
       _unregisterCancellationToken(transferId, cancellationToken);
       return SessionArtifactTransferWorkerResult(
@@ -1039,12 +1039,12 @@ class SessionArtifactTransferWorker {
     if (error is BrokerException) {
       final code = error.error?.code;
       return switch (code) {
-        'UPLOAD_TOO_LARGE' => 'Upload is larger than the broker limit.',
+        'UPLOAD_TOO_LARGE' => 'Upload is larger than the server limit.',
         'UPLOAD_NOT_FOUND' => _uploadResumeUnavailableMessage,
         'UPLOAD_EXPIRED' => _uploadResumeUnavailableMessage,
         'UPLOAD_SIZE_MISMATCH' =>
-          'Upload size did not match the broker record.',
-        'BAD_PARAM' => 'Upload request was rejected by the broker.',
+          'Upload size did not match the server record.',
+        'BAD_PARAM' => 'Upload request was rejected by the server.',
         _ => userFacingMessage(
           error,
           lead: "Couldn't upload this file.",
@@ -1081,7 +1081,7 @@ class SessionArtifactTransferWorker {
     transferController.markRunning(transferId, message: 'Downloading...');
 
     if (!hasActiveBrokerClient) {
-      const message = 'No active broker client for file download.';
+      const message = 'Connect to the server before downloading this file.';
       transferController.markFailed(transferId, message);
       _unregisterCancellationToken(transferId, cancellationToken);
       return SessionArtifactTransferWorkerResult(
@@ -1225,7 +1225,7 @@ class SessionArtifactTransferWorker {
     transferController.markRunning(transferId, message: 'Downloading...');
 
     if (!descriptor.isInlineDataUrl && !hasActiveBrokerClient) {
-      const message = 'No active broker client for artifact download.';
+      const message = 'Connect to the server before downloading this artifact.';
       transferController.markFailed(transferId, message);
       _unregisterCancellationToken(transferId, cancellationToken);
       return SessionArtifactTransferWorkerResult(
@@ -1360,7 +1360,7 @@ class SessionArtifactTransferWorker {
     }
 
     if (!descriptor.isInlineDataUrl && !hasActiveBrokerClient) {
-      const message = 'No active broker client for artifact preview.';
+      const message = 'Connect to the server before previewing this artifact.';
       transferController.markFailed(transferId, message);
       _unregisterCancellationToken(transferId, cancellationToken);
       return SessionArtifactTransferWorkerResult(

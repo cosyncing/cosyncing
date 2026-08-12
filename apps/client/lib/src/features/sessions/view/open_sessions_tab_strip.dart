@@ -1,6 +1,7 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_display_title.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
 import 'package:flutter/gestures.dart';
@@ -443,10 +444,11 @@ class _Tab extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _StatusMarker(
-                  toolColor: tokens.toolColor(ref.tool),
-                  status: ref.status,
-                  ringColor: tokens.statusNeedsInput,
+                StatusDot(
+                  color: tokens.toolColor(ref.tool),
+                  ringColor: needsInput ? tokens.statusNeedsInput : null,
+                  ringGapColor: needsInput ? tokens.surface : null,
+                  pulse: ref.status == SessionStatus.working,
                 ),
                 const SizedBox(width: 8),
                 Flexible(
@@ -482,38 +484,6 @@ class _Tab extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// A tool-identity dot; ringed in the needs-input color when the session is
-/// waiting on the user.
-///
-/// A null [status] is "not known yet" (a tab opened from cached identity before
-/// the roster loaded) and draws the plain tool dot — the same as any session
-/// that is not asking for attention, and no claim about what it is doing.
-class _StatusMarker extends StatelessWidget {
-  const _StatusMarker({
-    required this.toolColor,
-    required this.status,
-    required this.ringColor,
-  });
-
-  final Color toolColor;
-  final SessionStatus? status;
-  final Color ringColor;
-
-  @override
-  Widget build(BuildContext context) {
-    final needsInput = status == SessionStatus.needsInput;
-    return Container(
-      width: 12,
-      height: 12,
-      decoration: BoxDecoration(
-        color: toolColor,
-        shape: BoxShape.circle,
-        border: needsInput ? Border.all(color: ringColor, width: 2) : null,
       ),
     );
   }

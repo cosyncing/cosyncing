@@ -20,7 +20,6 @@ import {
   evaluateBrokerClientCompatibility,
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
-  isOwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
   SessionCreateTemporarilyUnavailableError,
   type AggregatedMachines,
@@ -104,6 +103,7 @@ import {
   type BoundedTailHistoryReplay,
   type CompactHistoryAttach,
   EncodedHistoryPageCache,
+  HISTORY_PAGE_CACHE_IDLE_TTL_MS,
   historySourceStillContainsSnapshot,
   IndexedHistoryPageCacheBuilder,
   type HistoryPageCache,
@@ -176,6 +176,7 @@ import { PRODUCT_IDENTITY } from './product.ts';
 import { BUILD_INFO, buildFingerprint } from './build-info.ts';
 import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from './web-handoff.ts';
+import { driveAttachRefusalCode } from './drive-attach-refusal.ts';
 import { APP_MOUNT_PATH, APP_PATH } from './web-routes.ts';
 import {
   ClientMessagePolicyError,
@@ -1811,6 +1812,71 @@ async function readHistoryPagePrefix(options: {
 }
 
 /**
+ * Completed bounded-tail fallbacks, pooled per attach scope (H1d).
+ *
+ * Before this pool every attach of an over-index source re-streamed the WHOLE
+ * source through the bounded sink — O(source) work per attach, serialized in
+ * front of the history frame. An active large session's clients reattach
+ * often, and when the scan outlasts a client's own attach deadline the client
+ * abandons the socket and retries, which re-runs the scan — the loop that
+ * starved live delivery for exactly the largest, busiest rollouts. The pool
+ * keeps the last finished sink and replay per scope: an unchanged source is
+ * answered from memory, an append-grown one pays only the delta through the
+ * adapter's capture resume, and anything else pays the full scan it always
+ * paid. Entries are few, small (one client window plus bounded enrichment),
+ * and idle-expired on the same TTL as the page-cache pool.
+ */
+const BOUNDED_TAIL_FALLBACK_MAX_ENTRIES = 4;
+type BoundedTailFallbackEntry = {
+  identity: HistorySourceIdentity;
+  sink: BoundedTailHistorySnapshotSink;
+  fallback: BoundedTailHistoryFallback;
+  lastUsedMs: number;
+};
+const boundedTailFallbacks = new Map<string, BoundedTailFallbackEntry>();
+const boundedTailFallbackFlights = new Map<
+  string,
+  Promise<BoundedTailHistoryFallback | undefined>
+>();
+
+function pruneBoundedTailFallbacks(now: number): void {
+  for (const [key, entry] of boundedTailFallbacks) {
+    if (now - entry.lastUsedMs > HISTORY_PAGE_CACHE_IDLE_TTL_MS) {
+      boundedTailFallbacks.delete(key);
+    }
+  }
+  while (boundedTailFallbacks.size > BOUNDED_TAIL_FALLBACK_MAX_ENTRIES) {
+    let oldestKey: string | undefined;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of boundedTailFallbacks) {
+      if (entry.lastUsedMs < oldestMs) {
+        oldestMs = entry.lastUsedMs;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey === undefined) break;
+    boundedTailFallbacks.delete(oldestKey);
+  }
+}
+
+function boundedTailReadMetric(kind: string, connection: SessionConnection): void {
+  if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
+    console.error(`[h1-history-read] ${kind} ${connection.info.tool}:${connection.info.id}`);
+  }
+}
+
+/** Whether a pooled capture may be extended by appended bytes instead of rebuilt. */
+function boundedTailAppendLineage(
+  pooled: HistorySourceIdentity,
+  source: HistorySourceIdentity,
+): boolean {
+  return pooled.sourceId === source.sourceId
+    && pooled.rewriteToken !== undefined
+    && pooled.rewriteToken === source.rewriteToken
+    && (source.appendPosition ?? 0) >= (pooled.appendPosition ?? 0);
+}
+
+/**
  * Read the newest bounded window of a history whose INDEX does not fit (H1c).
  *
  * This is the only thing standing between a genuine resource refusal and an
@@ -1825,44 +1891,98 @@ async function readHistoryPagePrefix(options: {
  * keep whatever the client already holds rather than replace it.
  */
 async function readBoundedTailHistoryReplay(options: {
+  scope: string;
   source: HistorySourceIdentity;
   connection: SessionConnection;
   artifactMode: 'inline' | 'reference' | undefined;
 }): Promise<BoundedTailHistoryFallback | undefined> {
-  const { source, connection, artifactMode } = options;
+  const { scope, source, connection, artifactMode } = options;
   if (typeof connection.captureHistorySnapshot !== 'function') return undefined;
-  if (process.env.COSYNCING_TEST_HISTORY_READ_METRICS === '1') {
-    console.error(`[h1-history-read] bounded-tail-fallback ${connection.info.tool}:${connection.info.id}`);
+  // Serialize per scope, so concurrent attaches of one session collapse into a
+  // single scan plus cheap continuations instead of N interleaved whole-source
+  // scans stretching each other's wall clock. Bounded: each awaited flight
+  // resolves, and a fresh flight behind it is this caller's own work.
+  for (let round = 0; round < 8; round += 1) {
+    const flight = boundedTailFallbackFlights.get(scope);
+    if (!flight) break;
+    await flight.catch(() => undefined);
   }
-  // No `acceptsLocations`: this deliberately takes the adapter's plain
-  // streaming path, so none of the random-access index budgets apply.
-  const sink = new BoundedTailHistorySnapshotSink();
-  const captured = await Promise.resolve(
-    connection.captureHistorySnapshot(sink, { artifactMode }),
-  ).catch(() => undefined);
-  if (!captured || isHistorySnapshotRefusal(captured)) return undefined;
-  if (
-    !historySourceStillContainsSnapshot(captured.identity, source)
-    && !historySourceStillContainsSnapshot(source, captured.identity)
-  ) {
-    return undefined;
+  const now = Date.now();
+  pruneBoundedTailFallbacks(now);
+  const pooled = boundedTailFallbacks.get(scope);
+  if (pooled && sameHistorySourceIdentity(pooled.identity, source)) {
+    pooled.lastUsedMs = now;
+    boundedTailReadMetric('bounded-tail-cached', connection);
+    return pooled.fallback;
   }
-  const skippedRecords = Math.max(0, Math.trunc(captured.skippedRecords ?? 0));
-  // A skipped record never reached the sink, so a newer `update_plan` inside it
-  // could not supersede anything and the older projection would replay as
-  // CURRENT (round 6, P1-2). This is the one place that knows both facts — the
-  // adapter's skip count and the sink still holding its state — so the capture
-  // gives up its latest-wins state claims here, before the replay is frozen.
-  if (skippedRecords > 0) sink.suppressStateAuthority();
-  const replay = sink.finish(captured.identity);
-  return {
-    replay,
-    skippedRecords,
-    clippedMessages: replay.clippedMessages,
-    omittedMessages: replay.omittedMessages,
-    supersededMessages: replay.supersededMessages,
-    unverifiedStateMessages: replay.unverifiedStateMessages,
-  };
+  const resumable = pooled !== undefined
+    && boundedTailAppendLineage(pooled.identity, source);
+  const flight = (async (): Promise<BoundedTailHistoryFallback | undefined> => {
+    const captureInto = async (
+      sink: BoundedTailHistorySnapshotSink,
+      resumedSink: boolean,
+    ): Promise<BoundedTailHistoryFallback | undefined | 'retry-fresh'> => {
+      const captured = await Promise.resolve(
+        connection.captureHistorySnapshot!(sink, { artifactMode }),
+      ).catch(() => undefined);
+      if (!captured || isHistorySnapshotRefusal(captured)) {
+        // A failed or refused pass may have partially fed this sink; nothing
+        // pooled from it can be trusted again.
+        boundedTailFallbacks.delete(scope);
+        // A pooled sink whose resume the adapter rejected (the source moved out
+        // from under the lineage check) still deserves the full read a
+        // first-time attach would get; a refusal is terminal either way.
+        return !captured && resumedSink ? 'retry-fresh' : undefined;
+      }
+      if (
+        !historySourceStillContainsSnapshot(captured.identity, source)
+        && !historySourceStillContainsSnapshot(source, captured.identity)
+      ) {
+        boundedTailFallbacks.delete(scope);
+        return undefined;
+      }
+      const skippedRecords = Math.max(0, Math.trunc(captured.skippedRecords ?? 0));
+      // A skipped record never reached the sink, so a newer `update_plan` inside it
+      // could not supersede anything and the older projection would replay as
+      // CURRENT (round 6, P1-2). This is the one place that knows both facts — the
+      // adapter's skip count and the sink still holding its state — so the capture
+      // gives up its latest-wins state claims here, before the replay is frozen.
+      if (skippedRecords > 0) sink.suppressStateAuthority();
+      const replay = sink.finish(captured.identity);
+      const fallback: BoundedTailHistoryFallback = {
+        replay,
+        skippedRecords,
+        clippedMessages: replay.clippedMessages,
+        omittedMessages: replay.omittedMessages,
+        supersededMessages: replay.supersededMessages,
+        unverifiedStateMessages: replay.unverifiedStateMessages,
+      };
+      boundedTailFallbacks.set(scope, {
+        identity: captured.identity,
+        sink,
+        fallback,
+        lastUsedMs: Date.now(),
+      });
+      pruneBoundedTailFallbacks(Date.now());
+      return fallback;
+    };
+    if (resumable) {
+      boundedTailReadMetric('bounded-tail-resume', connection);
+      const resumed = await captureInto(pooled!.sink, true);
+      if (resumed !== 'retry-fresh') return resumed;
+    }
+    boundedTailReadMetric('bounded-tail-fallback', connection);
+    // No `acceptsLocations`: this deliberately takes the adapter's plain
+    // streaming path, so none of the random-access index budgets apply.
+    const fresh = await captureInto(new BoundedTailHistorySnapshotSink(), false);
+    return fresh === 'retry-fresh' ? undefined : fresh;
+  })();
+  boundedTailFallbackFlights.set(scope, flight);
+  try {
+    return await flight;
+  } finally {
+    boundedTailFallbackFlights.delete(scope);
+  }
 }
 
 /**
@@ -4086,7 +4206,16 @@ server = Bun.serve<WsData>({
       } else {
         record = sessionMetadata.renameSession(tool, id, title);
       }
-      const base = nativeSession || await discoverSession(tool, id);
+      // A rename changes the title, not run/control state. When this session
+      // is open, keep the Hub owner's fresher facts and apply only the native
+      // accepted title; adapter rename responses are allowed to reconstruct
+      // otherwise-idle metadata from disk.
+      const liveSession = nativeSession ? hub.getConn(tool, id)?.conn.info : undefined;
+      const base = nativeSession
+        ? liveSession
+          ? { ...liveSession, title: nativeSession.title }
+          : nativeSession
+        : await discoverSession(tool, id);
       const session = base ? decorateSession(base) : undefined;
       // A NATIVE rename must also update any open connection's in-memory title: the alias was just
       // cleared, so a stale `mc.conn.info.title` would flicker back on every later status broadcast
@@ -5149,11 +5278,7 @@ server = Bun.serve<WsData>({
           // legacy error+close contract for older clients.
           if (mode !== 'resume' || !reason) throw err;
           const message = err instanceof Error ? err.message : String(err);
-          if (isOwnershipConflictError(err)) {
-            sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: 'DRIVE_OWNERSHIP_CONFLICT', message });
-          } else {
-            sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: 'DRIVE_RESTORE_FAILED', message });
-          }
+          sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: driveAttachRefusalCode(err), message });
           mode = undefined;
           ws.data.mode = undefined; // close() must release the fallback owner's bare key
           mc = await hub.ensure(tool, id);
@@ -5280,6 +5405,7 @@ server = Bun.serve<WsData>({
             ws.data.historyPagingUnavailableSource =
               kind === 'resource-limit' ? source : undefined;
             const fallback = await readBoundedTailHistoryReplay({
+              scope: historyCacheScope,
               source,
               connection: mc.conn,
               artifactMode,

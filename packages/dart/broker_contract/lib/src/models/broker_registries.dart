@@ -95,7 +95,7 @@ const List<String> brokerIntegrationRoutes = <String>[
 /// Mirrors the broker's `BROKER_ERROR_CODES` registry. The legacy
 /// `DUPLICATE_CLIENT_MESSAGE_ID` was removed; the broker now distinguishes
 /// malformed (`ACK_INVALID`) from unknown-scope (`ACK_UNKNOWN_TARGET`)
-/// receipts. The registry currently holds 97 codes.
+/// receipts. The registry currently holds 99 codes.
 const List<String> brokerErrorCodes = <String>[
   'BAD_PARAM',
   'ACK_UNKNOWN_TARGET',
@@ -187,6 +187,8 @@ const List<String> brokerErrorCodes = <String>[
   'SESSION_AGENT_OWNED',
   'SESSION_CREATE_TEMPORARILY_UNAVAILABLE',
   'DRIVE_OWNERSHIP_CONFLICT',
+  'DRIVE_OWNERSHIP_UNKNOWN',
+  'DRIVE_NATIVE_SESSION_UNRESUMABLE',
   'DRIVE_RESTORE_FAILED',
   'SCHEDULE_CRON_INVALID',
   'SCHEDULE_INVALID',

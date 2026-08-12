@@ -4,9 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   group('normalizeBrokerUrl', () {
     test('parses full HTTP URL', () {
-      final uri = normalizeBrokerUrl('http://192.168.1.10:7734');
+      final uri = normalizeBrokerUrl('http://192.0.2.10:7734');
       expect(uri.scheme, 'http');
-      expect(uri.host, '192.168.1.10');
+      expect(uri.host, '192.0.2.10');
       expect(uri.port, 7734);
     });
 
@@ -15,6 +15,13 @@ void main() {
       expect(uri.scheme, 'https');
       expect(uri.host, 'broker.example.com');
       expect(uri.port, 443);
+    });
+
+    test('keeps a portless HTTPS server address exact', () {
+      final uri = normalizeBrokerUrl('https://fixture.tailnet.ts.net');
+      expect(uri.toString(), 'https://fixture.tailnet.ts.net');
+      expect(uri.port, 443);
+      expect(uri.hasPort, isFalse);
     });
 
     test('strips path from full URL', () {

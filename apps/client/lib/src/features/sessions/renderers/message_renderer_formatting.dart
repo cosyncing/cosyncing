@@ -111,16 +111,6 @@ String? _formatTokenSummary(
     pieces.add(l10n.transcriptTokenCost(_formatCost(cost)));
   }
 
-  final total = [
-    input,
-    output,
-    cacheRead,
-    cacheWrite,
-  ].whereType<int>().fold<int>(0, (sum, value) => sum + value);
-  if (total > 0) {
-    pieces.insert(0, l10n.transcriptTokenTotal(total));
-  }
-
   if (pieces.isEmpty) {
     return null;
   }

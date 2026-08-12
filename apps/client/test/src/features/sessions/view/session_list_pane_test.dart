@@ -4,6 +4,7 @@ import 'dart:ui' show Tristate;
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_list_pane.dart';
@@ -53,6 +54,10 @@ void main() {
             : themeSpecById(kDefaultThemeId).light,
         brightness,
       ),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(disableAnimations: true),
+        child: child!,
+      ),
       home: Scaffold(body: child),
     ),
   );
@@ -61,7 +66,7 @@ void main() {
   /// session rows has to open its group first.
   Future<void> expandProject(WidgetTester tester, String key) async {
     await tester.tap(find.byKey(ValueKey('project-header-$key')));
-    await tester.pumpAndSettle();
+    await tester.pump();
   }
 
   /// Group key used by sessions built without a `cwd`.
@@ -136,9 +141,71 @@ void main() {
       expect(find.text('First'), findsOneWidget);
       expect(find.text('Second'), findsOneWidget);
       expect(find.byKey(const Key('session-row-claude/a')), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('Second'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsNothing,
+        reason: 'roster rows are navigation and carry no selection region',
+      );
+
+      await tester.drag(find.text('Second'), const Offset(80, 0));
+      await tester.pump();
+      expect(opened, isEmpty, reason: 'drag selection must not open the row');
 
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
-      expect(opened, ['codex/b']);
+      expect(
+        opened,
+        ['codex/b'],
+        reason:
+            'the row opens once; the tap region must not re-supply the tap '
+            'the row InkWell already receives',
+      );
+    });
+
+    testWidgets('the roster carries no selection machinery at all', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          SessionListPane(
+            sessions: [
+              _session('claude', 'a', title: 'First'),
+              _session('codex', 'b', title: 'Second'),
+              _session('codex', 'c', title: 'Third'),
+            ],
+            activeKey: 'claude/a',
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandProject(tester, ungrouped);
+
+      // The reported grey slab is Flutter's release RenderErrorBox, and it is
+      // consistent with a known web failure: every SelectionArea adds a
+      // platform view whose placeholder reads `localToGlobal` from a
+      // post-frame callback with no `attached` guard, and a scrolling viewport
+      // that collects it first makes that throw (flutter/flutter#122680, fixed
+      // by #186840, absent from the 3.44.3 we pin). No exception was ever
+      // captured and there is no deterministic repro, so that cause is
+      // unproven — but one region per row showed one slab per row and one
+      // shared region showed one slab over the list; removing SelectionArea
+      // from the roster removes the mechanism outright. It is navigation, not
+      // a document: no selection region, no per-row island.
+      expect(find.byType(SelectionArea), findsNothing);
+      expect(find.byType(SelectableTapRegion), findsNothing);
+      for (final title in ['First', 'Second', 'Third']) {
+        expect(
+          find.ancestor(
+            of: find.text(title),
+            matching: find.byType(SelectableRegion),
+          ),
+          findsNothing,
+          reason: '$title must not sit inside any selectable region',
+        );
+      }
     });
 
     testWidgets('shows status labels without overflowing', (tester) async {
@@ -634,7 +701,8 @@ void main() {
     });
 
     testWidgets(
-      'compact project headers ellipsize and keep New usable in both themes',
+      'compact project headers ellipsize non-selectable cwd metadata and '
+      'keep New usable',
       (tester) async {
         const longProjectName =
             'A project name long enough to require compact ellipsis';
@@ -662,11 +730,20 @@ void main() {
           await tester.pumpAndSettle();
 
           final title = tester.widget<Text>(find.text(longProjectName));
-          final cwd = tester.widget<Text>(find.text(longCwd));
           expect(title.maxLines, 1);
           expect(title.overflow, TextOverflow.ellipsis);
-          expect(cwd.maxLines, 1);
-          expect(cwd.overflow, TextOverflow.ellipsis);
+          final cwd = find.byKey(const ValueKey('project-cwd-$longCwd'));
+          expect(cwd, findsOneWidget);
+          final cwdText = tester.widget<Text>(cwd);
+          expect(cwdText.data, longCwd);
+          expect(cwdText.maxLines, 1);
+          expect(cwdText.overflow, TextOverflow.ellipsis);
+          // The header carries no copy affordance. It used to, and the
+          // button's tooltip opened a card over the roster row on hover. Both
+          // the button and the decorated code surface it sat in are gone; the
+          // path is non-selectable roster metadata, a plain `Text`.
+          expect(find.byType(CopyableCodeLine), findsNothing);
+          expect(find.byTooltip('Copy command'), findsNothing);
           expect(tester.takeException(), isNull);
 
           await tester.tap(find.byKey(const ValueKey('project-new-$longCwd')));
@@ -1501,6 +1578,11 @@ void main() {
       final child = find.byKey(const Key('session-row-opencode/c1'));
       expect(child, findsOneWidget);
       expect(
+        tester.getSemantics(parent).flagsCollection.isButton,
+        isTrue,
+        reason: 'plain row text must not erase button semantics',
+      );
+      expect(
         tester.getTopLeft(parent).dy,
         lessThan(tester.getTopLeft(child).dy),
       );
@@ -1763,6 +1845,208 @@ void main() {
 
       expect(find.byKey(const Key('session-row-opencode/g1')), findsOneWidget);
       expect(refreshes, 0);
+    });
+  });
+
+  group('SessionListPane roster clock and status affordances', () {
+    const ungrouped = '__ungrouped__';
+
+    Widget timedRoster({
+      required DateTime Function() now,
+      required int updatedAt,
+      bool tickerEnabled = true,
+      SessionStatus status = SessionStatus.idle,
+    }) {
+      return host(
+        TickerMode(
+          enabled: tickerEnabled,
+          child: SessionListPane(
+            sessions: [
+              _session(
+                'codex',
+                'timed',
+                status: status,
+                updatedAt: updatedAt,
+              ),
+            ],
+            activeKey: null,
+            onOpen: (_) {},
+            now: now,
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+    }
+
+    testWidgets('relative time advances without a broker rebuild', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 8, 10, 12);
+      final updatedAt = now
+          .subtract(const Duration(seconds: 30))
+          .millisecondsSinceEpoch;
+      await tester.pumpWidget(
+        timedRoster(now: () => now, updatedAt: updatedAt),
+      );
+      expect(
+        find.byKey(const ValueKey('project-header-__ungrouped__')),
+        findsOneWidget,
+      );
+      await expandProject(tester, ungrouped);
+      expect(
+        find.byKey(const Key('session-row-codex/timed')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('just now'), findsOneWidget);
+
+      now = now.add(const Duration(seconds: 31));
+      await tester.pump(const Duration(seconds: 30));
+      expect(find.textContaining('1m ago'), findsOneWidget);
+    });
+
+    testWidgets('one timer serves every row and skips unchanged rebuilds', (
+      tester,
+    ) async {
+      final fixedNow = DateTime(2026, 8, 10, 12);
+      var nowReads = 0;
+      var periodicTimers = 0;
+      DateTime now() {
+        nowReads += 1;
+        return fixedNow;
+      }
+
+      await runZoned(
+        () => tester.pumpWidget(
+          host(
+            SessionListPane(
+              sessions: [
+                for (var index = 0; index < 8; index += 1)
+                  _session(
+                    'codex',
+                    'clock-$index',
+                    updatedAt: fixedNow
+                        .subtract(const Duration(minutes: 2))
+                        .millisecondsSinceEpoch,
+                  ),
+              ],
+              activeKey: null,
+              onOpen: (_) {},
+              now: now,
+              visibilityPreferences: const SessionVisibilityPreferences(),
+            ),
+          ),
+        ),
+        zoneSpecification: ZoneSpecification(
+          createPeriodicTimer: (self, parent, zone, duration, callback) {
+            periodicTimers += 1;
+            return parent.createPeriodicTimer(zone, duration, callback);
+          },
+        ),
+      );
+      expect(periodicTimers, 1);
+
+      await expandProject(tester, ungrouped);
+      final readsAfterRowsBuilt = nowReads;
+      await tester.pump(const Duration(seconds: 30));
+
+      // The timer reads the clock once. Since all eight labels are unchanged,
+      // no row rebuild follows and there are no additional per-row reads.
+      expect(nowReads, readsAfterRowsBuilt + 1);
+    });
+
+    testWidgets('offstage and background clocks pause then refresh on resume', (
+      tester,
+    ) async {
+      var now = DateTime(2026, 8, 10, 12);
+      final updatedAt = now
+          .subtract(const Duration(seconds: 30))
+          .millisecondsSinceEpoch;
+
+      await tester.pumpWidget(
+        timedRoster(now: () => now, updatedAt: updatedAt),
+      );
+      await expandProject(tester, ungrouped);
+      expect(find.textContaining('just now'), findsOneWidget);
+
+      await tester.pumpWidget(
+        timedRoster(
+          now: () => now,
+          updatedAt: updatedAt,
+          tickerEnabled: false,
+        ),
+      );
+      now = now.add(const Duration(minutes: 2));
+      await tester.pump(const Duration(seconds: 60));
+      expect(find.textContaining('just now'), findsOneWidget);
+
+      await tester.pumpWidget(
+        timedRoster(now: () => now, updatedAt: updatedAt),
+      );
+      expect(find.textContaining('2m ago'), findsOneWidget);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump();
+      now = now.add(const Duration(minutes: 2));
+      await tester.pump(const Duration(seconds: 60));
+      expect(find.textContaining('2m ago'), findsOneWidget);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(find.textContaining('4m ago'), findsOneWidget);
+      addTearDown(
+        () => tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        ),
+      );
+    });
+
+    testWidgets('dispose cancels the shared roster timer', (tester) async {
+      final now = DateTime(2026, 8, 10, 12);
+      await tester.pumpWidget(
+        timedRoster(
+          now: () => now,
+          updatedAt: now.millisecondsSinceEpoch,
+        ),
+      );
+      await tester.pumpWidget(host(const SizedBox.shrink()));
+      await tester.pump(const Duration(minutes: 1));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('roster uses pulse and full ring status contracts', (
+      tester,
+    ) async {
+      for (final testCase in const [
+        (SessionStatus.working, true, false),
+        (SessionStatus.needsInput, false, true),
+        (SessionStatus.idle, false, false),
+      ]) {
+        final now = DateTime(2026, 8, 10, 12);
+        await tester.pumpWidget(
+          timedRoster(
+            now: () => now,
+            updatedAt: now.millisecondsSinceEpoch,
+            status: testCase.$1,
+          ),
+        );
+        final row = find.byKey(const Key('session-row-codex/timed'));
+        if (row.evaluate().isEmpty) {
+          await expandProject(tester, ungrouped);
+        }
+        final marker = tester.widget<StatusDot>(
+          find
+              .descendant(
+                of: row,
+                matching: find.byType(StatusDot),
+              )
+              .first,
+        );
+        expect(marker.pulse, testCase.$2);
+        expect(marker.ringColor != null, testCase.$3);
+        expect(marker.ringGapColor != null, testCase.$3);
+      }
     });
   });
 }

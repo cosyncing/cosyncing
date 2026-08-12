@@ -927,6 +927,23 @@ export class Hub {
     return mode && mode !== 'observe' ? `${tool}:${id}#${mode}` : `${tool}:${id}`;
   }
 
+  private reportEnsureBranch(branch: 'create' | 'reuse' | 'join', managed: ManagedConn, inflight = false): void {
+    if (!/^(1|true|yes|on)$/i.test(String(process.env.COSYNCING_CODEX_ATTACH_DIAGNOSTICS ?? '').trim())) return;
+    const attachMode = managed.conn.info.attachMode;
+    const transport = attachMode === 'live' ? 'daemon-proxy' : attachMode === 'resume' ? 'stdio' : 'observe';
+    try {
+      console.error(`[codex-attach] ${JSON.stringify({
+        event: 'hub.ensure',
+        branch,
+        transport,
+        ...(managed.conn.info.nativeId ? { threadId: managed.conn.info.nativeId } : {}),
+        ...(inflight ? { inflight: true } : {}),
+      })}`);
+    } catch {
+      /* diagnostics never change ownership */
+    }
+  }
+
   private cancelEvict(key: string): void {
     const t = this.evictTimers.get(key);
     if (t) {
@@ -1363,6 +1380,7 @@ export class Hub {
         this.cancelEvict(baseKey);
         this.attentionLeases.delete(base);
         this.attentionLeaseDenied.delete(base);
+        this.reportEnsureBranch('join', base);
         return base;
       }
     }
@@ -1371,10 +1389,15 @@ export class Hub {
     if (existing) {
       this.attentionLeases.delete(existing);
       this.attentionLeaseDenied.delete(existing);
+      this.reportEnsureBranch('reuse', existing);
       return existing;
     }
     const inflight = this.pending.get(key);
-    if (inflight) return inflight;
+    if (inflight) {
+      const managed = await inflight;
+      this.reportEnsureBranch('reuse', managed, true);
+      return managed;
+    }
 
     const p = (async () => {
       const backend = this.registry.get(tool);
@@ -1383,6 +1406,7 @@ export class Hub {
       const mc = this.createManaged(conn);
       this.conns.set(key, mc);
       this.pending.delete(key);
+      this.reportEnsureBranch('create', mc);
       return mc;
     })();
     this.pending.set(key, p);

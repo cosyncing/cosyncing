@@ -310,7 +310,7 @@ void main() {
                 .read(sessionDetailControllerProvider(key))
                 .actionStateFor('file-123')
                 .message,
-            contains('No active broker client for artifact download.'),
+            contains('Connect to the server before downloading this artifact.'),
           );
           expect(
             offlineContainer.read(sessionDetailControllerProvider(key)).error,
@@ -322,7 +322,7 @@ void main() {
           expect(transfer.status, SessionArtifactTransferStatus.failed);
           expect(
             transfer.error,
-            contains('No active broker client for artifact download.'),
+            contains('Connect to the server before downloading this artifact.'),
           );
         },
       );
@@ -533,7 +533,7 @@ void main() {
                 .read(sessionDetailControllerProvider(key))
                 .actionStateFor('html-1')
                 .message,
-            contains('No active broker client for artifact preview.'),
+            contains('Connect to the server before previewing this artifact.'),
           );
           expect(
             offlineContainer.read(sessionDetailControllerProvider(key)).error,

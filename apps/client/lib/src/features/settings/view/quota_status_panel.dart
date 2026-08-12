@@ -50,33 +50,35 @@ class QuotaStatusPanel extends StatelessWidget {
     final tokens = context.tokens;
     final now = this.now ?? DateTime.now();
 
-    return Column(
-      key: const Key('settings-quota-panel'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          l10n.settingsQuotaPanelTitle,
-          style: theme.textTheme.labelLarge?.copyWith(
-            color: tokens.textSecondary,
+    return SelectionArea(
+      child: Column(
+        key: const Key('settings-quota-panel'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            l10n.settingsQuotaPanelTitle,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: tokens.textSecondary,
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        if (loading)
-          _QuotaNotice(
-            icon: null,
-            text: l10n.settingsQuotaLoading,
-            showSpinner: true,
-          )
-        else
-          _buildContent(context, l10n, now),
-        const SizedBox(height: 8),
-        Text(
-          l10n.settingsQuotaReadOnlyNote,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: tokens.textTertiary,
+          const SizedBox(height: 8),
+          if (loading)
+            _QuotaNotice(
+              icon: null,
+              text: l10n.settingsQuotaLoading,
+              showSpinner: true,
+            )
+          else
+            _buildContent(context, l10n, now),
+          const SizedBox(height: 8),
+          Text(
+            l10n.settingsQuotaReadOnlyNote,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: tokens.textTertiary,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

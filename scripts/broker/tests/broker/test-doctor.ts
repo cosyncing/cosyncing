@@ -543,7 +543,7 @@ try {
         stderr: '',
       };
     },
-    fetchJson: async (url, headers) => {
+    fetchJson: async (url, headers, timeoutMs, maxBytes) => {
       calls.push(`get:${new URL(url).pathname}`);
       if (url.includes('/api/broker/health')) {
         check('internal health probe authenticates without placing the token in its URL',
@@ -560,6 +560,16 @@ try {
           { id: 'pi', displayName: 'Pi', canCreateSession: true },
           { id: 'claude', displayName: 'Claude Code', canCreateSession: true },
         ] };
+      }
+      // A bare `{ ok: true }` used to satisfy the advertised-endpoint check, because that check only
+      // looked at the HTTP status. It now requires the full identity, so the fixture must answer as the
+      // configured broker — anything less is exactly the foreign endpoint doctor is meant to reject.
+      if (new URL(url).pathname === '/api/health') {
+        return { status: 'ok', statusCode: 200, json: {
+          ok: true,
+          product: 'cosyncing',
+          machine: defaultBrokerConfig().broker.machineLabel,
+        } };
       }
       return { status: 'ok', statusCode: 200, json: { ok: true } };
     },
@@ -627,13 +637,90 @@ try {
     !reportJson.includes(credentials.brokerToken) && !reportJson.includes(credentials.piIntegration.credential) &&
       !reportJson.includes('fixture.tailnet.ts.net'));
 
+  // ── Advertised endpoint: broken MagicDNS, and identity that must not be assumed ──
+  // These drive the WHOLE doctor path, not the shared primitive: a host where the advertised NAME does not
+  // resolve, whose `tailscale status --json` supplies the addresses, reported through network.advertised-endpoint.
+  {
+    const TAILNET = 'https://fixture.tailnet.ts.net';
+    const ADDRESSES = ['100.64.0.1', 'fd7a:115c:a1e0::1'];
+    const brokenDnsContext = (): SetupDiagnosisContext => ({
+      ...aggregateContext,
+      resolveExecutable(command) {
+        if (command === 'tailscale') return '/usr/bin/tailscale';
+        return aggregateContext.resolveExecutable(command);
+      },
+      async runReadOnly(path, args) {
+        if (path === '/usr/bin/tailscale' && args[0] === 'status') {
+          return { status: 'ok', exitCode: 0, stderr: '', stdout: JSON.stringify({
+            BackendState: 'Running',
+            Self: { DNSName: 'fixture.tailnet.ts.net.', TailscaleIPs: ADDRESSES },
+          }) };
+        }
+        return aggregateContext.runReadOnly(path, args);
+      },
+      // The advertised NAME never resolves on this host; everything else answers as before.
+      // `maxBytes` is forwarded like every other argument, so a wrapper never silently narrows a
+      // ceiling its caller asked for.
+      async fetchJson(url, headers, timeoutMs, maxBytes) {
+        if (url.startsWith(TAILNET)) return { status: 'unreachable' };
+        return aggregateContext.fetchJson(url, headers, timeoutMs, maxBytes);
+      },
+    });
+    const doctorWith = async (
+      probe: (options: { address: string }) => { status: string; statusCode?: number; json?: unknown },
+    ) => collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: brokenDnsContext(),
+      assetReport: inspectRuntimeAssets(),
+      adapters: cleanAdapters,
+      stateHome,
+      advertisedDirectProbe: async (options) => probe(options) as never,
+    });
+    const advertisedCheck = (report: Awaited<ReturnType<typeof collectDoctorReport>>): SetupCheck | undefined =>
+      report.sections.flatMap((section) => section.checks)
+        .find((item) => item.id === 'network.advertised-endpoint');
+
+    const seen: string[] = [];
+    const healthy = advertisedCheck(await doctorWith(({ address }) => {
+      seen.push(address);
+      return { status: 'ok', statusCode: 200, json: {
+        ok: true, product: 'cosyncing', machine: configured.broker.machineLabel,
+      } };
+    }));
+    check('doctor verifies the advertised endpoint through this node address when MagicDNS cannot resolve',
+      healthy?.status === 'pass' && healthy.detailCode === 'advertised-endpoint-reachable'
+        && seen[0] === ADDRESSES[0],
+      `${healthy?.status}/${healthy?.detailCode} addresses=${seen.join(',')}`);
+
+    // A route into somebody else's broker answers 200 too. Reachability is not identity.
+    const foreign = advertisedCheck(await doctorWith(() => ({
+      status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: 'another-machine' },
+    })));
+    check('doctor rejects an advertised endpoint answering as a different machine',
+      foreign?.status === 'fail' && foreign.detailCode === 'advertised-endpoint-identity-mismatch',
+      `${foreign?.status}/${foreign?.detailCode}`);
+
+    const foreignProduct = advertisedCheck(await doctorWith(() => ({
+      status: 'ok', statusCode: 200, json: { ok: true, product: 'another-product', machine: configured.broker.machineLabel },
+    })));
+    check('doctor rejects an advertised endpoint answering as a different product',
+      foreignProduct?.status === 'fail' && foreignProduct.detailCode === 'advertised-endpoint-identity-mismatch',
+      `${foreignProduct?.status}/${foreignProduct?.detailCode}`);
+
+    // Unreachable and answered-wrongly are different failures with different remedies.
+    const dead = advertisedCheck(await doctorWith(() => ({ status: 'unreachable' })));
+    check('doctor still reports a genuinely unreachable advertised endpoint as unreachable',
+      dead?.status === 'fail' && dead.detailCode === 'advertised-endpoint-unreachable',
+      `${dead?.status}/${dead?.detailCode}`);
+  }
+
   const serviceBlindContext: SetupDiagnosisContext = {
     ...aggregateContext,
     resolveExecutable(command) {
       if (command === 'codex') return '/opt/node-v22.14.0-darwin-arm64/bin/codex';
       return aggregateContext.resolveExecutable(command);
     },
-    async fetchJson(url, headers, timeoutMs) {
+    async fetchJson(url, headers, timeoutMs, maxBytes) {
       if (new URL(url).pathname === '/api/agents') {
         return { status: 'ok', statusCode: 200, json: [
           { id: 'codex', displayName: 'Codex', canCreateSession: false, syncEnabled: true },
@@ -642,7 +729,7 @@ try {
           { id: 'claude', displayName: 'Claude Code', canCreateSession: false },
         ] };
       }
-      return aggregateContext.fetchJson(url, headers, timeoutMs);
+      return aggregateContext.fetchJson(url, headers, timeoutMs, maxBytes);
     },
   };
   const serviceBlindReport = await collectDoctorReport({

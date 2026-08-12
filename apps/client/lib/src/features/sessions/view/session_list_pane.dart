@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
@@ -10,6 +12,7 @@ import 'package:cosyncing_client/src/features/sessions/model/session_model_label
 import 'package:cosyncing_client/src/features/sessions/model/session_roster_identity.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/view/cached_roster_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/view/relative_time.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_visibility_controller.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
@@ -138,6 +141,7 @@ class SessionListPane extends ConsumerStatefulWidget {
     this.onOpenCached,
     this.queryWindow = SessionRosterQueryWindow.any,
     this.onQueryWindowChanged,
+    this.now,
     super.key,
   });
 
@@ -193,11 +197,22 @@ class SessionListPane extends ConsumerStatefulWidget {
   /// Requests a durable query-window change.
   final ValueChanged<SessionRosterQueryWindow>? onQueryWindowChanged;
 
+  /// Clock override for deterministic relative-time tests.
+  final DateTime Function()? now;
+
   @override
   ConsumerState<SessionListPane> createState() => _SessionListPaneState();
 }
 
 class _SessionListPaneState extends ConsumerState<SessionListPane> {
+  static const _clockInterval = Duration(seconds: 30);
+
+  Timer? _clock;
+  AppLifecycleListener? _lifecycle;
+  bool _appVisible = true;
+  bool _tickerEnabled = false;
+  final Map<int, String> _relativeTimeLabels = <int, String>{};
+
   /// Saved per-parent child-subtree choices. Absent means "follow the global
   /// background-session preference", which is what lets an explicit collapse
   /// close a subtree that preference is already revealing.
@@ -231,14 +246,76 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
   /// same display statuses without rebuilding it.
   SessionRosterLineage _lineage = SessionRosterLineage.build(const []);
 
+  DateTime get _now => widget.now?.call() ?? DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onHide: () {
+        _appVisible = false;
+        _syncClock();
+      },
+      onShow: () {
+        _appVisible = true;
+        _syncClock();
+        _tick(force: true);
+      },
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerEnabled == enabled) return;
+    _tickerEnabled = enabled;
+    _syncClock();
+  }
+
   @override
   void dispose() {
+    _clock?.cancel();
+    _lifecycle?.dispose();
     _searchController.dispose();
     super.dispose();
   }
 
+  void _syncClock() {
+    _clock?.cancel();
+    _clock = null;
+    if (!_appVisible || !_tickerEnabled) return;
+    _clock = Timer.periodic(_clockInterval, (_) => _tick());
+  }
+
+  void _tick({bool force = false}) {
+    if (!mounted || !_appVisible || !_tickerEnabled) return;
+    final l10n = AppLocalizations.of(context);
+    final now = _now;
+    final changed =
+        force ||
+        _relativeTimeLabels.entries.any(
+          (entry) =>
+              relativeTimeLabel(context, l10n, entry.key, now: now) !=
+              entry.value,
+        );
+    if (changed) setState(() {});
+  }
+
+  String _relativeTimeFor(int epochMs) {
+    final label = relativeTimeLabel(
+      context,
+      AppLocalizations.of(context),
+      epochMs,
+      now: _now,
+    );
+    _relativeTimeLabels[epochMs] = label;
+    return label;
+  }
+
   @override
   Widget build(BuildContext context) {
+    _relativeTimeLabels.clear();
     final queryActivity = _activityWindow(widget.queryWindow);
     if (_filters.activity != queryActivity) {
       _filters = _filters.copyWith(activity: queryActivity);
@@ -326,6 +403,21 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
           },
         ),
         Expanded(
+          // No selection region here, and none per row. The roster is
+          // navigation, not a document. Two separate reasons:
+          //
+          // On web every `SelectionArea` adds a platform view whose
+          // `_PlatformViewPlaceholderBox` reads `localToGlobal` from a
+          // post-frame callback with no `attached` guard; a scrolling viewport
+          // that collects the placeholder first leaves it on a detached render
+          // object and it throws — flutter/flutter#122680, fixed by #186840,
+          // absent from the 3.44.3 branch we pin. No exception was captured
+          // and there is no deterministic repro, so nothing is proven: the
+          // release `RenderErrorBox` seen over this list is consistent with
+          // that failure, and removing `SelectionArea` removes the mechanism.
+          //
+          // Selecting a row's text also fought the row's own purpose: it
+          // painted a highlight across a control whose only job is to open.
           child: ListView(
             key: const Key('session-roster-list'),
             padding: const EdgeInsets.symmetric(vertical: 4),
@@ -346,6 +438,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
                     onToggleCollapsed: () => _toggleProject(group.key),
                     readyToReviewKeys: _readyToReviewKeys,
                     onMarkOpened: _markOpened,
+                    relativeTimeFor: _relativeTimeFor,
                   ),
             ],
           ),
@@ -439,7 +532,7 @@ class _RosterError extends StatelessWidget {
           children: [
             Icon(Icons.cloud_off_outlined, color: tokens.textTertiary),
             const SizedBox(height: 12),
-            Text(
+            SelectableText(
               message ?? l10n.sessionRosterLoadFailed,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -655,6 +748,7 @@ class _ProjectGroup extends StatelessWidget {
     required this.onToggleCollapsed,
     required this.readyToReviewKeys,
     required this.onMarkOpened,
+    required this.relativeTimeFor,
   });
 
   final SessionProjectGroup group;
@@ -673,6 +767,7 @@ class _ProjectGroup extends StatelessWidget {
   final VoidCallback onToggleCollapsed;
   final Set<String> readyToReviewKeys;
   final ValueChanged<SessionInfo> onMarkOpened;
+  final String Function(int epochMs) relativeTimeFor;
 
   @override
   Widget build(BuildContext context) {
@@ -707,6 +802,7 @@ class _ProjectGroup extends StatelessWidget {
               parent: projection.parentFor(group.rows[index].session),
               onTap: () => onMarkOpened(group.rows[index].session),
               onToggleChildren: onToggleChildren,
+              relativeTimeFor: relativeTimeFor,
             ),
           ],
         const SizedBox(height: 8),
@@ -786,30 +882,48 @@ class _ProjectHeader extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        group.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.labelLarge?.copyWith(
-                          color: tokens.textPrimary,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      if (group.cwd != null)
-                        Text(
-                          group.cwd!,
-                          key: ValueKey('project-cwd-${group.key}'),
+                  child: group.cwd == null
+                      ? Text(
+                          group.label,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: tokens.textSecondary,
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            color: tokens.textPrimary,
+                            fontWeight: FontWeight.w700,
                           ),
+                        )
+                      // A project header states where the project is; it is not
+                      // a command to run. The copy affordance this used to
+                      // carry put an interactive island inside a row whose
+                      // only job is to expand, and its tooltip opened a card
+                      // over the roster. The path is now non-selectable roster
+                      // metadata: a plain `Text`, with no copy affordance and
+                      // no selection region anywhere above it.
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              group.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                color: tokens.textPrimary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            Text(
+                              group.cwd!,
+                              key: ValueKey('project-cwd-${group.key}'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: tokens.textSecondary,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ],
                         ),
-                    ],
-                  ),
                 ),
                 Text(
                   '${group.rootCount}',
@@ -1050,6 +1164,7 @@ class _SessionRow extends StatelessWidget {
     required this.parent,
     required this.onTap,
     required this.onToggleChildren,
+    required this.relativeTimeFor,
     super.key,
   });
 
@@ -1060,6 +1175,7 @@ class _SessionRow extends StatelessWidget {
   final VoidCallback onTap;
   final void Function(SessionInfo parent, {required bool revealed})
   onToggleChildren;
+  final String Function(int epochMs) relativeTimeFor;
 
   SessionInfo get session => row.session;
 
@@ -1101,7 +1217,7 @@ class _SessionRow extends StatelessWidget {
                 )
               : null,
           // The inset lives inside the ink response, so the whole row stays
-          // tappable and the selection boundary still spans the full width.
+          // tappable and the tap target still spans the full width.
           padding: EdgeInsets.fromLTRB(
             12 + _kSessionRowIndentStep * indentDepth,
             8,
@@ -1115,37 +1231,50 @@ class _SessionRow extends StatelessWidget {
                 ringColor: row.effectiveStatus == SessionStatus.needsInput
                     ? tokens.statusNeedsInput
                     : null,
+                ringGapColor: row.effectiveStatus == SessionStatus.needsInput
+                    ? tokens.surface
+                    : null,
+                pulse: row.effectiveStatus == SessionStatus.working,
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: tokens.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      ),
+                    // The roster is navigation, not a document. It carries no
+                    // selection machinery at all: no region, and no per-row
+                    // island. The row's own InkWell owns the tap, and nothing
+                    // here competes with it in the gesture arena.
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: tokens.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        _subtitle(context, session),
+                        if (session.currentAgent case final agent?) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            agent,
+                            key: ValueKey(
+                              'session-agent-${sessionRosterKey(session)}',
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: tokens.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
-                    const SizedBox(height: 4),
-                    _subtitle(context, session),
-                    if (session.currentAgent case final agent?) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        agent,
-                        key: ValueKey(
-                          'session-agent-${sessionRosterKey(session)}',
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: tokens.textSecondary,
-                        ),
-                      ),
-                    ],
                     if (childCount > 0) ...[
                       const SizedBox(height: 4),
                       Wrap(
@@ -1197,10 +1326,12 @@ class _SessionRow extends StatelessWidget {
         ),
       ),
     );
-    if (lineageLabel == null) return content;
     return Semantics(
-      key: ValueKey('session-lineage-${sessionRosterKey(session)}'),
+      key: lineageLabel == null
+          ? null
+          : ValueKey('session-lineage-${sessionRosterKey(session)}'),
       label: lineageLabel,
+      button: true,
       child: content,
     );
   }
@@ -1219,7 +1350,7 @@ class _SessionRow extends StatelessWidget {
       if (label != null) parts.add(label);
     }
     if (session.updatedAt != null) {
-      parts.add(_relativeTime(context, l10n, session.updatedAt!));
+      parts.add(relativeTimeFor(session.updatedAt!));
     }
     final child = Text(
       parts.join(' · '),
@@ -1246,22 +1377,6 @@ class _SessionRow extends StatelessWidget {
       _ => l10n.sessionRosterModelTooltip(technicalId),
     };
     return Tooltip(message: tooltip, child: child);
-  }
-
-  static String _relativeTime(
-    BuildContext context,
-    AppLocalizations l10n,
-    int epochMs,
-  ) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(epochMs);
-    final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return l10n.sessionRosterJustNow;
-    if (diff.inMinutes < 60) {
-      return l10n.sessionRosterMinutesAgo(diff.inMinutes);
-    }
-    if (diff.inHours < 24) return l10n.sessionRosterHoursAgo(diff.inHours);
-    if (diff.inDays < 7) return l10n.sessionRosterDaysAgo(diff.inDays);
-    return MaterialLocalizations.of(context).formatCompactDate(dt);
   }
 }
 

@@ -36,7 +36,8 @@ export type SetupMutationStep =
   | { kind: 'config'; configPath: string; internalUrl: string; advertisedUrl?: string }
   | { kind: 'credentials' }
   | { kind: 'setup-state'; service: SetupServiceChoice }
-  | { kind: 'pi-bridge'; path: string }
+  | { kind: 'pi-bridge'; path: string; replaceLegacy?: boolean }
+  | { kind: 'durable-state-permissions'; paths: readonly string[] }
   | { kind: 'agent-skill-install' }
   | { kind: 'agent-skill-refresh' }
   | { kind: 'agent-skill-remove' }
@@ -111,7 +112,9 @@ export interface SetupMessages {
   managedRuntimeTitle: string;
   managedRuntimeBody: (product: string) => string;
   managedRuntimeConfirm: (product: string) => string;
+  legacyPiBridgeConfirm: (path: string) => string;
   agentSkillConfirm: string;
+  legacyAgentSkillConfirm: (paths: string) => string;
   opencodeShimConfirm: string;
   serviceQuestion: string;
   serviceForegroundLabel: string;
@@ -160,6 +163,10 @@ export interface SetupMessages {
   outroOpenTailnet: (url: string) => string;
   outroOpenHereAfterStart: (url: string) => string;
   outroOpenTailnetAfterStart: (url: string) => string;
+  /** Native-client endpoint proved by setup; unlike the browser URL, it has no app path. */
+  outroLocalServerAddress: (url: string) => string;
+  /** Tailnet native-client endpoint proved by setup; absent unless Serve registration succeeded. */
+  outroTailnetServerAddress: (url: string) => string;
   outroPairInstead: (binary: string) => string;
   /** The same four lines for a build with no Flutter bundle: `/cosy` there is the pairing-guidance page. */
   outroPairPageHere: (url: string) => string;
@@ -219,7 +226,11 @@ const en: SetupMessages = {
     `${product} will manage supported shared Codex/OpenCode runtimes and the packaged Pi bridge. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
+  legacyPiBridgeConfirm: (path) =>
+    `Replace the exact known legacy Pi bridge at ${path} with this packaged version? A rollback restores it byte-for-byte.`,
   agentSkillConfirm: 'Install the cosyncing agent skill so agents with a supported session-bound tool can deliver files to the app?',
+  legacyAgentSkillConfirm: (paths) =>
+    `Upgrade the known preceding cosyncing skill at ${paths}? Unknown or edited skill content is never overwritten.`,
   opencodeShimConfirm:
     'Route `opencode` in your terminal to the shared cosyncing serve so its status shows live in the app?',
   serviceQuestion: 'How should the broker run after setup?',
@@ -293,7 +304,11 @@ const en: SetupMessages = {
         return `Record managed-runtime acknowledgement, ${step.service} service choice, separate lingering `
           + 'consent, independent Tailscale intent, and quota consent.';
       case 'pi-bridge':
-        return `Write the exact packaged bridge to ${step.path}; unrelated content is never overwritten.`;
+        return step.replaceLegacy
+          ? `Transactionally replace the exact known legacy bridge at ${step.path}; rollback restores the previous bytes.`
+          : `Write the exact packaged bridge to ${step.path}; unrelated content is never overwritten.`;
+      case 'durable-state-permissions':
+        return `Tighten owner-only permissions on current-schema durable state: ${step.paths.join(', ')}; content is unchanged.`;
       case 'agent-skill-install':
         return 'Install the packaged skill into both Claude and shared .agents discovery roots and record '
           + 'one ownership receipt per target.';
@@ -357,10 +372,12 @@ const en: SetupMessages = {
   outroTitle: (product) => `Open ${product}`,
   outroStateDirectory: (path) => `State directory: ${path}`,
   outroStartBroker: (binary) => `Nothing is listening yet. Start the broker: \`${binary} broker\`.`,
-  outroOpenHere: (url) => `Open the app on this machine: ${url}`,
-  outroOpenTailnet: (url) => `Open it from your tailnet: ${url}`,
-  outroOpenHereAfterStart: (url) => `Then open the app on this machine: ${url}`,
-  outroOpenTailnetAfterStart: (url) => `Then open it from your tailnet: ${url}`,
+  outroOpenHere: (url) => `Local web app: ${url}`,
+  outroOpenTailnet: (url) => `Tailnet web app: ${url}`,
+  outroOpenHereAfterStart: (url) => `Local web app: ${url}`,
+  outroOpenTailnetAfterStart: (url) => `Tailnet web app: ${url}`,
+  outroLocalServerAddress: (url) => `Local server address: ${url}`,
+  outroTailnetServerAddress: (url) => `Tailnet server address: ${url}`,
   outroPairInstead: (binary) => `Run \`${binary} pair\` and scan the QR to pair a client.`,
   outroPairPageHere: (url) => `The same steps in a browser: ${url}`,
   outroPairPageTailnet: (url) => `Or from your tailnet: ${url}`,
@@ -425,7 +442,11 @@ const zhHans: SetupMessages = {
   managedRuntimeBody: (product) =>
     `${product} 会接管支持的 Codex/OpenCode 共享运行时，以及随包提供的 Pi bridge。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
+  legacyPiBridgeConfirm: (path) =>
+    `用当前随包版本替换 ${path} 中内容完全匹配的已知旧版 Pi bridge？如果回滚，会逐字节恢复旧文件。`,
   agentSkillConfirm: '安装 cosyncing agent skill，让具备安全会话工具的编程助手可以把文件直接送到 App？',
+  legacyAgentSkillConfirm: (paths) =>
+    `升级 ${paths} 中已知的上一版 cosyncing skill？未知或已编辑的 skill 内容永远不会被覆盖。`,
   opencodeShimConfirm: '把终端里的 `opencode` 指向 cosyncing 的共享 serve，让它的状态实时显示在 App 里？',
   serviceQuestion: '安装完成后，broker 以哪种方式运行？',
   serviceForegroundLabel: '前台运行',
@@ -485,7 +506,11 @@ const zhHans: SetupMessages = {
         return `记录托管运行时的确认结果、${step.service} 运行方式、单独的 lingering 授权、`
           + '独立的 Tailscale 意向，以及配额跟踪的选择。';
       case 'pi-bridge':
-        return `把随包提供的 bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
+        return step.replaceLegacy
+          ? `以事务方式替换 ${step.path} 中内容完全匹配的已知旧版 bridge；回滚时会恢复原始字节。`
+          : `把随包提供的 bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
+      case 'durable-state-permissions':
+        return `收紧当前架构持久状态的仅本人访问权限：${step.paths.join('、')}；不修改文件内容。`;
       case 'agent-skill-install':
         return '把随包提供的 skill 安装到 Claude 和共享 .agents 两个发现目录，并为每个目标记录一条归属凭证。';
       case 'agent-skill-refresh':
@@ -538,10 +563,12 @@ const zhHans: SetupMessages = {
   outroTitle: (product) => `打开 ${product}`,
   outroStateDirectory: (path) => `数据目录：${path}`,
   outroStartBroker: (binary) => `broker 还没有在运行，先启动它：\`${binary} broker\`。`,
-  outroOpenHere: (url) => `在本机打开：${url}`,
-  outroOpenTailnet: (url) => `在 tailnet 内打开：${url}`,
-  outroOpenHereAfterStart: (url) => `启动后在本机打开：${url}`,
-  outroOpenTailnetAfterStart: (url) => `启动后在 tailnet 内打开：${url}`,
+  outroOpenHere: (url) => `本机 Web 应用：${url}`,
+  outroOpenTailnet: (url) => `Tailnet Web 应用：${url}`,
+  outroOpenHereAfterStart: (url) => `本机 Web 应用：${url}`,
+  outroOpenTailnetAfterStart: (url) => `Tailnet Web 应用：${url}`,
+  outroLocalServerAddress: (url) => `本机服务器地址：${url}`,
+  outroTailnetServerAddress: (url) => `Tailnet 服务器地址：${url}`,
   outroPairInstead: (binary) => `执行 \`${binary} pair\` 并扫描二维码，即可配对一台客户端。`,
   outroPairPageHere: (url) => `浏览器里也有同样的步骤：${url}`,
   outroPairPageTailnet: (url) => `或在 tailnet 内打开：${url}`,

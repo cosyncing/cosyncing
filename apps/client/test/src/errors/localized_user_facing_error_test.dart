@@ -41,7 +41,7 @@ void main() {
       lead: l10n.brokerProfilesLoadFailed,
     );
 
-    expect(message, contains("broker didn't respond"));
+    expect(message, contains("server didn't respond"));
     expect(message, isNot(contains('connection refused')));
   });
 }

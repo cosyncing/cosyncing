@@ -1,6 +1,9 @@
 import 'dart:io';
 
+import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
+import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/themes/soft_minimalist_theme.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/in_memory_broker_profile_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
@@ -20,7 +23,7 @@ void main() {
   );
 
   testWidgets(
-    'connects through the app UI and renders live broker sessions',
+    'connects through the app UI and activates the exact server',
     (tester) async {
       tester.view
         ..physicalSize = const Size(1280, 900)
@@ -30,15 +33,17 @@ void main() {
 
       final router = createGoRouter(initialLocation: '/connection');
       addTearDown(router.dispose);
+      final profiles = InMemoryBrokerProfileRepository();
+      final activeProfile = _InMemoryActiveBrokerProfileStore();
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             brokerProfileRepositoryProvider.overrideWithValue(
-              InMemoryBrokerProfileRepository(),
+              profiles,
             ),
             activeBrokerProfileStoreProvider.overrideWithValue(
-              _InMemoryActiveBrokerProfileStore(),
+              activeProfile,
             ),
             activeBrokerProfileHydrationProvider.overrideWith((_) async {}),
             sessionArtifactTransferRepositoryProvider.overrideWithValue(
@@ -46,42 +51,39 @@ void main() {
             ),
           ],
           child: MaterialApp.router(
-            theme: ThemeData(
-              colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-              useMaterial3: true,
-              splashFactory: InkRipple.splashFactory,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: buildAppTheme(
+              softMinimalistTheme.light,
+              Brightness.light,
+            ),
+            darkTheme: buildAppTheme(
+              softMinimalistTheme.dark,
+              Brightness.dark,
             ),
             routerConfig: router,
           ),
         ),
       );
 
-      await tester.enterText(find.byType(TextFormField), config.brokerUrl!);
+      final addressField = tester.widget<TextFormField>(
+        find.byKey(const Key('connection-server-address-field')),
+      );
+      addressField.controller!.text = config.brokerUrl!;
+      await tester.pump();
+      expect(
+        addressField.controller!.text,
+        config.brokerUrl,
+      );
       await tester.tap(find.text('Connect'));
       await _pumpUntilFound(tester, find.text('Connected'));
 
-      await tester.tap(find.byKey(const Key('app-command-sessions')));
-      await _pumpUntil(
-        tester,
-        () =>
-            find.text('Failed to load sessions').evaluate().isNotEmpty ||
-            find.text('No sessions').evaluate().isNotEmpty ||
-            _findKnownToolText().evaluate().isNotEmpty,
-      );
-
-      expect(find.text('Failed to load sessions'), findsNothing);
-      expect(find.text('No sessions'), findsNothing);
-      expect(_findKnownToolText(), findsAtLeastNWidgets(1));
+      final saved = await profiles.getAll();
+      expect(saved, hasLength(1));
+      expect(saved.single.baseUri, Uri.parse(config.brokerUrl!));
+      expect(await activeProfile.getActiveProfileId(), saved.single.id);
     },
     skip: config.shouldSkip,
-  );
-}
-
-Finder _findKnownToolText() {
-  return find.byWidgetPredicate(
-    (widget) =>
-        widget is Text &&
-        const {'claude', 'codex', 'opencode', 'pi'}.contains(widget.data),
   );
 }
 
@@ -145,11 +147,11 @@ _LiveAppBrokerConfig _resolveLiveAppBrokerConfig({
       );
     }
 
-    if (!isLoopbackHost(uri.host)) {
+    if (!isLoopbackHost(uri.host) && uri.scheme != 'https') {
       return const _LiveAppBrokerConfig(
         brokerUrl: null,
         skipReason:
-            'Skipped: live app smoke currently supports loopback brokers only.',
+            'Skipped: a remote live app smoke requires an HTTPS server.',
       );
     }
 

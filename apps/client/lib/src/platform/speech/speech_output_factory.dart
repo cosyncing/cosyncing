@@ -79,6 +79,9 @@ class UnavailableSpeechOutput implements SpeechOutput {
   }) async {}
 
   @override
+  Future<void> setRate(double rate) async {}
+
+  @override
   Future<void> pause() async {}
 
   @override

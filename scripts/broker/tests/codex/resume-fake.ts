@@ -12,15 +12,24 @@ import {
   mkdtempSync,
   rmSync,
   readFileSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isOwnershipConflictError } from '../../../../packages/typescript/adapter-api/src/index.ts';
-import { CodexAdapter } from '../../../../packages/typescript/adapters/codex/src/index.ts';
+import {
+  AgentRegistry,
+  isNativeSessionUnresumableError,
+  isOwnershipConflictError,
+} from '../../../../packages/typescript/adapter-api/src/index.ts';
+import {
+  CodexAdapter,
+  type CodexAttachDiagnostic,
+} from '../../../../packages/typescript/adapters/codex/src/index.ts';
 import { AttentionService } from '../../../../packages/typescript/broker/src/attention-service.ts';
-import { ManagedConn } from '../../../../packages/typescript/broker/src/hub.ts';
+import { driveAttachRefusalCode } from '../../../../packages/typescript/broker/src/drive-attach-refusal.ts';
+import { Hub, ManagedConn } from '../../../../packages/typescript/broker/src/hub.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const rand = () => Math.random().toString(36).slice(2, 8);
@@ -261,6 +270,45 @@ for await (const chunk of Bun.stdin.stream()) {
         settings?.params?.effort === 'high' &&
         Buffer.from(info.id, 'base64url').toString('utf8') === rollout,
       `tool=${info.tool} title=${info.title} cwd=${info.cwd} attach=${info.attachMode} control=${info.control?.drive.state} model=${JSON.stringify(info.currentModel)} native=${JSON.stringify(records)}`,
+    ];
+  });
+});
+
+await test('Codex rename returns the accepted title without watcher rediscovery', async () => {
+  return await withFakeCodex(`#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/name/set') {
+      appendFileSync('__MARKER__', JSON.stringify({ kind: 'rename', params: msg.params }) + '\\n');
+      send({ id: msg.id, result: {} });
+    }
+  }
+}
+`, async (rollout, dir, marker) => {
+    const sessionId = Buffer.from(rollout, 'utf8').toString('base64url');
+    const info = await new CodexAdapter().renameSession(sessionId, '  Accepted title  ');
+    const rename = readMarkers(marker).find((entry) => entry.kind === 'rename');
+    return [
+      info.title === 'Accepted title' &&
+        info.id === sessionId &&
+        info.nativeId === 'fake-thread' &&
+        info.cwd === dir &&
+        info.attachMode === 'observe' &&
+        info.control?.drive.state === 'observing' &&
+        rename?.params?.threadId === 'fake-thread' &&
+        rename?.params?.name === 'Accepted title',
+      `info=${JSON.stringify(info)} native=${JSON.stringify(rename)}`,
     ];
   });
 });
@@ -1917,7 +1965,7 @@ for await (const chunk of Bun.stdin.stream()) {
       startCount++;
       mark({ kind: 'turn/start-request', attempt: startCount, hasInput: inputText(msg.params?.input).trim().length > 0 });
       if (startCount === 1) {
-        send({ id: msg.id, error: { message: 'temporary start failure' } });
+        send({ id: msg.id, error: { message: 'temporary start failure for ' + inputText(msg.params?.input) } });
       } else {
         send({ id: msg.id, result: { turn: { id: 'turn-duplicate' } } });
         send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn-duplicate' } } });
@@ -1945,7 +1993,10 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `, async (rollout, _dir, marker) => {
-    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const diagnostics: CodexAttachDiagnostic[] = [];
+    const conn = await new CodexAdapter({
+      reportAttachDiagnostic: (event) => diagnostics.push(event),
+    }).attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
     const messages: any[] = [];
     let firstError: string | undefined;
     conn.subscribe((m: any) => messages.push(m));
@@ -1966,6 +2017,8 @@ for await (const chunk of Bun.stdin.stream()) {
         .filter((m) => m.type === 'model-output')
         .map((m) => m.text ?? m.delta ?? '')
         .join('');
+      const firstTurnDiagnostic = diagnostics.find((event) =>
+        event.event === 'rpc-stage' && event.stage === 'turn/start');
       return [
         startCalls.length === 1 &&
           firstError !== undefined &&
@@ -1973,8 +2026,18 @@ for await (const chunk of Bun.stdin.stream()) {
           steerCalls.length === 1 &&
           recoveredTurnSteered &&
           /RETRIED_STEER=turn-native/.test(out) &&
-          /temporary start failure/.test(firstError),
-        `starts=${startCalls.length} reads=${readCalls.length} steers=${steerCalls.length} out=${out} firstErr=${firstError}`,
+          /temporary start failure/.test(firstError) &&
+          diagnostics.some((event) =>
+            event.event === 'rpc-stage' &&
+            event.stage === 'thread/resume' &&
+            event.outcome === 'succeeded') &&
+          diagnostics.some((event) =>
+            event.event === 'rpc-stage' &&
+            event.stage === 'turn/start' &&
+            event.outcome === 'rejected') &&
+          firstTurnDiagnostic?.message?.includes('[redacted]') === true &&
+          firstTurnDiagnostic?.message?.includes('ambiguous start that may have landed') === false,
+        `starts=${startCalls.length} reads=${readCalls.length} steers=${steerCalls.length} out=${out} firstErr=${firstError} diagnostics=${JSON.stringify(diagnostics)}`,
       ];
     } finally {
       await conn.close().catch(() => {});
@@ -2877,7 +2940,11 @@ for await (const chunk of Bun.stdin.stream()) {
 
 // ── CR1: reason-tagged Drive attach arbitration (presence fail-closed) ──────────────────────────
 
-/** Minimal resume-capable fake: initialize/loaded-list/settings/resume only. */
+/** Minimal resume-capable fake: initialize/loaded-list/settings/resume only.
+ *  Resume rejects unless the adapter requests native full-history exclusion
+ *  while retaining its one-turn summary page. This is the mutation control
+ *  for the physical Computer Use stall: removing either bound fails every
+ *  ordinary/large success control that uses this fake. */
 const RESUME_ONLY_FAKE = `#!/usr/bin/env bun
 const enc = new TextDecoder();
 let buf = '';
@@ -2893,7 +2960,14 @@ for await (const chunk of Bun.stdin.stream()) {
     if (msg.method === 'initialize') send({ id: msg.id, result: {} });
     else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
     else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
-    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+    else if (msg.method === 'thread/resume') {
+      const page = msg.params?.initialTurnsPage;
+      if (msg.params?.excludeTurns !== true || page?.limit !== 1 || page?.sortDirection !== 'desc' || page?.itemsView !== 'summary') {
+        send({ id: msg.id, error: { code: -32602, message: 'resume must exclude full native history and request one summary turn' } });
+      } else {
+        send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'fake-provider' } });
+      }
+    }
   }
 }
 `;
@@ -3060,6 +3134,252 @@ await test('CR1 daemon-loaded thread rejects resume as a typed ownership conflic
   });
 });
 
+await test('C4 unresponsive daemon ownership stays unknown and never starts a private stdio owner', async () => {
+  return withFakeCodex(`#!/usr/bin/env bun
+const { appendFileSync } = require('node:fs');
+appendFileSync('__MARKER__', JSON.stringify({ kind: 'stdio-spawned', pid: process.pid }) + '\\n');
+setInterval(() => {}, 1000);
+`, async (rollout, dir, marker) => withLoadedDaemon(dir, [], async () => {
+    const diagnostics: CodexAttachDiagnostic[] = [];
+    const adapter = new CodexAdapter({
+      reportAttachDiagnostic: (event) => diagnostics.push(event),
+      scanCodexTuiPresence: async () => fakeTuiScan(),
+    });
+    const id = Buffer.from(rollout, 'utf8').toString('base64url');
+    const conflicts: string[] = [];
+    for (const reason of ['takeover', 'app-restore'] as const) {
+      try {
+        const conn = await adapter.attach(id, 'resume', { reason });
+        await conn.close().catch(() => {});
+        conflicts.push('attached');
+      } catch (error) {
+        conflicts.push(isOwnershipConflictError(error) ? error.conflict : String(error));
+      }
+    }
+    const fallback = await adapter.attach(id);
+    try {
+      const probeOutcomes = diagnostics
+        .filter((event) => event.event === 'daemon-loaded-probe')
+        .map((event) => event.outcome);
+      return [
+        conflicts.every((outcome) => outcome === 'daemon-ownership-unknown') &&
+          fallback.info.attachMode === 'observe' &&
+          fallback.info.control?.drive.state === 'observing' &&
+          !diagnostics.some((event) => event.event === 'transport-selected' && event.transport === 'stdio') &&
+          readMarkers(marker).length === 0 &&
+          probeOutcomes.every((outcome) => outcome === 'unknown'),
+        `conflicts=${conflicts.join(',')} fallback=${fallback.info.attachMode}/${fallback.info.control?.drive.state} probes=${probeOutcomes.join(',')} stdio=${readMarkers(marker).length}`,
+      ];
+    } finally {
+      await fallback.close().catch(() => {});
+    }
+  }, new Set(['initialize'])));
+});
+
+await test('C4 cached daemon absence cannot authorize Drive after the daemon becomes unresponsive', async () => {
+  return withFakeCodex(`#!/usr/bin/env bun
+const { appendFileSync } = require('node:fs');
+appendFileSync('__MARKER__', JSON.stringify({ kind: 'stdio-spawned', pid: process.pid }) + '\\n');
+setInterval(() => {}, 1000);
+`, async (rollout, dir, marker) => {
+    const ignoredMethods = new Set<string>();
+    return withLoadedDaemon(dir, [], async () => {
+      const diagnostics: CodexAttachDiagnostic[] = [];
+      const adapter = new CodexAdapter({
+        reportAttachDiagnostic: (event) => diagnostics.push(event),
+        scanCodexTuiPresence: async () => fakeTuiScan(),
+      });
+      const id = Buffer.from(rollout, 'utf8').toString('base64url');
+      const observe = await adapter.attach(id);
+      await observe.close();
+      ignoredMethods.add('initialize');
+
+      let conflict = '';
+      try {
+        const conn = await adapter.attach(id, 'resume', { reason: 'takeover' });
+        await conn.close().catch(() => {});
+        conflict = 'attached';
+      } catch (error) {
+        conflict = isOwnershipConflictError(error) ? error.conflict : String(error);
+      }
+      const probeOutcomes = diagnostics
+        .filter((event) => event.event === 'daemon-loaded-probe')
+        .map((event) => event.outcome);
+      return [
+        conflict === 'daemon-ownership-unknown' &&
+          probeOutcomes.at(-1) === 'unknown' &&
+          !diagnostics.some((event) => event.event === 'transport-selected' && event.transport === 'stdio') &&
+          readMarkers(marker).length === 0,
+        `conflict=${conflict} probes=${probeOutcomes.join(',')} stdio=${readMarkers(marker).length}`,
+      ];
+    }, ignoredMethods);
+  });
+});
+
+type TransactionalStartupFailure =
+  'initialize-timeout' | 'resume-timeout' | 'resume-reject' | 'resume-internal-reject' |
+  'resume-active-writer';
+
+function transactionalStartupFake(failure: TransactionalStartupFailure): string {
+  return `#!/usr/bin/env bun
+const { appendFileSync } = require('node:fs');
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + '\\n');
+const failure = '${failure}';
+mark({ kind: 'stdio-spawned', pid: process.pid, failure });
+process.on('SIGTERM', () => { mark({ kind: 'stdio-terminated', pid: process.pid, failure }); process.exit(0); });
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') {
+      if (failure !== 'initialize-timeout') send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/loaded/list') {
+      send({ id: msg.id, result: { data: [], nextCursor: null } });
+    } else if (msg.method === 'thread/resume') {
+      if (failure === 'resume-reject') {
+        send({ id: msg.id, error: { code: 'SESSION_NOT_RESUMABLE', message: 'native session is not resumable' } });
+      } else if (failure === 'resume-active-writer') {
+        send({ id: msg.id, error: { code: -32600, message: 'thread fake-thread already has an active writer' } });
+      } else if (failure === 'resume-internal-reject') {
+        send({ id: msg.id, error: { code: -32603, message: 'transient native internal error' } });
+      } else if (failure !== 'resume-timeout') {
+        send({ id: msg.id, result: { thread: { name: 'fake' } } });
+      }
+    }
+  }
+}
+`;
+}
+
+async function exerciseTransactionalStartupFailure(
+  failure: TransactionalStartupFailure,
+): Promise<[boolean, string]> {
+  return withFakeCodex(transactionalStartupFake(failure), async (rollout, _dir, marker) => withFakeSock(async () => {
+    const diagnostics: CodexAttachDiagnostic[] = [];
+    const adapter = new CodexAdapter({
+      reportAttachDiagnostic: (event) => diagnostics.push(event),
+      resumeStartupTimeoutMs: 80,
+      resumeProcessStopTimeoutMs: 500,
+      scanCodexTuiPresence: async () => fakeTuiScan(),
+    });
+    const registry = new AgentRegistry();
+    registry.register(adapter);
+    const hub = new Hub(registry, 20);
+    const id = Buffer.from(rollout, 'utf8').toString('base64url');
+    let thrown: unknown;
+    try {
+      await hub.ensure('codex', id, 'resume', 'takeover');
+    } catch (error) {
+      thrown = error;
+    }
+    const ownersAfterFailure = (hub as any).conns.size as number;
+    const pendingAfterFailure = (hub as any).pending.size as number;
+    const markers = readMarkers(marker);
+    const exitEvent = diagnostics.find(
+      (event) => event.event === 'child-lifecycle' && event.outcome?.startsWith('exited:'),
+    );
+    const failedStage = diagnostics.find(
+      (event) => event.event === 'rpc-stage' && event.outcome !== 'started' && event.outcome !== 'succeeded',
+    );
+    const fallback = await hub.ensure('codex', id);
+    const joinCommand = fallback.conn.info.control?.terminalSync.command ?? '';
+    const fallbackUsable = fallback.conn.info.attachMode === 'observe' &&
+      fallback.conn.info.control?.drive.state === 'observing' &&
+      joinCommand.includes('resume --remote');
+    await hub.dispose();
+    const rejectedTypeOk = failure === 'resume-reject'
+      ? isNativeSessionUnresumableError(thrown)
+      : failure === 'resume-active-writer'
+        ? isOwnershipConflictError(thrown) && thrown.conflict === 'native-active-writer'
+        : !isNativeSessionUnresumableError(thrown) && thrown instanceof Error;
+    const refusalCodeOk = failure === 'resume-internal-reject'
+      ? driveAttachRefusalCode(thrown) === 'DRIVE_RESTORE_FAILED'
+      : failure === 'resume-active-writer'
+        ? driveAttachRefusalCode(thrown) === 'DRIVE_OWNERSHIP_CONFLICT'
+        : true;
+    return [
+      rejectedTypeOk &&
+        refusalCodeOk &&
+        ownersAfterFailure === 0 &&
+        pendingAfterFailure === 0 &&
+        markers.some((event) => event.kind === 'stdio-spawned') &&
+        markers.some((event) => event.kind === 'stdio-terminated') &&
+        exitEvent?.pendingRpcCount === 0 &&
+        failedStage?.message != null &&
+        fallbackUsable,
+      `failure=${failure} error=${thrown instanceof Error ? thrown.name + ':' + thrown.message : String(thrown)} owners=${ownersAfterFailure} pending=${pendingAfterFailure} markers=${JSON.stringify(markers)} exit=${JSON.stringify(exitEvent)} fallback=${fallback.conn.info.attachMode}/${fallback.conn.info.control?.drive.state} join=${joinCommand}`,
+    ];
+  }));
+}
+
+await test('C4 initialize timeout transactionally retires the partial owner', async () =>
+  exerciseTransactionalStartupFailure('initialize-timeout'));
+
+await test('C4 thread/resume timeout transactionally retires the partial owner', async () =>
+  exerciseTransactionalStartupFailure('resume-timeout'));
+
+await test('C4 native thread/resume rejection is typed and transactionally retired', async () =>
+  exerciseTransactionalStartupFailure('resume-reject'));
+
+await test('C4 transient thread/resume rejection stays a generic restore failure', async () =>
+  exerciseTransactionalStartupFailure('resume-internal-reject'));
+
+await test('C5 native active-writer rejection is an ownership conflict and retires the partial owner', async () =>
+  exerciseTransactionalStartupFailure('resume-active-writer'));
+
+await test('C4 ordinary Codex Desktop metadata remains resumable', async () => {
+  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout, dir) => withFakeSock(async () => {
+    writeFileSync(
+      rollout,
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          id: 'fake-thread',
+          cwd: dir,
+          originator: 'Codex Desktop',
+          source: 'vscode',
+          title: 'Chrome plugin session',
+        },
+      }) + String.fromCharCode(10),
+    );
+    appendFileSync(rollout, JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'desktop transcript control' }] },
+    }) + String.fromCharCode(10));
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    try {
+      return [
+        conn.info.attachMode === 'resume' && conn.info.control?.drive.state === 'driving',
+        `attach=${conn.info.attachMode} drive=${conn.info.control?.drive.state} origin=${conn.info.origin ?? 'none'}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  }));
+});
+
+await test('C4/C5 large resumable rollout excludes native full history and is not refused by size', async () => {
+  return withFakeCodex(RESUME_ONLY_FAKE, async (rollout) => withFakeSock(async () => {
+    truncateSync(rollout, 80 * 1024 * 1024);
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    try {
+      return [
+        conn.info.attachMode === 'resume' && conn.info.control?.drive.state === 'driving',
+        `attach=${conn.info.attachMode} drive=${conn.info.control?.drive.state}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  }));
+});
+
 // ── CR4: agent-owned threads offer no Terminal Sync; NORMAL parents are untouched ────────────────
 // Both halves run against ONE fake app-server daemon that reports BOTH threads loaded. Being loaded
 // is precisely the state that makes a mode-less attach the mutable daemon-proxy owner, so the parent
@@ -3154,7 +3474,11 @@ class FakeCodexDaemon {
   private server: Server | undefined;
   private clients = new Set<FakeDaemonClient>();
 
-  constructor(private readonly socketPath: string, private readonly loadedThreadIds: string[]) {}
+  constructor(
+    private readonly socketPath: string,
+    private readonly loadedThreadIds: string[],
+    private readonly ignoredMethods = new Set<string>(),
+  ) {}
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -3177,6 +3501,7 @@ class FakeCodexDaemon {
 
   private handle(client: FakeDaemonClient, msg: any): void {
     if (!msg?.method) return;
+    if (this.ignoredMethods.has(String(msg.method))) return;
     switch (msg.method) {
       case 'initialize':
         client.send({ id: msg.id, result: { userAgent: 'codex-fake/0.0.0' } });
@@ -3195,9 +3520,14 @@ class FakeCodexDaemon {
 }
 
 /** Runs `fn` with a live fake daemon socket + sync-server mode on, then restores the environment. */
-async function withLoadedDaemon<T>(dir: string, loaded: string[], fn: () => Promise<T>): Promise<T> {
+async function withLoadedDaemon<T>(
+  dir: string,
+  loaded: string[],
+  fn: () => Promise<T>,
+  ignoredMethods = new Set<string>(),
+): Promise<T> {
   const sock = join(dir, 'app-server-control.sock');
-  const daemon = new FakeCodexDaemon(sock, loaded);
+  const daemon = new FakeCodexDaemon(sock, loaded, ignoredMethods);
   await daemon.start();
   const oldSock = process.env.COSYNCING_CODEX_APP_SERVER_SOCK;
   const oldSync = process.env.COSYNCING_CODEX_SYNC_SERVER;

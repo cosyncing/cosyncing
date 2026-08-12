@@ -20,7 +20,10 @@ lib/src/design/
 │   ├── status_dot.dart    # StatusDot: colored dot, optional attention ring
 │   ├── status_pill.dart   # StatusPill: color-coded status badge (label + semantic color)
 │   ├── metadata_chip.dart # MetadataChip: neutral surface-2 chip for quiet metadata
-│   └── section_header.dart# SectionHeader: accent-tinted section title
+│   ├── section_header.dart# SectionHeader: accent-tinted section title
+│   ├── copyable_code_line.dart # selectable, exact-copy command or path
+│   ├── selectable_tap_region.dart # selectable text in an activating row
+│   └── transcript_box.dart # compact tinted shell for boxed transcript content
 ├── themes/                # one isolated module per theme
 │   ├── <slug>_theme.dart  # reviewed public ThemeSpec source
 │   └── theme_registry.dart# kAppThemes, kDefaultThemeId, themeSpecById()
@@ -60,10 +63,20 @@ that froze in dark mode. Import `components.dart` and use the shared widgets:
 ```dart
 import 'package:cosyncing_client/src/design/components.dart';
 
-StatusDot(color: t.toolColor(tool), ringColor: needsInput ? t.statusNeedsInput : null);
+StatusDot(
+  color: t.toolColor(tool),
+  ringColor: needsInput ? t.statusNeedsInput : null,
+  ringGapColor: needsInput ? t.surface : null,
+  pulse: working,
+);
 StatusPill(label: 'Connected', color: t.statusWorking);   // severity via a token
 MetadataChip(label: model, maxWidth: 160);                // quiet neutral chip
 SectionHeader('Appearance');                              // accent-tinted title
+CopyableCodeLine(                                        // literal command/path
+  text: 'cosy pair',
+  copyTooltip: l10n.copyCommand,
+  copiedMessage: l10n.copyCommandCopied,
+);
 ```
 
 The kit widgets read `AppTokens` for shape (radius, surfaces) but take a

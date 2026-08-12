@@ -1,3 +1,12 @@
+/// Converts an app-facing multiplier to flutter_tts's platform convention.
+///
+/// Web Speech uses 1.0 as normal. flutter_tts's supported native adapters use
+/// 0.5 as normal (Android doubles that value before calling TextToSpeech).
+double flutterTtsPluginRateForMultiplier(
+  double multiplier, {
+  required bool isWeb,
+}) => isWeb ? multiplier : multiplier / 2;
+
 /// Narrow, injectable seam over the `flutter_tts` plugin.
 ///
 /// The real implementation wraps `FlutterTts` and lives in
@@ -20,6 +29,9 @@ abstract interface class FlutterTtsBackend {
   /// Speak [text]. Resolves when the utterance completes, is cancelled (by
   /// [stop]), or errors (reported via [setErrorHandler] before this resolves).
   Future<void> speak(String text);
+
+  /// Apply a human-facing speed [multiplier], where 1.0 is normal.
+  Future<void> setRate(double multiplier);
 
   /// Stop the current utterance and clear the platform queue.
   Future<void> stop();

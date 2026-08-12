@@ -2,13 +2,13 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/controller/new_session_launch_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/machine_roster_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_list_controller.dart';
@@ -20,6 +20,7 @@ import 'package:cosyncing_client/src/features/sessions/view/new_session_launch.d
 import 'package:cosyncing_client/src/features/sessions/view/new_session_sheet.dart';
 import 'package:cosyncing_client/src/features/sessions/view/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_list_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/view/sessions_empty_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -84,6 +85,14 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
     final hasActiveBrokerClient = ref
         .watch(brokerClientProvider)
         .maybeWhen(data: (client) => client != null, orElse: () => false);
+    final activeSource = RosterSource.of(
+      ref.watch(activeBrokerProfileProvider),
+    );
+    final creationAvailability = ref
+        .watch(sessionCreationReadyProvider)
+        .availabilityFor(activeSource);
+    final canCreateSession =
+        creationAvailability == SessionCreationAvailability.available;
 
     return CallbackShortcuts(
       bindings: {
@@ -111,7 +120,7 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
               ),
               TextButton.icon(
                 key: const Key('sessions-global-new'),
-                onPressed: _newSessionLaunch == null
+                onPressed: canCreateSession && _newSessionLaunch == null
                     ? () => unawaited(_openNewSession())
                     : null,
                 icon: const Icon(Icons.add),
@@ -144,8 +153,10 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                     sessions: const [],
                     status: state.status,
                     cachedRoster: cached,
-                    onNewProject: (project) =>
-                        unawaited(_openNewSession(project: project)),
+                    onNewProject: canCreateSession
+                        ? (project) =>
+                              unawaited(_openNewSession(project: project))
+                        : null,
                     onRetry: _loadSessions,
                   ),
                   (SessionListStatus.loading, _) => const _LoadingView(),
@@ -157,8 +168,10 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                     _SessionList(
                       sessions: sessions,
                       status: state.status,
-                      onNewProject: (project) =>
-                          unawaited(_openNewSession(project: project)),
+                      onNewProject: canCreateSession
+                          ? (project) =>
+                                unawaited(_openNewSession(project: project))
+                          : null,
                       onRetry: _loadSessions,
                     ),
                   (SessionListStatus.error, _) => _ErrorView(
@@ -167,14 +180,18 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                   (SessionListStatus.loaded, _) ||
                   (SessionListStatus.refreshing, _) =>
                     sessions.isEmpty
-                        ? _EmptyView(
+                        ? SessionsEmptyState(
                             hasActiveBrokerClient: hasActiveBrokerClient,
+                            creationAvailability: creationAvailability,
                           )
                         : _SessionList(
                             sessions: sessions,
                             status: state.status,
-                            onNewProject: (project) =>
-                                unawaited(_openNewSession(project: project)),
+                            onNewProject: canCreateSession
+                                ? (project) => unawaited(
+                                    _openNewSession(project: project),
+                                  )
+                                : null,
                             onRetry: _loadSessions,
                           ),
                 },
@@ -186,6 +203,7 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
   void _loadSessions() {
     ref.read(sessionListControllerProvider.notifier).load();
     ref.read(machineRosterControllerProvider.notifier).load();
+    unawaited(ref.read(sessionCreationReadyProvider.notifier).refresh());
   }
 
   Future<void> _showMachines() {
@@ -506,6 +524,9 @@ class _MachineSessionsSheet extends ConsumerWidget {
             Expanded(
               child: state.machines.isEmpty && !state.loading
                   ? Center(child: SelectableText(l10n.sessionsMachineNone))
+                  // No selection region: like the other two rosters this list
+                  // is navigation, and a `SelectionArea` here would reintroduce
+                  // the web platform view of flutter/flutter#122680.
                   : ListView(
                       key: const Key('machine-roster-list'),
                       padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
@@ -562,8 +583,12 @@ class _MachineRosterCard extends StatelessWidget {
                     ? Icons.cloud_outlined
                     : Icons.lock_outline,
               ),
-              title: Text(session.title.isEmpty ? session.id : session.title),
-              subtitle: SelectableText(
+              // Plain text: this row is navigation, so the ListTile's own
+              // onTap is the single handler and nothing here selects.
+              title: Text(
+                session.title.isEmpty ? session.id : session.title,
+              ),
+              subtitle: Text(
                 '${session.tool} · '
                 '${_machineRouteLabel(l10n, session.owner.route)}',
               ),
@@ -591,7 +616,7 @@ class _SessionList extends ConsumerWidget {
   });
 
   final List<SessionInfo> sessions;
-  final ValueChanged<SessionProjectGroup> onNewProject;
+  final ValueChanged<SessionProjectGroup>? onNewProject;
   final SessionListStatus status;
   final CachedRosterPresentation? cachedRoster;
   final VoidCallback? onRetry;
@@ -655,64 +680,6 @@ class _LoadingView extends StatelessWidget {
           const CircularProgressIndicator(),
           const SizedBox(height: 16),
           SelectableText(l10n.sessionsLoading),
-        ],
-      ),
-    );
-  }
-}
-
-/// Empty state when no sessions exist.
-class _EmptyView extends StatelessWidget {
-  const _EmptyView({required this.hasActiveBrokerClient});
-
-  final bool hasActiveBrokerClient;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = AppLocalizations.of(context);
-    final title = hasActiveBrokerClient
-        ? l10n.sessionsEmptyActiveTitle
-        : l10n.sessionsEmptyTitle;
-    final body = hasActiveBrokerClient
-        ? l10n.sessionsEmptyActiveBody
-        : l10n.sessionsEmptyBody;
-
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.inbox_outlined,
-            size: 64,
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(height: 16),
-          SelectableText(
-            title,
-            style: theme.textTheme.titleMedium,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 8),
-          SelectableText(
-            body,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          // Telling the user to connect without giving them a way to do it
-          // left the app's landing tab as the only empty state in the app
-          // with no action, unlike Broker Profiles two taps away.
-          if (!hasActiveBrokerClient) ...[
-            const SizedBox(height: 16),
-            FilledButton.tonalIcon(
-              key: const Key('sessions-empty-connect'),
-              onPressed: () => context.push(connectionRoute),
-              icon: const Icon(Icons.link),
-              label: Text(l10n.sessionsEmptyAction),
-            ),
-          ],
         ],
       ),
     );

@@ -233,9 +233,16 @@ for (const tool of ['codex', 'claude', 'opencode', 'pi'] as const) {
   const startedAt = performance.now();
   const native = await readNativeHistory();
   const history = native.messages;
+  // The Pi fixture is bare prompts with no reply, so its transcript ends
+  // mid-turn: the mapper truthfully appends ONE `running` run-summary for the
+  // trailing open turn (and no completed footers — a prompt the agent never
+  // answered carries no run evidence).
+  const expectedMessages = tool === 'pi'
+    ? FIXTURE_MESSAGES + 1
+    : FIXTURE_MESSAGES;
   assert(
-    history.length === FIXTURE_MESSAGES,
-    `${tool}: native mapper produced ${history.length}/${FIXTURE_MESSAGES} messages`,
+    history.length === expectedMessages,
+    `${tool}: native mapper produced ${history.length}/${expectedMessages} messages`,
   );
   const cache = EncodedHistoryPageCache.create(
     source(`${tool}:source`, history.length),
@@ -282,7 +289,7 @@ for (const tool of ['codex', 'claude', 'opencode', 'pi'] as const) {
   }
   assert(expectedOldest === 0, `${tool}: paging did not reach the true start`);
   assert(
-    transmittedMessages === FIXTURE_MESSAGES - INITIAL_TAIL,
+    transmittedMessages === expectedMessages - INITIAL_TAIL,
     `${tool}: paging skipped or duplicated messages`,
   );
   assert(

@@ -119,6 +119,8 @@ class FakeDaemonClient {
 }
 
 export interface FakeCodexDaemonOptions {
+  /** Methods accepted at the socket but deliberately left unanswered. */
+  ignoreMethods?: string[];
   /** Threads `thread/loaded/list` reports. */
   loadedThreadIds?: string[];
   /** Result for `thread/resume`; the thread id is filled in when omitted. */
@@ -177,6 +179,7 @@ export class FakeCodexDaemon {
   private handle(client: FakeDaemonClient, message: any): void {
     if (!message?.method) return;
     this.calls.push(String(message.method));
+    if (this.options.ignoreMethods?.includes(String(message.method))) return;
     const reply = (result: unknown): void => {
       if (message.id != null) client.send({ id: message.id, result });
     };

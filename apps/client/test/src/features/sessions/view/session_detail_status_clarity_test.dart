@@ -196,7 +196,7 @@ void main() {
 
       // A section headline, the control description, the status tag itself,
       // and a telemetry label with its value — one region, one selection.
-      expectFullySelected(tester, 'Connection & ownership');
+      expectFullySelected(tester, 'Session control');
       expectFullySelected(
         tester,
         'Driving from the app. Switch to Observe before resuming this session '
@@ -363,6 +363,75 @@ void main() {
       );
     });
 
+    testWidgets('join command keeps its terminal-sync section', (tester) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            controlEvent(const {
+              'drive': {'state': 'observing', 'supported': true},
+              'terminalSync': {
+                'supported': true,
+                'syncAvailable': true,
+                'active': false,
+                'action': 'join',
+                'command': 'codex resume --remote sock thread',
+              },
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openStatus(tester);
+      expect(
+        find.byKey(const Key('session-detail-status-sync-heading')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-status-copy-command')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-status-sync-description')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-status-takeover-heading')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('non-actionable unknown omits the terminal restatement', (
+      tester,
+    ) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            controlEvent(const {
+              'drive': {'state': 'observing', 'supported': false},
+              'terminalSync': {
+                'supported': true,
+                'syncAvailable': true,
+                'active': true,
+                'presence': 'unknown',
+              },
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openStatus(tester);
+      expect(
+        find.byKey(const Key('session-detail-status-terminal-heading')),
+        findsNothing,
+      );
+      expect(
+        find.text('The terminal connection could not be confirmed.'),
+        findsNothing,
+      );
+    });
+
     /// Every state that carries an action, a caveat, a limitation, a safety
     /// consequence, or a recovery path. None of these may be compacted.
     final preserved =
@@ -391,7 +460,7 @@ void main() {
                 'Synced with your terminal for answers only. Answer '
                 'permission and question cards here; send new prompts from '
                 'the terminal.',
-            terminal: 'Terminal connected and synced.',
+            terminal: null,
             action: null,
           ),
           (
@@ -407,7 +476,7 @@ void main() {
             description:
                 'The terminal owns input right now. Take over to send from '
                 'the app.',
-            terminal: 'The terminal connection could not be confirmed.',
+            terminal: null,
             action: const Key('session-detail-take-over-button'),
           ),
           (
@@ -442,8 +511,7 @@ void main() {
               },
             },
             description:
-                'A terminal can join this session. Run the command below '
-                'to sync, then send from either side.',
+                'No terminal is currently synced. Choose how to continue.',
             terminal: null,
             action: const Key('session-detail-status-copy-command'),
           ),
@@ -460,7 +528,7 @@ void main() {
             description:
                 'The app can neither take over nor sync this session. You can '
                 'only observe it.',
-            terminal: 'The terminal connection could not be confirmed.',
+            terminal: null,
             action: null,
           ),
           (
@@ -477,7 +545,7 @@ void main() {
             description:
                 'Synced with your terminal. Send from here or the '
                 'terminal; both stay in step.',
-            terminal: 'The terminal connection could not be confirmed.',
+            terminal: null,
             action: null,
           ),
           (
@@ -495,7 +563,8 @@ void main() {
             description:
                 'Synced with your terminal. Send from here or the '
                 'terminal; both stay in step.',
-            terminal: 'Terminal connected and synced.',
+            terminal:
+                'This terminal is behind. Restart or resume it to rejoin.',
             action: null,
           ),
         ];
@@ -556,7 +625,7 @@ void main() {
       // The composer caveat is a safety consequence, not repetition: it lives
       // on Chat and must survive whatever Status compacts.
       expect(
-        find.byKey(const Key('session-detail-composer-blocked-hint')),
+        find.byKey(const Key('session-detail-observe-composer-bar')),
         findsOneWidget,
       );
 
@@ -643,49 +712,214 @@ void main() {
       ('roomy', Size(1280, 900)),
     ];
 
-    for (final (label, size) in densities) {
-      for (final brightness in Brightness.values) {
-        for (final scale in const [1.0, 2.0]) {
-          testWidgets('$label ${brightness.name} at ${scale}x lays out '
-              'cleanly', (tester) async {
+    for (final themeId in const [kDefaultThemeId, 'soft-minimalist']) {
+      for (final (label, size) in densities) {
+        for (final brightness in Brightness.values) {
+          for (final scale in const [1.0, 2.0]) {
+            testWidgets('$themeId $label ${brightness.name} at ${scale}x '
+                'lays out cleanly', (tester) async {
+              tester.view
+                ..physicalSize = size
+                ..devicePixelRatio = 1;
+              addTearDown(tester.view.reset);
+
+              final spec = themeSpecById(themeId);
+              await tester.pumpWidget(
+                buildSessionDetailTestPage(
+                  events: [controlEvent(healthySyncedShared)],
+                  theme: buildAppTheme(
+                    brightness == Brightness.dark ? spec.dark : spec.light,
+                    brightness,
+                  ),
+                  textScale: scale,
+                ),
+              );
+              await tester.pumpAndSettle();
+              await openStatus(tester);
+
+              expect(
+                find.byKey(const Key('session-detail-status-panel')),
+                findsOneWidget,
+              );
+              expect(
+                find.byKey(
+                  const Key('session-detail-status-sheet-control-pill-synced'),
+                ),
+                findsOneWidget,
+              );
+              expect(
+                tester.takeException(),
+                isNull,
+                reason: 'no overflow or layout exception',
+              );
+            });
+          }
+        }
+      }
+    }
+
+    testWidgets(
+      'Status controls hold the panel type hierarchy, never ListTile defaults',
+      (tester) async {
+        // The regression: bare ListTiles (Session actions) and the
+        // Technical-details ExpansionTile rendered their control text at the
+        // Material default `bodyLarge` (16sp) — larger than the SectionHeader
+        // above them and every explanation around them. The panel's approved
+        // hierarchy caps control rows at `bodySmall`.
+        // Tall enough that the lazy Status ListView builds every action row
+        // without scripted scrolling.
+        tester.view
+          ..physicalSize = const Size(1280, 4000)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [
+              controlEvent(const <String, dynamic>{
+                'drive': {
+                  'state': 'observing',
+                  'supported': false,
+                  'reason': 'broker: fixture technical detail',
+                },
+                'terminalSync': {
+                  'supported': true,
+                  'syncAvailable': true,
+                  'active': false,
+                },
+              }),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await openStatus(tester);
+
+        final theme = Theme.of(
+          tester.element(find.byKey(const Key('session-detail-status-panel'))),
+        );
+        final bodySmallSize = theme.textTheme.bodySmall!.fontSize!;
+
+        double controlTextSize(String text) {
+          final richText = tester.widget<RichText>(
+            find
+                .descendant(
+                  of: inStatus(find.text(text)).first,
+                  matching: find.byType(RichText),
+                  matchRoot: true,
+                )
+                .first,
+          );
+          return richText.text.style!.fontSize!;
+        }
+
+        for (final label in const [
+          'Technical details',
+          'Detach',
+          'Fork at latest',
+          'Copy transcript',
+        ]) {
+          expect(
+            controlTextSize(label),
+            bodySmallSize,
+            reason:
+                '"$label" is a quiet control row: bodySmall, not the ListTile '
+                'bodyLarge default',
+          );
+        }
+        // Hit targets survive the smaller type.
+        expect(
+          tester
+              .getSize(find.byKey(const Key('session-detail-detach-button')))
+              .height,
+          greaterThanOrEqualTo(40),
+          reason: 'action rows keep an accessible touch target',
+        );
+      },
+    );
+
+    testWidgets('ownership pill is inline at 360dp and wraps below it', (
+      tester,
+    ) async {
+      for (final width in const [420.0, 359.0, 1280.0, 359.0]) {
+        tester.view
+          ..physicalSize = Size(width, 900)
+          ..devicePixelRatio = 1;
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [controlEvent(healthySyncedShared)],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await openStatus(tester);
+
+        final compact = find.byKey(
+          const Key('session-detail-status-ownership-header-compact'),
+        );
+        final roomy = find.byKey(
+          const Key('session-detail-status-ownership-header-roomy'),
+        );
+        expect(compact, width == 359 ? findsOneWidget : findsNothing);
+        expect(roomy, width == 359 ? findsNothing : findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }
+      addTearDown(tester.view.reset);
+    });
+
+    testWidgets('Status goldens cover locale, brightness, and density', (
+      tester,
+    ) async {
+      addTearDown(tester.view.reset);
+      final spec = themeSpecById(kDefaultThemeId);
+      for (final (density, size) in densities) {
+        for (final locale in const [Locale('en'), Locale('zh')]) {
+          for (final brightness in Brightness.values) {
             tester.view
               ..physicalSize = size
               ..devicePixelRatio = 1;
-            addTearDown(tester.view.reset);
-
-            final spec = themeSpecById(kDefaultThemeId);
             await tester.pumpWidget(
               buildSessionDetailTestPage(
-                events: [controlEvent(healthySyncedShared)],
+                events: [
+                  controlEvent(const {
+                    'drive': {'state': 'observing', 'supported': true},
+                    'terminalSync': {
+                      'supported': true,
+                      'syncAvailable': true,
+                      'active': false,
+                      'action': 'join',
+                      'command': 'codex resume --remote sock thread',
+                    },
+                  }),
+                  MessageWireEvent(
+                    seq: 1,
+                    message: AgentMessage.fromJson(const {
+                      'type': 'token-count',
+                      'input': 10800000,
+                      'output': 212000,
+                      'cacheRead': 332792,
+                      'cacheWrite': 656,
+                    }),
+                  ),
+                ],
+                locale: locale,
                 theme: buildAppTheme(
                   brightness == Brightness.dark ? spec.dark : spec.light,
                   brightness,
                 ),
-                textScale: scale,
               ),
             );
             await tester.pumpAndSettle();
             await openStatus(tester);
 
-            expect(
+            await expectLater(
               find.byKey(const Key('session-detail-status-panel')),
-              findsOneWidget,
-            );
-            expect(
-              find.byKey(
-                const Key('session-detail-status-sheet-control-pill-synced'),
+              matchesGoldenFile(
+                'goldens/status_panel_${density}_${brightness.name}_'
+                '${locale.languageCode}.png',
               ),
-              findsOneWidget,
             );
-            expect(
-              tester.takeException(),
-              isNull,
-              reason: 'no overflow or layout exception',
-            );
-          });
+          }
         }
       }
-    }
+    });
   });
 
   group('R0b Status is broker-qualified', () {

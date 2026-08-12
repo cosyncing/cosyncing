@@ -20,6 +20,13 @@ import {
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
 import { collectDoctorReport, DURABLE_SERVICE_CHECK_ID, type DoctorReport } from './doctor.ts';
 import {
+  assessDurableStateForSetup,
+  durableStateLayout,
+  inspectDurableSchemas,
+  type DurableStatePermissionRepair,
+  type DurableStoreInspection,
+} from './durable-state.ts';
+import {
   inspectInstallState,
   serviceExecutablePath,
   type InstallStateInspection,
@@ -112,6 +119,7 @@ import {
   TAILSCALE_SERVE_OWNERSHIP_MARKER,
   TAILSCALE_SERVE_RESOURCE_ID,
   TailscaleServeProvider,
+  resolveTailscaleAddresses,
   verifyAdvertisedBrokerEndpoint,
   type AdvertisedBrokerEndpointVerificationOptions,
   type TailscaleServeInspection,
@@ -142,6 +150,10 @@ export interface SetupChoices {
   quotaWarnings: boolean;
   installAgentSkill: boolean;
   installOpencodeShim: boolean;
+  /** One-run migration consent; never persisted as an enduring setup preference. */
+  replaceLegacyPiBridge?: boolean;
+  /** One-run migration consent; never authorizes any skill content except the exact known predecessor. */
+  upgradeLegacyAgentSkill?: boolean;
 }
 
 /** Per-rc-file view used by the plan to decide whether the managed block needs installing. */
@@ -189,6 +201,7 @@ export interface SetupBlockingIssue {
   code: string;
   summary: string;
   remediation: string;
+  localized?: Partial<Record<SetupLanguage, { summary: string; remediation: string }>>;
 }
 
 export interface SetupInspection {
@@ -208,6 +221,7 @@ export interface SetupInspection {
   setupState: SetupState;
   piAgentDir: string;
   piBridge: ReturnType<typeof inspectPiBridgeAsset>;
+  durableStatePermissionRepairs: DurableStatePermissionRepair[];
   agentSkills: AgentSkillInspection[];
   opencodeShim: OpencodeShimInspection;
   portStatus: 'free' | 'owned-running' | 'conflict' | 'unknown';
@@ -288,7 +302,9 @@ export interface SetupPresenter {
     tailscaleServe: boolean;
   };
   confirmManagedRuntime(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
+  confirmLegacyPiBridge?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmAgentSkill(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
+  confirmLegacyAgentSkill?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmOpencodeShim(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   chooseService(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<SetupServiceChoice>>;
   confirmTailscale(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
@@ -455,7 +471,10 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
   });
 }
 
-export function doctorBlockers(report: DoctorReport): SetupBlockingIssue[] {
+export function doctorBlockers(
+  report: DoctorReport,
+  permissionRepairIds: ReadonlySet<string> = new Set(),
+): SetupBlockingIssue[] {
   const checks = allChecks(report);
   const blockers: SetupBlockingIssue[] = [];
   for (const candidate of checks) {
@@ -474,8 +493,60 @@ export function doctorBlockers(report: DoctorReport): SetupBlockingIssue[] {
         remediation: candidate.remediation?.message ?? 'Use a supported Linux/WSL host.',
       });
     }
+    if (candidate.id.startsWith('state.schema.')) {
+      const store = candidate.id.slice('state.schema.'.length);
+      if (permissionRepairIds.has(store)) continue;
+      blockers.push({
+        code: candidate.detailCode,
+        summary: candidate.summary,
+        remediation: candidate.remediation?.message ?? 'Back up and reconcile durable state before rerunning setup.',
+        localized: {
+          'zh-Hans': {
+            summary: `${store} 持久状态未通过安全与架构检查。`,
+            remediation: '请先备份并明确处理该持久状态，然后重新运行安装；安装不会覆盖不明确的状态。',
+          },
+        },
+      });
+    }
   }
   return blockers;
+}
+
+function durableStateBlockers(
+  inspections: readonly DurableStoreInspection[],
+): SetupBlockingIssue[] {
+  return inspections.map((inspection) => {
+    const knownPreinstallMigration = inspection.id === 'setup'
+      && inspection.status === 'migration-required';
+    const unversioned = inspection.status === 'migration-required';
+    return {
+      code: inspection.detailCode,
+      summary: knownPreinstallMigration
+        ? 'Existing setup state uses a known older schema, but first-time setup cannot migrate it safely.'
+        : unversioned
+          ? `${inspection.id} durable state is unversioned and has no supported setup migration.`
+          : `${inspection.id} durable state is unsafe, malformed, or uses an unsupported schema.`,
+      remediation: knownPreinstallMigration
+        ? 'Back up and move the existing setup state file out of the cosyncing state directory, then rerun setup. Setup will not invoke the repair-only migration before it owns a committed installation.'
+        : unversioned
+          ? `Back up and move the existing ${inspection.id} state file out of the cosyncing state or cache directory, then rerun setup. Setup will not guess an unversioned format.`
+          : `Back up and reconcile the existing ${inspection.id} state before rerunning setup. Setup will not alter state whose ownership, file shape, permissions, and schema are not proven safe.`,
+      localized: {
+        'zh-Hans': {
+          summary: knownPreinstallMigration
+            ? '现有安装状态使用已知旧版架构，但首次安装无法安全迁移该文件。'
+            : unversioned
+              ? `${inspection.id} 持久状态没有版本信息，安装程序不支持自动迁移。`
+              : `${inspection.id} 持久状态不安全、格式错误或使用不受支持的架构版本。`,
+          remediation: knownPreinstallMigration
+            ? '请先备份现有安装状态文件，并将其移出 cosyncing 状态目录，然后重新运行安装。首次安装尚未取得已提交安装的所有权，因此不会调用仅供 repair 使用的迁移。'
+            : unversioned
+              ? `请先备份现有 ${inspection.id} 状态文件，并将其移出 cosyncing 状态或缓存目录，然后重新运行安装。安装程序不会猜测无版本格式。`
+              : `请先备份并明确处理现有 ${inspection.id} 状态，再重新运行安装。若所有权、文件类型、权限和架构未证明安全，安装程序不会修改该状态。`,
+        },
+      },
+    };
+  });
 }
 
 function uniqueIssues(issues: readonly SetupBlockingIssue[]): SetupBlockingIssue[] {
@@ -527,6 +598,7 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
       status,
       actualSha256,
     })),
+    durableStatePermissionRepairs: input.durableStatePermissionRepairs,
     opencodeShim: {
       shimStatus: input.opencodeShim.shimStatus,
       rc: input.opencodeShim.rc.map(({ id, state }) => ({ id, state })),
@@ -591,6 +663,12 @@ export async function inspectSetupEnvironment(options: {
       return { id, resourceId, path, state };
     }),
   };
+  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
+    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  const durableAssessment = assessDurableStateForSetup(durableStateLayout({
+    stateRoot: options.home,
+    cacheRoot,
+  }));
   const [doctor, tailscale] = await Promise.all([
     collectDoctorReport({
       buildInfo: options.buildInfo,
@@ -608,7 +686,10 @@ export async function inspectSetupEnvironment(options: {
     config: targetConfig,
     installed: installState.committed,
   });
-  const issues: SetupBlockingIssue[] = [...doctorBlockers(doctor)];
+  const issues: SetupBlockingIssue[] = [...doctorBlockers(
+    doctor,
+    new Set(durableAssessment.permissionRepairs.map((repair) => repair.id)),
+  ), ...durableStateBlockers(durableAssessment.blockers)];
   if (config.status === 'error') {
     issues.push({
       code: config.detailCode,
@@ -638,11 +719,17 @@ export async function inspectSetupEnvironment(options: {
     });
   }
   const pi = agents.find((agent) => agent.id === 'pi');
-  if (pi?.state === 'supported' && ['legacy-marker', 'unowned', 'unreadable'].includes(piBridge.status)) {
+  if (pi?.state === 'supported' && ['unowned', 'unreadable'].includes(piBridge.status)) {
     issues.push({
       code: `pi-bridge-${piBridge.status}`,
       summary: 'The Pi bridge target cannot be replaced safely during first-time setup.',
-      remediation: `Run \`${PRODUCT_IDENTITY.primaryBinary} repair\` for marker-confirmed migration or preserve the unowned extension.`,
+      remediation: `Move or back up ${piBridge.path}, then rerun setup; setup replaces only an exact known legacy bridge after confirmation.`,
+      localized: {
+        'zh-Hans': {
+          summary: '现有 Pi bridge 不是可证明属于 cosyncing 的已知旧版，安装不会覆盖。',
+          remediation: `请先移动或备份 ${piBridge.path}，再重新运行安装。只有内容完全匹配已知旧版且得到确认时，安装才会替换。`,
+        },
+      },
     });
   }
   if (!installState.committed && installState.reason !== 'missing') {
@@ -658,8 +745,6 @@ export async function inspectSetupEnvironment(options: {
   // by the packaged binary; contributor source runs retain foreground setup for local development.
   const systemdAvailable = options.buildInfo.packaged
     && (systemdCheck?.status === 'pass' || systemdCheck?.detailCode === 'systemd-user-degraded');
-  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
-    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
   const systemdProvider = systemdAvailable
     ? (options.systemdProviderFactory ?? createDurableServiceProvider)({
         context: options.context,
@@ -700,6 +785,7 @@ export async function inspectSetupEnvironment(options: {
     setupState,
     piAgentDir,
     piBridge,
+    durableStatePermissionRepairs: durableAssessment.permissionRepairs,
     agentSkills,
     opencodeShim,
     portStatus: currentPort,
@@ -1000,11 +1086,31 @@ export function buildSetupPlan(options: {
     actions.push(planned({ kind: 'setup-state', service: options.choices.service },
       { id: 'setup-state.write', title: 'Record setup choices', reversible: true }));
   }
+  const durableStatePermissionRepairs = options.inspection.durableStatePermissionRepairs ?? [];
+  if (durableStatePermissionRepairs.length > 0) {
+    actions.push(planned({
+      kind: 'durable-state-permissions',
+      paths: durableStatePermissionRepairs.map((repair) => repair.path),
+    }, {
+      id: 'durable-state.permissions',
+      title: 'Tighten legacy durable-state permissions',
+      reversible: true,
+    }));
+  }
   const installPiBridge = options.inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
-    && options.inspection.piBridge.status === 'missing';
+    && (options.inspection.piBridge.status === 'missing'
+      || (options.inspection.piBridge.status === 'legacy-marker' && options.choices.replaceLegacyPiBridge === true));
   if (installPiBridge) {
-    actions.push(planned({ kind: 'pi-bridge', path: options.inspection.piBridge.path },
-      { id: 'pi-bridge.install', title: 'Install packaged Pi bridge', reversible: true }));
+    const replacingLegacy = options.inspection.piBridge.status === 'legacy-marker';
+    actions.push(planned({
+      kind: 'pi-bridge',
+      path: options.inspection.piBridge.path,
+      ...(replacingLegacy ? { replaceLegacy: true } : {}),
+    }, {
+      id: 'pi-bridge.install',
+      title: replacingLegacy ? 'Replace the known legacy Pi bridge' : 'Install packaged Pi bridge',
+      reversible: true,
+    }));
   }
   const blockingIssues = [...options.inspection.blockingIssues];
   // Bootstrap copy. Planned whenever the home copy is not byte-identical to the running packaged executable,
@@ -1043,17 +1149,36 @@ export function buildSetupPlan(options: {
   }));
   // A receipt-proved owned-stale copy is a safe in-place upgrade, not a blocking drift.
   const unsafeSkill = skillReceipts.find(({ target, ownedStale }) =>
-    !['missing', 'owned'].includes(target.status) && !ownedStale);
+    !['missing', 'owned'].includes(target.status)
+      && !ownedStale
+      && !(target.status === 'known-legacy' && options.choices.upgradeLegacyAgentSkill === true));
   if (options.choices.installAgentSkill) {
     if (unsafeSkill) {
+      const knownLegacy = unsafeSkill.target.status === 'known-legacy';
+      const backupPath = `${unsafeSkill.target.path}.backup`;
       blockingIssues.push({
         code: `agent-skill-${unsafeSkill.target.id}-${unsafeSkill.target.status}`,
-        summary: `The ${unsafeSkill.target.id} cosyncing skill target is modified or unsafe and will be preserved.`,
-        remediation: 'Move or reconcile that user-managed skill explicitly, then rerun setup.',
+        summary: knownLegacy
+          ? `The ${unsafeSkill.target.id} target is the known preceding cosyncing skill and needs explicit upgrade confirmation.`
+          : `The ${unsafeSkill.target.id} cosyncing skill target is modified or unsafe and will be preserved.`,
+        remediation: knownLegacy
+          ? `Rerun setup and confirm the older skill upgrade, or back it up with: mv -- '${unsafeSkill.target.path}' '${backupPath}'`
+          : `Move or reconcile ${unsafeSkill.target.path} explicitly, then rerun setup; unknown content is never overwritten.`,
+        localized: {
+          'zh-Hans': knownLegacy
+            ? {
+                summary: `${unsafeSkill.target.id} 目标是已知的上一版 cosyncing skill，升级前需要单独确认。`,
+                remediation: `请重新运行安装并确认升级；或先备份：mv -- '${unsafeSkill.target.path}' '${backupPath}'`,
+              }
+            : {
+                summary: `${unsafeSkill.target.id} 目标已修改或不安全，安装会原样保留。`,
+                remediation: `请先明确移动或整理 ${unsafeSkill.target.path}，再重新运行安装；未知内容永远不会被覆盖。`,
+              },
+        },
       });
     } else if (skillReceipts.some(({ target, matches, ownedStale }) =>
-        target.status === 'missing' || ownedStale || !matches)) {
-      const upgrading = skillReceipts.some(({ ownedStale }) => ownedStale);
+        target.status === 'missing' || target.status === 'known-legacy' || ownedStale || !matches)) {
+      const upgrading = skillReceipts.some(({ target, ownedStale }) => ownedStale || target.status === 'known-legacy');
       actions.push(planned({ kind: upgrading ? 'agent-skill-refresh' : 'agent-skill-install' }, {
         id: 'agent-skill.reconcile',
         title: upgrading ? 'Refresh the packaged cosyncing skill' : 'Install the cosyncing skill',
@@ -1346,8 +1471,11 @@ function actionInputs(options: {
     setupState: options.plan.desiredSetupState,
     piAgentDir: options.inspection.piAgentDir,
     installPiBridge: options.plan.installPiBridge,
+    replaceLegacyPiBridge: options.plan.choices.replaceLegacyPiBridge,
+    durableStatePermissionRepairs: options.inspection.durableStatePermissionRepairs ?? [],
     agentSkillTargets: options.inspection.agentSkills,
     installAgentSkill: options.plan.choices.installAgentSkill,
+    upgradeLegacyAgentSkill: options.plan.choices.upgradeLegacyAgentSkill,
     removeAgentSkillResourceIds,
     opencodeShimRcTargets: options.inspection.opencodeShim.rc.map(({ id, resourceId, path }) => ({ id, resourceId, path })),
     installOpencodeShim: options.plan.choices.installOpencodeShim,
@@ -1394,6 +1522,14 @@ async function verifySetup(options: {
   const skillStatus = inspectAgentSkills(options.context);
   if (options.plan.choices.installAgentSkill
       && !skillStatus.every((target) => target.status === 'owned')) {
+    return false;
+  }
+  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
+    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  if (inspectDurableSchemas(durableStateLayout({
+    stateRoot: options.inspection.stateHome,
+    cacheRoot,
+  })).some((store) => store.status !== 'ok' && store.status !== 'missing')) {
     return false;
   }
   const port = await options.context.probeTcp('127.0.0.1', options.plan.targetConfig.broker.port);
@@ -1685,6 +1821,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         setupState: readSetupState(home),
         piAgentDir: context.env.PI_CODING_AGENT_DIR?.trim() || join(context.homeDir, '.pi', 'agent'),
         installPiBridge: true,
+        durableStatePermissionRepairs: [],
         agentSkillTargets: agentSkillTargets(context),
         installAgentSkill: true,
         removeAgentSkillResourceIds: [],
@@ -1797,20 +1934,29 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     language,
   };
   const existingPlan = buildSetupPlan({ inspection, choices: existingChoices, now: dependencies.now });
-  if (inspection.installState.committed && existingPlan.blockingIssues.length > 0) {
-    await dependencies.presenter.showBlockers(existingPlan.blockingIssues);
+  const legacyPiMigrationPending = inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
+    && inspection.piBridge.status === 'legacy-marker';
+  const legacyAgentSkillMigrationPending = existingChoices.installAgentSkill
+    && inspection.agentSkills.some((target) => target.status === 'known-legacy');
+  const existingBlockingIssues = existingPlan.blockingIssues.filter((issue) =>
+    !(legacyAgentSkillMigrationPending && issue.code.endsWith('-known-legacy')));
+  if (inspection.installState.committed && existingBlockingIssues.length > 0) {
+    await dependencies.presenter.showBlockers(existingBlockingIssues);
     const blocked = result({
       status: 'blocked',
       exitCode: 1,
       summaryCode: 'blocked-committed-dependency',
       inspection,
       recovered,
-      issues: existingPlan.blockingIssues,
+      issues: existingBlockingIssues,
     });
     await dependencies.presenter.failed(blocked);
     return blocked;
   }
-  if (inspection.installState.committed && existingPlan.noOp) {
+  if (inspection.installState.committed
+      && existingPlan.noOp
+      && !legacyPiMigrationPending
+      && !legacyAgentSkillMigrationPending) {
     // A committed rerun is a no-op for the transaction, but not for Tokdash. Provisioning is post-commit and
     // best-effort, so a first run that failed — no pipx on the host, say — leaves consent recorded and
     // nothing provisioned, and exiting here meant the operator's retry, pipx now installed, never reached
@@ -1863,9 +2009,49 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     return declined;
   }
 
+  let replaceLegacyPiBridge = false;
+  if (legacyPiMigrationPending) {
+    const replaceLegacy = await (dependencies.presenter.confirmLegacyPiBridge?.(inspection) ?? false);
+    if (replaceLegacy === SETUP_PROMPT_CANCELLED) {
+      return cancelled(dependencies, inspection, recovered, 'legacy Pi bridge migration');
+    }
+    if (!replaceLegacy) {
+      const declined = result({
+        status: 'declined',
+        exitCode: 1,
+        summaryCode: 'declined-plan',
+        inspection,
+        recovered,
+      });
+      await dependencies.presenter.failed(declined);
+      return declined;
+    }
+    replaceLegacyPiBridge = true;
+  }
+
   const installAgentSkill = await dependencies.presenter.confirmAgentSkill(inspection);
   if (installAgentSkill === SETUP_PROMPT_CANCELLED) {
     return cancelled(dependencies, inspection, recovered, 'agent skill choice');
+  }
+
+  let upgradeLegacyAgentSkill = false;
+  if (installAgentSkill && inspection.agentSkills.some((target) => target.status === 'known-legacy')) {
+    const upgradeLegacy = await (dependencies.presenter.confirmLegacyAgentSkill?.(inspection) ?? false);
+    if (upgradeLegacy === SETUP_PROMPT_CANCELLED) {
+      return cancelled(dependencies, inspection, recovered, 'legacy agent skill migration');
+    }
+    if (!upgradeLegacy) {
+      const declined = result({
+        status: 'declined',
+        exitCode: 1,
+        summaryCode: 'declined-plan',
+        inspection,
+        recovered,
+      });
+      await dependencies.presenter.failed(declined);
+      return declined;
+    }
+    upgradeLegacyAgentSkill = true;
   }
 
   const installOpencodeShim = await dependencies.presenter.confirmOpencodeShim(inspection);
@@ -1892,6 +2078,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     quotaWarnings: quota,
     installAgentSkill,
     installOpencodeShim,
+    replaceLegacyPiBridge,
+    upgradeLegacyAgentSkill,
   };
   const plan = buildSetupPlan({ inspection, choices, now: dependencies.now });
   if (plan.blockingIssues.length > 0) {
@@ -2023,11 +2211,23 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           if (!serviceReady.ok) return serviceReady;
           if (!lockedPlan.choices.tailscaleServe) return true;
           const advertisedUrl = lockedPlan.targetConfig.broker.advertisedUrl;
+          // Read this node's own Tailscale addresses so verification survives a host whose MagicDNS
+          // resolution is broken. They are only ever consulted after the advertised NAME fails to
+          // connect; a name that answers wrongly is a verification failure, not a lookup problem.
+          const injected = dependencies.advertisedEndpointVerification;
+          const fallbackAddresses = injected?.fallbackAddresses
+            ?? (inspection.tailscale.executablePath
+              ? await resolveTailscaleAddresses({
+                  context,
+                  executablePath: inspection.tailscale.executablePath,
+                })
+              : []);
           const advertisedReachable = !!advertisedUrl && await verifyAdvertisedBrokerEndpoint({
-            ...(dependencies.advertisedEndpointVerification ?? {}),
+            ...(injected ?? {}),
             context,
             advertisedUrl,
             machineLabel: lockedPlan.targetConfig.broker.machineLabel,
+            fallbackAddresses,
           });
           return advertisedReachable ? true : {
             ok: false,

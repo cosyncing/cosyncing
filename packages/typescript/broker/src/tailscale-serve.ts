@@ -1,4 +1,6 @@
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import { request as httpsRequest } from 'node:https';
+import { isIP } from 'node:net';
+import type { SetupDiagnosisContext, SetupHttpProbe } from '@cosyncing/adapter-api';
 import type { InstalledResourceRecord } from './install-state.ts';
 import { PRODUCT_IDENTITY } from './product.ts';
 import {
@@ -131,6 +133,64 @@ function dnsNameFromStatus(value: unknown): string | undefined {
   return cleanDnsName(field(self, 'DNSName'))
     ?? cleanDnsName(field(root, 'DNSName'))
     ?? cleanDnsName(field(record(field(root, 'CurrentTailnet')), 'MagicDNSSuffix'));
+}
+
+/**
+ * This machine's own Tailscale addresses, in the order the daemon reports them (IPv4 first in practice).
+ *
+ * These are read from `Self` ONLY. A peer's address is never a substitute for this node: the advertised
+ * endpoint must be proved to be THIS broker, and the identity check downstream would reject a peer anyway —
+ * but connecting to one at all is a probe of somebody else's machine, so it never happens here.
+ */
+export function tailscaleAddressesFromStatusJson(value: unknown): string[] {
+  const self = record(field(record(value), 'Self'));
+  const raw = field(self, 'TailscaleIPs');
+  if (!Array.isArray(raw)) return [];
+  const addresses: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    // isIP rejects anything that is not a bare literal — no ports, no zone ids, no hostnames. A value that
+    // is not already an address literal must never reach the connect path, because the whole point of the
+    // fallback is to bypass name resolution.
+    if (isIP(trimmed) === 0 || addresses.includes(trimmed)) continue;
+    addresses.push(trimmed);
+  }
+  return addresses;
+}
+
+/** Read this node's validated Tailscale addresses for the DNS-failure fallback. Never throws: no address
+ *  simply means the fallback is unavailable and hostname verification stands alone. */
+export async function resolveTailscaleAddresses(options: {
+  context: SetupDiagnosisContext;
+  executablePath: string;
+}): Promise<string[]> {
+  const status = await options.context.runReadOnly(options.executablePath, ['status', '--json']);
+  if (status.status !== 'ok') return [];
+  try {
+    return tailscaleAddressesFromStatusJson(JSON.parse(status.stdout));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * This node's fallback addresses for any surface that must reach the advertised endpoint, resolved from
+ * the host's own Tailscale CLI.
+ *
+ * Returns nothing when Tailscale is absent, and deliberately nothing for the Windows-host-only WSL
+ * topology: there `Self` describes the WINDOWS machine, so its addresses belong to a different host than
+ * the broker. The identity check would reject such an answer anyway, but connecting at all would be
+ * probing somebody else's machine, which this must never do.
+ */
+export async function resolveTailscaleFallbackAddresses(
+  context: SetupDiagnosisContext,
+): Promise<string[]> {
+  const wsl = wslContext(context);
+  const executablePath = resolveTailscaleExecutable(context, wsl);
+  if (!executablePath) return [];
+  if (wsl && (/\.exe$/i.test(executablePath) || /^\/mnt\/[a-z]\//i.test(executablePath))) return [];
+  return resolveTailscaleAddresses({ context, executablePath });
 }
 
 function matchingHostEntry(web: JsonRecord | undefined, dnsName: string): JsonRecord | undefined {
@@ -521,6 +581,191 @@ async function waitForAdvertisedEndpointPoll(
   }
 }
 
+/** Response body ceiling for the direct-address probe, matching the shared diagnosis fetch. */
+const ADVERTISED_ENDPOINT_BODY_LIMIT = 256 * 1024;
+
+/**
+ * Total wall-clock ceiling for ONE advertised-endpoint probe — the named request plus every address
+ * attempt together. Single-shot callers (`status`, `doctor`, `pair`) supply no deadline of their own, so
+ * without this a malformed or unexpectedly long `TailscaleIPs` list would multiply the per-request timeout
+ * by the address count and stall an interactive command.
+ */
+export const ADVERTISED_ENDPOINT_TOTAL_TIMEOUT_MS = 9_000;
+
+/**
+ * At most one IPv4 and one IPv6 candidate.
+ *
+ * A healthy node reports exactly that pair. Anything beyond it is either a topology this fallback has no
+ * business guessing at or a malformed status payload, and in both cases walking the whole list only buys
+ * latency: the addresses all belong to the same machine, so if the first of a family cannot be reached the
+ * rest almost certainly cannot either.
+ */
+export function limitFallbackAddresses(addresses: readonly string[]): string[] {
+  const chosen: string[] = [];
+  for (const family of [4, 6]) {
+    const match = addresses.find((address) => isIP(address) === family);
+    if (match) chosen.push(match);
+  }
+  return chosen;
+}
+
+/** The advertised endpoint answered, and answered as THIS broker. */
+export function advertisedProbeIsBroker(probe: SetupHttpProbe, machineLabel: string): boolean {
+  const body = record(probe.json);
+  return probe.status === 'ok'
+    && body?.ok === true
+    && body.product === PRODUCT_IDENTITY.productName
+    && body.machine === machineLabel;
+}
+
+export interface AdvertisedEndpointDirectProbeOptions {
+  /** Tailscale address literal to CONNECT to — never resolved, never a hostname. */
+  address: string;
+  port: number;
+  /** Advertised MagicDNS hostname: the TLS SNI value, the certificate validation target, and the HTTP Host. */
+  hostname: string;
+  path: string;
+  headers?: Readonly<Record<string, string>>;
+  timeoutMs: number;
+}
+
+export type AdvertisedEndpointDirectProbe =
+  (options: AdvertisedEndpointDirectProbeOptions) => Promise<SetupHttpProbe>;
+
+/**
+ * HTTPS probe aimed at an address literal while every identity input stays the advertised hostname.
+ *
+ * `servername` drives SNI *and* is what Node validates the presented certificate against, so a Serve
+ * certificate issued for the MagicDNS name still verifies while the connection skips resolution entirely.
+ * `rejectUnauthorized` is never lowered here and has no option to be: this path exists for a name-resolution
+ * failure, not for a broken or mismatched certificate, and a bad chain must fail exactly as it would have.
+ */
+const defaultAdvertisedEndpointDirectProbe: AdvertisedEndpointDirectProbe = (options) =>
+  new Promise<SetupHttpProbe>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let request: ReturnType<typeof httpsRequest> | undefined;
+    const finish = (probe: SetupHttpProbe): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      // Destroying the request tears the socket down on every exit path, including the ones where a
+      // response was already parsed, so a verified endpoint leaves no connection behind either.
+      try { request?.destroy(); } catch { /* already closed */ }
+      resolve(probe);
+    };
+    try {
+      request = httpsRequest({
+        host: options.address,
+        port: options.port,
+        path: options.path,
+        method: 'GET',
+        servername: options.hostname,
+        rejectUnauthorized: true,
+        // Host is set LAST so a caller-supplied header set can never redirect the request's identity
+        // away from the advertised hostname the certificate was just validated against.
+        headers: { ...options.headers, Host: options.hostname },
+        family: isIP(options.address) === 6 ? 6 : 4,
+      }, (response) => {
+        const statusCode = response.statusCode ?? 0;
+        let body = '';
+        let bytes = 0;
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => {
+          bytes += Buffer.byteLength(chunk, 'utf8');
+          if (bytes > ADVERTISED_ENDPOINT_BODY_LIMIT) {
+            finish({ status: 'invalid-response', statusCode });
+            return;
+          }
+          body += chunk;
+        });
+        response.on('error', () => finish({ status: 'unreachable' }));
+        response.on('end', () => {
+          let json: unknown;
+          try { json = body ? JSON.parse(body) : undefined; } catch {
+            finish({ status: 'invalid-response', statusCode });
+            return;
+          }
+          // A redirect is not followed: the shared fetch treats one as an error, and this path holds the
+          // same line so a Serve route pointing somewhere else can never be read as this broker.
+          finish({
+            status: statusCode >= 200 && statusCode < 300 ? 'ok' : 'http-error',
+            statusCode,
+            ...(json !== undefined ? { json } : {}),
+          });
+        });
+      });
+      request.on('error', () => finish({ status: 'unreachable' }));
+      timer = setTimeout(() => finish({ status: 'unreachable' }), Math.max(100, options.timeoutMs));
+      timer.unref?.();
+      request.end();
+    } catch {
+      finish({ status: 'unreachable' });
+    }
+  });
+
+export interface AdvertisedEndpointProbeOptions {
+  context: SetupDiagnosisContext;
+  /** Base URL whose HOSTNAME is the identity throughout — the address literals only carry the packets. */
+  advertisedUrl: string;
+  path?: string;
+  headers?: Readonly<Record<string, string>>;
+  fallbackAddresses?: readonly string[];
+  directProbe?: AdvertisedEndpointDirectProbe;
+  requestTimeoutMs?: number;
+  /** Ceiling for the named request plus every address attempt. Defaults to
+   *  {@link ADVERTISED_ENDPOINT_TOTAL_TIMEOUT_MS}; ignored when `deadline` is supplied. */
+  totalTimeoutMs?: number;
+  /** Optional hard stop shared with a polling caller, so walking several addresses cannot overrun it. */
+  deadline?: { now: () => number; at: number };
+}
+
+/**
+ * One advertised-endpoint probe, by name first and by this node's own addresses only if the name could not
+ * be reached. This is the single DNS-independent primitive: setup polls it to a deadline, while status,
+ * doctor, and pairing each take one shot, so a host with broken MagicDNS resolution reports the same truth
+ * everywhere instead of only surviving setup.
+ *
+ * The name's answer always wins when there is one. Any completed HTTP exchange — a status code, an
+ * unparsable body, or a valid body with the wrong identity — is returned as-is and no address is tried,
+ * because that is the endpoint answering, and re-asking an address literal would only be shopping for a
+ * better reply. Address probes stop at the first one that answers for the same reason.
+ */
+export async function probeAdvertisedEndpointOnce(
+  options: AdvertisedEndpointProbeOptions,
+): Promise<SetupHttpProbe> {
+  const target = new URL(options.path ?? '/api/health', options.advertisedUrl);
+  const headers = options.headers ?? {};
+  const ceiling = Math.max(1, options.requestTimeoutMs ?? ADVERTISED_ENDPOINT_REQUEST_TIMEOUT_MS);
+  // A total deadline ALWAYS applies. A polling caller shares its own so the poll's bound governs
+  // everything; a single-shot caller gets one synthesised here, because otherwise each address would
+  // cost a full request timeout and an interactive command could hang for the length of the list.
+  const deadline = options.deadline ?? (() => {
+    const at = Date.now() + Math.max(1, options.totalTimeoutMs ?? ADVERTISED_ENDPOINT_TOTAL_TIMEOUT_MS);
+    return { now: () => Date.now(), at };
+  })();
+  // Each probe is clamped to whatever is left of that deadline, so a list of addresses costs at most the
+  // remaining budget rather than one full request timeout apiece.
+  const budget = (): number => Math.min(ceiling, deadline.at - deadline.now());
+  const named = await options.context.fetchJson(target.toString(), headers, Math.max(1, budget()));
+  if (named.status !== 'unreachable' || target.protocol !== 'https:') return named;
+  const directProbe = options.directProbe ?? defaultAdvertisedEndpointDirectProbe;
+  for (const address of limitFallbackAddresses(options.fallbackAddresses ?? [])) {
+    const remaining = budget();
+    if (remaining <= 0) break;
+    const direct = await directProbe({
+      address,
+      port: target.port ? Number(target.port) : 443,
+      hostname: target.hostname,
+      path: `${target.pathname}${target.search}`,
+      headers,
+      timeoutMs: remaining,
+    });
+    if (direct.status !== 'unreachable') return direct;
+  }
+  return named;
+}
+
 export interface AdvertisedBrokerEndpointVerificationOptions {
   context: SetupDiagnosisContext;
   advertisedUrl: string;
@@ -529,6 +774,9 @@ export interface AdvertisedBrokerEndpointVerificationOptions {
   intervalMs?: number;
   requestTimeoutMs?: number;
   clock?: AdvertisedEndpointPollingClock;
+  /** This node's Tailscale addresses, used only when the advertised NAME cannot be reached. */
+  fallbackAddresses?: readonly string[];
+  directProbe?: AdvertisedEndpointDirectProbe;
 }
 
 export async function verifyAdvertisedBrokerEndpoint(
@@ -539,23 +787,30 @@ export async function verifyAdvertisedBrokerEndpoint(
   const intervalMs = Math.max(1, options.intervalMs ?? ADVERTISED_ENDPOINT_VERIFY_INTERVAL_MS);
   const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? ADVERTISED_ENDPOINT_REQUEST_TIMEOUT_MS);
   const deadline = clock.now() + timeoutMs;
-  const healthUrl = new URL('/api/health', options.advertisedUrl).toString();
+  /**
+   * Set the moment ANY probe completes an HTTP exchange — a status code, an unparsable body, or a valid
+   * answer carrying the wrong product/machine. All of those prove the endpoint was reached and answered
+   * wrongly, which is a real verification failure and never a resolution problem. Retrying it against an
+   * address literal would be asking a second question to get a nicer answer, so the fallback is retired
+   * for the rest of this verification — the one piece of state a single probe cannot carry.
+   */
+  let answeredWrongly = false;
+
+  const isThisBroker = (probe: SetupHttpProbe): boolean =>
+    advertisedProbeIsBroker(probe, options.machineLabel);
 
   while (clock.now() < deadline) {
     const remainingBeforeProbe = deadline - clock.now();
-    const health = await options.context.fetchJson(
-      healthUrl,
-      {},
-      Math.min(requestTimeoutMs, remainingBeforeProbe),
-    );
-    const body = record(health.json);
-    if (clock.now() < deadline
-        && health.status === 'ok'
-        && body?.ok === true
-        && body.product === PRODUCT_IDENTITY.productName
-        && body.machine === options.machineLabel) {
-      return true;
-    }
+    const probe = await probeAdvertisedEndpointOnce({
+      context: options.context,
+      advertisedUrl: options.advertisedUrl,
+      requestTimeoutMs: Math.min(requestTimeoutMs, remainingBeforeProbe),
+      deadline: { now: () => clock.now(), at: deadline },
+      ...(options.directProbe ? { directProbe: options.directProbe } : {}),
+      fallbackAddresses: answeredWrongly ? [] : (options.fallbackAddresses ?? []),
+    });
+    if (clock.now() < deadline && isThisBroker(probe)) return true;
+    if (probe.status !== 'unreachable') answeredWrongly = true;
 
     const remaining = deadline - clock.now();
     if (remaining <= 0) return false;

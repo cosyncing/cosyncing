@@ -82,7 +82,11 @@ function bridgeCheck(context: SetupDiagnosisContext, inspection: PiBridgeDiagnos
         detailCode: 'bridge-legacy-marker',
         summary: 'A legacy cosyncing Pi bridge is present and requires confirmation before replacement.',
         evidence: { path, requiresConfirmation: true },
-        remediation: { kind: 'command', message: 'Review and reconcile the legacy bridge.', command: 'cosyncing repair' },
+        remediation: {
+          kind: 'command',
+          message: 'Rerun setup and confirm replacement of the exact known legacy bridge.',
+          command: 'cosyncing setup',
+        },
       };
     case 'unowned':
       return {

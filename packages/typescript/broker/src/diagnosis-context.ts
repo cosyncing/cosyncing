@@ -19,6 +19,28 @@ import type {
 
 const COMMAND_OUTPUT_LIMIT = 64 * 1024;
 const HTTP_BODY_LIMIT = 256 * 1024;
+/**
+ * The most this context will ever hold in memory for one response, whatever a caller asks for.
+ *
+ * `maxBytes` is a caller's *request* for a wider ceiling, not a grant of one. Without this, a
+ * caller passing `Infinity` — or a plain arithmetic slip producing `NaN` — would remove the
+ * capability boundary altogether and let a hostile or broken endpoint grow the process until it
+ * died. The largest legitimate reader is the session roster, and this is set to exactly what that
+ * reader asks for, so raising it is a deliberate act rather than a side effect of a caller's typo.
+ */
+const HTTP_BODY_HARD_LIMIT = 16 * 1024 * 1024;
+
+/**
+ * Resolve the byte ceiling actually enforced for one response.
+ *
+ * Anything that is not a finite, positive byte count — `Infinity`, `NaN`, zero, a negative — is not
+ * a *smaller* request but a nonsense one, so it collapses to the probe default rather than to the
+ * maximum. A caller that has lost track of its own arithmetic gets the conservative ceiling.
+ */
+function bodyCeiling(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested) || requested < 1) return HTTP_BODY_LIMIT;
+  return Math.min(Math.floor(requested), HTTP_BODY_HARD_LIMIT);
+}
 
 function boundedAppend(current: string, chunk: Buffer | string, limit: number): string {
   if (current.length >= limit) return current;
@@ -158,7 +180,10 @@ async function runReadOnly(
   });
 }
 
-async function boundedResponseText(response: Response): Promise<string | undefined> {
+async function boundedResponseText(
+  response: Response,
+  maxBytes: number,
+): Promise<string | undefined> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -169,7 +194,7 @@ async function boundedResponseText(response: Response): Promise<string | undefin
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > HTTP_BODY_LIMIT) {
+      if (bytes > maxBytes) {
         await reader.cancel().catch(() => undefined);
         return undefined;
       }
@@ -186,10 +211,12 @@ async function fetchJson(
   url: string,
   headers: Readonly<Record<string, string>> = {},
   timeoutMs = 3_000,
+  maxBytes?: number,
 ): Promise<SetupHttpProbe> {
   let parsed: URL;
   try { parsed = new URL(url); } catch { return { status: 'unreachable' }; }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { status: 'unreachable' };
+  const ceiling = bodyCeiling(maxBytes);
   try {
     const response = await fetch(parsed, {
       method: 'GET',
@@ -197,9 +224,11 @@ async function fetchJson(
       redirect: 'error',
       signal: AbortSignal.timeout(Math.max(100, timeoutMs)),
     });
+    // A declared length only ever ends the read early. A missing, malformed, or lying header
+    // decides nothing — the streaming ceiling below is what actually bounds the read.
     const declared = Number(response.headers.get('content-length') ?? 0);
-    if (declared > HTTP_BODY_LIMIT) return { status: 'invalid-response', statusCode: response.status };
-    const body = await boundedResponseText(response);
+    if (declared > ceiling) return { status: 'invalid-response', statusCode: response.status };
+    const body = await boundedResponseText(response, ceiling);
     if (body === undefined) return { status: 'invalid-response', statusCode: response.status };
     let json: unknown;
     try { json = body ? JSON.parse(body) : undefined; } catch {

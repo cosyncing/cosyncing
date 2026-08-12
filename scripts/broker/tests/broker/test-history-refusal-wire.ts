@@ -20,11 +20,13 @@ import {
 import {
   appendFileSync,
   closeSync,
+  ftruncateSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -71,6 +73,10 @@ type RunningBroker = {
 async function startBroker(
   home: string,
   codexHome: string,
+  options: {
+    historyReadMetrics?: (line: string) => void;
+    captureHoldFile?: string;
+  } = {},
 ): Promise<RunningBroker> {
   const port = await freePort();
   const child = Bun.spawn(
@@ -84,12 +90,41 @@ async function startBroker(
           COSYNCING_HOME: home,
           COSYNCING_TOKEN: '',
           COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+          ...(options.historyReadMetrics
+            ? { COSYNCING_TEST_HISTORY_READ_METRICS: '1' }
+            : {}),
+          ...(options.captureHoldFile
+            ? { COSYNCING_TEST_CODEX_CAPTURE_HOLD_FILE: options.captureHoldFile }
+            : {}),
         },
       }),
       stdout: 'ignore',
-      stderr: 'ignore',
+      stderr: options.historyReadMetrics ? 'pipe' : 'ignore',
     },
   );
+  if (options.historyReadMetrics) {
+    const onMetric = options.historyReadMetrics;
+    void (async () => {
+      const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let buffered = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+          let newline: number;
+          while ((newline = buffered.indexOf('\n')) !== -1) {
+            const line = buffered.slice(0, newline);
+            buffered = buffered.slice(newline + 1);
+            if (line.includes('[h1-history-read]')) onMetric(line);
+          }
+        }
+      } catch {
+        /* broker exited */
+      }
+    })();
+  }
   const base = `http://127.0.0.1:${port}`;
   // Readiness is not one of this suite's assertions, so it does not get this
   // suite's WAIT_MS: a broker booting beside other suites is slow, not broken.
@@ -145,6 +180,42 @@ async function openClient(
     'Codex initial history',
   );
   return { ws, frames, attach };
+}
+
+/** Open the stream but return as soon as the SESSION frame arrives — before the history
+ *  capture completes. The cold-attach race test needs a subscribed socket whose first
+ *  capture is still in flight; waiting for the history frame (as openClient does) would
+ *  put every later action after the race window it exists to occupy. */
+async function openClientDeferred(
+  wsBase: string,
+  id: string,
+): Promise<{ ws: WebSocket; frames: any[] }> {
+  const frames: any[] = [];
+  const params = new URLSearchParams({
+    artifactMode: 'reference',
+    contractRevision: '9',
+    minimumBrokerRevision: '2',
+    initialHistory: `${PAGE_MESSAGES}`,
+  });
+  const ws = new WebSocket(
+    `${wsBase}/api/sessions/codex/${encodeURIComponent(id)}/stream?${params}`,
+  );
+  ws.onmessage = (event) => {
+    try {
+      frames.push(JSON.parse(String(event.data)));
+    } catch {
+      // The timeout below reports a malformed/missing production frame.
+    }
+  };
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error('WebSocket failed to open'));
+  });
+  await waitFor(
+    () => frames.find((frame) => frame.kind === 'session'),
+    'Codex session frame (pre-history)',
+  );
+  return { ws, frames };
 }
 
 async function requestPage(
@@ -462,6 +533,254 @@ try {
     'a skipped-record window still cannot offer an older cursor',
   );
 
+  // -------------------- H1d live streaming over an over-index source (wire)
+  // The production reproduction: a rollout beyond the whole-source index
+  // ceiling, observed mid-turn. Before H1d every attach re-streamed the whole
+  // source (O(source) serialized in front of the history frame — the cost that
+  // made real clients abandon and retry, starving live delivery), and the
+  // observe tail keyed live rows on a synthetic byte base that no history read
+  // agrees with, so a manual refresh rendered the same rows under second
+  // identities. Both halves are pinned here through the real broker and a real
+  // WebSocket.
+  for (const ws of clients.splice(0)) ws.close();
+  broker.child.kill();
+  await broker.child.exited.catch(() => undefined);
+  const metricLines: string[] = [];
+  const bigDay = join(codexHome, 'sessions', '2026', '08', '01');
+  mkdirSync(bigDay, { recursive: true });
+  const bigRollout = join(
+    bigDay,
+    'rollout-2026-08-01T00-00-00-00000000-0000-4000-8000-0000000001d1.jsonl',
+  );
+  {
+    const bigFd = openSync(bigRollout, 'w');
+    try {
+      // Sparse: the hole is one unreadable record the bounded window skips; the
+      // rows plus an OPEN turn (no terminal marker — the mid-turn production
+      // shape) live beyond the indexing ceiling.
+      ftruncateSync(bigFd, 256 * 1024 * 1024 + 1);
+      const seedRows = Array.from({ length: 30 }, (_unused, index) => JSON.stringify({
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: `h1d live row ${index}` },
+      }));
+      seedRows.push(JSON.stringify({
+        timestamp: '2026-08-01T00:59:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'h1d-open-turn' },
+      }));
+      writeSync(bigFd, `\n${seedRows.join('\n')}\n`, 256 * 1024 * 1024 + 1);
+    } finally {
+      closeSync(bigFd);
+    }
+  }
+  broker = await startBroker(home, codexHome, {
+    historyReadMetrics: (line) => metricLines.push(line),
+  });
+  const bigId = Buffer.from(bigRollout, 'utf8').toString('base64url');
+  const liveClient = await openClient(broker.wsBase, bigId);
+  clients.push(liveClient.ws);
+  assertTruthfulAttach(liveClient.attach, 'oversized live attach');
+  assert.equal(liveClient.attach.gap?.code, 'HISTORY_PAGE_RESOURCE_LIMIT');
+  assert(liveClient.attach.messages.length > 0);
+
+  appendFileSync(
+    bigRollout,
+    `${JSON.stringify({
+      timestamp: '2026-08-01T01:00:00.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call',
+        name: 'shell',
+        call_id: 'h1d-live-call',
+        input: '{"command":"echo hi"}',
+      },
+    })}\n${JSON.stringify({
+      timestamp: '2026-08-01T01:00:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output',
+        call_id: 'h1d-live-call',
+        output: 'hi',
+      },
+    })}\n${JSON.stringify({
+      timestamp: '2026-08-01T01:00:02.000Z',
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'h1d live assistant text' },
+    })}\n`,
+  );
+  // Intermediate output must stream to the ATTACHED socket — no refresh, no
+  // reconnect, no turn boundary.
+  const liveAssistant = await waitFor(
+    () => liveClient.frames.find((frame) =>
+      frame.kind === 'message'
+      && frame.message?.type === 'model-output'
+      && String(frame.message?.text ?? '').includes('h1d live assistant text')),
+    'live assistant frame on an over-index session',
+  );
+  assert(
+    liveClient.frames.some((frame) =>
+      frame.kind === 'message' && frame.message?.type === 'tool-call'
+      && frame.message?.callId === 'h1d-live-call'),
+    'live tool call must stream on an over-index session',
+  );
+  assert(
+    liveClient.frames.some((frame) =>
+      frame.kind === 'message' && frame.message?.type === 'tool-result'
+      && frame.message?.callId === 'h1d-live-call'),
+    'live tool result must stream on an over-index session',
+  );
+
+  // A manual refresh (a fresh attach) must converge on the SAME identity for
+  // the rows it replays — one key per logical message across live and history,
+  // or every refresh doubles the transcript.
+  const refreshed = await openClient(broker.wsBase, bigId);
+  clients.push(refreshed.ws);
+  const refreshedAssistant = (refreshed.attach.messages as any[]).find((message) =>
+    message?.type === 'model-output'
+    && String(message?.text ?? '').includes('h1d live assistant text'));
+  assert(refreshedAssistant, 'the refreshed window must include the streamed assistant text');
+  assert.equal(
+    refreshedAssistant.key,
+    liveAssistant.message.key,
+    'live delivery and a later history read must agree on one identity per row',
+  );
+  assert.equal(
+    (refreshed.attach.messages as any[])
+      .filter((message) => message?.type === 'model-output'
+        && String(message?.text ?? '').includes('h1d live assistant text')).length,
+    1,
+    'the streamed row must appear exactly once after a refresh',
+  );
+  // The whole-source bounded scan is paid once; the refresh extends it by the
+  // appended bytes instead of re-streaming 256 MiB per attach.
+  const fullTailScans = metricLines.filter((line) =>
+    line.includes(' bounded-tail-fallback ')).length;
+  assert.equal(
+    fullTailScans,
+    1,
+    `exactly one whole-source bounded scan across attaches, got ${fullTailScans}:\n${metricLines.join('\n')}`,
+  );
+
+  // -------------------- H1e cold-attach race: the source grows DURING the first capture
+  // The broker subscribes the live tail before the history capture runs. On an
+  // over-ceiling source the tail starts on a synthetic byte base; before this
+  // fix, a line drained while the first capture was still scanning went out
+  // under that base, permanently blocked watermark adoption, and the same row
+  // then arrived AGAIN inside the history frame under its record-index key —
+  // two identities on the very first socket, and every later live row stayed
+  // synthetic. The capture hold file pins the capture open so the append lands
+  // deterministically inside the race window.
+  for (const ws of clients.splice(0)) ws.close();
+  broker.child.kill();
+  await broker.child.exited.catch(() => undefined);
+  const raceRollout = join(
+    bigDay,
+    'rollout-2026-08-01T00-00-00-00000000-0000-4000-8000-0000000001e1.jsonl',
+  );
+  {
+    const raceFd = openSync(raceRollout, 'w');
+    try {
+      ftruncateSync(raceFd, 256 * 1024 * 1024 + 1);
+      const seedRows = Array.from({ length: 10 }, (_unused, index) => JSON.stringify({
+        timestamp: '2026-08-01T00:00:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: `h1e seed row ${index}` },
+      }));
+      seedRows.push(JSON.stringify({
+        timestamp: '2026-08-01T00:59:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'task_started', turn_id: 'h1e-open-turn' },
+      }));
+      writeSync(raceFd, `\n${seedRows.join('\n')}\n`, 256 * 1024 * 1024 + 1);
+    } finally {
+      closeSync(raceFd);
+    }
+  }
+  const holdFile = join(root, 'h1e-capture-hold');
+  writeFileSync(holdFile, '1');
+  broker = await startBroker(home, codexHome, { captureHoldFile: holdFile });
+  const raceId = Buffer.from(raceRollout, 'utf8').toString('base64url');
+  const raceClient = await openClientDeferred(broker.wsBase, raceId);
+  clients.push(raceClient.ws);
+  // The session frame is sent after the tail subscribed and before the capture;
+  // the capture is now parked on the hold file. Land the append inside it, and
+  // give the (80ms-debounced) watcher time to fire while the capture is still
+  // provably open — pre-fix, this is the moment the synthetic-keyed row went out.
+  appendFileSync(
+    raceRollout,
+    `${JSON.stringify({
+      timestamp: '2026-08-01T01:00:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'h1e mid-capture row' },
+    })}\n`,
+  );
+  await Bun.sleep(400);
+  rmSync(holdFile);
+  const raceAttach = await waitFor(
+    () => raceClient.frames.find((frame) => frame.kind === 'history'),
+    'history frame after the capture hold released',
+  );
+  assertTruthfulAttach(raceAttach, 'cold-attach race attach');
+  // Let any (buggy) queued live copies flush behind the history frame before counting.
+  await Bun.sleep(300);
+  const midCaptureInHistory = (raceAttach.messages as any[]).filter((message) =>
+    message?.type === 'model-output'
+    && String(message?.text ?? '').includes('h1e mid-capture row'));
+  const midCaptureLive = raceClient.frames.filter((frame) =>
+    frame.kind === 'message'
+    && frame.message?.type === 'model-output'
+    && String(frame.message?.text ?? '').includes('h1e mid-capture row'));
+  assert.equal(
+    midCaptureInHistory.length + midCaptureLive.length,
+    1,
+    `a row appended during the first capture must reach the initial socket exactly once, `
+      + `got ${midCaptureInHistory.length} in history + ${midCaptureLive.length} live`,
+  );
+  const midCaptureKey = midCaptureInHistory[0]?.key ?? midCaptureLive[0]?.message?.key;
+  // Adoption must have survived the mid-capture append: the NEXT live row streams
+  // under a record-index key, not the synthetic byte base.
+  appendFileSync(
+    raceRollout,
+    `${JSON.stringify({
+      timestamp: '2026-08-01T01:00:05.000Z',
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'h1e post-adoption row' },
+    })}\n`,
+  );
+  const postAdoptionLive = await waitFor(
+    () => raceClient.frames.find((frame) =>
+      frame.kind === 'message'
+      && frame.message?.type === 'model-output'
+      && String(frame.message?.text ?? '').includes('h1e post-adoption row')),
+    'live frame after adoption on the raced connection',
+  );
+  const raceRefresh = await openClient(broker.wsBase, raceId);
+  clients.push(raceRefresh.ws);
+  const refreshRows = (raceRefresh.attach.messages as any[]).filter((message) =>
+    message?.type === 'model-output'
+    && String(message?.text ?? '').includes('h1e '));
+  for (const text of ['h1e mid-capture row', 'h1e post-adoption row']) {
+    const copies = refreshRows.filter((message) => String(message.text).includes(text));
+    assert.equal(copies.length, 1, `${text} must appear exactly once after a refresh`);
+  }
+  const refreshMidKey = refreshRows.find((message) =>
+    String(message.text).includes('h1e mid-capture row'))!.key;
+  const refreshPostKey = refreshRows.find((message) =>
+    String(message.text).includes('h1e post-adoption row'))!.key;
+  assert.equal(
+    midCaptureKey,
+    refreshMidKey,
+    `the mid-capture row must keep one identity across the initial socket and a refresh `
+      + `(${midCaptureKey} vs ${refreshMidKey})`,
+  );
+  assert.equal(
+    postAdoptionLive.message.key,
+    refreshPostKey,
+    `the post-adoption live row must keep one identity across live and a refresh `
+      + `(${postAdoptionLive.message.key} vs ${refreshPostKey})`,
+  );
+
   console.log(JSON.stringify({
     sourceBytes: statSync(rollout).size,
     refusalCode: first.attach.gap.code,
@@ -472,6 +791,11 @@ try {
       sourceBytes: statSync(skipRollout).size,
       replayedMessages: skipped.attach.messages.length,
       gapMessage: skipGapMessage,
+    },
+    liveOverIndexFixture: {
+      sourceBytes: statSync(bigRollout).size,
+      liveAssistantKey: liveAssistant.message.key,
+      fullTailScans,
     },
   }));
   console.log('PASS H1c refused Codex history keeps a truthful replay on the wire');

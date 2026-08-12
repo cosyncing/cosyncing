@@ -515,22 +515,22 @@ try {
   );
 
   // The immediately previous revision must stay writable through the
-  // one-revision overlap window. Revision 11 only adds a stable error code, so
-  // a released revision-10 client's request body is unchanged.
+  // one-revision overlap window. Revision 12 only adds stable Drive refusal
+  // codes, so a released revision-11 client's request body is unchanged.
   // Both numbers move together on every bump: the query names the revision
   // immediately below the assertion just under it, and a stale query would
   // silently test a client two revisions back, which the overlap window
   // legitimately rejects.
   const previousRevisionQuery =
-    "contractRevision=10&minimumBrokerRevision=2&" +
-    "contractSurfaceHash=fnv1a32%3Aeab8e93f&clientVersion=0.9.9";
+    "contractRevision=11&minimumBrokerRevision=2&" +
+    "contractSurfaceHash=fnv1a32%3A53636b2a&clientVersion=0.9.9";
   const previousRevision = await request(
     running.base,
     `/api/sessions/claude?${previousRevisionQuery}`,
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 11);
+  assert.equal(BROKER_CONTRACT.revision, 12);
   assert.equal(
     previousRevision.status,
     200,

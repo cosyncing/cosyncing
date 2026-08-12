@@ -144,6 +144,7 @@
     {"id": "dart.broker-crypto.test", "description": "broker_crypto tests pass independently."},
     {"id": "browser.startup-cache", "description": "The canonical web build passes real-browser startup and cache handoff."},
     {"id": "browser.artifact-session-isolation", "description": "Real Flutter-web artifact display, cache, retry, download, reload, and broker switching preserve exact broker, tool, and session ownership."},
+    {"id": "browser.client-platform", "description": "Flutter browser-platform client tests pass in a real Chromium: the first frame cannot precede a settled browser context-menu state, and a channel failure leaves the menu enabled with no later mutation."},
     {"id": "browser.cache-model", "description": "The service-worker cache model passes deterministic mutation tests."},
     {"id": "browser.update-handoff", "description": "A verified web update hands every open tab over automatically, or defers silently."},
     {"id": "repository.source-stability", "description": "All cumulative results describe one unchanged source state."},
@@ -478,7 +479,7 @@
       "subSuites": [
         {"id":"typecheck","claimId":"broker.typecheck","command":["bun","run","typecheck"],"sourceOwners":["tsconfig.json"]},
         {"id":"conformance","claimId":"broker.conformance","command":["bun","run","scripts/broker/conformance.ts","--render"],"sourceOwners":["scripts/broker/conformance.ts"]},
-        {"id":"broker-surface","claimId":"broker.surface","command":["bun","run","check:broker-surface"],"sourceOwners":["scripts/broker/check-broker-surface.ts"]},
+        {"id":"broker-surface","claimId":"broker.surface","command":["bun","run","check:broker-surface"],"sourceOwners":["scripts/broker/check-broker-surface.ts","packages/typescript/broker/src/drive-attach-refusal.ts"]},
         {"id":"codex-permissions","claimId":"broker.codex-permissions","command":["bun","run","scripts/broker/tests/codex/resume-fake.ts"],"sourceOwners":["scripts/broker/tests/codex/resume-fake.ts"]},
         {"id":"cli-package-boundary","claimId":"broker.cli-package-boundary","command":["bun","run","test:broker-cli"],"sourceOwners":["scripts/broker/tests/broker/test-cli.ts"]},
         {"id":"compiled-assets","claimId":"broker.compiled-assets","command":["bun","run","test:broker-assets"],"sourceOwners":["scripts/broker/tests/broker/test-runtime-assets.ts"]},
@@ -560,15 +561,15 @@
     {
       "id": "web-browser",
       "releaseDomain": "web runtime",
-      "claimIds": ["browser.startup-cache", "browser.artifact-session-isolation"],
+      "claimIds": ["browser.startup-cache", "browser.artifact-session-isolation", "browser.client-platform"],
       "command": ["bun","run","test:web-browser:built"],
-      "focusedDiagnostics": [["bun","run","test:web-startup-shell"],["bun","run","test:web-artifact-session-isolation"],["bun","run","test:web-client-upgrade"]],
+      "focusedDiagnostics": [["bun","run","test:web-startup-shell"],["bun","run","test:web-artifact-session-isolation"],["bun","run","test:web-client-upgrade"],["bun","run","test:client-browser-platform"]],
       "dependencies": ["client"],
       "expectedArtifacts": [{"path":"output/check/logs/web-browser.log","kind":"log"},{"path":"output/artifact-session-isolation/artifact-card-light.png","kind":"artifact"},{"path":"output/artifact-session-isolation/artifact-card-dark.png","kind":"artifact"}],
       "timeoutClass": "medium",
       "resourceClass": "standard",
       "platformExclusions": ["physical-multi-host-real-agent"],
-      "sourceOwners": ["scripts/client/tests/test-startup-shell-browser.mjs","scripts/client/tests/test-web-artifact-session-isolation.ts","scripts/client/tests/test-web-client-upgrade-browser.ts"]
+      "sourceOwners": ["scripts/client/tests/test-startup-shell-browser.mjs","scripts/client/tests/test-web-artifact-session-isolation.ts","scripts/client/tests/test-web-client-upgrade-browser.ts","scripts/client/tests/run-client-browser-platform-tests.ts","apps/client/test/src/platform/startup/browser_context_menu_startup_web_test.dart","apps/client/test/src/features/schedules/platform/device_time_zone_web_test.dart"]
     },
     {
       "id": "web-cache",

@@ -4,6 +4,14 @@ output/*
 thirdparty/
 .worktrees/
 
+# Bun's compile scratch. `bun build --compile` writes `.<hash>-<n>.bun-build` in the repo root with mode
+# 000 and removes it on success, so it is only ever visible when a build is interrupted. Untracked and
+# unignored, it entered `git ls-files --others --exclude-standard` and hard-crashed both check-public-tree
+# and the source fingerprint on EACCES — two required gates felled by a killed build. The pattern covers
+# every `.bun-build` name, not just the dot-prefixed one Bun happens to emit today: the gate crash is a
+# property of the extension, and a leading-dot rule would let a renamed scratch file fell the gate again.
+*.bun-build
+
 # Local secrets
 .api_keys/
 

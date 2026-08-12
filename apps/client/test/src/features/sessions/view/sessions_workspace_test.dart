@@ -9,7 +9,9 @@ import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/controller/new_session_launch_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/data/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_drive_intent_store.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_list_controller.dart';
@@ -45,6 +47,8 @@ void main() {
     _FakeWorkspacePrefsStore? prefsStore,
     BrokerClient? brokerClient,
     NewSessionConnectionPreparer? connectionPreparer,
+    Brightness brightness = Brightness.light,
+    bool hasBrokerClient = true,
   }) {
     final listController =
         controller ??
@@ -66,6 +70,9 @@ void main() {
             collapsed: false,
           ),
         );
+    final effectiveBrokerClient = hasBrokerClient
+        ? brokerClient ?? _CreateSessionFakeBrokerClient()
+        : null;
     return ProviderScope(
       overrides: [
         sessionListControllerProvider.overrideWith(
@@ -88,14 +95,14 @@ void main() {
             createdAt: DateTime(2026),
           ),
         ),
-        brokerClientProvider.overrideWith((ref) async => brokerClient),
+        brokerClientProvider.overrideWith((ref) async => effectiveBrokerClient),
         if (connectionPreparer != null)
           newSessionConnectionPreparerProvider.overrideWithValue(
             connectionPreparer,
           ),
         // The create flow builds an operation-owned client from the captured
         // profile through this factory.
-        if (brokerClient case final client?)
+        if (effectiveBrokerClient case final client?)
           brokerClientFactoryProvider.overrideWith(
             (ref) =>
                 (profile) async => client,
@@ -108,8 +115,10 @@ void main() {
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: buildAppTheme(
-          themeSpecById(kDefaultThemeId).light,
-          Brightness.light,
+          brightness == Brightness.light
+              ? themeSpecById(kDefaultThemeId).light
+              : themeSpecById(kDefaultThemeId).dark,
+          brightness,
         ),
         home: Scaffold(
           body: SessionsWorkspace(
@@ -172,6 +181,37 @@ void main() {
       expect(find.byKey(const Key('open-session-tab-codex/b')), findsOneWidget);
     });
 
+    testWidgets('expanded tab strip reflects an accepted rename immediately', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSubject([
+          _session('claude', 'a', title: 'Before'),
+          _session('codex', 'b', title: 'Other'),
+        ]),
+      );
+      await tester.pumpAndSettle();
+      await expandRosterProject(tester);
+      await tester.tap(find.byKey(const Key('session-row-claude/a')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+
+      final context = tester.element(find.byType(SessionsWorkspace));
+      ProviderScope.containerOf(context)
+          .read(openSessionsControllerProvider.notifier)
+          .renameSessionTitle('claude', 'a', 'After');
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('open-session-tab-claude/a')),
+          matching: find.text('After'),
+        ),
+        findsOneWidget,
+      );
+    });
+
     // The roster starts collapsed and only the async prefs restore opens it, so
     // these states need a frame past the restore. pumpAndSettle is not an
     // option here: the loading spinner animates forever.
@@ -185,7 +225,7 @@ void main() {
 
       expect(find.byKey(const Key('session-roster-loading')), findsOneWidget);
       expect(
-        find.text('No sessions on this Broker yet. Create one to get started.'),
+        find.text('No sessions on this server yet. Create one to get started.'),
         findsNothing,
       );
 
@@ -198,17 +238,249 @@ void main() {
       expect(find.text('No sessions on this broker yet.'), findsNothing);
     });
 
-    testWidgets('shows empty text only after a completed empty load', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildSubject(const []));
+    testWidgets(
+      'shows broker connection actions after a completed empty load',
+      (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          buildSubject(const [], hasBrokerClient: false),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const Key('session-roster-loading')), findsNothing);
+        expect(
+          find.text('Connect to a server to see its sessions.'),
+          findsNWidgets(2),
+        );
+        expect(find.text('Connect to a server'), findsNWidgets(2));
+        expect(find.byKey(const Key('sessions-empty-title')), findsOneWidget);
+        expect(find.byKey(const Key('sessions-empty-connect')), findsOneWidget);
+        expect(
+          find.text(
+            'No sessions on this server yet. Create one to get started.',
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('keeps the connected empty workspace copy', (tester) async {
+      await tester.pumpWidget(
+        buildSubject(
+          const [],
+          brokerClient: _CreateSessionFakeBrokerClient(),
+        ),
+      );
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('session-roster-loading')), findsNothing);
       expect(
-        find.text('No sessions on this Broker yet. Create one to get started.'),
-        findsOneWidget,
+        find.text('No sessions on this server yet. Create one to get started.'),
+        findsNWidgets(2),
       );
+      final create = tester.widget<IconButton>(
+        find.byKey(const Key('sessions-workspace-global-new')),
+      );
+      expect(create.onPressed, isNotNull);
+      expect(find.text('Select a session to open it here.'), findsNothing);
+      expect(find.byKey(const Key('sessions-empty-connect')), findsNothing);
+    });
+
+    testWidgets(
+      'connected empty workspace disables creation when no agent is ready',
+      (tester) async {
+        await tester.pumpWidget(
+          buildSubject(
+            const [],
+            brokerClient: _NoCreateSessionBrokerClient(),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'No registered agent on this server is ready to create sessions.',
+          ),
+          findsNWidgets(2),
+        );
+        expect(find.textContaining('Create one'), findsNothing);
+        expect(find.text('Select a session to open it here.'), findsNothing);
+        final create = tester.widget<IconButton>(
+          find.byKey(const Key('sessions-workspace-global-new')),
+        );
+        expect(create.onPressed, isNull);
+      },
+    );
+
+    testWidgets(
+      'connected empty workspace reports readiness while checking',
+      (tester) async {
+        final heldReadiness = Completer<List<AgentInfo>>();
+        final client = _ScriptedWorkspaceCapabilityClient([
+          () => heldReadiness.future,
+        ]);
+        await tester.pumpWidget(buildSubject(const [], brokerClient: client));
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.text(
+            'Checking whether a registered agent can create sessions…',
+          ),
+          findsNWidgets(2),
+        );
+        expect(
+          find.textContaining('No registered agent on this server is ready'),
+          findsNothing,
+        );
+        expect(_expandedCreateAction(tester).onPressed, isNull);
+
+        heldReadiness.complete(const []);
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'connected empty workspace reports a readiness check failure',
+      (tester) async {
+        final client = _ScriptedWorkspaceCapabilityClient([
+          () => Future<List<AgentInfo>>.error(StateError('starting')),
+        ]);
+        await tester.pumpWidget(buildSubject(const [], brokerClient: client));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            "Couldn't check whether an agent can create sessions. Refresh to "
+            'try again.',
+          ),
+          findsNWidgets(2),
+        );
+        expect(
+          find.textContaining('No registered agent on this server is ready'),
+          findsNothing,
+        );
+        expect(_expandedCreateAction(tester).onPressed, isNull);
+      },
+    );
+
+    testWidgets(
+      'periodic Sessions refresh recovers creation readiness without '
+      'remounting',
+      (tester) async {
+        final client = _ScriptedWorkspaceCapabilityClient([
+          () async => const [],
+          () async => const [_workspaceCreationReadyAgent],
+        ]);
+        await tester.pumpWidget(
+          buildSubject(const [], brokerClient: client),
+        );
+        await tester.pumpAndSettle();
+        expect(_expandedCreateAction(tester).onPressed, isNull);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionsWorkspace)),
+        );
+        await container.read(sessionRosterResumeRefreshProvider)();
+        await tester.pumpAndSettle();
+
+        expect(_expandedCreateAction(tester).onPressed, isNotNull);
+        expect(find.textContaining('Create one'), findsNWidgets(2));
+      },
+    );
+
+    testWidgets('expanded creation readiness retries after request failure', (
+      tester,
+    ) async {
+      final client = _ScriptedWorkspaceCapabilityClient([
+        () => Future<List<AgentInfo>>.error(StateError('starting')),
+        () async => const [_workspaceCreationReadyAgent],
+      ]);
+      await tester.pumpWidget(buildSubject(const [], brokerClient: client));
+      await tester.pumpAndSettle();
+      expect(_expandedCreateAction(tester).onPressed, isNull);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsWorkspace)),
+      );
+      await container.read(sessionCreationReadyProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+
+      expect(_expandedCreateAction(tester).onPressed, isNotNull);
+      expect(client.listAgentCalls, 2);
+    });
+
+    testWidgets('expanded manual refresh rechecks creation readiness', (
+      tester,
+    ) async {
+      final client = _ScriptedWorkspaceCapabilityClient([
+        () async => const [_workspaceCreationReadyAgent],
+        () async => const [],
+      ]);
+      await tester.pumpWidget(buildSubject(const [], brokerClient: client));
+      await tester.pumpAndSettle();
+      expect(_expandedCreateAction(tester).onPressed, isNotNull);
+
+      await tester.tap(find.byKey(const Key('roster-freshness-refresh')));
+      await tester.pumpAndSettle();
+
+      expect(_expandedCreateAction(tester).onPressed, isNull);
+      expect(client.listAgentCalls, 2);
+    });
+
+    testWidgets(
+      'expanded readiness rejects an old server result after switching',
+      (tester) async {
+        final heldA = Completer<List<AgentInfo>>();
+        final client = _ScriptedWorkspaceCapabilityClient([
+          () => heldA.future,
+          () async => const [_workspaceCreationReadyAgent],
+        ]);
+        await tester.pumpWidget(buildSubject(const [], brokerClient: client));
+        await tester.pump();
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionsWorkspace)),
+        );
+        container
+            .read(activeBrokerProfileProvider.notifier)
+            .state = BrokerProfile(
+          id: 'server-b',
+          displayName: 'server-b',
+          baseUri: Uri.parse('https://server-b.example'),
+          createdAt: DateTime(2026),
+          incarnationId: 'server-b-generation',
+        );
+        await tester.pumpAndSettle();
+        expect(_expandedCreateAction(tester).onPressed, isNotNull);
+
+        heldA.complete(const []);
+        await tester.pumpAndSettle();
+
+        expect(_expandedCreateAction(tester).onPressed, isNotNull);
+        expect(
+          container.read(sessionCreationReadyProvider).source?.profileId,
+          'server-b',
+        );
+      },
+    );
+
+    testWidgets('renders the broker connection empty state in dark mode', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSubject(
+          const [],
+          brightness: Brightness.dark,
+          hasBrokerClient: false,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Connect to a server'), findsNWidgets(2));
+      expect(find.byKey(const Key('sessions-empty-title')), findsOneWidget);
+      expect(find.byKey(const Key('sessions-empty-connect')), findsOneWidget);
     });
 
     testWidgets(
@@ -269,6 +541,10 @@ void main() {
 
       expect(find.byKey(const Key('session-roster-error')), findsOneWidget);
       expect(find.text('broker unavailable'), findsOneWidget);
+      expect(
+        find.widgetWithText(SelectableText, 'broker unavailable'),
+        findsOneWidget,
+      );
       final initialLoads = controller.loadCount;
       await tester.tap(find.byKey(const Key('session-roster-retry')));
       await tester.pump();
@@ -951,6 +1227,49 @@ class _HangingLoadSessionListController extends _StubSessionListController {
   }
 }
 
+IconButton _expandedCreateAction(WidgetTester tester) =>
+    tester.widget<IconButton>(
+      find.byKey(const Key('sessions-workspace-global-new')),
+    );
+
+const AgentInfo _workspaceCreationReadyAgent = AgentInfo(
+  id: 'codex',
+  displayName: 'Codex',
+  capabilities: AgentCapabilities(
+    integrationKind: IntegrationKind.jsonrpcStdio,
+    attachModes: [AttachMode.resume],
+    supportsObserve: true,
+    supportsResume: true,
+    supportsLiveAttach: false,
+    supportsNativeArtifact: false,
+    supportsNativeFileInput: false,
+    supportsModelSwitch: true,
+    permissionGranularity: PermissionGranularity.perSession,
+  ),
+  canCreateSession: true,
+  canRenameNative: false,
+  canFork: false,
+  canClone: false,
+  canTranscriptExport: false,
+);
+
+final class _ScriptedWorkspaceCapabilityClient extends BrokerClient {
+  _ScriptedWorkspaceCapabilityClient(this.responses)
+    : super(baseUrl: 'http://test');
+
+  final List<Future<List<AgentInfo>> Function()> responses;
+  int listAgentCalls = 0;
+
+  @override
+  Future<List<AgentInfo>> listAgents() {
+    listAgentCalls += 1;
+    return responses.removeAt(0)();
+  }
+
+  @override
+  void close() {}
+}
+
 /// Minimal broker client for the New Session sheet: one creatable agent and an
 /// immediate create that returns `codex/created`.
 final class _CreateSessionFakeBrokerClient extends BrokerClient {
@@ -1006,6 +1325,13 @@ final class _CreateSessionFakeBrokerClient extends BrokerClient {
 
   @override
   void close() {}
+}
+
+final class _NoCreateSessionBrokerClient extends BrokerClient {
+  _NoCreateSessionBrokerClient() : super(baseUrl: 'http://test');
+
+  @override
+  Future<List<AgentInfo>> listAgents() async => const [];
 }
 
 class _FakeWorkspacePrefsStore implements WorkspacePrefsStore {

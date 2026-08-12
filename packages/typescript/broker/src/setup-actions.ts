@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   readFileSync,
@@ -67,6 +68,10 @@ import type {
   SetupTransactionAction,
   SetupTransactionContext,
 } from './setup-transaction.ts';
+import {
+  inspectDurableStatePermissionRepair,
+  type DurableStatePermissionRepair,
+} from './durable-state.ts';
 
 interface FileSnapshot {
   target: string;
@@ -92,8 +97,14 @@ export interface SetupActionInputs {
   setupState: SetupState;
   piAgentDir: string;
   installPiBridge: boolean;
+  /** Separate consent to replace only the exact preceding packaged Pi bridge. */
+  replaceLegacyPiBridge?: boolean;
+  /** Current-schema, owner-held files whose only defect is a loose mode. */
+  durableStatePermissionRepairs?: readonly DurableStatePermissionRepair[];
   agentSkillTargets: readonly AgentSkillTarget[];
   installAgentSkill: boolean;
+  /** Separate consent to replace only exact known preceding packaged skill content. */
+  upgradeLegacyAgentSkill?: boolean;
   removeAgentSkillResourceIds: readonly string[];
   /** Opt-in shell shim. All candidate rc targets (bash/zsh); the action installs only into existing files. */
   opencodeShimRcTargets?: readonly OpencodeShimRcTarget[];
@@ -411,7 +422,10 @@ export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTrans
           ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
         } satisfies InstalledResourceRecord],
       };
-      if (inspection.status !== 'missing') throw new Error('Pi bridge target is not safely replaceable');
+      if (inspection.status !== 'missing'
+          && !(inspection.status === 'legacy-marker' && inputs.replaceLegacyPiBridge === true)) {
+        throw new Error('Pi bridge target is not safely replaceable');
+      }
       atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
       return {
         resources: [{
@@ -423,6 +437,30 @@ export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTrans
       };
     },
     verify: () => inspectPiBridgeAsset(inputs.piAgentDir).status === 'owned',
+    rollback: (_context, record) => { rollbackSetupFiles(record); },
+  };
+}
+
+export function createDurableStatePermissionsSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
+  const repairs = inputs.durableStatePermissionRepairs ?? [];
+  return {
+    id: 'durable-state.permissions',
+    prepare: (context) => snapshotSetupFiles(
+      context,
+      'durable-state.permissions',
+      repairs.map((repair) => repair.path),
+    ),
+    apply: () => {
+      for (const repair of repairs) {
+        const status = inspectDurableStatePermissionRepair(repair);
+        if (status === 'current') continue;
+        if (status !== 'tightenable') {
+          throw new Error(`durable state is not safely permission-repairable: ${repair.id}`);
+        }
+        chmodSync(repair.path, 0o600);
+      }
+    },
+    verify: () => repairs.every((repair) => inspectDurableStatePermissionRepair(repair) === 'current'),
     rollback: (_context, record) => { rollbackSetupFiles(record); },
   };
 }
@@ -456,6 +494,8 @@ export function createAgentSkillSetupAction(inputs: SetupActionInputs): SetupTra
             atomicWriteOwnerOnly(target.path, AGENT_SKILL_SOURCE, { mode: 0o600 });
           } else if (inspection.status === 'owned') {
             // Current packaged content already on disk; only (re)record the ownership receipt below.
+          } else if (inspection.status === 'known-legacy' && inputs.upgradeLegacyAgentSkill === true) {
+            atomicWriteOwnerOnly(target.path, AGENT_SKILL_SOURCE, { mode: 0o600 });
           } else if (inspection.status === 'drifted' && receiptProves(inspection.actualSha256)) {
             // owned-stale: our receipt proves we installed this exact older content -> upgrade it in place.
             atomicWriteOwnerOnly(target.path, AGENT_SKILL_SOURCE, { mode: 0o600 });
@@ -639,6 +679,7 @@ export function createSetupActionCatalog(inputs: SetupActionInputs): {
     createConfigurationSetupAction(inputs),
     createCredentialSetupAction(inputs),
     createSetupStateAction(inputs),
+    createDurableStatePermissionsSetupAction(inputs),
     // Keep the complete stable catalog available for interrupted-transaction recovery. The plan decides
     // whether this action runs; merely constructing it performs no filesystem mutation.
     createPiBridgeSetupAction(inputs),
@@ -653,8 +694,11 @@ export function setupActionContentHash(inputs: SetupActionInputs): string {
     config: inputs.config,
     setupState: inputs.setupState,
     installPiBridge: inputs.installPiBridge,
+    replaceLegacyPiBridge: inputs.replaceLegacyPiBridge,
+    durableStatePermissionRepairs: inputs.durableStatePermissionRepairs,
     agentSkillTargets: inputs.agentSkillTargets,
     installAgentSkill: inputs.installAgentSkill,
+    upgradeLegacyAgentSkill: inputs.upgradeLegacyAgentSkill,
     removeAgentSkillResourceIds: inputs.removeAgentSkillResourceIds,
     opencodeShimRcTargets: inputs.opencodeShimRcTargets,
     installOpencodeShim: inputs.installOpencodeShim,

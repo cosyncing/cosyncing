@@ -34,13 +34,13 @@ import 'package:cosyncing_client/src/features/sessions/renderers/message_rendere
 import 'package:cosyncing_client/src/features/sessions/view/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_artifact_preview_presenter.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_artifact_preview_result.dart';
-import 'package:cosyncing_client/src/features/sessions/view/session_browser_context_menu.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_context_meter.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
+import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/voice_input_controller.dart';
 import 'package:cosyncing_client/src/features/voice/model/voice_transcript_insertion.dart';
 import 'package:cosyncing_client/src/features/voice/view/read_aloud_action.dart';
@@ -256,7 +256,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       _terminalFresh = _terminalTabVisible;
     }
     WidgetsBinding.instance.addObserver(this);
-    unawaited(disableSessionBrowserContextMenu());
     unawaited(_loadLiveStateArchive());
     // N3b: this composer is the app's durable device-local state on the web, so
     // it is what decides whether the tab may be moved through a web-update
@@ -297,12 +296,20 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       retirement = ledger.pendingFor(_key);
     }
     if (_awaitingRetirementHandoff) {
-      // First contact with the session's provider since mount: the ledger is
-      // clear, so this read builds a fresh controller. Terminal visibility
-      // was deliberately not initialized from the retiring one in initState.
+      // Let the handoff-clearing rebuild establish both the page's production
+      // watch and the supervisor's resident lease before starting transport
+      // work. Reading the notifier immediately creates an unlistened family
+      // element in the retirement callback; autoDispose can reap it while its
+      // async interactive attach is resolving, after which the supervisor
+      // builds a second controller that attaches only in background Observe.
+      setState(() => _awaitingRetirementHandoff = false);
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      // First provider contact since mount now reads the controller retained
+      // by the rebuilt page. Terminal visibility was deliberately not
+      // initialized from the retiring one in initState.
       final refreshed = _sessionState;
       setState(() {
-        _awaitingRetirementHandoff = false;
         _terminalTabVisible = refreshed.terminalOutputMessages.isNotEmpty;
         _terminalFresh = _terminalTabVisible;
       });
@@ -390,7 +397,6 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(restoreSessionBrowserContextMenu());
     // N3b: leave the handoff registry before the controllers below are torn
     // down, so a prepare that arrives during teardown can never read a disposed
     // FocusNode or TextEditingController.
@@ -1867,6 +1873,18 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         activeBrokerProfileProvider.select(RosterSource.of),
         (previous, next) {
           if (previous == next) return;
+          // At the production branch boundary the supervisor publishes this
+          // key's retirement before descendant source listeners run. The
+          // outgoing page must not race that owner by reattaching its retiring
+          // provider to the new source; the replacement page attaches after
+          // the ledger clears. A standalone detail has no pending retirement
+          // and retains its existing self-rebind behavior.
+          if (ref
+                  .read(sessionDetailRetirementLedgerProvider)
+                  .pendingFor(_key) !=
+              null) {
+            return;
+          }
           unawaited(_changeProfileAfterDraftBarrier());
         },
       )
@@ -2086,6 +2104,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                   onRename: (value) => unawaited(_renameSession(value)),
                   control: control,
                   freshness: detailFreshness,
+                  telemetry: state.telemetry,
                   restoringDrive:
                       state.driveRestorePhase ==
                       SessionDriveRestorePhase.restoring,
@@ -2151,6 +2170,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                           bottomPadding: kComposerBottomInset,
                           child: _ChatPanel(
                             key: const Key('session-detail-tab-panel-chat'),
+                            sessionKey: _key,
                             state: state,
                             controller: controller,
                             commands: commands,

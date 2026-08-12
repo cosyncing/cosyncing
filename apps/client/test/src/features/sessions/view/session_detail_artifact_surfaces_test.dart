@@ -91,9 +91,43 @@ void main() {
           findsOneWidget,
           reason: 'Download belongs to the file-artifact card action region',
         );
+        expect(find.text('View in Files'), findsNothing);
         expect(tester.takeException(), isNull);
       });
     }
+
+    testWidgets('legacy unqualified Chat artifact has no invented action', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.fileArtifact,
+                id: 'legacy-artifact',
+                raw: {
+                  'type': 'file-artifact',
+                  'name': 'legacy-report.txt',
+                  'path': '/tmp/legacy-report.txt',
+                  'size': 12,
+                },
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final artifactCard = find.widgetWithText(Card, 'legacy-report.txt');
+      expect(artifactCard, findsOneWidget);
+      expect(
+        find.descendant(of: artifactCard, matching: find.text('Download')),
+        findsNothing,
+      );
+      expect(find.text('View in Files'), findsNothing);
+    });
 
     testWidgets(
       'disables fork/clone actions when broker capabilities are unavailable',

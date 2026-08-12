@@ -594,7 +594,7 @@ final class BrowserSessionArtifactFileService
     cancellationToken?.throwIfCanceled();
     final backend = _downloadBackend;
     if (backend == null) {
-      throw StateError('Connect to an active broker before downloading.');
+      throw StateError('Connect to an active server before downloading.');
     }
     final download = await _fetchBoundedSessionFile(
       backend,
@@ -650,11 +650,11 @@ final class BrowserSessionArtifactFileService
   ) async {
     final backend = _downloadBackend;
     if (backend == null) {
-      throw StateError('Connect to an active broker before downloading.');
+      throw StateError('Connect to an active server before downloading.');
     }
     if (backend is! BoundedArtifactDownloadBackend) {
       throw StateError(
-        'The active broker client cannot bound browser artifact downloads.',
+        'The active server cannot bound browser artifact downloads.',
       );
     }
     final boundedBackend = backend as BoundedArtifactDownloadBackend;
@@ -690,7 +690,7 @@ final class BrowserSessionArtifactFileService
   }) async {
     if (backend is! BoundedResumableArtifactDownloadBackend) {
       throw StateError(
-        'The active broker client cannot bound browser workspace '
+        'The active server cannot bound browser workspace '
         'downloads.',
       );
     }
@@ -740,7 +740,7 @@ final class BrowserSessionArtifactFileService
             (download.contentLength != null &&
                 download.contentLength != download.bytes.length)) {
           throw const BrokerException(
-            message: 'Broker returned an invalid full browser download.',
+            message: 'Server returned an invalid full browser download.',
           );
         }
         bytes.add(download.bytes);
@@ -757,7 +757,7 @@ final class BrowserSessionArtifactFileService
           range.end - range.start + 1 != download.bytes.length ||
           download.bytes.isEmpty) {
         throw const BrokerException(
-          message: 'Broker returned an invalid browser download range.',
+          message: 'Server returned an invalid browser download range.',
         );
       }
       if (range.total! > _browserArtifactCacheMaxBytes) {
@@ -782,7 +782,7 @@ final class BrowserSessionArtifactFileService
           download.etag == null &&
           download.lastModified == null) {
         throw const BrokerException(
-          message: 'Broker did not provide a browser range validator.',
+          message: 'Server did not provide a browser range validator.',
         );
       }
       bytes.add(download.bytes);
@@ -1060,7 +1060,7 @@ final class DefaultSessionArtifactFileService
     cancellationToken?.throwIfCanceled();
     final backend = _downloadBackend;
     if (backend == null) {
-      throw StateError('Connect to an active broker before downloading.');
+      throw StateError('Connect to an active server before downloading.');
     }
     final resumableBackend = switch (backend) {
       final ResumableArtifactDownloadBackend value => value,
@@ -1165,7 +1165,7 @@ final class DefaultSessionArtifactFileService
         if (download.contentLength case final advertisedLength?
             when advertisedLength != download.bytes.length) {
           throw const BrokerException(
-            message: 'Broker returned an incomplete full download.',
+            message: 'Server returned an incomplete full download.',
           );
         }
         await partialFile.writeAsBytes(download.bytes, flush: true);
@@ -1203,7 +1203,7 @@ final class DefaultSessionArtifactFileService
             range.end - range.start + 1 != download.bytes.length ||
             download.bytes.isEmpty) {
           throw const BrokerException(
-            message: 'Broker returned an invalid download range.',
+            message: 'Server returned an invalid download range.',
           );
         }
         final representationChanged =
@@ -1482,7 +1482,7 @@ final class DefaultSessionArtifactFileService
 
     final backend = _downloadBackend;
     if (backend == null) {
-      throw StateError('Connect to an active broker before downloading.');
+      throw StateError('Connect to an active server before downloading.');
     }
 
     final download = await backend.fetchArtifactUrl(source);

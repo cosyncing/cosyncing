@@ -180,7 +180,7 @@ void main() {
     });
 
     testWidgets(
-      'compatibility notice is localized without a selection island',
+      'compatibility notice is localized and selectable',
       (
         tester,
       ) async {
@@ -212,14 +212,14 @@ void main() {
         final notice = find.byKey(
           const Key('session-detail-compatibility-notice'),
         );
-        final selectionIsland = find.descendant(
+        final selectionArea = find.descendant(
           of: notice,
-          matching: find.byType(SelectableText),
+          matching: find.byType(SelectionArea),
         );
         final l10n = AppLocalizations.of(tester.element(notice));
 
         expect(notice, findsOneWidget);
-        expect(selectionIsland, findsNothing);
+        expect(selectionArea, findsOneWidget);
         expect(
           find.descendant(
             of: notice,
@@ -2061,7 +2061,15 @@ void main() {
     ) async {
       final connection = ScriptedSessionDetailConnection(
         events: const [
-          CommandsWireEvent(commands: [SlashCommand(name: '/goal')]),
+          CommandsWireEvent(
+            commands: [
+              SlashCommand(
+                name: '/goal',
+                description: 'Set the current goal',
+                usage: '/goal set <text>',
+              ),
+            ],
+          ),
         ],
       );
       await tester.pumpWidget(
@@ -2074,6 +2082,14 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('/goal'));
       await tester.pumpAndSettle();
+      expect(
+        find.ancestor(
+          of: find.text('Set the current goal'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('/goal set <text>'), findsOneWidget);
 
       await tester.enterText(
         find.byKey(const Key('session-detail-command-args-input')),

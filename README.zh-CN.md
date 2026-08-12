@@ -59,8 +59,9 @@ Broker 运行在智能体所在的那台机器上，负责观察它们的会话�
 </p>
 
 四者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
-Claude Code 的会话在接管之前保持只读。逐项能力矩阵见
-[adapter support and evidence](docs/protocol/adapter-support.md)（英文）。
+Claude Code 的会话在接管之前保持只读。版本与安装方法见
+[支持的智能体](docs/supported_agents/README.md)，逐项能力见
+[适配器支持](docs/protocol/adapter-support.md)（均为英文）。
 
 ## 安装
 
@@ -71,17 +72,29 @@ Claude Code 的会话在接管之前保持只读。逐项能力矩阵见
 该发行包包含一个 JavaScript 应用包和网页客户端。受支持的 Broker 主机为 Linux x64、Linux arm64
 与 Apple Silicon macOS；Windows 上请在 WSL 内运行 Broker。
 
+setup 前只安装你要使用的智能体；详见[智能体安装与 PATH
+预检](docs/supported_agents/README.md#preflight)（英文）。
+
 安装当前发行版：
 
 ```bash
 npm install --global cosyncing
+```
+
+打开一个新的登录 shell，然后配置服务：
+
+```bash
 cosyncing setup
-cosyncing pair
+cosy restart
+cosy doctor
+cosy status
+cosy pair
 ```
 
 `setup` 会检查这台机器，展示将要做的全部变更，然后要么整体应用、要么完全不动。它把 Broker
 复制到 `~/.cosyncing/bin/cosyncing`，安装用户服务（由你的 Bun 运行该副本），并打印你的 Broker
-地址。在 setup 提交之前，Broker 拒绝启动。
+地址。在 setup 提交之前，Broker 拒绝启动。setup 完成后，下文的日常命令使用已安装的 `cosy`
+简写；完整的 `cosyncing` 命令仍然有效。
 
 更新时，先用包管理器更新发行包，再重新运行 setup —— 后者会重新复制新的应用并协调服务：
 
@@ -90,11 +103,10 @@ npm update --global cosyncing
 cosyncing setup
 ```
 
-`pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
-`cosyncing devices list` 列出已配对设备，`cosyncing devices revoke <id>` 撤销指定设备。
+`cosy pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
+`cosy devices list` 列出已配对设备，`cosy devices revoke <id>` 撤销指定设备。
 
-动手之前还有两个有用的命令：`cosyncing doctor` 只诊断、不改动机器；`cosyncing status`
-汇总安装、服务、智能体与会话的状态。
+setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇总安装、服务、智能体与会话的状态。
 
 ## 网页客户端
 

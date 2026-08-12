@@ -562,13 +562,21 @@ class _CompactBottomNav extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
     final unreadCount = ref.watch(attentionUnreadCountProvider);
+    const branchIndexes = <int>[0, 1, 3];
+    final displayedIndex = branchIndexes.indexOf(
+      navigationShell.currentIndex,
+    );
     return NavigationBar(
       key: const Key('app-bottom-nav'),
-      selectedIndex: navigationShell.currentIndex,
+      // `/connection` remains a compact deep/recovery route, but is no longer
+      // a destination. Leave Sessions selected while that branch is showing;
+      // every actual destination derives its index from [branchIndexes].
+      selectedIndex: displayedIndex < 0 ? 0 : displayedIndex,
       onDestinationSelected: (index) {
+        final branchIndex = branchIndexes[index];
         navigationShell.goBranch(
-          index,
-          initialLocation: index == navigationShell.currentIndex,
+          branchIndex,
+          initialLocation: branchIndex == navigationShell.currentIndex,
         );
       },
       destinations: [
@@ -589,11 +597,6 @@ class _CompactBottomNav extends ConsumerWidget {
             child: const Icon(Icons.notifications),
           ),
           label: l10n.notificationsTitle,
-        ),
-        NavigationDestination(
-          icon: const Icon(Icons.link_outlined),
-          selectedIcon: const Icon(Icons.link),
-          label: l10n.connectionTitle,
         ),
         NavigationDestination(
           icon: const Icon(Icons.settings_outlined),

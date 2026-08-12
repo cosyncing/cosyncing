@@ -13,14 +13,21 @@ Anthropic also provides a native installer for macOS, Linux, and WSL:
 curl -fsSL https://claude.ai/install.sh | bash
 ```
 
+If Claude Code is npm-managed, it belongs to the active Node/npm prefix.
+Changing Node or removing an old version-manager directory can therefore hide
+the `claude` command until it is reinstalled. Follow the shared [PATH,
+preflight, and Node migration guide](README.md#the-two-path-environments).
+
 Run `claude doctor` to check the upstream installation type. Then reconcile the
 broker service:
 
 ```bash
+type -a claude
 claude --version
 claude doctor
 cosyncing setup
-cosyncing doctor
+cosy restart
+cosy doctor
 ```
 
 cosyncing reads Claude's local transcripts. Sessions begin in Observe mode and

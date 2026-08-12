@@ -180,6 +180,9 @@ class PairingController extends Notifier<PairingControllerState> {
       return;
     }
 
+    ref
+        .read(connectionControllerProvider.notifier)
+        .supersedePendingConnection();
     state = PairingControllerState(isBusy: true);
 
     final profileId = payload.brokerUrl.toString();
@@ -271,6 +274,9 @@ class PairingController extends Notifier<PairingControllerState> {
       return;
     }
 
+    ref
+        .read(connectionControllerProvider.notifier)
+        .supersedePendingConnection();
     state = PairingControllerState(isBusy: true);
 
     try {

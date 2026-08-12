@@ -32,6 +32,7 @@ import { join, basename, dirname, extname, resolve } from 'node:path';
 import {
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
+  PI_BRIDGE_KNOWN_LEGACY_SOURCE,
   PI_BRIDGE_LEGACY_MARKER,
 } from './bridge-asset.ts';
 import {
@@ -105,6 +106,7 @@ export interface PiAdapterOptions {
 export {
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
+  PI_BRIDGE_KNOWN_LEGACY_SOURCE,
   PI_BRIDGE_LEGACY_MARKER,
 } from './bridge-asset.ts';
 
@@ -116,7 +118,7 @@ export interface PiBridgeAssetInspection {
   requiresConfirmation: boolean;
 }
 
-/** Exact package hashes prove ownership. A legacy marker is evidence only and never authorizes overwrite. */
+/** Exact current content proves ownership; exact known legacy content may be offered for confirmed migration. */
 export function inspectPiBridgeAsset(agentDir = PI_AGENT_DIR): PiBridgeAssetInspection {
   const path = join(agentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
   if (!existsSync(path)) {
@@ -129,7 +131,9 @@ export function inspectPiBridgeAsset(agentDir = PI_AGENT_DIR): PiBridgeAssetInsp
       return { status: 'owned', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, actualSha256, path, requiresConfirmation: false };
     }
     return {
-      status: content.includes(PI_BRIDGE_LEGACY_MARKER) ? 'legacy-marker' : 'unowned',
+      // A copied marker, an edited legacy bridge, or any other content is unowned. Setup/repair may replace
+      // only the complete preceding packaged source after a separate operator confirmation.
+      status: content === PI_BRIDGE_KNOWN_LEGACY_SOURCE ? 'legacy-marker' : 'unowned',
       expectedSha256: PI_BRIDGE_EMBEDDED_SHA256,
       actualSha256,
       path,
@@ -909,6 +913,10 @@ class PiConnection implements SessionConnection {
   private proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
   private reqId = 0;
   private readonly pendingRpc = new Map<string, (resp: any) => void>();
+  /** Connection-wide prompt transaction tail. Broker clients have independent WebSocket queues,
+   *  so the adapter must serialize native-state reconciliation, optimistic FIFO mutation, model
+   *  override, and prompt acknowledgement across every caller sharing this PiConnection. */
+  private promptDeliveryTail: Promise<void> = Promise.resolve();
   /** extension UI requests awaiting a user decision: requestId → method. */
   private readonly pendingUi = new Map<string, { method: string; options?: string[] }>();
   /** The exact permission/question-request frames still UNRESOLVED — replayed on attach via
@@ -916,22 +924,54 @@ class PiConnection implements SessionConnection {
    *  Tracked centrally in {@link emit} and cleared on the matching *-resolved frame. (Issue G.) */
   private readonly pendingFrames = new Map<string, AgentMessage>();
   private streaming = false;
+  /** A partial model switch could not be rolled back or reconciled. No later prompt may reach Pi
+   *  until get_state succeeds and republishes the actual native selection. */
+  private modelStateUncertain = false;
   /** Per-turn counter: Pi's message_update carries no message.id, so without this every turn's
-   *  deltas share a constant key ('m:…') and the app collapses all turns into one growing bubble. */
+   *  deltas share a constant key ('m:…') and the app collapses all turns into one growing bubble.
+   *  Seeded from the session file's entry count at {@link start}: a reconnect constructs a fresh
+   *  connection, and a counter restarting at 0 would key a NEW turn's deltas onto the OLDEST
+   *  retained bubble a client still holds — the mid-transcript "text appears at the top" scramble.
+   *  Entries grow with every turn, so the seed strictly exceeds every previously-issued number
+   *  (the same rule the bridge extension applies at hello). */
   private turnSeq = 0;
   /** Tool-call arguments by callId, so a later tool_execution_end can recover the edited file's path
    *  (Pi's result event carries no args) for the canonical tool-result `path` chip. */
   private readonly toolArgs = new Map<string, any>();
   /** Per-prompt counter for the optimistic user-message key, so the app's keyed history-vs-live
-   *  dedupe has a stable (non-random) key to work with — matching OpenCode's keyed user-messages. */
+   *  dedupe has a stable (non-random) key to work with — matching OpenCode's keyed user-messages.
+   *  Seeded with {@link turnSeq} for the same reconnect-collision reason. */
   private userSeq = 0;
+  /** Durable per-user-turn ordinal shared with the JSONL mapper and bridge (`u0`, `u1`, ...).
+   *  Unlike the optimistic user bubble key, this is reproducible after reload even though Pi's
+   *  live user message carries no native entry id. */
+  private nextUserTurnOrdinal = 0;
   private lastUserMessageKey: string | undefined;
+  /** Optimistic prompt keys not yet consumed by a user `message_start` — FIFO, because a queued
+   *  steer/follow-up is consumed in send order. The durable summary ordinal is allocated only when
+   *  the turn actually starts, so a rejected/dropped prompt cannot leave a reload-visible gap. */
+  private readonly pendingUserTurns: string[] = [];
+  /** When the current RUN began: stamped at agent_start. Only the FALLBACK turn anchor (a
+   *  degraded stream that never forwards `message_start`) consumes it; the authoritative
+   *  anchor is the opening user message itself, matching the JSONL mapper. */
+  private runStartedAt: number | undefined;
+  /** The OPEN user turn — one summary per USER TURN, the same authority model as
+   *  {@link mapPiMessages}: a user message entering the conversation closes the previous
+   *  turn and opens its own; a terminal stopReason closes immediately; agent_end closes
+   *  whatever remains. One summary per RUN diverged from every reload of the JSONL file
+   *  as soon as a run batched queued steer/follow-up turns. */
   private currentRun:
     | {
         key: string;
         turnId: string;
         userMessageKey?: string;
         startedAt?: number;
+        /** Any assistant streaming reached this turn — distinguishes a degraded stream that
+         *  never forwards message_end (close at run end) from a prompt the agent truly never
+         *  answered (suppress, as the mapper does). */
+        sawAssistantActivity?: boolean;
+        lastAssistant?: { stopReason?: string; errored: boolean; completedAt?: number };
+        tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
       }
     | undefined;
 
@@ -981,6 +1021,17 @@ class PiConnection implements SessionConnection {
       // to the broker (a loop / double-owner). The flag tells the extension to stay dormant here.
       env: { ...process.env, COSYNCING_NO_BRIDGE: '1' },
     });
+    // Seed the live key namespaces above every entry already in this session,
+    // so a reconnect's fresh counters can never re-issue a key an earlier
+    // connection's turns already own (see the field docs).
+    try {
+      const raw = readFileSync(this.sessionPath, 'utf8');
+      this.turnSeq = countJsonlLines(raw);
+      this.userSeq = this.turnSeq;
+      this.nextUserTurnOrdinal = countPiJsonlUserMessages(raw);
+    } catch {
+      /* a fresh session file may not exist yet — counters stay at 0 */
+    }
     const split = createJsonlSplitter((line) => this.onLine(line));
     void (async () => {
       const reader = this.proc!.stdout.getReader();
@@ -1045,49 +1096,139 @@ class PiConnection implements SessionConnection {
     this.handleEvent(obj);
   }
 
+  /** Close the open user turn with the JSONL mapper's exact rule set: status from the last
+   *  assistant's terminal stopReason (error > cancelled > done), completion clock only from
+   *  assistant-end evidence (or the supplied run-end clock), duration only when both clocks
+   *  exist and agree, and NO summary at all for a prompt the agent never answered — the same
+   *  hollow-summary guard `mapPiMessages` applies, so live and reload agree turn for turn. */
+  private closeCurrentRun(fallbackCompletedAt?: number): void {
+    const run = this.currentRun;
+    if (!run) return;
+    this.currentRun = undefined;
+    let last = run.lastAssistant;
+    // A degraded RPC stream may expose deltas but omit message_end. Keep the same fallback the
+    // bridge applies: assistant activity is enough for a summary, but not enough to invent an end
+    // clock unless agent_end supplied one. A prompt with no assistant evidence is still suppressed.
+    if (!last && run.sawAssistantActivity) last = { errored: false, completedAt: undefined };
+    if (!last) return;
+    const terminal = piTerminalStopReason(last.stopReason);
+    const completedAt = last.completedAt ?? fallbackCompletedAt;
+    const totalRuntimeMs =
+      run.startedAt != null && completedAt != null && completedAt >= run.startedAt
+        ? completedAt - run.startedAt
+        : undefined;
+    this.emit({
+      type: 'run-summary',
+      key: run.key,
+      turnId: run.turnId,
+      userMessageKey: run.userMessageKey,
+      status: last.errored ? 'error' : (terminal ?? 'done'),
+      ...(run.startedAt != null ? { startedAt: run.startedAt } : {}),
+      ...(completedAt != null ? { completedAt } : {}),
+      ...(totalRuntimeMs != null ? { totalRuntimeMs } : {}),
+      ...(run.tokens ? { tokens: run.tokens } : {}),
+      source: 'pi-rpc',
+    });
+  }
+
+  /** Degraded RPC fallback: Pi normally emits turn_start BEFORE the user message_start, so
+   *  turn_start itself must never mint a summary. If a runtime omits the user event entirely,
+   *  the first assistant event opens the turn here using the run clock and queued prompt link. */
+  private ensureCurrentRun(): void {
+    if (this.currentRun) return;
+    const anchor = `u${this.nextUserTurnOrdinal++}`;
+    this.currentRun = {
+      key: `pi:run:${anchor}`,
+      turnId: anchor,
+      userMessageKey: this.pendingUserTurns.shift() ?? this.lastUserMessageKey,
+      startedAt: this.runStartedAt ?? Date.now(),
+    };
+    this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: 'pi-rpc' });
+  }
+
+  /** Remove one prompt that never reached Pi's agent loop without disturbing older/newer queued
+   *  prompts. A blanket shift/pop is wrong when several steers are pending: the later successful
+   *  message_start must still consume its own optimistic bubble key. */
+  private removePendingUserTurn(userKey: string): void {
+    const index = this.pendingUserTurns.indexOf(userKey);
+    if (index !== -1) this.pendingUserTurns.splice(index, 1);
+  }
+
   private handleEvent(ev: any): void {
     switch (ev.type) {
       case 'agent_start':
         this.streaming = true;
+        // The run's start clock — consumed only by the FALLBACK turn anchor below; the
+        // authoritative anchor is the opening user message itself (message_start).
+        this.runStartedAt = nativeTimeMs(ev.timestamp) ?? Date.now();
         this.emit({ type: 'status', status: 'running' });
         return;
+      case 'message_start': {
+        // A user message ENTERING the conversation — typed prompt or queued steer/follow-up
+        // consumed mid-run — is the user-turn boundary, exactly as its JSONL entry is for
+        // mapPiMessages: it closes the previous turn and opens its own. Grouping summaries per
+        // RUN instead left one summary spanning every queued turn, so count, keys, timing and
+        // token grouping all changed on the first reload of the session file.
+        const m = ev.message;
+        if (m?.role !== 'user') return;
+        this.closeCurrentRun();
+        const userKey = this.pendingUserTurns.shift();
+        const anchor = `u${this.nextUserTurnOrdinal++}`;
+        this.currentRun = {
+          key: `pi:run:${anchor}`,
+          turnId: anchor,
+          userMessageKey: userKey,
+          // The message's own clock is the turn's start — the durable record of the same
+          // instant the JSONL entry carries, so live and reload agree.
+          startedAt: nativeTimeMs(m.timestamp) ?? nativeTimeMs(ev.timestamp) ?? Date.now(),
+        };
+        this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: 'pi-rpc' });
+        return;
+      }
       case 'turn_start':
         // Advance the key namespace PER LLM TURN, not per agent RUN. agent_start fires once per run,
         // but a run can batch many turns (queued steer/follow-up) — incrementing on agent_start kept
         // the key constant so every reply's deltas collided and merged into one bubble (the same bug
         // the bridge fixed). turn_start IS forwarded over RPC stdout. See the bridge extension.
         this.turnSeq++;
-        this.currentRun = {
-          key: `pi:run:${this.turnSeq}`,
-          turnId: `t${this.turnSeq}`,
-          userMessageKey: this.lastUserMessageKey,
-          startedAt: nativeTimeMs(ev.timestamp) ?? Date.now(),
-        };
-        this.emit({ type: 'run-summary', ...this.currentRun, status: 'running', source: 'pi-rpc' });
+        // The installed Pi loop emits this BEFORE the user message_start. Opening a fallback here
+        // minted an orphan running summary, then message_start opened the real ordinal one. Wait
+        // for that user event; a degraded stream falls back at its first assistant event instead.
         return;
+      case 'message_end': {
+        // The assistant message's END clock is the live analog of the JSONL entry's write
+        // time — the only authoritative completion evidence. A terminal stopReason closes
+        // the turn HERE, as the mapper closes on the entry, so a queued follow-up's next
+        // turn never inherits the previous turn's span or usage.
+        const m = ev.message;
+        if (m?.role !== 'assistant') return;
+        this.ensureCurrentRun();
+        const currentRun = this.currentRun!;
+        currentRun.lastAssistant = {
+          stopReason: typeof m.stopReason === 'string' ? m.stopReason : undefined,
+          errored: !!m.error,
+          completedAt: nativeTimeMs(ev.timestamp) ?? Date.now(),
+        };
+        accumulatePiUsage(currentRun, m.usage);
+        if (piTerminalStopReason(m.stopReason) !== undefined || m.error) this.closeCurrentRun();
+        return;
+      }
       case 'agent_end':
         this.streaming = false;
         this.toolArgs.clear(); // turn boundary — drop args of any tool-call whose result never arrived (abort/block)
-        if (this.currentRun) {
-          const completedAt = nativeTimeMs(ev.timestamp) ?? Date.now();
-          this.emit({
-            type: 'run-summary',
-            ...this.currentRun,
-            status: 'done',
-            completedAt,
-            totalRuntimeMs:
-              this.currentRun.startedAt != null && completedAt >= this.currentRun.startedAt
-                ? completedAt - this.currentRun.startedAt
-                : undefined,
-            source: 'pi-rpc',
-          });
-          this.currentRun = undefined;
-        }
+        this.runStartedAt = undefined;
+        this.pendingUserTurns.length = 0; // unconsumed queue entries died with the run
+        // Whatever is still open closes at the run's end clock. A degraded stream that
+        // streamed assistant output but forwards no message_end still gets its summary; a
+        // prompt the agent truly never answered is suppressed, exactly as the mapper does.
+        this.closeCurrentRun(nativeTimeMs(ev.timestamp) ?? Date.now());
         this.emit({ type: 'status', status: 'idle' });
         void this.emitSessionStats();
         return;
       case 'message_update': {
         const e = ev.assistantMessageEvent ?? {};
+        this.ensureCurrentRun();
+        this.currentRun!.sawAssistantActivity = true;
         // Pi gives no message.id, so the turn counter IS the key. Key by content KIND (text/thinking),
         // not the model-dependent contentIndex, so live deltas and any finalized/history snapshot
         // align on the same key — matches the bridge extension's keying.
@@ -1205,6 +1346,28 @@ class PiConnection implements SessionConnection {
   }
 
   async getHistory(): Promise<AgentMessage[]> {
+    // Prefer the session FILE: it is the durable causal record. Its entry ids
+    // key every row identically to Observe and across reloads (get_messages
+    // returns bare messages, which forced positional h<n> keys that re-key the
+    // whole transcript on every mode switch), and its entry envelopes carry
+    // write-time clocks — the only authoritative completion evidence a
+    // history read has. RPC state remains the fallback for a file that cannot
+    // be read; its summaries then carry no completion clock rather than one
+    // inferred from adjacent message timestamps.
+    try {
+      const raw = readFileSync(this.sessionPath, 'utf8');
+      if (raw.trim()) {
+        const history = mapPiJsonlText(raw, 0);
+        // A file with no message entries yet (a fresh session header, or a runtime
+        // that has not flushed) proves nothing — let RPC state answer instead.
+        if (history.length > 0) {
+          history.push(...await this.sessionStatsMessages());
+          return history;
+        }
+      }
+    } catch {
+      /* unreadable session file → RPC fallback below */
+    }
     const resp = await this.rpc({ type: 'get_messages' });
     const msgs: any[] = resp?.data?.messages ?? [];
     // First pass: collect tool-call args by id so a toolResult further down can recover its file path
@@ -1213,7 +1376,16 @@ class PiConnection implements SessionConnection {
     for (const m of msgs)
       if (m?.role === 'assistant' && Array.isArray(m.content))
         for (const c of m.content) if (c?.type === 'toolCall' && c.id != null) argsByCallId.set(String(c.id), c.arguments);
-    const history = mapPiMessages(msgs.map((message, index) => ({ message, index, keyBase: message?.id != null ? String(message.id) : `h${index}`, timestamp: nativeTimeMs(message?.timestamp) })), argsByCallId, true);
+    const history = mapPiMessages(
+      msgs.map((message, index) => ({
+        message,
+        index,
+        keyBase: message?.id != null ? String(message.id) : `h${index}`,
+        messageAt: nativeTimeMs(message?.timestamp),
+      })),
+      argsByCallId,
+      true,
+    );
     history.push(...await this.sessionStatsMessages());
     return history;
   }
@@ -1236,11 +1408,100 @@ class PiConnection implements SessionConnection {
     for (const message of await this.sessionStatsMessages()) this.emit(message);
   }
 
+  /** Make the broker's advertised selection match one acknowledged native Pi state. */
+  private publishNativeModelState(state: any): boolean {
+    const currentModel = piCurrentModelFromNative(state?.model, state?.thinkingLevel);
+    if (!currentModel) return false;
+    this.modelStateUncertain = false;
+    this.info.currentModel = currentModel;
+    const label = state?.model?.name ?? state?.model?.label ?? state?.model?.id ?? state?.model?.modelID;
+    if (typeof label === 'string' && label) this.info.model = label;
+    this.emit({
+      type: 'metadata-update',
+      key: 'sessionInfo',
+      value: { currentModel, ...(this.info.model ? { model: this.info.model } : {}) },
+    });
+    return true;
+  }
+
+  /** Gate prompt delivery after an unreconciled partial switch. Recovery happens before the
+   *  optimistic bubble/FIFO entry is created, so a refused retry cannot poison turn identity. */
+  private async ensureNativeModelStateKnown(): Promise<void> {
+    if (!this.modelStateUncertain) return;
+    const actualResp = await this.rpc({ type: 'get_state' });
+    if (actualResp?.success === true && this.publishNativeModelState(actualResp.data)) return;
+    const detail = actualResp?.error ?? 'Pi get_state did not return a valid model selection.';
+    throw new Error(`Pi model state is uncertain; prompt delivery is blocked: ${detail}`);
+  }
+
+  /** A thinking-level rejection happens after Pi has already accepted set_model. Restore both
+   *  pieces of the previous native selection. If either rollback command is rejected/ambiguous,
+   *  read Pi's actual state and advertise that instead of guessing which mutation took effect. */
+  private async restoreNativeModelState(previousState: any): Promise<void> {
+    const previousModel = piCurrentModelFromNative(previousState?.model, previousState?.thinkingLevel);
+    if (!previousModel) throw new Error('Pi model rollback has no valid previous model.');
+    const modelResp = await this.rpc({
+      type: 'set_model',
+      provider: previousModel.providerID,
+      modelId: previousModel.modelID,
+    });
+    const previousEffort = normalizePiThinkingLevel(previousState?.thinkingLevel ?? previousModel.reasoningEffort);
+    if (!previousEffort) throw new Error('Pi model rollback has no valid previous thinking level.');
+    const effortResp = await this.rpc({ type: 'set_thinking_level', level: previousEffort });
+    if (modelResp?.success === true && effortResp?.success === true) {
+      this.publishNativeModelState(previousState);
+      return;
+    }
+
+    this.modelStateUncertain = true;
+    const actualResp = await this.rpc({ type: 'get_state' });
+    if (actualResp?.success === true && this.publishNativeModelState(actualResp.data)) return;
+    throw new Error(actualResp?.error ?? 'Pi get_state failed after model rollback failed.');
+  }
+
   private async applyModelOverride(model: PromptInput['model'] | undefined): Promise<void> {
     if (!model?.modelID) return;
-    const modelResp = await this.rpc({ type: 'set_model', provider: model.providerID, modelId: model.modelID });
     const effort = normalizePiThinkingLevel(model.reasoningEffort);
-    if (effort) await this.rpc({ type: 'set_thinking_level', level: effort });
+    // Snapshot native state, not merely `info`, because set_model and set_thinking_level are two
+    // separate mutations and the second can fail after the first has already taken effect.
+    const previousResp = await this.rpc({ type: 'get_state' });
+    const previousModel = piCurrentModelFromNative(
+      previousResp?.data?.model,
+      previousResp?.data?.thinkingLevel,
+    );
+    if (previousResp?.success !== true || !previousModel) {
+      throw new Error(previousResp?.error ?? 'Pi get_state failed before model override.');
+    }
+    if (
+      effort
+      && !normalizePiThinkingLevel(previousResp.data?.thinkingLevel ?? previousModel.reasoningEffort)
+    ) {
+      throw new Error('Pi get_state returned no rollback-safe thinking level.');
+    }
+    const modelResp = await this.rpc({ type: 'set_model', provider: model.providerID, modelId: model.modelID });
+    if (modelResp?.success !== true) {
+      throw new Error(modelResp?.error ?? 'Pi set_model failed.');
+    }
+    if (effort) {
+      const effortResp = await this.rpc({ type: 'set_thinking_level', level: effort });
+      if (effortResp?.success !== true) {
+        const failure = effortResp?.error ?? 'Pi set_thinking_level failed.';
+        // Native Pi may already be on the requested model. Block concurrent/later delivery until
+        // rollback or reconciliation below establishes and publishes one authoritative selection.
+        this.modelStateUncertain = true;
+        try {
+          await this.restoreNativeModelState(previousResp.data);
+        } catch (rollbackError) {
+          const rollbackDetail = rollbackError instanceof Error
+            ? rollbackError.message
+            : String(rollbackError);
+          throw new Error(`${failure} ${rollbackDetail}`);
+        }
+        throw new Error(failure);
+      }
+    }
+    // Publish the requested selection only after every required Pi mutation is acknowledged.
+    // A partial/failed switch must neither masquerade as active nor allow its prompt to run.
     this.info.currentModel = piCurrentModelFromNative(modelResp?.data, effort) ?? {
       providerID: model.providerID,
       modelID: model.modelID,
@@ -1248,7 +1509,19 @@ class PiConnection implements SessionConnection {
     };
   }
 
+  private serializePromptDelivery(operation: () => Promise<void>): Promise<void> {
+    const result = this.promptDeliveryTail.then(operation);
+    // Keep the tail fulfilled even when one prompt is rejected, or every later prompt would inherit
+    // the rejection without entering its own critical section.
+    this.promptDeliveryTail = result.catch(() => {});
+    return result;
+  }
+
   async sendPrompt(input: PromptInput): Promise<void> {
+    return this.serializePromptDelivery(() => this.sendPromptCritical(input));
+  }
+
+  private async sendPromptCritical(input: PromptInput): Promise<void> {
     let text = input.text;
     // Attachments: write each to the workspace inbox and reference them by ABSOLUTE path in THIS
     // turn (multi-file + file+prompt) — the same universal path as OpenCode.
@@ -1262,6 +1535,9 @@ class PiConnection implements SessionConnection {
     }
     // Ignore a truly empty prompt (no text, no images, no files) — it spawns a wasted no-op turn.
     if (!text.trim() && !(input.images?.length)) return;
+    // A previous partial model switch may have left native Pi on an unknown selection. Reconcile
+    // before creating the optimistic bubble; if state is still unavailable, this prompt is refused.
+    await this.ensureNativeModelStateKnown();
     // Pi (unlike OpenCode) emits NO event echoing the user's own prompt, so the app would never
     // show the message you just sent until a reattach reloads history. Echo it optimistically so
     // it renders immediately (and so the queued-bubble reconcile in the app has something to adopt).
@@ -1273,15 +1549,28 @@ class PiConnection implements SessionConnection {
     const sentAt = Date.now();
     const userKey = `u:sent:${++this.userSeq}`;
     this.lastUserMessageKey = userKey;
+    // Consumed FIFO by the user message_start this prompt produces — queued steers are
+    // delivered in send order, and each turn's summary must link to ITS echo bubble.
+    this.pendingUserTurns.push(userKey);
     this.emit({ type: 'user-message', text, key: userKey, turnId: userKey, sentAt, ...(input.clientMessageId ? { clientKey: input.clientMessageId } : {}) });
-    // Per-prompt model override: Pi switches the active model with set_model before the turn runs.
-    await this.applyModelOverride(input.model);
+    // Per-prompt model override happens before prompt delivery. If it fails, this optimistic key
+    // has no future message_start and must leave the FIFO now or it will be assigned to the next
+    // successful prompt's summary.
+    try {
+      await this.applyModelOverride(input.model);
+    } catch (error) {
+      this.removePendingUserTurn(userKey);
+      throw error;
+    }
     const images = (input.images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType }));
     const cmd: Record<string, unknown> = { type: 'prompt', message: text };
     if (images.length) cmd.images = images;
     if (this.streaming) cmd.streamingBehavior = 'steer';
     const resp = await this.rpc(cmd);
     if (resp && resp.success === false && !resp.timeout) {
+      // An explicit rejection proves Pi did not accept this prompt. A timeout is deliberately
+      // different: delivery is ambiguous, so retain the key for a possible later message_start.
+      this.removePendingUserTurn(userKey);
       throw new Error(resp.error ?? 'pi prompt rejected');
     }
   }
@@ -1430,6 +1719,10 @@ class PiObserveConnection implements SessionConnection {
   private lineIndex = 0;
   private tailBuffer = '';
   private primed = false;
+  /** Open-turn evidence threaded across tail windows, so a turn whose prompt
+   *  arrived in one read and whose final entry arrives in a later one closes
+   *  with the SAME summary a whole-file reload computes. */
+  private turnCarry: PiJsonlTurnCarry = {};
 
   constructor(
     private readonly sessionPath: string,
@@ -1458,8 +1751,9 @@ class PiObserveConnection implements SessionConnection {
     this.offset = Buffer.byteLength(raw);
     this.lineIndex = countJsonlLines(raw);
     this.primed = true;
+    this.turnCarry = {};
     this.startWatch();
-    return mapPiJsonlText(raw, 0);
+    return mapPiJsonlLines(raw.split('\n'), 0, true, this.turnCarry);
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
@@ -1487,6 +1781,7 @@ class PiObserveConnection implements SessionConnection {
       this.offset = 0;
       this.tailBuffer = '';
       this.lineIndex = 0;
+      this.turnCarry = {};
       this.emit({ type: 'history-reset' });
     }
     if (buf.length <= this.offset) return;
@@ -1496,7 +1791,7 @@ class PiObserveConnection implements SessionConnection {
     const lines = this.tailBuffer.split('\n');
     this.tailBuffer = lines.pop() ?? '';
     if (!lines.length) return;
-    const messages = mapPiJsonlLines(lines, this.lineIndex);
+    const messages = mapPiJsonlLines(lines, this.lineIndex, false, this.turnCarry);
     this.lineIndex += lines.length;
     for (const m of messages) this.emit(m);
   }
@@ -1576,8 +1871,51 @@ export function mapPiJsonlText(raw: string, firstIndex = 0): AgentMessage[] {
   return mapPiJsonlLines(raw.split('\n'), firstIndex, true);
 }
 
-function mapPiJsonlLines(lines: string[], firstIndex = 0, includeTotals = false): AgentMessage[] {
-  const entries: { message: any; index: number; keyBase: string; timestamp?: number }[] = [];
+/**
+ * The turn a mapped window left OPEN, carried into the next window.
+ *
+ * The observe tail maps the session file in arbitrary append chunks. A turn's
+ * evidence routinely spans chunks — the prompt arrives in one read, the final
+ * assistant entry in a later one — and a stateless mapper could then never
+ * compute the same run summary a whole-file read does. The connection threads
+ * this accumulator through consecutive windows, so a turn closed by a later
+ * chunk carries the exact start evidence its opening chunk recorded, and the
+ * live view converges with a reload instead of trailing it.
+ */
+export interface PiJsonlTurnCarry {
+  open?: PiOpenTurn;
+  /** User-turn ordinal for the next prompt in a later append window. This makes an incremental
+   *  observe tail mint the same summary identity as a fresh whole-file reload. */
+  nextUserOrdinal?: number;
+}
+
+type PiOpenTurn = {
+  /** Reload-stable summary identity. Pi's live user events expose no JSONL entry id, so all three
+   *  paths use the user's durable transcript ordinal instead (`u0`, `u1`, ...). */
+  summaryAnchor?: string;
+  /** Opening durable user entry key — links the summary to the reloaded user bubble. */
+  userKey?: string;
+  /** The opening prompt's own timestamp: the turn's authoritative start. */
+  startedAt?: number;
+  /** Newest assistant entry seen for the turn, with its completion evidence. */
+  lastAssistant?: {
+    keyBase: string;
+    stopReason?: string;
+    errored: boolean;
+    /** Entry write time — present only when the source records it (JSONL). */
+    completedAt?: number;
+    textKey?: string;
+  };
+  tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
+};
+
+function mapPiJsonlLines(
+  lines: string[],
+  firstIndex = 0,
+  includeTotals = false,
+  carry?: PiJsonlTurnCarry,
+): AgentMessage[] {
+  const entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[] = [];
   lines.forEach((line, i) => {
     if (!line.trim()) return;
     let obj: any;
@@ -1590,7 +1928,13 @@ function mapPiJsonlLines(lines: string[], firstIndex = 0, includeTotals = false)
     if (!message) return;
     const index = firstIndex + i;
     const keyBase = obj.id != null ? String(obj.id) : message.id != null ? String(message.id) : `h${index}`;
-    entries.push({ message, index, keyBase, timestamp: nativeTimeMs(obj.timestamp) ?? nativeTimeMs(message.timestamp) });
+    entries.push({
+      message,
+      index,
+      keyBase,
+      entryAt: nativeTimeMs(obj.timestamp),
+      messageAt: nativeTimeMs(message.timestamp),
+    });
   });
   const argsByCallId = new Map<string, any>();
   for (const e of entries) {
@@ -1599,43 +1943,153 @@ function mapPiJsonlLines(lines: string[], firstIndex = 0, includeTotals = false)
       for (const c of m.content) if (c?.type === 'toolCall' && c.id != null) argsByCallId.set(String(c.id), c.arguments);
     }
   }
-  return mapPiMessages(entries, argsByCallId, includeTotals);
+  return mapPiMessages(entries, argsByCallId, includeTotals, carry);
 }
 
+/** Pi's terminal stop reasons. `toolUse` means the run continues; absence proves nothing. */
+function piTerminalStopReason(stopReason: unknown): 'done' | 'cancelled' | 'error' | undefined {
+  if (stopReason === 'stop') return 'done';
+  if (stopReason === 'aborted') return 'cancelled';
+  if (stopReason === 'error') return 'error';
+  return undefined;
+}
+
+function accumulatePiUsage(
+  into: { tokens?: PiOpenTurn['tokens'] },
+  usage: any,
+): void {
+  const tokens = piUsageTokens(usage);
+  if (!tokens) return;
+  const sum = into.tokens ?? {};
+  for (const field of ['input', 'output', 'cacheRead', 'cacheWrite', 'cost'] as const) {
+    const value = tokens[field];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      sum[field] = (sum[field] ?? 0) + value;
+    }
+  }
+  into.tokens = sum;
+}
+
+/**
+ * One run summary per USER TURN, from evidence only.
+ *
+ * The retired per-assistant-entry summaries fabricated both halves of the
+ * footer: every entry present in a snapshot was stamped `done` — a reload
+ * mid-turn showed a completed "Ran for …" for a run still going — and its
+ * duration was inferred from the ADJACENT user message's timestamp against the
+ * entry's own, which measures neither the run nor the message (an assistant
+ * entry's embedded timestamp is its request-creation time and routinely EQUALS
+ * the preceding entry's). The rules here:
+ *
+ *  - `startedAt` is the opening prompt entry's own timestamp — the durable
+ *    record of the same instant the live `turn_start`/`agent_start` events
+ *    stamp, so live and reload agree.
+ *  - `completedAt` is the final assistant ENTRY's write time. Only the JSONL
+ *    entry envelope records it; a source without it (RPC `get_messages`)
+ *    yields a summary with no completion clock and no duration, never an
+ *    inferred one.
+ *  - A turn is CLOSED only with evidence: a terminal stopReason
+ *    (`stop`/`aborted`/`error`), or a later user entry proving the run ended.
+ *    Anything else — a trailing `toolUse`, a bare prompt, a window that ends
+ *    mid-run — stays `running`, which the client renders without a footer.
+ *  - Missing or contradictory clocks omit the duration rather than guess.
+ */
 function mapPiMessages(
-  entries: { message: any; index: number; keyBase: string; timestamp?: number }[],
+  entries: { message: any; index: number; keyBase: string; entryAt?: number; messageAt?: number }[],
   argsByCallId: Map<string, any>,
   includeTotals: boolean,
+  carry?: PiJsonlTurnCarry,
 ): AgentMessage[] {
   const out: AgentMessage[] = [];
-  let lastUserKey: string | undefined;
-  let lastUserAt: number | undefined;
   const summaries: AgentMessage[] = [];
+  let open: PiOpenTurn | undefined = carry?.open;
+  let nextUserOrdinal = carry?.nextUserOrdinal ?? 0;
+
+  const summarize = (turn: PiOpenTurn, closed: boolean): AgentMessage | undefined => {
+    const last = turn.lastAssistant;
+    if (!turn.userKey && !last) return undefined;
+    // A prompt the agent never answered before the next one carries no run
+    // evidence at all — summarizing it as completed would mint one hollow
+    // "done" footer per prompt. Only the trailing OPEN turn may stand on the
+    // prompt alone (as `running`, which renders no footer).
+    if (closed && !last) return undefined;
+    const anchor = turn.summaryAnchor ?? turn.userKey ?? last!.keyBase;
+    const terminal = last ? piTerminalStopReason(last.stopReason) : undefined;
+    const status = !closed
+      ? 'running'
+      : last?.errored
+        ? 'error'
+        : (terminal ?? 'done');
+    const startedAt = turn.startedAt;
+    const completedAt = closed ? last?.completedAt : undefined;
+    const totalRuntimeMs = closed
+      && startedAt != null
+      && completedAt != null
+      && completedAt >= startedAt
+      ? completedAt - startedAt
+      : undefined;
+    return {
+      type: 'run-summary',
+      key: `pi:run:${anchor}`,
+      turnId: anchor,
+      userMessageKey: turn.userKey,
+      assistantMessageKey: last?.textKey,
+      status,
+      ...(startedAt != null ? { startedAt } : {}),
+      ...(completedAt != null ? { completedAt } : {}),
+      ...(totalRuntimeMs != null ? { totalRuntimeMs } : {}),
+      ...(turn.tokens ? { tokens: turn.tokens } : {}),
+      source: 'pi-jsonl',
+    };
+  };
+
+  const close = (turn: PiOpenTurn | undefined, closed: boolean): void => {
+    if (!turn) return;
+    const summary = summarize(turn, closed);
+    if (!summary) return;
+    out.push(summary);
+    summaries.push(summary);
+  };
+
   for (const e of entries) {
-    out.push(...mapPiMessage(e.message, e.index, argsByCallId, e.keyBase, e.timestamp));
+    out.push(...mapPiMessage(e.message, e.index, argsByCallId, e.keyBase, e.entryAt ?? e.messageAt));
     if (e.message?.role === 'user') {
-      lastUserKey = e.keyBase;
-      lastUserAt = nativeTimeMs(e.message.timestamp) ?? e.timestamp ?? lastUserAt;
-    } else if (e.message?.role === 'assistant') {
-      const startedAt = lastUserAt ?? nativeTimeMs(e.message.timestamp);
-      const completedAt = e.timestamp ?? nativeTimeMs(e.message.timestamp);
-      const textKey = firstPiAssistantTextKey(e.message, e.keyBase);
-      const summary: AgentMessage = {
-        type: 'run-summary',
-        key: `pi:run:${e.keyBase}`,
-        turnId: e.keyBase,
-        userMessageKey: lastUserKey,
-        assistantMessageKey: textKey,
-        status: e.message.error ? 'error' : 'done',
-        startedAt,
-        completedAt,
-        totalRuntimeMs: startedAt != null && completedAt != null && completedAt >= startedAt ? completedAt - startedAt : undefined,
-        tokens: piUsageTokens(e.message.usage),
-        source: 'pi-jsonl',
+      // A later prompt proves the previous run ended even without a terminal
+      // stopReason (an abort can leave none behind).
+      close(open, true);
+      open = {
+        summaryAnchor: `u${nextUserOrdinal++}`,
+        userKey: e.keyBase,
+        startedAt: e.messageAt ?? e.entryAt,
       };
-      out.push(summary);
-      summaries.push(summary);
+    } else if (e.message?.role === 'assistant') {
+      open ??= {};
+      open.lastAssistant = {
+        keyBase: e.keyBase,
+        stopReason: typeof e.message.stopReason === 'string' ? e.message.stopReason : undefined,
+        errored: !!e.message.error,
+        completedAt: e.entryAt,
+        textKey: firstPiAssistantTextKey(e.message, e.keyBase),
+      };
+      accumulatePiUsage(open, e.message.usage);
+      // Terminal evidence closes the turn immediately; the next user entry
+      // opens its own.
+      const terminal = piTerminalStopReason(open.lastAssistant.stopReason) !== undefined
+        || open.lastAssistant.errored;
+      if (terminal) {
+        close(open, true);
+        open = undefined;
+      }
     }
+  }
+  if (carry) {
+    // The window ended mid-turn: hand the open evidence to the next window and
+    // report the turn as running, so nothing fabricates a completion.
+    carry.open = open;
+    carry.nextUserOrdinal = nextUserOrdinal;
+    close(open, false);
+  } else {
+    close(open, false);
   }
   const totals = includeTotals ? runtimeTotalsFromRunSummaries(summaries, 'pi') : undefined;
   if (totals) out.push(totals);
@@ -1646,6 +2100,22 @@ function countJsonlLines(raw: string): number {
   if (!raw) return 0;
   const parts = raw.split('\n');
   return raw.endsWith('\n') ? parts.length - 1 : parts.length;
+}
+
+/** Count durable Pi user entries without trusting line count: session/model/tool rows share the
+ *  file, while summary identity advances only for user turns. */
+function countPiJsonlUserMessages(raw: string): number {
+  let count = 0;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type === 'message' && entry.message?.role === 'user') count += 1;
+    } catch {
+      // A torn/malformed row is not a durable user turn; the next start/reload applies the same rule.
+    }
+  }
+  return count;
 }
 
 function nativeTimeMs(value: unknown): number | undefined {
@@ -1769,8 +2239,8 @@ function piBridgeExtensionInstalled(): boolean {
 }
 
 // True-sync on by default (issues-part2): install the embedded bridge extension when the target is absent.
-// Exact hash matches are idempotent. A differing legacy-marker or unrelated file is preserved until the
-// transactional setup flow obtains confirmation; marker-only evidence never authorizes an automatic overwrite.
+// Exact current content is idempotent. Exact known legacy or unrelated content is preserved until the
+// transactional setup flow obtains confirmation; marker-only evidence never authorizes an overwrite.
 // Runs once per broker lifetime; COSYNCING_PI_BRIDGE_AUTOINSTALL=0 opts out.
 let _piBridgeEnsured = false;
 function ensurePiBridgeExtension(): void {

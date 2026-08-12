@@ -1856,6 +1856,155 @@ function check(name: string, ok: boolean, detail = ''): void {
   );
 }
 
+// ── 1k. Codex 0.146 assistant compatibility: new-only, old-only, dual ─────────────
+// Codex 0.146 writes item_completed + response_item/message and may omit the legacy
+// event_msg/agent_message entirely. These fixtures copy only that public record shape; no path or
+// text from the maintainer's recorded sessions enters the repository.
+await (async () => {
+  type AssistantEmission = 'new-only' | 'old-only' | 'dual';
+  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+  const assistantRows = (
+    emission: AssistantEmission,
+    id: string,
+    text: string,
+    phase: 'commentary' | 'final_answer',
+  ): any[] => {
+    const legacy = {
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: text, phase },
+    };
+    const response = {
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'assistant',
+        id,
+        phase,
+        content: [{ type: 'output_text', text }],
+      },
+    };
+    switch (emission) {
+      case 'new-only':
+        return [
+          { type: 'event_msg', payload: { type: 'item_completed' } },
+          response,
+        ];
+      case 'old-only':
+        return [legacy];
+      case 'dual':
+        return [legacy, response];
+    }
+  };
+  const transcript = (messages: any[]) => messages.filter((message) =>
+    message.type === 'model-output'
+      || message.type === 'tool-call'
+      || message.type === 'tool-result');
+  const signature = (messages: any[]) => transcript(messages).map((message) =>
+    message.type === 'model-output'
+      ? `${message.type}:${message.text}`
+      : `${message.type}:${message.callId}`);
+
+  for (const emission of ['new-only', 'old-only', 'dual'] as const) {
+    const dir = join(
+      '/tmp',
+      `cosyncing-codex-0146-${emission}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    mkdirSync(dir, { recursive: true });
+    const path = join(
+      dir,
+      'rollout-2026-08-10T00-00-00-00000000-0000-4000-8000-000000000146.jsonl',
+    );
+    const coldRows = [
+      { type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000146', cwd: dir } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: `cold-${emission}` } },
+      ...assistantRows(emission, `msg_cold_${emission}`, 'Cold answer.', 'commentary'),
+      { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: `call_cold_${emission}`, arguments: '{}' } },
+      { type: 'response_item', payload: { type: 'function_call_output', call_id: `call_cold_${emission}`, output: 'ok' } },
+      ...assistantRows(emission, `msg_cold_final_${emission}`, 'Cold final.', 'final_answer'),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: `cold-${emission}` } },
+    ];
+    writeFileSync(path, coldRows.map(line).join(''));
+
+    const id = Buffer.from(path, 'utf8').toString('base64url');
+    const conn = await new CodexAdapter().attach(id, 'observe');
+    const liveMessages: any[] = [];
+    const unsubscribe = conn.subscribe((message: any) => liveMessages.push(message));
+    try {
+      const first = await conn.getHistory() as any[];
+      const coldSignature = signature(first);
+      check(
+        `Codex 0.146 ${emission} cold history keeps assistant text and tools in order`,
+        JSON.stringify(coldSignature) === JSON.stringify([
+          'model-output:Cold answer.',
+          `tool-call:call_cold_${emission}`,
+          `tool-result:call_cold_${emission}`,
+          'model-output:Cold final.',
+        ]),
+        JSON.stringify(coldSignature),
+      );
+      const coldAnswers = first.filter((message) => message.type === 'model-output');
+      check(
+        `Codex 0.146 ${emission} cold history emits each assistant item exactly once`,
+        coldAnswers.length === 2 && new Set(coldAnswers.map((message) => message.key)).size === 2,
+        JSON.stringify(coldAnswers.map((message) => message.key)),
+      );
+      const repeated = (await conn.getHistory() as any[])
+        .filter((message) => message.type === 'model-output')
+        .map((message) => message.key);
+      check(
+        `Codex 0.146 ${emission} cold replay keeps stable assistant keys`,
+        JSON.stringify(repeated) === JSON.stringify(coldAnswers.map((message) => message.key)),
+        JSON.stringify(repeated),
+      );
+
+      appendFileSync(
+        path,
+        [
+          { type: 'event_msg', payload: { type: 'task_started', turn_id: `live-${emission}` } },
+          ...assistantRows(emission, `msg_live_${emission}`, 'Live answer.', 'commentary'),
+          { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: `call_live_${emission}`, arguments: '{}' } },
+          { type: 'response_item', payload: { type: 'function_call_output', call_id: `call_live_${emission}`, output: 'ok' } },
+          ...assistantRows(emission, `msg_live_final_${emission}`, 'Live final.', 'final_answer'),
+          { type: 'event_msg', payload: { type: 'task_complete', turn_id: `live-${emission}` } },
+        ].map(line).join(''),
+      );
+      const deadline = Date.now() + 4_000;
+      while (Date.now() < deadline && transcript(liveMessages).length < 4) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const liveSignature = signature(liveMessages);
+      check(
+        `Codex 0.146 ${emission} live follow keeps assistant text and tools in order`,
+        JSON.stringify(liveSignature) === JSON.stringify([
+          'model-output:Live answer.',
+          `tool-call:call_live_${emission}`,
+          `tool-result:call_live_${emission}`,
+          'model-output:Live final.',
+        ]),
+        JSON.stringify(liveSignature),
+      );
+      const liveAnswers = liveMessages.filter((message) => message.type === 'model-output');
+      check(
+        `Codex 0.146 ${emission} live follow emits each assistant item exactly once`,
+        liveAnswers.length === 2 && new Set(liveAnswers.map((message) => message.key)).size === 2,
+        JSON.stringify(liveAnswers.map((message) => message.key)),
+      );
+      const replay = (await conn.getHistory() as any[])
+        .filter((message) => message.type === 'model-output');
+      check(
+        `Codex 0.146 ${emission} live and replay assistant keys agree`,
+        JSON.stringify(replay.slice(-2).map((message) => message.key))
+          === JSON.stringify(liveAnswers.map((message) => message.key)),
+        `history=${JSON.stringify(replay.slice(-2).map((message) => message.key))} live=${JSON.stringify(liveAnswers.map((message) => message.key))}`,
+      );
+    } finally {
+      unsubscribe();
+      await conn.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+})();
+
 // ── 1b. live tail identity (CR4): the tail must decide identity exactly as a whole-file map does ──
 // The native id lives on the record AFTER the assistant event, which a tail has not read yet when it
 // reaches the event. Emitting immediately would key the same line differently here than getHistory()

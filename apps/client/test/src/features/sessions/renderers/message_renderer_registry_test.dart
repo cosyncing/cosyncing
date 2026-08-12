@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/soft_minimalist_theme.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/model/tool_display_mode.dart';
@@ -54,6 +55,57 @@ void main() {
       expect(find.textContaining('fallback-only'), findsAtLeastNWidgets(1));
     });
 
+    testWidgets('error boxes show payload without generic filler', (
+      tester,
+    ) async {
+      await _pumpRenderer(
+        tester,
+        const AgentMessage(
+          type: AgentMessageType.error,
+          raw: {
+            'type': 'error',
+            'code': 'E_WRITE',
+            'message': 'Write failed',
+          },
+        ),
+      );
+
+      expect(find.byType(TranscriptBox), findsOneWidget);
+      expect(find.text('code: E_WRITE'), findsOneWidget);
+      expect(find.text('message: Write failed'), findsOneWidget);
+      expect(find.text('No further detail was provided.'), findsNothing);
+      expect(
+        find.text(
+          'The session reported an error. Open details for technical '
+          'information.',
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('empty error boxes use the localized no-detail fallback', (
+      tester,
+    ) async {
+      await _pumpRenderer(
+        tester,
+        const AgentMessage(
+          type: AgentMessageType.error,
+          raw: {'type': 'error'},
+        ),
+      );
+      expect(find.text('No further detail was provided.'), findsOneWidget);
+
+      await _pumpRenderer(
+        tester,
+        const AgentMessage(
+          type: AgentMessageType.error,
+          raw: {'type': 'error'},
+        ),
+        locale: const Locale('zh'),
+      );
+      expect(find.text('未提供更多细节。'), findsOneWidget);
+    });
+
     testWidgets('renders token counts as a slim caption, not a card', (
       tester,
     ) async {
@@ -65,7 +117,9 @@ void main() {
         ),
       );
 
-      expect(find.textContaining('Tokens: 150 total'), findsOneWidget);
+      expect(find.textContaining('100 input'), findsOneWidget);
+      expect(find.textContaining('50 output'), findsOneWidget);
+      expect(find.textContaining('total'), findsNothing);
       expect(find.byType(Card), findsNothing);
       expect(find.byType(Divider), findsNothing);
       expect(find.text('Token count'), findsNothing);
@@ -891,7 +945,7 @@ List<_TypedMessageFixture> get _renderedFixtures => const [
       },
     ),
     expectedText: [
-      'Tokens: 180 total',
+      'Tokens: 100 input, 50 output, 25 cache read, 5 cache write',
       '100 input',
       r'cost $0.1234',
     ],
@@ -909,7 +963,7 @@ List<_TypedMessageFixture> get _renderedFixtures => const [
       },
     ),
     expectedText: [
-      'Run done - 2m 5s - Tokens: 150 total',
+      'Run done - 2m 5s - Tokens: 100 input, 50 output',
       'turn-1',
     ],
   ),
@@ -1071,6 +1125,7 @@ Future<void> _pumpRenderer(
   WidgetTester tester,
   AgentMessage message, {
   Brightness brightness = Brightness.light,
+  Locale? locale,
 }) async {
   final tokens = brightness == Brightness.light
       ? softMinimalistTheme.light
@@ -1080,6 +1135,7 @@ Future<void> _pumpRenderer(
       key: ValueKey(brightness),
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
+      locale: locale,
       theme: buildAppTheme(tokens, brightness).copyWith(
         splashFactory: InkRipple.splashFactory,
       ),

@@ -64,6 +64,10 @@ class CachedRosterPane extends ConsumerWidget {
           onRetry: onRetry,
         ),
         Expanded(
+          // No selection region, matching the authoritative pane: this is a
+          // navigation roster, and on web a `SelectionArea` carries a platform
+          // view whose placeholder can throw when a scrolling viewport
+          // collects it (flutter/flutter#122680, unfixed in our pinned 3.44.3).
           child: ListView(
             key: const Key('cached-roster-list'),
             padding: const EdgeInsets.symmetric(vertical: 4),
@@ -208,30 +212,47 @@ class _CachedProjectGroupState extends State<_CachedProjectGroup> {
                     ),
                     const SizedBox(width: 4),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            group.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              color: tokens.textPrimary,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          if (group.cwd != null)
-                            Text(
-                              group.cwd!,
-                              key: ValueKey('cached-project-cwd-${group.key}'),
+                      child: group.cwd == null
+                          ? Text(
+                              group.label,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: tokens.textSecondary,
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                color: tokens.textPrimary,
+                                fontWeight: FontWeight.w700,
                               ),
+                            )
+                          // No copy affordance, matching the authoritative
+                          // header: the path is non-selectable roster
+                          // metadata, not a command, and the button put an
+                          // interactive island inside an expand-only row.
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  group.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.labelLarge?.copyWith(
+                                    color: tokens.textPrimary,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                Text(
+                                  group.cwd!,
+                                  key: ValueKey(
+                                    'cached-project-cwd-${group.key}',
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: tokens.textSecondary,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ],
                             ),
-                        ],
-                      ),
                     ),
                     Text(
                       '${group.rootCount}',
@@ -324,6 +345,8 @@ class _CachedSessionRow extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(
+                // Plain text in a navigation row: no selection island, so the
+                // row's InkWell owns the tap outright.
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -355,10 +378,12 @@ class _CachedSessionRow extends StatelessWidget {
       ),
     );
 
-    if (lineageLabel == null) return content;
     return Semantics(
-      key: ValueKey('cached-session-lineage-${row.key}'),
+      key: lineageLabel == null
+          ? null
+          : ValueKey('cached-session-lineage-${row.key}'),
       label: lineageLabel,
+      button: true,
       child: content,
     );
   }

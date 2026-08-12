@@ -173,11 +173,31 @@ process.env.COSYNCING_HOME = pureCliHome;
       return { exitCode: 0 };
     },
   });
+  let migrationFlagsSeen = false;
+  const acceptedMigrations = await callCli([
+    'setup',
+    '--yes',
+    '--accept-managed-runtime-ownership',
+    '--replace-legacy-pi-bridge',
+    '--upgrade-legacy-agent-skill',
+  ], {
+    runSetup: async (options) => {
+      migrationFlagsSeen = options.replaceLegacyPiBridge && options.upgradeLegacyAgentSkill;
+      return { exitCode: 0 };
+    },
+  });
+  const migrationWithoutYes = await callCli(['setup', '--replace-legacy-pi-bridge'], {
+    runSetup: async () => ({ exitCode: 0 }),
+  });
   check('non-interactive setup requires explicit ownership acknowledgement and separate lingering consent',
     missingOwnershipAck.code === 2
       && missingOwnershipAck.stderr.includes('managed-runtime-ownership-acknowledgement-required')
       && acceptedSetup.code === 0 && setupCalls === 1
       && optedOutSetup.code === 0 && optOutSeen);
+  check('legacy setup migrations require --yes and carry separate explicit consent flags',
+    acceptedMigrations.code === 0 && migrationFlagsSeen
+      && migrationWithoutYes.code === 2
+      && migrationWithoutYes.stderr.includes('non-interactive setup flags require --yes'));
 
   const restartReport = {
     status: 'restart-required' as const,

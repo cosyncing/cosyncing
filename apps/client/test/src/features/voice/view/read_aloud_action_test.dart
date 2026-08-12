@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
+import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/features/voice/view/read_aloud_action.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_capabilities.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output.dart';
@@ -11,6 +12,8 @@ import 'package:cosyncing_client/src/platform/speech/speech_utterance.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../../../support/in_memory_read_aloud_preferences_store.dart';
 
 void main() {
   group('ReadAloudAction visibility', () {
@@ -301,6 +304,19 @@ void main() {
   });
 
   group('capability gating', () {
+    testWidgets('shows action while synthesis is unprobed', (tester) async {
+      final output = _FakeSpeechOutput()
+        ..capabilities = const SpeechOutputCapabilities.unprobed();
+      await _pumpAction(
+        tester,
+        message: _finalMessage(key: 'turn-1', id: 'msg-1'),
+        isNewestForIdentity: true,
+        output: output,
+      );
+
+      expect(find.byTooltip('Read aloud'), findsOneWidget);
+    });
+
     testWidgets('hides action when synthesis unavailable', (tester) async {
       final output = _FakeSpeechOutput()
         ..capabilities = SpeechOutputCapabilities.unavailable;
@@ -457,7 +473,12 @@ Future<void> _pumpAction(
   output ??= _FakeSpeechOutput();
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [speechOutputProvider.overrideWithValue(output)],
+      overrides: [
+        speechOutputProvider.overrideWithValue(output),
+        readAloudPreferencesStoreProvider.overrideWithValue(
+          InMemoryReadAloudPreferencesStore(),
+        ),
+      ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
@@ -487,6 +508,7 @@ class _FakeSpeechOutput implements SpeechOutput {
   );
 
   final List<(String, List<SpeechUtterance>)> speakCalls = [];
+  final List<double> rateCalls = [];
   int stopCalls = 0;
   int pauseCalls = 0;
   int resumeCalls = 0;
@@ -506,6 +528,9 @@ class _FakeSpeechOutput implements SpeechOutput {
     _current = SpeechOutputSpeaking(messageKey);
     _stateController.add(_current);
   }
+
+  @override
+  Future<void> setRate(double rate) async => rateCalls.add(rate);
 
   @override
   Future<void> stop() async {

@@ -18,7 +18,16 @@ final class FlutterSecureStorageBrokerCredentialBackend
     implements SecureBrokerCredentialBackend {
   /// Creates a backend with an optional [delegate].
   FlutterSecureStorageBrokerCredentialBackend({FlutterSecureStorage? delegate})
-    : _delegate = delegate ?? const FlutterSecureStorage();
+    : _delegate =
+          delegate ??
+          const FlutterSecureStorage(
+            // The public macOS client is intentionally distributed without an
+            // Apple development certificate. The data-protection keychain
+            // requires the signed Keychain Sharing capability, while the
+            // standard macOS login keychain remains OS-managed secure storage
+            // and works for this unsigned application.
+            mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+          );
 
   final FlutterSecureStorage _delegate;
 

@@ -175,12 +175,8 @@ void main() {
           isTrue,
         );
         expect(
-          tester
-              .widget<IconButton>(
-                find.byKey(const Key('session-detail-send-button')),
-              )
-              .onPressed,
-          isNull,
+          find.byKey(const Key('session-detail-send-button')),
+          findsNothing,
         );
         expect(
           tester
@@ -245,12 +241,8 @@ void main() {
           isTrue,
         );
         expect(
-          tester
-              .widget<IconButton>(
-                find.byKey(const Key('session-detail-send-button')),
-              )
-              .onPressed,
-          isNull,
+          find.byKey(const Key('session-detail-send-button')),
+          findsNothing,
         );
         expect(
           find.byKey(const Key('session-detail-bootstrap-blocking')),
@@ -374,7 +366,7 @@ void main() {
             failureSource: SessionDetailBootstrapFailureSource.attach,
           ),
           "Couldn't load this session",
-          "Couldn't connect to this session. The broker didn't respond.",
+          "Couldn't connect to this session. The server didn't respond.",
         ),
         (
           const Size(1280, 800),
@@ -409,6 +401,20 @@ void main() {
 
         expect(find.text(testCase.$4), findsOneWidget);
         expect(find.textContaining(testCase.$5), findsOneWidget);
+        expect(
+          find.ancestor(
+            of: find.byKey(const Key('session-detail-bootstrap-title')),
+            matching: find.byType(SelectionArea),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(
+            of: find.byKey(const Key('session-detail-bootstrap-message')),
+            matching: find.byType(SelectionArea),
+          ),
+          findsOneWidget,
+        );
         expect(
           find.text('raw transport exception must stay hidden'),
           findsNothing,
@@ -467,6 +473,15 @@ void main() {
       expect(controller.attachCallCount, 1);
 
       expect(find.text('Still visible after timeout'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.byKey(
+            const Key('session-detail-bootstrap-inline-message'),
+          ),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
       final retry = find.byKey(
         const Key('session-detail-bootstrap-inline-retry'),
       );

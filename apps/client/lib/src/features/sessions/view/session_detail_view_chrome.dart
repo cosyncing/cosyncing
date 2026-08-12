@@ -90,6 +90,7 @@ class _SessionTopStrip extends StatelessWidget {
     required this.onRename,
     required this.control,
     required this.freshness,
+    required this.telemetry,
     required this.badgeLabel,
     required this.onStatusTap,
     required this.menu,
@@ -116,6 +117,7 @@ class _SessionTopStrip extends StatelessWidget {
 
   /// The detail's one typed freshness state, consumed by the control pill.
   final SessionDetailFreshnessPresentation freshness;
+  final SessionTelemetry telemetry;
   final String? badgeLabel;
   final VoidCallback onStatusTap;
 
@@ -144,75 +146,149 @@ class _SessionTopStrip extends StatelessWidget {
     final back = onBack;
     final leadingBack = back ?? onPopRoute;
 
-    return SizedBox(
-      key: const Key('session-detail-top-strip'),
-      width: double.infinity,
-      height: kSessionStripHeight,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(leadingBack == null ? 16 : 4, 0, 4, 0),
-        child: Row(
-          children: [
-            if (back != null)
-              _StripBackButton(
-                key: const Key('session-detail-view-back'),
-                tooltip: l10n.sessionViewBackTooltip,
-                onPressed: back,
-              )
-            else if (onPopRoute != null)
-              // Material's own BackButton, not a look-alike: this leaves the
-              // route, and the compact layout hides the bottom nav on the
-              // promise that detail stays poppable.
-              BackButton(
-                key: const Key('session-detail-route-back'),
-                onPressed: onPopRoute,
-                style: _stripIconButtonStyle(context),
-              ),
-            Expanded(
-              child: viewLabel != null
-                  ? Text(
-                      viewLabel!,
-                      key: const Key('session-detail-view-title'),
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    )
-                  : _SessionTitleEditor(
-                      title: title,
-                      editableTitle: editableTitle,
-                      tool: tool,
-                      canRename: canRename,
-                      busy: renameBusy,
-                      onRename: onRename,
-                    ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final telemetryText = constraints.maxWidth >= 840
+            ? _formatSessionTopRowTelemetry(l10n, telemetry)
+            : null;
+        return SizedBox(
+          key: const Key('session-detail-top-strip'),
+          width: double.infinity,
+          height: kSessionStripHeight,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              leadingBack == null ? 16 : 4,
+              0,
+              4,
+              0,
             ),
-            const SizedBox(width: 8),
-            // This must not be a loose Flexible beside the expanded title:
-            // Flex would reserve half the remaining row for this intrinsically
-            // small pill and leave that unused allocation after the menu,
-            // stranding the right controls near the middle of a wide pane.
-            // The cap still makes long freshness copy ellipsize at large text
-            // scales while the title absorbs every other spare pixel.
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 192),
-              child: KeyedSubtree(
-                key: const Key('session-detail-bottom-status-button'),
-                child: _StatusChipButton(
-                  control: control,
-                  freshness: freshness,
-                  badgeLabel: badgeLabel,
-                  onTap: onStatusTap,
-                  restoringDrive: restoringDrive,
+            child: Row(
+              children: [
+                if (back != null)
+                  _StripBackButton(
+                    key: const Key('session-detail-view-back'),
+                    tooltip: l10n.sessionViewBackTooltip,
+                    onPressed: back,
+                  )
+                else if (onPopRoute != null)
+                  // Material's own BackButton, not a look-alike: this leaves
+                  // route, and the compact layout hides the bottom nav on the
+                  // promise that detail stays poppable.
+                  BackButton(
+                    key: const Key('session-detail-route-back'),
+                    onPressed: onPopRoute,
+                    style: _stripIconButtonStyle(context),
+                  ),
+                Expanded(
+                  child: viewLabel != null
+                      ? Text(
+                          viewLabel!,
+                          key: const Key('session-detail-view-title'),
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        )
+                      : _SessionTitleEditor(
+                          title: title,
+                          editableTitle: editableTitle,
+                          tool: tool,
+                          canRename: canRename,
+                          busy: renameBusy,
+                          onRename: onRename,
+                        ),
                 ),
-              ),
+                if (telemetryText != null) ...[
+                  const SizedBox(width: 8),
+                  // Non-flex, exactly like the status chip below and for the
+                  // same reason: a loose Flexible here shares the row's free
+                  // space 50/50 with the expanded title, and the unused half of
+                  // that share collapses AFTER the menu — stranding the whole
+                  // trailing cluster near the middle of a wide pane. A fixed
+                  // cap keeps giant counters ellipsizing while the title
+                  // absorbs every spare pixel and the cluster stays at the
+                  // trailing edge.
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: ExcludeSemantics(
+                      child: Text(
+                        telemetryText,
+                        key: const Key('session-detail-top-row-telemetry'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: context.tokens.textTertiary,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 8),
+                // This must not be a loose Flexible beside the expanded title:
+                // Flex would reserve half the remaining row for this
+                // intrinsically
+                // small pill and leave that unused allocation after the menu,
+                // stranding the right controls near the middle of a wide pane.
+                // The cap still makes long freshness copy ellipsize at large
+                // text
+                // scales while the title absorbs every other spare pixel.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 192),
+                  child: KeyedSubtree(
+                    key: const Key('session-detail-bottom-status-button'),
+                    child: _StatusChipButton(
+                      control: control,
+                      freshness: freshness,
+                      badgeLabel: badgeLabel,
+                      onTap: onStatusTap,
+                      restoringDrive: restoringDrive,
+                    ),
+                  ),
+                ),
+                menu,
+              ],
             ),
-            menu,
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
+}
+
+String? _formatSessionTopRowTelemetry(
+  AppLocalizations l10n,
+  SessionTelemetry telemetry,
+) {
+  final parts = <String>[
+    if (telemetry.inputTokens case final value?)
+      l10n.sessionTurnTokensInput(_formatCompactTelemetryCount(value)),
+    if (telemetry.outputTokens case final value?)
+      l10n.sessionTurnTokensOutput(_formatCompactTelemetryCount(value)),
+    if (telemetry.totalRuntimeMs case final value?)
+      [
+        l10n.sessionDetailTelemetryChipRuntime,
+        _formatCompactDuration(value),
+      ].join(' '),
+  ];
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
+String _formatCompactTelemetryCount(int value) {
+  if (value.abs() < 1000) return '$value';
+  if (value.abs() < 1000000) {
+    final compact = (value / 1000).toStringAsFixed(
+      value.abs() < 100000 ? 1 : 0,
+    );
+    return '${compact.replaceFirst(RegExp(r'\.0$'), '')}k';
+  }
+  if (value.abs() < 1000000000) {
+    final compact = (value / 1000000).toStringAsFixed(1);
+    return '${compact.replaceFirst(RegExp(r'\.0$'), '')}M';
+  }
+  final compact = (value / 1000000000).toStringAsFixed(1);
+  return '${compact.replaceFirst(RegExp(r'\.0$'), '')}B';
 }
 
 /// Shared sizing for the strip's icon buttons: a 32dp box holding a 16px glyph

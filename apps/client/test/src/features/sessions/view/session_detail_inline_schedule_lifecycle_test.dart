@@ -484,7 +484,7 @@ void main() {
           final text = tester.widget<Text>(errorFinder);
           expect(
             text.data,
-            "Couldn't update this scheduled message. The broker ran into a "
+            "Couldn't update this scheduled message. The server ran into a "
             'problem on its end. Try again in a moment.',
             reason:
                 'localized lead plus classified recovery advice, and no '

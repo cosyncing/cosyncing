@@ -24,6 +24,7 @@ import 'package:cosyncing_client/src/features/settings/view/broker_devices_setti
 import 'package:cosyncing_client/src/features/settings/view/general_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/notification_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
+import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/platform/update/desktop_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
@@ -32,6 +33,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/in_memory_read_aloud_preferences_store.dart';
 import '../../../../support/in_memory_session_display_preferences_store.dart';
 
 void main() {
@@ -102,6 +104,9 @@ void main() {
         desktopClientVersionProvider.overrideWithValue(clientVersion),
         sessionDisplayPreferencesStoreProvider.overrideWithValue(
           InMemorySessionDisplayPreferencesStore(),
+        ),
+        readAloudPreferencesStoreProvider.overrideWithValue(
+          InMemoryReadAloudPreferencesStore(),
         ),
       ];
 
@@ -193,8 +198,8 @@ void main() {
     }
 
     // Layer one is the whole point of the hierarchy: the hub lists categories
-    // and the one destructive action, and carries no controls of its own.
-    testWidgets('hub lists every category and the sign-out action', (
+    // and carries no controls of its own.
+    testWidgets('hub lists every category', (
       tester,
     ) async {
       await tester.pumpWidget(buildSubject());
@@ -203,7 +208,7 @@ void main() {
       for (final entry in const [
         ('settings-category-display', 'Display'),
         ('settings-category-notifications', 'Notifications'),
-        ('settings-category-broker', 'Broker & devices'),
+        ('settings-category-broker', 'Servers'),
         ('settings-category-agents', 'Agents & usage'),
         ('settings-category-general', 'General'),
       ]) {
@@ -211,10 +216,7 @@ void main() {
         expect(find.widgetWithText(ListTile, entry.$2), findsOneWidget);
       }
 
-      expect(find.byKey(const Key('settings-sign-out')), findsOneWidget);
-
-      // Sign out is an action, not a category: no chevron, and the categories
-      // are the only rows that lead anywhere.
+      expect(find.byKey(const Key('servers-remove-credential')), findsNothing);
       expect(find.byIcon(Icons.chevron_right), findsNWidgets(5));
 
       // Controls that moved to layer two must not linger on the hub.
@@ -236,8 +238,8 @@ void main() {
 
       expect(
         find.text(
-          'Connect to a broker first, then add a token for a remote '
-          'broker here.',
+          'Connect to a server first, then add a token for a remote '
+          'server here.',
         ),
         findsOneWidget,
       );
@@ -385,6 +387,13 @@ void main() {
         findsOneWidget,
       );
       expect(
+        find.ancestor(
+          of: find.textContaining('Running 0.144.1'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+      expect(
         find.byKey(const Key('settings-restart-runtime-codex')),
         findsOneWidget,
       );
@@ -502,13 +511,28 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Restart everything?'), findsOneWidget);
       expect(
-        find.textContaining('Codex, OpenCode, and the broker'),
+        find.textContaining('Codex, OpenCode, and the server'),
         findsOneWidget,
       );
 
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(managedRuntimeApi.restartAllCalls, 0);
+
+      await tester.tap(find.byKey(const Key('settings-restart-everything')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Restart everything'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(managedRuntimeApi.restartAllCalls, 1);
+      expect(
+        find.widgetWithText(SelectableText, 'scheduled'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('persists notification setting from the settings toggle', (
@@ -696,7 +720,7 @@ void main() {
         expect(
           find.text(
             'Client update recommended for Test workstation. Install the '
-            'latest signed app release to match this broker.',
+            'latest signed app release to match this server.',
           ),
           findsOneWidget,
         );
@@ -1124,6 +1148,8 @@ void main() {
         find.byKey(const Key('settings-broker-token-field')),
         token,
       );
+      await tester.ensureVisible(find.byKey(const Key('settings-save-token')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-save-token')));
       await tester.pumpAndSettle();
 
@@ -1172,6 +1198,8 @@ void main() {
       );
 
       hints = 0;
+      await tester.ensureVisible(find.byKey(const Key('settings-save-token')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-save-token')));
       await tester.pumpAndSettle();
 
@@ -1220,6 +1248,8 @@ void main() {
       );
       const field = Key('settings-broker-token-field');
       await tester.enterText(find.byKey(field), 'first-token');
+      await tester.ensureVisible(find.byKey(const Key('settings-save-token')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-save-token')));
       await tester.pump();
 
@@ -1276,6 +1306,8 @@ void main() {
         find.byKey(const Key('settings-broker-token-field')),
         'not-actually-saved',
       );
+      await tester.ensureVisible(find.byKey(const Key('settings-save-token')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-save-token')));
       await tester.pumpAndSettle();
 
@@ -1291,7 +1323,9 @@ void main() {
       );
     });
 
-    testWidgets('allows clearing a stored remote token', (tester) async {
+    testWidgets('outer Servers action removes a stored credential', (
+      tester,
+    ) async {
       const profileId = 'https://broker.example.com:9443';
       const token = 'stored-token';
       const credentialKey = 'broker-token:$profileId';
@@ -1319,17 +1353,41 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byKey(const Key('settings-clear-token')));
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('servers-remove-credential')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('servers-remove-credential')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Sign out'),
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(await store.readBrokerToken(credentialKey), isNull);
-      expect(find.text('Token removed.'), findsOneWidget);
+      expect(
+        find.text('Signed out. Server credentials were removed.'),
+        findsOneWidget,
+      );
+      expect(
+        find.widgetWithText(
+          SelectableText,
+          'Signed out. Server credentials were removed.',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('gate stays out of the way while connected', (tester) async {
       await tester.pumpWidget(
         buildSubject(home: const BrokerDevicesSettingsPage()),
       );
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView), const Offset(0, -500));
       await tester.pumpAndSettle();
 
       // A connected gate occupies no space and shows no recovery UI.
@@ -1342,7 +1400,7 @@ void main() {
         find.byKey(const Key('broker-gate-credential-missing')),
         findsNothing,
       );
-      expect(find.text('Broker Credentials'), findsOneWidget);
+      expect(find.text('Server Credentials'), findsOneWidget);
     });
 
     testWidgets('gate reports an offline broker without asking for a token', (
@@ -1397,18 +1455,23 @@ void main() {
       );
       await repository.save(profile);
 
-      await tester.pumpWidget(buildSubject(activeProfile: profile));
+      await tester.pumpWidget(
+        buildSubject(
+          home: const BrokerDevicesSettingsPage(),
+          activeProfile: profile,
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
-        find.byKey(const Key('settings-sign-out')),
+        find.byKey(const Key('servers-remove-credential')),
         300,
         scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const Key('settings-sign-out')));
+      await tester.tap(find.byKey(const Key('servers-remove-credential')));
       await tester.pumpAndSettle();
-      expect(find.text('Sign out of this broker?'), findsOneWidget);
+      expect(find.text('Sign out of this server?'), findsOneWidget);
 
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
@@ -1432,16 +1495,21 @@ void main() {
       );
       await repository.save(profile);
 
-      await tester.pumpWidget(buildSubject(activeProfile: profile));
+      await tester.pumpWidget(
+        buildSubject(
+          home: const BrokerDevicesSettingsPage(),
+          activeProfile: profile,
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
-        find.byKey(const Key('settings-sign-out')),
+        find.byKey(const Key('servers-remove-credential')),
         300,
         scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const Key('settings-sign-out')));
+      await tester.tap(find.byKey(const Key('servers-remove-credential')));
       await tester.pumpAndSettle();
       await tester.tap(
         find.descendant(

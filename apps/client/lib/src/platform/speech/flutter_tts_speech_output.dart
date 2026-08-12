@@ -26,25 +26,33 @@ import 'package:cosyncing_client/src/platform/speech/speech_utterance.dart';
 /// immediately so a disposed backend is never touched again. [speak] calls
 /// [initialize] automatically so direct callers need not initialize first.
 ///
-/// **Pre-playback stop:** when switching or starting a message, a
-/// [FlutterTtsBackend.stop] failure aborts the new queue and emits a sanitized
-/// [SpeechOutputError] scoped to the requested message identity - it never
-/// continues and risks overlapping speech.
+/// **Native stop boundary:** [FlutterTtsBackend.stop] is called only while a
+/// native speak is pending. First use and idle disposal never call stop, which
+/// avoids the Windows plugin's null `speakResult` fault.
 ///
 /// Governing doc: `docs/architecture/client-ui.md`
 /// (sections "Final-message read-aloud" and "Flutter Integration Direction").
 class FlutterTtsSpeechOutput implements SpeechOutput {
   /// Creates an adapter backed by a backend.
   ///
-  /// Call [initialize] after construction to probe capabilities and enable
-  /// await-speak-completion. Until initialization completes, capabilities
-  /// report [SpeechOutputCapabilities.unavailable]. [speak] also calls
-  /// [initialize] automatically.
-  FlutterTtsSpeechOutput(this._backend);
+  /// Tests may supply an already-created backend. Production uses
+  /// [FlutterTtsSpeechOutput.lazy] so mounting a session does not construct or
+  /// probe the native plugin.
+  FlutterTtsSpeechOutput(FlutterTtsBackend backend)
+    : _backend = backend,
+      _createBackend = null;
 
-  final FlutterTtsBackend _backend;
+  /// Creates an adapter whose backend is constructed only by [initialize],
+  /// normally reached from the first manual [speak].
+  FlutterTtsSpeechOutput.lazy(FlutterTtsBackend Function() createBackend)
+    : _backend = null,
+      _createBackend = createBackend;
 
-  SpeechOutputCapabilities _capabilities = SpeechOutputCapabilities.unavailable;
+  FlutterTtsBackend? _backend;
+  final FlutterTtsBackend Function()? _createBackend;
+
+  SpeechOutputCapabilities _capabilities =
+      const SpeechOutputCapabilities.unprobed();
   SpeechOutputState _current = const SpeechOutputIdle();
   StreamController<SpeechOutputState>? _stateController =
       StreamController<SpeechOutputState>.broadcast();
@@ -56,11 +64,15 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
   List<SpeechUtterance> _queue = const [];
   int _queueIndex = 0;
   String? _speakingKey;
+  double _rate = 1;
 
   /// Whether the error handler fired during a pending [speak].
   /// The raw plugin payload is never retained; a boolean marker is
   /// sufficient because all errors produce the same sanitized state.
   bool _pendingError = false;
+
+  /// Whether a backend `speak` future is currently unresolved.
+  bool _backendSpeakPending = false;
 
   /// Cached initialization future so [initialize] is idempotent.
   Future<void>? _initFuture;
@@ -93,11 +105,18 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
   }
 
   Future<void> _doInitialize() async {
+    FlutterTtsBackend backend;
     try {
-      await _backend.enableAwaitCompletion();
+      backend = _backend ??= _createBackend!();
     } on Object {
-      // Backend unavailable; capabilities stay unavailable.
-      _safeEmit(_current);
+      _markUnavailable();
+      return;
+    }
+    if (_disposed) return;
+    try {
+      await backend.enableAwaitCompletion();
+    } on Object {
+      _markUnavailable();
       return;
     }
     if (_disposed) return;
@@ -105,7 +124,7 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
     var voices = false;
 
     try {
-      final languages = await _backend.getLanguages();
+      final languages = await backend.getLanguages();
       if (_disposed) return;
       if (languages.isNotEmpty) {
         synthesis = true;
@@ -127,6 +146,12 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
     _safeEmit(_current);
   }
 
+  void _markUnavailable() {
+    if (_disposed) return;
+    _capabilities = SpeechOutputCapabilities.unavailable;
+    _safeEmit(_current);
+  }
+
   @override
   Future<void> speak({
     required String messageKey,
@@ -145,29 +170,49 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
       return;
     }
     if (_disposed) return;
-    // Honor capabilities: never invoke the backend if synthesis is unavailable.
+    // Honor the completed probe: never invoke synthesis if it is unavailable.
     if (!_capabilities.synthesis) return;
 
-    _speakToken++;
-    final token = _speakToken;
-    try {
-      await _backend.stop();
-    } on Object {
-      // Pre-playback stop failed: abort the new queue and emit a scoped
-      // error rather than risking overlapping speech.
+    final backend = _backend;
+    if (backend == null) return;
+
+    // A replacement stops only an actually pending native utterance. First
+    // use and replacement between chunks require no speculative native stop.
+    if (_backendSpeakPending) {
+      _speakToken++;
       _speakingKey = null;
       _queue = const [];
       _queueIndex = 0;
       _pendingError = false;
+      try {
+        await backend.stop();
+      } on Object {
+        _safeEmit(
+          SpeechOutputError(
+            reason: _sanitizeError('stop failed'),
+            messageKey: messageKey,
+          ),
+        );
+        return;
+      }
+      if (_disposed) return;
+    }
+
+    try {
+      await backend.setRate(_rate);
+    } on Object {
       _safeEmit(
         SpeechOutputError(
-          reason: _sanitizeError('stop failed'),
+          reason: _sanitizeError('rate failed'),
           messageKey: messageKey,
         ),
       );
       return;
     }
     if (_disposed) return;
+
+    _speakToken++;
+    final token = _speakToken;
     _queue = List<SpeechUtterance>.unmodifiable(utterances);
     _queueIndex = 0;
     _speakingKey = messageKey;
@@ -176,17 +221,39 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
     unawaited(_speakQueue(token));
   }
 
+  @override
+  Future<void> setRate(double rate) async {
+    if (_disposed || !rate.isFinite || rate <= 0) return;
+    _rate = rate;
+    // Store the preference without constructing or probing the backend. The
+    // first manual speak applies it after initialization.
+    final backend = _backend;
+    if (backend == null || !_capabilities.synthesis) return;
+    try {
+      await backend.setRate(rate);
+    } on Object {
+      // Keep the requested value for the next playback attempt, which reports
+      // a scoped sanitized error if the platform still rejects it. Settings
+      // never surface raw plugin failures.
+    }
+  }
+
   Future<void> _speakQueue(int token) async {
     while (token == _speakToken && _queueIndex < _queue.length && !_disposed) {
       _pendingError = false;
       _safeSetErrorHandler(token);
+      final backend = _backend;
+      if (backend == null) return;
+      _backendSpeakPending = true;
       try {
-        await _backend.speak(_queue[_queueIndex].text);
+        await backend.speak(_queue[_queueIndex].text);
       } on Object {
         if (token == _speakToken && !_disposed) {
           _handleError();
         }
         return;
+      } finally {
+        _backendSpeakPending = false;
       }
       if (token != _speakToken || _disposed) return;
       if (_pendingError) {
@@ -206,7 +273,7 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
   void _safeSetErrorHandler(int token) {
     if (_disposed) return;
     try {
-      _backend.setErrorHandler(
+      _backend?.setErrorHandler(
         (message) => _onErrorHandler(token, message),
       );
     } on Object {
@@ -248,8 +315,13 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
     _queue = const [];
     _queueIndex = 0;
     _pendingError = false;
+    final backend = _backend;
+    if (!_backendSpeakPending || backend == null) {
+      _safeEmit(const SpeechOutputIdle());
+      return;
+    }
     try {
-      await _backend.stop();
+      await backend.stop();
       _safeEmit(const SpeechOutputIdle());
     } on Object {
       // Stop failed: we cannot confirm silence. Emit an honest scoped error
@@ -283,13 +355,16 @@ class FlutterTtsSpeechOutput implements SpeechOutput {
     _queue = const [];
     _queueIndex = 0;
     _pendingError = false;
-    try {
-      await _backend.stop();
-    } on Object {
-      // Best-effort stop during disposal.
+    final backend = _backend;
+    if (_backendSpeakPending && backend != null) {
+      try {
+        await backend.stop();
+      } on Object {
+        // Best-effort stop only while native playback is pending.
+      }
     }
     try {
-      _backend.dispose();
+      backend?.dispose();
     } on Object {
       // Best-effort backend disposal.
     }

@@ -54,7 +54,25 @@ export default function (pi: ExtensionAPI) {
   // every reply's deltas collided on one key and the app merged them into a single bubble (later
   // turns vanished). See docs/project/implementation-status.md
   let turn = 0;
-  let currentRun: { key: string; turnId: string; userMessageKey?: string; startedAt?: number } | undefined;
+  /** The OPEN user turn — one summary per USER TURN, mirroring buildHistory (and the broker's
+   *  JSONL mapper): a user message_start closes the previous turn and opens its own, a terminal
+   *  stopReason closes at that message_end, agent_end closes whatever remains. One summary per
+   *  RUN diverged from every reload as soon as a run batched queued steer/follow-up turns. */
+  let currentRun:
+    | {
+        key: string;
+        turnId: string;
+        userMessageKey?: string;
+        startedAt?: number;
+        sawAssistantActivity?: boolean;
+        lastAssistant?: { stopReason?: string; errored: boolean; completedAt?: number };
+      }
+    | undefined;
+  /** When the current RUN began (agent_start). Only the FALLBACK turn anchor consumes it — the
+   *  authoritative anchor is the opening user message itself. */
+  let agentStartAt: number | undefined;
+  /** Usage summed across the OPEN TURN's message_ends, reported on that turn's summary. */
+  let currentRunTokens: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number } | undefined;
   let lastUserMessageKey: string | undefined;
   // Per-user-message key counter. Pi's UserMessage has NO id field (message_start emits a bare
   // Message), so we mint a stable `u<n>` key ourselves — without it the app can't dedupe a user
@@ -454,14 +472,92 @@ export default function (pi: ExtensionAPI) {
   // ── outbound relays ──
   // agent_start = once per RUN (status only). turn_start = once per LLM turn → advance the key
   // namespace here so each turn's deltas/final get a distinct key (the multi-turn-merge fix).
-  pi.on('agent_start', (_event: any, ctx: any) => { lastCtx = ctx; emit({ t: 'status', running: true }); });
-  pi.on('agent_end', (_event: any, ctx: any) => { lastCtx = ctx; toolArgs.clear(); emit({ t: 'status', running: false }); }); // drop args of any uncompleted tool call
+
+  /** Close the open USER TURN with buildHistory's exact rules — status from the last assistant's
+   *  terminal stopReason, completion only from message-end evidence (or the supplied run-end
+   *  clock), duration only when both clocks agree, and NO summary for a prompt the agent never
+   *  answered — so the live stream and the next backfill agree turn for turn, key for key. */
+  const closeLiveTurn = (fallbackCompletedAt?: number): void => {
+    const run = currentRun;
+    currentRun = undefined;
+    const tokens = currentRunTokens;
+    currentRunTokens = undefined;
+    if (!run) return;
+    let last = run.lastAssistant;
+    // Assistant streaming without a message_end (degraded stream) still earns the summary;
+    // a prompt with no assistant activity at all is suppressed, as buildHistory suppresses it.
+    if (!last && run.sawAssistantActivity) last = { errored: false, completedAt: undefined };
+    if (!last) return;
+    const terminal = last.stopReason === 'stop'
+      ? 'done'
+      : last.stopReason === 'aborted'
+        ? 'cancelled'
+        : last.stopReason === 'error'
+          ? 'error'
+          : undefined;
+    const completedAt = last.completedAt ?? fallbackCompletedAt;
+    const duration = run.startedAt != null && completedAt != null && completedAt >= run.startedAt
+      ? completedAt - run.startedAt
+      : undefined;
+    emit({
+      t: 'run-summary',
+      key: run.key,
+      turnId: run.turnId,
+      userMessageKey: run.userMessageKey,
+      status: last.errored ? 'error' : (terminal ?? 'done'),
+      ...(run.startedAt != null ? { startedAt: run.startedAt } : {}),
+      ...(completedAt != null ? { completedAt } : {}),
+      ...(duration != null ? { totalRuntimeMs: duration } : {}),
+      ...(tokens ? { tokens } : {}),
+      source: 'pi-bridge',
+    });
+  };
+
+  /** Pi normally emits turn_start BEFORE the user message_start. A fallback created at
+   *  turn_start therefore becomes an orphan as soon as the real user turn opens. Wait until the
+   *  first assistant event; only a degraded stream with no user event reaches this path. */
+  const ensureLiveTurn = (): void => {
+    if (currentRun) return;
+    const startedAt = agentStartAt ?? Date.now();
+    const fallbackTurn = `t${Math.max(turn, 1)}`;
+    currentRun = {
+      key: `pi:run:${fallbackTurn}`,
+      turnId: fallbackTurn,
+      userMessageKey: lastUserMessageKey,
+      startedAt,
+    };
+    emit({
+      t: 'run-summary',
+      key: currentRun.key,
+      turnId: currentRun.turnId,
+      userMessageKey: currentRun.userMessageKey,
+      startedAt,
+      status: 'running',
+      source: 'pi-bridge',
+    });
+  };
+
+  pi.on('agent_start', (event: any, ctx: any) => {
+    lastCtx = ctx;
+    // The run's start clock — consumed only by the FALLBACK turn anchor; the authoritative
+    // anchor is the opening user message itself (message_start below).
+    agentStartAt = timeMs(event?.timestamp) ?? Date.now();
+    emit({ t: 'status', running: true });
+  });
+  pi.on('agent_end', (event: any, ctx: any) => {
+    lastCtx = ctx;
+    toolArgs.clear(); // drop args of any uncompleted tool call
+    // Whatever turn is still open closes at the run's end clock — a stream with no terminal
+    // stopReason evidence (abort) or none of the message_* events at all (degraded).
+    closeLiveTurn(timeMs(event?.timestamp) ?? Date.now());
+    agentStartAt = undefined;
+    emit({ t: 'status', running: false });
+  });
   pi.on('turn_start', (event: any, ctx: any) => {
     lastCtx = ctx;
     turn++;
-    const startedAt = timeMs(event?.timestamp) ?? Date.now();
-    currentRun = { key: `pi:run:t${turn}`, turnId: `t${turn}`, userMessageKey: lastUserMessageKey, startedAt };
-    emit({ t: 'run-summary', ...currentRun, status: 'running', source: 'pi-bridge' });
+    // Do not open summary state here: Pi emits turn_start before the user message_start. A runtime
+    // that omits the user event falls back lazily at its first assistant event (ensureLiveTurn).
   });
 
   pi.on('message_start', (event: any, ctx: any) => {
@@ -474,17 +570,31 @@ export default function (pi: ExtensionAPI) {
     const text = contentText(m?.content);
     // Mint a stable per-message key (Pi gives none) so the broker/app dedupe this against the
     // in-window history copy and across reattaches — parity with OpenCode's keyed user-messages.
-    if (text) {
-      const key = `u${userKeySeq++}`;
-      lastUserMessageKey = key;
-      emit({ t: 'user', text, key, sentAt: timeMs(m.timestamp ?? event?.timestamp) ?? Date.now() });
-    }
+    // The ordinal advances for EVERY user message (buildHistory does the same), so live keys and
+    // the next backfill's keys stay in one space even across empty-content messages.
+    const key = `u${userKeySeq++}`;
+    lastUserMessageKey = key;
+    if (text) emit({ t: 'user', text, key, sentAt: timeMs(m.timestamp ?? event?.timestamp) ?? Date.now() });
+    // A user message ENTERING the conversation is the user-turn boundary, exactly as its entry
+    // is for buildHistory: it closes the previous turn and opens its own. One summary per RUN
+    // instead left a single row spanning every queued steer/follow-up turn, so summary count,
+    // keys, timing and token grouping all changed on the next backfill.
+    closeLiveTurn();
+    currentRun = {
+      key: `pi:run:${key}`,
+      turnId: key,
+      userMessageKey: key,
+      startedAt: timeMs(m?.timestamp ?? event?.timestamp) ?? Date.now(),
+    };
+    emit({ t: 'run-summary', key: currentRun.key, turnId: key, userMessageKey: key, startedAt: currentRun.startedAt, status: 'running', source: 'pi-bridge' });
   });
 
   pi.on('message_update', (event: any, ctx: any) => {
     lastCtx = ctx;
     const e = event?.assistantMessageEvent;
     if (!e) return;
+    ensureLiveTurn();
+    currentRun!.sawAssistantActivity = true;
     // Key by turn + content KIND (not the model-dependent contentIndex), so the final below always
     // shares the deltas' key and a reattach/history replay can't draw a second, misaligned bubble.
     if (e.type === 'text_delta') emit({ t: 'delta', kind: 'text', key: `t${turn}:t`, delta: e.delta });
@@ -495,26 +605,46 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     const m = event?.message;
     if (m?.role !== 'assistant') return;
+    ensureLiveTurn();
     // Finalized snapshots for history backfill, keyed identically to the live deltas (see above).
     const text = contentText(m?.content);
     if (text) emit({ t: 'final', kind: 'text', key: `t${turn}:t`, text });
     const think = thinkingText(m?.content);
     if (think) emit({ t: 'final', kind: 'thinking', key: `t${turn}:r`, text: think });
     const u = m?.usage;
-    const tokens = u ? { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost?.total } : undefined;
-    if (u) emit({ t: 'token', input: u.input, output: u.output, cost: u.cost?.total });
-    const completedAt = timeMs(m?.timestamp ?? event?.timestamp) ?? Date.now();
-    const run = currentRun ?? { key: `pi:run:t${turn}`, turnId: `t${turn}`, userMessageKey: lastUserMessageKey, startedAt: undefined };
-    emit({
-      t: 'run-summary',
-      ...run,
-      status: 'done',
-      completedAt,
-      totalRuntimeMs: run.startedAt != null && completedAt >= run.startedAt ? completedAt - run.startedAt : undefined,
-      tokens,
-      source: 'pi-bridge',
-    });
-    currentRun = undefined;
+    if (u) {
+      emit({ t: 'token', input: u.input, output: u.output, cost: u.cost?.total });
+      // Summed for the OPEN TURN's summary. A run with tool calls has many message_ends
+      // inside one turn — only a TERMINAL stopReason below ends the turn, so a mid-turn
+      // toolUse end never stamps a premature completed footer.
+      const sum = currentRunTokens ?? {};
+      for (const [field, value] of [
+        ['input', u.input],
+        ['output', u.output],
+        ['cacheRead', u.cacheRead],
+        ['cacheWrite', u.cacheWrite],
+        ['cost', u.cost?.total],
+      ] as const) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          sum[field] = (sum[field] ?? 0) + value;
+        }
+      }
+      currentRunTokens = sum;
+    }
+    // The message's END clock is the live analog of the entry write time buildHistory reads —
+    // the only authoritative completion evidence. A terminal stopReason closes the turn HERE,
+    // as buildHistory closes on the entry, so a queued follow-up's next turn never inherits
+    // this turn's span or usage.
+    if (currentRun) {
+      currentRun.lastAssistant = {
+        stopReason: typeof m.stopReason === 'string' ? m.stopReason : undefined,
+        errored: !!m.error,
+        completedAt: timeMs(event?.timestamp) ?? Date.now(),
+      };
+      if (m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error) {
+        closeLiveTurn();
+      }
+    }
   });
 
   pi.on('tool_execution_start', (event: any, ctx: any) => {
@@ -755,14 +885,16 @@ function entryCount(ctx: any): number {
   }
 }
 
-/** How many user messages the session already has (with non-empty text) — seeds the live user-key
- *  counter so it continues exactly above buildHistory's `u0..u(k-1)`. MUST mirror buildHistory's
- *  `if (text)` filter so the two key spaces stay aligned (no gap, no collision). */
+/** How many user messages the session already has — seeds the live user-key counter so it
+ *  continues exactly above buildHistory's `u0..u(k-1)`. MUST mirror buildHistory's ordinal,
+ *  which advances for EVERY user entry (empty content included) so the two key spaces stay
+ *  aligned (no gap, no collision) and a live turn's summary key equals the key the next
+ *  backfill gives the same turn. */
 function countUserMessages(ctx: any): number {
   let n = 0;
   try {
     for (const e of ctx?.sessionManager?.getEntries?.() ?? [])
-      if (e?.type === 'message' && e.message?.role === 'user' && contentText(e.message.content)) n++;
+      if (e?.type === 'message' && e.message?.role === 'user') n++;
   } catch {
     /* getEntries unavailable → 0 (fresh session) */
   }
@@ -786,11 +918,63 @@ function buildHistory(ctx: any): any[] {
   const out: any[] = [];
   let i = 0;
   let u = 0; // user-message ordinal → `u0,u1,…`; live message_start continues this space (userKeySeq)
-  let lastUserKey: string | undefined;
-  let lastUserAt: number | undefined;
   let totalRuntimeMs = 0;
   let turnCount = 0;
   let updatedAt: number | undefined;
+  // One summary per USER TURN, from evidence only — the same rules the broker's
+  // JSONL mapper applies. A per-entry "done" summary put a completed footer on a
+  // run still going (this backfill runs at every hello, including a reload
+  // mid-run), and its span was inferred from adjacent message timestamps.
+  let openTurn:
+    | {
+        userKey?: string;
+        startedAt?: number;
+        last?: { key: string; stopReason?: string; errored: boolean; completedAt?: number; anchor?: string };
+        tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number };
+      }
+    | undefined;
+  const closeTurn = (closed: boolean): void => {
+    const turnState = openTurn;
+    openTurn = undefined;
+    if (!turnState || (!turnState.userKey && !turnState.last)) return;
+    // No assistant entry = no run evidence: a closed prompt-only turn earns no
+    // summary (one hollow "done" per prompt otherwise); only the trailing OPEN
+    // turn may stand on the prompt alone, as `running`.
+    if (closed && !turnState.last) return;
+    const last = turnState.last;
+    const terminal = last?.stopReason === 'stop'
+      ? 'done'
+      : last?.stopReason === 'aborted'
+        ? 'cancelled'
+        : last?.stopReason === 'error'
+          ? 'error'
+          : undefined;
+    const status = !closed ? 'running' : last?.errored ? 'error' : (terminal ?? 'done');
+    const startedAt = turnState.startedAt;
+    const completedAt = closed ? last?.completedAt : undefined;
+    const duration = closed && startedAt != null && completedAt != null && completedAt >= startedAt
+      ? completedAt - startedAt
+      : undefined;
+    const anchor = turnState.userKey ?? last!.key;
+    out.push({
+      t: 'run-summary',
+      key: `pi:run:${anchor}`,
+      turnId: anchor,
+      userMessageKey: turnState.userKey,
+      assistantMessageKey: last?.anchor,
+      status,
+      ...(startedAt != null ? { startedAt } : {}),
+      ...(completedAt != null ? { completedAt } : {}),
+      ...(duration != null ? { totalRuntimeMs: duration } : {}),
+      ...(turnState.tokens ? { tokens: turnState.tokens } : {}),
+      source: 'pi-bridge-history',
+    });
+    if (duration != null) {
+      totalRuntimeMs += duration;
+      turnCount++;
+      if (completedAt != null) updatedAt = updatedAt == null ? completedAt : Math.max(updatedAt, completedAt);
+    }
+  };
   for (const e of entries) {
     if (e?.type !== 'message') continue;
     const m = e.message ?? {};
@@ -799,9 +983,10 @@ function buildHistory(ctx: any): any[] {
       const text = contentText(m.content);
       const userKey = `u${u++}`;
       const sentAt = timeMs(m.timestamp ?? e.timestamp);
+      // A later prompt proves the previous run ended even without a terminal stopReason.
+      closeTurn(true);
       if (text) out.push({ t: 'user', text, key: userKey, turnId: userKey, sentAt });
-      lastUserKey = userKey;
-      lastUserAt = sentAt ?? lastUserAt;
+      openTurn = { userKey, startedAt: sentAt };
     } else if (m.role === 'assistant') {
       const think = thinkingText(m.content);
       if (think) out.push({ t: 'final', kind: 'thinking', key: `${key}:r`, text: think });
@@ -811,30 +996,31 @@ function buildHistory(ctx: any): any[] {
         for (const p of m.content)
           if (p?.type === 'toolCall')
             out.push({ t: 'tool-call', callId: String(p.id ?? ''), name: String(p.name ?? 'tool'), args: p.arguments });
-      const startedAt = lastUserAt ?? timeMs(m.timestamp);
-      const completedAt = timeMs(e.timestamp) ?? timeMs(m.timestamp);
-      const duration = startedAt != null && completedAt != null && completedAt >= startedAt ? completedAt - startedAt : undefined;
-      const tokens = m.usage
-        ? { input: m.usage.input, output: m.usage.output, cacheRead: m.usage.cacheRead, cacheWrite: m.usage.cacheWrite, cost: m.usage.cost?.total }
-        : undefined;
-      out.push({
-        t: 'run-summary',
-        key: `pi:run:${key}`,
-        turnId: key,
-        userMessageKey: lastUserKey,
-        assistantMessageKey: text ? `${key}:t` : think ? `${key}:r` : undefined,
-        status: m.error ? 'error' : 'done',
-        startedAt,
-        completedAt,
-        totalRuntimeMs: duration,
-        tokens,
-        source: 'pi-bridge-history',
-      });
-      if (duration != null) {
-        totalRuntimeMs += duration;
-        turnCount++;
-        if (completedAt != null) updatedAt = updatedAt == null ? completedAt : Math.max(updatedAt, completedAt);
+      openTurn ??= {};
+      openTurn.last = {
+        key,
+        stopReason: typeof m.stopReason === 'string' ? m.stopReason : undefined,
+        errored: !!m.error,
+        // Entry write time only: the message's own timestamp is its request-creation
+        // time and must never stand in for completion.
+        completedAt: timeMs(e.timestamp),
+        anchor: text ? `${key}:t` : think ? `${key}:r` : undefined,
+      };
+      if (m.usage) {
+        const sum = openTurn.tokens ?? {};
+        for (const [field, value] of [
+          ['input', m.usage.input],
+          ['output', m.usage.output],
+          ['cacheRead', m.usage.cacheRead],
+          ['cacheWrite', m.usage.cacheWrite],
+          ['cost', m.usage.cost?.total],
+        ] as const) {
+          if (typeof value === 'number' && Number.isFinite(value)) sum[field] = (sum[field] ?? 0) + value;
+        }
+        openTurn.tokens = sum;
       }
+      const terminal = m.stopReason === 'stop' || m.stopReason === 'aborted' || m.stopReason === 'error' || !!m.error;
+      if (terminal) closeTurn(true);
     } else if (m.role === 'toolResult') {
       const callId = String(m.toolCallId ?? m.callId ?? m.id ?? '');
       out.push({
@@ -848,6 +1034,9 @@ function buildHistory(ctx: any): any[] {
       });
     }
   }
+  // A backfill taken mid-run reports the trailing turn as running — never as a
+  // completed footer the run has not earned yet.
+  closeTurn(false);
   if (turnCount) out.push({ t: 'runtime-totals', value: { totalRuntimeMs, turnCount, updatedAt, source: 'pi-bridge-history' } });
   return out;
 }

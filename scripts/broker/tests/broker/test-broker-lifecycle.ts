@@ -16,9 +16,11 @@ import { dirname, join } from 'node:path';
 import {
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
-  PI_BRIDGE_LEGACY_MARKER,
 } from '../../../../packages/typescript/adapters/pi/src/index.ts';
-import type { SetupDiagnosisContext } from '../../../../packages/typescript/adapter-api/src/index.ts';
+import type {
+  SetupDiagnosisContext,
+  SetupHttpProbe,
+} from '../../../../packages/typescript/adapter-api/src/index.ts';
 import {
   collectLifecycleStatus,
   inspectRepair,
@@ -28,8 +30,12 @@ import {
   runServiceCommand,
   runUninstall,
   renderLifecycleStatus,
+  type LifecycleStatusReport,
 } from '../../../../packages/typescript/broker/src/broker-lifecycle.ts';
+import { cliMessages } from '../../../../packages/typescript/broker/src/cli-i18n.ts';
+import { PRODUCT_IDENTITY } from '../../../../packages/typescript/adapter-api/src/index.ts';
 import { BUILD_INFO, buildFingerprint } from '../../../../packages/typescript/broker/src/build-info.ts';
+import { createSetupDiagnosisContext } from '../../../../packages/typescript/broker/src/diagnosis-context.ts';
 import { runCli } from '../../../../packages/typescript/broker/src/cli.ts';
 import {
   localizeCliStatusValue,
@@ -96,6 +102,20 @@ import {
   opencodeShimPort,
   opencodeShimShellPath,
 } from '../../../../packages/typescript/broker/src/opencode-shim.ts';
+
+function readFrozenTextFixture(path: string): string {
+  const asset = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  if (asset.schemaVersion !== 1 || asset.release !== '0.1.0'
+    || !Array.isArray(asset.lines) || !asset.lines.every((line) => typeof line === 'string')
+    || typeof asset.trailingNewline !== 'boolean') throw new Error(`invalid frozen text fixture: ${path}`);
+  return `${asset.lines.join('\n')}${asset.trailingNewline ? '\n' : ''}`;
+}
+
+// The repair fixture comes from the frozen released asset, never from the production identity constant.
+const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
+  import.meta.dir,
+  '../../../../packages/typescript/adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+));
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -358,6 +378,55 @@ try {
     const m = machine({ service: true, binaryHash: true }); cleanup.push(m.root);
     await m.service.installDefinition();
     await m.service.start();
+    // ── status on a host whose MagicDNS will not resolve ──
+    // Drives collectLifecycleStatus itself: the advertised NAME never connects, `tailscale status --json`
+    // supplies this node's addresses, and the endpoint must still report ready — but only for THIS broker.
+    {
+      const ADDRESSES = ['100.64.0.1', 'fd7a:115c:a1e0::1'];
+      const brokenDns = {
+        ...m.context,
+        resolveExecutable(command: string) {
+          if (command === 'tailscale') return '/usr/bin/tailscale';
+          return m.context.resolveExecutable(command);
+        },
+        async runReadOnly(path: string, args: readonly string[]) {
+          if (path === '/usr/bin/tailscale' && args[0] === 'status') {
+            return { status: 'ok' as const, exitCode: 0, stderr: '', stdout: JSON.stringify({
+              BackendState: 'Running',
+              Self: { DNSName: 'fixture.tailnet.ts.net.', TailscaleIPs: ADDRESSES },
+            }) };
+          }
+          return m.context.runReadOnly(path, args);
+        },
+        async fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number) {
+          if (url.startsWith('https://fixture.tailnet.ts.net')) return { status: 'unreachable' as const };
+          return m.context.fetchJson(url, headers, timeoutMs);
+        },
+      };
+      const contacted: string[] = [];
+      const statusVia = async (machine: string) => collectLifecycleStatus({
+        ...baseOptions(m),
+        context: brokenDns,
+        advertisedDirectProbe: async ({ address }) => {
+          contacted.push(address);
+          return { status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine } };
+        },
+      });
+      const readyViaAddress = await statusVia('fixture-machine');
+      check('status reports the advertised endpoint ready through this node address when MagicDNS fails',
+        readyViaAddress.endpoints.advertised === 'ready' && contacted[0] === ADDRESSES[0],
+        `${readyViaAddress.endpoints.advertised} contacted=${contacted.join(',')}`);
+      const foreign = await statusVia('another-machine');
+      check('status reports identity-mismatch when the address answers as a different machine',
+        foreign.endpoints.advertised === 'identity-mismatch',
+        foreign.endpoints.advertised);
+      // Loopback must never be given the fallback: it needs no name resolution and an address retry there
+      // would be probing something the internal URL never pointed at.
+      check('the internal loopback endpoint is unaffected by the advertised fallback',
+        readyViaAddress.endpoints.internal === 'ready',
+        readyViaAddress.endpoints.internal);
+    }
+
     const status = await collectLifecycleStatus(baseOptions(m));
     const serialized = JSON.stringify(status);
     check('status summarizes service/endpoints/agents/sessions/updates without credentials',
@@ -365,8 +434,219 @@ try {
         && status.agents.find((agent) => agent.id === 'codex')?.canCreateSession === false
         && status.agents.find((agent) => agent.id === 'codex')?.syncEnabled === true
         && status.agents.find((agent) => agent.id === 'opencode')?.canCreateSession === true
-        && status.sessions?.total === 2 && status.updates?.pending === 1
+        && typeof status.sessions === 'object' && status.sessions?.total === 2
+        && typeof status.updates === 'object' && status.updates?.pending === 1
         && !serialized.includes(readBrokerToken(join(m.home, 'secrets', 'broker-token'))));
+
+    // A roster too large to read is NOT an unavailable broker. It reported as one until now: the read
+    // failed, the count became null, and the presenter rendered "broker unavailable" about a broker that
+    // was answering correctly — a lie that got likelier the more sessions the operator accumulated.
+    {
+      const sessionsAnswering = async (probe: SetupHttpProbe) => collectLifecycleStatus({
+        ...baseOptions(m),
+        context: {
+          ...m.context,
+          async fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number, maxBytes?: number) {
+            if (new URL(url).pathname === '/api/sessions') return probe;
+            return m.context.fetchJson(url, headers, timeoutMs, maxBytes);
+          },
+        },
+      });
+      const tooLarge = await sessionsAnswering({ status: 'invalid-response', statusCode: 200 });
+      check('a roster too large to read reports unreadable rather than an unavailable broker',
+        tooLarge.sessions === 'unreadable', String(tooLarge.sessions));
+      check('the unreadable roster never renders as broker unavailable in either locale',
+        !renderLifecycleStatus(tooLarge, 'en').includes('Sessions: broker unavailable')
+          && !renderLifecycleStatus(tooLarge, 'zh-Hans').includes('会话：broker 不可用'),
+        renderLifecycleStatus(tooLarge, 'en').split('\n').find((line) => line.startsWith('Sessions:')));
+      // The distinction is only worth anything if the genuine case still reads unavailable.
+      const silent = await sessionsAnswering({ status: 'unreachable' });
+      check('a broker that does not answer at all still reports unavailable',
+        silent.sessions === null
+          && renderLifecycleStatus(silent, 'en').includes('Sessions: broker unavailable'),
+        String(silent.sessions));
+    }
+
+    // The raised ceiling is production wiring, not a default. Without it a real roster fails the moment it
+    // passes the shared 256 KiB probe limit, which 2.4k sessions already do three times over.
+    {
+      const requested = new Map<string, { maxBytes?: number; timeoutMs?: number }>();
+      await collectLifecycleStatus({
+        ...baseOptions(m),
+        context: {
+          ...m.context,
+          async fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number, maxBytes?: number) {
+            requested.set(new URL(url).pathname, { maxBytes, timeoutMs });
+            return m.context.fetchJson(url, headers, timeoutMs, maxBytes);
+          },
+        },
+      });
+      const roster = requested.get('/api/sessions');
+      check('the roster read asks for a body ceiling far above the 256 KiB probe default',
+        (roster?.maxBytes ?? 0) >= 8 * 1024 * 1024,
+        `maxBytes=${roster?.maxBytes}`);
+      // The allowance is the ROSTER's, not the status command's. `status` reads three authenticated
+      // endpoints concurrently, so granting all of them the roster ceiling would let one invocation
+      // accept three times it — for two documents whose size is fixed by the protocol and that could
+      // never have needed it. Every endpoint below must therefore ask for nothing at all, which is
+      // what leaves it on the shared probe default.
+      // `/api/health` names the 3s probe deadline explicitly, which is the default value spelled out
+      // rather than an expanded one, so the test asks whether an endpoint EXCEEDS the defaults.
+      for (const path of ['/api/health', '/api/agents', '/api/agent-runtime-updates']) {
+        const asked = requested.get(path);
+        check(`${path} keeps the probe defaults instead of inheriting the roster allowance`,
+          asked !== undefined
+            && asked.maxBytes === undefined
+            && (asked.timeoutMs === undefined || asked.timeoutMs <= 3_000),
+          `observed=${JSON.stringify(asked)} roster=${JSON.stringify(roster)}`);
+      }
+    }
+
+    // The wiring above proves what the roster read ASKS for. This proves the shipped context honours it,
+    // against a real socket rather than a fake, because everything above would still pass if
+    // `fetchJson` accepted the argument and ignored it.
+    {
+      const rows = Array.from({ length: 12_000 }, (_, index) => ({ id: `session-${index}`, status: 'idle' }));
+      const body = JSON.stringify({ sessions: rows });
+      const server = Bun.serve({
+        port: 0,
+        fetch: () => new Response(body, { headers: { 'content-type': 'application/json' } }),
+      });
+      try {
+        const url = `http://127.0.0.1:${server.port}/api/sessions`;
+        const real = createSetupDiagnosisContext();
+        check('the roster fixture is genuinely larger than the shared probe ceiling',
+          body.length > 256 * 1024, `bytes=${body.length}`);
+        const atProbeDefault = await real.fetchJson(url, {}, 5_000);
+        check('the probe default still refuses an oversized body, and calls it answered not unreachable',
+          atProbeDefault.status === 'invalid-response', atProbeDefault.status);
+        const atRosterCeiling = await real.fetchJson(url, {}, 5_000, 16 * 1024 * 1024);
+        const parsed = atRosterCeiling.status === 'ok' && atRosterCeiling.json
+          && typeof atRosterCeiling.json === 'object'
+          ? (atRosterCeiling.json as { sessions?: unknown[] }).sessions
+          : undefined;
+        check('the shipped context reads the whole roster when the caller raises the ceiling',
+          atRosterCeiling.status === 'ok' && parsed?.length === rows.length,
+          `${atRosterCeiling.status} rows=${parsed?.length}`);
+      } finally {
+        server.stop(true);
+      }
+    }
+
+    // `maxBytes` is a request, not a grant. These drive the shipped context against an endpoint that
+    // never stops sending and never declares a length, so nothing but the streaming ceiling can end
+    // the read.
+    //
+    // The endpoint never ends its response and never declares a length, and it produces bytes only
+    // when pulled. That makes both halves of the contract observable without trusting a counter that
+    // measures the wrong side: the stream's own `cancel` fires exactly when the reader gives up, and
+    // `produced` counts only what the reader actually pulled, because an unread stream stops being
+    // pulled. Status alone can never prove this — a read with no ceiling at all ends in
+    // `invalid-response` too, just after swallowing every byte first. Elapsed time separates the two
+    // remaining explanations: a ceiling returns in milliseconds, an unbounded read runs to the
+    // timeout and comes back `unreachable`.
+    {
+      const MIB = 1024 * 1024;
+      const HARD_LIMIT = 16 * MIB;
+      const TIMEOUT_MS = 10_000;
+      const payload = new Uint8Array(128 * 1024).fill(0x20);
+      const streamProbe = async (maxBytes?: number): Promise<{
+        status: string;
+        produced: number;
+        elapsedMs: number;
+      }> => {
+        let produced = 0;
+        const server = Bun.serve({
+          port: 0,
+          fetch: () => new Response(
+            new ReadableStream({
+              async pull(controller) {
+                controller.enqueue(payload);
+                produced += payload.length;
+                // Paced, so an unbounded read cannot exhaust this host's memory before the timeout
+                // catches it, and so elapsed time tracks bytes read rather than scheduler luck.
+                await Bun.sleep(1);
+              },
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
+        });
+        try {
+          const started = Bun.nanoseconds();
+          const probe = await createSetupDiagnosisContext()
+            .fetchJson(`http://127.0.0.1:${server.port}/api/sessions`, {}, TIMEOUT_MS, maxBytes);
+          // Sampled here and never later: the server keeps producing into its own buffers after the
+          // reader has gone, so anything read after this line measures the server, not the ceiling.
+          return { status: probe.status, produced, elapsedMs: (Bun.nanoseconds() - started) / 1e6 };
+        } finally {
+          server.stop(true);
+        }
+      };
+
+      // The fixture must declare no length, or every assertion below exercises the wrong branch: a
+      // declared length ends the read before the streaming ceiling comes into play at all. Checked on
+      // a server of its own, because a second reader on the shared one keeps being pulled after its
+      // body is cancelled and silently inflates the byte counter the measurements depend on.
+      {
+        const framingServer = Bun.serve({
+          port: 0,
+          fetch: () => new Response(
+            new ReadableStream({
+              // Paced like the measured fixture: an unpaced pull never yields, and the request that
+              // is only here to read a header would hang the suite producing bytes nobody reads.
+              async pull(controller) { controller.enqueue(payload); await Bun.sleep(1); },
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
+        });
+        try {
+          const response = await fetch(`http://127.0.0.1:${framingServer.port}/api/sessions`);
+          const declared = response.headers.get('content-length');
+          await response.body?.cancel().catch(() => undefined);
+          check('the endless fixture declares no length, so only the streaming ceiling can end the read',
+            declared === null, `content-length=${declared}`);
+        } finally {
+          framingServer.stop(true);
+        }
+      }
+
+      // The ceiling actually granted is not directly observable, so it is measured by proxy: how far
+      // an endless response got before the reader gave up. Everything below is relative to this one.
+      const atMaximum = await streamProbe(HARD_LIMIT);
+      check('an endless response is cut off at the repository maximum rather than running to the timeout',
+        atMaximum.status === 'invalid-response'
+          && atMaximum.elapsedMs < TIMEOUT_MS / 2
+          && atMaximum.produced <= HARD_LIMIT + 4 * MIB,
+        `status=${atMaximum.status} produced=${atMaximum.produced} ms=${Math.round(atMaximum.elapsedMs)}`);
+
+      // Anything that is not a finite positive byte count collapses to the probe DEFAULT. Comparing
+      // against the maximum rather than against a fixed byte count is what makes that specific:
+      // collapsing to the maximum instead would return the same status and the same `cancelled`, and
+      // only the distance travelled tells the two apart.
+      for (const [label, requested] of [
+        ['omitted', undefined],
+        ['Infinity', Number.POSITIVE_INFINITY],
+        ['NaN', Number.NaN],
+        ['zero', 0],
+        ['negative', -1],
+      ] as const) {
+        const probe = await streamProbe(requested);
+        check(`an endless undeclared response stops at the probe default when maxBytes is ${label}`,
+          probe.status === 'invalid-response'
+            && probe.elapsedMs < TIMEOUT_MS / 2
+            && probe.produced < atMaximum.produced / 2,
+          `status=${probe.status} produced=${probe.produced}`
+            + ` vs maximum=${atMaximum.produced} ms=${Math.round(probe.elapsedMs)}`);
+      }
+
+      // A finite request beyond the repository maximum is capped at it, not honoured.
+      const beyond = await streamProbe(1e12);
+      check('a maxBytes request of a terabyte is capped at the repository maximum',
+        beyond.status === 'invalid-response'
+          && beyond.elapsedMs < TIMEOUT_MS / 2
+          && beyond.produced <= atMaximum.produced + 4 * MIB,
+        `status=${beyond.status} produced=${beyond.produced} vs maximum=${atMaximum.produced} ms=${Math.round(beyond.elapsedMs)}`);
+    }
     const chineseStatus = renderLifecycleStatus(status, 'zh-Hans');
     check('human lifecycle status localizes labels and enum values while keeping names and detail codes stable',
       chineseStatus.includes('cosyncing 1.0.0：就绪')
@@ -503,7 +783,7 @@ try {
   {
     const m = machine({ binaryHash: true }); cleanup.push(m.root);
     const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-    atomicWriteOwnerOnly(piPath, `// ${PI_BRIDGE_LEGACY_MARKER}\nconst leaked = 'COSYNCING_TOKEN=legacy-secret';\n`);
+    atomicWriteOwnerOnly(piPath, PI_BRIDGE_V010_FIXTURE);
     atomicWriteOwnerOnly(m.claudeSettings, `${JSON.stringify({
       preserve: { theme: 'dark' },
       hooks: {
@@ -1612,6 +1892,23 @@ try {
     await runCli(['uninstall', '--yes', '--purge-data', '--confirm-purge-data'], dependencies);
     check('CLI parses status/service/logs/repair/upgrade/uninstall with explicit destructive gates',
       calls.join('|') === 'status|restart|logs:42|repair:true|upgrade:https://releases.example/manifest.json|uninstall:true:true', calls.join('|'));
+
+    // The unreadable-roster line tells the operator to run a command; that command has to exist and
+    // has to be one that helps. It names `logs` rather than `doctor` because doctor reads only
+    // fixed-size documents — it never looks at the roster, so it would report a healthy broker and
+    // leave the line unexplained. Bound to the parser above rather than to a string: the command in
+    // the copy is extracted and re-run through the real CLI, so renaming or dropping it fails here.
+    for (const language of ['en', 'zh-Hans'] as const) {
+      const line = cliMessages(language).status.sessions(
+        { sessions: 'unreadable' } as unknown as LifecycleStatusReport,
+      );
+      const named = line.match(new RegExp(`${PRODUCT_IDENTITY.primaryBinary} ([a-z-]+)`))?.[1];
+      calls.length = 0;
+      if (named) await runCli([named, '--lines', '42'], dependencies);
+      check(`the ${language} unreadable-roster line names a command the CLI actually runs`,
+        named === 'logs' && calls.join('|') === 'logs:42',
+        `named=${named} line=${line} calls=${calls.join('|')}`);
+    }
   }
 } finally {
   for (const root of cleanup) rmSync(root, { recursive: true, force: true });

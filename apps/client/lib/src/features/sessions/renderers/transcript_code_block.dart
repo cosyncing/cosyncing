@@ -27,6 +27,7 @@ class _MonospaceDetailSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final tokens = context.tokens;
     final language = codeLanguage;
     if (language == null) {
       // Preserve the established terminal/structured-message rendering path.
@@ -36,7 +37,7 @@ class _MonospaceDetailSection extends StatelessWidget {
         decoration: BoxDecoration(
           color: theme.colorScheme.surface,
           border: Border.all(color: theme.colorScheme.outline),
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(tokens.radiusSm),
         ),
         padding: const EdgeInsets.all(8),
         child: Text(
@@ -48,7 +49,11 @@ class _MonospaceDetailSection extends StatelessWidget {
         ),
       );
     }
-    final tokens = context.tokens;
+    final platform = theme.platform;
+    final headerExtent =
+        platform == TargetPlatform.android || platform == TargetPlatform.iOS
+        ? 40.0
+        : 32.0;
     final baseStyle = theme.textTheme.bodySmall?.copyWith(
       color: tokens.textPrimary,
       fontFamily: 'monospace',
@@ -72,7 +77,8 @@ class _MonospaceDetailSection extends StatelessWidget {
           // exactly the authored code and prose.
           SelectionContainer.disabled(
             child: SizedBox(
-              height: 40,
+              key: ValueKey('$keyPrefix-$sourceId-header'),
+              height: headerExtent,
               child: Row(
                 children: [
                   const SizedBox(width: 12),
@@ -93,12 +99,12 @@ class _MonospaceDetailSection extends StatelessWidget {
                     key: ValueKey('$keyPrefix-$sourceId-copy'),
                     tooltip: AppLocalizations.of(context).transcriptCodeCopy,
                     onPressed: () => unawaited(_copyExactSource(context)),
-                    icon: const Icon(Icons.content_copy, size: 16),
+                    icon: const Icon(Icons.content_copy, size: 14),
                     style: IconButton.styleFrom(
                       foregroundColor: tokens.textSecondary,
                       padding: EdgeInsets.zero,
-                      minimumSize: const Size(40, 40),
-                      maximumSize: const Size(40, 40),
+                      minimumSize: Size.square(headerExtent),
+                      maximumSize: Size.square(headerExtent),
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                   ),

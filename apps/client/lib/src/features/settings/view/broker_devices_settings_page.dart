@@ -4,6 +4,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/broker_profiles/view/broker_profiles_page.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_connection_gate.dart';
@@ -74,10 +75,54 @@ class _BrokerDevicesSettingsPageState
     }
   }
 
-  void _clearToken() {
-    unawaited(
-      ref.read(brokerCredentialsControllerProvider.notifier).clearToken(),
+  Future<void> _showAddServerChoices() async {
+    final l10n = AppLocalizations.of(context);
+    final choice = await showModalBottomSheet<_AddServerChoice>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              key: const Key('servers-add-direct'),
+              leading: const Icon(Icons.link),
+              title: Text(l10n.connectionDirectTitle),
+              subtitle: Text(l10n.connectionDirectBody),
+              onTap: () => Navigator.pop(context, _AddServerChoice.direct),
+            ),
+            ListTile(
+              key: const Key('servers-add-pair'),
+              leading: const Icon(Icons.qr_code_scanner),
+              title: Text(l10n.connectionPairTitle),
+              subtitle: Text(l10n.connectionPairBody),
+              onTap: () => Navigator.pop(context, _AddServerChoice.pair),
+            ),
+          ],
+        ),
+      ),
     );
+    if (!mounted || choice == null) return;
+    await context.push(
+      choice == _AddServerChoice.direct ? connectionRoute : pairingRoute,
+    );
+  }
+
+  Future<void> _signOut() async {
+    final l10n = AppLocalizations.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(l10n.settingsSignOutConfirmTitle),
+        content: Text(l10n.settingsSignOutConfirmBody),
+        actions: [
+          const SettingsDialogCancelButton(),
+          SettingsDialogConfirmButton(label: l10n.settingsSignOutAction),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await ref.read(brokerCredentialsControllerProvider.notifier).signOut();
   }
 
   Widget _buildCredentialStateMessage(
@@ -105,7 +150,7 @@ class _BrokerDevicesSettingsPageState
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(message, style: TextStyle(color: color)),
+              child: SelectableText(message, style: TextStyle(color: color)),
             ),
           ],
         ),
@@ -129,6 +174,23 @@ class _BrokerDevicesSettingsPageState
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            SettingsSection(
+              title: l10n.savedServers,
+              child: const BrokerProfilesPage(embedded: true),
+            ),
+            const SizedBox(height: 16),
+            Card(
+              margin: EdgeInsets.zero,
+              child: ListTile(
+                key: const Key('servers-add'),
+                leading: const Icon(Icons.add_circle_outline),
+                title: Text(l10n.serversAddTitle),
+                subtitle: Text(l10n.serversAddSubtitle),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => unawaited(_showAddServerChoices()),
+              ),
+            ),
+            const SizedBox(height: 16),
             const BrokerConnectionGate(),
             const _ClientCompatibilityFallback(),
             const BrokerStatusSettingsSection(),
@@ -142,31 +204,17 @@ class _BrokerDevicesSettingsPageState
                   ? const _EmptyCredentialSection()
                   : _RemoteCredentialSection(
                       tokenController: _tokenController,
-                      hasCredentialKey: activeProfile.credentialKey != null,
                       onSave: () => unawaited(_saveToken()),
-                      onClear: _clearToken,
                       isBusy: credentialState.isBusy,
                     ),
             ),
             const SizedBox(height: 16),
             _buildCredentialStateMessage(context, credentialState),
             const SizedBox(height: 16),
-            SettingsLinkGroup(
-              tiles: [
-                SettingsLinkTile(
-                  icon: Icons.storage_outlined,
-                  title: l10n.settingsBrokerProfilesTitle,
-                  subtitle: l10n.settingsBrokerProfilesSubtitle,
-                  onTap: () => context.push(brokerProfilesRoute),
-                ),
-                SettingsLinkTile(
-                  tileKey: const Key('settings-pairing'),
-                  icon: Icons.qr_code_scanner,
-                  title: l10n.settingsPairingTitle,
-                  subtitle: l10n.settingsPairingSubtitle,
-                  onTap: () => context.push(pairingRoute),
-                ),
-              ],
+            _ServerCredentialRemoval(
+              isBusy: credentialState.isBusy,
+              hasCredential: activeProfile?.credentialKey != null,
+              onSignOut: () => unawaited(_signOut()),
             ),
           ],
         ),
@@ -271,16 +319,12 @@ class _EmptyCredentialSection extends StatelessWidget {
 class _RemoteCredentialSection extends StatelessWidget {
   const _RemoteCredentialSection({
     required this.tokenController,
-    required this.hasCredentialKey,
     required this.onSave,
-    required this.onClear,
     required this.isBusy,
   });
 
   final TextEditingController tokenController;
-  final bool hasCredentialKey;
   final VoidCallback onSave;
-  final VoidCallback onClear;
   final bool isBusy;
 
   @override
@@ -329,16 +373,47 @@ class _RemoteCredentialSection extends StatelessWidget {
                     : l10n.settingsSaveTokenAction,
               ),
             ),
-            if (hasCredentialKey)
-              OutlinedButton.icon(
-                key: const Key('settings-clear-token'),
-                onPressed: isBusy ? null : onClear,
-                icon: const Icon(Icons.delete_outline),
-                label: Text(l10n.settingsDeleteTokenAction),
-              ),
           ],
         ),
       ],
+    );
+  }
+}
+
+enum _AddServerChoice { direct, pair }
+
+class _ServerCredentialRemoval extends StatelessWidget {
+  const _ServerCredentialRemoval({
+    required this.isBusy,
+    required this.hasCredential,
+    required this.onSignOut,
+  });
+
+  final bool isBusy;
+  final bool hasCredential;
+  final VoidCallback onSignOut;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final colors = Theme.of(context).colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: ListTile(
+        key: const Key('servers-remove-credential'),
+        leading: Icon(Icons.logout, color: colors.error),
+        title: Text(
+          l10n.settingsSignOutAction,
+          style: TextStyle(color: colors.error),
+        ),
+        subtitle: Text(
+          hasCredential
+              ? l10n.settingsSignOutSubtitleHasCredential
+              : l10n.settingsSignOutSubtitleNoCredential,
+        ),
+        enabled: !isBusy && hasCredential,
+        onTap: isBusy || !hasCredential ? null : onSignOut,
+      ),
     );
   }
 }

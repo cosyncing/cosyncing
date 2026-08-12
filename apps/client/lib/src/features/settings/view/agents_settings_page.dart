@@ -203,8 +203,9 @@ class _ManagedRuntimeSection extends StatelessWidget {
                 ),
                 if (data.actionMessage != null) ...[
                   const SizedBox(height: 8),
-                  Text(
+                  SelectableText(
                     data.actionMessage!,
+                    key: const Key('settings-runtime-action-message'),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -318,28 +319,37 @@ class _RuntimeStatusRow extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    update.displayName,
-                    style: Theme.of(context).textTheme.titleSmall,
+            SelectionArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          update.displayName,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                      StatusPill(
+                        label: pending
+                            ? l10n.settingsUpdateReady
+                            : update.state,
+                        color: pending ? colors.tertiary : colors.primary,
+                      ),
+                    ],
                   ),
-                ),
-                StatusPill(
-                  label: pending ? l10n.settingsUpdateReady : update.state,
-                  color: pending ? colors.tertiary : colors.primary,
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(_runtimePendingChangeCopy(update, l10n)),
-            const SizedBox(height: 4),
-            Text(
-              _runtimeBlockerCopy(update, l10n),
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+                  const SizedBox(height: 8),
+                  Text(_runtimePendingChangeCopy(update, l10n)),
+                  const SizedBox(height: 4),
+                  Text(
+                    _runtimeBlockerCopy(update, l10n),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
             if (pending) ...[
               const SizedBox(height: 12),

@@ -760,7 +760,7 @@ class _TransferSessionGroup extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
+        SelectableText(
           '${sessionKey.tool} / ${sessionKey.sessionId}',
           style: theme.textTheme.titleSmall,
         ),
@@ -858,23 +858,30 @@ class _TransferRow extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '${_transferDirectionLabel(l10n, transfer.direction)}: '
-                  '${transfer.fileName}',
-                  style: theme.textTheme.bodyMedium,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  detailLabel,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: isFailed
-                        ? theme.colorScheme.error
-                        : theme.colorScheme.onSurfaceVariant,
+                SelectionArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${_transferDirectionLabel(l10n, transfer.direction)}: '
+                        '${transfer.fileName}',
+                        style: theme.textTheme.bodyMedium,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        detailLabel,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: isFailed
+                              ? theme.colorScheme.error
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
                 ),
                 if (localPathLabel != null) ...[
                   const SizedBox(height: 4),

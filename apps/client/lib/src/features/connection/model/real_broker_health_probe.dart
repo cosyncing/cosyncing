@@ -32,8 +32,8 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
       if (!response.ok) {
         return const HealthProbeResult.failure(
           error:
-              'The broker answered but reported itself unhealthy. Check '
-              'the broker host, then try again.',
+              'The server answered but reported itself unhealthy. Check '
+              'the server host, then try again.',
           unhealthy: true,
         );
       }
@@ -44,7 +44,7 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
       // raw SocketException/ClientException text in the Connection screen's
       // status card.
       return HealthProbeResult.failure(
-        error: userFacingMessage(e, lead: "Couldn't reach the broker."),
+        error: userFacingMessage(e, lead: "Couldn't reach the server."),
         detail: failureDetail(e),
       );
     } finally {

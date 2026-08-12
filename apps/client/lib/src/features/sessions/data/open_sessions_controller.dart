@@ -329,4 +329,31 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
       _commitLegacy(next);
     }
   }
+
+  /// Applies an accepted native title without disturbing live tab status.
+  void renameSessionTitle(String tool, String id, String title) {
+    final current = _current;
+    final key = '$tool/$id';
+    final index = current.refs.indexWhere((ref) => ref.key == key);
+    if (index < 0) return;
+    final existing = current.refs[index];
+    final acceptedTitle = title.isEmpty ? id : title;
+    if (existing.title == acceptedTitle) return;
+    final refs = [...current.refs];
+    refs[index] = SessionRef(
+      tool: existing.tool,
+      id: existing.id,
+      title: acceptedTitle,
+      status: existing.status,
+    );
+    final next = OpenSessionsState(refs: refs, activeKey: current.activeKey);
+    if (_store case final LosslessOpenSessionsStore _) {
+      _setLocal(next);
+      _runLosslessOperation(
+        (store, sourceKey) => store.refreshMemberMetadata(sourceKey, refs),
+      );
+    } else {
+      _commitLegacy(next);
+    }
+  }
 }

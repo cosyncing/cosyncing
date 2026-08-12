@@ -60,7 +60,7 @@ void main() {
     expect(result.isSuccess, isFalse);
     // The broker's own 5xx text is diagnostic, not instruction: it moves to
     // `detail` and the user reads a classified message instead.
-    expect(result.error, contains("Couldn't reach the broker"));
+    expect(result.error, contains("Couldn't reach the server"));
     expect(result.error, contains('on its end'));
     expect(result.error, isNot(contains('broker unavailable')));
     expect(result.detail, contains('broker unavailable'));
@@ -73,7 +73,7 @@ void main() {
     final result = await probe.probe(Uri.parse('http://127.0.0.1:7734'));
 
     expect(result.isSuccess, isFalse);
-    expect(result.error, contains("Couldn't reach the broker"));
+    expect(result.error, contains("Couldn't reach the server"));
     expect(result.error, isNot(contains('network down')));
     expect(result.detail, contains('network down'));
     verify(() => client.close()).called(1);

@@ -110,40 +110,20 @@ Widget _fileArtifactMessageRenderer(
   AgentMessage message, {
   Widget? action,
 }) {
-  final l10n = AppLocalizations.of(context);
-  return _TranscriptBubble(
-    icon: Icons.insert_drive_file_outlined,
-    title: l10n.fileArtifact,
-    summary:
-        _firstPayloadValue(
-          message: message,
-          preferredKeys: const ['name', 'path', 'filePath'],
-        ) ??
-        l10n.artifactMetadata,
-    payloadRows: _collectPayloadRows(
-      message: message,
-      preferredKeys: const ['name', 'path', 'filePath', 'size'],
-      maxRows: 4,
-    ),
-    detailContent: action,
-  );
+  return _TranscriptArtifactRow(message: message, action: action);
 }
 
 Widget _permissionRequestMessageRenderer(
   BuildContext context,
-  AgentMessage message,
-) {
+  AgentMessage message, {
+  Widget? action,
+}) {
   final l10n = AppLocalizations.of(context);
-  return _TranscriptBubble(
+  return _TranscriptBoxMessage(
     icon: Icons.gpp_good_outlined,
     title: l10n.sessionRequestPermissionTitle,
     summary:
-        message.permissionRequestTitle ??
-        _firstPayloadValue(
-          message: message,
-          preferredKeys: const ['permission', 'reason', 'tool', 'operation'],
-        ) ??
-        l10n.sessionRequestPermissionFallback,
+        message.permissionRequestTitle ?? l10n.sessionRequestPermissionFallback,
     payloadRows: _collectPayloadRows(
       message: message,
       preferredKeys: const [
@@ -165,6 +145,8 @@ Widget _permissionRequestMessageRenderer(
     readOnlyHint: message.requestIsReadOnly
         ? l10n.sessionRequestAwaitingPermission
         : null,
+    payloadAsChips: true,
+    detailContent: action,
   );
 }
 
@@ -208,22 +190,23 @@ Widget _permissionResolvedMessageRenderer(
 
 Widget _questionRequestMessageRenderer(
   BuildContext context,
-  AgentMessage message,
-) {
+  AgentMessage message, {
+  Widget? action,
+}) {
   final l10n = AppLocalizations.of(context);
   final questions = message.questionRequestQuestions;
-  return _TranscriptBubble(
+  return _TranscriptBoxMessage(
     icon: Icons.quiz_outlined,
     title: questions.length > 1
         ? l10n.sessionRequestQuestionsTitle
         : l10n.sessionRequestQuestionTitle,
-    summary:
-        (questions.isEmpty ? null : questions.first.question) ??
-        _firstPayloadValue(
-          message: message,
-          preferredKeys: const ['question', 'prompt', 'message'],
-        ) ??
-        l10n.sessionRequestQuestionFallback,
+    // Structured actions render each question next to its own input. Only the
+    // legacy free-text request needs a separate summary above the controls.
+    summary: questions.isNotEmpty && action != null
+        ? null
+        : questions.isNotEmpty
+        ? questions.first.question
+        : l10n.sessionRequestQuestionFallback,
     payloadRows: _collectPayloadRows(
       message: message,
       preferredKeys: const ['question', 'prompt', 'message', 'context'],
@@ -231,6 +214,8 @@ Widget _questionRequestMessageRenderer(
     readOnlyHint: message.requestIsReadOnly
         ? l10n.sessionRequestAwaitingAnswer
         : null,
+    payloadAsChips: true,
+    detailContent: action,
   );
 }
 
@@ -545,17 +530,16 @@ class _InlineTranscriptNotice extends StatelessWidget {
 Widget _errorMessageRenderer(BuildContext context, AgentMessage message) {
   final l10n = AppLocalizations.of(context);
 
-  return _TranscriptBubble(
+  return _TranscriptBoxMessage(
     icon: Icons.error_outline,
     title: l10n.errorEvent,
-    summary: l10n.errorEventSummary,
     isError: true,
     payloadRows: _collectPayloadRows(
       message: message,
       preferredKeys: const ['message', 'code', 'details', 'stack'],
       maxRows: 10,
     ),
-    readOnlyHint: l10n.renderedForVisibilityOnly,
+    noDetailText: l10n.errorEventNoDetail,
   );
 }
 

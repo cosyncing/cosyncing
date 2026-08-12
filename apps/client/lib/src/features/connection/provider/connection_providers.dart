@@ -169,6 +169,8 @@ brokerClientFactoryProvider =
 /// Manages the connection lifecycle: idle → validating → success/failure.
 /// Screens dispatch intents; this controller owns the state machine.
 class ConnectionController extends Notifier<ConnectionStateModel> {
+  var _intentGeneration = 0;
+
   @override
   ConnectionStateModel build() {
     return ConnectionStateModel();
@@ -178,7 +180,9 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
   ///
   /// Transitions: idle/validating/success/failure → validating →
   /// success or failure.
-  Future<void> connect(String input) async {
+  Future<bool> connect(String input) async {
+    final intentGeneration = ++_intentGeneration;
+
     // Normalize the URL first.
     final Uri normalized;
     try {
@@ -189,7 +193,7 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
         failureKind: ConnectionFailureKind.invalidAddress,
         technicalDetail: e.message,
       );
-      return;
+      return false;
     }
 
     // Validate the normalized URL.
@@ -201,7 +205,7 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
         failureKind: ConnectionFailureKind.invalidAddress,
         technicalDetail: errors.join('; '),
       );
-      return;
+      return false;
     }
 
     // Run the health probe.
@@ -212,37 +216,47 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
 
     final probe = ref.read(brokerHealthProbeProvider);
     final result = await probe.probe(normalized);
+    if (!_isCurrent(intentGeneration)) return false;
 
     if (result.isSuccess) {
       final repository = ref.read(brokerProfileRepositoryProvider);
-      await ref.read(brokerProfileMutationGateProvider).runForCurrent(
-        normalized.toString(),
-        (persistedProfile) async {
-          final now = DateTime.now();
-          final profile = BrokerProfile(
-            id: normalized.toString(),
-            displayName: persistedProfile?.displayName ?? normalized.host,
-            baseUri: normalized,
-            createdAt: persistedProfile?.createdAt ?? now,
-            incarnationId: persistedProfile?.incarnationId,
-            updatedAt: now,
-            lastUsedAt: now,
-            credentialKey: persistedProfile?.credentialKey,
+      final activated = await ref
+          .read(brokerProfileMutationGateProvider)
+          .runForCurrent(
+            normalized.toString(),
+            (persistedProfile) async {
+              if (!_isCurrent(intentGeneration)) return false;
+              final now = DateTime.now();
+              final profile = BrokerProfile(
+                id: normalized.toString(),
+                displayName: persistedProfile?.displayName ?? normalized.host,
+                baseUri: normalized,
+                createdAt: persistedProfile?.createdAt ?? now,
+                incarnationId: persistedProfile?.incarnationId,
+                updatedAt: now,
+                lastUsedAt: now,
+                credentialKey: persistedProfile?.credentialKey,
+              );
+              final saved = await repository.save(profile);
+              if (!_isCurrent(intentGeneration)) return false;
+              ref.invalidate(brokerProfileListProvider);
+              await ref
+                  .read(activeBrokerProfileStoreProvider)
+                  .setActiveProfileId(saved.id);
+              if (!_isCurrent(intentGeneration)) return false;
+              ref.read(activeBrokerProfileProvider.notifier).state = saved;
+              return true;
+            },
           );
-          final saved = await repository.save(profile);
-          ref.invalidate(brokerProfileListProvider);
-          await ref
-              .read(activeBrokerProfileStoreProvider)
-              .setActiveProfileId(saved.id);
-          ref.read(activeBrokerProfileProvider.notifier).state = saved;
-        },
-      );
+      if (!activated || !_isCurrent(intentGeneration)) return false;
       state = ConnectionStateModel(
         status: ConnectionStatus.success,
         brokerUrl: normalized,
         machine: result.machine,
       );
+      return true;
     } else {
+      if (!_isCurrent(intentGeneration)) return false;
       state = ConnectionStateModel(
         status: ConnectionStatus.failure,
         brokerUrl: normalized,
@@ -251,16 +265,30 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
             : ConnectionFailureKind.unreachable,
         technicalDetail: result.detail ?? result.error,
       );
+      return false;
     }
   }
 
+  /// Retires any in-flight direct-connect result after a newer server choice.
+  ///
+  /// Saved-profile selection and pairing call this when their user intent
+  /// begins, before any asynchronous profile work. A late health probe can
+  /// therefore neither reactivate its server nor publish a stale success.
+  void supersedePendingConnection() {
+    _intentGeneration += 1;
+    state = ConnectionStateModel();
+  }
+
+  bool _isCurrent(int intentGeneration) =>
+      intentGeneration == _intentGeneration;
+
   /// Resets the connection state to idle.
   Future<void> reset() async {
+    supersedePendingConnection();
     await ref.read(brokerProfileMutationGateProvider).runExclusive(() async {
       await ref.read(activeBrokerProfileStoreProvider).clearActiveProfileId();
       ref.read(activeBrokerProfileProvider.notifier).state = null;
     });
-    state = ConnectionStateModel();
   }
 }
 

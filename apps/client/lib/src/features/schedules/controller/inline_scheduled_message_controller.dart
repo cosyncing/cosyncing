@@ -285,6 +285,11 @@ final class InlineScheduledMessageController
   /// are retired.
   bool _appVisible = true;
 
+  /// Whether this session page is the onstage retained page.
+  bool _hostVisible = true;
+
+  bool get _workVisible => _appVisible && _hostVisible;
+
   /// Which broker SOURCE — (profile, endpoint) — [_transportConnected]
   /// describes.
   ///
@@ -363,7 +368,7 @@ final class InlineScheduledMessageController
     // Only a report made FOR this source can arm it. After a switch the
     // standing report belongs to the previous transport, so this session stays
     // silent until Chat reports the new broker's own connected state.
-    if (_appVisible &&
+    if (_workVisible &&
         source != null &&
         _transportConnected &&
         _reportedTransportSource == source) {
@@ -393,7 +398,7 @@ final class InlineScheduledMessageController
     // Every transition retires the read that was running under the old one, so
     // release it here rather than leave it holding a socket across the drop.
     _cancelTrackedRefresh('session transport state changed');
-    if (!connected || !_appVisible) {
+    if (!connected || !_workVisible) {
       // A read retired by this drop publishes nothing, so nothing else would
       // settle the indicator — and a request that hangs past the drop would
       // leave it stuck true for as long as the socket takes to fail.
@@ -419,7 +424,25 @@ final class InlineScheduledMessageController
       _settleRetiredLoading();
       return;
     }
-    if (!_transportConnected || _activeSource == null) return;
+    if (!_hostVisible || !_transportConnected || _activeSource == null) return;
+    _startPolling(generation: _generation);
+  }
+
+  /// Reports whether this retained Session Detail page is onstage.
+  ///
+  /// The app lifecycle and page visibility are separate gates: an app resume
+  /// must not restart polling for a tab that remains hidden in the page LRU.
+  void setHostVisible({required bool visible}) {
+    if (_hostVisible == visible) return;
+    _hostVisible = visible;
+    _transportEpoch += 1;
+    _stopPolling();
+    _cancelTrackedRefresh('retained session page visibility changed');
+    if (!visible) {
+      _settleRetiredLoading();
+      return;
+    }
+    if (!_appVisible || !_transportConnected || _activeSource == null) return;
     _startPolling(generation: _generation);
   }
 
@@ -497,7 +520,7 @@ final class InlineScheduledMessageController
   /// The read is deferred by a microtask because this runs from a widget build
   /// (Chat reports the transport there) and starting it writes `loading`.
   void _startPolling({required int generation}) {
-    assert(_appVisible, 'hidden documents cannot arm schedule polling');
+    assert(_workVisible, 'hidden documents cannot arm schedule polling');
     assert(_pollTimer == null, 'the caller cancels before re-arming');
     final epoch = _transportEpoch;
     _pollTimer = Timer.periodic(pollInterval, (_) {
@@ -505,7 +528,7 @@ final class InlineScheduledMessageController
     });
     Future<void>.microtask(() {
       if (_disposed ||
-          !_appVisible ||
+          !_workVisible ||
           !_transportConnected ||
           _generation != generation ||
           _transportEpoch != epoch) {
@@ -540,7 +563,7 @@ final class InlineScheduledMessageController
     required bool force,
     required _RefreshOrigin origin,
   }) {
-    if (_disposed || !_appVisible) return Future<void>.value();
+    if (_disposed || !_workVisible) return Future<void>.value();
     final source = _activeSource;
     if (source == null) return Future<void>.value();
     if (!force && _mutationInFlight) return Future<void>.value();

@@ -299,6 +299,71 @@ void main() {
       }
     });
 
+    testWidgets(
+      'with telemetry present the status cluster stays anchored at the '
+      'trailing edge',
+      (tester) async {
+        // The regression: the tab-row telemetry entered the strip as a loose
+        // Flexible beside the expanded title. RenderFlex then split the free
+        // space between them, and the unused half of the telemetry's share
+        // collapsed AFTER the menu — the telemetry, status chip, and overflow
+        // menu floated near the middle of a wide pane. The no-telemetry
+        // sibling test cannot catch it: the flex branch never enters the tree.
+        tester.view
+          ..physicalSize = const Size(1440, 900)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [
+              session(),
+              MessageWireEvent(
+                seq: 1,
+                message: AgentMessage.fromJson(const {
+                  'type': 'token-count',
+                  'input': 2500000000,
+                  'output': 5700000,
+                }),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('session-detail-top-row-telemetry')),
+          findsOneWidget,
+          reason: 'the fixture must actually exercise the telemetry slot',
+        );
+        final stripRect = tester.getRect(
+          find.byKey(const Key('session-detail-top-strip')),
+        );
+        final menuRect = tester.getRect(
+          find.byKey(const Key('session-detail-view-menu')),
+        );
+        expect(
+          stripRect.right - menuRect.right,
+          4,
+          reason:
+              'the status cluster and overflow menu must hold the trailing '
+              'edge of a wide pane even when telemetry renders beside the '
+              'title',
+        );
+        // The cluster reads right-to-left from the edge: menu, then the chip
+        // immediately before it — never a mid-pane float.
+        final chipRect = tester.getRect(
+          find.byKey(const Key('session-detail-bottom-status-button')),
+        );
+        expect(
+          menuRect.left - chipRect.right,
+          lessThanOrEqualTo(8),
+          reason: 'the status chip sits immediately before the overflow menu',
+        );
+      },
+    );
+
     testWidgets('the aggregate dot stays small enough for a 16px glyph', (
       tester,
     ) async {

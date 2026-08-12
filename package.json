@@ -1,6 +1,6 @@
 {
   "name": "cosyncing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "packageManager": "bun@1.3.8",
   "license": "Apache-2.0",
@@ -41,7 +41,8 @@
     "test:web-startup-shell:built": "node scripts/client/tests/test-startup-shell-browser.mjs",
     "test:web-artifact-session-isolation": "bun run client:build:web && bun run test:web-artifact-session-isolation:built",
     "test:web-artifact-session-isolation:built": "bun run scripts/client/tests/test-web-artifact-session-isolation.ts",
-    "test:web-browser:built": "bun run test:web-startup-shell:built && bun run test:web-artifact-session-isolation:built",
+    "test:web-browser:built": "bun run test:web-startup-shell:built && bun run test:web-artifact-session-isolation:built && bun run test:client-browser-platform",
+    "test:client-browser-platform": "bun run scripts/client/tests/run-client-browser-platform-tests.ts",
     "test:web-client-upgrade": "bun run scripts/client/tests/test-web-client-upgrade-browser.ts",
     "build:broker": "bun run scripts/broker/build-broker.ts",
     "contract:export": "bun run scripts/broker/export-client-contract.ts",

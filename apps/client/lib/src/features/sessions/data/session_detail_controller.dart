@@ -10,6 +10,7 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_fee
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/data/created_session_attach_intents.dart';
+import 'package:cosyncing_client/src/features/sessions/data/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_artifact_transfer.dart';
@@ -775,7 +776,7 @@ class SessionDetailController
             driveRestoreConflict: const SessionDriveRestoreConflict(
               reason: kDriveAttachReasonTakeover,
               code: 'DRIVE_RESTORE_TIMEOUT',
-              message: 'The broker did not confirm the takeover in time.',
+              message: 'The server did not confirm the takeover in time.',
             ),
           );
           // Disarming alone only shapes the NEXT reconnect; the armed
@@ -1402,7 +1403,7 @@ class SessionDetailController
           _historyPageRequestId != null) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
-        historyPageError = 'The broker returned a malformed history page.';
+        historyPageError = 'The server returned a malformed history page.';
       }
       // A standing agent-owned refusal is a claim about the session this frame
       // just re-described. `sessionInfo` is replaced wholesale here, so once an

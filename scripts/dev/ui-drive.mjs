@@ -8,7 +8,7 @@
 // chrome-headless-shell over raw CDP sidesteps the zygote entirely.
 //
 // Unlike screenshot-client.mjs, this does NOT serve the build from disk. It
-// points at the live broker (default http://127.0.0.1:7734/cosy/) so the API,
+// points at the source review broker (default http://127.0.0.1:17734/cosy/) so the API,
 // the auth gate and real session data are all in play.
 //
 //   node scripts/dev/ui-drive.mjs scenario.mjs [--base URL] [--out DIR] [--keep]
@@ -46,7 +46,7 @@ if (!scenarioPath || scenarioPath.startsWith("--")) {
   process.exit(2);
 }
 
-const BASE = (arg("base", "http://127.0.0.1:7734/cosy/")).replace(/\/$/, "") + "/";
+const BASE = (arg("base", "http://127.0.0.1:17734/cosy/")).replace(/\/$/, "") + "/";
 const OUT = resolve(arg("out", join(REPO, "output/screenshots")));
 const KEEP = process.argv.includes("--keep");
 

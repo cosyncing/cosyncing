@@ -877,9 +877,10 @@ class SessionDriveRestoreConflict {
   /// The drive-attach reason the client sent.
   final String reason;
 
-  /// Stable machine code: `DRIVE_OWNERSHIP_CONFLICT` or
-  /// `DRIVE_RESTORE_FAILED` from the broker, or the client-local
-  /// `DRIVE_RESTORE_TIMEOUT` for a takeover the broker never confirmed.
+  /// Stable machine code from the broker (`DRIVE_OWNERSHIP_CONFLICT`,
+  /// `DRIVE_OWNERSHIP_UNKNOWN`, `DRIVE_NATIVE_SESSION_UNRESUMABLE`, or
+  /// `DRIVE_RESTORE_FAILED`), or the client-local `DRIVE_RESTORE_TIMEOUT` for
+  /// a takeover the broker never confirmed.
   final String code;
 
   /// Human-readable broker/adapter detail.

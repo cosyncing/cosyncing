@@ -31,6 +31,12 @@ abstract interface class SpeechOutput {
     required List<SpeechUtterance> utterances,
   });
 
+  /// Applies a playback-speed multiplier to current and future synthesis.
+  ///
+  /// The abstraction uses human-facing multipliers where 1.0 is normal speed;
+  /// platform adapters own any plugin-specific normalization.
+  Future<void> setRate(double rate);
+
   /// Pause synthesis where the platform supports it.
   Future<void> pause();
 
