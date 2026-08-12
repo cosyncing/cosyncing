@@ -25,7 +25,7 @@ Verify the installation and runtime:
 ```bash
 opencode --version
 cosyncing setup
-cosyncing doctor
+cosy doctor
 ```
 
 See the [official OpenCode installation guide](https://opencode.ai/docs/).

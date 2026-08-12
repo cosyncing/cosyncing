@@ -98,8 +98,14 @@ class _BrokerHealthRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final status = health?.status ?? l10n.sessionTurnStatusUnknown;
-    final healthy = health?.status == 'healthy';
+    final status = health?.status;
+    final healthy = status == 'healthy';
+    final statusText = switch (status) {
+      'healthy' => l10n.settingsBrokerHealthHealthy,
+      'degraded' => l10n.settingsBrokerHealthDegraded,
+      'critical' => l10n.settingsBrokerHealthCritical,
+      _ => l10n.settingsBrokerHealthUnknown,
+    };
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(
@@ -109,11 +115,7 @@ class _BrokerHealthRow extends StatelessWidget {
             : context.tokens.statusError,
       ),
       title: Text(l10n.settingsBrokerHealthTitle),
-      subtitle: SelectableText(
-        healthy
-            ? l10n.settingsBrokerHealthHealthy
-            : l10n.settingsBrokerHealthUnhealthy(status),
-      ),
+      subtitle: SelectableText(statusText),
     );
   }
 }

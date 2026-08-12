@@ -246,7 +246,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
   }) async {
     final brokerProfileId = _brokerScopeKey;
     if (brokerProfileId == null) {
-      throw StateError('Cannot persist a session action without a broker.');
+      throw StateError(
+        'Cannot save a session action without an active server.',
+      );
     }
     final repository = ref.read(sessionOutboxRepositoryProvider);
     final clientMessageId = _nextClientMessageId();
@@ -260,7 +262,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
       ),
     );
     if (_brokerScopeKey != brokerProfileId) {
-      throw StateError('Broker profile changed before the action was sent.');
+      throw StateError('The active server changed before the action was sent.');
     }
     onPersisted?.call(clientMessageId);
     try {
@@ -270,7 +272,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
       // markSending write can regress it back to in-flight.
       await repository.markSending(clientMessageId);
       if (_brokerScopeKey != brokerProfileId) {
-        throw StateError('Broker profile changed before the action was sent.');
+        throw StateError(
+          'The active server changed before the action was sent.',
+        );
       }
       await send(clientMessageId);
     } on Object catch (e) {

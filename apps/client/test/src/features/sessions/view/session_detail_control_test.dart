@@ -64,7 +64,7 @@ void main() {
     Future<void> expectTerminalStatusCase({
       required WidgetTester tester,
       required String presence,
-      required String status,
+      required String? status,
       required bool hasCommand,
       required String action,
       required bool optionalBeforeSheet,
@@ -109,8 +109,20 @@ void main() {
         expect(find.text('Open in terminal (optional)'), findsNothing);
       }
       await openStatusSheet(tester);
-      expect(find.text('Terminal (optional)'), findsOneWidget);
-      expect(find.text(status), findsOneWidget);
+      final hasJoinCommand = action == 'join' && hasCommand;
+      final hasTerminalSection =
+          action != 'join' && (hasCommand || presence == 'private');
+      expect(
+        find.text('Terminal (optional)'),
+        hasTerminalSection ? findsOneWidget : findsNothing,
+      );
+      expect(
+        find.text('Sync with a terminal'),
+        hasJoinCommand ? findsOneWidget : findsNothing,
+      );
+      if (status case final status?) {
+        expect(find.text(status), findsOneWidget);
+      }
       if (label != null) {
         expect(find.text(label), findsOneWidget);
       }
@@ -182,12 +194,12 @@ void main() {
     });
 
     // Observing prevents broker mutation, not local durable staging. The
-    // redundant full-width banner remains absent because the header already
-    // carries the state; states the pill cannot express still get the banner.
-    testWidgets('observing keeps local editing without restating the status '
-        'pill', (
+    // composer explains that ownership state and replaces the dead Send action
+    // with the same Take over flow offered by Status.
+    testWidgets('observing preserves a durable draft and offers Take over', (
       tester,
     ) async {
+      final semantics = tester.ensureSemantics();
       await tester.pumpWidget(
         buildSessionDetailTestPage(
           events: const [],
@@ -208,21 +220,62 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.byKey(const Key('session-detail-composer-blocked-hint')),
-        findsNothing,
-        reason: 'the header status pill already says Observing',
+        find.byKey(const Key('session-detail-observe-composer-bar')),
+        findsOneWidget,
       );
-      // The state itself must still be on screen — this de-duplicates, it does
-      // not drop information.
-      expect(find.text('Observing'), findsWidgets);
+      expect(
+        find.text(
+          'The terminal owns input right now. Take over to send from the app.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getSemantics(
+              find.byKey(const Key('session-detail-observe-composer-bar')),
+            )
+            .label,
+        contains('Observing. The terminal owns input right now.'),
+      );
+      expect(
+        find.byKey(const Key('session-detail-send-button')),
+        findsNothing,
+      );
       final promptInput = tester.widget<TextField>(
         find.byKey(const Key('session-detail-prompt-input')),
       );
       expect(promptInput.enabled, isTrue);
+      expect(promptInput.decoration?.hintText, 'Draft a prompt');
+      await tester.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'Keep this local draft',
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('session-detail-prompt-input')),
+            )
+            .controller
+            ?.text,
+        'Keep this local draft',
+      );
+      semantics.dispose();
     });
 
     testWidgets('answer-only sync keeps the pill Synced but blocks the '
         'composer', (tester) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view
+        ..physicalSize = const Size(360, 760)
+        ..devicePixelRatio = 1;
       await tester.pumpWidget(
         buildSessionDetailTestPage(
           events: const [],
@@ -244,8 +297,42 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.byKey(const Key('session-detail-composer-blocked-hint')),
+        find.byKey(const Key('session-detail-observe-composer-bar')),
         findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Synced with your terminal for answers only. '
+          'Answer permission and question cards here; send new prompts from '
+          'the terminal.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.ancestor(
+          of: find.byKey(
+            const Key('session-detail-observe-composer-description'),
+          ),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('session-detail-send-button')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('session-detail-prompt-input')),
+            )
+            .decoration
+            ?.hintText,
+        'Draft a prompt',
       );
     });
 
@@ -287,7 +374,7 @@ void main() {
         await expectTerminalStatusCase(
           tester: tester,
           presence: 'shared',
-          status: 'Terminal connected and synced.',
+          status: null,
           hasCommand: false,
           action: 'join',
           expectReattachNull: false,
@@ -297,17 +384,16 @@ void main() {
     );
 
     testWidgets(
-      'terminal status matrix: app+absent shows optional join and no command '
-      'before sheet',
+      'terminal status matrix: app+absent shows terminal-sync choice only in '
+      'Status',
       (tester) async {
         await expectTerminalStatusCase(
           tester: tester,
           presence: 'absent',
-          status: 'Driving in the app. No terminal is open or behind.',
+          status: null,
           hasCommand: true,
           action: 'join',
           launchSurface: 'app',
-          label: 'Open in terminal (optional)',
           expectReattachNull: false,
           optionalBeforeSheet: true,
         );
@@ -315,15 +401,14 @@ void main() {
     );
 
     testWidgets(
-      'terminal status matrix: private without behind',
+      'terminal status matrix: private join uses terminal-sync choice',
       (tester) async {
         await expectTerminalStatusCase(
           tester: tester,
           presence: 'private',
-          status: 'This terminal needs a restart to join cosyncing.',
+          status: null,
           hasCommand: true,
           action: 'join',
-          label: 'Open in terminal (optional)',
           expectReattachNull: false,
           optionalBeforeSheet: false,
         );
@@ -331,16 +416,15 @@ void main() {
     );
 
     testWidgets(
-      'terminal status matrix: private behind',
+      'terminal status matrix: private behind join uses terminal-sync choice',
       (tester) async {
         await expectTerminalStatusCase(
           tester: tester,
           presence: 'private',
-          status: 'This terminal is behind. Restart or resume it to rejoin.',
+          status: null,
           hasCommand: true,
           action: 'join',
           behind: true,
-          label: 'Open in terminal (optional)',
           expectReattachNull: false,
           optionalBeforeSheet: false,
         );
@@ -353,7 +437,7 @@ void main() {
         await expectTerminalStatusCase(
           tester: tester,
           presence: 'unknown',
-          status: 'The terminal connection could not be confirmed.',
+          status: null,
           hasCommand: true,
           action: 'handoff',
           label: 'Resume in terminal',
@@ -434,6 +518,164 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    testWidgets('composer Take over reuses confirmation and keeps its draft', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+      final input = find.byKey(const Key('session-detail-prompt-input'));
+      await tester.enterText(input, 'Draft survives ownership change');
+
+      final takeOver = find.byKey(
+        const Key('session-detail-composer-take-over-button'),
+      );
+      final takeOverFocus = Focus.of(
+        tester.element(
+          find.descendant(of: takeOver, matching: find.text('Take over')),
+        ),
+      )..requestFocus();
+      await tester.pump();
+      expect(takeOverFocus.hasFocus, isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('session-detail-take-over-dialog')),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.byKey(const Key('session-detail-take-over-confirm')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(connection.reattachModes, ['resume']);
+      expect(connection.reattachReasons, ['takeover']);
+      expect(
+        tester.widget<TextField>(input).controller?.text,
+        'Draft survives '
+        'ownership change',
+      );
+    });
+
+    testWidgets(
+      'Observe bar stays usable in EN/ZH, light/dark and both widths',
+      (tester) async {
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+        final spec = themeSpecById(kDefaultThemeId);
+        for (final locale in const [Locale('en'), Locale('zh')]) {
+          for (final brightness in Brightness.values) {
+            for (final width in const [360.0, 1000.0]) {
+              tester.view
+                ..physicalSize = Size(width, 760)
+                ..devicePixelRatio = 1;
+              await tester.pumpWidget(
+                buildSessionDetailTestPage(
+                  events: const [],
+                  connection: controlConnection(const {
+                    'drive': {'state': 'observing', 'supported': true},
+                    'terminalSync': {
+                      'supported': false,
+                      'syncAvailable': false,
+                      'active': false,
+                    },
+                  }),
+                  locale: locale,
+                  theme: buildAppTheme(
+                    brightness == Brightness.dark ? spec.dark : spec.light,
+                    brightness,
+                  ),
+                ),
+              );
+              await tester.pumpAndSettle();
+
+              final bar = find.byKey(
+                const Key('session-detail-observe-composer-bar'),
+              );
+              expect(tester.getSize(bar).height, 40);
+              expect(
+                find.byKey(
+                  const Key('session-detail-composer-take-over-button'),
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.byKey(const Key('session-detail-send-button')),
+                findsNothing,
+              );
+              final field = tester.widget<TextField>(
+                find.byKey(const Key('session-detail-prompt-input')),
+              );
+              expect(
+                field.decoration?.hintText,
+                locale.languageCode == 'zh' ? '暂存提示' : 'Draft a prompt',
+              );
+              expect(tester.takeException(), isNull);
+            }
+          }
+        }
+      },
+    );
+
+    testWidgets('compact Observe bar goldens cover EN light and ZH dark', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      tester.view
+        ..physicalSize = const Size(420, 900)
+        ..devicePixelRatio = 1;
+      final spec = themeSpecById(kDefaultThemeId);
+      for (final variant in [
+        (
+          locale: const Locale('en'),
+          brightness: Brightness.light,
+          tokens: spec.light,
+          file: 'goldens/observe_composer_compact_light_en.png',
+        ),
+        (
+          locale: const Locale('zh'),
+          brightness: Brightness.dark,
+          tokens: spec.dark,
+          file: 'goldens/observe_composer_compact_dark_zh.png',
+        ),
+      ]) {
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: controlConnection(const {
+              'drive': {'state': 'observing', 'supported': true},
+              'terminalSync': {
+                'supported': false,
+                'syncAvailable': false,
+                'active': false,
+              },
+            }),
+            locale: variant.locale,
+            theme: buildAppTheme(variant.tokens, variant.brightness),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await expectLater(
+          find.byKey(const Key('session-detail-observe-composer-bar')),
+          matchesGoldenFile(variant.file),
+        );
+      }
+    });
+
     testWidgets('observing offers Take over → confirm → drives (resume)', (
       tester,
     ) async {
@@ -465,11 +707,29 @@ void main() {
     });
 
     testWidgets(
-      'observing with sync merely available still offers Take over (CR1)',
+      'sync-available exposes independent terminal and Take over choices',
       (tester) async {
         // `syncAvailable` is a capability, not ownership: the pill may read
         // "Sync available" and Join may be the primary action, but Drive must
         // stay reachable — Join can never be the only path.
+        const command = '  codex resume --remote sock thread  ';
+        String? copiedText;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copiedText =
+                  (call.arguments as Map<Object?, Object?>)['text'] as String?;
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
         final connection = controlConnection(const {
           'drive': {'state': 'observing', 'supported': true},
           'terminalSync': {
@@ -477,7 +737,7 @@ void main() {
             'syncAvailable': true,
             'active': false,
             'action': 'join',
-            'command': 'codex resume --remote sock thread',
+            'command': command,
           },
         });
         await tester.pumpWidget(
@@ -485,12 +745,73 @@ void main() {
         );
         await tester.pumpAndSettle();
 
+        expect(
+          find.byKey(const Key('session-detail-observe-composer-bar')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const Key('session-detail-composer-copy-sync-command'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsOneWidget,
+        );
+        expect(find.text(command), findsNothing);
+        expect(
+          find.byKey(const Key('session-detail-send-button')),
+          findsNothing,
+        );
+        await tester.tap(
+          find.byKey(
+            const Key('session-detail-composer-copy-sync-command'),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(copiedText, command);
+        expect(connection.reattachModes, isEmpty);
+        expect(
+          find.text(
+            'Command copied. Run it in a terminal to sync both sides.',
+          ),
+          findsOneWidget,
+        );
+
         await openSessionDetailTestTab(tester, 'session-detail-tab-status');
         expect(
           find.byKey(
             const Key(
               'session-detail-status-control-pill-syncAvailable',
             ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Session control'),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            'No terminal is currently synced. Choose how to continue.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Sync with a terminal'), findsOneWidget);
+        expect(
+          find.text(
+            'Run this command in a terminal. Once synced, you can send from '
+            'either the terminal or Cosyncing.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text(command), findsOneWidget);
+        expect(find.text('Continue in Cosyncing'), findsOneWidget);
+        expect(
+          find.text(
+            'Take over to send from Cosyncing without syncing a terminal.',
           ),
           findsOneWidget,
         );
@@ -512,6 +833,343 @@ void main() {
         expect(connection.reattachReasons, ['takeover']);
       },
     );
+
+    testWidgets('terminal-command-only state shows only the sync choice', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {'state': 'unavailable', 'supported': false},
+        'terminalSync': {
+          'supported': true,
+          'syncAvailable': true,
+          'active': false,
+          'action': 'join',
+          'command': 'codex resume --remote only-command',
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-detail-composer-copy-sync-command')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsNothing,
+      );
+
+      await openStatusSheet(tester);
+      expect(find.text('Sync with a terminal'), findsOneWidget);
+      expect(find.text('Continue in Cosyncing'), findsNothing);
+      expect(
+        find.byKey(const Key('session-detail-take-over-button')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('join with no usable command falls back to Take over only', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': true,
+          'syncAvailable': true,
+          'active': false,
+          'action': 'join',
+          'command': '   ',
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-detail-composer-copy-sync-command')),
+        findsNothing,
+      );
+      expect(
+        find.text(
+          'The terminal owns input right now. Take over to send from the app.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsOneWidget,
+      );
+
+      await openStatusSheet(tester);
+      expect(find.text('Sync with a terminal'), findsNothing);
+      expect(find.text('Continue in Cosyncing'), findsOneWidget);
+      expect(
+        find.text(
+          'Take over to send from Cosyncing without syncing a terminal.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('join with neither path shows the unavailable explanation', (
+      tester,
+    ) async {
+      for (final command in <String?>[null, '', '   ']) {
+        final connection = controlConnection({
+          'drive': {'state': 'unavailable', 'supported': false},
+          'terminalSync': {
+            'supported': true,
+            'syncAvailable': true,
+            'active': false,
+            'action': 'join',
+            if (command != null) 'command': command,
+          },
+        });
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('session-detail-composer-copy-sync-command')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsNothing,
+        );
+        expect(
+          find.text(
+            'The app can neither take over nor sync this session. You can '
+            'only observe it.',
+          ),
+          findsOneWidget,
+        );
+
+        await openStatusSheet(tester);
+        expect(find.text('Sync with a terminal'), findsNothing);
+        expect(find.text('Continue in Cosyncing'), findsNothing);
+        expect(
+          find.text(
+            'The app can neither take over nor sync this session. You can '
+            'only observe it.',
+          ),
+          findsOneWidget,
+        );
+      }
+    });
+
+    testWidgets('Take over pending disables the composer sync copy action', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': true,
+          'syncAvailable': true,
+          'active': false,
+          'action': 'join',
+          'command': 'codex resume --remote pending',
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-detail-take-over-dialog')),
+        findsOneWidget,
+      );
+      final copy = find.byKey(
+        const Key('session-detail-composer-copy-sync-command'),
+        skipOffstage: false,
+      );
+      expect(copy, findsOneWidget);
+      expect(
+        tester
+            .widget<TextButton>(
+              find.descendant(
+                of: copy,
+                matching: find.byType(TextButton),
+                skipOffstage: false,
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+      'terminal-sync choices fit EN/ZH themes and responsive widths',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+        final spec = themeSpecById(kDefaultThemeId);
+        for (final locale in const [Locale('en'), Locale('zh')]) {
+          for (final brightness in Brightness.values) {
+            for (final width in const [360.0, 420.0, 600.0, 1000.0]) {
+              tester.view
+                ..physicalSize = Size(width, 900)
+                ..devicePixelRatio = 1;
+              await tester.pumpWidget(
+                buildSessionDetailTestPage(
+                  events: const [],
+                  connection: controlConnection(const {
+                    'drive': {'state': 'observing', 'supported': true},
+                    'terminalSync': {
+                      'supported': true,
+                      'syncAvailable': true,
+                      'active': false,
+                      'action': 'join',
+                      'command': 'codex resume --remote responsive',
+                    },
+                  }),
+                  locale: locale,
+                  theme: buildAppTheme(
+                    brightness == Brightness.dark ? spec.dark : spec.light,
+                    brightness,
+                  ),
+                ),
+              );
+              await tester.pumpAndSettle();
+
+              final bar = find.byKey(
+                const Key('session-detail-observe-composer-bar'),
+              );
+              final barWidth = tester.getSize(bar).width;
+              expect(tester.getSize(bar).height, 40);
+              expect(
+                find.byKey(
+                  const Key('session-detail-composer-copy-sync-command'),
+                ),
+                findsOneWidget,
+              );
+              expect(
+                find.byKey(
+                  const Key('session-detail-composer-take-over-button'),
+                ),
+                findsOneWidget,
+              );
+              final explanation = locale.languageCode == 'zh'
+                  ? barWidth >= 600
+                        ? '终端尚未同步。要从 Cosyncing 发送：'
+                        : '终端尚未同步：'
+                  : barWidth >= 600
+                  ? 'Terminal not synced. To send from Cosyncing:'
+                  : 'Terminal not synced:';
+              expect(find.text(explanation), findsOneWidget);
+              expect(
+                tester
+                    .getSemantics(
+                      find.byKey(
+                        const Key(
+                          'session-detail-composer-copy-sync-command',
+                        ),
+                      ),
+                    )
+                    .label,
+                contains(
+                  locale.languageCode == 'zh'
+                      ? '复制终端同步命令'
+                      : 'Copy terminal sync command',
+                ),
+              );
+              if (barWidth <= kObserveComposerActionCollapseWidth) {
+                expect(
+                  tester.getSize(
+                    find.byKey(
+                      const Key(
+                        'session-detail-composer-copy-sync-command',
+                      ),
+                    ),
+                  ),
+                  const Size.square(40),
+                );
+                expect(
+                  find.text(locale.languageCode == 'zh' ? '接管' : 'Take over'),
+                  findsOneWidget,
+                );
+              } else {
+                expect(
+                  find.text(
+                    locale.languageCode == 'zh'
+                        ? '复制同步命令'
+                        : 'Copy sync command',
+                  ),
+                  findsOneWidget,
+                );
+              }
+              expect(tester.takeException(), isNull);
+            }
+          }
+        }
+        semantics.dispose();
+      },
+    );
+
+    testWidgets('terminal-sync choices grow to two rows at text scale 2', (
+      tester,
+    ) async {
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      for (final width in const [360.0, 420.0, 600.0, 1000.0]) {
+        tester.view
+          ..physicalSize = Size(width, 1000)
+          ..devicePixelRatio = 1;
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: controlConnection(const {
+              'drive': {'state': 'observing', 'supported': true},
+              'terminalSync': {
+                'supported': true,
+                'syncAvailable': true,
+                'active': false,
+                'action': 'join',
+                'command': 'codex resume --remote large-text',
+              },
+            }),
+            textScale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          tester
+              .getSize(
+                find.byKey(const Key('session-detail-observe-composer-bar')),
+              )
+              .height,
+          greaterThanOrEqualTo(64),
+        );
+        expect(
+          find.byKey(const Key('session-detail-composer-copy-sync-command')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('session-detail-composer-take-over-button')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }
+    });
 
     testWidgets('willFork shows the fork confirm wording', (tester) async {
       final connection = controlConnection(const {

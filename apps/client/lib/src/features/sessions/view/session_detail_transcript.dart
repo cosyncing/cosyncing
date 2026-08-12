@@ -388,48 +388,6 @@ List<_ChatItem> _flattenConversationTurns({
   return result;
 }
 
-class _ComposerBlockedHint extends StatelessWidget {
-  const _ComposerBlockedHint({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    // Compact status band: the header pill already carries the coarse state,
-    // so this only adds the one-line detail. Kept short (icon 14, labelSmall,
-    // tight padding) so it does not steal transcript height.
-    return Container(
-      key: const Key('session-detail-composer-blocked-hint'),
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.visibility_outlined,
-            size: 14,
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              message,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _CompatibilityNotice extends StatelessWidget {
   const _CompatibilityNotice({required this.message});
 
@@ -448,14 +406,14 @@ class _CompatibilityNotice extends StatelessWidget {
         borderRadius: BorderRadius.circular(tokens.radiusMd),
         border: Border.all(color: colors.tertiary),
       ),
-      child: Row(
-        children: [
-          Icon(Icons.system_update_alt, size: 18, color: colors.tertiary),
-          const SizedBox(width: 8),
-          // Avoid an independent selection island. Plain Text participates in
-          // an ancestor selection owner when the notice is hosted with one.
-          Expanded(child: Text(message)),
-        ],
+      child: SelectionArea(
+        child: Row(
+          children: [
+            Icon(Icons.system_update_alt, size: 18, color: colors.tertiary),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message)),
+          ],
+        ),
       ),
     );
   }
@@ -1248,7 +1206,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     final canReadAloud = ref
         .read(readAloudControllerProvider)
         .capabilities
-        .synthesis;
+        .canAttemptSynthesis;
     return AdaptiveTextSelectionToolbar.buttonItems(
       anchors: selection.contextMenuAnchors,
       buttonItems: [
@@ -1869,9 +1827,12 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // would rebuild the notifier on every connect/disconnect frame and drop the
     // cached cards. Repeated frames of the same value are a no-op inside the
     // controller, and nothing here writes provider state during this build.
-    final inlineController = ref.read(
-      inlineScheduledMessageControllerProvider(inlineTarget).notifier,
-    )..setTransportConnected(connected: widget.isConnected);
+    final inlineController =
+        ref.read(
+            inlineScheduledMessageControllerProvider(inlineTarget).notifier,
+          )
+          ..setHostVisible(visible: TickerMode.valuesOf(context).enabled)
+          ..setTransportConnected(connected: widget.isConnected);
     final rowWork = debugTranscriptRowWork;
     final conversationPageSegments = widget.state
         .transcriptConversationSegments(widget.toolDisplayMode);

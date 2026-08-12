@@ -17,6 +17,25 @@ void main() {
     await pumpEventQueue();
   });
 
+  test('plugin rate normalization keeps 1.0 normal on web and native', () {
+    expect(
+      flutterTtsPluginRateForMultiplier(1, isWeb: true),
+      1,
+    );
+    expect(
+      flutterTtsPluginRateForMultiplier(1, isWeb: false),
+      0.5,
+    );
+    expect(
+      flutterTtsPluginRateForMultiplier(1.5, isWeb: true),
+      1.5,
+    );
+    expect(
+      flutterTtsPluginRateForMultiplier(1.5, isWeb: false),
+      0.75,
+    );
+  });
+
   group('ordered chunk playback', () {
     test('speaks utterances in order', () async {
       await output.speak(
@@ -51,7 +70,59 @@ void main() {
     });
   });
 
+  group('rate', () {
+    test(
+      'applies the human-facing multiplier immediately and before speak',
+      () async {
+        await output.setRate(1.5);
+        await output.speak(
+          messageKey: 'm1',
+          utterances: const [SpeechUtterance('hello')],
+        );
+
+        expect(backend.rateCalls, [1.5, 1.5]);
+        expect(backend.spokenTexts, ['hello']);
+      },
+    );
+
+    test('default playback explicitly applies the 1.0 multiplier', () async {
+      await output.speak(
+        messageKey: 'm1',
+        utterances: const [SpeechUtterance('hello')],
+      );
+
+      expect(backend.rateCalls, [1]);
+    });
+
+    test(
+      'backend rejection prevents untruthful playback at another rate',
+      () async {
+        backend.rateException = Exception('raw platform rate failure');
+        await output.setRate(1.25);
+        await output.speak(
+          messageKey: 'm1',
+          utterances: const [SpeechUtterance('hello')],
+        );
+
+        expect(backend.spokenTexts, isEmpty);
+        final current = output.current;
+        expect(current, isA<SpeechOutputError>());
+        expect((current as SpeechOutputError).reason, 'Playback error.');
+        expect(current.reason, isNot(contains('platform')));
+      },
+    );
+  });
+
   group('stop', () {
+    test('idle stop never calls the native backend', () async {
+      expect(backend.stopCallCount, 0);
+
+      await output.stop();
+
+      expect(backend.stopCallCount, 0);
+      expect(output.current, isA<SpeechOutputIdle>());
+    });
+
     test('stop returns to idle and cancels remaining queue', () async {
       await output.speak(
         messageKey: 'm1',
@@ -68,9 +139,14 @@ void main() {
 
       expect(output.current, isA<SpeechOutputIdle>());
       expect(backend.spokenTexts, ['one']);
+      expect(backend.stopCallCount, 1);
     });
 
     test('stop failure emits scoped error instead of claiming idle', () async {
+      await output.speak(
+        messageKey: 'm1',
+        utterances: const [SpeechUtterance('hello')],
+      );
       backend.stopException = Exception('stop channel crash');
       await output.stop();
       await pumpEventQueue();
@@ -79,6 +155,20 @@ void main() {
       expect(current, isA<SpeechOutputError>());
       expect((current as SpeechOutputError).reason, 'Playback error.');
       expect(current.reason, isNot(contains('channel')));
+    });
+
+    test('stop after natural completion never calls native stop', () async {
+      await output.speak(
+        messageKey: 'm1',
+        utterances: const [SpeechUtterance('hello')],
+      );
+      await backend.completeAllSpeaks();
+      await pumpEventQueue();
+
+      await output.stop();
+
+      expect(backend.stopCallCount, 0);
+      expect(output.current, isA<SpeechOutputIdle>());
     });
   });
 
@@ -107,6 +197,7 @@ void main() {
       expect(backend.spokenTexts, contains('b1'));
       expect(backend.spokenTexts, isNot(contains('a2')));
       expect(backend.spokenTexts, isNot(contains('a3')));
+      expect(backend.stopCallCount, 1);
 
       final current = output.current;
       if (current is SpeechOutputSpeaking) {
@@ -225,28 +316,33 @@ void main() {
     );
   });
 
-  group('pre-playback stop failure', () {
+  group('pending replacement stop failure', () {
     test(
-      'backend.speak not invoked after pre-stop failure; scoped error emitted',
+      'replacement does not start after pending stop fails',
       () async {
-        backend.stopException = Exception('stop failed before speak');
+        await output.speak(
+          messageKey: 'A',
+          utterances: const [SpeechUtterance('a1')],
+        );
+        backend.stopException = Exception('stop failed during replacement');
 
         await output.speak(
-          messageKey: 'm1',
-          utterances: const [SpeechUtterance('hello')],
+          messageKey: 'B',
+          utterances: const [SpeechUtterance('b1')],
         );
         await pumpEventQueue();
 
-        // backend.speak was never called.
-        expect(backend.spokenTexts, isEmpty);
+        expect(backend.spokenTexts, ['a1']);
         // A scoped error was emitted.
         final current = output.current;
         expect(current, isA<SpeechOutputError>());
         final error = current as SpeechOutputError;
-        expect(error.messageKey, 'm1');
+        expect(error.messageKey, 'B');
         expect(error.reason, 'Playback error.');
         // Raw exception text not exposed.
         expect(error.reason, isNot(contains('stop failed')));
+
+        await backend.completeAllSpeaks();
       },
     );
   });
@@ -318,6 +414,71 @@ void main() {
   });
 
   group('speak must initialize and honor capabilities', () {
+    test('lazy adapter stays unprobed and silent until first speak', () async {
+      final lazyBackend = _FakeBackend();
+      var constructionCount = 0;
+      final lazyOutput = FlutterTtsSpeechOutput.lazy(() {
+        constructionCount++;
+        return lazyBackend;
+      });
+
+      expect(lazyOutput.capabilities.synthesis, isFalse);
+      expect(lazyOutput.capabilities.canAttemptSynthesis, isTrue);
+      await lazyOutput.setRate(1.25);
+      await lazyOutput.stop();
+
+      expect(constructionCount, 0);
+      expect(lazyBackend.calls, isEmpty);
+    });
+
+    test(
+      'first lazy speak initializes, applies rate, and speaks without stop',
+      () async {
+        final lazyBackend = _FakeBackend();
+        final lazyOutput = FlutterTtsSpeechOutput.lazy(() => lazyBackend);
+
+        await lazyOutput.setRate(1.25);
+        await lazyOutput.speak(
+          messageKey: 'm1',
+          utterances: const [SpeechUtterance('hello')],
+        );
+
+        expect(
+          lazyBackend.calls,
+          [
+            'enableAwaitCompletion',
+            'getLanguages',
+            'setRate:1.25',
+            'setErrorHandler',
+            'speak:hello',
+          ],
+        );
+        expect(lazyBackend.stopCallCount, 0);
+
+        await lazyBackend.completeAllSpeaks();
+      },
+    );
+
+    test(
+      'failed first-use probe becomes unavailable without stop or speak',
+      () async {
+        final lazyBackend = _FakeBackend()
+          ..enableAwaitCompletionException = Exception('init crash');
+        final lazyOutput = FlutterTtsSpeechOutput.lazy(() => lazyBackend);
+
+        await lazyOutput.speak(
+          messageKey: 'm1',
+          utterances: const [SpeechUtterance('hello')],
+        );
+
+        expect(lazyOutput.capabilities.synthesis, isFalse);
+        expect(lazyOutput.capabilities.canAttemptSynthesis, isFalse);
+        expect(lazyBackend.calls, ['enableAwaitCompletion']);
+        expect(lazyBackend.stopCallCount, 0);
+        expect(lazyBackend.spokenTexts, isEmpty);
+      },
+    );
+
     test(
       'direct speak triggers initialization exactly once',
       () async {
@@ -497,12 +658,15 @@ Future<void> pumpEventQueue() async {
 }
 
 class _FakeBackend implements FlutterTtsBackend {
+  final List<String> calls = [];
   final List<String> spokenTexts = [];
+  final List<double> rateCalls = [];
   List<String> languages = ['en-US'];
   Duration languagesDelay = Duration.zero;
   Exception? enableAwaitCompletionException;
   Exception? languagesException;
   Exception? speakException;
+  Exception? rateException;
   Exception? stopException;
   void Function(Object?)? errorHandler;
   String? nextError;
@@ -512,6 +676,7 @@ class _FakeBackend implements FlutterTtsBackend {
 
   @override
   Future<void> enableAwaitCompletion() async {
+    calls.add('enableAwaitCompletion');
     if (enableAwaitCompletionException != null) {
       throw enableAwaitCompletionException!;
     }
@@ -519,6 +684,7 @@ class _FakeBackend implements FlutterTtsBackend {
 
   @override
   Future<void> speak(String text) async {
+    calls.add('speak:$text');
     spokenTexts.add(text);
     if (speakException != null) {
       final ex = speakException!;
@@ -539,10 +705,18 @@ class _FakeBackend implements FlutterTtsBackend {
     }
   }
 
+  @override
+  Future<void> setRate(double multiplier) async {
+    calls.add('setRate:$multiplier');
+    rateCalls.add(multiplier);
+    if (rateException != null) throw rateException!;
+  }
+
   int stopCallCount = 0;
 
   @override
   Future<void> stop() async {
+    calls.add('stop');
     stopCallCount++;
     if (stopException != null) {
       final ex = stopException!;
@@ -558,11 +732,13 @@ class _FakeBackend implements FlutterTtsBackend {
 
   @override
   void setErrorHandler(void Function(Object? message) handler) {
+    calls.add('setErrorHandler');
     errorHandler = handler;
   }
 
   @override
   Future<List<String>> getLanguages() async {
+    calls.add('getLanguages');
     getLanguagesCallCount++;
     if (languagesDelay > Duration.zero) {
       await Future<void>.delayed(languagesDelay);

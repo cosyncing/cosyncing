@@ -55,9 +55,8 @@ hosted service between the client and the broker.
 </p>
 
 One protocol covers all four. Per-agent control differs, and Claude Code sessions open read-only
-until you take over. See [adapter support and evidence](docs/protocol/adapter-support.md) for the
-function-by-function matrix. See [supported-agent setup](docs/supported_agents/README.md) for
-minimum versions, official install methods, and agent-specific runtime requirements.
+until you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
+installation, and [adapter support](docs/protocol/adapter-support.md) for the capability matrix.
 
 ## Install
 
@@ -68,18 +67,30 @@ minimum versions, official install methods, and agent-specific runtime requireme
 The package contains one JavaScript application bundle and the web client. Supported broker hosts
 are Linux x64, Linux arm64, and Apple Silicon macOS; on Windows, run the broker inside WSL.
 
+Before setup, install only the agents you use; see [agent setup and PATH
+preflight](docs/supported_agents/README.md#preflight).
+
 Install the current release:
 
 ```bash
 npm install --global cosyncing
+```
+
+Open a new login shell, then configure the service:
+
+```bash
 cosyncing setup
-cosyncing pair
+cosy restart
+cosy doctor
+cosy status
+cosy pair
 ```
 
 `setup` inspects the machine, shows exactly what it will change, and applies the whole plan or none
 of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service that runs that
 copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
-committed.
+committed. After setup, the examples use the installed `cosy` shorthand for routine commands;
+`cosyncing` remains valid too.
 
 To update, move the package with your package manager and then re-run setup, which re-copies the new
 application and reconciles the service:
@@ -89,11 +100,11 @@ npm update --global cosyncing
 cosyncing setup
 ```
 
-`pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
-`cosyncing devices list` lists paired devices, and `cosyncing devices revoke <id>` revokes one.
+`cosy pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
+`cosy devices list` lists paired devices, and `cosy devices revoke <id>` revokes one.
 
-Before anything else: `cosyncing doctor` diagnoses the machine without changing it, and
-`cosyncing status` summarizes install, service, agents, and sessions.
+After setup, `cosy doctor` diagnoses the machine without changing it, and `cosy status` summarizes
+install, service, agents, and sessions.
 
 ## The web client
 

@@ -48,8 +48,8 @@ class _TelemetryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
     if (telemetry.isEmpty) {
       return Text(
         l10n.sessionDetailTelemetryEmpty,
@@ -66,8 +66,6 @@ class _TelemetryPanel extends StatelessWidget {
           l10n.sessionDetailTelemetryContextUsed,
           _describeContext(telemetry),
         ),
-      if (telemetry.totalTokens case final total?)
-        (l10n.sessionDetailTelemetryTotalTokens, _formatGroupedCount(total)),
       if (telemetry.inputTokens case final value?)
         (l10n.sessionDetailTelemetryInput, _formatGroupedCount(value)),
       if (telemetry.outputTokens case final value?)
@@ -101,7 +99,7 @@ class _TelemetryPanel extends StatelessWidget {
       key: const Key('session-detail-telemetry-panel'),
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(context.tokens.radiusLg),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -126,14 +124,14 @@ class _TelemetryPanel extends StatelessWidget {
                   children: [
                     Text(
                       label,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: context.tokens.textSecondary,
                       ),
                     ),
                     Text(
                       value,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontWeight: FontWeight.w600,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: context.tokens.textPrimary,
                         fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
@@ -280,7 +278,7 @@ class _StatusChipButton extends StatelessWidget {
           : l10n.sessionStatusTooltipWithLabel(label),
       child: InkWell(
         key: const Key('session-detail-status-chip'),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(context.tokens.radiusSm),
         onTap: onTap,
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -291,7 +289,13 @@ class _StatusChipButton extends StatelessWidget {
                 child: label == null
                     ? Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Text(l10n.sessionViewStatus),
+                        // Same role as the pill label it stands in for; bare
+                        // Text here inherited whatever ambient style reached
+                        // this subtree.
+                        child: Text(
+                          l10n.sessionViewStatus,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
                       )
                     : _SessionControlPill(
                         control: control,
@@ -387,7 +391,7 @@ class _SessionControlPill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(tokens.radiusSm),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -517,6 +521,68 @@ class _StatusTabPanel extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<_StatusTabPanel> createState() => _StatusTabPanelState();
+}
+
+/// Status heading hierarchy: section title, inline ownership pill, then the
+/// quiet explanation supplied by the panel. Below 360dp the pill wraps to its
+/// own line so neither the localized title nor the authoritative state clips.
+class _StatusOwnershipHeader extends StatelessWidget {
+  const _StatusOwnershipHeader({
+    required this.title,
+    required this.control,
+    required this.freshness,
+    required this.restoringDrive,
+    required this.controlPillState,
+  });
+
+  final String title;
+  final SessionControlView control;
+  final SessionDetailFreshnessPresentation freshness;
+  final bool restoringDrive;
+  final String controlPillState;
+
+  @override
+  Widget build(BuildContext context) {
+    final pill = KeyedSubtree(
+      key: Key(
+        'session-detail-status-sheet-control-pill-$controlPillState',
+      ),
+      child: _SessionControlPill(
+        control: control,
+        freshness: freshness,
+        keyPrefix: 'session-detail-status-control-pill',
+        restoringDrive: restoringDrive,
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final titleWidget = SectionHeader(title, padding: EdgeInsets.zero);
+        if (constraints.maxWidth < 360) {
+          return Column(
+            key: const Key(
+              'session-detail-status-ownership-header-compact',
+            ),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              titleWidget,
+              const SizedBox(height: 4),
+              pill,
+            ],
+          );
+        }
+        return Row(
+          key: const Key('session-detail-status-ownership-header-roomy'),
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Expanded(child: titleWidget),
+            const SizedBox(width: 8),
+            pill,
+          ],
+        );
+      },
+    );
+  }
 }
 
 class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
@@ -699,16 +765,21 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
         compatibleControls &&
         (state.agentActions?.canTranscriptExport ?? false) &&
         !state.transcriptExportActionState.isBusy;
-    // Only surface the terminal command as an action affordance: handoff
-    // (Resume — driving) or join/handoff. Never on Observe/Synced, where
-    // `terminalSync.command` can still be set but running it would fork a
-    // divergent owner (e.g. a live Claude terminal).
-    final showCommand =
+    final joinCommand = compatibleControls ? _usableJoinCommand(control) : null;
+    final handoffCommand =
         compatibleControls &&
-        control.command != null &&
-        (control.action == SessionControlAction.join ||
-            control.action == SessionControlAction.handoff) &&
-        control.terminalPresence != TerminalSyncPresence.shared;
+            control.action == SessionControlAction.handoff &&
+            (control.command?.trim().isNotEmpty ?? false) &&
+            control.terminalPresence != TerminalSyncPresence.shared
+        ? control.command
+        : null;
+    final joinPresentation =
+        compatibleControls && control.action == SessionControlAction.join;
+    final showTerminalStatus =
+        control.terminalPresence == TerminalSyncPresence.private ||
+        (control.terminalBehind ?? false);
+    final showTerminalSection =
+        !joinPresentation && (handoffCommand != null || showTerminalStatus);
     // U3-E. In exactly one state — connected, compatible, Synced (not
     // answer-only), with the terminal actually shared and not behind — the card
     // said the same thing three times: the pill, a general "Synced with your
@@ -730,8 +801,18 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
         !(control.terminalBehind ?? false) &&
         control.reason == null &&
         !control.canTakeOver &&
-        !showCommand &&
+        joinCommand == null &&
+        handoffCommand == null &&
         state.driveRestoreConflict == null;
+    final statusDescription = syncedSharedHealthy
+        ? null
+        : joinPresentation
+        ? joinCommand != null
+              ? l10n.sessionControlSyncAvailableDescription
+              : control.canTakeOver
+              ? null
+              : l10n.sessionControlUnavailableDescription
+        : _controlStatusDescription(l10n, control);
     // U3-D. One selection region over the whole Status surface: labels, values,
     // descriptions and status tags are ordinary `Text`, and under a
     // `SelectionArea` they become selectable and copyable together without any
@@ -748,65 +829,50 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             child: Card(
               margin: EdgeInsets.zero,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(context.tokens.radiusLg),
               ),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      l10n.sessionConnectionOwnership,
-                      style: theme.textTheme.titleSmall,
+                    _StatusOwnershipHeader(
+                      title: l10n.sessionControlHeading,
+                      control: control,
+                      freshness: freshness,
+                      restoringDrive: restoringDrive,
+                      controlPillState: controlPillState,
                     ),
                     // U3-C: the native session id used to sit here. It is
                     // technical identity, and Debug's "Session identity" card —
                     // behind General → Developer options → Show debug views,
                     // default off — already owns it. Normal Status answers "who
                     // controls this session", not "what is its fingerprint".
-                    const SizedBox(height: 8),
-                    // R0b: one owner for the freshness statement. The pill's
-                    // footprint carries it in every state — Driving/Synced when
-                    // the frame is authoritative, Refreshing/Reconnecting when
-                    // it is not — so the panel no longer adds a second
-                    // reconnect sentence beside it. `Not attached` survives
-                    // because it is a different, terminal fact: nothing is
-                    // being re-established.
-                    KeyedSubtree(
-                      key: Key(
-                        'session-detail-status-sheet-control-pill-'
-                        '$controlPillState',
-                      ),
-                      child: _SessionControlPill(
-                        control: control,
-                        freshness: freshness,
-                        keyPrefix: 'session-detail-status-control-pill',
-                        restoringDrive: restoringDrive,
-                      ),
-                    ),
                     if (!isConnected &&
                         state.connectionStatus !=
                             SessionDetailConnectionStatus.reconnecting &&
                         state.connectionStatus !=
                             SessionDetailConnectionStatus.connecting)
                       Padding(
-                        padding: const EdgeInsets.only(top: 8),
+                        padding: const EdgeInsets.only(top: 4),
                         child: Text(
                           l10n.sessionNotAttached,
                           key: const Key('session-detail-status-offline-hint'),
-                          style: theme.textTheme.bodyMedium?.copyWith(
+                          style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.error,
                           ),
                         ),
                       ),
-                    if (!syncedSharedHealthy) ...[
-                      const SizedBox(height: 12),
+                    if (statusDescription != null) ...[
+                      const SizedBox(height: 4),
                       Text(
-                        _controlStatusDescription(l10n, control),
+                        statusDescription,
                         key: const Key(
                           'session-detail-status-control-description',
                         ),
-                        style: theme.textTheme.bodyMedium,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: context.tokens.textSecondary,
+                        ),
                       ),
                     ],
                     if (control.reason?.trim().isNotEmpty ?? false) ...[
@@ -815,7 +881,16 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                         type: MaterialType.transparency,
                         child: ExpansionTile(
                           tilePadding: EdgeInsets.zero,
-                          title: Text(l10n.technicalDetails),
+                          // A quiet disclosure, not a heading: without an
+                          // explicit role the ListTile default (bodyLarge,
+                          // 16sp) rendered this control larger than the
+                          // SectionHeader above it and the reason body below.
+                          title: Text(
+                            l10n.technicalDetails,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: context.tokens.textSecondary,
+                            ),
+                          ),
                           children: [
                             SelectableText(
                               control.reason!,
@@ -830,13 +905,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                     if (state.driveRestoreConflict case final conflict?) ...[
                       const SizedBox(height: 8),
                       Text(
-                        switch (conflict.code) {
-                          'DRIVE_OWNERSHIP_CONFLICT' =>
-                            l10n.sessionDriveRestoreConflictNote,
-                          'DRIVE_RESTORE_TIMEOUT' =>
-                            l10n.sessionDriveTakeoverTimeoutNote,
-                          _ => l10n.sessionDriveRestoreFailureNote,
-                        },
+                        _driveConflictFeedback(l10n, conflict),
                         key: const Key(
                           'session-detail-drive-restore-conflict',
                         ),
@@ -862,33 +931,98 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                         ),
                       ),
                     ],
-                    if (!syncedSharedHealthy) ...[
+                    if (joinPresentation && joinCommand != null) ...[
                       const SizedBox(height: 16),
-                      Text(
-                        l10n.sessionTerminalOptional,
+                      SectionHeader(
+                        l10n.sessionSyncWithTerminal,
+                        padding: EdgeInsets.zero,
                         key: const Key(
-                          'session-detail-status-terminal-heading',
-                        ),
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
+                          'session-detail-status-sync-heading',
                         ),
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        _controlTerminalStatusDescription(l10n, control),
+                        l10n.sessionSyncWithTerminalDescription,
                         key: const Key(
-                          'session-detail-status-terminal-description',
+                          'session-detail-status-sync-description',
                         ),
                         style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
+                          color: context.tokens.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _CopyCommandRow(
+                        command: joinCommand,
+                        copyTooltip: l10n.sessionCopyTerminalSyncCommand,
+                        copiedMessage: l10n.sessionSyncCommandCopied,
+                        enabled:
+                            isConnected &&
+                            compatibleControls &&
+                            !_takeOverPending,
+                      ),
+                    ],
+                    if (joinPresentation && control.canTakeOver) ...[
+                      const SizedBox(height: 16),
+                      SectionHeader(
+                        l10n.sessionContinueInCosyncing,
+                        padding: EdgeInsets.zero,
+                        key: const Key(
+                          'session-detail-status-takeover-heading',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        l10n.sessionContinueInCosyncingDescription,
+                        key: const Key(
+                          'session-detail-status-takeover-description',
+                        ),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: context.tokens.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          key: const Key('session-detail-take-over-button'),
+                          icon: const Icon(Icons.login),
+                          label: Text(l10n.sessionTakeOver),
+                          onPressed:
+                              isConnected &&
+                                  compatibleControls &&
+                                  !_takeOverPending
+                              ? () => unawaited(_takeOver())
+                              : null,
                         ),
                       ),
                     ],
-                    if (showCommand) ...[
-                      const SizedBox(height: 12),
+                    if (showTerminalSection) ...[
+                      const SizedBox(height: 16),
+                      SectionHeader(
+                        l10n.sessionTerminalOptional,
+                        padding: EdgeInsets.zero,
+                        key: const Key(
+                          'session-detail-status-terminal-heading',
+                        ),
+                      ),
+                      if (showTerminalStatus) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          _controlTerminalStatusDescription(l10n, control),
+                          key: const Key(
+                            'session-detail-status-terminal-description',
+                          ),
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: context.tokens.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ],
+                    if (handoffCommand != null) ...[
+                      const SizedBox(height: 8),
                       _CopyCommandRow(
                         label: _controlCommandLabel(l10n, control),
-                        command: control.command!,
+                        command: handoffCommand,
                         enabled:
                             isConnected &&
                             compatibleControls &&
@@ -896,7 +1030,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                         onCopied: isHandoff ? _handoffToTerminal : null,
                       ),
                     ],
-                    if (isHandoff && control.command == null) ...[
+                    if (isHandoff && handoffCommand == null) ...[
                       const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,
@@ -917,7 +1051,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                     // including the Sync-available pill, where Join is only the
                     // primary action. Sync must never be the only path back to
                     // Drive.
-                    if (control.canTakeOver) ...[
+                    if (!joinPresentation && control.canTakeOver) ...[
                       const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,
@@ -952,7 +1086,10 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
             ),
           ),
           const SizedBox(height: 16),
-          Text(l10n.sessionPlanActivity, style: theme.textTheme.titleSmall),
+          SectionHeader(
+            l10n.sessionPlanActivity,
+            padding: EdgeInsets.zero,
+          ),
           const SizedBox(height: 8),
           if (state.liveState.isEmpty && state.commandProgress == null)
             Text(
@@ -973,14 +1110,14 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
               canPrompt: compatibleControls && control.canPrompt,
             ),
           const SizedBox(height: 16),
-          Text(
-            l10n.sessionDetailTelemetryHeading,
-            style: theme.textTheme.titleSmall,
+          SectionHeader(
+            l10n.sessionSummaryTitle,
+            padding: EdgeInsets.zero,
           ),
           const SizedBox(height: 8),
           _TelemetryPanel(telemetry: state.telemetry),
           const SizedBox(height: 16),
-          Text(l10n.sessionActions, style: theme.textTheme.titleSmall),
+          SectionHeader(l10n.sessionActions, padding: EdgeInsets.zero),
           const SizedBox(height: 4),
           _SessionActionGroups(
             sessionKey: widget.sessionKey,
@@ -1020,11 +1157,11 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
               style: theme.textTheme.bodySmall,
             ),
           const SizedBox(height: 16),
-          Text(l10n.sessionSendLater, style: theme.textTheme.titleSmall),
+          SectionHeader(l10n.sessionSendLater, padding: EdgeInsets.zero),
           Card(
             margin: EdgeInsets.zero,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(context.tokens.radiusLg),
             ),
             child: ListTile(
               key: const Key('session-detail-send-later'),
@@ -1114,7 +1251,26 @@ Future<bool> _confirmAndTakeOver(
       (latestControl.willFork && !confirmedFork)) {
     return false;
   }
-  return controller.takeOver();
+  final conflictBefore = latestState.driveRestoreConflict;
+  final tookOver = await controller.takeOver();
+  if (!tookOver && context.mounted) {
+    final conflict = readQualifiedDetail(ref, sessionKey).driveRestoreConflict;
+    if (conflict != null &&
+        conflict.reason == kDriveAttachReasonTakeover &&
+        !identical(conflict, conflictBefore)) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              _driveConflictFeedback(AppLocalizations.of(context), conflict),
+              key: const Key('session-detail-take-over-refusal'),
+            ),
+          ),
+        );
+    }
+  }
+  return tookOver;
 }
 
 /// Result of the take-over confirm dialog (null = cancelled).
@@ -1242,10 +1398,44 @@ String _controlStatusDescription(
   };
 }
 
+String _driveConflictFeedback(
+  AppLocalizations l10n,
+  SessionDriveRestoreConflict conflict,
+) {
+  final manualTakeover = conflict.reason == kDriveAttachReasonTakeover;
+  return switch (conflict.code) {
+    'DRIVE_OWNERSHIP_CONFLICT' || 'DRIVE_OWNERSHIP_UNKNOWN' =>
+      manualTakeover
+          ? l10n.sessionDriveTakeoverOwnershipConflictNote
+          : l10n.sessionDriveRestoreConflictNote,
+    'DRIVE_NATIVE_SESSION_UNRESUMABLE' =>
+      manualTakeover
+          ? l10n.sessionDriveNativeTakeoverUnresumableNote
+          : l10n.sessionDriveNativeRestoreUnresumableNote,
+    'DRIVE_RESTORE_TIMEOUT' => l10n.sessionDriveTakeoverTimeoutNote,
+    _ =>
+      manualTakeover
+          ? l10n.sessionDriveTakeoverFailureNote
+          : l10n.sessionDriveRestoreFailureNote,
+  };
+}
+
+/// A terminal Join command is an available choice only when the broker chose
+/// the join action and supplied a non-whitespace command. Trimming proves
+/// availability only; callers always render and copy the original string.
+String? _usableJoinCommand(SessionControlView control) {
+  if (control.action != SessionControlAction.join) return null;
+  final command = control.command;
+  return command != null && command.trim().isNotEmpty ? command : null;
+}
+
 String _controlTerminalStatusDescription(
   AppLocalizations l10n,
   SessionControlView control,
 ) {
+  if (control.terminalBehind ?? false) {
+    return l10n.sessionTerminalBehind;
+  }
   if (control.terminalPresence == TerminalSyncPresence.shared) {
     return l10n.sessionTerminalSynced;
   }
@@ -1280,48 +1470,32 @@ String _controlCommandLabel(
 /// (`control.terminalSync.command`), shown verbatim and never tool-branched.
 class _CopyCommandRow extends StatelessWidget {
   const _CopyCommandRow({
-    required this.label,
     required this.command,
+    this.label,
     this.enabled = true,
     this.onCopied,
+    this.copyTooltip,
+    this.copiedMessage,
   });
 
-  final String label;
+  final String? label;
   final String command;
   final bool enabled;
+  final String? copyTooltip;
+  final String? copiedMessage;
 
   /// Invoked only after the clipboard write succeeds. For handoff this
   /// demotes the app to Observe and reports whether that transition succeeded.
   final Future<bool> Function()? onCopied;
 
-  Future<void> _copy(BuildContext context) async {
+  Future<String?> _afterCopy(BuildContext context) async {
     final l10n = AppLocalizations.of(context);
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    try {
-      await Clipboard.setData(ClipboardData(text: command));
-    } on PlatformException {
-      if (messenger?.mounted ?? false) {
-        messenger!.showSnackBar(
-          SnackBar(content: Text(l10n.sessionCopyCommandFailed)),
-        );
-      }
-      return;
-    }
     final handedOff = await onCopied?.call();
-    if (!(messenger?.mounted ?? false)) {
-      return;
-    }
-    messenger!.showSnackBar(
-      SnackBar(
-        content: Text(
-          onCopied == null
-              ? l10n.sessionCommandCopied
-              : handedOff ?? false
-              ? l10n.sessionCommandCopiedHandedOff
-              : l10n.sessionCommandCopiedHandoffFailed,
-        ),
-      ),
-    );
+    return onCopied == null
+        ? l10n.sessionCommandCopied
+        : handedOff ?? false
+        ? l10n.sessionCommandCopiedHandedOff
+        : l10n.sessionCommandCopiedHandoffFailed;
   }
 
   @override
@@ -1331,40 +1505,23 @@ class _CopyCommandRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: theme.textTheme.labelMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 6),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: theme.colorScheme.outlineVariant),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    command,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
-                    ),
-                  ),
-                ),
-                IconButton(
-                  key: const Key('session-detail-status-copy-command'),
-                  tooltip: l10n.sessionCopyCommand,
-                  icon: const Icon(Icons.copy, size: 18),
-                  onPressed: enabled ? () => unawaited(_copy(context)) : null,
-                ),
-              ],
+        if (label != null) ...[
+          Text(
+            label!,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
+          const SizedBox(height: 4),
+        ],
+        CopyableCodeLine(
+          text: command,
+          copyTooltip: copyTooltip ?? l10n.sessionCopyCommand,
+          copiedMessage: copiedMessage ?? l10n.sessionCommandCopied,
+          enabled: enabled,
+          copyButtonKey: const Key('session-detail-status-copy-command'),
+          copyFailedMessage: l10n.sessionCopyCommandFailed,
+          afterCopy: onCopied == null ? null : () => _afterCopy(context),
         ),
       ],
     );

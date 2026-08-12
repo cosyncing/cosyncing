@@ -13,6 +13,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/data/in_memory_cre
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/data.dart';
 import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/data/roster_snapshot_store.dart';
@@ -67,6 +68,7 @@ void main() {
   Widget buildSubject({
     List<SessionInfo>? sessions,
     BrokerProfile? activeProfile,
+    BrokerClient? brokerClient,
   }) {
     fakeRepo.sessions = sessions ?? [];
     return ProviderScope(
@@ -81,6 +83,8 @@ void main() {
         ),
         if (activeProfile != null)
           activeBrokerProfileProvider.overrideWith((ref) => activeProfile),
+        if (brokerClient != null)
+          brokerClientProvider.overrideWith((ref) async => brokerClient),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -193,9 +197,11 @@ void main() {
       await tester.pumpWidget(buildSubject(sessions: []));
       await tester.pumpAndSettle();
 
-      expect(find.text('No sessions'), findsOneWidget);
+      expect(find.text('Connect to a server'), findsNWidgets(2));
+      expect(find.byKey(const Key('sessions-empty-title')), findsOneWidget);
+      expect(find.byKey(const Key('sessions-empty-connect')), findsOneWidget);
       expect(
-        find.text('Connect to a broker to see its sessions.'),
+        find.text('Connect to a server to see its sessions.'),
         findsOneWidget,
       );
     });
@@ -212,6 +218,7 @@ void main() {
               baseUri: Uri.parse('http://127.0.0.1:7734'),
               createdAt: DateTime(2026),
             ),
+            brokerClient: _AgentCapabilityBrokerClient(canCreate: true),
           ),
         );
         await tester.pumpAndSettle();
@@ -219,14 +226,234 @@ void main() {
         expect(find.text('No active sessions'), findsOneWidget);
         expect(
           find.text(
-            'This broker is connected, but nothing is running yet. Start a '
+            'This server is connected, but nothing is running yet. Start a '
             'session and it will appear here.',
           ),
           findsOneWidget,
         );
         expect(
-          find.text('Connect to a broker to see its sessions.'),
+          find.text('Connect to a server to see its sessions.'),
           findsNothing,
+        );
+        final create = tester.widget<TextButton>(
+          find.byKey(const Key('sessions-global-new')),
+        );
+        expect(create.onPressed, isNotNull);
+      },
+    );
+
+    testWidgets(
+      'connected empty page disables creation when no agent is ready',
+      (tester) async {
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: [],
+            activeProfile: BrokerProfile(
+              id: 'local',
+              displayName: 'local',
+              baseUri: Uri.parse('http://127.0.0.1:7734'),
+              createdAt: DateTime(2026),
+            ),
+            brokerClient: _AgentCapabilityBrokerClient(canCreate: false),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'This server is connected, but no registered agent is ready to '
+            'create sessions.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('Start a session'), findsNothing);
+        final create = tester.widget<TextButton>(
+          find.byKey(const Key('sessions-global-new')),
+        );
+        expect(create.onPressed, isNull);
+      },
+    );
+
+    testWidgets(
+      'connected empty page reports creation readiness while checking',
+      (tester) async {
+        final heldReadiness = Completer<List<AgentInfo>>();
+        final client = _ScriptedCapabilityBrokerClient([
+          () => heldReadiness.future,
+        ]);
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [],
+            activeProfile: _profile('server-a'),
+            brokerClient: client,
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.text(
+            'This server is connected. Checking whether a registered agent '
+            'can create sessions…',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('no registered agent is ready'),
+          findsNothing,
+        );
+        expect(_compactCreateAction(tester).onPressed, isNull);
+
+        heldReadiness.complete(const []);
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'connected empty page reports a creation readiness check failure',
+      (tester) async {
+        final client = _ScriptedCapabilityBrokerClient([
+          () => Future<List<AgentInfo>>.error(StateError('starting')),
+        ]);
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [],
+            activeProfile: _profile('server-a'),
+            brokerClient: client,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            "This server is connected, but the app couldn't check whether an "
+            'agent can create sessions. Refresh Sessions to try again.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('no registered agent is ready'),
+          findsNothing,
+        );
+        expect(_compactCreateAction(tester).onPressed, isNull);
+      },
+    );
+
+    testWidgets(
+      'creation readiness recovers from unavailable without remounting',
+      (tester) async {
+        final client = _ScriptedCapabilityBrokerClient([
+          () async => const [],
+          () async => const [_creationReadyAgent],
+        ]);
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [],
+            activeProfile: _profile('server-a'),
+            brokerClient: client,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(_compactCreateAction(tester).onPressed, isNull);
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionsPage)),
+        );
+        await container.read(sessionCreationReadyProvider.notifier).refresh();
+        await tester.pumpAndSettle();
+
+        expect(_compactCreateAction(tester).onPressed, isNotNull);
+        expect(find.textContaining('Start a session'), findsOneWidget);
+      },
+    );
+
+    testWidgets('creation readiness retries after a request failure', (
+      tester,
+    ) async {
+      final client = _ScriptedCapabilityBrokerClient([
+        () => Future<List<AgentInfo>>.error(StateError('starting')),
+        () async => const [_creationReadyAgent],
+      ]);
+      await tester.pumpWidget(
+        buildSubject(
+          sessions: const [],
+          activeProfile: _profile('server-a'),
+          brokerClient: client,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(_compactCreateAction(tester).onPressed, isNull);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsPage)),
+      );
+      await container.read(sessionCreationReadyProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+
+      expect(_compactCreateAction(tester).onPressed, isNotNull);
+      expect(client.listAgentCalls, 2);
+    });
+
+    testWidgets('manual Sessions refresh rechecks creation readiness', (
+      tester,
+    ) async {
+      final client = _ScriptedCapabilityBrokerClient([
+        () async => const [_creationReadyAgent],
+        () async => const [],
+      ]);
+      await tester.pumpWidget(
+        buildSubject(
+          sessions: const [],
+          activeProfile: _profile('server-a'),
+          brokerClient: client,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(_compactCreateAction(tester).onPressed, isNotNull);
+
+      await tester.tap(find.byKey(const Key('roster-freshness-refresh')));
+      await tester.pumpAndSettle();
+
+      expect(_compactCreateAction(tester).onPressed, isNull);
+      expect(client.listAgentCalls, 2);
+    });
+
+    testWidgets(
+      'old server readiness cannot publish after a profile switch',
+      (tester) async {
+        final heldA = Completer<List<AgentInfo>>();
+        final client = _ScriptedCapabilityBrokerClient([
+          () => heldA.future,
+          () async => const [_creationReadyAgent],
+        ]);
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [],
+            activeProfile: _profile('server-a'),
+            brokerClient: client,
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(SessionsPage)),
+        );
+        container.read(activeBrokerProfileProvider.notifier).state = _profile(
+          'server-b',
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(_compactCreateAction(tester).onPressed, isNotNull);
+
+        heldA.complete(const []);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(_compactCreateAction(tester).onPressed, isNotNull);
+        expect(
+          container.read(sessionCreationReadyProvider).source?.profileId,
+          'server-b',
         );
       },
     );
@@ -280,7 +507,7 @@ void main() {
         await tester.pumpAndSettle();
 
         // No active profile yet -> null client -> empty roster.
-        expect(find.text('No sessions'), findsOneWidget);
+        expect(find.text('Connect to a server'), findsNWidgets(2));
         expect(find.text('Late session'), findsNothing);
 
         // The async same-origin hydration completes: set the active profile.
@@ -297,7 +524,7 @@ void main() {
 
         // The view reloaded once the client appeared -> roster now populated.
         expect(find.text('Late session'), findsOneWidget);
-        expect(find.text('No sessions'), findsNothing);
+        expect(find.text('Connect to a server'), findsNothing);
       },
     );
 
@@ -761,6 +988,32 @@ void main() {
 
         await tester.tap(find.byKey(const Key('sessions-machines')));
         await tester.pumpAndSettle();
+        // The machine rail follows the same policy as the other two rosters:
+        // it is navigation, so it carries no selection region at any level.
+        // On web a SelectionArea brings a platform view whose placeholder
+        // throws when a scrolling viewport collects it
+        // (flutter/flutter#122680, fixed by #186840, absent from the 3.44.3
+        // we pin). The reported grey RenderErrorBox is consistent with that
+        // failure; no exception was captured, so it is not proven, and
+        // dropping SelectionArea removes the mechanism regardless.
+        for (final title in ['Peer-owned session', 'Second peer session']) {
+          expect(
+            find.ancestor(
+              of: find.text(title),
+              matching: find.byType(SelectableRegion),
+            ),
+            findsNothing,
+            reason: '$title must not sit inside any selectable region',
+          );
+        }
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('machine-roster-list')),
+            matching: find.byType(SelectionArea),
+          ),
+          findsNothing,
+          reason: 'no selection region inside the machine roster either',
+        );
         await tester.tap(find.text('Peer-owned session'));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('machine-owner-connect')), findsOneWidget);
@@ -868,6 +1121,111 @@ void main() {
       );
     });
   });
+}
+
+BrokerProfile _profile(String id) => BrokerProfile(
+  id: id,
+  displayName: id,
+  baseUri: Uri.parse('https://$id.example'),
+  createdAt: DateTime(2026),
+  incarnationId: '$id-generation',
+);
+
+TextButton _compactCreateAction(WidgetTester tester) =>
+    tester.widget<TextButton>(find.byKey(const Key('sessions-global-new')));
+
+const AgentInfo _creationReadyAgent = AgentInfo(
+  id: 'codex',
+  displayName: 'Codex',
+  capabilities: AgentCapabilities(
+    integrationKind: IntegrationKind.jsonrpcStdio,
+    attachModes: [AttachMode.resume],
+    supportsObserve: true,
+    supportsResume: true,
+    supportsLiveAttach: false,
+    supportsNativeArtifact: false,
+    supportsNativeFileInput: false,
+    supportsModelSwitch: true,
+    permissionGranularity: PermissionGranularity.perSession,
+  ),
+  canCreateSession: true,
+  canRenameNative: false,
+  canFork: false,
+  canClone: false,
+  canTranscriptExport: false,
+);
+
+final class _ScriptedCapabilityBrokerClient extends BrokerClient {
+  _ScriptedCapabilityBrokerClient(this.responses)
+    : super(baseUrl: 'http://test');
+
+  final List<Future<List<AgentInfo>> Function()> responses;
+  int listAgentCalls = 0;
+
+  @override
+  Future<List<AgentInfo>> listAgents() {
+    listAgentCalls += 1;
+    return responses.removeAt(0)();
+  }
+
+  @override
+  Future<AggregatedMachinesResponse> listMachines() async =>
+      const AggregatedMachinesResponse(
+        ok: true,
+        version: 1,
+        machine: 'test',
+        machineId: 'test',
+        generatedAt: 0,
+        machines: [],
+      );
+
+  @override
+  void close() {}
+}
+
+final class _AgentCapabilityBrokerClient extends BrokerClient {
+  _AgentCapabilityBrokerClient({required this.canCreate})
+    : super(baseUrl: 'http://test');
+
+  final bool canCreate;
+
+  @override
+  Future<List<AgentInfo>> listAgents() async => [
+    AgentInfo(
+      id: 'codex',
+      displayName: 'Codex',
+      capabilities: const AgentCapabilities(
+        integrationKind: IntegrationKind.jsonrpcStdio,
+        attachModes: [AttachMode.resume],
+        supportsObserve: true,
+        supportsResume: true,
+        supportsLiveAttach: false,
+        supportsNativeArtifact: false,
+        supportsNativeFileInput: false,
+        supportsModelSwitch: true,
+        permissionGranularity: PermissionGranularity.perSession,
+      ),
+      canCreateSession: canCreate,
+      canRenameNative: false,
+      canFork: false,
+      canClone: false,
+      canTranscriptExport: false,
+    ),
+  ];
+
+  @override
+  Future<AggregatedMachinesResponse> listMachines() async =>
+      const AggregatedMachinesResponse(
+        ok: true,
+        version: 1,
+        machine: 'test',
+        machineId: 'test',
+        generatedAt: 0,
+        machines: [],
+      );
+
+  @override
+  void close() {}
 }
 
 /// Records what the working set actually persisted.
@@ -1058,6 +1416,26 @@ final class _MachineOwnerBrokerClient extends BrokerClient {
     owner: _owner,
   );
 
+  /// A second row exists so "one selection region for the list" can be told
+  /// apart from "one region per row". With a single row an ancestor lookup
+  /// finds exactly one region either way.
+  MachineSessionInfo get _secondSession => MachineSessionInfo(
+    session: SessionInfo.fromJson(const {
+      'id': 'peer-session-2',
+      'tool': 'codex',
+      'title': 'Second peer session',
+      'status': 'idle',
+      'attachMode': 'observe',
+    }),
+    identity: const MachineSessionIdentity(
+      machineId: 'peer-a',
+      tool: 'codex',
+      sessionId: 'peer-session-2',
+      key: 'peer-a/codex/peer-session-2',
+    ),
+    owner: _owner,
+  );
+
   @override
   Future<AggregatedMachinesResponse> listMachines() async {
     return AggregatedMachinesResponse(
@@ -1072,8 +1450,8 @@ final class _MachineOwnerBrokerClient extends BrokerClient {
           machine: 'Peer A',
           role: MachineRosterRole.peer,
           status: MachineRosterStatus.ok,
-          sessions: [_session],
-          sessionCount: 1,
+          sessions: [_session, _secondSession],
+          sessionCount: 2,
           checkedAt: 1,
           freshness: MachineRosterFreshness.fresh,
         ),

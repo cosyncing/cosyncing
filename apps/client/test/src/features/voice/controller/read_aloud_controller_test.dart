@@ -2,6 +2,10 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
+import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
+import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
+import 'package:cosyncing_client/src/platform/speech/flutter_tts_backend.dart';
+import 'package:cosyncing_client/src/platform/speech/flutter_tts_speech_output.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_capabilities.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_output_state.dart';
@@ -9,17 +13,24 @@ import 'package:cosyncing_client/src/platform/speech/speech_utterance.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../../../support/in_memory_read_aloud_preferences_store.dart';
+
 void main() {
   late _FakeSpeechOutput fakeOutput;
   late ProviderContainer container;
   late ProviderSubscription<ReadAloudState> subscription;
   late ReadAloudController controller;
+  late InMemoryReadAloudPreferencesStore rateStore;
 
   setUp(() {
     fakeOutput = _FakeSpeechOutput();
+    rateStore = InMemoryReadAloudPreferencesStore();
     container = ProviderContainer(
       overrides: [
         speechOutputFactoryProvider.overrideWithValue(() => fakeOutput),
+        readAloudPreferencesStoreProvider.overrideWithValue(
+          rateStore,
+        ),
       ],
     );
     subscription = container.listen(
@@ -52,6 +63,14 @@ void main() {
   }
 
   group('speakForMessage', () {
+    test('allows the first manual probe while synthesis is unprobed', () async {
+      fakeOutput.capabilities = const SpeechOutputCapabilities.unprobed();
+
+      await controller.speakForMessage(finalMessage());
+
+      expect(fakeOutput.speakCalls, hasLength(1));
+    });
+
     test('compiles final complete text and calls speak', () async {
       await controller.speakForMessage(finalMessage());
 
@@ -155,6 +174,59 @@ void main() {
     });
   });
 
+  group('rate', () {
+    test('controller mount does not apply a native rate', () {
+      expect(fakeOutput.rateCalls, isEmpty);
+    });
+
+    test(
+      'defaults to 1.0 and applies a persisted supported multiplier',
+      () async {
+        await pumpEventQueue();
+        expect(container.read(readAloudControllerProvider).rate, 1);
+        fakeOutput.rateCalls.clear();
+
+        await controller.setRate(1.25);
+        await pumpEventQueue();
+
+        expect(rateStore.value, '1.25');
+        expect(fakeOutput.rateCalls, contains(1.25));
+        expect(container.read(readAloudControllerProvider).rate, 1.25);
+      },
+    );
+
+    test('rejects a multiplier outside the product ladder', () async {
+      expect(() => controller.setRate(2), throwsArgumentError);
+      expect(rateStore.value, isNull);
+    });
+
+    test('hydrates a stored multiplier before playback', () async {
+      final output = _FakeSpeechOutput();
+      final localStore = InMemoryReadAloudPreferencesStore(value: '1.5');
+      final localContainer = ProviderContainer(
+        overrides: [
+          speechOutputFactoryProvider.overrideWithValue(() => output),
+          readAloudPreferencesStoreProvider.overrideWithValue(localStore),
+        ],
+      );
+      final localSubscription = localContainer.listen(
+        readAloudControllerProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(() {
+        localSubscription.close();
+        localContainer.dispose();
+      });
+
+      await localContainer.read(readAloudRateControllerProvider.future);
+      await pumpEventQueue();
+
+      expect(localContainer.read(readAloudControllerProvider).rate, 1.5);
+      expect(output.rateCalls, contains(1.5));
+    });
+  });
+
   group('state propagation', () {
     test('speaking state propagates from output', () async {
       await controller.speakForMessage(finalMessage(key: 'k1'));
@@ -181,6 +253,42 @@ void main() {
   });
 
   group('Riverpod lifetime and disposal race', () {
+    test('controller mount does not construct a lazy native backend', () async {
+      var constructionCount = 0;
+      final output = FlutterTtsSpeechOutput.lazy(() {
+        constructionCount++;
+        return _NoopFlutterTtsBackend();
+      });
+      final localContainer = ProviderContainer(
+        overrides: [
+          speechOutputFactoryProvider.overrideWithValue(() => output),
+          readAloudPreferencesStoreProvider.overrideWithValue(
+            InMemoryReadAloudPreferencesStore(),
+          ),
+        ],
+      );
+      final localSubscription = localContainer.listen(
+        readAloudControllerProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(() {
+        localSubscription.close();
+        localContainer.dispose();
+      });
+
+      await pumpEventQueue();
+
+      expect(constructionCount, 0);
+      expect(
+        localContainer
+            .read(readAloudControllerProvider)
+            .capabilities
+            .canAttemptSynthesis,
+        isTrue,
+      );
+    });
+
     test(
       'rebuild replaces output without leaking the old subscription',
       () async {
@@ -193,6 +301,9 @@ void main() {
               factoryCalls++;
               return factoryCalls == 1 ? firstOutput : secondOutput;
             }),
+            readAloudPreferencesStoreProvider.overrideWithValue(
+              InMemoryReadAloudPreferencesStore(),
+            ),
           ],
         );
         final localSubscription = localContainer.listen(
@@ -290,6 +401,7 @@ class _FakeSpeechOutput implements SpeechOutput {
 
   /// Recorded speak calls as (messageKey, utterances) pairs.
   final List<(String, List<SpeechUtterance>)> speakCalls = [];
+  final List<double> rateCalls = [];
   int stopCalls = 0;
   int pauseCalls = 0;
   int resumeCalls = 0;
@@ -312,6 +424,9 @@ class _FakeSpeechOutput implements SpeechOutput {
     _current = SpeechOutputSpeaking(messageKey);
     _stateController.add(_current);
   }
+
+  @override
+  Future<void> setRate(double rate) async => rateCalls.add(rate);
 
   @override
   Future<void> stop() async {
@@ -352,4 +467,27 @@ class _FakeSpeechOutput implements SpeechOutput {
       _stateController.add(state);
     }
   }
+}
+
+class _NoopFlutterTtsBackend implements FlutterTtsBackend {
+  @override
+  Future<void> enableAwaitCompletion() async {}
+
+  @override
+  Future<List<String>> getLanguages() async => const ['en-US'];
+
+  @override
+  Future<void> setRate(double multiplier) async {}
+
+  @override
+  void setErrorHandler(void Function(Object? message) handler) {}
+
+  @override
+  Future<void> speak(String text) async {}
+
+  @override
+  Future<void> stop() async {}
+
+  @override
+  void dispose() {}
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
 import 'package:cosyncing_client/src/features/voice/model/read_aloud_eligibility.dart';
 import 'package:cosyncing_client/src/features/voice/model/speech_text_compiler.dart';
 import 'package:cosyncing_client/src/platform/speech/flutter_tts_backend_real.dart';
@@ -25,6 +26,7 @@ class ReadAloudState {
   const ReadAloudState({
     this.outputState = const SpeechOutputIdle(),
     this.capabilities = SpeechOutputCapabilities.unavailable,
+    this.rate = kDefaultReadAloudRate,
   });
 
   /// The current platform output state.
@@ -32,6 +34,9 @@ class ReadAloudState {
 
   /// The adapter's reported capabilities.
   final SpeechOutputCapabilities capabilities;
+
+  /// Human-facing playback multiplier.
+  final double rate;
 
   /// The message key currently speaking or paused, or null when idle/error.
   String? get activeMessageKey {
@@ -56,20 +61,27 @@ final Provider<SpeechOutput Function()> speechOutputFactoryProvider = Provider(
   (ref) => createDefaultSpeechOutput,
 );
 
-/// Provider for the platform [SpeechOutput] adapter.
+/// App-lifetime provider for the platform [SpeechOutput] adapter.
 ///
 /// Creates the platform-default adapter via [createDefaultSpeechOutput]. On
 /// unsupported platforms (Linux native, Fuchsia) or construction failure,
 /// returns an unavailable stub. Tests override this provider with a fake.
-/// The provider owns disposal of the output (which stops playback).
-final AutoDisposeProvider<SpeechOutput> speechOutputProvider =
-    Provider.autoDispose<SpeechOutput>((ref) {
-      final output = ref.watch(speechOutputFactoryProvider)();
-      // Explicit unawaited: dispose is async (stops playback + closes stream).
-      // The provider owns disposal; the controller cleanup does not stop.
-      ref.onDispose(() => unawaited(output.dispose()));
-      return output;
-    });
+/// The provider owns disposal of the output (which stops playback). It is
+/// deliberately not auto-disposed: responsive session routing replaces the
+/// expanded detail page with a compact detail route. On Windows, disposing one
+/// `flutter_tts` instance while constructing its replacement can race inside
+/// the native plugin and fault the process. One provider-container-owned
+/// adapter also preserves active playback across that presentation-only swap.
+final Provider<SpeechOutput> speechOutputProvider = Provider<SpeechOutput>((
+  ref,
+) {
+  final output = ref.watch(speechOutputFactoryProvider)();
+  // Explicit unawaited: disposal is async (stop + stream close). A normal
+  // provider stays alive until invalidated or its ProviderScope is torn
+  // down, so responsive route swaps cannot overlap native instances.
+  ref.onDispose(() => unawaited(output.dispose()));
+  return output;
+});
 
 /// Controller for manual final-message read-aloud.
 ///
@@ -77,9 +89,10 @@ final AutoDisposeProvider<SpeechOutput> speechOutputProvider =
 /// auto-starts playback from live frames, replay, reconnect, or state changes
 /// - playback begins only when the user taps the read-aloud action.
 ///
-/// Uses `ref.watch` (not `ref.read`) so the autoDispose [speechOutputProvider]
-/// stays alive for the controller's lifetime. The provider owns disposal of
-/// the output (which stops playback); the controller's cleanup only marks
+/// Uses `ref.watch` (not `ref.read`) so provider invalidation still rebuilds
+/// the controller when future voice/rate settings replace the app-lifetime
+/// [speechOutputProvider]. The provider owns disposal of the output (which
+/// stops playback); the controller's cleanup only marks
 /// itself disposed, cancels its subscription, and ignores late state events
 /// (no separate stop races disposal).
 ///
@@ -94,6 +107,7 @@ class ReadAloudController extends AutoDisposeNotifier<ReadAloudState> {
   SpeechOutput? _output;
   StreamSubscription<SpeechOutputState>? _subscription;
   bool _disposed = false;
+  double _rate = kDefaultReadAloudRate;
 
   static const SpeechTextCompiler _compiler = SpeechTextCompiler();
 
@@ -107,14 +121,30 @@ class ReadAloudController extends AutoDisposeNotifier<ReadAloudState> {
     // ref.watch keeps the autoDispose output provider alive for the
     // controller's lifetime.
     final output = ref.watch(speechOutputProvider);
+    _rate =
+        ref.read(readAloudRateControllerProvider).valueOrNull ??
+        kDefaultReadAloudRate;
     _output = output;
     _subscription = output.states.listen(
       (outputState) => _onOutputState(output, outputState),
     );
-    ref.onDispose(_cleanup);
+    ref
+      ..onDispose(_cleanup)
+      ..listen(readAloudRateControllerProvider, (_, next) {
+        final rate = next.valueOrNull;
+        if (rate == null || rate == _rate || _disposed) return;
+        _rate = rate;
+        unawaited(output.setRate(rate));
+        state = ReadAloudState(
+          outputState: output.current,
+          capabilities: output.capabilities,
+          rate: rate,
+        );
+      });
     return ReadAloudState(
       outputState: output.current,
       capabilities: output.capabilities,
+      rate: _rate,
     );
   }
 
@@ -123,6 +153,7 @@ class ReadAloudController extends AutoDisposeNotifier<ReadAloudState> {
     state = ReadAloudState(
       outputState: outputState,
       capabilities: source.capabilities,
+      rate: _rate,
     );
   }
 
@@ -152,7 +183,7 @@ class ReadAloudController extends AutoDisposeNotifier<ReadAloudState> {
     required String text,
   }) async {
     final output = _output;
-    if (output == null || !output.capabilities.synthesis) return;
+    if (output == null || !output.capabilities.canAttemptSynthesis) return;
     if (text.trim().isEmpty) return;
     final utterances = _compiler.compile(text);
     if (utterances.isEmpty) return;
@@ -167,6 +198,15 @@ class ReadAloudController extends AutoDisposeNotifier<ReadAloudState> {
 
   /// Resume playback where the adapter supports it.
   Future<void> resume() async => _output?.resume();
+
+  /// Applies and durably stores one of the supported playback multipliers.
+  Future<void> setRate(double rate) async {
+    if (!isSupportedReadAloudRate(rate)) {
+      throw ArgumentError.value(rate, 'rate', 'unsupported read-aloud rate');
+    }
+    await _output?.setRate(rate);
+    await ref.read(readAloudRateControllerProvider.notifier).setRate(rate);
+  }
 
   void _cleanup() {
     _disposed = true;

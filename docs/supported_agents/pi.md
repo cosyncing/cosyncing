@@ -23,15 +23,21 @@ new Node installation on `PATH`. Pi may start but then crash in `undici` with
 then reinstall Pi under that Node installation; do not work around the check by
 pointing cosyncing at a different launcher.
 
+The shell used by setup and the persistent broker service have related but
+separate `PATH` values. Read the shared [PATH, preflight, and Node migration
+guide](README.md#the-two-path-environments) before changing an existing Node
+installation.
+
 Verify the effective commands before rerunning setup:
 
 ```bash
-command -v node
-node --version
-command -v pi
+type -a node npm pi
+node -p 'process.execPath + " " + process.version'
+head -n 1 "$(command -v pi)"
 pi --version
 cosyncing setup
-cosyncing doctor
+cosy restart
+cosy doctor
 ```
 
 Setup installs cosyncing's Pi bridge after Pi passes these checks. It does not

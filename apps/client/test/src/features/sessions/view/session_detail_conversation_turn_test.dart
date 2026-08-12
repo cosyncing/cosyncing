@@ -241,8 +241,19 @@ void main() {
       );
       expect(find.text('Completed'), findsOneWidget);
       expect(find.text('Status'), findsOneWidget);
-      expect(find.text('Tokens'), findsOneWidget);
+      expect(find.text('Input'), findsOneWidget);
+      expect(find.text('100'), findsOneWidget);
+      expect(find.text('Output'), findsOneWidget);
+      expect(find.text('50'), findsOneWidget);
+      expect(find.text('Tokens'), findsNothing);
       expect(find.text('Tool calls'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('Completed'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
       // One distinct tool call in this turn.
       expect(find.text('1'), findsWidgets);
     });
@@ -494,6 +505,35 @@ void main() {
       await tester.tap(find.byKey(const Key('conversation-turn-read-aloud')));
       await tester.pumpAndSettle();
       expect(readAloudIcon(tester), Icons.pause_outlined); // speaking again
+    });
+
+    testWidgets('active read-aloud offers only the four truthful rates', (
+      tester,
+    ) async {
+      final speech = RecordingSpeechOutput();
+      addTearDown(speech.close);
+      await pumpSingleTurn(tester, speech);
+
+      final rateMenu = find.byKey(
+        const Key('conversation-turn-read-aloud-rate'),
+      );
+      expect(rateMenu, findsNothing);
+      await tester.tap(find.byKey(const Key('conversation-turn-read-aloud')));
+      await tester.pumpAndSettle();
+
+      expect(rateMenu, findsOneWidget);
+      expect(find.text('1.0×'), findsOneWidget);
+      await tester.tap(rateMenu);
+      await tester.pumpAndSettle();
+      for (final label in const ['0.75×', '1.0×', '1.25×', '1.5×']) {
+        expect(find.text(label), findsWidgets);
+      }
+      await tester.tap(find.text('1.5×').last);
+      await tester.pumpAndSettle();
+
+      expect(speech.rateCalls, contains(1.5));
+      expect(find.text('1.5×'), findsOneWidget);
+      expect(find.byType(Slider), findsNothing);
     });
 
     testWidgets('Stop returns the footer to idle play', (tester) async {

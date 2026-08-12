@@ -302,6 +302,7 @@ class FakeControllerBrokerClient extends BrokerClient {
   Object? forkError;
   Object? cloneError;
   Object? renameError;
+  Completer<RenameSessionResponse>? renameResponseCompleter;
   int listAgentsCount = 0;
   int prepareTranscriptExportCount = 0;
   int exportTranscriptCount = 0;
@@ -429,6 +430,8 @@ class FakeControllerBrokerClient extends BrokerClient {
     if (renameError != null) {
       Error.throwWithStackTrace(renameError!, StackTrace.current);
     }
+    final completer = renameResponseCompleter;
+    if (completer != null) return completer.future;
     return RenameSessionResponse(ok: true, title: title);
   }
 
@@ -1052,6 +1055,19 @@ class StubSessionListController extends SessionListController {
     state = SessionListState(
       status: SessionListStatus.loaded,
       sessions: sessions,
+    );
+  }
+
+  @override
+  void renameSessionTitle(String tool, String id, String title) {
+    state = state.copyWith(
+      sessions: [
+        for (final session in state.sessions)
+          if (session.tool == tool && session.id == id)
+            SessionInfo.fromJson({...session.toJson(), 'title': title})
+          else
+            session,
+      ],
     );
   }
 

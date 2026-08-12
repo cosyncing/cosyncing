@@ -55,6 +55,39 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('schedule-row-live')), findsNothing);
   });
+
+  testWidgets('schedule editor validation error is selectable', (
+    tester,
+  ) async {
+    final fake = _FakeBrokerClient();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [brokerClientProvider.overrideWith((ref) async => fake)],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          theme: ThemeData(
+            extensions: [themeSpecById(kDefaultThemeId).light],
+          ),
+          home: const ScheduleManagerPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('schedule-edit-live')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('schedule-editor-message')),
+      '   ',
+    );
+    await tester.tap(find.byKey(const Key('schedule-editor-save')));
+    await tester.pump();
+
+    final error = find.byKey(const Key('schedule-editor-error'));
+    expect(error, findsOneWidget);
+    expect(tester.widget(error), isA<SelectableText>());
+  });
 }
 
 ScheduleRecord _row(String id, ScheduleState state, int at) => ScheduleRecord(

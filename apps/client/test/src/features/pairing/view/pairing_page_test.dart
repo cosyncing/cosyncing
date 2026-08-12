@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/connection/data/active_broker_prof
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/pairing/controller/pairing_controller.dart';
 import 'package:cosyncing_client/src/features/pairing/view/pairing_page.dart';
+import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,12 +20,20 @@ void main() {
   late _InMemoryActiveBrokerProfileStore activeStore;
 
   setUp(() {
+    WebHandoffParticipants.instance.reset();
     credentialStore = _SpyCredentialStore();
     repository = _InMemoryBrokerProfileRepository();
     activeStore = _InMemoryActiveBrokerProfileStore();
   });
 
-  Widget buildSubject({PairingControllerState? pairingState}) {
+  tearDown(WebHandoffParticipants.instance.reset);
+
+  Widget buildSubject({
+    PairingControllerState? pairingState,
+    TargetPlatform platform = TargetPlatform.android,
+    Locale locale = const Locale('en'),
+    PairingScannerBuilder? scannerBuilder,
+  }) {
     return ProviderScope(
       overrides: [
         credentialStoreProvider.overrideWithValue(credentialStore),
@@ -36,13 +45,17 @@ void main() {
           ),
       ],
       child: MaterialApp(
+        locale: locale,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: ThemeData(
+          platform: platform,
           splashFactory: InkRipple.splashFactory,
           extensions: [themeSpecById(kDefaultThemeId).light],
         ),
-        home: const PairingPage(),
+        home: PairingPage(
+          scannerBuilder: scannerBuilder ?? _fakeScannerBuilder,
+        ),
       ),
     );
   }
@@ -72,7 +85,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('Pairing complete. This broker is now active.'),
+      find.text('Pairing complete. This server is now active.'),
       findsOneWidget,
     );
     expect(
@@ -80,15 +93,117 @@ void main() {
       isNotNull,
     );
     expect(activeStore.activeProfileId, 'https://broker.example.com:9443');
+    expect(
+      tester
+          .widget<TextFormField>(
+            find.byKey(const Key('pairing-payload-field')),
+          )
+          .controller!
+          .text,
+      isEmpty,
+    );
+    expect(await WebHandoffParticipants.instance.prepare(), isTrue);
   });
 
-  testWidgets('shows mobile QR scan action with paste fallback', (
+  testWidgets('supported mobile opens scanner and imports one detection', (
     tester,
   ) async {
     await tester.pumpWidget(buildSubject());
 
     expect(find.byKey(const Key('pairing-scan-button')), findsOneWidget);
     expect(find.byKey(const Key('pairing-payload-field')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('pairing-scan-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pairing-fake-scanner')), findsOneWidget);
+    expect(find.text('Scan QR code'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('pairing-fake-detect')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('pairing-fake-scanner')), findsNothing);
+    expect(
+      await repository.getById('https://scan.example.com:9443'),
+      isNotNull,
+    );
+    expect(activeStore.activeProfileId, 'https://scan.example.com:9443');
+  });
+
+  testWidgets('iOS scanner route can be cancelled without importing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(buildSubject(platform: TargetPlatform.iOS));
+
+    await tester.tap(find.byKey(const Key('pairing-scan-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pairing-fake-scanner')), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('pairing-fake-scanner')), findsNothing);
+    expect(repository.getAll(), completion(isEmpty));
+  });
+
+  testWidgets('busy mobile pairing truthfully disables scanner and import', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildSubject(
+        pairingState: PairingControllerState(isBusy: true),
+      ),
+    );
+
+    final scanner = tester.widget<IconButton>(
+      find.byKey(const Key('pairing-scan-button')),
+    );
+    expect(scanner.onPressed, isNull);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const Key('pairing-import-button')),
+          )
+          .onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('unsupported platforms omit scanner and retain paste import', (
+    tester,
+  ) async {
+    for (final platform in const [
+      TargetPlatform.linux,
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+      TargetPlatform.fuchsia,
+    ]) {
+      await tester.pumpWidget(buildSubject(platform: platform));
+      expect(
+        find.byKey(const Key('pairing-scan-button')),
+        findsNothing,
+        reason: '$platform',
+      );
+      expect(find.byKey(const Key('pairing-payload-field')), findsOneWidget);
+      expect(find.byKey(const Key('pairing-import-button')), findsOneWidget);
+    }
+  });
+
+  testWidgets('scanner route title is localized in English and Chinese', (
+    tester,
+  ) async {
+    for (final testCase in const [
+      (Locale('en'), 'Scan QR code'),
+      (Locale('zh'), '扫描二维码'),
+    ]) {
+      await tester.pumpWidget(
+        buildSubject(locale: testCase.$1),
+      );
+      await tester.tap(find.byKey(const Key('pairing-scan-button')));
+      await tester.pumpAndSettle();
+      expect(find.text(testCase.$2), findsOneWidget);
+      tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+      await tester.pumpAndSettle();
+    }
   });
 
   testWidgets('shows parser error for malformed payload', (tester) async {
@@ -104,7 +219,7 @@ void main() {
     expect(find.textContaining("isn't valid"), findsOneWidget);
   });
 
-  testWidgets('renders only the bounded selectable technical detail', (
+  testWidgets('does not expose pairing technical details', (
     tester,
   ) async {
     final oversized = 'pairing-body:${'x' * 5000}:unbounded-tail';
@@ -116,20 +231,28 @@ void main() {
 
     await tester.pumpWidget(buildSubject(pairingState: state));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Technical details'));
-    await tester.pumpAndSettle();
 
-    final detail = find.text(state.technicalDetail!);
-    expect(detail, findsOneWidget);
+    expect(find.text('Technical details'), findsNothing);
+    expect(find.text(state.technicalDetail!), findsNothing);
     expect(find.textContaining('unbounded-tail'), findsNothing);
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is SelectableText && widget.data == state.technicalDetail,
-      ),
-      findsOneWidget,
-    );
   });
+}
+
+Widget _fakeScannerBuilder(
+  BuildContext _,
+  ValueChanged<String> onDetected,
+) {
+  return Center(
+    key: const Key('pairing-fake-scanner'),
+    child: FilledButton(
+      key: const Key('pairing-fake-detect'),
+      onPressed: () => onDetected(
+        '{"brokerUrl":"https://scan.example.com:9443",'
+        '"displayName":"Scanned"}',
+      ),
+      child: const Text('Detect'),
+    ),
+  );
 }
 
 class _FixedPairingController extends PairingController {

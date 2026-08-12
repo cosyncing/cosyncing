@@ -116,15 +116,15 @@
   "@retry": {
     "description": "Retry action after an error."
   },
-  "brokerGateCheckingTitle": "Checking your broker…",
+  "brokerGateCheckingTitle": "Checking your server…",
   "@brokerGateCheckingTitle": {
     "description": "Title of the broker connection gate while the probe is still running."
   },
-  "brokerGateCheckingBody": "Making sure the broker is running and that it recognizes this device.",
+  "brokerGateCheckingBody": "Making sure the server is running and that it recognizes this device.",
   "@brokerGateCheckingBody": {
     "description": "Body of the broker connection gate while the probe is still running."
   },
-  "brokerGateErrorTitle": "Couldn't check the broker",
+  "brokerGateErrorTitle": "Couldn't check the server",
   "@brokerGateErrorTitle": {
     "description": "Title shown when the broker connection probe itself failed unexpectedly."
   },
@@ -132,15 +132,15 @@
   "@brokerGateErrorBody": {
     "description": "Body shown when the broker connection probe itself failed unexpectedly."
   },
-  "brokerGateUnreachableTitle": "Can't reach the broker",
+  "brokerGateUnselectedTitle": "Connect to a server",
+  "brokerGateUnselectedBody": "Connect to a server to see its sessions.",
+  "brokerGateConnectServer": "Connect to a server",
+  "brokerGateUnreachableTitle": "Can't reach {serverName}",
   "@brokerGateUnreachableTitle": {
-    "description": "Title shown when the broker did not respond at all."
+    "description": "Title shown when the selected saved server did not respond.",
+    "placeholders": {"serverName": {"type": "String"}}
   },
-  "brokerGateUnreachableBody": "The broker didn't respond. Check that it's running and that you're on the right network, then try again. Your saved sign-in details are safe — there's nothing to re-enter.",
-  "@brokerGateUnreachableBody": {
-    "description": "Body shown when the broker did not respond and its address is unknown."
-  },
-  "brokerGateUnreachableBodyAt": "Nothing responded at {brokerUrl}. The broker may be stopped, the address may be wrong, or your network may be unavailable. Your saved sign-in details are safe — there's nothing to re-enter.",
+  "brokerGateUnreachableBodyAt": "The server at {brokerUrl} did not respond. Check that the server is running and that this device is on the correct network, then try again.",
   "@brokerGateUnreachableBodyAt": {
     "description": "Body shown when the broker at a known address did not respond.",
     "placeholders": {
@@ -150,15 +150,13 @@
       }
     }
   },
-  "brokerGateChangeUrl": "Change broker address",
-  "@brokerGateChangeUrl": {
-    "description": "Action that opens the screen for editing the broker address."
-  },
+  "brokerGateSwitchServer": "Switch server",
+  "brokerGateAddServer": "Add another server",
   "brokerGateMissingTitle": "Connect this device",
   "@brokerGateMissingTitle": {
     "description": "Title shown when the broker wants a credential and none is stored on this device."
   },
-  "brokerGateMissingBody": "Your broker is running and ready — this device just needs a credential. Paste a broker token below, or scan the pairing QR code.",
+  "brokerGateMissingBody": "Your server is running and ready — this device just needs a credential. Paste a server token below, or scan the pairing QR code.",
   "@brokerGateMissingBody": {
     "description": "Body shown when the broker wants a credential and none is stored on this device. Names both ways in."
   },
@@ -166,7 +164,7 @@
   "@brokerGateRejectedTitle": {
     "description": "Title shown when the broker refused the credential stored on this device."
   },
-  "brokerGateRejectedBody": "The broker is running, but it no longer accepts this device's saved access — it was probably revoked or renewed. Paste a new broker token below, or scan the pairing QR code.",
+  "brokerGateRejectedBody": "The server is running, but it no longer accepts this device's saved access — it was probably revoked or renewed. Paste a new server token below, or scan the pairing QR code.",
   "@brokerGateRejectedBody": {
     "description": "Body shown when the broker refused the credential stored on this device. Names both ways in."
   },
@@ -174,13 +172,25 @@
   "@brokerGateTokenHelpTitle": {
     "description": "Heading of the block explaining how to obtain a broker token."
   },
-  "brokerGateTokenHelpLocation": "On the broker host, open this file:",
+  "brokerGateTokenHelpLocation": "On the server host, open this file:",
   "@brokerGateTokenHelpLocation": {
     "description": "Introduces the file path that holds the broker token."
   },
-  "brokerGateTokenHelpPair": "Or run this on the broker host to pair this device instead:",
+  "brokerGateTokenHelpPair": "Or run this on the server host to pair this device instead:",
   "@brokerGateTokenHelpPair": {
     "description": "Introduces the CLI command that starts pairing."
+  },
+  "brokerGateTokenHelpGuidance": "On the server, run `cat ~/.cosyncing/secrets/broker-token` to view the server token, or run `cosy pair` to pair this device.",
+  "@brokerGateTokenHelpGuidance": {
+    "description": "Explains the two server-side commands available during credential recovery. The literal commands must remain unchanged."
+  },
+  "copyCommand": "Copy command",
+  "@copyCommand": {
+    "description": "Accessible label for copying a literal command or path."
+  },
+  "copyCommandCopied": "Command copied",
+  "@copyCommandCopied": {
+    "description": "Confirmation shown after copying a literal command or path."
   },
   "brokerGatePairDevice": "Scan pairing QR code",
   "@brokerGatePairDevice": {
@@ -194,15 +204,15 @@
   "@brokerGateRetry": {
     "description": "Action that re-runs the broker connection check."
   },
-  "brokerGateTokenNotice": "A broker token unlocks everything on the broker. Pairing is safer: it creates access just for this device, which you can revoke later.",
+  "brokerGateTokenNotice": "A server token unlocks everything on the server. Pairing is safer: it creates access just for this device, which you can revoke later.",
   "@brokerGateTokenNotice": {
     "description": "Note under the token form explaining the tradeoff against pairing."
   },
-  "brokerGateBrokerFieldLabel": "Broker",
+  "brokerGateBrokerFieldLabel": "Server",
   "@brokerGateBrokerFieldLabel": {
     "description": "Label for the read-only broker identity field in the token form."
   },
-  "brokerGateTokenFieldLabel": "Broker token",
+  "brokerGateTokenFieldLabel": "Server token",
   "@brokerGateTokenFieldLabel": {
     "description": "Label for the broker token input field."
   },
@@ -222,7 +232,7 @@
   "@brokerGateTokenRejectedTitle": {
     "description": "Title shown when a token the user just entered was refused. Deliberately distinct from brokerGateRejectedTitle, which implies access that used to work; on a brand-new device that framing is false."
   },
-  "brokerGateTokenRejectedBody": "The broker is running, but it didn't accept the token you entered. Check that you copied all of it — tokens are long and easy to truncate — then try again, or scan the pairing QR code instead.",
+  "brokerGateTokenRejectedBody": "The server is running, but it didn't accept the token you entered. Check that you copied all of it — tokens are long and easy to truncate — then try again, or scan the pairing QR code instead.",
   "@brokerGateTokenRejectedBody": {
     "description": "Body shown when a token the user just entered was refused."
   },
@@ -240,19 +250,19 @@
       }
     }
   },
-  "failureAdviceOffline": "The broker didn't respond. Check that it's running and that you're on the right network, then try again.",
+  "failureAdviceOffline": "The server didn't respond. Check that it's running and that you're on the right network, then try again.",
   "@failureAdviceOffline": {
     "description": "Recovery advice when the broker was never reached."
   },
-  "failureAdviceUnauthorized": "The broker refused this device's access. Pair this device again, or paste a current broker token.",
+  "failureAdviceUnauthorized": "The server refused this device's access. Pair this device again, or paste a current server token.",
   "@failureAdviceUnauthorized": {
     "description": "Recovery advice when the broker refused the credential."
   },
-  "failureAdviceRejected": "The broker rejected the request. Try again.",
+  "failureAdviceRejected": "The server rejected the request. Try again.",
   "@failureAdviceRejected": {
     "description": "Recovery advice when the broker answered and refused the request itself."
   },
-  "failureAdviceBrokerFault": "The broker ran into a problem on its end. Try again in a moment.",
+  "failureAdviceBrokerFault": "The server ran into a problem on its end. Try again in a moment.",
   "@failureAdviceBrokerFault": {
     "description": "Recovery advice when the broker failed on its own side."
   },
@@ -264,11 +274,11 @@
   "@failureAdviceUnknown": {
     "description": "Recovery advice for an unclassified failure. Deliberately makes no claim about the cause."
   },
-  "brokerProfilesLoadFailed": "Couldn't load broker profiles.",
-  "brokerProfileActivated": "{profileName} is now the active broker.",
+  "brokerProfilesLoadFailed": "Couldn't load saved servers.",
+  "brokerProfileActivated": "{profileName} is now the active server.",
   "@brokerProfileActivated": {"placeholders": {"profileName": {"type": "String"}}},
-  "brokerProfileActivateFailed": "Couldn't switch brokers. Try again.",
-  "brokerProfileDeleteTitle": "Delete broker profile",
+  "brokerProfileActivateFailed": "Couldn't switch servers. Try again.",
+  "brokerProfileDeleteTitle": "Delete saved server",
   "brokerProfileDeleteWithoutToken": "Delete {profileName}? If it is active, cosyncing will clear the selection.",
   "@brokerProfileDeleteWithoutToken": {"placeholders": {"profileName": {"type": "String"}}},
   "brokerProfileDeleteWithToken": "Delete {profileName}? This also removes its saved token. If it is active, cosyncing will clear the selection.",
@@ -276,24 +286,24 @@
   "brokerProfileDeleteAction": "Delete",
   "brokerProfileDeleted": "Deleted {profileName}.",
   "@brokerProfileDeleted": {"placeholders": {"profileName": {"type": "String"}}},
-  "brokerProfileDeleteFailed": "Couldn't delete this broker profile. Try again.",
-  "brokerProfileUpdated": "Broker profile updated.",
+  "brokerProfileDeleteFailed": "Couldn't delete this saved server. Try again.",
+  "brokerProfileUpdated": "Saved server updated.",
   "brokerProfileActive": "Active",
   "brokerProfileUse": "Use",
-  "brokerProfileEditTooltip": "Edit profile",
-  "brokerProfileDeleteTooltip": "Delete profile",
+  "brokerProfileEditTooltip": "Edit server",
+  "brokerProfileDeleteTooltip": "Delete server",
   "brokerProfileCreated": "Created: {date}",
   "@brokerProfileCreated": {"placeholders": {"date": {"type": "String"}}},
   "brokerProfileLastUsed": "Last used: {date}",
   "@brokerProfileLastUsed": {"placeholders": {"date": {"type": "String"}}},
-  "brokerProfileEmptyTitle": "No broker profiles yet",
-  "brokerProfileEmptyBody": "Open Connection and connect once to save a broker profile. Return here to edit it or switch brokers.",
+  "brokerProfileEmptyTitle": "No saved servers yet",
+  "brokerProfileEmptyBody": "Open Connection and connect once to save a server. Return here to edit it or switch servers.",
   "brokerProfileOpenConnection": "Open Connection",
-  "brokerProfileEditTitle": "Edit broker profile",
+  "brokerProfileEditTitle": "Edit saved server",
   "brokerProfileDisplayName": "Display name",
   "brokerProfileDisplayNameRequired": "Enter a display name.",
-  "brokerProfileBaseUrl": "Base URL",
-  "brokerProfileBaseUrlRequired": "Enter a base URL.",
+  "brokerProfileBaseUrl": "Server address",
+  "brokerProfileBaseUrlRequired": "Enter a server address.",
   "brokerProfileSaveFailed": "Couldn't save these changes. Check the URL and try again.",
   "save": "Save",
   "@brokerProfilesLoadFailed": {
@@ -303,7 +313,7 @@
   "@attentionInboxLoadFailed": {
     "description": "Lead sentence when the Attention inbox cannot be loaded."
   },
-  "attentionSavedLocallySyncPending": "Saved on this device — it'll sync once the broker is reachable.",
+  "attentionSavedLocallySyncPending": "Saved on this device — it'll sync once the server is reachable.",
   "@attentionSavedLocallySyncPending": {
     "description": "Notice after an Attention action is stored locally but its broker acknowledgement is pending."
   },
@@ -399,11 +409,11 @@
   "@credentialSignOutFailed": {
     "description": "Lead sentence when signing out of a broker failed."
   },
-  "credentialNoActiveProfile": "No broker is selected yet. Connect to a broker first, then add its token.",
+  "credentialNoActiveProfile": "No server is selected yet. Connect to a server first, then add its token.",
   "@credentialNoActiveProfile": {
     "description": "Shown when a credential action ran with no active broker profile."
   },
-  "credentialTokenEmpty": "Enter a broker token first.",
+  "credentialTokenEmpty": "Enter a server token first.",
   "@credentialTokenEmpty": {
     "description": "Shown when the token field was blank. States the action rather than naming the validation rule."
   },
@@ -419,15 +429,15 @@
   "@credentialNoTokenStored": {
     "description": "Shown when a clear action ran with no stored token."
   },
-  "credentialNoProfileActive": "No broker profile is active.",
+  "credentialNoProfileActive": "No server profile is active.",
   "@credentialNoProfileActive": {
     "description": "Shown when sign-out ran with no active broker profile."
   },
-  "credentialNoCredentialStored": "No credential is stored for this broker.",
+  "credentialNoCredentialStored": "No credential is stored for this server.",
   "@credentialNoCredentialStored": {
     "description": "Shown when sign-out ran with nothing stored to remove."
   },
-  "credentialSignedOut": "Signed out. Broker credentials were removed.",
+  "credentialSignedOut": "Signed out. Server credentials were removed.",
   "@credentialSignedOut": {
     "description": "Confirmation that sign-out removed the stored credential."
   },
@@ -447,13 +457,21 @@
   "@settingsCategoryNotificationsSubtitle": {
     "description": "Subtitle of the Notifications category row on the Settings hub."
   },
-  "settingsCategoryBrokerTitle": "Broker & devices",
+  "settingsCategoryBrokerTitle": "Servers",
   "@settingsCategoryBrokerTitle": {
     "description": "Settings hub category, and the title of its page: broker connection and pairing."
   },
-  "settingsCategoryBrokerSubtitle": "Connection, credentials, health, updates, and pairing",
+  "settingsCategoryBrokerSubtitle": "Saved servers, connection, health, credentials, and pairing",
   "@settingsCategoryBrokerSubtitle": {
-    "description": "Subtitle of the Broker & devices category row on the Settings hub."
+    "description": "Subtitle of the Servers category row on the Settings hub."
+  },
+  "serversAddTitle": "Add server",
+  "@serversAddTitle": {
+    "description": "Action on the Servers page that starts direct connection or pairing."
+  },
+  "serversAddSubtitle": "Connect directly or pair this device",
+  "@serversAddSubtitle": {
+    "description": "Subtitle for the Add server action."
   },
   "settingsCategoryAgentsTitle": "Agents & usage",
   "@settingsCategoryAgentsTitle": {
@@ -475,6 +493,18 @@
   "@settingsGroupActivity": {
     "description": "Heading over the Settings group holding Scheduled sends and Transfers."
   },
+  "settingsReadAloudTitle": "Read aloud",
+  "@settingsReadAloudTitle": {
+    "description": "Heading for read-aloud preferences in General settings."
+  },
+  "readAloudSpeed": "Read-aloud speed",
+  "@readAloudSpeed": {
+    "description": "Label and tooltip for the read-aloud playback-rate control."
+  },
+  "settingsReadAloudSpeedSubtitle": "Applies to transcript and selected-text playback.",
+  "@settingsReadAloudSpeedSubtitle": {
+    "description": "Explanation under the durable read-aloud speed setting."
+  },
   "settingsRuntimeStatusUnavailable": "Couldn't load runtime status.",
   "@settingsRuntimeStatusUnavailable": {
     "description": "Shown when the managed-runtime section failed to load. A Retry button sits beside it."
@@ -495,7 +525,7 @@
   "@settingsRemoteWakeTitle": {
     "description": "Title of the background-wake toggle."
   },
-  "settingsRemoteWakeSubtitle": "Let this device wake in the background to check enabled brokers for updates, using your operating system's push service. Push messages never carry session content — only a signal to refresh. Not available in every build.",
+  "settingsRemoteWakeSubtitle": "Let this device wake in the background to check enabled servers for updates, using your operating system's push service. Push messages never carry session content — only a signal to refresh. Not available in every build.",
   "@settingsRemoteWakeSubtitle": {
     "description": "Subtitle of the background-wake toggle. Replaces copy naming APNs/FCM and deployment push credentials."
   },
@@ -503,7 +533,7 @@
   "@settingsBrokerContractCompatible": {
     "description": "Broker version row subtitle when the broker's contract is understood. The raw contract revision and hash move to a tooltip for support."
   },
-  "settingsBrokerContractLegacy": "This broker is an older version; some features may not work.",
+  "settingsBrokerContractLegacy": "This server is an older version; some features may not work.",
   "@settingsBrokerContractLegacy": {
     "description": "Broker version row subtitle when the broker reports no contract identity."
   },
@@ -603,15 +633,15 @@
   "@shortcutCancelTransfer": {
     "description": "Description of Escape or Delete on a focused transfer row."
   },
-  "sessionsEmptyTitle": "No sessions",
+  "sessionsEmptyTitle": "Connect to a server",
   "@sessionsEmptyTitle": {
     "description": "Title of the sessions empty state when no broker is connected."
   },
-  "sessionsEmptyBody": "Connect to a broker to see its sessions.",
+  "sessionsEmptyBody": "Connect to a server to see its sessions.",
   "@sessionsEmptyBody": {
     "description": "Body of the sessions empty state when no broker is connected."
   },
-  "sessionsEmptyAction": "Connect a broker",
+  "sessionsEmptyAction": "Connect to a server",
   "@sessionsEmptyAction": {
     "description": "Button on the sessions empty state that opens the Connection screen."
   },
@@ -619,28 +649,52 @@
   "@sessionsEmptyActiveTitle": {
     "description": "Title of the sessions empty state when a broker is connected but idle."
   },
-  "sessionsEmptyActiveBody": "This broker is connected, but nothing is running yet. Start a session and it will appear here.",
+  "sessionsEmptyActiveBody": "This server is connected, but nothing is running yet. Start a session and it will appear here.",
+  "sessionsEmptyCreationCheckingBody": "This server is connected. Checking whether a registered agent can create sessions…",
+  "@sessionsEmptyCreationCheckingBody": {
+    "description": "Body of the sessions empty state while creation capability is being checked."
+  },
+  "sessionsEmptyCreationUnavailableBody": "This server is connected, but no registered agent is ready to create sessions.",
+  "@sessionsEmptyCreationUnavailableBody": {
+    "description": "Body of the sessions empty state when connected but no agent can create sessions."
+  },
+  "sessionsEmptyCreationCheckFailedBody": "This server is connected, but the app couldn't check whether an agent can create sessions. Refresh Sessions to try again.",
+  "@sessionsEmptyCreationCheckFailedBody": {
+    "description": "Body of the sessions empty state when creation capability discovery failed."
+  },
   "sessionsWorkspaceSelectPrompt": "Select a session to open it here.",
-  "sessionsWorkspaceEmpty": "No sessions on this Broker yet. Create one to get started.",
+  "sessionsWorkspaceEmpty": "No sessions on this server yet. Create one to get started.",
+  "sessionsWorkspaceEmptyCreationChecking": "Checking whether a registered agent can create sessions…",
+  "@sessionsWorkspaceEmptyCreationChecking": {
+    "description": "Expanded roster empty copy while creation capability is being checked."
+  },
+  "sessionsWorkspaceEmptyCreationUnavailable": "No registered agent on this server is ready to create sessions.",
+  "@sessionsWorkspaceEmptyCreationUnavailable": {
+    "description": "Expanded roster empty copy when connected but session creation is unavailable."
+  },
+  "sessionsWorkspaceEmptyCreationCheckFailed": "Couldn't check whether an agent can create sessions. Refresh to try again.",
+  "@sessionsWorkspaceEmptyCreationCheckFailed": {
+    "description": "Expanded roster empty copy when creation capability discovery failed."
+  },
   "sessionsNewAction": "New",
   "sessionsMachineTitle": "Machine sessions",
   "sessionsMachineRefresh": "Refresh machine sessions",
-  "sessionsMachineLoadFailed": "Couldn't load machine sessions. Check the broker connection and retry.",
+  "sessionsMachineLoadFailed": "Couldn't load machine sessions. Check the server connection and retry.",
   "sessionsMachineNone": "No configured machines.",
   "sessionsMachineStale": "This machine record is out of date. Refresh the list and try again.",
-  "sessionsMachineOwnerUnknown": "Couldn't determine which broker owns this session. Refresh the list and try again.",
-  "sessionsMachineOwnerUnreachable": "The broker that owns this session is not reachable right now.",
-  "sessionsMachineOwnerAmbiguous": "More than one broker reported this session. Refresh the machine list before opening it.",
-  "sessionsMachineOwnerNotFound": "This session is no longer available on its reported broker.",
-  "sessionsMachineNoRoute": "The owning broker didn't provide a direct connection address.",
+  "sessionsMachineOwnerUnknown": "Couldn't determine which server owns this session. Refresh the list and try again.",
+  "sessionsMachineOwnerUnreachable": "The server that owns this session is not reachable right now.",
+  "sessionsMachineOwnerAmbiguous": "More than one server reported this session. Refresh the machine list before opening it.",
+  "sessionsMachineOwnerNotFound": "This session is no longer available on its reported server.",
+  "sessionsMachineNoRoute": "The owning server didn't provide a direct connection address.",
   "sessionsMachineConnectTitle": "Connect to {machine}?",
   "@sessionsMachineConnectTitle": {"placeholders": {"machine": {"type": "String"}}},
-  "sessionsMachineConnectBody": "This session belongs to another broker. cosyncing will switch to the independently paired “{profileName}” profile.",
+  "sessionsMachineConnectBody": "This session belongs to another server. cosyncing will switch to the independently paired “{profileName}” profile.",
   "@sessionsMachineConnectBody": {"placeholders": {"profileName": {"type": "String"}}},
-  "sessionsMachinePairTitle": "Pair this broker separately",
-  "sessionsMachinePairBody": "{machine} owns this session at {brokerUrl}. Save and pair that broker as its own profile before connecting. Credentials from the current broker are never forwarded.",
+  "sessionsMachinePairTitle": "Pair this server separately",
+  "sessionsMachinePairBody": "{machine} owns this session at {brokerUrl}. Save and pair that server as its own profile before connecting. Credentials from the current server are never forwarded.",
   "@sessionsMachinePairBody": {"placeholders": {"machine": {"type": "String"}, "brokerUrl": {"type": "String"}}},
-  "sessionsMachineOpenProfiles": "Broker Profiles",
+  "sessionsMachineOpenProfiles": "Server Profiles",
   "sessionsMachineRoleLocal": "This device",
   "sessionsMachineRolePeer": "Remote device",
   "sessionsMachineRoleUnknown": "Unknown device",
@@ -658,7 +712,7 @@
   "@sessionsScheduledConfirmation": {"placeholders": {"date": {"type": "String"}}},
   "sessionsLoading": "Loading sessions…",
   "sessionsLoadFailedTitle": "Couldn't load sessions",
-  "sessionsLoadFailedBody": "Check the broker connection and try again.",
+  "sessionsLoadFailedBody": "Check the server connection and try again.",
   "@sessionsEmptyActiveBody": {
     "description": "Body of the sessions empty state when a broker is connected but idle."
   },
@@ -672,7 +726,7 @@
   },
   "schedulesEmptyBody": "Schedule a message from any session's prompt box and it will appear here.",
   "schedulesTitle": "Scheduled sends",
-  "schedulesLoadFailed": "Couldn't load scheduled sends. Check the broker connection and retry.",
+  "schedulesLoadFailed": "Couldn't load scheduled sends. Check the server connection and retry.",
   "scheduleNewSessionTarget": "New {tool} session",
   "@scheduleNewSessionTarget": {"placeholders": {"tool": {"type": "String"}}},
   "scheduleRepeatDaily": "Daily",
@@ -728,22 +782,22 @@
   "scheduleMessageTarget": "To: {sessionTitle} ({tool})",
   "@scheduleMessageTarget": {"placeholders": {"sessionTitle": {"type": "String"}, "tool": {"type": "String"}}},
   "scheduleSendAtLabel": "Send at",
-  "scheduleMessagePolicy": "Uses the session model, mode, and permission settings that are active when the broker sends it.",
+  "scheduleMessagePolicy": "Uses the session model, mode, and permission settings that are active when the server sends it.",
   "scheduleAction": "Schedule",
   "scheduleMessageRequired": "Enter the message to schedule.",
   "scheduleMessageTooLong": "Scheduled messages can contain at most {count} characters.",
   "@scheduleMessageTooLong": {"placeholders": {"count": {"type": "int"}}},
-  "scheduleCreateFailed": "Couldn't schedule this message. Check the broker connection and try again.",
+  "scheduleCreateFailed": "Couldn't schedule this message. Check the server connection and try again.",
   "scheduleChange": "Change",
   "scheduleInlineTitle": "Scheduled message",
   "@schedulesEmptyBody": {
     "description": "Body of the scheduled sends empty state. Names where schedules are created, since this screen has no compose control of its own."
   },
-  "scheduleInlineConnectToView": "Connect to a broker to view scheduled messages.",
+  "scheduleInlineConnectToView": "Connect to a server to view scheduled messages.",
   "@scheduleInlineConnectToView": {
     "description": "Shown in a session's chat when the user asks for scheduled messages and the active broker profile has no client. Only an explicit request produces this; automatic refresh stays silent."
   },
-  "scheduleInlineConnectToChange": "Connect to a broker before changing a scheduled message.",
+  "scheduleInlineConnectToChange": "Connect to a server before changing a scheduled message.",
   "@scheduleInlineConnectToChange": {
     "description": "Shown when an edit or cancellation is attempted and the active broker profile has no client."
   },
@@ -770,6 +824,10 @@
   "sessionDetailTelemetryHeading": "Usage & context",
   "@sessionDetailTelemetryHeading": {
     "description": "Heading over the telemetry panel on the session Status tab."
+  },
+  "sessionSummaryTitle": "Session summary",
+  "@sessionSummaryTitle": {
+    "description": "Heading over raw session telemetry on the Status tab."
   },
   "sessionComposerMoreTooltip": "More",
   "@sessionComposerMoreTooltip": {
@@ -859,7 +917,7 @@
   "@sessionDetailBootstrapFailureLead": {
     "description": "Lead sentence combined with classified recovery advice after Session Detail attach fails."
   },
-  "sessionDetailBootstrapNoProfileBody": "Choose a broker connection, then try again.",
+  "sessionDetailBootstrapNoProfileBody": "Choose a server connection, then try again.",
   "@sessionDetailBootstrapNoProfileBody": {
     "description": "Recovery copy when Session Detail cannot load because no broker profile is active."
   },
@@ -867,7 +925,7 @@
   "@sessionDetailBootstrapTimeoutTitle": {
     "description": "Title when the session connected but its initial authoritative history timed out."
   },
-  "sessionDetailBootstrapTimeoutBody": "The session connected, but its history didn't arrive. Check the broker and network, then retry.",
+  "sessionDetailBootstrapTimeoutBody": "The session connected, but its history didn't arrive. Check the server and network, then retry.",
   "@sessionDetailBootstrapTimeoutBody": {
     "description": "Recovery copy after the initial Session Detail history response times out."
   },
@@ -971,7 +1029,7 @@
   "@settingsBackToSessions": {
     "description": "Tooltip on the back button shown when Settings was opened from the wide Sessions workspace."
   },
-  "settingsSectionBrokerCredentials": "Broker Credentials",
+  "settingsSectionBrokerCredentials": "Server Credentials",
   "@settingsSectionBrokerCredentials": {
     "description": "Title of the Broker Credentials section on the Settings root."
   },
@@ -1031,11 +1089,11 @@
   "@settingsTransfersSubtitle": {
     "description": "Subtitle of the Transfers link tile."
   },
-  "settingsBrokerProfilesTitle": "Broker Profiles",
+  "settingsBrokerProfilesTitle": "Saved servers",
   "@settingsBrokerProfilesTitle": {
     "description": "Title of the Broker Profiles link tile in the Broker & device settings group."
   },
-  "settingsBrokerProfilesSubtitle": "Manage saved broker profiles",
+  "settingsBrokerProfilesSubtitle": "Manage and switch saved servers",
   "@settingsBrokerProfilesSubtitle": {
     "description": "Subtitle of the Broker Profiles link tile."
   },
@@ -1043,7 +1101,7 @@
   "@settingsPairingTitle": {
     "description": "Title of the Pairing link tile in the Broker & device settings group."
   },
-  "settingsPairingSubtitle": "Pair this device with a broker",
+  "settingsPairingSubtitle": "Pair this device with a server",
   "@settingsPairingSubtitle": {
     "description": "Subtitle of the Pairing link tile."
   },
@@ -1059,19 +1117,19 @@
   "@settingsSignOutAction": {
     "description": "Sign-out action label, used both on the Settings root list tile and the confirm dialog's affirmative button."
   },
-  "settingsSignOutSubtitleHasCredential": "Remove stored broker credentials from this device",
+  "settingsSignOutSubtitleHasCredential": "Remove stored server credentials from this device",
   "@settingsSignOutSubtitleHasCredential": {
     "description": "Subtitle of the Sign out row when a credential is currently stored."
   },
-  "settingsSignOutSubtitleNoCredential": "No broker credentials are stored on this device",
+  "settingsSignOutSubtitleNoCredential": "No server credentials are stored on this device",
   "@settingsSignOutSubtitleNoCredential": {
     "description": "Subtitle of the Sign out row when no credential is currently stored."
   },
-  "settingsSignOutConfirmTitle": "Sign out of this broker?",
+  "settingsSignOutConfirmTitle": "Sign out of this server?",
   "@settingsSignOutConfirmTitle": {
     "description": "Title of the confirm dialog before signing out of the active broker."
   },
-  "settingsSignOutConfirmBody": "Stored broker credentials are removed from this device. Sessions and history on the broker are unaffected. You will need to pair again, or paste a broker token, to reconnect.",
+  "settingsSignOutConfirmBody": "Stored server credentials are removed from this device. Sessions and history on the server are unaffected. You will need to pair again, or paste a server token, to reconnect.",
   "@settingsSignOutConfirmBody": {
     "description": "Body of the confirm dialog before signing out of the active broker."
   },
@@ -1109,7 +1167,7 @@
   "@settingsRestartEverythingConfirmTitle": {
     "description": "Title of the confirm dialog before restarting every managed runtime and the broker."
   },
-  "settingsRestartEverythingConfirmBody": "This restarts Codex, OpenCode, and the broker. All connected app clients can briefly disconnect, and idle Codex terminals may need a manual resume.",
+  "settingsRestartEverythingConfirmBody": "This restarts Codex, OpenCode, and the server. All connected app clients can briefly disconnect, and idle Codex terminals may need a manual resume.",
   "@settingsRestartEverythingConfirmBody": {
     "description": "Body of the confirm dialog before restarting every managed runtime and the broker."
   },
@@ -1117,7 +1175,7 @@
   "@settingsRestartEverythingAction": {
     "description": "Restart-everything action label, used both on the outlined button and the confirm dialog's affirmative button."
   },
-  "settingsUpdateBrokerConfirmTitle": "Update broker?",
+  "settingsUpdateBrokerConfirmTitle": "Update server?",
   "@settingsUpdateBrokerConfirmTitle": {
     "description": "Title of the confirm dialog before installing a broker update."
   },
@@ -1125,7 +1183,7 @@
   "@settingsUpdateBrokerReleaseFallback": {
     "description": "Fallback word used in place of a version number in the update-broker confirm dialog when the latest version is unknown."
   },
-  "settingsUpdateBrokerConfirmBody": "Install signed broker {version}? The broker will restart, run its health check, and roll back if the new binary is unhealthy.",
+  "settingsUpdateBrokerConfirmBody": "Install signed server {version}? The server will restart, run its health check, and roll back if the new binary is unhealthy.",
   "@settingsUpdateBrokerConfirmBody": {
     "description": "Body of the confirm dialog before installing a broker update.",
     "placeholders": {
@@ -1135,15 +1193,15 @@
       }
     }
   },
-  "settingsUpdateBrokerAction": "Update broker",
+  "settingsUpdateBrokerAction": "Update server",
   "@settingsUpdateBrokerAction": {
     "description": "Affirmative button label on the update-broker confirm dialog."
   },
-  "settingsConnectToInspectRuntimes": "Connect to a broker to inspect managed runtimes and recovery.",
+  "settingsConnectToInspectRuntimes": "Connect to a server to inspect managed runtimes and recovery.",
   "@settingsConnectToInspectRuntimes": {
     "description": "Shown in the Managed Agent Runtimes section when no broker is connected."
   },
-  "settingsRuntimeOwnershipNotice": "cosyncing owns the managed server lifecycle. Apply agent updates and configuration changes here so the broker can defer automatic restarts according to the selected policy.",
+  "settingsRuntimeOwnershipNotice": "cosyncing owns the managed server lifecycle. Apply agent updates and configuration changes here so the server can defer automatic restarts according to the selected policy.",
   "@settingsRuntimeOwnershipNotice": {
     "description": "Explanatory strip above the runtime controls, framing cosyncing as the place to apply updates."
   },
@@ -1227,13 +1285,13 @@
       }
     }
   },
-  "settingsBrokerAndUpdateSection": "Broker health & updates",
-  "settingsBrokerStatusUnavailable": "Couldn't load broker health and update status.",
-  "settingsConnectToInspectBroker": "Connect to a broker to inspect its health, version, and available updates.",
+  "settingsBrokerAndUpdateSection": "Server health & updates",
+  "settingsBrokerStatusUnavailable": "Couldn't load server health and update status.",
+  "settingsConnectToInspectBroker": "Connect to a server to inspect its health, version, and available updates.",
   "settingsBrokerTechnicalDetails": "Technical details",
   "settingsBrokerContractDetails": "Contract revision {revision} · {surfaceHash}",
   "@settingsBrokerContractDetails": {"placeholders": {"revision": {"type": "int"}, "surfaceHash": {"type": "String"}}},
-  "settingsBrokerHealthTitle": "Broker health",
+  "settingsBrokerHealthTitle": "Server health",
   "@settingsBrokerHealthTitle": {
     "description": "Title of the broker health row."
   },
@@ -1241,21 +1299,23 @@
   "@settingsBrokerHealthHealthy": {
     "description": "Subtitle of the broker health row when the broker reports healthy."
   },
-  "settingsBrokerHealthUnhealthy": "Status: {status}. Open Notifications for recovery details.",
-  "@settingsBrokerHealthUnhealthy": {
-    "description": "Subtitle of the broker health row when the broker reports a non-healthy status.",
-    "placeholders": {
-      "status": {
-        "type": "String",
-        "example": "degraded"
-      }
-    }
+  "settingsBrokerHealthDegraded": "Persistence or storage checks are degraded.",
+  "@settingsBrokerHealthDegraded": {
+    "description": "Subtitle when server persistence or storage is degraded."
+  },
+  "settingsBrokerHealthCritical": "Persistence or storage checks need attention.",
+  "@settingsBrokerHealthCritical": {
+    "description": "Subtitle when server persistence or storage needs immediate attention."
+  },
+  "settingsBrokerHealthUnknown": "Server health checks are unavailable.",
+  "@settingsBrokerHealthUnknown": {
+    "description": "Subtitle when no recognized server-health result is available."
   },
   "settingsBrokerVersionUnknown": "version unknown",
   "@settingsBrokerVersionUnknown": {
     "description": "Fallback text for the broker version row title when the version isn't reported."
   },
-  "settingsBrokerVersionTitle": "Broker {version}",
+  "settingsBrokerVersionTitle": "Server {version}",
   "@settingsBrokerVersionTitle": {
     "description": "Title of the broker version row.",
     "placeholders": {
@@ -1291,7 +1351,7 @@
   "@settingsBrokerStatusPackageManaged": {
     "description": "Status pill on the broker version row when the broker is an npm package that its package manager updates, not the app."
   },
-  "settingsBrokerPackageManagedBody": "This broker was installed as an npm package, so it does not update itself. Run {updateCommand} (or the equivalent for the manager you installed it with), then {setupCommand}.",
+  "settingsBrokerPackageManagedBody": "This server was installed as an npm package, so it does not update itself. Run {updateCommand} (or the equivalent for the manager you installed it with), then {setupCommand}.",
   "@settingsBrokerPackageManagedBody": {
     "description": "Guidance shown under the broker version row when the broker is owned by a package manager.",
     "placeholders": {
@@ -1309,7 +1369,7 @@
   "@settingsDesktopBuildUpdateTitle": {
     "description": "Title of the row shown on Windows, Linux, and macOS when the broker runs a newer release than the installed desktop app."
   },
-  "settingsDesktopBuildUpdateBody": "This broker runs {version}. Desktop builds don't update themselves — download the matching build.",
+  "settingsDesktopBuildUpdateBody": "This server runs {version}. Desktop builds don't update themselves — download the matching build.",
   "@settingsDesktopBuildUpdateBody": {
     "description": "Subtitle of the desktop build update row.",
     "placeholders": {
@@ -1467,7 +1527,7 @@
   "@settingsQuotaReadOnlyNote": {
     "description": "Footnote under the quota panel preserving the locally-cached, read-only boundary."
   },
-  "settingsConnectToBrokerFirst": "Connect to a broker first, then add a token for a remote broker here.",
+  "settingsConnectToBrokerFirst": "Connect to a server first, then add a token for a remote server here.",
   "@settingsConnectToBrokerFirst": {
     "description": "Shown in the Broker Credentials section when no broker profile is active yet."
   },
@@ -1523,11 +1583,11 @@
       }
     }
   },
-  "settingsAttentionDeliveryDescription": "Choose which brokers populate Notifications. This is independent from operating-system notification display.",
+  "settingsAttentionDeliveryDescription": "Choose which servers populate Notifications. This is independent from operating-system notification display.",
   "@settingsAttentionDeliveryDescription": {
     "description": "Explanatory text above the per-broker attention feed toggles."
   },
-  "settingsAttentionNoProfiles": "Save a broker profile to enable its notification feed.",
+  "settingsAttentionNoProfiles": "Save a server profile to enable its notification feed.",
   "@settingsAttentionNoProfiles": {
     "description": "Shown in the Attention Delivery section when no broker profiles are saved yet."
   },
@@ -1535,7 +1595,7 @@
   "@settingsAttentionFeedConnected": {
     "description": "Per-profile attention feed support state: the durable feed is connected."
   },
-  "settingsAttentionFeedUnsupported": "This broker is older; the notification feed is unavailable",
+  "settingsAttentionFeedUnsupported": "This server is older; the notification feed is unavailable",
   "@settingsAttentionFeedUnsupported": {
     "description": "Per-profile attention feed support state: the broker is too old to support it."
   },
@@ -1543,7 +1603,7 @@
   "@settingsAttentionFeedUnknown": {
     "description": "Per-profile attention feed support state: not yet checked."
   },
-  "settingsRemoteCredentialDescription": "Save or clear the token used by this remote broker profile.",
+  "settingsRemoteCredentialDescription": "Save or clear the token used by this remote server profile.",
   "@settingsRemoteCredentialDescription": {
     "description": "Explanatory text above the broker token field for an active remote profile."
   },
@@ -1582,8 +1642,8 @@
       }
     }
   },
-  "newSessionCreateFailed": "Couldn't create the session. Check the Broker connection and try again.",
-  "newSessionScheduleFailed": "Couldn't schedule the session. Check the Broker connection and try again.",
+  "newSessionCreateFailed": "Couldn't create the session. Check the Server connection and try again.",
+  "newSessionScheduleFailed": "Couldn't schedule the session. Check the Server connection and try again.",
   "create": "Create",
   "newSessionCreatingLabel": "Creating session…",
   "@newSessionCreatingLabel": {
@@ -1717,6 +1777,7 @@
   "sessionScheduledFor": "Message scheduled for {date}",
   "@sessionScheduledFor": {"placeholders": {"date": {"type": "String"}}},
   "sessionConnectionOwnership": "Connection & ownership",
+  "sessionControlHeading": "Session control",
   "sessionNotAttached": "Not attached to the session.",
   "sessionAttach": "Attach",
   "sessionRetryAttach": "Retry attach",
@@ -1728,14 +1789,14 @@
   "sessionPlanActivityEmpty": "No active or retained plan state.",
   "sessionActions": "Session actions",
   "sessionDetach": "Detach",
-  "sessionDetachDescription": "Detach this device. The agent keeps running on the Broker.",
+  "sessionDetachDescription": "Detach this device. The agent keeps running on the Server.",
   "sessionForkLatest": "Fork at latest",
   "sessionDuplicate": "Duplicate session",
   "sessionDuplicateDisabledUnsupported": "This agent type can't duplicate sessions.",
   "sessionExportTranscript": "Export transcript",
   "sessionExportDisabledUnsupported": "This agent type can't export transcripts.",
   "sessionActionDisabledOffline": "Available while the session is connected.",
-  "sessionActionDisabledNoBroker": "Available while the broker connection is active.",
+  "sessionActionDisabledNoBroker": "Available while the server connection is active.",
   "sessionActionDisabledReadOnly": "Unavailable while compatibility keeps this session read-only.",
   "sessionActionDisabledCapabilityPending": "Checking what this agent type supports…",
   "sessionActionDisabledCapabilityUnknown": "Couldn't confirm what this agent type supports.",
@@ -1757,7 +1818,11 @@
   "sessionControlDrivingNoCommand": "Driving from the app. Switch to Observe before resuming this session manually in a terminal.",
   "sessionControlSyncedDescription": "Synced with your terminal. Send from here or the terminal; both stay in step.",
   "sessionControlDrivingDescription": "Driving from the app. Terminal options are shown below.",
-  "sessionControlSyncAvailableDescription": "A terminal can join this session. Run the command below to sync, then send from either side.",
+  "sessionControlSyncAvailableDescription": "No terminal is currently synced. Choose how to continue.",
+  "sessionSyncWithTerminal": "Sync with a terminal",
+  "sessionSyncWithTerminalDescription": "Run this command in a terminal. Once synced, you can send from either the terminal or Cosyncing.",
+  "sessionContinueInCosyncing": "Continue in Cosyncing",
+  "sessionContinueInCosyncingDescription": "Take over to send from Cosyncing without syncing a terminal.",
   "sessionControlObservingDescription": "The terminal owns input right now. Take over to send from the app.",
   "sessionControlUnavailableDescription": "The app can neither take over nor sync this session. You can only observe it.",
   "sessionControlUnknownDescription": "Session control status is unavailable.",
@@ -1775,8 +1840,8 @@
   "sessionFilesRefresh": "Refresh files",
   "sessionFilesLoadingWorkspace": "Loading workspace…",
   "sessionFilesLoading": "Loading files…",
-  "sessionFilesConnectBrowse": "Connect to the Broker before browsing files.",
-  "sessionFilesConnectPreview": "Connect to the Broker before previewing files.",
+  "sessionFilesConnectBrowse": "Connect to the Server before browsing files.",
+  "sessionFilesConnectPreview": "Connect to the Server before previewing files.",
   "sessionFilesPreviewTextOnly": "Preview is available only for text files.",
   "sessionFilesReading": "Reading {fileName}…",
   "@sessionFilesReading": {"placeholders": {"fileName": {"type": "String"}}},
@@ -1791,9 +1856,9 @@
   "sessionFilesNotRegular": "Only regular files can be previewed or downloaded.",
   "sessionFilesNotDirectory": "That path is not a directory.",
   "sessionFilesInvalidRequest": "The file request is invalid.",
-  "sessionFilesDownloadTooLarge": "The file exceeds this Broker's download limit.",
-  "sessionFilesRemoteDisabled": "Remote file browsing is disabled by the Broker administrator.",
-  "sessionFilesFailed": "Couldn't access these files. Check the Broker connection and try again.",
+  "sessionFilesDownloadTooLarge": "The file exceeds this Server's download limit.",
+  "sessionFilesRemoteDisabled": "Remote file browsing is disabled by the Server administrator.",
+  "sessionFilesFailed": "Couldn't access these files. Check the Server connection and try again.",
   "sessionFilesEmptyDirectory": "This directory is empty.",
   "sessionFilesUnnamed": "(unnamed)",
   "sessionFilesPreviewFile": "Preview file",
@@ -1834,7 +1899,7 @@
   "messageDetails": "Message details",
   "typeLabel": "Type",
   "timestamp": "Timestamp",
-  "notSuppliedByBroker": "Not supplied by Broker",
+  "notSuppliedByBroker": "Not supplied by server",
   "duration": "Duration",
   "millisecondsCount": "{count} ms",
   "@millisecondsCount": {"placeholders": {"count": {"type": "String"}}},
@@ -1857,7 +1922,7 @@
   "done": "Done",
   "failed": "Failed",
   "pending": "Pending",
-  "activityProgressLive": "Progress remains live until the Broker reports completion.",
+  "activityProgressLive": "Progress remains live until the Server reports completion.",
   "updateGoalObjective": "Update goal objective",
   "objective": "Objective",
   "goalPursuing": "Pursuing goal",
@@ -1923,7 +1988,7 @@
   "taskListState": "Task list state",
   "agentActivity": "Agent activity",
   "errorEvent": "Session error",
-  "errorEventSummary": "The session reported an error. Open details for technical information.",
+  "errorEventNoDetail": "No further detail was provided.",
   "renderedForVisibilityOnly": "Shown for visibility only",
   "unsupportedMessageType": "Unsupported message type",
   "noSummaryAvailable": "No summary is available.",
@@ -1998,19 +2063,19 @@
   "artifactPreviewLoadFailed": "Couldn't load the preview. Try again.",
   "artifactPreviewBlocked": "The preview blocked a link that would leave this local file.",
   "artifactPreviewBrowserFailed": "Couldn't open the preview in your browser. Try again.",
-  "sessionDetailUpdateFailed": "The session couldn't update. Check the Broker connection and try again.",
+  "sessionDetailUpdateFailed": "The session couldn't update. Check the Server connection and try again.",
   "sessionForkCreating": "Creating forked session…",
   "sessionForkCreated": "Forked session: {title}",
   "@sessionForkCreated": {"placeholders": {"title": {"type": "String"}}},
-  "sessionForkFailed": "Couldn't fork this session. Check the Broker connection and try again.",
+  "sessionForkFailed": "Couldn't fork this session. Check the Server connection and try again.",
   "sessionCloneCreating": "Creating duplicate session…",
   "sessionCloneCreated": "Duplicated session: {title}",
   "@sessionCloneCreated": {"placeholders": {"title": {"type": "String"}}},
-  "sessionCloneFailed": "Couldn't duplicate this session. Check the Broker connection and try again.",
+  "sessionCloneFailed": "Couldn't duplicate this session. Check the Server connection and try again.",
   "sessionExportPreparing": "Preparing transcript export…",
   "sessionExportInProgress": "Exporting transcript…",
   "sessionExportReady": "Transcript export is ready in Files.",
-  "sessionExportFailed": "Couldn't export the transcript. Check the Broker connection and try again.",
+  "sessionExportFailed": "Couldn't export the transcript. Check the Server connection and try again.",
   "terminalShowingLatest": "Showing latest {visible} of {total}",
   "@terminalShowingLatest": {"placeholders": {"visible": {"type": "int"}, "total": {"type": "int"}}},
   "terminalShowingAll": "Showing all {count}",
@@ -2044,6 +2109,12 @@
   "sessionCopyCommand": "Copy command",
   "sessionCopyCommandFailed": "Couldn't copy the command.",
   "sessionCommandCopied": "Command copied to the clipboard.",
+  "sessionComposerTerminalNotSynced": "Terminal not synced. To send from Cosyncing:",
+  "sessionComposerTerminalNotSyncedCompact": "Terminal not synced:",
+  "sessionCopySyncCommand": "Copy sync command",
+  "sessionCopyTerminalSyncCommand": "Copy terminal sync command",
+  "sessionSyncCommandCopied": "Command copied. Run it in a terminal to sync both sides.",
+  "sessionChoiceOr": "or",
   "sessionCommandCopiedHandedOff": "Command copied. Control returned to your terminal.",
   "sessionCommandCopiedHandoffFailed": "Command copied, but control could not return to your terminal.",
   "sessionExportConfirmBody": "Export a redacted {format} copy of the full transcript.",
@@ -2139,9 +2210,25 @@
   "@sessionDriveRestoreFailureNote": {
     "description": "Status note after a non-ownership Drive restore failure; the manual Take over stays available."
   },
-  "sessionDriveTakeoverTimeoutNote": "The broker did not confirm the takeover. The session stays in Observe; you can try Take over again.",
+  "sessionDriveNativeRestoreUnresumableNote": "Codex could not resume this session to restore Drive automatically. It stays in Observe.",
+  "@sessionDriveNativeRestoreUnresumableNote": {
+    "description": "Status note after the native Codex runtime rejects thread resume during automatic Drive restoration."
+  },
+  "sessionDriveNativeTakeoverUnresumableNote": "Codex could not resume this session for Take over. It stays in Observe.",
+  "@sessionDriveNativeTakeoverUnresumableNote": {
+    "description": "Immediate feedback after the native Codex runtime rejects thread resume during a manual takeover."
+  },
+  "sessionDriveTakeoverTimeoutNote": "The server did not confirm the takeover. The session stays in Observe; you can try Take over again.",
   "@sessionDriveTakeoverTimeoutNote": {
     "description": "Status note after a manual takeover was not confirmed by the broker in time; the session remains observed and the action can be retried."
+  },
+  "sessionDriveTakeoverOwnershipConflictNote": "Couldn’t take over because Codex Desktop or another Codex client may still control this session. It remains read-only in Cosyncing.",
+  "@sessionDriveTakeoverOwnershipConflictNote": {
+    "description": "Persistent composer and immediate feedback after a manual Codex takeover is refused because another native writer is active or ownership is unknown."
+  },
+  "sessionDriveTakeoverFailureNote": "Couldn’t take over. The session remains in Observe.",
+  "@sessionDriveTakeoverFailureNote": {
+    "description": "Immediate feedback after a manual takeover fails for a non-ownership, non-native-capability reason."
   },
   "sessionForkAgentOwnedRefusal": "This session was spawned by another agent session; fork its parent instead.",
   "@sessionForkAgentOwnedRefusal": {
@@ -2168,7 +2255,7 @@
   "@sessionRosterCachedReconnecting": {
     "description": "Banner above the locally cached roster while the authoritative broker roster is still loading."
   },
-  "sessionRosterCachedUnreachable": "Couldn't reach the broker. Showing last known sessions — activity isn't current.",
+  "sessionRosterCachedUnreachable": "Couldn't reach the server. Showing last known sessions — activity isn't current.",
   "@sessionRosterCachedUnreachable": {
     "description": "Banner above the locally cached roster after the authoritative broker roster failed to load."
   },
@@ -2291,7 +2378,7 @@
   "foregroundAttentionDevicePaired": "Device paired",
   "foregroundAttentionSecurityAlert": "Security alert",
   "foregroundAttentionUsageThreshold": "Usage running low",
-  "foregroundAttentionBrokerHealth": "Broker health update",
+  "foregroundAttentionBrokerHealth": "Server health update",
   "foregroundAttentionScheduledSend": "Scheduled message sent",
   "foregroundAttentionScheduledSendFailed": "Scheduled message failed",
   "notificationSessionActionTitle": "Session action required",
@@ -2300,14 +2387,14 @@
   "notificationRunFailedBody": "A session run failed. Open the session to inspect details.",
   "notificationScheduledFailedTitle": "Scheduled message failed",
   "notificationScheduledFailedBody": "A scheduled message was not sent. Open it to inspect details.",
-  "notificationSecurityTitle": "Broker security alert",
+  "notificationSecurityTitle": "Server security alert",
   "notificationSecurityBody": "A device-access or authentication incident was recorded.",
   "notificationDevicePairedTitle": "Device paired",
-  "notificationDevicePairedBody": "A device was connected to this Broker.",
+  "notificationDevicePairedBody": "A device was connected to this Server.",
   "notificationSessionStatusTitle": "Session status update",
   "notificationSessionStatusBody": "A session event is ready to review.",
-  "notificationBrokerHealthTitle": "Broker health needs attention",
-  "notificationBrokerHealthBody": "Broker storage reported a critical health incident.",
+  "notificationBrokerHealthTitle": "Server health needs attention",
+  "notificationBrokerHealthBody": "Server storage reported a critical health incident.",
   "notificationMaintenanceTitle": "Maintenance update",
   "notificationMaintenanceBody": "A maintenance event needs review.",
   "notificationGenericTitle": "Notification update",
@@ -2320,7 +2407,7 @@
   "attentionPageActionRequired": "Action required",
   "attentionPageActionRequiredSubtitle": "Sessions waiting for you or runs that need inspection",
   "attentionPageMaintenance": "Maintenance",
-  "attentionPageMaintenanceSubtitle": "Runtime, quota, sync, security, and broker notices",
+  "attentionPageMaintenanceSubtitle": "Runtime, quota, sync, security, and server notices",
   "attentionPageRecent": "Recent",
   "attentionPageRecentSubtitle": "Resolved and informational history",
   "attentionPageDismiss": "Dismiss",
@@ -2328,7 +2415,7 @@
   "attentionPageScheduledFailed": "Scheduled message failed",
   "attentionPageFallbackTitle": "Notification update",
   "attentionPageEmptyTitle": "Nothing needs your attention",
-  "attentionPageEmptyBody": "Action requests, background run results, runtime updates, quota warnings, and broker health notices appear here.",
+  "attentionPageEmptyBody": "Action requests, background run results, runtime updates, quota warnings, and server health notices appear here.",
   "close": "Close",
   "@close": {"description": "Generic Close action that dismisses a dialog or sheet."},
   "sessionTurnQueuedBadge": "Queued",
@@ -2498,13 +2585,13 @@
   "@sessionHistoryPartialTitle": {"description": "Compact label for a capped transcript window."},
   "sessionHistoryResyncedTitle": "History resynced",
   "@sessionHistoryResyncedTitle": {"description": "Compact label after a history cursor gap forced a replay."},
-  "sessionHistoryCursorUnavailable": "The requested history cursor was unavailable ({code}); the broker sent a full replay.",
+  "sessionHistoryCursorUnavailable": "The requested history cursor was unavailable ({code}); the server sent a full replay.",
   "@sessionHistoryCursorUnavailable": {"description": "History gap explanation with broker code.", "placeholders": {"code": {"type": "String"}}},
   "sessionHistoryUnavailable": "Earlier messages couldn't be read ({code}); anything below is the newest history available.",
   "@sessionHistoryUnavailable": {"description": "History gap explanation when the broker could not read the history, so no replay was sent.", "placeholders": {"code": {"type": "String"}}},
   "sessionHistoryTruncation": "Showing the newest {shown} of {total} messages.",
   "@sessionHistoryTruncation": {"description": "Initial transcript-tail count summary.", "placeholders": {"shown": {"type": "int"}, "total": {"type": "int"}}},
-  "sessionHistoryCapped": "The broker returned a capped history window.",
+  "sessionHistoryCapped": "The server returned a capped history window.",
   "@sessionHistoryCapped": {"description": "Fallback summary when a capped history total is unavailable."},
   "sessionHistoryDecodedGap": "Some decoded messages were released to stay within the active history limit.",
   "@sessionHistoryDecodedGap": {"description": "Explicit marker between retained transcript segments."},
@@ -2522,7 +2609,7 @@
   "@sessionCompatibilityClientBehind": {"description": "Selectable Session Detail notice when the client is one writable compatibility revision behind the broker."},
   "settingsCompatibilityTitle": "Compatibility",
   "@settingsCompatibilityTitle": {"description": "Settings → Broker & devices section heading for profile-qualified broker/client compatibility guidance."},
-  "settingsClientBehindMessage": "Client update recommended for {profileName}. Install the latest signed app release to match this broker.",
+  "settingsClientBehindMessage": "Client update recommended for {profileName}. Install the latest signed app release to match this server.",
   "@settingsClientBehindMessage": {
     "description": "Selectable Settings fallback for a writable client-behind overlap when no complete web update is waiting.",
     "placeholders": {
@@ -2534,11 +2621,11 @@
   },
   "appUpdateHandoffFailedMessage": "Cosyncing couldn’t switch to the new version automatically. Close the other Cosyncing tabs to finish updating.",
   "@appUpdateHandoffFailedMessage": {"description": "App-level nonblocking notice shown only after this tab has spent its bounded budget of real web-update handoff attempts; a routine update shows nothing at all."},
-  "sessionCompatibilityBrokerBehind": "This broker is one contract revision behind. Check Settings for a signed broker update.",
+  "sessionCompatibilityBrokerBehind": "This server is one contract revision behind. Check Settings for a signed server update.",
   "@sessionCompatibilityBrokerBehind": {"description": "Selectable Session Detail notice when the broker is one writable compatibility revision behind the client."},
-  "sessionCompatibilityHardIncompatible": "This client and broker are incompatible. Observe remains available, but controls are disabled until one side is updated.",
+  "sessionCompatibilityHardIncompatible": "This client and server are incompatible. Observe remains available, but controls are disabled until one side is updated.",
   "@sessionCompatibilityHardIncompatible": {"description": "Selectable Session Detail notice when contract negotiation makes the session read-only."},
-  "sessionCompatibilityUnknown": "This broker did not provide a complete compatibility identity. Legacy operation remains available.",
+  "sessionCompatibilityUnknown": "This server did not provide a complete compatibility identity. Legacy operation remains available.",
   "@sessionCompatibilityUnknown": {"description": "Selectable Session Detail notice for a legacy broker without complete contract metadata."},
   "rosterRefresh": "Refresh",
   "@rosterRefresh": {"description": "Roster action that reloads the authoritative session list."},
@@ -2556,6 +2643,8 @@
   "@sessionControlReconnecting": {"description": "Session Detail control pill while the session transport is being re-established."},
   "sessionComposerPromptHint": "Send a prompt",
   "@sessionComposerPromptHint": {"description": "Placeholder in the Session Detail prompt composer."},
+  "sessionComposerDraftHint": "Draft a prompt",
+  "@sessionComposerDraftHint": {"description": "Placeholder in the Session Detail composer while prompting is unavailable but local draft editing remains enabled."},
   "sessionVoiceInputTooltip": "Voice input",
   "@sessionVoiceInputTooltip": {"description": "Tooltip for the Session Detail voice-input button."},
   "sessionAttachmentAddTooltip": "Add files",
@@ -2625,12 +2714,16 @@
   "@newSessionModelStale": {"description": "Status after refresh fails while retained model options remain visible."},
   "newSessionModelRetired": "The selected model is no longer available. Choose another model or use the tool default.",
   "@newSessionModelRetired": {"description": "Validation error when a selected model disappears from a fresh catalog."},
-  "newSessionModelSourceMismatch": "The selected model belongs to a different broker connection. Refresh the model list and choose again.",
+  "newSessionModelSourceMismatch": "The selected model belongs to a different server connection. Refresh the model list and choose again.",
   "@newSessionModelSourceMismatch": {"description": "Validation error when a scheduled session model came from a different broker incarnation."},
   "newSessionModelRefresh": "Refresh models",
   "@newSessionModelRefresh": {"description": "Button that retries the selected agent model catalog."},
   "notificationsTitle": "Notifications",
   "connectionTitle": "Connection",
+  "connectionDirectTitle": "Connect directly",
+  "connectionDirectBody": "Enter a server address. If the server requires authentication, continue with its existing token flow.",
+  "connectionPairTitle": "Pair this device",
+  "connectionPairBody": "Paste the one-use pairing link shown by cosyncing pair, or scan its QR code.",
   "transfersTitle": "Transfers",
   "transferClearFinishedTooltip": "Clear finished transfer records",
   "transferSelectAllVisible": "Select all visible",
@@ -2762,7 +2855,7 @@
   "progress": "Progress",
   "tool": "Tool",
   "sessionId": "Session ID",
-  "brokerProfile": "Broker profile",
+  "brokerProfile": "Saved server",
   "transferId": "Transfer ID",
   "actionKey": "Action key",
   "sourceUrl": "Source URL",
@@ -2770,7 +2863,7 @@
   "cachedPath": "Cached path",
   "created": "Created",
   "updated": "Updated",
-  "legacyUnscopedTransfer": "Legacy transfer without a Broker profile",
+  "legacyUnscopedTransfer": "Legacy transfer without a saved server",
   "technicalDetails": "Technical details",
   "errorLabel": "Error",
   "clear": "Clear",
@@ -2806,50 +2899,51 @@
   "transfersSearchEmptyActive": "No active transfers matching search",
   "transfersSearchEmptyFinished": "No finished transfers matching search",
   "transfersSearchEmptyFailed": "No failed transfers matching search",
-  "brokerProfilesTitle": "Broker Profiles",
+  "brokerProfilesTitle": "Saved servers",
+  "savedServers": "Saved servers",
   "pairingTitle": "Pairing",
   "backToSessions": "Back to Sessions",
   "connectionReset": "Reset",
   "connectionManagedRuntimeTitle": "cosyncing manages agent runtimes",
   "connectionManagedRuntimeBody": "After setup, apply Codex and OpenCode updates or configuration changes through cosyncing. Automatic restarts follow the selected safety policy; manual recovery always warns before disconnecting attached terminals.",
-  "connectionBrokerUrlLabel": "Broker URL",
-  "connectionBrokerUrlHint": "Full URL (http://host:port), host:port, or host name",
-  "connectionBrokerUrlRequired": "Enter a broker URL.",
+  "connectionBrokerUrlLabel": "Server address",
+  "connectionBrokerUrlHint": "Leave blank for localhost (127.0.0.1:7734), or enter another server.",
+  "connectionBrokerUrlRequired": "Enter a server address.",
   "connectionConnect": "Connect",
   "connectionConnecting": "Connecting…",
   "connectionIdleTitle": "Not connected",
-  "connectionIdleBody": "Enter a broker URL, then connect.",
+  "connectionIdleBody": "Connect to the local server shown above, or enter another server address.",
   "connectionCheckingTitle": "Checking…",
-  "connectionCheckingBody": "Checking that the broker responds…",
+  "connectionCheckingBody": "Checking that the server responds…",
   "connectionConnectedTitle": "Connected",
   "connectionConnectedMachine": "Connected to {machine}.",
   "@connectionConnectedMachine": {"placeholders": {"machine": {"type": "String"}}},
-  "connectionConnectedAt": "The broker at {brokerUrl} is reachable.",
+  "connectionConnectedAt": "The server at {brokerUrl} is reachable.",
   "@connectionConnectedAt": {"placeholders": {"brokerUrl": {"type": "String"}}},
   "connectionFailedTitle": "Couldn't connect",
-  "connectionInvalidUrl": "That broker address isn't valid. Check it and try again.",
-  "connectionBrokerUnhealthy": "The broker responded, but its health check failed. Check the broker host, then try again.",
-  "connectionBrokerUnreachable": "Couldn't reach the broker. Check that it's running and that the address and network are right, then try again.",
+  "connectionInvalidUrl": "That server address isn't valid. Check it and try again.",
+  "connectionBrokerUnhealthy": "The server responded, but its health check failed. Check the server host, then try again.",
+  "connectionBrokerUnreachable": "Couldn't reach the server. Check that it's running and that the address and network are right, then try again.",
   "pairingFieldLabel": "Pairing code or link",
-  "pairingFieldHint": "Paste what the broker gave you",
+  "pairingFieldHint": "Paste what the server gave you",
   "pairingImport": "Import pairing",
   "pairingImporting": "Importing…",
   "pairingScanQr": "Scan QR code",
-  "pairingHeaderTitle": "Pair a broker",
-  "pairingHeaderBody": "Scan the QR code shown by the broker, or paste the pairing code or link it gave you.",
+  "pairingHeaderTitle": "Pair a server",
+  "pairingHeaderBody": "Scan the QR code shown by the server, or paste the pairing code or link it gave you.",
   "pairingEmptyError": "Paste a pairing code or scan a QR code first.",
-  "pairingInvalidError": "This pairing code or link isn't valid. Check it or generate a new one on the broker.",
-  "pairingQrInvalidError": "This QR code can't be used for pairing. Generate a new one on the broker and scan it again.",
-  "pairingQrOldError": "This QR code is from an older version and can't be used directly. Paste the broker address or token instead, or generate a new QR code on the broker.",
+  "pairingInvalidError": "This pairing code or link isn't valid. Check it or generate a new one on the server.",
+  "pairingQrInvalidError": "This QR code can't be used for pairing. Generate a new one on the server and scan it again.",
+  "pairingQrOldError": "This QR code is from an older version and can't be used directly. Paste the server address or token instead, or generate a new QR code on the server.",
   "pairingSaveTokenError": "Couldn't save the token. Try again.",
-  "pairingSaveProfileError": "Couldn't finish pairing with this broker. Try again.",
-  "pairingActivateProfileError": "Pairing was saved, but cosyncing couldn't switch to this broker automatically. Open Broker Profiles and select it.",
-  "pairingSuccess": "Pairing complete. This broker is now active.",
+  "pairingSaveProfileError": "Couldn't finish pairing with this server. Try again.",
+  "pairingActivateProfileError": "Pairing was saved, but cosyncing couldn't switch to this server automatically. Open Server Profiles and select it.",
+  "pairingSuccess": "Pairing complete. This server is now active.",
   "pairingDeviceSuccess": "Device paired. Its revocable credential is active.",
-  "pairingDeviceActivateError": "This device is paired, but cosyncing couldn't switch to the broker automatically. Open Broker Profiles and select it.",
-  "pairingUnlockError": "This QR code couldn't be unlocked. It may have expired or belong to another device. Generate a new one on the broker and scan it again.",
+  "pairingDeviceActivateError": "This device is paired, but cosyncing couldn't switch to the server automatically. Open Server Profiles and select it.",
+  "pairingUnlockError": "This QR code couldn't be unlocked. It may have expired or belong to another device. Generate a new one on the server and scan it again.",
   "pairingGenericError": "Couldn't finish pairing this device. Try again.",
-  "pairingRejectedError": "The broker rejected this pairing request. Generate a new QR code and try again.",
+  "pairingRejectedError": "The server rejected this pairing request. Generate a new QR code and try again.",
   "pairingExpiredError": "This pairing request expired. Generate a new QR code and try again.",
   "pairingUsedError": "This pairing request was already used. Generate a new QR code and try again.",
   "pairingNotFoundError": "This pairing request is no longer available. Generate a new QR code and try again.",
@@ -2924,9 +3018,9 @@
   "transcriptToolCalls": "{count} tool calls",
   "@transcriptToolCalls": {"placeholders": {"count": {"type": "int"}}},
   "sessionPermissionModeFallback": "Permission",
-  "sessionPermissionModeTooltip": "Command permission mode. Applies only to slash commands; prompts keep the Broker session mode.",
+  "sessionPermissionModeTooltip": "Command permission mode. Applies only to slash commands; prompts keep the Server session mode.",
   "sessionPermissionModeSheetTitle": "Command permission mode",
-  "sessionPermissionModeSheetBody": "Applies to slash commands sent from this composer. Regular prompts keep the permission mode published by the Broker.",
+  "sessionPermissionModeSheetBody": "Applies to slash commands sent from this composer. Regular prompts keep the permission mode published by the Server.",
   "sessionPermissionModeAsk": "Ask permission",
   "sessionPermissionModeApprove": "Approve for me",
   "sessionPermissionModeFullAccess": "Full access",
@@ -2947,17 +3041,17 @@
   "sessionTranscriptCopied": "Transcript copied",
   "sessionTranscriptCopyOmissionMarker": "[… transcript content outside the retained window …]",
   "sessionClearCurrentCache": "Clear this session cache",
-  "sessionClearCurrentCacheDescription": "Remove the local transcript snapshot and this broker's cached artifacts for this session.",
+  "sessionClearCurrentCacheDescription": "Remove the local transcript snapshot and this server's cached artifacts for this session.",
   "sessionClearCurrentCacheConfirmTitle": "Clear this session cache?",
-  "sessionClearCurrentCacheConfirmBody": "This removes the local transcript snapshot and this broker's cached artifacts for this session. It doesn't delete the native session.",
+  "sessionClearCurrentCacheConfirmBody": "This removes the local transcript snapshot and this server's cached artifacts for this session. It doesn't delete the native session.",
   "sessionClearCurrentCacheConfirm": "Clear session cache",
   "sessionCurrentCacheCleared": "This session cache was cleared",
-  "sessionCurrentCacheClearedLocally": "The local transcript cache was cleared, but broker artifacts couldn't be cleared",
+  "sessionCurrentCacheClearedLocally": "The local transcript cache was cleared, but server artifacts couldn't be cleared",
   "sessionCurrentCacheClearFailed": "Couldn't clear this session cache",
   "sessionClearAllCache": "Clear all local session cache",
-  "sessionClearAllCacheDescription": "Remove rebuildable transcript and roster snapshots for all broker profiles.",
+  "sessionClearAllCacheDescription": "Remove rebuildable transcript and roster snapshots for all server profiles.",
   "sessionClearAllCacheConfirmTitle": "Clear all local session cache?",
-  "sessionClearAllCacheConfirmBody": "This removes rebuildable transcript and roster snapshots for all broker profiles. Drafts, queued sends, settings, and native sessions are kept.",
+  "sessionClearAllCacheConfirmBody": "This removes rebuildable transcript and roster snapshots for all server profiles. Drafts, queued sends, settings, and native sessions are kept.",
   "sessionClearAllCacheConfirm": "Clear all cache",
   "sessionAllCacheCleared": "All local session cache was cleared",
   "sessionAllCacheClearFailed": "Couldn't clear all local session cache"

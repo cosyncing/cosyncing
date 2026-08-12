@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  CANDIDATE_CREDENTIAL_FIELD_LABEL,
   candidateBrokerEnvironment,
   brokerIdentityMatchesCandidate,
   isAddressInUse,
@@ -9,6 +10,9 @@ import {
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
 } from '../../release/verify-candidate-pair.ts';
+
+assert.equal(CANDIDATE_CREDENTIAL_FIELD_LABEL, 'Server token');
+console.log('PASS  publication verifier targets the current server token field');
 
 const webIdentity = {
   version: '1.2.3',

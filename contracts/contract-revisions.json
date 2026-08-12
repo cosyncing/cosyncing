@@ -50,6 +50,13 @@
       "minimumClientRevision": 0,
       "clientMinimumBrokerRevision": 2,
       "change": "Stable SESSION_CREATE_TEMPORARILY_UNAVAILABLE error code for bounded agent-startup readiness failures."
+    },
+    {
+      "revision": 12,
+      "surfaceHash": "fnv1a32:f2eb77a8",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Stable DRIVE_OWNERSHIP_UNKNOWN and DRIVE_NATIVE_SESSION_UNRESUMABLE codes for distinct reason-tagged Drive refusal feedback."
     }
   ]
 }

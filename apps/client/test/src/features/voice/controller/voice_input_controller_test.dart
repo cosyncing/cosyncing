@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/voice_input_controller.dart';
+import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_capabilities.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input.dart';
 import 'package:cosyncing_client/src/platform/speech/speech_input_state.dart';
@@ -11,6 +12,8 @@ import 'package:cosyncing_client/src/platform/speech/speech_recognition_policy.d
 import 'package:cosyncing_client/src/platform/speech/speech_utterance.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../../../support/in_memory_read_aloud_preferences_store.dart';
 
 void main() {
   late _FakeSpeechInput fakeInput;
@@ -26,6 +29,9 @@ void main() {
       overrides: [
         speechInputFactoryProvider.overrideWithValue(() => fakeInput),
         speechOutputProvider.overrideWithValue(fakeOutput),
+        readAloudPreferencesStoreProvider.overrideWithValue(
+          InMemoryReadAloudPreferencesStore(),
+        ),
       ],
     );
     subscription = container.listen(
@@ -359,6 +365,9 @@ class _FakeSpeechOutput implements SpeechOutput {
     required String messageKey,
     required List<SpeechUtterance> utterances,
   }) async {}
+
+  @override
+  Future<void> setRate(double rate) async {}
 
   @override
   Future<void> pause() async {}

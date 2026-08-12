@@ -1,6 +1,6 @@
 {
   "schemaVersion": 3,
-  "acceptedBase": "17ad739baa190a366d34318f1128049f720e34a5",
+  "acceptedBase": "acb302df9603399b30f94d8551aea9f52d0a69af",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -65,6 +65,7 @@
     "broker.web-origin",
     "browser.artifact-session-isolation",
     "browser.cache-model",
+    "browser.client-platform",
     "browser.startup-cache",
     "browser.update-handoff",
     "ci.workflow-policy",
@@ -202,7 +203,7 @@
     },
     {
       "id": "web-browser",
-      "fingerprint": "sha256:ce5ba17cdc345a4e5d96c717e3563b0a741eaf2eea57d7172c33e0534eec2b82"
+      "fingerprint": "sha256:3e05859e47407f18525f0fb291454e9c891e62566d88a78232ac62d94c811326"
     },
     {
       "id": "web-cache",
@@ -248,7 +249,7 @@
     },
     {
       "id": "broker-surface",
-      "fingerprint": "sha256:f146cd6f229a5ee2b8005c71bd52b7ee0b4a4e963bf186bb47c81caa4691757e"
+      "fingerprint": "sha256:81e678c7f03ed1d50f092767af506b92dd13fc8b5f23b6d697d22bafd278e317"
     },
     {
       "id": "broker-update-contract",

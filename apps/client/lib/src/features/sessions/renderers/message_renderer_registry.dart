@@ -5,6 +5,8 @@ import 'dart:math' as math;
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/features/sessions/data/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_diff_body_loader.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/model/tool_display_mode.dart';
@@ -15,6 +17,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 part 'message_family_renderers.dart';
 part 'message_renderer_formatting.dart';
+part 'conversation_message_widgets.dart';
 part 'tool_diff_view.dart';
 part 'tool_family_views.dart';
 part 'tool_message_cards.dart';
@@ -66,12 +69,27 @@ Widget buildAgentMessageRenderer(
   BuildContext context,
   AgentMessage message, {
   Widget? fileArtifactAction,
+  Widget? requestAction,
 }) {
   if (message.type == AgentMessageType.fileArtifact) {
     return _fileArtifactMessageRenderer(
       context,
       message,
       action: fileArtifactAction,
+    );
+  }
+  if (message.type == AgentMessageType.permissionRequest) {
+    return _permissionRequestMessageRenderer(
+      context,
+      message,
+      action: requestAction,
+    );
+  }
+  if (message.type == AgentMessageType.questionRequest) {
+    return _questionRequestMessageRenderer(
+      context,
+      message,
+      action: requestAction,
     );
   }
   return (agentMessageRendererRegistry[message.type] ??

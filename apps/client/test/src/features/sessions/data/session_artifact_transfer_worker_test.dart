@@ -144,7 +144,7 @@ void main() {
         expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
         expect(
           result.message,
-          'No active broker client for artifact download.',
+          'Connect to the server before downloading this artifact.',
         );
         expect(fileService.cacheCallCount, 0);
         expect(fileService.exportCallCount, 0);
@@ -155,7 +155,7 @@ void main() {
         expect(transfer.status, SessionArtifactTransferStatus.failed);
         expect(
           transfer.error,
-          'No active broker client for artifact download.',
+          'Connect to the server before downloading this artifact.',
         );
       },
     );
@@ -263,7 +263,7 @@ void main() {
       expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
       expect(
         result.message,
-        'Artifact reference is not bound to this broker, session, and version.',
+        'Artifact reference is not bound to this server, session, and version.',
       );
       expect(fileService.cacheCallCount, 0);
       expect(fileService.exportCallCount, 0);
@@ -316,7 +316,7 @@ void main() {
         );
 
         expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
-        expect(result.message, contains('broker profile'));
+        expect(result.message, contains('saved server and address'));
         expect(fileService.cacheCallCount, 0);
         expect(fileService.exportCallCount, 0);
         expect(controller.transferById(transferId)?.attemptCount, 0);
@@ -340,7 +340,7 @@ void main() {
       );
 
       expect(result.outcome, SessionArtifactTransferWorkerOutcome.failed);
-      expect(result.message, contains('broker profile'));
+      expect(result.message, contains('saved server and address'));
       expect(fileService.cacheCallCount, 0);
       expect(controller.transferById(transferId)?.attemptCount, 0);
     });
@@ -428,12 +428,12 @@ void main() {
           downloadRetry.outcome,
           SessionArtifactTransferWorkerOutcome.failed,
         );
-        expect(downloadRetry.message, contains('broker profile'));
+        expect(downloadRetry.message, contains('saved server and address'));
         expect(
           uploadResume.outcome,
           SessionArtifactTransferWorkerOutcome.failed,
         );
-        expect(uploadResume.message, contains('broker profile'));
+        expect(uploadResume.message, contains('saved server and address'));
         // Zero file or upload work reached endpoint B on A's behalf.
         expect(fileService.cacheCallCount, 0);
         expect(fileService.exportCallCount, 0);

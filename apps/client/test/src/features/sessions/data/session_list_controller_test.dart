@@ -67,6 +67,33 @@ void main() {
       expect(state.sessions[1].title, 'Another session');
     });
 
+    test('accepted rename patches only the matching roster title', () async {
+      fakeRepo.sessions = [
+        const SessionInfo(
+          id: 's1',
+          tool: 'codex',
+          title: 'Before',
+          status: SessionStatus.working,
+          attachMode: AttachMode.live,
+          model: 'gpt-control',
+        ),
+      ];
+      await container.read(sessionListControllerProvider.notifier).load();
+
+      container
+          .read(sessionListControllerProvider.notifier)
+          .renameSessionTitle('codex', 's1', 'After');
+
+      final session = container
+          .read(sessionListControllerProvider)
+          .sessions
+          .single;
+      expect(session.title, 'After');
+      expect(session.status, SessionStatus.working);
+      expect(session.attachMode, AttachMode.live);
+      expect(session.model, 'gpt-control');
+    });
+
     test('sets error state on repository failure', () async {
       fakeRepo.shouldFail = true;
 

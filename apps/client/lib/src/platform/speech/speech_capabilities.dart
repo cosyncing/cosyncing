@@ -48,6 +48,18 @@ class SpeechInputCapabilities {
 /// Together with [SpeechInputCapabilities], these cover the six capability
 /// dimensions from the design: recognition, on-device recognition, sound-level
 /// events, synthesis, pause/resume, and installed language/voice availability.
+enum SpeechSynthesisAvailability {
+  /// The platform supports a synthesis adapter, but no native probe has run.
+  unprobed,
+
+  /// A native probe confirmed synthesis is available.
+  available,
+
+  /// The platform is unsupported or a native probe failed.
+  unavailable,
+}
+
+/// Platform speech-output capabilities and their native probe state.
 class SpeechOutputCapabilities {
   /// Creates an immutable TTS capability snapshot.
   ///
@@ -55,10 +67,13 @@ class SpeechOutputCapabilities {
   /// [installedLanguageVoiceAvailability] cannot be true when [synthesis] is
   /// false.
   const SpeechOutputCapabilities({
-    required this.synthesis,
+    required bool synthesis,
     required this.pauseResume,
     required this.installedLanguageVoiceAvailability,
-  }) : assert(
+  }) : synthesisAvailability = synthesis
+           ? SpeechSynthesisAvailability.available
+           : SpeechSynthesisAvailability.unavailable,
+       assert(
          !pauseResume || synthesis,
          'pauseResume requires synthesis',
        ),
@@ -67,8 +82,22 @@ class SpeechOutputCapabilities {
          'installedLanguageVoiceAvailability requires synthesis',
        );
 
-  /// Text-to-speech synthesis is available.
-  final bool synthesis;
+  /// Creates a platform-supported capability that has not touched native TTS.
+  const SpeechOutputCapabilities.unprobed()
+    : synthesisAvailability = SpeechSynthesisAvailability.unprobed,
+      pauseResume = false,
+      installedLanguageVoiceAvailability = false;
+
+  /// Current three-state synthesis probe result.
+  final SpeechSynthesisAvailability synthesisAvailability;
+
+  /// Whether a native probe confirmed text-to-speech synthesis.
+  bool get synthesis =>
+      synthesisAvailability == SpeechSynthesisAvailability.available;
+
+  /// Whether a manual Read-aloud action may perform the first native probe.
+  bool get canAttemptSynthesis =>
+      synthesisAvailability != SpeechSynthesisAvailability.unavailable;
 
   /// Pause/resume is supported. The adapter reports whether its platform
   /// exposes pause/resume; the capability reflects adapter behavior, not a

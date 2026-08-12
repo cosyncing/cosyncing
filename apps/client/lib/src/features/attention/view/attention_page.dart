@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_inb
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/attention/view/attention_event_copy.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/view/relative_time.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -430,17 +431,12 @@ class _AttentionEventCard extends ConsumerWidget {
 
   static String _relativeTime(BuildContext context, int epochMs) {
     final l10n = AppLocalizations.of(context);
-    final difference = DateTime.now().difference(
-      DateTime.fromMillisecondsSinceEpoch(epochMs),
+    return relativeTimeLabel(
+      context,
+      l10n,
+      epochMs,
+      now: DateTime.now(),
     );
-    if (difference.inMinutes < 1) return l10n.sessionRosterJustNow;
-    if (difference.inHours < 1) {
-      return l10n.sessionRosterMinutesAgo(difference.inMinutes);
-    }
-    if (difference.inDays < 1) {
-      return l10n.sessionRosterHoursAgo(difference.inHours);
-    }
-    return l10n.sessionRosterDaysAgo(difference.inDays);
   }
 }
 

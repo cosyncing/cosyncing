@@ -10,9 +10,9 @@ const String kUngroupedProjectKey = '__ungrouped__';
 /// rows has to expand their group first. This is idempotent so a test that
 /// re-pumps the same pane (for example across several widths) can call it on
 /// every iteration without toggling the group shut again.
-/// Set [settle] to false when the roster is in a busy freshness state: the
-/// shared R0b status slot renders a continuous progress indicator there, so
-/// `pumpAndSettle` would never return.
+/// Set [settle] to false when the caller only needs one frame. The normal path
+/// advances the finite expand transition by a fixed duration because working
+/// session dots intentionally animate continuously.
 Future<void> expandRosterProject(
   WidgetTester tester, {
   String key = kUngroupedProjectKey,
@@ -27,9 +27,9 @@ Future<void> expandRosterProject(
   if (collapsed.evaluate().isEmpty) return;
   await tester.tap(find.byKey(ValueKey('project-header-$key')));
   if (settle) {
-    await tester.pumpAndSettle();
-  } else {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
+  } else {
+    await tester.pump();
   }
 }

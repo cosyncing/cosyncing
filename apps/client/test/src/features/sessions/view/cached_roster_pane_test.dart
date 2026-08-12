@@ -258,6 +258,17 @@ void main() {
         ),
       );
       await expandGroup(tester, groupKey);
+      expect(
+        find.ancestor(
+          of: find.text('Cached session'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsNothing,
+        reason: 'cached rows are navigation and carry no selection region',
+      );
+      await tester.drag(find.text('Cached session'), const Offset(80, 0));
+      await tester.pump();
+      expect(opened, isEmpty, reason: 'drag selection must not open the row');
       await tester.tap(find.text('Cached session'));
       await tester.pump();
 
@@ -279,6 +290,42 @@ void main() {
 
       expect(find.text('Last known'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('cached cwd is non-selectable metadata, no copy affordance', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          CachedRosterPane(
+            presentation: presentation(),
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+
+      final cwd = find.byKey(
+        const ValueKey('cached-project-cwd-$groupKey'),
+      );
+      expect(cwd, findsOneWidget);
+      final cwdText = tester.widget<Text>(cwd);
+      expect(cwdText.data, '/work/alpha');
+      expect(cwdText.overflow, TextOverflow.ellipsis);
+      // Matches the authoritative header: the copy button and the decorated
+      // code surface it sat in are both gone, leaving a plain `Text`.
+      expect(find.byType(CopyableCodeLine), findsNothing);
+      expect(find.byTooltip('Copy command'), findsNothing);
+      // Reading the path leaves the group collapsed, as before.
+      expect(
+        tester
+            .widget<Icon>(
+              find.byKey(const ValueKey('cached-project-collapse-$groupKey')),
+            )
+            .icon,
+        Icons.chevron_right,
+      );
+      expect(find.text('Cached session'), findsNothing);
     });
   });
 
@@ -353,6 +400,76 @@ void main() {
 
       expect(find.byKey(const Key('cached-roster-pane')), findsNothing);
       expect(find.byKey(const Key('session-roster-loading')), findsOneWidget);
+    });
+  });
+
+  group('selection region', () {
+    // This pane mirrors the authoritative roster exactly: no selection region
+    // and no per-row island. On web a SelectionArea carries a platform view
+    // whose placeholder throws when a scrolling viewport collects it
+    // (flutter/flutter#122680, fixed by #186840, absent from the 3.44.3 we
+    // pin). No exception was captured and there is no deterministic repro, so
+    // that cause is unproven; the reported grey RenderErrorBox is consistent
+    // with it, and dropping SelectionArea removes the mechanism regardless.
+    testWidgets('the cached roster carries no selection machinery', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        host(
+          CachedRosterPane(
+            presentation: presentation(
+              rows: [
+                identity(title: 'Cached first'),
+                identity(id: 's2', title: 'Cached second'),
+                identity(id: 's3', title: 'Cached third'),
+              ],
+            ),
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandGroup(tester, groupKey);
+
+      expect(find.byType(SelectionArea), findsNothing);
+      expect(find.byType(SelectableTapRegion), findsNothing);
+      for (final title in ['Cached first', 'Cached second', 'Cached third']) {
+        expect(
+          find.ancestor(
+            of: find.text(title),
+            matching: find.byType(SelectableRegion),
+          ),
+          findsNothing,
+          reason: '$title must not sit inside any selectable region',
+        );
+      }
+    });
+
+    // The other half of the same change: the row's own InkWell now sees the
+    // tap directly. While the row carried a selection island, that island's
+    // recognizer won the arena and swallowed the tap, so the region
+    // re-supplied it — leaving both to fire once the island went away.
+    testWidgets('opening a cached row reports it exactly once', (tester) async {
+      final opened = <String>[];
+      await tester.pumpWidget(
+        host(
+          CachedRosterPane(
+            presentation: presentation(
+              rows: [
+                identity(title: 'Cached first'),
+                identity(id: 's2', title: 'Cached second'),
+              ],
+            ),
+            onOpen: (row) => opened.add(row.sessionId),
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandGroup(tester, groupKey);
+
+      await tester.tap(find.text('Cached second'));
+      await tester.pumpAndSettle();
+      expect(opened, ['s2']);
     });
   });
 }

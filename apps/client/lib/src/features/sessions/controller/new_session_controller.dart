@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -132,6 +134,179 @@ final newSessionControllerProvider =
       NewSessionController.new,
     );
 
+/// Whether the active server exposes at least one creation-ready agent.
+///
+/// Session creation is a server capability, not a consequence of being
+/// connected. Until this read succeeds, creation controls fail closed.
+final sessionCreationReadyProvider =
+    AutoDisposeNotifierProvider<
+      SessionCreationReadinessController,
+      SessionCreationReadinessState
+    >(SessionCreationReadinessController.new);
+
+/// User-facing interpretation of creation capability for the active server.
+enum SessionCreationAvailability {
+  /// Capability has not been confirmed yet, or a read is in flight.
+  checking,
+
+  /// At least one registered agent can create sessions.
+  available,
+
+  /// A successful read confirmed that no registered agent can create sessions.
+  unavailable,
+
+  /// The most recent capability read failed.
+  failed,
+}
+
+/// Source-qualified creation capability for the Sessions surfaces.
+///
+/// [canCreateSession] is meaningful only for [source]. Keeping the source in
+/// the state prevents a completed read from server A from enabling creation
+/// after the active profile has switched to server B.
+@immutable
+final class SessionCreationReadinessState {
+  /// Creates a creation-readiness snapshot.
+  const SessionCreationReadinessState({
+    required this.source,
+    this.canCreateSession = false,
+    this.isRefreshing = false,
+    this.failed = false,
+  });
+
+  /// Exact server source evaluated by this state.
+  final RosterSource? source;
+
+  /// Whether that source has at least one creation-ready agent.
+  final bool canCreateSession;
+
+  /// Whether a newer read for the same source is in flight.
+  final bool isRefreshing;
+
+  /// Whether the most recent read failed.
+  final bool failed;
+
+  /// Returns readiness only when this state belongs to [activeSource].
+  bool isReadyFor(RosterSource? activeSource) =>
+      availabilityFor(activeSource) == SessionCreationAvailability.available;
+
+  /// Interprets this snapshot only for the exact [activeSource].
+  ///
+  /// A retained positive result remains usable while its refresh is in flight.
+  /// Without a positive result, loading and failure stay distinct from a
+  /// successful read that confirmed no creation-ready agents.
+  SessionCreationAvailability availabilityFor(RosterSource? activeSource) {
+    if (source != activeSource || activeSource == null) {
+      return SessionCreationAvailability.checking;
+    }
+    if (canCreateSession) return SessionCreationAvailability.available;
+    if (isRefreshing) return SessionCreationAvailability.checking;
+    if (failed) return SessionCreationAvailability.failed;
+    return SessionCreationAvailability.unavailable;
+  }
+}
+
+@immutable
+final class _SessionCreationReadinessAdmission {
+  const _SessionCreationReadinessAdmission({
+    required this.source,
+    required this.generation,
+  });
+
+  final RosterSource? source;
+  final int generation;
+}
+
+/// Refreshable, source-fenced creation capability discovery.
+final class SessionCreationReadinessController
+    extends AutoDisposeNotifier<SessionCreationReadinessState> {
+  int _generation = 0;
+  var _disposed = false;
+
+  @override
+  SessionCreationReadinessState build() {
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
+    final source = ref.watch(
+      activeBrokerProfileProvider.select(RosterSource.of),
+    );
+    final agents = ref
+        .watch(brokerClientProvider.future)
+        .then<List<AgentInfo>?>((client) async {
+          if (client == null) return null;
+          return client.listAgents();
+        });
+    final admission = _SessionCreationReadinessAdmission(
+      source: source,
+      generation: ++_generation,
+    );
+    unawaited(_load(admission, agents));
+    return SessionCreationReadinessState(
+      source: source,
+      isRefreshing: source != null,
+    );
+  }
+
+  /// Re-reads creation capability for the exact active server.
+  Future<void> refresh() async {
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
+    final admission = _SessionCreationReadinessAdmission(
+      source: source,
+      generation: ++_generation,
+    );
+    final retained = state.source == source && state.canCreateSession;
+    state = SessionCreationReadinessState(
+      source: source,
+      canCreateSession: retained,
+      isRefreshing: source != null,
+    );
+    final agents = ref.read(brokerClientProvider.future).then<List<AgentInfo>?>(
+      (client) async {
+        if (client == null) return null;
+        return client.listAgents();
+      },
+    );
+    await _load(admission, agents);
+  }
+
+  Future<void> _load(
+    _SessionCreationReadinessAdmission admission,
+    Future<List<AgentInfo>?> agentsFuture,
+  ) async {
+    final source = admission.source;
+    if (source == null) {
+      if (_canPublish(admission)) {
+        state = const SessionCreationReadinessState(source: null);
+      }
+      return;
+    }
+
+    try {
+      final agents = await agentsFuture;
+      if (!_canPublish(admission)) return;
+      if (agents == null) {
+        state = SessionCreationReadinessState(source: source);
+        return;
+      }
+      state = SessionCreationReadinessState(
+        source: source,
+        canCreateSession: agents.any((agent) => agent.canCreateSession),
+      );
+    } on Object {
+      if (!_canPublish(admission)) return;
+      // Capability discovery fails closed, but remains retryable through the
+      // normal Sessions refresh and connection-recovery paths.
+      state = SessionCreationReadinessState(source: source, failed: true);
+    }
+  }
+
+  bool _canPublish(_SessionCreationReadinessAdmission admission) =>
+      !_disposed &&
+      admission.generation == _generation &&
+      admission.source ==
+          RosterSource.of(ref.read(activeBrokerProfileProvider));
+}
+
 /// Owns the New Session REST lifecycle; the sheet only renders and dispatches.
 final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
   int _agentGeneration = 0;
@@ -166,7 +341,7 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     try {
       final client = await ref.read(brokerClientProvider.future);
       if (client == null) {
-        throw StateError('Connect to a broker before creating a session.');
+        throw StateError('Connect to a server before creating a session.');
       }
       final agents = (await client.listAgents())
           .where((agent) => agent.canCreateSession)
@@ -207,7 +382,7 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
       state = state.copyWith(
         modelCatalogPhase: NewSessionModelCatalogPhase.failed,
         modelTool: tool,
-        modelError: 'Connect to a broker before loading models.',
+        modelError: 'Connect to a server before loading models.',
       );
       return;
     }

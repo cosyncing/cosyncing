@@ -251,7 +251,7 @@ class SessionFileBackgroundDownloadCoordinator {
   }) async {
     final client = brokerClient;
     if (!hasActiveBrokerClient || client == null) {
-      const message = 'No active broker client for file download.';
+      const message = 'Connect to the server before downloading this file.';
       transferController.markFailed(transferId, message);
       return _failed(transferId, message);
     }

@@ -186,6 +186,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     file: 'scripts/broker/tests/codex/rollout.ts',
     title: 'Codex rollout mapping and runtime suite',
     coverage: [
+      { fn: 'F04', level: 'L2', agents: ['codex'], note: '0.146 new-only, legacy-only, and dual-emission assistant text across cold history and live follow' },
       { fn: 'F15', level: 'L2', agents: ['codex'], note: 'sentAt/run-summary/runtimeTotals and token policy' },
       { fn: 'F16', level: 'L2', agents: ['codex'], note: 'observe-first Drive gating and control-state metadata' },
     ],

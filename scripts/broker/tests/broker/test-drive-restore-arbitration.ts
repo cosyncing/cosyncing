@@ -32,10 +32,13 @@ import {
   settledProcessOutput,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
+import { FakeCodexDaemon } from '../helpers/fake-codex-daemon.ts';
 import { Hub } from '../../../../packages/typescript/broker/src/hub.ts';
+import { driveAttachRefusalCode } from '../../../../packages/typescript/broker/src/drive-attach-refusal.ts';
 import {
   AgentRegistry,
   isOwnershipConflictError,
+  NativeSessionUnresumableError,
   OwnershipConflictError,
   type AgentMessage,
   type AttachMode,
@@ -50,6 +53,15 @@ const check = (label: string, ok: boolean, extra = '') => {
   if (!ok) failures++;
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function waitFor<T>(read: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value !== undefined) return value;
+    await sleep(20);
+  }
+  return undefined;
+}
 
 type FakeConn = SessionConnection & { closed: number };
 
@@ -222,6 +234,13 @@ check('D3 an active terminal bridge (pinned) wins — the restore JOINS it',
   joinedBridge.conn === bridge && resumeAttaches === 4);
 
 // ── E: a typed ownership conflict propagates; the fallback leaves no rival ───
+check(
+  'E0 attach failures map to distinct stable machine codes without session heuristics',
+  driveAttachRefusalCode(new OwnershipConflictError('unknown', 'daemon-ownership-unknown')) === 'DRIVE_OWNERSHIP_UNKNOWN' &&
+    driveAttachRefusalCode(new OwnershipConflictError('owned', 'terminal-private')) === 'DRIVE_OWNERSHIP_CONFLICT' &&
+    driveAttachRefusalCode(new NativeSessionUnresumableError('native refused')) === 'DRIVE_NATIVE_SESSION_UNRESUMABLE' &&
+    driveAttachRefusalCode(new Error('other')) === 'DRIVE_RESTORE_FAILED',
+);
 conflictNextResume = new OwnershipConflictError('a private terminal owns this session', 'terminal-private');
 let conflictCaught: unknown;
 try {
@@ -292,6 +311,9 @@ await hub.dispose();
   const rollout = join(home, `rollout-2026-07-24T00-00-00-${threadUuid}.jsonl`);
   writeFileSync(rollout, `${JSON.stringify({ type: 'session_meta', payload: { id: threadUuid, cwd: workDir } })}\n`);
   const sessionId = Buffer.from(rollout, 'utf8').toString('base64url');
+  const daemonSocket = join(home, 'app-server.sock');
+  const daemon = new FakeCodexDaemon(daemonSocket, { ignoreMethods: ['initialize'] });
+  await daemon.start();
 
   // Competing-owner evidence for the REAL presence scan: a fake /proc with a
   // live TUI resuming this exact thread against a DIFFERENT daemon socket.
@@ -316,7 +338,26 @@ await hub.dispose();
   const fakeBin = join(home, 'codex');
   writeFileSync(
     fakeBin,
-    `#!/bin/sh\necho "$@" >> ${invocationLog}\ncase "$*" in *"app-server --stdio"*) sleep 1000;; esac\n`,
+    `#!/usr/bin/env bun
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(invocationLog)}, process.argv.slice(2).join(' ') + '\\n');
+if (process.argv.slice(2).join(' ') !== 'app-server --stdio') process.exit(0);
+const decoder = new TextDecoder();
+let buffer = '';
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true });
+  let newline;
+  while ((newline = buffer.indexOf('\\n')) !== -1) {
+    const raw = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    if (!raw) continue;
+    const message = JSON.parse(raw);
+    if (message.method === 'initialize' || message.method === 'thread/name/set') {
+      console.log(JSON.stringify({ id: message.id, result: {} }));
+    }
+  }
+}
+`,
   );
   chmodSync(fakeBin, 0o755);
   const resumeOwnerSpawned = () => {
@@ -340,11 +381,10 @@ await hub.dispose();
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
       COSYNCING_CODEX_BIN: fakeBin,
       COSYNCING_CODEX_PROC_ROOT: procRoot,
-      COSYNCING_CODEX_APP_SERVER_SOCK: join(home, 'no-daemon.sock'),
+      COSYNCING_CODEX_APP_SERVER_SOCK: daemonSocket,
+      COSYNCING_CODEX_SYNC_SERVER: '1',
     },
   });
-  // The fallback must be a pure file-watching Observe owner, not a live daemon join.
-  delete env.COSYNCING_CODEX_SYNC_SERVER;
   await portLease.release();
   const broker = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
     cwd: process.cwd(), env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
@@ -417,7 +457,7 @@ await hub.dispose();
       'G5 the denied restore arrives as a structured attach-conflict frame',
       conflict?.requestedMode === 'resume' &&
         conflict?.reason === 'app-restore' &&
-        conflict?.code === 'DRIVE_OWNERSHIP_CONFLICT' &&
+        conflict?.code === 'DRIVE_OWNERSHIP_UNKNOWN' &&
         typeof conflict?.message === 'string' &&
         conflict.message.length > 0,
       JSON.stringify(conflict),
@@ -427,8 +467,13 @@ await hub.dispose();
       conflictIndex !== -1 &&
         sessionIndex > conflictIndex &&
         session?.info?.attachMode === 'observe' &&
-        session?.info?.control?.drive?.state === 'observing',
+        session?.info?.control?.drive?.state === 'observing' &&
+        String(session?.info?.control?.terminalSync?.command ?? '').includes('resume --remote'),
       JSON.stringify(session?.info?.control ?? null),
+    );
+    check(
+      'G6b exactly one structured refusal was sent before the Observe fallback',
+      frames.filter((frame) => frame.kind === 'attach-conflict').length === 1,
     );
     check('G7 no Resume owner process was spawned by the denied restore', !resumeOwnerSpawned());
 
@@ -441,10 +486,65 @@ await hub.dispose();
       bareFrames.some((f) => f.kind === 'session') && bareFrames.every((f) => f.kind !== 'attach-conflict'),
     );
     check('G9 the bare attach spawned no Resume owner either', !resumeOwnerSpawned());
+
+    // Keep one Observe client attached while the native rename runs. Its
+    // second session frame must carry the accepted title immediately; waiting
+    // for Codex's delayed session-index rediscovery would leave this socket and
+    // the client roster at the old title.
+    const renameFrames: any[] = [];
+    const renameSocket = new WebSocket(
+      `ws://127.0.0.1:${port}${streamPath}?token=${token}`,
+    );
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('rename socket timed out')), 10_000);
+      renameSocket.onmessage = (event) => {
+        const frame = JSON.parse(String(event.data));
+        renameFrames.push(frame);
+        if (frame.kind === 'session') {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      renameSocket.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error('rename socket failed'));
+      };
+    });
+    const renameResponse = await fetch(
+      `${base}/api/sessions/codex/${encodeURIComponent(sessionId)}/rename`,
+      {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json',
+          'x-cosyncing-token': token,
+        },
+        body: JSON.stringify({ title: 'Accepted native title' }),
+      },
+    );
+    const renameBody = await renameResponse.json() as any;
+    const renameBroadcast = await waitFor(() => {
+      return renameFrames.find(
+        (frame) => frame.kind === 'session' && frame.info?.title === 'Accepted native title',
+      );
+    }, 10_000);
+    check(
+      'G10 native Codex rename responds with the accepted title immediately',
+      renameResponse.status === 200 &&
+        renameBody?.title === 'Accepted native title' &&
+        renameBody?.session?.title === 'Accepted native title',
+      JSON.stringify(renameBody),
+    );
+    check(
+      'G11 the attached Observe socket receives the accepted title without rediscovery',
+      Boolean(renameBroadcast),
+      JSON.stringify(renameFrames.filter((frame) => frame.kind === 'session')),
+    );
+    renameSocket.close();
   } finally {
     broker.kill();
     await broker.exited.catch(() => undefined);
     await settledProcessOutput(brokerOutput);
+    await daemon.stop();
     rmSync(home, { recursive: true, force: true });
   }
 }

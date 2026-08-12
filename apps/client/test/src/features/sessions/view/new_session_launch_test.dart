@@ -121,6 +121,13 @@ void main() {
             .data,
         isNot(contains('raw opening failure')),
       );
+      expect(
+        find.ancestor(
+          of: find.byKey(const Key('new-session-launch-error')),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
 
       final retry = find.byKey(const Key('new-session-launch-retry'));
       await tester.tap(retry);
@@ -156,7 +163,7 @@ void main() {
     final message = tester
         .widget<Text>(find.byKey(const Key('new-session-launch-error')))
         .data;
-    expect(message, contains('The broker ran into a problem on its end.'));
+    expect(message, contains('The server ran into a problem on its end.'));
     expect(message, isNot(contains('private broker diagnostic')));
 
     await tester.tap(find.byKey(const Key('new-session-launch-back')));

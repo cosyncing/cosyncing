@@ -142,6 +142,13 @@ void main() {
 
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(find.text('Reading quota data…'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('Reading quota data…'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('unavailable state never leaks raw errors or endpoints', (

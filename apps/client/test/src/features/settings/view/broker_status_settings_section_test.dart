@@ -75,7 +75,7 @@ void main() {
       expect(pointer, findsOneWidget);
       expect(find.text('New desktop build available'), findsOneWidget);
       expect(
-        find.textContaining('This broker runs 1.4.0.'),
+        find.textContaining('This server runs 1.4.0.'),
         findsOneWidget,
       );
       expect(download, findsOneWidget);
@@ -341,12 +341,82 @@ void main() {
       expect(packageManaged, findsNothing);
     });
   });
+
+  group('BrokerStatusSettingsSection server-health truth', () {
+    late _FakeManagedRuntimeApi api;
+
+    setUp(() {
+      api = _FakeManagedRuntimeApi();
+    });
+
+    Widget buildSubject(Locale locale) {
+      final themeSpec = themeSpecById(kDefaultThemeId);
+      return ProviderScope(
+        key: ValueKey((locale, api.healthStatus)),
+        overrides: [
+          managedRuntimeApiProvider.overrideWithValue(api),
+          desktopClientVersionProvider.overrideWithValue('1.4.0'),
+        ],
+        child: MaterialApp(
+          locale: locale,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          theme: ThemeData(extensions: [themeSpec.light]),
+          home: const Scaffold(body: BrokerStatusSettingsSection()),
+        ),
+      );
+    }
+
+    testWidgets('names persistence health without presenting severity as it', (
+      tester,
+    ) async {
+      for (final testCase in const [
+        (
+          'critical',
+          Locale('en'),
+          'Persistence or storage checks need attention.',
+        ),
+        ('critical', Locale('zh'), '持久化或存储检查需要处理。'),
+        (
+          'degraded',
+          Locale('en'),
+          'Persistence or storage checks are degraded.',
+        ),
+        ('degraded', Locale('zh'), '持久化或存储检查处于降级状态。'),
+      ]) {
+        api.healthStatus = testCase.$1;
+        await tester.pumpWidget(buildSubject(testCase.$2));
+        await tester.pumpAndSettle();
+
+        expect(find.text(testCase.$3), findsOneWidget);
+        expect(find.textContaining('Status: critical'), findsNothing);
+        expect(find.textContaining('状态：critical'), findsNothing);
+        expect(find.textContaining('Notifications'), findsNothing);
+        expect(find.textContaining('“通知”'), findsNothing);
+      }
+    });
+
+    testWidgets('unknown health never prints an unrecognized raw status', (
+      tester,
+    ) async {
+      api.healthStatus = 'future-attention-severity';
+      await tester.pumpWidget(buildSubject(const Locale('en')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Server health checks are unavailable.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('future-attention-severity'), findsNothing);
+    });
+  });
 }
 
 /// Serves one broker version; every other read is the quiet, healthy answer so
 /// only the version drives what the section renders.
 final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   String? brokerVersion = '1.4.0';
+  String healthStatus = 'healthy';
   // The broker's own answer about the release channel. An npm install reports
   // `unknown` with `upgrade-package-manager-owned`, because it declines to
   // probe a manifest that describes native artifacts.
@@ -368,7 +438,7 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
 
   @override
   Future<BrokerHealthResponse> getHealth() async =>
-      const BrokerHealthResponse(status: 'healthy', checkedAt: 1);
+      BrokerHealthResponse(status: healthStatus, checkedAt: 1);
 
   @override
   Future<HealthResponse> getProductHealth() async =>

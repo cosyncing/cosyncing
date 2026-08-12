@@ -32,7 +32,7 @@ class _DebugTimelineBody extends StatelessWidget {
         AppLocalizations.of(context).sessionDebugTimelineHeading,
         style: theme.textTheme.titleSmall,
       ),
-      subtitle: Text(
+      subtitle: SelectableText(
         '${state.events.length} wire events',
         style: theme.textTheme.bodySmall?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
@@ -43,7 +43,7 @@ class _DebugTimelineBody extends StatelessWidget {
         if (state.events.isEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: Text(
+            child: SelectableText(
               'No timeline events yet',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
@@ -51,19 +51,21 @@ class _DebugTimelineBody extends StatelessWidget {
             ),
           )
         else
-          ListView.separated(
-            physics: const NeverScrollableScrollPhysics(),
-            shrinkWrap: true,
-            itemCount: state.events.length,
-            separatorBuilder: (context, index) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              return ListTile(
-                dense: true,
-                leading: _EventIcon(event: state.events[index]),
-                title: Text(state.eventSummaries[index]),
-                subtitle: Text(state.events[index].runtimeType.toString()),
-              );
-            },
+          SelectionArea(
+            child: ListView.separated(
+              physics: const NeverScrollableScrollPhysics(),
+              shrinkWrap: true,
+              itemCount: state.events.length,
+              separatorBuilder: (context, index) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                return ListTile(
+                  dense: true,
+                  leading: _EventIcon(event: state.events[index]),
+                  title: Text(state.eventSummaries[index]),
+                  subtitle: Text(state.events[index].runtimeType.toString()),
+                );
+              },
+            ),
           ),
       ],
     );

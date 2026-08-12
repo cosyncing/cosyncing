@@ -5,6 +5,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/broker_client_session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/data/in_memory_session_list_repository.dart';
 import 'package:cosyncing_client/src/features/sessions/data/roster_snapshot_store.dart';
@@ -276,6 +277,26 @@ class SessionListController extends Notifier<SessionListState> {
     } finally {
       _projectRenamesInFlight.remove(normalizedCwd);
     }
+  }
+
+  /// Applies an accepted native session title to the authoritative roster row.
+  ///
+  /// Only the title changes: the rename response must not overwrite fresher
+  /// status, control, model, or project facts already held by the roster.
+  void renameSessionTitle(String tool, String id, String title) {
+    if (_disposed) return;
+    final index = state.sessions.indexWhere(
+      (session) => session.tool == tool && session.id == id,
+    );
+    if (index < 0 || state.sessions[index].title == title) return;
+    final sessions = [...state.sessions];
+    final existing = sessions[index];
+    sessions[index] = SessionInfo.fromJson({
+      ...existing.toJson(),
+      'title': title,
+    });
+    state = state.copyWith(sessions: sessions);
+    _markSnapshotDirty();
   }
 
   Future<void> _load({required bool silent, bool acceptReset = false}) async {
@@ -857,10 +878,11 @@ final sessionRosterResumeRefreshProvider = Provider<SessionRosterResumeRefresh>(
       final active = inFlight;
       if (active != null) return active;
       late final Future<void> operation;
-      operation = ref
-          .read(sessionListControllerProvider.notifier)
-          .load(silent: true)
-          .whenComplete(() {
+      operation =
+          Future.wait<void>([
+            ref.read(sessionListControllerProvider.notifier).load(silent: true),
+            ref.read(sessionCreationReadyProvider.notifier).refresh(),
+          ]).whenComplete(() {
             if (identical(inFlight, operation)) inFlight = null;
           });
       inFlight = operation;

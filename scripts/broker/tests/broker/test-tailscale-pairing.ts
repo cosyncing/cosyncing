@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /** Tailscale topology/ownership plus terminal pair/list/revoke acceptance. */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { SetupDiagnosisContext } from '../../../../packages/typescript/adapter-api/src/index.ts';
+import { join, resolve } from 'node:path';
+import type { SetupDiagnosisContext, SetupHttpProbe } from '../../../../packages/typescript/adapter-api/src/index.ts';
 import {
   createQrPairingPayload,
   parseQrPairingPayload,
@@ -42,8 +42,12 @@ import {
   inspectTailscaleServe,
   MACOS_TAILSCALE_BUNDLE_CLI,
   TAILSCALE_SERVE_RESOURCE_ID,
+  limitFallbackAddresses,
+  probeAdvertisedEndpointOnce,
   TailscaleServeProvider,
+  tailscaleAddressesFromStatusJson,
   verifyAdvertisedBrokerEndpoint,
+  type AdvertisedEndpointDirectProbeOptions,
   type AdvertisedEndpointPollingClock,
 } from '../../../../packages/typescript/broker/src/tailscale-serve.ts';
 import type { SetupTransactionContext } from '../../../../packages/typescript/broker/src/setup-transaction.ts';
@@ -124,6 +128,7 @@ class ImmediatePollingClock implements AdvertisedEndpointPollingClock {
       expectedSha256: '0'.repeat(64),
       requiresConfirmation: false,
     },
+    durableStatePermissionRepairs: [],
     agentSkills: [],
     opencodeShim: { shimPath: '/fixture/.cosyncing/shell/opencode-shim.sh', shimStatus: 'missing', rc: [] },
     portStatus: 'free',
@@ -217,6 +222,200 @@ class ImmediatePollingClock implements AdvertisedEndpointPollingClock {
       && wrongIdentityClock.cancellations === 3
       && wrongIdentityClock.pending.size === 0,
     `scheduled=${wrongIdentityClock.schedules} cancelled=${wrongIdentityClock.cancellations} pending=${wrongIdentityClock.pending.size}`);
+
+  // ── Address fallback when the advertised NAME cannot be resolved ──
+  // A WSL host reproduces this exactly: the MagicDNS name fails through the system resolver while the
+  // node's own Tailscale address answers normally. Verification must survive that without ever loosening
+  // what it proves — same identity checks, same deadline, same certificate validation.
+  const ADVERTISED = 'https://devbox.tailnet.ts.net';
+  const IPV4 = '100.64.0.1';
+  const IPV6 = 'fd7a:115c:a1e0::1';
+  const thisBroker = { ok: true, product: 'cosyncing', machine: 'devbox' };
+
+  /** Run one verification, recording every address literal the fallback actually connected to. */
+  async function verifyWithFallback(options: {
+    named: () => SetupHttpProbe;
+    direct?: (probe: AdvertisedEndpointDirectProbeOptions) => SetupHttpProbe;
+    addresses?: readonly string[];
+    advertisedUrl?: string;
+    timeoutMs?: number;
+  }): Promise<{
+    ok: boolean;
+    calls: AdvertisedEndpointDirectProbeOptions[];
+    clock: ImmediatePollingClock;
+  }> {
+    const context = fakeContext({});
+    const clock = new ImmediatePollingClock();
+    const calls: AdvertisedEndpointDirectProbeOptions[] = [];
+    context.fetchJson = async () => options.named();
+    const ok = await verifyAdvertisedBrokerEndpoint({
+      context,
+      advertisedUrl: options.advertisedUrl ?? ADVERTISED,
+      machineLabel: 'devbox',
+      timeoutMs: options.timeoutMs ?? ADVERTISED_ENDPOINT_VERIFY_INTERVAL_MS * 2 + 1,
+      clock,
+      fallbackAddresses: options.addresses ?? [IPV4, IPV6],
+      async directProbe(probe) {
+        calls.push(probe);
+        return options.direct?.(probe) ?? { status: 'unreachable' };
+      },
+    });
+    return { ok, calls, clock };
+  }
+
+  const resolvable = await verifyWithFallback({ named: () => ({ status: 'ok', statusCode: 200, json: thisBroker }) });
+  check('a resolvable MagicDNS name verifies without ever probing an address literal',
+    resolvable.ok && resolvable.calls.length === 0,
+    `ok=${resolvable.ok} directProbes=${resolvable.calls.length}`);
+
+  const ipv4Fallback = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: (probe) => (probe.address === IPV4
+      ? { status: 'ok', statusCode: 200, json: thisBroker }
+      : { status: 'unreachable' }),
+  });
+  check('a MagicDNS name that will not resolve still verifies through this node IPv4 address',
+    ipv4Fallback.ok && ipv4Fallback.calls.length === 1 && ipv4Fallback.calls[0]?.address === IPV4,
+    `ok=${ipv4Fallback.ok} calls=${ipv4Fallback.calls.map((c) => c.address).join(',')}`);
+  check('the fallback presents the advertised hostname for SNI, certificate validation, and Host',
+    ipv4Fallback.calls[0]?.hostname === 'devbox.tailnet.ts.net'
+      && ipv4Fallback.calls[0]?.port === 443
+      && ipv4Fallback.calls[0]?.path === '/api/health',
+    JSON.stringify(ipv4Fallback.calls[0]));
+  check('a fallback success leaves no advertised polling timer armed',
+    ipv4Fallback.clock.pending.size === 0
+      && ipv4Fallback.clock.schedules === ipv4Fallback.clock.cancellations,
+    `scheduled=${ipv4Fallback.clock.schedules} cancelled=${ipv4Fallback.clock.cancellations} pending=${ipv4Fallback.clock.pending.size}`);
+
+  const ipv6Fallback = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: (probe) => (probe.address === IPV6
+      ? { status: 'ok', statusCode: 200, json: thisBroker }
+      : { status: 'unreachable' }),
+  });
+  check('an unreachable IPv4 literal falls through to this node IPv6 address',
+    ipv6Fallback.ok && ipv6Fallback.calls.map((c) => c.address).join(',') === `${IPV4},${IPV6}`,
+    `ok=${ipv6Fallback.ok} calls=${ipv6Fallback.calls.map((c) => c.address).join(',')}`);
+
+  // A certificate that does not validate for the advertised hostname reaches the probe as a transport
+  // failure. It must end as a verification failure: nothing here may retry with validation disabled.
+  const badCertificate = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: () => ({ status: 'unreachable' }),
+  });
+  check('an untrusted or mismatched certificate fails verification instead of being bypassed',
+    !badCertificate.ok && badCertificate.calls.length > 0,
+    `ok=${badCertificate.ok} attempts=${badCertificate.calls.length}`);
+
+  const wrongProduct = await verifyWithFallback({
+    named: () => ({ status: 'ok', statusCode: 200, json: { ok: true, product: 'another-product', machine: 'devbox' } }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: thisBroker }),
+  });
+  check('a name answering with the wrong product never falls back to an address literal',
+    !wrongProduct.ok && wrongProduct.calls.length === 0,
+    `ok=${wrongProduct.ok} directProbes=${wrongProduct.calls.length}`);
+
+  const wrongMachine = await verifyWithFallback({
+    named: () => ({ status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: 'another-machine' } }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: thisBroker }),
+  });
+  check('a name answering as another machine never falls back to an address literal',
+    !wrongMachine.ok && wrongMachine.calls.length === 0,
+    `ok=${wrongMachine.ok} directProbes=${wrongMachine.calls.length}`);
+
+  const httpError = await verifyWithFallback({
+    named: () => ({ status: 'http-error', statusCode: 502 }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: thisBroker }),
+  });
+  check('an HTTP error from the advertised name is a verification failure, not a resolution failure',
+    !httpError.ok && httpError.calls.length === 0,
+    `ok=${httpError.ok} directProbes=${httpError.calls.length}`);
+
+  // A reachable-but-wrong ADDRESS is the same class of evidence: stop probing literals rather than
+  // walking the list hoping a different one answers as this broker.
+  const wrongViaAddress = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: 'another-machine' } }),
+  });
+  check('an address literal answering as another machine retires the fallback instead of trying the rest',
+    !wrongViaAddress.ok && wrongViaAddress.calls.length === 1,
+    `ok=${wrongViaAddress.ok} calls=${wrongViaAddress.calls.map((c) => c.address).join(',')}`);
+
+  const unreachable = await verifyWithFallback({ named: () => ({ status: 'unreachable' }) });
+  check('a genuinely unreachable endpoint fails after exhausting both the name and every address',
+    !unreachable.ok && unreachable.calls.length === 6 && unreachable.clock.pending.size === 0,
+    `ok=${unreachable.ok} attempts=${unreachable.calls.length} pending=${unreachable.clock.pending.size}`);
+
+  const nonLiteral = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: thisBroker }),
+    addresses: ['not-an-ip', 'devbox.tailnet.ts.net', '', '100.64.0.1:443'],
+  });
+  check('a fallback entry that is not a bare address literal is never connected to',
+    !nonLiteral.ok && nonLiteral.calls.length === 0,
+    `ok=${nonLiteral.ok} directProbes=${nonLiteral.calls.length}`);
+
+  const plaintext = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    direct: () => ({ status: 'ok', statusCode: 200, json: thisBroker }),
+    advertisedUrl: 'http://devbox.tailnet.ts.net',
+  });
+  check('a non-HTTPS advertised URL gets no address fallback, because SNI is what makes it sound',
+    !plaintext.ok && plaintext.calls.length === 0,
+    `ok=${plaintext.ok} directProbes=${plaintext.calls.length}`);
+
+  // Bounding, not just ordering: a malformed or unexpectedly long status payload must not turn one
+  // interactive probe into N request timeouts.
+  const manyAddresses = await verifyWithFallback({
+    named: () => ({ status: 'unreachable' }),
+    addresses: ['100.64.0.1', '100.64.0.2', '100.64.0.3', IPV6, 'fd7a:115c:a1e0::2'],
+    timeoutMs: ADVERTISED_ENDPOINT_VERIFY_INTERVAL_MS + 1,
+  });
+  check('at most one IPv4 and one IPv6 candidate are ever contacted',
+    manyAddresses.calls.every((call) => call.address === '100.64.0.1' || call.address === IPV6)
+      && new Set(manyAddresses.calls.map((call) => call.address)).size === 2,
+    manyAddresses.calls.map((call) => call.address).join(','));
+  check('capping keeps the two families rather than the first two entries',
+    limitFallbackAddresses(['100.64.0.1', '100.64.0.2', IPV6]).join(',') === `100.64.0.1,${IPV6}`
+      && limitFallbackAddresses(['bogus', IPV6]).join(',') === IPV6
+      && limitFallbackAddresses([]).length === 0,
+    limitFallbackAddresses(['100.64.0.1', '100.64.0.2', IPV6]).join(','));
+
+  // A single-shot caller supplies no deadline of its own, so the primitive must impose one.
+  {
+    const context = fakeContext({});
+    context.fetchJson = async () => ({ status: 'unreachable' });
+    let contacted = 0;
+    const started = Date.now();
+    const probe = await probeAdvertisedEndpointOnce({
+      context,
+      advertisedUrl: ADVERTISED,
+      fallbackAddresses: [IPV4, IPV6],
+      totalTimeoutMs: 120,
+      async directProbe(options) {
+        contacted += 1;
+        await new Promise((wait) => setTimeout(wait, options.timeoutMs));
+        return { status: 'unreachable' };
+      },
+    });
+    const elapsed = Date.now() - started;
+    check('a single-shot probe bounds the name plus every address under one total deadline',
+      probe.status === 'unreachable' && contacted >= 1 && elapsed < 1_000,
+      `elapsed=${elapsed}ms addressAttempts=${contacted}`);
+  }
+
+  const parsed = tailscaleAddressesFromStatusJson({
+    BackendState: 'Running',
+    Self: { DNSName: 'devbox.tailnet.ts.net.', TailscaleIPs: [IPV4, IPV6, 'bogus', 42, IPV4] },
+    Peer: { 'peer-key': { TailscaleIPs: ['100.64.9.9'] } },
+  });
+  check('self addresses parse from tailscale status, dropping duplicates, malformed entries, and peers',
+    parsed.join(',') === `${IPV4},${IPV6}`,
+    parsed.join(',') || '(none)');
+  check('a status payload with no self addresses yields no fallback at all',
+    tailscaleAddressesFromStatusJson({ BackendState: 'Running', Self: { DNSName: 'devbox.tailnet.ts.net.' } }).length === 0
+      && tailscaleAddressesFromStatusJson({}).length === 0
+      && tailscaleAddressesFromStatusJson(undefined).length === 0);
 }
 
 function fakeContext(options: {
@@ -324,12 +523,33 @@ const healthyStatus = {
       && parsedOffer.transport.url === advertisedUrl);
   // Compaction bought headroom, not immunity: the advertised URL is the operator's, and a long enough one
   // still crosses 80. Pin where that happens so the fallback below is a measured floor, not a guess.
+  //
+  // The ids below are FIXED fixtures rather than this offer's own, because a symbol's size follows the
+  // ENCODED payload and the encoder segments by content, not merely by length: base64url mixes
+  // alphanumeric-encodable runs (A-Z, 0-9, -) with byte-only ones, so two payloads of identical length
+  // can encode to different QR versions. At this URL length the payload sits exactly on the version
+  // 13/14 boundary, and live random ids rendered 77 instead of the asserted 81 for ~1% of offers — a
+  // gate failure with no source change behind it. Lengthening the URL does not fix it; sampling put a
+  // 93-character URL at 1 in 50_000. Only fixed content makes the measurement reproducible, and the
+  // lengths are asserted against the live offer so pinning content cannot mask a change in the real
+  // id or key shapes.
   {
+    // Production shapes: `broker_` + 12 characters, `pair_` + 22, and a 59-character key.
+    const brokerId = 'broker_Fixture0Qr01';
+    const pairingId = 'pair_Fixture0000QrWidth0001';
+    const publicKey = 'FixtureQrWidthPublicKey00000000000000000000000000000000abcd';
+    check('the fixed width fixtures still carry the production id and key lengths',
+      brokerId.length === parsedOffer.brokerId.length
+        && pairingId.length === parsedOffer.pairingId.length
+        && publicKey.length === parsedOffer.publicKey.length,
+      `fixture=${brokerId.length}/${pairingId.length}/${publicKey.length}`
+        + ` live=${parsedOffer.brokerId.length}/${parsedOffer.pairingId.length}`
+        + `/${parsedOffer.publicKey.length}`);
     const overflowing = createQrPairingPayload({
       version: 2,
-      brokerId: parsedOffer.brokerId,
-      pairingId: parsedOffer.pairingId,
-      publicKey: parsedOffer.publicKey,
+      brokerId,
+      pairingId,
+      publicKey,
       transport: { kind: 'tailscale-direct', url: `https://${'h'.repeat(75)}.ts.net` },
     });
     check('a 90-character advertised URL is the first that outgrows 80 columns',
@@ -553,14 +773,18 @@ function writer() {
   };
 }
 
-function prepareHome(root: string, serviceChoice: 'foreground' | 'systemd' = 'foreground'): string {
+function prepareHome(
+  root: string,
+  serviceChoice: 'foreground' | 'systemd' = 'foreground',
+  language: 'en' | 'zh-Hans' = 'en',
+): string {
   const home = join(root, '.cosyncing');
   const config = defaultBrokerConfig();
   config.broker.machineLabel = 'devbox';
   config.broker.advertisedUrl = 'https://devbox.tailnet.ts.net';
   writeBrokerConfig(config, home);
   ensureInstallationCredentials({ home, internalUrl: config.broker.internalUrl });
-  writeSetupState({ schemaVersion: 1, serviceChoice, tailscaleServeRequested: true }, home);
+  writeSetupState({ schemaVersion: 1, serviceChoice, tailscaleServeRequested: true, language }, home);
   writeInstallState(committedInstallState('2026-07-17T00:00:00.000Z'), home);
   return home;
 }
@@ -589,6 +813,7 @@ try {
     const calls: Array<{ url: string; method: string; authenticated: boolean }> = [];
     const out = writer();
     const err = writer();
+    let renderedPayload = '';
     const result = await runPairCommand({
       json: false,
       wait: true,
@@ -599,7 +824,7 @@ try {
       stdout: out.output,
       stderr: err.output,
     }, {
-      renderQr: async (payload) => `QR(${payload})`,
+      renderQr: async (payload) => { renderedPayload = payload; return `QR(${payload})`; },
       fetch: async (input, init) => {
         const url = String(input);
         const method = init?.method ?? 'GET';
@@ -637,6 +862,17 @@ try {
         && out.text().includes('Paired device phone-1')
         && !/peerToken|privateKey/.test(out.text())
         && err.text() === '');
+    const printedPairingLink = out.text().split('\n').find((line) => line.startsWith('Pairing link: '));
+    const parsedPrintedPayload = printedPairingLink == null
+      ? undefined
+      : parseQrPairingPayload(printedPairingLink.slice('Pairing link: '.length)) as QrPairingPayloadV2;
+    check('the selectable pairing link exactly matches the QR payload and keeps the advertised Tailscale origin',
+      renderedPayload === qr
+        && printedPairingLink === `Pairing link: ${qr}`
+        && parsedPrintedPayload != null
+        && parsedPrintedPayload.transport.url === 'https://devbox.tailnet.ts.net'
+        && !parsedPrintedPayload.transport.url.includes('/cosy'),
+      JSON.stringify({ renderedPayload, printedPairingLink, transport: parsedPrintedPayload?.transport.url }));
     const tokenPath = brokerTokenPath(home);
     const actualToken = readBrokerToken(tokenPath);
     check('non-interactive pair --wait tells the operator where the browser-client (shared) token lives',
@@ -648,6 +884,98 @@ try {
         && !out.text().includes(actualToken)
         && err.text() === '',
       out.text());
+  }
+
+  // ── pair on a host whose MagicDNS will not resolve ──
+  // Drives the real command: the advertised NAME refuses to connect, the node's own address answers, and
+  // the offer must still be created exactly once with the HOSTNAME in the QR — a paired phone has to reach
+  // this broker by name from wherever it is, so an address literal there would be a broken credential.
+  {
+    const runPairOverBrokenDns = async (
+      directJson: unknown,
+    ): Promise<{
+      exitCode: number;
+      posts: number;
+      advertisedNameAttempts: number;
+      transportUrl?: string;
+      contactedAddresses: string[];
+    }> => {
+      const out = writer();
+      const err = writer();
+      let posts = 0;
+      let advertisedNameAttempts = 0;
+      let transportUrl: string | undefined;
+      const contactedAddresses: string[] = [];
+      const result = await runPairCommand({
+        json: false,
+        wait: false,
+        home,
+        invocation: 'cosy',
+        interactive: false,
+        stdout: out.output,
+        stderr: err.output,
+      }, {
+        renderQr: async (payload) => {
+          transportUrl = (parseQrPairingPayload(payload) as QrPairingPayloadV2).transport.url;
+          return `QR(${payload})`;
+        },
+        fetch: async (input, init) => {
+          const url = String(input);
+          // Exactly what a failed MagicDNS lookup does to fetch: it throws, and `request` maps that to
+          // the unreachable kind that alone earns the address retry.
+          if (url.startsWith('https://devbox.tailnet.ts.net')) {
+            advertisedNameAttempts += 1;
+            throw new TypeError('getaddrinfo ENOTFOUND devbox.tailnet.ts.net');
+          }
+          if (url.endsWith('/api/health')) return jsonResponse({ ok: true, product: 'cosyncing', machine: 'devbox' });
+          if (url.endsWith('/api/transport/pairings') && (init?.method ?? 'GET') === 'POST') {
+            posts += 1;
+            return jsonResponse({
+              ok: true,
+              pairingId,
+              qr,
+              brokerPeerId: 'broker_public_fixture',
+              expiresAt: '2026-07-17T00:05:00.000Z',
+            }, 201);
+          }
+          return jsonResponse({ error: 'unexpected' }, 500);
+        },
+        now: () => Date.parse('2026-07-17T00:00:00.000Z'),
+        // A context, NOT a list of addresses: pair must run the real `tailscale status --json` resolution,
+        // so severing that wiring fails this test instead of silently passing on injected literals.
+        diagnosisContext: {
+          ...fakeContext({ executable: '/usr/bin/tailscale' }),
+          async runReadOnly(path: string, args: readonly string[]) {
+            if (path === '/usr/bin/tailscale' && args[0] === 'status') {
+              return { status: 'ok', exitCode: 0, stderr: '', stdout: JSON.stringify({
+                BackendState: 'Running',
+                Self: { DNSName: 'devbox.tailnet.ts.net.', TailscaleIPs: ['100.64.0.1', 'fd7a:115c:a1e0::1'] },
+              }) };
+            }
+            return { status: 'nonzero', exitCode: 1, stdout: '', stderr: 'unexpected' };
+          },
+        },
+        advertisedDirectProbe: async ({ address }) => {
+          contactedAddresses.push(address);
+          return { status: 'ok', statusCode: 200, json: directJson };
+        },
+      });
+      return { exitCode: result.exitCode, posts, advertisedNameAttempts, transportUrl, contactedAddresses };
+    };
+
+    const paired = await runPairOverBrokenDns({ ok: true, product: 'cosyncing', machine: 'devbox' });
+    check('pair creates exactly one offer when the advertised name resolves only through this node address',
+      paired.exitCode === 0 && paired.posts === 1 && paired.advertisedNameAttempts >= 1
+        && paired.contactedAddresses[0] === '100.64.0.1',
+      JSON.stringify(paired));
+    check('the QR still carries the advertised hostname, never the address literal it was verified through',
+      paired.transportUrl === 'https://devbox.tailnet.ts.net',
+      String(paired.transportUrl));
+
+    const foreign = await runPairOverBrokenDns({ ok: true, product: 'cosyncing', machine: 'another-machine' });
+    check('pair refuses to create an offer when the address answers as a different machine',
+      foreign.exitCode !== 0 && foreign.posts === 0,
+      JSON.stringify(foreign));
   }
 
   // A plain single-offer `pair` (no --wait) still ends with the same browser-client credential pointer.
@@ -745,6 +1073,52 @@ try {
         && out.text().includes(narrowQr)
         && out.text().includes(`${narrowWidth - 1} columns wide`)
         && out.text().includes(`needs ${narrowWidth}`)
+        && err.text() === '',
+      out.text());
+  }
+
+  // Human pair output follows the setup language while the payload remains byte-for-byte identical.
+  {
+    const zhHome = prepareHome(join(root, 'zh-pair'), 'foreground', 'zh-Hans');
+    const out = writer();
+    const err = writer();
+    const zhPairingId = 'pair_zh_fixture';
+    const zhQr = createQrPairingPayload({
+      version: 2,
+      brokerId: 'broker_public_fixture',
+      pairingId: zhPairingId,
+      publicKey: 'broker-public-key',
+      transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+    });
+    const result = await runPairCommand({
+      json: false,
+      wait: false,
+      home: zhHome,
+      invocation: 'cosy',
+      stdout: out.output,
+      stderr: err.output,
+    }, {
+      renderQr: async () => 'QR',
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/api/health')) return jsonResponse({ ok: true, product: 'cosyncing', machine: 'devbox' });
+        if (url.endsWith('/api/transport/pairings') && method === 'POST') {
+          return jsonResponse({
+            ok: true,
+            pairingId: zhPairingId,
+            qr: zhQr,
+            brokerPeerId: 'broker_public_fixture',
+            expiresAt: '2026-07-17T00:05:00.000Z',
+          }, 201);
+        }
+        return jsonResponse({ error: 'unexpected' }, 500);
+      },
+    });
+    check('Chinese pair output labels the same selectable one-use payload as 配对链接',
+      result.exitCode === 0
+        && out.text().split('\n').includes(`配对链接: ${zhQr}`)
+        && !out.text().includes('Pairing link:')
         && err.text() === '',
       out.text());
   }
@@ -1068,6 +1442,105 @@ try {
   }
 } finally {
   rmSync(root, { recursive: true, force: true });
+}
+
+// ── Real TLS: the shipped direct probe against a real HTTPS server ──
+// Everything above injects a fake directProbe, so none of it executes the https.request path, presents a
+// real SNI value, or validates a real certificate chain. This block runs the SHIPPED probe against a real
+// server with a real certificate, because "we never disable TLS validation" is only worth as much as the
+// evidence that validation actually rejects something.
+{
+  const openssl = Bun.which('openssl');
+  if (!openssl) {
+    check('real-TLS direct probe coverage requires openssl', false,
+      'openssl not found; this evidence cannot be produced on this host');
+  } else {
+    const tlsHome = mkdtempSync(join(tmpdir(), 'cosyncing-serve-tls-'));
+    const HOST = 'fixture.tailnet.ts.net';
+    const path$ = (name: string): string => join(tlsHome, name);
+    const run = async (args: string[]): Promise<boolean> => {
+      const proc = Bun.spawn([openssl, ...args], { cwd: tlsHome, stdout: 'pipe', stderr: 'pipe' });
+      return (await proc.exited) === 0;
+    };
+    await Bun.write(path$('ext.cnf'), `subjectAltName=DNS:${HOST}\n`);
+    const built = await run(['req', '-x509', '-newkey', 'rsa:2048', '-keyout', 'ca.key', '-out', 'ca.pem',
+      '-days', '1', '-nodes', '-subj', '/CN=cosyncing-test-ca'])
+      && await run(['req', '-newkey', 'rsa:2048', '-keyout', 'srv.key', '-out', 'srv.csr', '-nodes',
+        '-subj', `/CN=${HOST}`])
+      && await run(['x509', '-req', '-in', 'srv.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key',
+        '-CAcreateserial', '-out', 'srv.pem', '-days', '1', '-extfile', 'ext.cnf']);
+
+    if (!built) {
+      check('real-TLS fixture certificates build', false, 'openssl could not produce the fixture chain');
+    } else {
+      const { createServer } = await import('node:https');
+      const seenHost: string[] = [];
+
+      const server = createServer({
+        key: readFileSync(path$('srv.key')),
+        cert: readFileSync(path$('srv.pem')),
+      }, (request, response) => {
+        seenHost.push(String(request.headers.host ?? ''));
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ ok: true, product: 'cosyncing', machine: 'devbox' }));
+      });
+
+      await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+      const port = (server.address() as { port: number }).port;
+
+      // The probe runs in a child so NODE_EXTRA_CA_CERTS is set before TLS initialises. Trust is granted
+      // ONLY through that variable; nothing here lowers rejectUnauthorized, which has no option to lower.
+      const driver = path$('drive.ts');
+      await Bun.write(driver, [
+        `import { probeAdvertisedEndpointOnce } from '${resolve('packages/typescript/broker/src/tailscale-serve.ts')}';`,
+        `const [hostname, port] = [process.argv[2], Number(process.argv[3])];`,
+        `const probe = await probeAdvertisedEndpointOnce({`,
+        `  context: { fetchJson: async () => ({ status: 'unreachable' }) } as never,`,
+        `  advertisedUrl: 'https://' + hostname + ':' + port,`,
+        `  fallbackAddresses: ['127.0.0.1'],`,
+        `});`,
+        `console.log(JSON.stringify(probe));`,
+      ].join('\n'));
+
+      const drive = async (hostname: string, trust: boolean): Promise<{ status?: string; json?: unknown }> => {
+        const proc = Bun.spawn(['bun', 'run', driver, hostname, String(port)], {
+          env: { ...process.env, ...(trust ? { NODE_EXTRA_CA_CERTS: path$('ca.pem') } : {}) },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        const out = await new Response(proc.stdout).text();
+        await proc.exited;
+        try { return JSON.parse(out.trim().split('\n').pop() ?? '{}'); } catch { return {}; }
+      };
+
+      const trusted = await drive(HOST, true);
+      check('the shipped probe completes a real TLS handshake and reads the broker identity',
+        trusted.status === 'ok'
+          && (trusted.json as { machine?: string } | undefined)?.machine === 'devbox',
+        JSON.stringify(trusted));
+      check('it sends the advertised hostname as the Host header, never the address literal',
+        seenHost.length > 0 && seenHost.every((value) => value.startsWith(HOST)),
+        `host=${seenHost.join(',')}`);
+
+      const untrusted = await drive(HOST, false);
+      check('an untrusted chain is refused rather than bypassed',
+        untrusted.status === 'unreachable', JSON.stringify(untrusted));
+
+      // The connection above is to 127.0.0.1 while the certificate covers only the advertised hostname.
+      // Succeeding for HOST and failing for a name the certificate does not cover is the proof that
+      // `servername` drives BOTH the SNI sent and the identity the chain is validated against — the
+      // server side cannot supply it, because Bun's node:https emits neither secureConnection nor a
+      // servername, and honours no SNICallback.
+      const wrongName = await drive('other.tailnet.ts.net', true);
+      check('a certificate that does not cover the advertised hostname is refused',
+        wrongName.status === 'unreachable', JSON.stringify(wrongName));
+      check('certificate validation is bound to the advertised hostname, not the connected address',
+        trusted.status === 'ok' && wrongName.status === 'unreachable',
+        `sameAddress=127.0.0.1 trusted(${HOST})=${trusted.status} wrongName=${wrongName.status}`);
+      await new Promise<void>((closed) => server.close(() => closed()));
+    }
+    rmSync(tlsHome, { recursive: true, force: true });
+  }
 }
 
 const failed = results.filter((result) => !result.ok);

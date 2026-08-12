@@ -57,6 +57,8 @@ export interface CliDependencies {
     enableTailscaleServe: boolean;
     installAgentSkill: boolean;
     opencodeShimSignal: OpencodeShimSignal;
+    replaceLegacyPiBridge: boolean;
+    upgradeLegacyAgentSkill: boolean;
   }) => Promise<{ exitCode: number }>;
   runPair?: (options: {
     json: boolean;
@@ -168,7 +170,7 @@ function help(command: string, packaged: boolean): string {
 
 Usage:
   ${brokerUsage}
-  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--enable-tailscale-serve] [--no-install-agent-skill]]
+  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--enable-tailscale-serve] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
   ${command} pair [--label <device>] [--wait] [--json]
   ${command} devices list [--json]
   ${command} devices revoke <id> [--yes] [--json]
@@ -281,6 +283,8 @@ async function defaultRunSetup(options: {
   enableTailscaleServe: boolean;
   installAgentSkill: boolean;
   opencodeShimSignal: OpencodeShimSignal;
+  replaceLegacyPiBridge: boolean;
+  upgradeLegacyAgentSkill: boolean;
   buildInfo: Readonly<BuildInfo>;
   stdout: CliWriter;
 }): Promise<{ exitCode: number }> {
@@ -295,6 +299,8 @@ async function defaultRunSetup(options: {
         enableTailscaleServe: options.enableTailscaleServe,
         installAgentSkill: options.installAgentSkill,
         opencodeShim: options.opencodeShimSignal,
+        replaceLegacyPiBridge: options.replaceLegacyPiBridge,
+        upgradeLegacyAgentSkill: options.upgradeLegacyAgentSkill,
       })
     : presenters.createClackSetupPresenter();
   return runSetup({
@@ -650,6 +656,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       '--no-install-agent-skill',
       '--install-opencode-shim',
       '--no-install-opencode-shim',
+      '--replace-legacy-pi-bridge',
+      '--upgrade-legacy-agent-skill',
     ]);
     const unknown = args.find((arg) => !allowed.has(arg));
     const duplicates = args.some((arg, index) => args.indexOf(arg) !== index);
@@ -662,6 +670,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const enableSystemdLingering = args.includes('--enable-systemd-lingering');
     const enableTailscaleServe = args.includes('--enable-tailscale-serve');
     const installAgentSkill = !args.includes('--no-install-agent-skill');
+    const replaceLegacyPiBridge = args.includes('--replace-legacy-pi-bridge');
+    const upgradeLegacyAgentSkill = args.includes('--upgrade-legacy-agent-skill');
     // Tri-state consent. If both flags are passed, --no- wins deterministically. 'unset' (neither) never
     // silently enables in the non-interactive path — the presenter honors only a prior stored opt-in.
     const opencodeShimSignal: OpencodeShimSignal = args.includes('--no-install-opencode-shim')
@@ -671,7 +681,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         : 'unset';
     // Non-interactive negative flags require --yes; the bare positive opt-in (--install-opencode-shim) does not
     // — it only informs the non-interactive presenter and is inert in the interactive (clack) path.
-    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering || enableTailscaleServe || !installAgentSkill || opencodeShimSignal === 'off')) {
+    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering || enableTailscaleServe
+      || !installAgentSkill || opencodeShimSignal === 'off' || replaceLegacyPiBridge || upgradeLegacyAgentSkill)) {
       stderr.write(`${command}: non-interactive setup flags require --yes\n`);
       return 2;
     }
@@ -689,7 +700,16 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     }
     try {
       const setup = dependencies.runSetup
-        ? await dependencies.runSetup({ yes, acceptManagedRuntimeOwnership, enableSystemdLingering, enableTailscaleServe, installAgentSkill, opencodeShimSignal })
+        ? await dependencies.runSetup({
+            yes,
+            acceptManagedRuntimeOwnership,
+            enableSystemdLingering,
+            enableTailscaleServe,
+            installAgentSkill,
+            opencodeShimSignal,
+            replaceLegacyPiBridge,
+            upgradeLegacyAgentSkill,
+          })
         : await defaultRunSetup({
             yes,
             acceptManagedRuntimeOwnership,
@@ -697,6 +717,8 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             enableTailscaleServe,
             installAgentSkill,
             opencodeShimSignal,
+            replaceLegacyPiBridge,
+            upgradeLegacyAgentSkill,
             buildInfo,
             stdout,
           });

@@ -118,14 +118,14 @@ String failureDetail(Object error) {
 String recoveryAdviceEn(FailureKind kind) {
   return switch (kind) {
     FailureKind.offline =>
-      "The broker didn't respond. Check that it's running and that you're on "
+      "The server didn't respond. Check that it's running and that you're on "
           'the right network, then try again.',
     FailureKind.unauthorized =>
-      "The broker refused this device's access. Pair this device again, or "
-          'paste a current broker token.',
-    FailureKind.rejected => 'The broker rejected the request. Try again.',
+      "The server refused this device's access. Pair this device again, or "
+          'paste a current server token.',
+    FailureKind.rejected => 'The server rejected the request. Try again.',
     FailureKind.brokerFault =>
-      'The broker ran into a problem on its end. Try again in a moment.',
+      'The server ran into a problem on its end. Try again in a moment.',
     FailureKind.deviceStorage =>
       "This device's secure storage refused the change. Try again, or restart "
           'the app.',

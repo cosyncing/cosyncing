@@ -96,7 +96,7 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
     try {
       final client = await ref.read(brokerClientProvider.future);
       if (client == null) {
-        throw StateError('Connect to a broker to view scheduled sends.');
+        throw StateError('Connect to a server to view scheduled sends.');
       }
       final response = await client.listSchedules();
       if (!_canApplyListResult(source, generation)) return;
@@ -145,7 +145,7 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
               profile!,
             );
       if (client == null) {
-        throw StateError('Connect to a broker before scheduling a send.');
+        throw StateError('Connect to a server before scheduling a send.');
       }
       final response = await client.createSchedule(request);
       if (!_sourceMatches(source)) return null;
@@ -209,7 +209,7 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
     try {
       final client = await ref.read(brokerClientProvider.future);
       if (client == null) {
-        throw StateError('Connect to a broker before changing a schedule.');
+        throw StateError('Connect to a server before changing a schedule.');
       }
       final response = await mutation(client);
       if (!_sourceMatches(source)) return false;
@@ -251,7 +251,7 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
     try {
       final client = await ref.read(brokerClientProvider.future);
       if (client == null) {
-        throw StateError('Connect to a broker before changing a schedule.');
+        throw StateError('Connect to a server before changing a schedule.');
       }
       final response = await client.deleteSchedule(id);
       if (!_sourceMatches(source)) return false;

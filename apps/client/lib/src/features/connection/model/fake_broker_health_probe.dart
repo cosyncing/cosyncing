@@ -37,7 +37,7 @@ class FakeBrokerHealthProbe implements BrokerHealthProbe {
       return HealthProbeResult.success(machine: machineName);
     }
     return const HealthProbeResult.failure(
-      error: 'Connection refused — is the broker running?',
+      error: 'Connection refused — is the server running?',
     );
   }
 }

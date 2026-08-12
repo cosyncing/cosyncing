@@ -1,4 +1,6 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 final class _InMemoryBrokerCredentialBackend
@@ -22,6 +24,37 @@ final class _InMemoryBrokerCredentialBackend
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('unsigned macOS backend uses the standard login keychain', () async {
+    const channel = MethodChannel(
+      'plugins.it_nomads.com/flutter_secure_storage',
+    );
+    final binding = TestDefaultBinaryMessengerBinding.instance;
+    MethodCall? capturedCall;
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      capturedCall = call;
+      return null;
+    });
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null);
+    });
+
+    await FlutterSecureStorageBrokerCredentialBackend().write(
+      'credential-key',
+      'credential-value',
+    );
+
+    expect(capturedCall?.method, 'write');
+    final arguments = capturedCall?.arguments as Map<Object?, Object?>?;
+    final options = arguments?['options'] as Map<Object?, Object?>?;
+    expect(options?['usesDataProtectionKeychain'], 'false');
+  });
+
   group('SecureBrokerCredentialStore', () {
     test('readBrokerToken reads null when no credential is stored', () async {
       final backend = _InMemoryBrokerCredentialBackend();

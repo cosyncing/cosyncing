@@ -414,6 +414,13 @@ void main() {
 
       expect(find.text('Debug timeline'), findsOneWidget);
       expect(find.text('notice: agent ready'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('debug-timeline-expander')),
+          matching: find.byType(SelectableText),
+        ),
+        findsOneWidget,
+      );
 
       await tester.ensureVisible(
         find.byKey(const Key('debug-timeline-expander')),
@@ -424,6 +431,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('notice: agent ready'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('notice: agent ready'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('session: '), findsNothing);
     });
 
@@ -619,6 +633,56 @@ void main() {
         expect(sourceText, contains(spokenText));
       },
     );
+
+    for (final platform in const [
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+    ]) {
+      testWidgets(
+        '${platform.name} selection menu exposes working read aloud',
+        (tester) async {
+          useRoomyTestViewport(tester);
+          const sourceText = 'Desktop selected response';
+          final speechOutput = RecordingSpeechOutput();
+          addTearDown(speechOutput.close);
+          final spec = themeSpecById(kDefaultThemeId);
+          await tester.pumpWidget(
+            buildSessionDetailTestPage(
+              speechOutput: speechOutput,
+              theme: buildAppTheme(
+                spec.light,
+                Brightness.light,
+              ).copyWith(platform: platform),
+              events: const [
+                MessageWireEvent(
+                  seq: 1,
+                  message: AgentMessage(
+                    id: 'desktop-selection-message',
+                    type: AgentMessageType.modelOutput,
+                    raw: {
+                      'type': 'model-output',
+                      'key': 'desktop-selection-message',
+                      'text': sourceText,
+                      'final': true,
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.longPress(find.text(sourceText));
+          await tester.pumpAndSettle();
+          expect(find.text('Read aloud'), findsOneWidget);
+          await tester.tap(find.text('Read aloud'));
+          await tester.pump();
+
+          expect(speechOutput.spokenTexts, hasLength(1));
+          expect(sourceText, contains(speechOutput.spokenTexts.single));
+        },
+      );
+    }
 
     testWidgets(
       'selection does not pin an evicted transcript payload',
@@ -1553,7 +1617,7 @@ void main() {
       );
       expect(
         find.text(
-          'Remote file browsing is disabled by the Broker administrator.',
+          'Remote file browsing is disabled by the Server administrator.',
         ),
         findsOneWidget,
       );
@@ -1672,7 +1736,7 @@ void main() {
         expect(find.text('Detach'), findsOneWidget);
         expect(
           find.text(
-            'Detach this device. The agent keeps running on the Broker.',
+            'Detach this device. The agent keeps running on the Server.',
           ),
           findsOneWidget,
         );

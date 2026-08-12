@@ -145,7 +145,7 @@ void main() {
         find.byKey(const Key('session-detail-clear-all-cache-button')),
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining('all broker profiles'), findsWidgets);
+      expect(find.textContaining('all server profiles'), findsWidgets);
       await tester.tap(
         find.byKey(const Key('session-detail-clear-all-cache-confirm')),
       );
@@ -183,7 +183,7 @@ void main() {
         expect(brokerClient.clearSessionCacheCount, 1);
         expect(
           find.textContaining(
-            'local transcript cache was cleared, but broker artifacts',
+            'local transcript cache was cleared, but server artifacts',
           ),
           findsOneWidget,
         );
@@ -230,7 +230,7 @@ void main() {
         find.byKey(const Key('session-detail-clear-all-cache-button')),
       );
       await tester.pumpAndSettle();
-      expect(find.textContaining('all broker profiles'), findsWidgets);
+      expect(find.textContaining('all server profiles'), findsWidgets);
       await tester.tap(
         find.byKey(const Key('session-detail-clear-all-cache-confirm')),
       );

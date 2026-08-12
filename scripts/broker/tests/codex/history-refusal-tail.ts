@@ -1581,6 +1581,105 @@ try {
     }));
   }
 
+  // ------------------------------------------------- H1d append-only resume
+  // Reattaching an over-index source used to re-stream the WHOLE source
+  // through the bounded sink — O(source) work per attach, serialized in front
+  // of the history frame. For the largest active rollouts that cost outlasted
+  // the client's own attach deadline, so the client abandoned the socket and
+  // retried the same scan: the live-stream starvation this lane fixes. The
+  // capture now freezes a watermark for the exact sink it fed, so the same
+  // sink is extended by exactly the appended bytes — and the window must be
+  // indistinguishable from a fresh whole-source capture of the same bytes.
+  const resumeSource = join(temp, 'resume-oversize.jsonl');
+  {
+    const resumeFd = openSync(resumeSource, 'w');
+    try {
+      ftruncateSync(resumeFd, 256 * 1024 * 1024 + 1);
+      writeSync(
+        resumeFd,
+        `\n${Array.from({ length: 40 }, (_unused, index) => userRow(index, 64)).join('\n')}\n`,
+        256 * 1024 * 1024 + 1,
+      );
+    } finally {
+      closeSync(resumeFd);
+    }
+  }
+  const scanRanges: Array<{ start: number; end: number }> = [];
+  const resumeSink = new BoundedTailHistorySnapshotSink();
+  const firstCapture = await captureFileHistoryInto(
+    resumeSource,
+    resumeSink,
+    undefined,
+    { onScanRange: (start, end) => scanRanges.push({ start, end }) },
+  );
+  assert(firstCapture && !('refusal' in firstCapture), 'oversized tail capture must serve');
+  const firstSize = statSync(resumeSource).size;
+  assert(
+    scanRanges.length > 0 && scanRanges.every((range) => range.start === 0),
+    'a first capture reads the whole source',
+  );
+  scanRanges.length = 0;
+  appendFileSync(
+    resumeSource,
+    `${Array.from({ length: 7 }, (_unused, index) => userRow(1_000 + index, 64)).join('\n')}\n`,
+  );
+  const grownSize = statSync(resumeSource).size;
+  const resumedCapture = await captureFileHistoryInto(
+    resumeSource,
+    resumeSink,
+    undefined,
+    { onScanRange: (start, end) => scanRanges.push({ start, end }) },
+  );
+  assert(resumedCapture && !('refusal' in resumedCapture), 'append resume must serve');
+  assert(scanRanges.length > 0, 'a resumed capture must report its scan ranges');
+  for (const range of scanRanges) {
+    assert.equal(
+      range.start,
+      firstSize,
+      'a resumed capture must read only the appended bytes, never the whole source again',
+    );
+    assert.equal(range.end, grownSize);
+  }
+  const resumedReplay = resumeSink.finish(resumedCapture.identity);
+  const freshTail = await captureTail(resumeSource);
+  assert(!freshTail.refused, 'the fresh whole-source control capture must serve');
+  const resumedAttach = resumedReplay.attach(undefined, PAGE_MESSAGES);
+  const freshAttach = freshTail.replay!.attach(undefined, PAGE_MESSAGES);
+  assert.deepEqual(
+    resumedAttach.messages,
+    freshAttach.messages,
+    'a resumed window must be identical to a fresh whole-source capture of the same bytes',
+  );
+  assert.equal(
+    resumedAttach.cursor,
+    freshAttach.cursor,
+    'a resumed window must issue the same reconnect cursor a fresh capture does',
+  );
+  assert.equal(resumedReplay.durableCount, freshTail.replay!.durableCount);
+  // A same-size in-place rewrite breaks the lineage: the fed sink must never be
+  // scanned into from byte zero again (every retained row would double), so the
+  // answer is the ordinary retriable `undefined` and the caller's fresh sink.
+  {
+    const rewriteFd = openSync(resumeSource, 'r+');
+    try {
+      const stamp = Buffer.from('{"type":"rewritten-in-place"}');
+      writeSync(rewriteFd, stamp, 0, stamp.length, 256 * 1024 * 1024 + 2);
+    } finally {
+      closeSync(rewriteFd);
+    }
+    const afterRewrite = await captureFileHistoryInto(resumeSource, resumeSink);
+    assert.equal(
+      afterRewrite,
+      undefined,
+      'a rewritten source must not resume into an already-fed sink',
+    );
+    const freshAfterRewrite = await captureTail(resumeSource);
+    assert(
+      !freshAfterRewrite.refused,
+      'the rewritten source must still serve a fresh whole-source capture',
+    );
+  }
+
   console.log('PASS H1c bounded large-history refusal never empties a session');
 } finally {
   rmSync(temp, { recursive: true, force: true });

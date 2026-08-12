@@ -61,6 +61,16 @@ export interface DurableStoreInspection {
   detailCode: string;
 }
 
+export interface DurableStatePermissionRepair {
+  id: DurableSchemaSpec['id'];
+  path: string;
+}
+
+export interface DurableStateSetupAssessment {
+  permissionRepairs: DurableStatePermissionRepair[];
+  blockers: DurableStoreInspection[];
+}
+
 export interface DurableCorruptionEvidence {
   id: DurableSchemaSpec['id'];
   detailCode: string;
@@ -116,32 +126,77 @@ export function inspectDurableSchemas(layout = durableStateLayout()): DurableSto
     const file = inspectOwnerOnlyFile(path);
     if (file.status === 'missing') return { id: spec.id, status: 'missing', detailCode: `${spec.id}-missing` };
     if (file.status !== 'ok') return { id: spec.id, status: 'unsafe', detailCode: `${spec.id}-unsafe` };
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-malformed` };
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-malformed` };
-    }
-    const version = (parsed as Record<string, unknown>)[spec.versionField];
-    if (version == null) {
-      return { id: spec.id, status: 'migration-required', detailCode: `${spec.id}-unversioned` };
-    }
-    if (!Number.isSafeInteger(version)) {
-      return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-version-malformed` };
-    }
-    if (version !== spec.currentVersion) {
-      return {
-        id: spec.id,
-        status: 'unsupported-version',
-        version: version as number,
-        detailCode: `${spec.id}-unsupported-version`,
-      };
-    }
-    return { id: spec.id, status: 'ok', version: version as number, detailCode: `${spec.id}-ok` };
+    return inspectDurableSchemaContent(spec, path);
   });
+}
+
+function durableSchemaPath(spec: DurableSchemaSpec, layout: DurableStateLayout): string {
+  return join(spec.root === 'state' ? layout.stateRoot : layout.cacheRoot, spec.relativePath);
+}
+
+function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): DurableStoreInspection {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-malformed` };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-malformed` };
+  }
+  const version = (parsed as Record<string, unknown>)[spec.versionField];
+  if (version == null) {
+    return { id: spec.id, status: 'migration-required', detailCode: `${spec.id}-unversioned` };
+  }
+  if (!Number.isSafeInteger(version)) {
+    return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-version-malformed` };
+  }
+  if (version !== spec.currentVersion) {
+    return {
+      id: spec.id,
+      status: 'unsupported-version',
+      version: version as number,
+      detailCode: `${spec.id}-unsupported-version`,
+    };
+  }
+  return { id: spec.id, status: 'ok', version: version as number, detailCode: `${spec.id}-ok` };
+}
+
+/**
+ * A setup-safe permission migration is intentionally narrow: an owner-held regular file, no symlinked
+ * parent, current schema, and the mode as its only defect. Content and ownership problems remain blockers.
+ */
+export function inspectDurableStatePermissionRepair(
+  repair: Readonly<DurableStatePermissionRepair>,
+): 'current' | 'tightenable' | 'blocked' {
+  const spec = DURABLE_SCHEMA_REGISTRY.find((candidate) => candidate.id === repair.id);
+  if (!spec || !spec.sensitive) return 'blocked';
+  const file = inspectOwnerOnlyFile(repair.path);
+  if (file.status === 'ok') {
+    return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'current' : 'blocked';
+  }
+  if (file.status !== 'unsafe' || file.problem !== 'unsafe-mode') return 'blocked';
+  return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'tightenable' : 'blocked';
+}
+
+/** Classify every durable doctor failure before setup is allowed to plan a commit. */
+export function assessDurableStateForSetup(
+  layout = durableStateLayout(),
+): DurableStateSetupAssessment {
+  const permissionRepairs: DurableStatePermissionRepair[] = [];
+  const blockers: DurableStoreInspection[] = [];
+  for (const inspection of inspectDurableSchemas(layout)) {
+    if (inspection.status === 'ok' || inspection.status === 'missing') continue;
+    const spec = DURABLE_SCHEMA_REGISTRY.find((candidate) => candidate.id === inspection.id);
+    if (!spec) {
+      blockers.push(inspection);
+      continue;
+    }
+    const repair = { id: spec.id, path: durableSchemaPath(spec, layout) };
+    if (inspectDurableStatePermissionRepair(repair) === 'tightenable') permissionRepairs.push(repair);
+    else blockers.push(inspection);
+  }
+  return { permissionRepairs, blockers };
 }
 
 /**

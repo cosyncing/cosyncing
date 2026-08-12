@@ -55,22 +55,6 @@ class _MessageRow extends StatelessWidget {
             ),
           )
         : null;
-    // Action surfaces for request messages are type-driven and stay outside raw
-    // renderers, per
-    // `docs/architecture/client-ui.md`.
-    final renderer = _MessageContextRegion(
-      message: message,
-      canFork: isConnected && canFork,
-      onForkFromMessage: onForkFromMessage,
-      child: TranscriptMessageMetadataScope(
-        timestamp: message.timestamp,
-        child: buildAgentMessageRenderer(
-          context,
-          message,
-          fileArtifactAction: artifactAction,
-        ),
-      ),
-    );
     final requestId = onExtractRequestId(message);
     final isResolved =
         requestId != null && resolvedRequestIds.contains(requestId);
@@ -79,7 +63,6 @@ class _MessageRow extends StatelessWidget {
       AgentMessageType.permissionRequest when requestId != null =>
         _PermissionRequestActions(
           requestId: requestId,
-          requestMetadata: _permissionRequestMetadata(message),
           supportsSessionApproval: _supportsSessionApproval(message),
           isReadOnly: message.requestIsReadOnly,
           onApprove: () => controller.sendPermissionDecision(
@@ -101,7 +84,6 @@ class _MessageRow extends StatelessWidget {
       AgentMessageType.questionRequest when requestId != null =>
         _QuestionRequestActions(
           requestId: requestId,
-          requestMetadata: _questionRequestMetadata(message),
           questions: message.questionRequestQuestions,
           isReadOnly: message.requestIsReadOnly,
           isEnabled: isConnected && canMutate,
@@ -114,18 +96,24 @@ class _MessageRow extends StatelessWidget {
         ),
       _ => null,
     };
-    // Request actions use the shared 8px gap. ReadAloudAction owns its own
-    // top padding so hidden states are truly zero-height (no invisible gap).
-    if (requestAction != null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          renderer,
-          const SizedBox(height: 8),
-          requestAction,
-        ],
-      );
-    }
+    // Request controls remain type-driven here, while the renderer places the
+    // resulting stateful surface inside the same compact box as its request
+    // title and body. The controller and exact request identity never cross
+    // into the design layer.
+    final renderer = _MessageContextRegion(
+      message: message,
+      canFork: isConnected && canFork,
+      onForkFromMessage: onForkFromMessage,
+      child: TranscriptMessageMetadataScope(
+        timestamp: message.timestamp,
+        child: buildAgentMessageRenderer(
+          context,
+          message,
+          fileArtifactAction: artifactAction,
+          requestAction: requestAction,
+        ),
+      ),
+    );
 
     if (message.type == AgentMessageType.modelOutput) {
       return Column(
@@ -180,13 +168,14 @@ class _TranscriptArtifactDownloadAction extends StatelessWidget {
             key: ValueKey(
               'session-detail-chat-artifact-download-$sourceId',
             ),
+            style: _transcriptActionButtonStyle(context),
             onPressed: canDownload ? () => unawaited(onDownload()) : null,
             icon: isBusy
                 ? const SizedBox.square(
                     dimension: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.download_outlined, size: 18),
+                : const Icon(Icons.download_outlined, size: 14),
             label: Text(l10n.download),
           ),
           if (stateLabel.isNotEmpty) ...[
@@ -207,7 +196,7 @@ class _TranscriptArtifactDownloadAction extends StatelessWidget {
               child: ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 title: Text(l10n.technicalDetails),
-                children: [SelectableText(actionState.message)],
+                children: [Text(actionState.message)],
               ),
             ),
         ],
@@ -313,7 +302,7 @@ class _MessageContextRegionState extends ConsumerState<_MessageContextRegion> {
   /// type-driven and synthesis has to be available on the platform.
   bool get _canReadAloud =>
       isReadAloudEligible(message) &&
-      ref.read(readAloudControllerProvider).capabilities.synthesis;
+      ref.read(readAloudControllerProvider).capabilities.canAttemptSynthesis;
 
   void _readAloud() {
     unawaited(
@@ -655,44 +644,6 @@ bool _supportsSessionApproval(AgentMessage message) {
   });
 }
 
-List<String> _permissionRequestMetadata(AgentMessage message) {
-  return _extractRequestMetadata(message, const [
-    'permission',
-    'reason',
-    'operation',
-    'target',
-  ]);
-}
-
-List<String> _questionRequestMetadata(AgentMessage message) {
-  return _extractRequestMetadata(message, const ['question', 'prompt']);
-}
-
-List<String> _extractRequestMetadata(
-  AgentMessage message,
-  List<String> keys,
-) {
-  final values = <String>[];
-  for (final key in keys) {
-    final value = _stringifyMessageValue(message.raw[key]).trim();
-    if (value.isNotEmpty) {
-      values.add('$key: $value');
-    }
-  }
-  return values;
-}
-
-class _RequestMetaLine extends StatelessWidget {
-  const _RequestMetaLine({required this.value});
-
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return MetadataChip(label: value, maxWidth: 280);
-  }
-}
-
 class _RequestOutcomeBadge extends StatelessWidget {
   const _RequestOutcomeBadge({
     required this.state,
@@ -720,10 +671,29 @@ class _RequestOutcomeBadge extends StatelessWidget {
   }
 }
 
+double _transcriptActionTargetExtent(BuildContext context) {
+  final platform = Theme.of(context).platform;
+  return platform == TargetPlatform.android || platform == TargetPlatform.iOS
+      ? 40
+      : 32;
+}
+
+ButtonStyle _transcriptActionButtonStyle(BuildContext context) {
+  return ButtonStyle(
+    minimumSize: WidgetStatePropertyAll(
+      Size(0, _transcriptActionTargetExtent(context)),
+    ),
+    padding: const WidgetStatePropertyAll(
+      EdgeInsets.symmetric(horizontal: 8),
+    ),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    visualDensity: VisualDensity.standard,
+  );
+}
+
 class _PermissionRequestActions extends StatefulWidget {
   const _PermissionRequestActions({
     required this.requestId,
-    required this.requestMetadata,
     required this.supportsSessionApproval,
     required this.isReadOnly,
     required this.onApprove,
@@ -735,7 +705,6 @@ class _PermissionRequestActions extends StatefulWidget {
   });
 
   final String requestId;
-  final List<String> requestMetadata;
   final bool supportsSessionApproval;
   final bool isReadOnly;
   final Future<bool> Function() onApprove;
@@ -807,115 +776,98 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
     // (a local send flips _outcome to `sent` and owns its own "Sent" badge).
     final resolvedElsewhere =
         widget.isResolved && _outcome != _RequestActionOutcomeState.sent;
-    return Container(
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        borderRadius: BorderRadius.circular(tokens.radiusMd),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (resolvedElsewhere) ...[
+          Text(
+            switch (widget.resolvedDecision) {
+              'approve' => l10n.sessionRequestOutcomeApproved,
+              'approve-session' => l10n.sessionRequestOutcomeApprovedSession,
+              'reject' => l10n.sessionRequestOutcomeRejected,
+              _ => l10n.sessionRequestResolvedElsewhere,
+            },
+            key: ValueKey(
+              'session-detail-permission-outcome-${widget.requestId}',
+            ),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 4),
+        ] else if (widget.isReadOnly) ...[
+          Text(
+            l10n.sessionRequestReadOnlyReply,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 4),
+        ] else if (!widget.isEnabled) ...[
+          Text(
+            l10n.sessionRequestConnectToReply,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.statusError,
+            ),
+          ),
+          const SizedBox(height: 4),
+        ],
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 4,
           children: [
-            if (widget.requestMetadata.isNotEmpty) ...[
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final item in widget.requestMetadata)
-                    _RequestMetaLine(value: item),
-                ],
+            OutlinedButton(
+              key: ValueKey(
+                'session-detail-permission-reject-${widget.requestId}',
               ),
-              const SizedBox(height: 8),
-            ],
-            if (resolvedElsewhere) ...[
-              Text(
-                switch (widget.resolvedDecision) {
-                  'approve' => l10n.sessionRequestOutcomeApproved,
-                  'approve-session' =>
-                    l10n.sessionRequestOutcomeApprovedSession,
-                  'reject' => l10n.sessionRequestOutcomeRejected,
-                  _ => l10n.sessionRequestResolvedElsewhere,
-                },
+              style: _transcriptActionButtonStyle(context),
+              onPressed: canSubmit ? () => _send(widget.onReject) : null,
+              child: Text(l10n.sessionRequestReject),
+            ),
+            FilledButton(
+              key: ValueKey(
+                'session-detail-permission-approve-${widget.requestId}',
+              ),
+              style: _transcriptActionButtonStyle(context),
+              onPressed: canSubmit ? () => _send(widget.onApprove) : null,
+              child: _isSubmitting
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(l10n.sessionRequestApproveOnce),
+            ),
+            if (widget.supportsSessionApproval)
+              FilledButton.tonal(
                 key: ValueKey(
-                  'session-detail-permission-outcome-${widget.requestId}',
+                  'session-detail-permission-approve-session-'
+                  '${widget.requestId}',
                 ),
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textSecondary,
-                ),
+                style: _transcriptActionButtonStyle(context),
+                onPressed: canSubmit
+                    ? () => _send(widget.onApproveSession)
+                    : null,
+                child: Text(l10n.sessionRequestApproveSession),
               ),
-              const SizedBox(height: 4),
-            ] else if (widget.isReadOnly) ...[
-              Text(
-                l10n.sessionRequestReadOnlyReply,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textSecondary,
-                ),
-              ),
-              const SizedBox(height: 4),
-            ] else if (!widget.isEnabled) ...[
-              Text(
-                l10n.sessionRequestConnectToReply,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.statusError,
-                ),
-              ),
-              const SizedBox(height: 4),
-            ],
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                OutlinedButton(
-                  key: ValueKey(
-                    'session-detail-permission-reject-${widget.requestId}',
-                  ),
-                  onPressed: canSubmit ? () => _send(widget.onReject) : null,
-                  child: Text(l10n.sessionRequestReject),
-                ),
-                FilledButton(
-                  key: ValueKey(
-                    'session-detail-permission-approve-${widget.requestId}',
-                  ),
-                  onPressed: canSubmit ? () => _send(widget.onApprove) : null,
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(l10n.sessionRequestApproveOnce),
-                ),
-                if (widget.supportsSessionApproval)
-                  FilledButton.tonal(
-                    key: ValueKey(
-                      'session-detail-permission-approve-session-'
-                      '${widget.requestId}',
-                    ),
-                    onPressed: canSubmit
-                        ? () => _send(widget.onApproveSession)
-                        : null,
-                    child: Text(l10n.sessionRequestApproveSession),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            _RequestOutcomeBadge(
-              state: _outcome,
-              label: _requestOutcomeLabel(l10n, _outcome),
-            ),
-            if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                _failureMessage!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
-              ),
-            ],
           ],
         ),
-      ),
+        const SizedBox(height: 8),
+        _RequestOutcomeBadge(
+          state: _outcome,
+          label: _requestOutcomeLabel(l10n, _outcome),
+        ),
+        if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            _failureMessage!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -923,7 +875,6 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
 class _QuestionRequestActions extends StatefulWidget {
   const _QuestionRequestActions({
     required this.requestId,
-    required this.requestMetadata,
     required this.questions,
     required this.isReadOnly,
     required this.isEnabled,
@@ -933,7 +884,6 @@ class _QuestionRequestActions extends StatefulWidget {
   });
 
   final String requestId;
-  final List<String> requestMetadata;
   final List<AgentQuestion> questions;
   final bool isReadOnly;
   final bool isEnabled;
@@ -1120,109 +1070,90 @@ class _QuestionRequestActionsState extends State<_QuestionRequestActions>
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final tokens = context.tokens;
-    return Container(
-      decoration: BoxDecoration(
-        color: tokens.surface,
-        borderRadius: BorderRadius.circular(tokens.radiusMd),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (widget.isResolved && _outcome != _RequestActionOutcomeState.sent)
+          Text(
+            l10n.sessionRequestResolvedElsewhere,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          )
+        else if (widget.isReadOnly)
+          Text(
+            l10n.sessionRequestReadOnlyReply,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textSecondary,
+            ),
+          )
+        else if (!widget.isEnabled)
+          Text(
+            l10n.sessionRequestConnectToReply,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.statusError,
+            ),
+          ),
+        const SizedBox(height: 8),
+        if (widget.questions.isEmpty)
+          _buildAnswerField(context, index: 0, legacy: true)
+        else
+          for (var index = 0; index < widget.questions.length; index++) ...[
+            if (index > 0) const SizedBox(height: 16),
+            _buildStructuredQuestion(context, index),
+          ],
+        const SizedBox(height: 8),
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 4,
           children: [
-            if (widget.requestMetadata.isNotEmpty) ...[
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final item in widget.requestMetadata)
-                    _RequestMetaLine(value: item),
-                ],
+            TextButton(
+              key: ValueKey(
+                'session-detail-question-reject-${widget.requestId}',
               ),
-              const SizedBox(height: 8),
-            ],
-            if (widget.isResolved &&
-                _outcome != _RequestActionOutcomeState.sent)
-              Text(
-                l10n.sessionRequestResolvedElsewhere,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textSecondary,
-                ),
-              )
-            else if (widget.isReadOnly)
-              Text(
-                l10n.sessionRequestReadOnlyReply,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.textSecondary,
-                ),
-              )
-            else if (!widget.isEnabled)
-              Text(
-                l10n.sessionRequestConnectToReply,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: tokens.statusError,
-                ),
-              ),
-            const SizedBox(height: 8),
-            if (widget.questions.isEmpty)
-              _buildAnswerField(context, index: 0, legacy: true)
-            else
-              for (var index = 0; index < widget.questions.length; index++) ...[
-                if (index > 0) const SizedBox(height: 16),
-                _buildStructuredQuestion(context, index),
-              ],
-            const SizedBox(height: 8),
-            Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                TextButton(
-                  key: ValueKey(
-                    'session-detail-question-reject-${widget.requestId}',
-                  ),
-                  onPressed:
-                      widget.isEnabled &&
-                          !widget.isReadOnly &&
-                          !widget.isResolved &&
-                          !_isSubmitting &&
-                          _outcome != _RequestActionOutcomeState.sent
-                      ? _reject
-                      : null,
-                  child: Text(l10n.sessionRequestDismiss),
-                ),
-                FilledButton(
-                  key: ValueKey(
-                    'session-detail-question-answer-button-${widget.requestId}',
-                  ),
-                  onPressed: _canSend ? _send : null,
-                  child: _isSubmitting
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(l10n.sessionRequestSubmit),
-                ),
-              ],
+              style: _transcriptActionButtonStyle(context),
+              onPressed:
+                  widget.isEnabled &&
+                      !widget.isReadOnly &&
+                      !widget.isResolved &&
+                      !_isSubmitting &&
+                      _outcome != _RequestActionOutcomeState.sent
+                  ? _reject
+                  : null,
+              child: Text(l10n.sessionRequestDismiss),
             ),
-            const SizedBox(height: 8),
-            _RequestOutcomeBadge(
-              state: _outcome,
-              label: _requestOutcomeLabel(l10n, _outcome),
-            ),
-            if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                _failureMessage!,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
+            FilledButton(
+              key: ValueKey(
+                'session-detail-question-answer-button-${widget.requestId}',
               ),
-            ],
+              style: _transcriptActionButtonStyle(context),
+              onPressed: _canSend ? _send : null,
+              child: _isSubmitting
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(l10n.sessionRequestSubmit),
+            ),
           ],
         ),
-      ),
+        const SizedBox(height: 8),
+        _RequestOutcomeBadge(
+          state: _outcome,
+          label: _requestOutcomeLabel(l10n, _outcome),
+        ),
+        if (_failureMessage != null && _failureMessage!.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            _failureMessage!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+            ),
+          ),
+        ],
+      ],
     );
   }
 

@@ -91,11 +91,33 @@ class _OpenSessionSyncSupervisorState
 
   @override
   Widget build(BuildContext context) {
+    final currentSource = ref.watch(
+      activeBrokerProfileProvider.select(RosterSource.of),
+    );
     ref
-      ..watch(activeBrokerProfileProvider.select(RosterSource.of))
+      ..listen<RosterSource?>(
+        activeBrokerProfileProvider.select(RosterSource.of),
+        (previous, next) {
+          if (previous == next || !mounted || _source == next) return;
+          _adoptSource(next);
+        },
+      )
       ..watch(openSessionsControllerProvider)
       ..watch(visibleAttentionSessionProvider);
     _scheduleReconcile();
+    // A source change is visible to child SessionDetailPage widgets during
+    // this build, one frame before the supervisor's deferred reconciliation
+    // can publish and await the old providers' retirements. Mounting the child
+    // in that gap lets it reattach the still-resident provider against the new
+    // endpoint, creating a transient socket that the retirement immediately
+    // tears down. Withhold the whole child until the old source is retired;
+    // the durable open set remains in the controller and remounts afterward.
+    if (_sourceRetirementPending ||
+        (_source != null && _source != currentSource)) {
+      return const SizedBox.shrink(
+        key: Key('open-session-source-retirement'),
+      );
+    }
     return widget.child;
   }
 
@@ -167,16 +189,8 @@ class _OpenSessionSyncSupervisorState
     _latestLifecycle = lifecycle;
     _visibleKey = visibleKey;
     if (_source != source) {
-      _source = source;
-      _latestOpen = null;
-      if (!_sourceRetirementPending &&
-          (_leases.isNotEmpty || _runningAttaches > 0)) {
-        _beginSourceRetirement();
-        return;
-      }
-      if (!_sourceRetirementPending) {
-        unawaited(_retireAll());
-      }
+      _adoptSource(source);
+      if (_sourceRetirementPending) return;
     }
     if (open != null) _latestOpen = open;
     if (_sourceRetirementPending) {
@@ -234,6 +248,27 @@ class _OpenSessionSyncSupervisorState
     }
 
     _warmDesiredSessions(desired, _visibleKey, source);
+  }
+
+  /// Adopts [source] before descendant source listeners can attach against it.
+  ///
+  /// The supervisor's `ref.listen` is registered by the parent before any
+  /// Session Detail descendant. Publishing the retirement ledger from that
+  /// listener fences those descendants during the provider-notification turn,
+  /// not one post-frame callback later.
+  void _adoptSource(RosterSource? source) {
+    if (_source == source) return;
+    _source = source;
+    _latestOpen = null;
+    if (!_sourceRetirementPending &&
+        (_leases.isNotEmpty || _runningAttaches > 0)) {
+      _beginSourceRetirement();
+      return;
+    }
+    if (!_sourceRetirementPending) {
+      unawaited(_retireAll());
+      setState(() {});
+    }
   }
 
   void _warmDesiredSessions(
@@ -466,14 +501,22 @@ class _OpenSessionSyncSupervisorState
     );
   }
 
-  Future<void> _retireAll({bool clearViewports = true}) async {
+  Future<void> _retireAll({
+    bool clearViewports = true,
+    Future<void>? retirementBarrier,
+  }) async {
     _admissionEpoch++;
     _attachQueue.clear();
     final retirements = <Future<void>>[];
     for (final lease in _leases.values) {
       lease.active = false;
+      final retirement = retirementBarrier == null
+          ? _suspendAndCloseLease(lease)
+          : retirementBarrier.then<void>(
+              (_) => _suspendAndCloseLease(lease),
+            );
       retirements.add(
-        _registerRetirement(lease.key, _suspendAndCloseLease(lease)),
+        _registerRetirement(lease.key, retirement),
       );
     }
     _leases.clear();
@@ -485,10 +528,26 @@ class _OpenSessionSyncSupervisorState
   }
 
   void _beginSourceRetirement() {
-    _sourceRetirementPending = true;
-    _attachAdmissionSuspended = true;
+    setState(() {
+      _sourceRetirementPending = true;
+      _attachAdmissionSuspended = true;
+    });
     final generation = ++_sourceRetirementGeneration;
-    unawaited(_completeSourceRetirement(generation, _retireAll()));
+    // Publish every key's retirement immediately, so descendant source
+    // listeners cannot self-rebind, but hold the actual invalidations until
+    // the pending-state rebuild removes those descendant subscriptions.
+    // Invalidating while an outgoing SessionDetailPage still watches the
+    // family keeps the provider element alive and rebuilds the same controller
+    // instance, violating the source-generation fence even though its
+    // transport is replaced.
+    final descendantsUnmounted = Completer<void>();
+    final retirement = _retireAll(
+      retirementBarrier: descendantsUnmounted.future,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      descendantsUnmounted.complete();
+    });
+    unawaited(_completeSourceRetirement(generation, retirement));
   }
 
   Future<void> _completeSourceRetirement(
@@ -505,7 +564,7 @@ class _OpenSessionSyncSupervisorState
       _latestOpen = null;
     }
     if (!mounted || generation != _sourceRetirementGeneration) return;
-    _sourceRetirementPending = false;
+    setState(() => _sourceRetirementPending = false);
     final lifecycle = _readLifecycle();
     _attachAdmissionSuspended =
         _lifecycleSuspended ||

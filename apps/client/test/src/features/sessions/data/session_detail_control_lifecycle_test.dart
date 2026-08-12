@@ -14,7 +14,10 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/sessions/controller/new_session_launch_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/created_session_attach_intents.dart';
 import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/data/open_sessions_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_command_args_codec.dart';
+import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import '../../../../support/session_detail_controller_test_harness.dart';
@@ -29,6 +32,8 @@ void main() {
   late InMemoryControllerDriveIntentStore fakeDriveIntentStore;
   late InMemorySessionListRepository fakeSessionListRepository;
   late StubSessionListController fakeSessionListController;
+  late FakeControllerBrokerClient? alternateBrokerClient;
+  late Completer<BrokerClient?>? brokerClientResolution;
   late ProviderContainer container;
 
   late List<Override> baseOverrides;
@@ -43,12 +48,25 @@ void main() {
     fakeDriveIntentStore = InMemoryControllerDriveIntentStore();
     fakeSessionListRepository = InMemorySessionListRepository();
     fakeSessionListController = StubSessionListController();
+    alternateBrokerClient = null;
+    brokerClientResolution = null;
     baseOverrides = [
       ...dr1DurableDraftTestOverrides(),
       activeBrokerProfileProvider.overrideWith(
         (ref) => fakeControllerBrokerProfile(),
       ),
-      brokerClientProvider.overrideWith((ref) async => fakeBrokerClient),
+      brokerClientProvider.overrideWith(
+        (ref) {
+          final profile = ref.watch(activeBrokerProfileProvider);
+          final resolution = brokerClientResolution;
+          if (resolution != null) return resolution.future;
+          final alternate = alternateBrokerClient;
+          if (alternate != null && profile?.baseUri.port == 17734) {
+            return Future.value(alternate);
+          }
+          return Future.value(fakeBrokerClient);
+        },
+      ),
       sessionNotificationLifecycleMonitorProvider.overrideWithValue(
         StubBrokerAppLifecycleMonitor(
           currentState: BrokerAppLifecycleState.paused,
@@ -144,7 +162,7 @@ void main() {
         state.connectionStatus,
         SessionDetailConnectionStatus.disconnected,
       );
-      expect(state.error, contains('Connect to a broker'));
+      expect(state.error, contains('Connect to a server'));
     });
 
     test('takeOver re-attaches in resume (Drive) mode', () async {
@@ -524,6 +542,59 @@ void main() {
         expect(restored.driveRestoreConflict, isNull);
       },
     );
+
+    for (final code in const [
+      'DRIVE_OWNERSHIP_UNKNOWN',
+      'DRIVE_NATIVE_SESSION_UNRESUMABLE',
+    ]) {
+      test(
+        '$code remains visible through the Observe fallback',
+        () async {
+          fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+          keepSessionDetailAlive(container, key);
+
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .attach();
+          fakeConnection
+            ..emitEvent(
+              AttachConflictWireEvent(
+                requestedMode: 'resume',
+                reason: 'app-restore',
+                code: code,
+                message: 'Drive attach refused safely.',
+              ),
+            )
+            ..emitSessionControl(const {
+              'drive': {'state': 'observing', 'supported': true},
+              'terminalSync': {
+                'supported': true,
+                'syncAvailable': true,
+                'active': false,
+                'action': 'join',
+                'command': 'codex resume --remote socket thread',
+              },
+            });
+          await Future<void>.delayed(Duration.zero);
+
+          final state = container.read(sessionDetailControllerProvider(key));
+          expect(state.driveRestorePhase, SessionDriveRestorePhase.conflict);
+          expect(state.driveRestoreConflict?.code, code);
+          expect(
+            state.sessionInfo?.control?.drive.state,
+            DriveState.observing,
+          );
+          expect(
+            SessionControlView.fromSessionInfo(state.sessionInfo).canTakeOver,
+            isTrue,
+          );
+          expect(
+            fakeDriveIntentStore.intents['claude/session-1'],
+            SessionDriveProvenanceKind.appCreated,
+          );
+        },
+      );
+    }
 
     test(
       'non-driving arbitration answer preserves provenance for later reopens',
@@ -1374,6 +1445,27 @@ void main() {
     );
 
     test('renameSession updates title from the broker response', () async {
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(
+            const SessionRef(
+              tool: 'claude',
+              id: 'session-1',
+              title: 'Before',
+              status: SessionStatus.needsInput,
+            ),
+          );
+      container.read(sessionListControllerProvider);
+      fakeSessionListController.setSessions([
+        const SessionInfo(
+          id: 'session-1',
+          tool: 'claude',
+          title: 'Before',
+          status: SessionStatus.working,
+          attachMode: AttachMode.live,
+        ),
+      ]);
       keepSessionDetailAlive(container, key);
       await container
           .read(sessionDetailControllerProvider(key).notifier)
@@ -1404,7 +1496,241 @@ void main() {
         current.renameSessionActionState.phase,
         SessionActionPhase.success,
       );
+      await drainSessionDetailMicrotasks();
+      final openRef = container
+          .read(openSessionsControllerProvider)
+          .value!
+          .refs
+          .single;
+      expect(openRef.title, 'After');
+      expect(openRef.status, SessionStatus.needsInput);
+      final roster = container
+          .read(sessionListControllerProvider)
+          .sessions
+          .single;
+      expect(roster.title, 'After');
+      expect(roster.status, SessionStatus.working);
+      expect(roster.attachMode, AttachMode.live);
     });
+
+    test(
+      'rename attached to A cannot start while B is active',
+      () async {
+        final serverBClient = FakeControllerBrokerClient();
+        alternateBrokerClient = serverBClient;
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Server A detail',
+              'status': 'idle',
+              'attachMode': 'observe',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .agentActions
+              ?.canRenameNative,
+          isTrue,
+          reason: 'server A supplied the stale rename capability',
+        );
+
+        container
+            .read(activeBrokerProfileProvider.notifier)
+            .state = fakeControllerBrokerProfile(
+          baseUri: Uri.parse('http://127.0.0.1:17734'),
+        );
+        await Future<void>.delayed(Duration.zero);
+        final renamed = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .renameSession('Must not reach server B');
+
+        expect(renamed, isFalse);
+        expect(fakeBrokerClient.renameSessionCount, 0);
+        expect(serverBClient.renameSessionCount, 0);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .sessionInfo
+              ?.title,
+          'Server A detail',
+        );
+      },
+    );
+
+    test(
+      'rename does not reach a client resolved after a source switch',
+      () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Old server detail',
+              'status': 'idle',
+              'attachMode': 'observe',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        brokerClientResolution = Completer<BrokerClient?>();
+        container.invalidate(brokerClientProvider);
+        final rename = container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .renameSession('Wrong server title');
+        await Future<void>.delayed(Duration.zero);
+
+        container
+            .read(activeBrokerProfileProvider.notifier)
+            .state = fakeControllerBrokerProfile(
+          baseUri: Uri.parse('http://127.0.0.1:17734'),
+        );
+        brokerClientResolution!.complete(fakeBrokerClient);
+
+        expect(await rename, isFalse);
+        expect(fakeBrokerClient.renameSessionCount, 0);
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .sessionInfo
+              ?.title,
+          'Old server detail',
+        );
+      },
+    );
+
+    test(
+      'delayed rename cannot cross a repointed broker source',
+      () async {
+        final store = container.read(openSessionsStoreProvider);
+        expect(store, isA<LosslessOpenSessionsStore>());
+        final losslessStore = store as LosslessOpenSessionsStore;
+        final oldProfile = fakeControllerBrokerProfile();
+        final newProfile = fakeControllerBrokerProfile(
+          baseUri: Uri.parse('http://127.0.0.1:17734'),
+        );
+        final oldSource = RosterSource.ofProfile(oldProfile);
+        final newSource = RosterSource.ofProfile(newProfile);
+
+        await container.read(openSessionsControllerProvider.future);
+        container
+            .read(openSessionsControllerProvider.notifier)
+            .open(
+              const SessionRef(
+                tool: 'claude',
+                id: 'session-1',
+                title: 'Old server tab',
+                status: SessionStatus.needsInput,
+              ),
+            );
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions([
+          const SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Old server roster',
+            status: SessionStatus.working,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+        fakeConnection.emitEvent(
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Old server detail',
+              'status': 'idle',
+              'attachMode': 'observe',
+            }),
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        fakeBrokerClient.renameResponseCompleter =
+            Completer<RenameSessionResponse>();
+        final rename = container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .renameSession('Wrong server title');
+        await Future<void>.delayed(Duration.zero);
+        expect(fakeBrokerClient.renameSessionCount, 1);
+
+        container.read(activeBrokerProfileProvider.notifier).state = newProfile;
+        await container.read(openSessionsControllerProvider.future);
+        container
+            .read(openSessionsControllerProvider.notifier)
+            .open(
+              const SessionRef(
+                tool: 'claude',
+                id: 'session-1',
+                title: 'New server tab',
+                status: SessionStatus.idle,
+              ),
+            );
+        await drainSessionDetailMicrotasks();
+
+        fakeBrokerClient.renameResponseCompleter!.complete(
+          const RenameSessionResponse(ok: true, title: 'Wrong server title'),
+        );
+
+        expect(await rename, isFalse);
+        await drainSessionDetailMicrotasks();
+        expect(
+          container
+              .read(sessionDetailControllerProvider(key))
+              .sessionInfo
+              ?.title,
+          'Old server detail',
+          reason: 'the retired response must not change Session Detail',
+        );
+        expect(
+          container.read(sessionListControllerProvider).sessions.single.title,
+          'Old server roster',
+          reason: 'the retired response must not change the current roster',
+        );
+        expect(
+          container
+              .read(openSessionsControllerProvider)
+              .value!
+              .refs
+              .single
+              .title,
+          'New server tab',
+          reason: 'the retired response must not change the active tab strip',
+        );
+        expect(
+          (await losslessStore.loadLossless(
+            newSource.storageKey,
+            legacyProfileId: newProfile.id,
+          )).refs.single.title,
+          'New server tab',
+          reason: 'the retired response must not change durable tabs',
+        );
+        expect(
+          (await losslessStore.loadLossless(
+            oldSource.storageKey,
+            legacyProfileId: oldProfile.id,
+          )).refs.single.title,
+          'Old server tab',
+        );
+      },
+    );
 
     test('renameSession sends null to clear the native title', () async {
       keepSessionDetailAlive(container, key);
@@ -1670,7 +1996,7 @@ void main() {
       );
       expect(
         disconnectedContainer.read(sessionDetailControllerProvider(key)).error,
-        contains('Connect to a broker before forking'),
+        contains('Connect to a server before forking'),
       );
     });
 

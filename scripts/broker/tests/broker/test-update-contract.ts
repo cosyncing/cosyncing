@@ -78,11 +78,11 @@ check('one overlap revision behind nudges the client without disabling control',
 // The literal is a deliberate tripwire, not a duplicate of the constant: every
 // revision bump must land here and re-argue that the new revision is additive
 // before the "previous-revision client stays writable" claim is renewed.
-// Revision 11 only adds a stable typed error code. A released revision-10
-// client can ignore that new code and keeps working unchanged, so the claim
-// holds.
+// Revision 12 only adds stable typed Drive refusal codes. A released
+// revision-11 client can ignore those new codes and keeps working unchanged,
+// so the claim holds.
 check('an installed previous-revision client remains writable against the additive current broker',
-  BROKER_CONTRACT.revision === 11
+  BROKER_CONTRACT.revision === 12
     && clientBehind.status === 'client-behind'
     && !clientBehind.readOnly);
 check('one-revision overlap remains writable despite the older surface hash',

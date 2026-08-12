@@ -5,6 +5,7 @@ import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/pairing/view/pairing_page.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_hold.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,8 +33,11 @@ class ConnectionPage extends ConsumerStatefulWidget {
 
 class _ConnectionPageState extends ConsumerState<ConnectionPage>
     with WebHandoffHold<ConnectionPage> {
+  static const _defaultBrokerUrl = 'http://127.0.0.1:7734';
+
   final _urlController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  String? _committedUrl;
 
   // A half-typed broker endpoint lives only here until Connect is pressed, so
   // a web-update handoff must defer rather than clear the field (N3b).
@@ -41,20 +45,37 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage>
   List<TextEditingController> get webHandoffControllers => [_urlController];
 
   @override
+  bool webHandoffHasContent() {
+    final value = _urlController.text;
+    return value.isNotEmpty && value != _committedUrl;
+  }
+
+  @override
   void dispose() {
     _urlController.dispose();
     super.dispose();
   }
 
-  void _onConnect() {
+  Future<void> _onConnect() async {
     if (_formKey.currentState?.validate() ?? false) {
-      ref
+      if (_urlController.text.trim().isEmpty) {
+        _urlController
+          ..text = _defaultBrokerUrl
+          ..selection = const TextSelection.collapsed(
+            offset: _defaultBrokerUrl.length,
+          );
+      }
+      final connected = await ref
           .read(connectionControllerProvider.notifier)
           .connect(_urlController.text);
+      if (!mounted || !connected) return;
+      _committedUrl = _urlController.text;
+      webHandoffContentChanged();
     }
   }
 
   void _onReset() {
+    _committedUrl = null;
     _urlController.clear();
     unawaited(ref.read(connectionControllerProvider.notifier).reset());
   }
@@ -75,29 +96,82 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage>
               )
             : null,
         title: Text(l10n.connectionTitle),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          const _ManagedRuntimeOwnershipNotice(),
-          const SizedBox(height: 24),
-          _BrokerUrlForm(
-            formKey: _formKey,
-            urlController: _urlController,
-            isEnabled: connState.status != ConnectionStatus.validating,
+        actions: [
+          TextButton.icon(
+            key: const Key('connection-saved-servers'),
+            onPressed: () => context.push(brokerProfilesRoute),
+            icon: const Icon(Icons.dns_outlined),
+            label: Text(l10n.savedServers),
           ),
-          const SizedBox(height: 24),
-          _ConnectButton(
-            isLoading: connState.status == ConnectionStatus.validating,
-            onPressed: _onConnect,
-          ),
-          const SizedBox(height: 32),
-          _ConnectionStatusCard(state: connState),
-          if (connState.status != ConnectionStatus.idle) ...[
-            const SizedBox(height: 16),
-            TextButton(onPressed: _onReset, child: Text(l10n.connectionReset)),
-          ],
+          const SizedBox(width: 8),
         ],
+      ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final direct = _ConnectionMethodCard(
+              key: const Key('connection-direct-method'),
+              icon: Icons.link,
+              title: l10n.connectionDirectTitle,
+              body: l10n.connectionDirectBody,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _BrokerUrlForm(
+                    formKey: _formKey,
+                    urlController: _urlController,
+                    isEnabled: connState.status != ConnectionStatus.validating,
+                    onSubmitted: _onConnect,
+                  ),
+                  const SizedBox(height: 16),
+                  _ConnectButton(
+                    isLoading: connState.status == ConnectionStatus.validating,
+                    onPressed: _onConnect,
+                  ),
+                  const SizedBox(height: 24),
+                  _ConnectionStatusCard(state: connState),
+                  if (connState.status != ConnectionStatus.idle) ...[
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: _onReset,
+                      child: Text(l10n.connectionReset),
+                    ),
+                  ],
+                ],
+              ),
+            );
+            const pair = _PairingConnectionMethod();
+            final methods = constraints.maxWidth >= 900
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: direct),
+                      const SizedBox(width: 20),
+                      const Expanded(child: pair),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [direct, const SizedBox(height: 20), pair],
+                  );
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1120),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const _ManagedRuntimeOwnershipNotice(),
+                      const SizedBox(height: 24),
+                      methods,
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -157,11 +231,13 @@ class _BrokerUrlForm extends StatelessWidget {
     required this.formKey,
     required this.urlController,
     required this.isEnabled,
+    required this.onSubmitted,
   });
 
   final GlobalKey<FormState> formKey;
   final TextEditingController urlController;
   final bool isEnabled;
+  final VoidCallback onSubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -177,21 +253,18 @@ class _BrokerUrlForm extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           TextFormField(
+            key: const Key('connection-server-address-field'),
             controller: urlController,
             enabled: isEnabled,
             decoration: const InputDecoration(
-              hintText: 'http://127.0.0.1:7734',
+              hintText: _ConnectionPageState._defaultBrokerUrl,
               border: OutlineInputBorder(),
               prefixIcon: Icon(Icons.link),
             ),
             keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.done,
             autocorrect: false,
-            validator: (value) {
-              if (value == null || value.trim().isEmpty) {
-                return l10n.connectionBrokerUrlRequired;
-              }
-              return null;
-            },
+            onFieldSubmitted: isEnabled ? (_) => onSubmitted() : null,
           ),
           const SizedBox(height: 8),
           SelectableText(
@@ -202,6 +275,74 @@ class _BrokerUrlForm extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _PairingConnectionMethod extends StatelessWidget {
+  const _PairingConnectionMethod();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return _ConnectionMethodCard(
+      key: const Key('connection-pair-method'),
+      icon: Icons.qr_code_2,
+      title: l10n.connectionPairTitle,
+      body: l10n.connectionPairBody,
+      child: const PairingForm(showHeader: false),
+    );
+  }
+}
+
+class _ConnectionMethodCard extends StatelessWidget {
+  const _ConnectionMethodCard({
+    required this.icon,
+    required this.title,
+    required this.body,
+    required this.child,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: tokens.accent),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    body,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: tokens.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        child,
+      ],
     );
   }
 }

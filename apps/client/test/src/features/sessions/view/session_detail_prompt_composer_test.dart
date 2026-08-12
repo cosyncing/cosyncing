@@ -607,6 +607,13 @@ void main() {
 
       expect(find.byKey(const Key('voice-input-status')), findsOneWidget);
       expect(find.text('Microphone permission was denied.'), findsOneWidget);
+      expect(
+        find.widgetWithText(
+          SelectableText,
+          'Microphone permission was denied.',
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('keeps composer controls visible across widths', (
@@ -726,10 +733,11 @@ void main() {
           disconnectedInput.controller?.text,
           'staged while reconnecting',
         );
-        final disconnectedSendButton = tester.widget<IconButton>(
+        expect(disconnectedInput.decoration?.hintText, 'Draft a prompt');
+        expect(
           find.byKey(const Key('session-detail-send-button')),
+          findsNothing,
         );
-        expect(disconnectedSendButton.onPressed, isNull);
         final attachButton = tester.widget<IconButton>(
           find.byKey(const Key('session-detail-attach-button')),
         );

@@ -239,6 +239,45 @@ with_repo('public-hosted') do |dir|
   )
 end
 
+# (e) Bun's interrupted-compile scratch never reaches the gate.
+#
+# `bun build --compile` writes a mode-000 `.bun-build` file in the repository
+# root and unlinks it on success, so one only survives a killed build. The gate
+# reads every path its discovery command returns, so a single survivor aborts it
+# on EACCES; the repository's ignore rule is the only thing keeping the file out
+# of that command. The rule is copied from the real `.gitignore` instead of being
+# restated here, so narrowing it back to a leading-dot pattern turns this red.
+#
+# The discovery assertion is the binding one because it holds for any uid. The
+# gate-survives assertion is uid-dependent — root can read a mode-000 file — so
+# it is evidence rather than the contract.
+REPOSITORY_GITIGNORE = File.expand_path(File.join(__dir__, '..', '..', '..', '.gitignore'))
+BUN_SCRATCH_NAMES = ['.0a1b2c3d4e5f-0.bun-build', 'plain.bun-build'].freeze
+
+with_repo('public-hosted') do |dir|
+  FileUtils.cp(REPOSITORY_GITIGNORE, File.join(dir, '.gitignore'))
+  BUN_SCRATCH_NAMES.each do |name|
+    scratch = File.join(dir, name)
+    File.write(scratch, "interrupted compile\n")
+    File.chmod(0o000, scratch)
+  end
+  discovered, discovery_status = Open3.capture2(
+    GIT_ENV, 'git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', chdir: dir
+  )
+  visible = discovered.split("\0").reject(&:empty?) & BUN_SCRATCH_NAMES
+  output, status = run_gate(dir)
+  BUN_SCRATCH_NAMES.each { |name| File.chmod(0o600, File.join(dir, name)) }
+  record(
+    'the shipped ignore rule hides both bun-build scratch shapes from discovery',
+    discovery_status.success? && visible.empty?,
+    "reached the gate: #{visible.join(', ')}"
+  )
+  record(
+    'an unreadable bun-build scratch does not abort the gate',
+    status.success?, output
+  )
+end
+
 if FAILURES.empty?
   puts 'PASS: public-tree policy regressions hold.'
 else

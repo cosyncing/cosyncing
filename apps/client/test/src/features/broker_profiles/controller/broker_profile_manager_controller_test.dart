@@ -487,7 +487,7 @@ void main() {
             isA<BrokerProfileManagerException>().having(
               (error) => error.message,
               'message',
-              contains('revoke'),
+              contains('active server'),
             ),
           ),
         );

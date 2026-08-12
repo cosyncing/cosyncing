@@ -50,15 +50,39 @@ void main() {
       tester,
     ) async {
       final brokerClient = FakeBrokerClient();
+      final openSessions = InMemoryOpenSessionsStore(
+        snapshot: const OpenSessionsSnapshot(
+          refs: [
+            SessionRef(
+              tool: 'claude',
+              id: 'session-1',
+              title: 'Before',
+              status: SessionStatus.idle,
+            ),
+            SessionRef(
+              tool: 'codex',
+              id: 'other',
+              title: 'Other',
+              status: SessionStatus.idle,
+            ),
+          ],
+          activeKey: 'claude/session-1',
+        ),
+      );
+      tester.view.physicalSize = const Size(600, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       await tester.pumpWidget(
         buildSessionDetailTestPage(
           events: [sessionEvent('Before')],
           brokerClient: brokerClient,
+          openSessionsStore: openSessions,
         ),
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Before'), findsOneWidget);
+      expect(find.text('Before'), findsNWidgets(2));
       // The title is the affordance: tapping converts it in place, and Enter
       // commits. There is no dialog and no save button any more.
       await tester.tap(
@@ -74,8 +98,15 @@ void main() {
 
       expect(brokerClient.renameSessionCount, 1);
       expect(brokerClient.lastRenameTitle, 'After');
-      expect(find.text('After'), findsOneWidget);
+      expect(find.text('After'), findsNWidgets(2));
       expect(find.text('Before'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('open-session-tab-claude/session-1')),
+          matching: find.text('After'),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('hides rename when the broker capability is unavailable', (

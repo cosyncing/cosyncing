@@ -382,7 +382,12 @@ function contextFor(options: {
       return {
         status: 'ok' as const,
         exitCode: 0,
-        stdout: JSON.stringify({ BackendState: 'Running', Self: { DNSName: 'devbox.tailnet.ts.net.' } }),
+        // A real node reports its own addresses here; setup reads them for the DNS-independent
+        // verification fallback, so the fixture has to carry them for that path to be exercised.
+        stdout: JSON.stringify({
+          BackendState: 'Running',
+          Self: { DNSName: 'devbox.tailnet.ts.net.', TailscaleIPs: ['100.64.0.1', 'fd7a:115c:a1e0::1'] },
+        }),
         stderr: '',
       };
     }
@@ -2199,6 +2204,60 @@ try {
     check('delayed advertised success leaves no polling timer behind',
       clock.schedules === 2 && clock.cancellations === 2 && clock.pending.size === 0,
       `scheduled=${clock.schedules} cancelled=${clock.cancellations} pending=${clock.pending.size}`);
+  }
+
+  // ── setup commits on a host whose MagicDNS will not resolve ──
+  // The advertised NAME never answers. Addresses come from the fixture's real `tailscale status --json`
+  // (NOT injected), so removing setup's fallback wiring makes this fail. Identity is still mandatory.
+  {
+    const commitVia = async (label: string, machineLabel: string) => {
+      const machine = join(root, label);
+      const provider = new FakeLaunchdProvider(machine);
+      const tailscale = new FakeTailscaleProvider();
+      const clock = new ImmediatePollingClock();
+      const contacted: string[] = [];
+      const result = await runSetup(setupOptions({
+        root: machine,
+        provider,
+        tailscale,
+        presenter: new ServicePresenter({ service: 'launchd', tailscale: true }),
+        platform: 'darwin',
+        buildInfo: { ...BUILD_INFO, packaged: true, target: 'darwin-arm64' },
+        advertisedHealth: () => ({ status: 'unreachable' }),
+        advertisedEndpointVerification: {
+          timeoutMs: 2_500,
+          intervalMs: 500,
+          clock,
+          directProbe: async ({ address, hostname }) => {
+            contacted.push(`${address}|${hostname}`);
+            return { status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: machineLabel } };
+          },
+        },
+      }));
+      return { result, tailscale, provider, contacted, home: join(machine, '.cosyncing') };
+    };
+
+    const committed = await commitVia(
+      'launchd-tailscale-broken-dns',
+      defaultBrokerConfig().broker.machineLabel,
+    );
+    check('setup commits by verifying the advertised route through addresses from tailscale status --json',
+      committed.result.status === 'complete'
+        && inspectInstallState(committed.home).committed
+        && committed.tailscale.route === 'desired'
+        && committed.tailscale.events.join(',') === 'register'
+        && committed.contacted[0] === '100.64.0.1|devbox.tailnet.ts.net',
+      `${committed.result.status} contacted=${committed.contacted.join(',')} route=${committed.tailscale.route}`);
+
+    const foreign = await commitVia('launchd-tailscale-foreign-identity', 'another-machine');
+    check('setup rolls the route back when the address answers as a different machine',
+      foreign.result.status === 'failed'
+        && foreign.result.failure?.code === 'verify-post-commit'
+        && foreign.result.failure.rollback === 'complete'
+        && foreign.tailscale.events.join(',') === 'register,remove'
+        && foreign.tailscale.route === 'missing'
+        && !inspectInstallState(foreign.home).committed,
+      `${foreign.result.status}:${foreign.result.failure?.rollback} route=${foreign.tailscale.route}`);
   }
 
   {

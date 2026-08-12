@@ -151,6 +151,38 @@ void main() {
       expect(state.refs.single.title, 'Fresh title');
     });
 
+    test(
+      'accepted rename updates and persists title without changing status',
+      () async {
+        final first = buildContainer(profile: _profile('p1'));
+        await first.read(openSessionsControllerProvider.future);
+        first.read(openSessionsControllerProvider.notifier)
+          ..open(
+            _ref(
+              'codex',
+              'a',
+              title: 'Before',
+              status: SessionStatus.needsInput,
+            ),
+          )
+          ..renameSessionTitle('codex', 'a', 'After');
+        await _settle();
+
+        final renamed = first.read(openSessionsControllerProvider).value!;
+        expect(renamed.refs.single.title, 'After');
+        expect(renamed.refs.single.status, SessionStatus.needsInput);
+        first.dispose();
+
+        final second = buildContainer(profile: _profile('p1'));
+        addTearDown(second.dispose);
+        final restored = await second.read(
+          openSessionsControllerProvider.future,
+        );
+        expect(restored.refs.single.title, 'After');
+        expect(restored.refs.single.status, SessionStatus.needsInput);
+      },
+    );
+
     test('persists and restores across a fresh container', () async {
       final first = buildContainer(profile: _profile('p1'));
       await first.read(openSessionsControllerProvider.future);

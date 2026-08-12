@@ -282,6 +282,107 @@ void main() {
       );
     });
 
+    for (final variant in const [
+      (
+        platform: TargetPlatform.linux,
+        brightness: Brightness.light,
+        locale: Locale('en'),
+        extent: 32.0,
+      ),
+      (
+        platform: TargetPlatform.windows,
+        brightness: Brightness.dark,
+        locale: Locale('zh'),
+        extent: 32.0,
+      ),
+      (
+        platform: TargetPlatform.android,
+        brightness: Brightness.dark,
+        locale: Locale('zh'),
+        extent: 40.0,
+      ),
+      (
+        platform: TargetPlatform.iOS,
+        brightness: Brightness.light,
+        locale: Locale('en'),
+        extent: 40.0,
+      ),
+    ]) {
+      testWidgets(
+        '${variant.platform.name} code header and copy hit target are '
+        '${variant.extent.toInt()}dp',
+        (tester) async {
+          await _pumpMarkdown(
+            tester,
+            allCategoriesFence,
+            brightness: variant.brightness,
+            platform: variant.platform,
+            locale: variant.locale,
+          );
+
+          final header = find.byKey(
+            const ValueKey('markdown-code-block-0-header'),
+          );
+          final copy = find.byKey(
+            const ValueKey('markdown-code-block-0-copy'),
+          );
+          expect(tester.getSize(header).height, variant.extent);
+          expect(tester.getSize(copy), Size.square(variant.extent));
+          expect(
+            tester
+                .widget<Icon>(
+                  find.descendant(of: copy, matching: find.byType(Icon)),
+                )
+                .size,
+            14,
+          );
+          expect(
+            tester.getRect(header).bottom,
+            tester.getRect(copy).bottom,
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
+    testWidgets('code header goldens cover EN/ZH and both brightnesses', (
+      tester,
+    ) async {
+      for (final variant in const [
+        (
+          locale: Locale('en'),
+          brightness: Brightness.light,
+          file: 'goldens/code_header_light_en.png',
+        ),
+        (
+          locale: Locale('zh'),
+          brightness: Brightness.light,
+          file: 'goldens/code_header_light_zh.png',
+        ),
+        (
+          locale: Locale('en'),
+          brightness: Brightness.dark,
+          file: 'goldens/code_header_dark_en.png',
+        ),
+        (
+          locale: Locale('zh'),
+          brightness: Brightness.dark,
+          file: 'goldens/code_header_dark_zh.png',
+        ),
+      ]) {
+        await _pumpMarkdown(
+          tester,
+          allCategoriesFence,
+          locale: variant.locale,
+          brightness: variant.brightness,
+        );
+        await expectLater(
+          find.byKey(const ValueKey('markdown-code-block-0')),
+          matchesGoldenFile(variant.file),
+        );
+      }
+    });
+
     testWidgets('header copy returns the exact authored source', (
       tester,
     ) async {
@@ -304,13 +405,24 @@ void main() {
       );
 
       await _pumpMarkdown(tester, allCategoriesFence);
-      await tester.tap(
-        find.byKey(const ValueKey('markdown-code-block-0-copy')),
-      );
+      final copy = find.byKey(const ValueKey('markdown-code-block-0-copy'));
+      final copyFocus = Focus.of(
+        tester.element(
+          find.descendant(of: copy, matching: find.byType(Icon)),
+        ),
+      )..requestFocus();
+      await tester.pump();
+      expect(copyFocus.hasFocus, isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
 
       expect(clipboardText, allCategoriesSource);
       expect(find.text('Code copied'), findsOneWidget);
+
+      clipboardText = null;
+      await tester.tap(copy);
+      await tester.pumpAndSettle();
+      expect(clipboardText, allCategoriesSource);
       expect(tester.takeException(), isNull);
     });
 
@@ -565,6 +677,8 @@ Future<ThemeData> _pumpMarkdown(
   UiDensity density = UiDensity.comfortable,
   TextScaler textScaler = TextScaler.noScaling,
   Size viewSize = const Size(800, 600),
+  TargetPlatform platform = TargetPlatform.linux,
+  Locale locale = const Locale('en'),
 }) async {
   tester.view
     ..physicalSize = viewSize
@@ -577,12 +691,13 @@ Future<ThemeData> _pumpMarkdown(
     brightness == Brightness.dark ? spec.dark : spec.light,
     brightness,
     density: density.visualDensity,
-  );
+  ).copyWith(platform: platform);
   late ThemeData resolvedTheme;
   await tester.pumpWidget(
     MediaQuery(
       data: MediaQueryData(textScaler: textScaler),
       child: MaterialApp(
+        locale: locale,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: theme,

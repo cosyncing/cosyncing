@@ -15,7 +15,7 @@ void main() {
         title: 'Command permission mode',
         body:
             'Applies to slash commands sent from this composer. Regular '
-            'prompts keep the permission mode published by the Broker.',
+            'prompts keep the permission mode published by the Server.',
         ask: 'Ask permission',
         approve: 'Approve for me',
       ),
@@ -24,7 +24,7 @@ void main() {
         fallback: '权限',
         title: '命令权限模式',
         body:
-            '适用于从此输入框发送的斜杠命令。普通提示词仍沿用 Broker '
+            '适用于从此输入框发送的斜杠命令。普通提示词仍沿用服务器'
             '发布的权限模式。',
         ask: '每次询问',
         approve: '自动批准',

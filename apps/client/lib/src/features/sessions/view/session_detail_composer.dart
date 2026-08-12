@@ -8,6 +8,10 @@ part of 'session_detail_page.dart';
 /// context meter drops from `verbose` to `ring`.
 const double kComposerCollapseWidth = 420;
 
+/// Observe ownership-choice bar threshold, intentionally independent from the
+/// general composer control collapse policy above.
+const double kObserveComposerActionCollapseWidth = 420;
+
 /// Glyph for the slash-command affordance.
 ///
 /// `Icons.terminal` muddies into a filled rectangle at control-row sizes and
@@ -760,6 +764,334 @@ class _PromptComposer extends ConsumerStatefulWidget {
   ConsumerState<_PromptComposer> createState() => _PromptComposerState();
 }
 
+/// Explains why prompt mutation is unavailable while preserving the editable
+/// durable-draft surface directly below it.
+class _ObserveComposerBar extends ConsumerStatefulWidget {
+  const _ObserveComposerBar({
+    required this.control,
+    required this.sessionKey,
+    required this.conflict,
+  });
+
+  final SessionControlView control;
+  final SessionDetailKey sessionKey;
+  final SessionDriveRestoreConflict? conflict;
+
+  @override
+  ConsumerState<_ObserveComposerBar> createState() =>
+      _ObserveComposerBarState();
+}
+
+class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
+  bool _takeOverPending = false;
+  bool _copyPending = false;
+
+  Future<void> _takeOver() async {
+    if (_takeOverPending || _copyPending) return;
+    setState(() => _takeOverPending = true);
+    try {
+      await _confirmAndTakeOver(context, ref, widget.sessionKey);
+    } finally {
+      if (mounted) setState(() => _takeOverPending = false);
+    }
+  }
+
+  Future<void> _copySyncCommand(String command) async {
+    if (_copyPending || _takeOverPending) return;
+    setState(() => _copyPending = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = AppLocalizations.of(context);
+    try {
+      await Clipboard.setData(ClipboardData(text: command));
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text(l10n.sessionSyncCommandCopied)),
+        );
+    } on PlatformException {
+      if (!mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text(l10n.sessionCopyCommandFailed)),
+        );
+    } finally {
+      if (mounted) setState(() => _copyPending = false);
+    }
+  }
+
+  Widget _takeOverButton(AppLocalizations l10n) {
+    return FilledButton(
+      key: const Key('session-detail-composer-take-over-button'),
+      onPressed: _takeOverPending || _copyPending
+          ? null
+          : () => unawaited(_takeOver()),
+      child: Text(l10n.sessionTakeOver),
+    );
+  }
+
+  Widget _copyButton(
+    AppLocalizations l10n,
+    String command, {
+    required bool labeled,
+  }) {
+    final enabled = !_copyPending && !_takeOverPending;
+    return Semantics(
+      key: const Key('session-detail-composer-copy-sync-command'),
+      label: l10n.sessionCopyTerminalSyncCommand,
+      button: true,
+      enabled: enabled,
+      onTap: enabled ? () => unawaited(_copySyncCommand(command)) : null,
+      child: ExcludeSemantics(
+        child: labeled
+            ? TextButton.icon(
+                onPressed: enabled
+                    ? () => unawaited(_copySyncCommand(command))
+                    : null,
+                icon: const Icon(Icons.content_copy_outlined, size: 16),
+                label: Text(l10n.sessionCopySyncCommand),
+              )
+            : Tooltip(
+                message: l10n.sessionCopyTerminalSyncCommand,
+                child: IconButton(
+                  onPressed: enabled
+                      ? () => unawaited(_copySyncCommand(command))
+                      : null,
+                  icon: const Icon(Icons.content_copy_outlined, size: 16),
+                  style: IconButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size.square(40),
+                    maximumSize: const Size.square(40),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _syncChoiceBar(
+    BuildContext context,
+    AppLocalizations l10n,
+    String command,
+    BoxConstraints constraints,
+    String? takeoverRefusal,
+  ) {
+    final tokens = context.tokens;
+    final compact = constraints.maxWidth <= kObserveComposerActionCollapseWidth;
+    final roomy = constraints.maxWidth >= 600;
+    final largeText = MediaQuery.textScalerOf(context).scale(1) >= 1.5;
+    final hasTakeOver = widget.control.canTakeOver;
+    final description =
+        takeoverRefusal ??
+        (roomy
+            ? l10n.sessionComposerTerminalNotSynced
+            : l10n.sessionComposerTerminalNotSyncedCompact);
+    final showPersistentRefusal = takeoverRefusal != null;
+    final copy = _copyButton(l10n, command, labeled: !compact);
+    final takeOver = hasTakeOver ? _takeOverButton(l10n) : null;
+
+    List<Widget> actionChildren({required bool showOr}) => [
+      copy,
+      if (showOr && takeOver != null)
+        Text(
+          l10n.sessionChoiceOr,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
+        ),
+      if (takeOver != null) takeOver,
+    ];
+
+    Widget actions({required bool showOr, required bool allowWrap}) {
+      final children = actionChildren(showOr: showOr);
+      return allowWrap
+          ? Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: children,
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 8,
+              children: children,
+            );
+    }
+
+    final explanation = SelectionArea(
+      child: Text(
+        description,
+        key: Key(
+          showPersistentRefusal
+              ? 'session-detail-observe-composer-refusal'
+              : 'session-detail-observe-composer-description',
+        ),
+        style:
+            Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(
+              color: showPersistentRefusal
+                  ? tokens.statusError
+                  : tokens.textSecondary,
+            ),
+      ),
+    );
+
+    final stackContent = largeText || showPersistentRefusal;
+
+    return Semantics(
+      container: true,
+      label: description,
+      child: Container(
+        key: const Key('session-detail-observe-composer-bar'),
+        constraints: BoxConstraints(minHeight: stackContent ? 64 : 40),
+        height: stackContent ? null : 40,
+        padding: EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: stackContent ? 8 : 0,
+        ),
+        decoration: BoxDecoration(
+          color: tokens.surface,
+          borderRadius: BorderRadius.circular(tokens.radiusLg),
+        ),
+        child: stackContent
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  explanation,
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: AlignmentDirectional.centerEnd,
+                    child: actions(showOr: compact, allowWrap: true),
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  Expanded(child: explanation),
+                  const SizedBox(width: 8),
+                  actions(showOr: compact, allowWrap: false),
+                ],
+              ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    final conflict = widget.conflict;
+    final takeoverRefusal = conflict?.reason == kDriveAttachReasonTakeover
+        ? _driveConflictFeedback(l10n, conflict!)
+        : null;
+    final joinCommand = _usableJoinCommand(widget.control);
+    final takeOverOnly =
+        joinCommand == null &&
+        widget.control.action == SessionControlAction.join &&
+        widget.control.canTakeOver;
+    final joinUnavailable =
+        joinCommand == null &&
+        widget.control.action == SessionControlAction.join &&
+        !widget.control.canTakeOver;
+    final description =
+        takeoverRefusal ??
+        (joinUnavailable
+            ? l10n.sessionControlUnavailableDescription
+            : takeOverOnly
+            ? l10n.sessionControlObservingDescription
+            : _controlStatusDescription(l10n, widget.control));
+    final stateLabel = switch (widget.control.pill) {
+      SessionControlPill.synced => l10n.sessionControlSynced,
+      SessionControlPill.driving => l10n.sessionControlDriving,
+      SessionControlPill.syncAvailable => l10n.sessionControlSyncAvailable,
+      SessionControlPill.observing => l10n.sessionControlObserving,
+      SessionControlPill.unavailable => l10n.sessionControlUnavailable,
+      SessionControlPill.unknown => l10n.sessionControlUnknownDescription,
+    };
+    final icon = switch (widget.control.pill) {
+      SessionControlPill.observing => Icons.visibility_outlined,
+      SessionControlPill.synced => Icons.sync,
+      SessionControlPill.syncAvailable when !takeOverOnly => Icons.sync,
+      SessionControlPill.syncAvailable => Icons.visibility_outlined,
+      _ => Icons.block_outlined,
+    };
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (joinCommand != null) {
+          return _syncChoiceBar(
+            context,
+            l10n,
+            joinCommand,
+            constraints,
+            takeoverRefusal,
+          );
+        }
+        final compact =
+            constraints.maxWidth <= kObserveComposerActionCollapseWidth;
+        Widget? action;
+        if (widget.control.canTakeOver) {
+          final button = _takeOverButton(l10n);
+          action = compact
+              ? Tooltip(message: description, child: button)
+              : button;
+        }
+        final hideDescription = compact && action != null;
+        return Semantics(
+          container: true,
+          label: '$stateLabel. $description',
+          child: Container(
+            key: const Key('session-detail-observe-composer-bar'),
+            height: 40,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: tokens.surface,
+              borderRadius: BorderRadius.circular(tokens.radiusLg),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 16, color: tokens.textSecondary),
+                const SizedBox(width: 8),
+                if (!hideDescription)
+                  Expanded(
+                    child: ExcludeSemantics(
+                      child: SelectionArea(
+                        child: Text(
+                          description,
+                          key: Key(
+                            takeoverRefusal != null
+                                ? 'session-detail-observe-composer-refusal'
+                                : 'session-detail-observe-composer-description',
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: takeoverRefusal != null
+                                    ? tokens.statusError
+                                    : tokens.textSecondary,
+                              ),
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  const Spacer(),
+                if (action != null) action,
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _PromptComposerState extends ConsumerState<_PromptComposer>
     with _SlashPaletteHost, _SessionAttachmentIntakeComposerHost {
   bool _voiceWasRequested = false;
@@ -1081,7 +1413,7 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
                 sendButton,
                 const SizedBox(width: 4),
                 interruptButton,
-              ] else
+              ] else if (widget.controlsEnabled)
                 sendButton,
             ],
           ),
@@ -1139,7 +1471,9 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
                   textInputAction: TextInputAction.newline,
                   style: theme.textTheme.bodyMedium,
                   decoration: InputDecoration(
-                    hintText: l10n.sessionComposerPromptHint,
+                    hintText: widget.controlsEnabled
+                        ? l10n.sessionComposerPromptHint
+                        : l10n.sessionComposerDraftHint,
                     hintStyle: theme.textTheme.bodyMedium?.copyWith(
                       color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
                     ),
@@ -1169,7 +1503,7 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
             if (voiceStatus != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                child: Text(
+                child: SelectableText(
                   key: const Key('voice-input-status'),
                   voiceStatus,
                   style: theme.textTheme.bodySmall?.copyWith(
@@ -1566,23 +1900,33 @@ class _CommandPickerSheetState extends State<_CommandPickerSheet> {
                   errorText: argsError,
                 ),
               ),
-              const SizedBox(height: 6),
-              if ((selectedCommand.description ?? '').isNotEmpty)
-                Text(
-                  selectedCommand.description!,
-                  style: theme.textTheme.bodySmall,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              if ((selectedCommand.usage ?? '').isNotEmpty)
-                Text(
-                  selectedCommand.usage!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+              if ((selectedCommand.description ?? '').isNotEmpty ||
+                  (selectedCommand.usage ?? '').isNotEmpty) ...[
+                const SizedBox(height: 8),
+                SelectionArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if ((selectedCommand.description ?? '').isNotEmpty)
+                        Text(
+                          selectedCommand.description!,
+                          style: theme.textTheme.bodySmall,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      if ((selectedCommand.usage ?? '').isNotEmpty)
+                        Text(
+                          selectedCommand.usage!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
+              ],
             ],
           ],
         ),

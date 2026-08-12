@@ -74,7 +74,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('No broker profiles yet'), findsOneWidget);
+      expect(find.text('No saved servers yet'), findsOneWidget);
       expect(
         find.byKey(const Key('broker-profile-empty-open-connection')),
         findsOneWidget,
@@ -85,7 +85,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Broker URL'), findsOneWidget);
+      expect(find.text('Server address'), findsOneWidget);
       expect(
         find.byKey(const Key('broker-profile-empty-open-connection')),
         findsNothing,
@@ -104,7 +104,7 @@ void main() {
 
       expect(
         find.text(
-          "Couldn't load broker profiles. Try again. If it keeps happening, "
+          "Couldn't load saved servers. Try again. If it keeps happening, "
           'the technical details can help support.',
         ),
         findsOneWidget,
@@ -143,6 +143,20 @@ void main() {
       expect(find.text('http://127.0.0.1:7734'), findsOneWidget);
       expect(find.text('http://broker.example.com:9443'), findsOneWidget);
       expect(find.text('Active'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('Local'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('http://127.0.0.1:7734'),
+          matching: find.byType(SelectionArea),
+        ),
+        findsOneWidget,
+      );
       expect(
         find.byKey(const Key('broker-profile-activate-http_127_0_0_1_7734')),
         findsOneWidget,

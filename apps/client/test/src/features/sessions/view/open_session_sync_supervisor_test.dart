@@ -846,6 +846,9 @@ void main() {
             activeBrokerProfileProvider.overrideWith(
               (ref) => _profile(endpoint: 'http://127.0.0.1:7734'),
             ),
+            brokerClientProvider.overrideWith(
+              (ref) async => FakeControllerBrokerClient(),
+            ),
             openSessionsStoreProvider.overrideWithValue(store),
             sessionNotificationLifecycleMonitorProvider.overrideWithValue(
               lifecycle,

@@ -185,8 +185,11 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'No private advertised endpoint is configured; the broker remains loopback-only.': '未配置私有公开端点；broker 仍仅限本机访问。',
   'Configure Tailscale Serve only if private remote access is wanted.': '仅在需要私有远程访问时配置 Tailscale Serve。',
   'The advertised private endpoint is reachable.': '私有公开端点可访问。',
+  'The advertised private endpoint is reachable and answers as this broker.': '私有公开端点可访问，且响应身份就是本 broker。',
   'The configured advertised endpoint is unreachable.': '无法访问已配置的公开端点。',
+  'The advertised endpoint answered, but not as this cosyncing broker.': '公开端点有响应，但其身份并非本 cosyncing broker。',
   'Repair the private Serve route or advertised URL.': '请修复私有 Serve 路由或公开 URL。',
+  'Another service or broker answers the advertised route; reconcile it before relying on it.': '当前占用该公开路由的是其他服务或 broker；请先处理该冲突再依赖它。',
   'Update cosyncing to a build with complete adapter diagnosis.': '请将 cosyncing 更新到包含完整适配器诊断的版本。',
   'Retry diagnosis after checking the agent installation.': '检查智能体安装后，请重试诊断。',
   'Repair or reinstall the packaged runtime assets.': '请修复或重新安装发行包运行时资源。',
@@ -222,7 +225,8 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'The Pi bridge extension is not installed.': '未安装 Pi bridge 扩展。',
   'Install the packaged Pi bridge through setup.': '请通过 setup 安装发行包中的 Pi bridge。',
   'A legacy cosyncing Pi bridge is present and requires confirmation before replacement.': '存在旧版 cosyncing Pi bridge；替换前需要确认。',
-  'Review and reconcile the legacy bridge.': '请检查并修复旧版 bridge。',
+  'Rerun setup and confirm replacement of the exact known legacy bridge.':
+    '请重新运行安装，并确认替换内容完全匹配的已知旧版 bridge。',
   'The Pi bridge target contains unowned content and will not be overwritten.': 'Pi bridge 目标中含有非自有内容，不会被覆盖。',
   'Back up or relocate the existing extension, then rerun `cosyncing repair`.': '请备份或移动现有扩展，然后重新运行 `cosyncing repair`。',
   'The Pi bridge target cannot be inspected safely.': '无法安全检查 Pi bridge 目标。',
@@ -428,8 +432,22 @@ const en: CliMessages = {
     }).join(', ') : 'broker unavailable'}${report.agents.some((agent) => agent.canCreateSession === false)
       ? `; run ${PRODUCT_IDENTITY.primaryBinary} doctor for creation setup guidance`
       : ''}`,
-    sessions: (report) => `Sessions: ${report.sessions ? `${report.sessions.active} active / ${report.sessions.total} total` : 'broker unavailable'}`,
-    updates: (report) => `Updates: ${report.updates ? `${report.updates.pending} pending` : 'broker unavailable'}`,
+    // "unreadable" is never folded into "broker unavailable": the broker answered, and telling the
+    // operator it is unavailable sends them to restart a service that is running correctly.
+    //
+    // It points at `logs`, not at `doctor`. Doctor reads fixed-size documents; nothing it does looks
+    // at the roster, so it would report a healthy broker and leave this line unexplained. The broker's
+    // own log covers the request that produced the response, which is where the answer actually is.
+    sessions: (report) => `Sessions: ${report.sessions === null
+      ? 'broker unavailable'
+      : report.sessions === 'unreadable'
+        ? `broker answered but the roster could not be read; run ${PRODUCT_IDENTITY.primaryBinary} logs`
+        : `${report.sessions.active} active / ${report.sessions.total} total`}`,
+    updates: (report) => `Updates: ${report.updates === null
+      ? 'broker unavailable'
+      : report.updates === 'unreadable'
+        ? `broker answered but the update list could not be read; run ${PRODUCT_IDENTITY.primaryBinary} doctor`
+        : `${report.updates.pending} pending`}`,
     fix: (detailCodes) => `Fix: ${detailCodes.join(', ')}; run ${PRODUCT_IDENTITY.primaryBinary} doctor.`,
   },
   uninstall: {
@@ -557,8 +575,16 @@ const zhHans: CliMessages = {
     }).join(', ') : 'broker 不可用'}${report.agents.some((agent) => agent.canCreateSession === false)
       ? `；会话创建配置请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor 检查`
       : ''}`,
-    sessions: (report) => `会话：${report.sessions ? `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个` : 'broker 不可用'}`,
-    updates: (report) => `更新：${report.updates ? `${report.updates.pending} 个待处理` : 'broker 不可用'}`,
+    sessions: (report) => `会话：${report.sessions === null
+      ? 'broker 不可用'
+      : report.sessions === 'unreadable'
+        ? `broker 有响应，但会话列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} logs`
+        : `${report.sessions.active} 个活跃 / 共 ${report.sessions.total} 个`}`,
+    updates: (report) => `更新：${report.updates === null
+      ? 'broker 不可用'
+      : report.updates === 'unreadable'
+        ? `broker 有响应，但更新列表无法读取；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor`
+        : `${report.updates.pending} 个待处理`}`,
     fix: (detailCodes) => `处理：${detailCodes.join(', ')}；请运行 ${PRODUCT_IDENTITY.primaryBinary} doctor。`,
   },
   uninstall: {

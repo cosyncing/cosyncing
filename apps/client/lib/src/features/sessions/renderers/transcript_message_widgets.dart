@@ -15,9 +15,7 @@ class _TranscriptBubble extends StatelessWidget {
     required this.title,
     required this.summary,
     required this.payloadRows,
-    this.readOnlyHint,
     this.detailContent,
-    this.isError = false,
     this.isUserMessage = false,
     this.isQueued = false,
   });
@@ -26,9 +24,7 @@ class _TranscriptBubble extends StatelessWidget {
   final String title;
   final String summary;
   final List<MapEntry<String, Object?>> payloadRows;
-  final String? readOnlyHint;
   final Widget? detailContent;
-  final bool isError;
   final bool isUserMessage;
   final bool isQueued;
 
@@ -36,14 +32,10 @@ class _TranscriptBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
-    final accentColor = isError
-        ? theme.colorScheme.error
-        : isUserMessage
+    final accentColor = isUserMessage
         ? theme.colorScheme.primary
         : theme.colorScheme.primaryContainer;
-    final backgroundColor = isError
-        ? theme.colorScheme.errorContainer.withValues(alpha: 0.35)
-        : isUserMessage
+    final backgroundColor = isUserMessage
         ? theme.colorScheme.primaryContainer.withValues(alpha: 0.75)
         : theme.colorScheme.surfaceContainerHighest;
     final timestamp = TranscriptMessageMetadataScope.timestampOf(context);
@@ -78,12 +70,6 @@ class _TranscriptBubble extends StatelessWidget {
                           ),
                         ),
                       ),
-                      if (isError)
-                        Icon(
-                          Icons.warning_amber,
-                          color: theme.colorScheme.error,
-                          size: 18,
-                        ),
                       if (isQueued)
                         _ToolMetadataChip(
                           key: const Key('queued-user-message-badge'),
@@ -101,10 +87,6 @@ class _TranscriptBubble extends StatelessWidget {
                       ],
                     ],
                   ),
-                  if (readOnlyHint != null) ...[
-                    const SizedBox(height: 8),
-                    _ReadOnlyHint(label: l10n.readOnlySuffix(readOnlyHint!)),
-                  ],
                   const SizedBox(height: 8),
                   _MarkdownBody(source: summary),
                   if (visibleRows.isNotEmpty) ...[
@@ -123,6 +105,218 @@ class _TranscriptBubble extends StatelessWidget {
                   ],
                 ],
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact shared shell for error, permission, and question messages.
+///
+/// These families are structurally boxed content rather than conversational
+/// bubbles. Keeping this adapter beside [_TranscriptBubble] preserves the same
+/// readable width and alignment while [TranscriptBox] owns the common chrome.
+class _TranscriptBoxMessage extends StatelessWidget {
+  const _TranscriptBoxMessage({
+    required this.icon,
+    required this.title,
+    required this.payloadRows,
+    this.summary,
+    this.readOnlyHint,
+    this.detailContent,
+    this.noDetailText,
+    this.isError = false,
+    this.payloadAsChips = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? summary;
+  final List<MapEntry<String, Object?>> payloadRows;
+  final String? readOnlyHint;
+  final Widget? detailContent;
+  final String? noDetailText;
+  final bool isError;
+  final bool payloadAsChips;
+
+  @override
+  Widget build(BuildContext context) {
+    final timestamp = TranscriptMessageMetadataScope.timestampOf(context);
+    final summary = this.summary?.trim();
+    final hasSummary = summary != null && summary.isNotEmpty;
+    final visibleRows = visibleTranscriptPayloadRows(
+      summary: summary ?? '',
+      rows: payloadRows,
+    );
+    final hasBody =
+        hasSummary ||
+        visibleRows.isNotEmpty ||
+        readOnlyHint != null ||
+        detailContent != null ||
+        noDetailText != null;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FractionallySizedBox(
+        widthFactor: _transcriptBubbleWidthFactor,
+        child: TranscriptBox(
+          tone: isError ? TranscriptBoxTone.error : TranscriptBoxTone.neutral,
+          icon: icon,
+          title: title,
+          trailing: timestamp == null
+              ? null
+              : Text(
+                  _formatTranscriptTime(timestamp),
+                  key: const Key('transcript-message-time'),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: context.tokens.textSecondary,
+                  ),
+                ),
+          body: hasBody
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (hasSummary) _MarkdownBody(source: summary),
+                    if (readOnlyHint != null) ...[
+                      if (hasSummary) const SizedBox(height: 4),
+                      _ReadOnlyHint(
+                        label: AppLocalizations.of(
+                          context,
+                        ).readOnlySuffix(readOnlyHint!),
+                      ),
+                    ],
+                    if (visibleRows.isNotEmpty) ...[
+                      if (hasSummary || readOnlyHint != null) ...[
+                        const SizedBox(height: 8),
+                        const Divider(height: 1),
+                        const SizedBox(height: 8),
+                      ],
+                      if (payloadAsChips)
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          children: [
+                            for (final row in visibleRows)
+                              MetadataChip(
+                                label:
+                                    '${row.key}: '
+                                    '${_stringifyPayloadValue(row.value)}',
+                                maxWidth: 280,
+                              ),
+                          ],
+                        )
+                      else
+                        for (final row in visibleRows)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: _TranscriptDetailRow(row: row),
+                          ),
+                    ],
+                    if (detailContent != null) ...[
+                      if (hasSummary ||
+                          readOnlyHint != null ||
+                          visibleRows.isNotEmpty)
+                        const SizedBox(height: 8),
+                      detailContent!,
+                    ],
+                    if (!hasSummary &&
+                        visibleRows.isEmpty &&
+                        readOnlyHint == null &&
+                        detailContent == null &&
+                        noDetailText != null)
+                      Text(noDetailText!),
+                  ],
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+}
+
+/// One-line file-artifact presentation with the existing download widget.
+class _TranscriptArtifactRow extends StatelessWidget {
+  const _TranscriptArtifactRow({required this.message, this.action});
+
+  final AgentMessage message;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    final descriptor = SessionArtifactDescriptor.fromMessage(message);
+    final descriptorName = descriptor?.name?.trim();
+    final descriptorPath = descriptor?.path?.trim();
+    final name = (descriptorName?.isNotEmpty ?? false)
+        ? descriptorName!
+        : (descriptorPath?.isNotEmpty ?? false)
+        ? descriptorPath!
+        : l10n.sessionArtifactUntitled;
+    final size = descriptor?.size;
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FractionallySizedBox(
+        widthFactor: _transcriptBubbleWidthFactor,
+        child: Card(
+          color: theme.colorScheme.surfaceContainerHighest,
+          margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(tokens.radiusLg),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compactAtLargeText =
+                    MediaQuery.textScalerOf(context).scale(1) >= 1.5 &&
+                    constraints.maxWidth < 400;
+                return Row(
+                  children: [
+                    Icon(
+                      Icons.insert_drive_file_outlined,
+                      size: 16,
+                      color: tokens.textSecondary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: tokens.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (size != null && !compactAtLargeText) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        l10n.bytesCount(size),
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: tokens.textTertiary,
+                        ),
+                      ),
+                    ],
+                    if (action != null) ...[
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth:
+                              constraints.maxWidth *
+                              (compactAtLargeText ? 0.62 : 0.45),
+                        ),
+                        child: action,
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
         ),
@@ -348,252 +542,6 @@ class _TranscriptDetailRow extends StatelessWidget {
             TextSpan(
               text: _stringifyPayloadValue(row.value),
               style: theme.textTheme.bodySmall,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Right-aligned user bubble for a conversation turn.
-///
-/// Authorship is carried by alignment and surface colour alone — no person icon
-/// and no `User message` header. A queued prompt is dimmed and tagged.
-class _ConversationUserBubble extends StatelessWidget {
-  const _ConversationUserBubble({required this.message});
-
-  final AgentMessage message;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = AppLocalizations.of(context);
-    final queued = message.userMessageQueued;
-    final text =
-        _firstPayloadValue(
-          message: message,
-          preferredKeys: const ['content', 'text', 'message'],
-        ) ??
-        '';
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxWidth = constraints.maxWidth.isFinite
-            ? constraints.maxWidth * 0.82
-            : double.infinity;
-        return Align(
-          alignment: Alignment.centerRight,
-          child: Opacity(
-            opacity: queued ? 0.62 : 1,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: maxWidth),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer.withValues(
-                    alpha: 0.75,
-                  ),
-                  borderRadius: BorderRadius.circular(context.tokens.radiusLg),
-                ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    if (queued) ...[
-                      _ToolMetadataChip(
-                        key: const Key('queued-user-message-badge'),
-                        label: l10n.sessionTurnQueuedBadge,
-                      ),
-                      const SizedBox(height: 4),
-                    ],
-                    _MarkdownBody(source: text),
-                    if (message.bodyTruncated)
-                      const _BodyTruncatedNote(
-                        key: Key('user-message-body-truncated'),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// Continuous left-aligned model-output surface for a conversation turn.
-class _ConversationModelOutput extends StatelessWidget {
-  const _ConversationModelOutput({required this.message});
-
-  final AgentMessage message;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final text =
-        message.modelOutputText ??
-        message.modelOutputDelta ??
-        l10n.sessionTurnModelOutputFallback;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: message.bodyTruncated
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _MarkdownBody(source: text),
-                const _BodyTruncatedNote(
-                  key: Key('model-output-body-truncated'),
-                ),
-              ],
-            )
-          : _MarkdownBody(source: text),
-    );
-  }
-}
-
-/// Quiet expandable thinking row for a conversation turn.
-class _ConversationThinkingRow extends StatefulWidget {
-  const _ConversationThinkingRow({required this.message});
-
-  final AgentMessage message;
-
-  @override
-  State<_ConversationThinkingRow> createState() =>
-      _ConversationThinkingRowState();
-}
-
-class _ConversationThinkingRowState extends State<_ConversationThinkingRow> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = AppLocalizations.of(context);
-    final content =
-        _firstPayloadValue(
-          message: widget.message,
-          preferredKeys: const ['content', 'thought', 'text', 'status'],
-        ) ??
-        '';
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            key: const Key('conversation-thinking-toggle'),
-            borderRadius: BorderRadius.circular(context.tokens.radiusMd),
-            onTap: () => setState(() => _expanded = !_expanded),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.psychology_outlined,
-                    size: 16,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    l10n.sessionTurnThinkingLabel,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 18,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_expanded && content.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 2, bottom: 4),
-              child: DefaultTextStyle.merge(
-                style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _MarkdownBody(source: content),
-                    if (widget.message.bodyTruncated)
-                      const _BodyTruncatedNote(
-                        key: Key('thinking-body-truncated'),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Localized note under a body the BROKER shortened to fit a bounded history
-/// replay.
-///
-/// The broker deliberately sends no prose inside message content — English text
-/// in a transcript body is the localization defect H1c removed from the gap
-/// notice — so it sends a `bodyTruncated` flag and this renders the sentence in
-/// the reader's own language.
-class _BodyTruncatedNote extends StatelessWidget {
-  const _BodyTruncatedNote({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Text(
-        AppLocalizations.of(context).sessionTurnBodyTruncated,
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-      ),
-    );
-  }
-}
-
-class _ReadOnlyHint extends StatelessWidget {
-  const _ReadOnlyHint({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.lock_outline,
-              size: 14,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-              ),
             ),
           ],
         ),

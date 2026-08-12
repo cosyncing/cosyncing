@@ -48,7 +48,7 @@ extension _SessionDetailBootstrap on SessionDetailController {
           source: SessionDetailBootstrapFailureSource.noProfile,
           hasCachedMessages: hasVisibleTranscript,
         ),
-        error: 'Connect to a broker before attaching to a session.',
+        error: 'Connect to a server before attaching to a session.',
         clearSessionInfo: true,
       );
       return;
@@ -111,7 +111,7 @@ extension _SessionDetailBootstrap on SessionDetailController {
           hasCachedMessages: hasVisibleTranscript,
         ),
         error: clientError == null
-            ? 'Connect to a broker before attaching to a session.'
+            ? 'Connect to a server before attaching to a session.'
             : userFacingMessage(
                 clientError!,
                 lead: "Couldn't connect to this session.",

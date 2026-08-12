@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profile_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
+import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/connection_state.dart';
 import 'package:cosyncing_client/src/features/connection/model/fake_broker_health_probe.dart';
+import 'package:cosyncing_client/src/features/connection/model/health_probe_result.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -141,6 +146,107 @@ void main() {
         ConnectionStatus.idle,
       );
     });
+
+    test(
+      'reset retires a late successful direct-connect probe',
+      () async {
+        container.dispose();
+        final heldProbe = _HeldBrokerHealthProbe();
+        container = ProviderContainer(
+          overrides: [
+            brokerHealthProbeProvider.overrideWithValue(heldProbe),
+            brokerProfileRepositoryProvider.overrideWithValue(
+              brokerProfileRepository,
+            ),
+            activeBrokerProfileStoreProvider.overrideWithValue(
+              activeBrokerProfileStore,
+            ),
+          ],
+        );
+        final successStates = <ConnectionStateModel>[];
+        container.listen(connectionControllerProvider, (previous, next) {
+          if (next.status == ConnectionStatus.success) successStates.add(next);
+        });
+        final controller = container.read(
+          connectionControllerProvider.notifier,
+        );
+
+        final connectA = controller.connect('http://192.0.2.1:7734');
+        await heldProbe.started.future;
+        await controller.reset();
+        heldProbe.succeed();
+
+        expect(await connectA, isFalse);
+        expect(container.read(activeBrokerProfileProvider), isNull);
+        expect(await activeBrokerProfileStore.getActiveProfileId(), isNull);
+        expect(
+          await brokerProfileRepository.getById('http://192.0.2.1:7734'),
+          isNull,
+        );
+        expect(successStates, isEmpty);
+        expect(
+          container.read(connectionControllerProvider).status,
+          ConnectionStatus.idle,
+        );
+      },
+    );
+
+    test(
+      'saved-server selection retires a late direct-connect success',
+      () async {
+        container.dispose();
+        final heldProbe = _HeldBrokerHealthProbe();
+        container = ProviderContainer(
+          overrides: [
+            brokerHealthProbeProvider.overrideWithValue(heldProbe),
+            brokerProfileRepositoryProvider.overrideWithValue(
+              brokerProfileRepository,
+            ),
+            activeBrokerProfileStoreProvider.overrideWithValue(
+              activeBrokerProfileStore,
+            ),
+          ],
+        );
+        final profileB = await brokerProfileRepository.save(
+          BrokerProfile(
+            id: 'http://192.0.2.2:7734',
+            displayName: 'Server B',
+            baseUri: Uri.parse('http://192.0.2.2:7734'),
+            createdAt: DateTime(2026, 8, 10),
+          ),
+        );
+        final successStates = <ConnectionStateModel>[];
+        container.listen(connectionControllerProvider, (previous, next) {
+          if (next.status == ConnectionStatus.success) successStates.add(next);
+        });
+        final controller = container.read(
+          connectionControllerProvider.notifier,
+        );
+
+        final connectA = controller.connect('http://192.0.2.1:7734');
+        await heldProbe.started.future;
+        await container
+            .read(brokerProfileManagerControllerProvider)
+            .setActiveProfile(profileB.id, expectedProfile: profileB);
+        heldProbe.succeed();
+
+        expect(await connectA, isFalse);
+        expect(container.read(activeBrokerProfileProvider)?.id, profileB.id);
+        expect(
+          await activeBrokerProfileStore.getActiveProfileId(),
+          profileB.id,
+        );
+        expect(
+          await brokerProfileRepository.getById('http://192.0.2.1:7734'),
+          isNull,
+        );
+        expect(successStates, isEmpty);
+        expect(
+          container.read(connectionControllerProvider).status,
+          ConnectionStatus.idle,
+        );
+      },
+    );
 
     test('probe is called with normalized URL', () async {
       fakeProbe.shouldSucceed = true;
@@ -363,5 +469,20 @@ class _InMemoryActiveBrokerProfileStore implements ActiveBrokerProfileStore {
   @override
   Future<void> clearActiveProfileId() async {
     _activeProfileId = null;
+  }
+}
+
+final class _HeldBrokerHealthProbe implements BrokerHealthProbe {
+  final Completer<Uri> started = Completer<Uri>();
+  final Completer<HealthProbeResult> _result = Completer<HealthProbeResult>();
+
+  @override
+  Future<HealthProbeResult> probe(Uri baseUrl) {
+    started.complete(baseUrl);
+    return _result.future;
+  }
+
+  void succeed() {
+    _result.complete(const HealthProbeResult.success(machine: 'server-a'));
   }
 }

@@ -558,6 +558,40 @@ void main() {
       });
     });
 
+    testWidgets(
+      'a retained hidden page stays silent across an app resume',
+      (tester) async {
+        final fake = _FakeBrokerClient(rows: [_row(id: 'target')]);
+        await _withLifecycle(tester, fake, (container, controller) async {
+          controller.setTransportConnected(connected: true);
+          await tester.pump(Duration.zero);
+          expect(fake.listCalls, 1);
+
+          controller.setHostVisible(visible: false);
+          await tester.pump(_pollInterval * 2);
+          expect(fake.listCalls, 1);
+          expect(controller.debugPollingActive, isFalse);
+
+          controller
+            ..setAppVisible(visible: false)
+            ..setAppVisible(visible: true);
+          await tester.pump(_pollInterval * 2);
+          expect(
+            fake.listCalls,
+            1,
+            reason: 'app resume cannot reactivate a hidden retained page',
+          );
+          expect(controller.debugPollingActive, isFalse);
+
+          controller.setHostVisible(visible: true);
+          await tester.pump(Duration.zero);
+          expect(fake.listCalls, 2, reason: 'onstage gets one catch-up read');
+          await tester.pump(_pollInterval);
+          expect(fake.listCalls, 3, reason: 'one timer resumes');
+        });
+      },
+    );
+
     testWidgets('disposal stops the poll timer', (tester) async {
       final fake = _FakeBrokerClient(rows: [_row(id: 'target')]);
       final container = _container(fake);

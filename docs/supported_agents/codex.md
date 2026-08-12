@@ -22,8 +22,27 @@ Verify the installation and reconcile the broker service:
 ```bash
 codex --version
 cosyncing setup
-cosyncing doctor
+cosy doctor
 ```
+
+## Session control boundaries
+
+Codex permits one active writer for a thread. Codex Desktop uses its own
+private app-server connection rather than cosyncing's shared daemon. If
+Desktop retains the active writer, **Take over** is refused and the session
+stays read-only in cosyncing. Conversely, Desktop cannot drive the same thread
+while cosyncing owns it. Use **Detach** or close the current writer before
+transferring control.
+
+This is not a blanket restriction on sessions created in Codex Desktop. An
+idle Desktop session that no longer has an active writer can be resumed by
+cosyncing. The native resume result, not the session title, origin, size, or
+contents, decides whether control can transfer.
+
+Live two-way terminal sync is available for Codex CLI sessions joined to the
+managed daemon with the **Sync with a terminal** command shown by cosyncing
+(`codex resume --remote ...`). A plain Codex Desktop session and a plain
+`codex resume` process do not share that synchronized owner.
 
 Direct agent-to-user file delivery is not currently available in Codex. The
 installed skill leaves generated files in the workspace because Codex has no

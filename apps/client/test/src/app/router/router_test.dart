@@ -1,6 +1,8 @@
 import 'dart:io';
 
+import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
@@ -17,11 +19,13 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:cosyncing_client/src/features/sessions/data/data.dart';
 import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/data/workspace_prefs_store.dart';
+import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_detail_page.dart';
 import 'package:cosyncing_client/src/features/sessions/view/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -288,7 +292,7 @@ void main() {
       expect(find.text('No transfers'), findsOneWidget);
     });
 
-    testWidgets('settings can open broker profile manager route', (
+    testWidgets('Servers embeds saved server management', (
       tester,
     ) async {
       await pumpApp(tester);
@@ -296,17 +300,8 @@ void main() {
       await tester.tap(find.text('Settings'));
       await tester.pumpAndSettle();
       await openSettingsCategory(tester, const Key('settings-category-broker'));
-      final profilesTile = find.widgetWithText(ListTile, 'Broker Profiles');
-      await tester.scrollUntilVisible(
-        profilesTile,
-        400,
-        scrollable: find.byType(Scrollable).last,
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(profilesTile);
-      await tester.pumpAndSettle();
-
-      expect(find.text('Broker Profiles'), findsAtLeastNWidgets(1));
+      expect(find.text('Saved servers'), findsAtLeastNWidgets(1));
+      expect(find.byKey(const Key('servers-add')), findsOneWidget);
     });
 
     testWidgets('settings can open pairing route', (tester) async {
@@ -315,7 +310,7 @@ void main() {
       await tester.tap(find.text('Settings'));
       await tester.pumpAndSettle();
       await openSettingsCategory(tester, const Key('settings-category-broker'));
-      final pairingTile = find.byKey(const Key('settings-pairing'));
+      final pairingTile = find.byKey(const Key('servers-add'));
       await tester.scrollUntilVisible(
         pairingTile,
         400,
@@ -323,6 +318,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.tap(pairingTile);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('servers-add-pair')));
       await tester.pumpAndSettle();
 
       expect(find.text('Pairing'), findsOneWidget);
@@ -563,7 +560,7 @@ void main() {
             'Connection',
             'Settings',
             'Transfers',
-            'Broker Profiles',
+            'Saved servers',
             'Pairing',
             'Keyboard Shortcuts',
           },
@@ -713,8 +710,27 @@ void main() {
           findsNothing,
         );
         expect(find.byKey(const Key('app-command-sessions')), findsNothing);
+        final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
+        expect(nav.destinations, hasLength(3));
+        expect(find.text('Connection'), findsNothing);
       },
     );
+
+    testWidgets('compact Settings maps to shell branch 3', (tester) async {
+      final router = await pumpApp(
+        tester,
+        surfaceSize: const Size(600, 900),
+        initialLocation: connectionRoute,
+      );
+
+      expect(router.state.uri.path, connectionRoute);
+      expect(find.widgetWithText(AppBar, 'Connection'), findsOneWidget);
+      await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+
+      expect(router.state.uri.path, settingsRoute);
+      expect(find.widgetWithText(AppBar, 'Settings'), findsOneWidget);
+    });
 
     testWidgets('medium width keeps bottom navigation through 839dp', (
       tester,
@@ -1064,6 +1080,57 @@ void main() {
       // Wide layout never had a bottom nav; the rule must not change that.
       expect(find.byKey(const Key('app-bottom-nav')), findsNothing);
     });
+
+    testWidgets(
+      'Windows preserves an open detail across repeated shell breakpoints',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final profile = BrokerProfile(
+          id: 'p1',
+          displayName: 'p1',
+          baseUri: Uri.parse('http://127.0.0.1:7734'),
+          createdAt: DateTime(2026),
+        );
+        final openStore = _InMemoryOpenSessionsStore(
+          const OpenSessionsSnapshot(
+            refs: [
+              SessionRef(
+                tool: 'claude',
+                id: 'session-a',
+                title: 'First',
+                status: SessionStatus.idle,
+              ),
+            ],
+            activeKey: 'claude/session-a',
+          ),
+        );
+        final router = await pumpApp(
+          tester,
+          surfaceSize: const Size(1200, 900),
+          overrides: [
+            activeBrokerProfileProvider.overrideWith((_) => profile),
+            openSessionsStoreProvider.overrideWithValue(openStore),
+            brokerClientProvider.overrideWith((_) async => null),
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+          ],
+        );
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+        expect(find.byType(SessionDetailPage), findsOneWidget);
+
+        for (var crossing = 0; crossing < 6; crossing++) {
+          tester.view.physicalSize = crossing.isEven
+              ? const Size(400, 900)
+              : const Size(1200, 900);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+        }
+        expect(router.state.uri.path, '/sessions');
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
   });
 }
 
@@ -1185,9 +1252,14 @@ final class _InMemorySessionNotificationSettingsStore
 }
 
 class _InMemoryOpenSessionsStore implements OpenSessionsStore {
+  _InMemoryOpenSessionsStore([
+    this.initial = OpenSessionsSnapshot.empty,
+  ]);
+
+  final OpenSessionsSnapshot initial;
+
   @override
-  Future<OpenSessionsSnapshot> load(String profileId) async =>
-      OpenSessionsSnapshot.empty;
+  Future<OpenSessionsSnapshot> load(String profileId) async => initial;
 
   @override
   Future<void> save(String profileId, OpenSessionsSnapshot snapshot) async {}

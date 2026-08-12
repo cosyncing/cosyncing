@@ -7,7 +7,8 @@ library;
 /// Normalizes a broker endpoint string into a canonical [Uri].
 ///
 /// Accepts:
-/// - Full URL: `http://192.168.1.10:7734`
+/// - Full URL: `http://192.0.2.10:7734` or
+///   `https://fixture.tailnet.ts.net`
 /// - Host and port: `192.168.1.10:7734`
 /// - Bare host: `192.168.1.10` (defaults to port 7734, scheme http)
 /// - Localhost shorthand: `localhost` → `http://127.0.0.1:7734`
@@ -35,12 +36,18 @@ Uri normalizeBrokerUrl(String input) {
     // the scheme default (80/443) even when no port was specified, so we
     // inspect the raw string.
     final hasExplicitPort = _urlHasExplicitPort(trimmed);
-    // Build a clean base URI: scheme + host + port only.
+    // Build a clean base URI: scheme + host + port only. Portless HTTPS keeps
+    // its standard implicit port so setup's Tailnet server address remains
+    // exact; portless HTTP retains the established broker-port default.
     // Strip path, query, and fragment — broker base URL is host:port only.
     return Uri(
       scheme: uri.scheme,
       host: uri.host,
-      port: hasExplicitPort ? uri.port : _defaultPort,
+      port: hasExplicitPort
+          ? uri.port
+          : uri.scheme == 'https'
+          ? null
+          : _defaultPort,
     );
   }
 

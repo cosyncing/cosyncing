@@ -52,8 +52,8 @@ void main() {
   });
 
   group('brokerErrorCodes', () {
-    test('has 97 entries', () {
-      expect(brokerErrorCodes, hasLength(97));
+    test('has 99 entries', () {
+      expect(brokerErrorCodes, hasLength(99));
     });
 
     test('includes temporary session creation unavailability', () {
@@ -68,6 +68,8 @@ void main() {
         brokerErrorCodes,
         containsAll(<String>[
           'DRIVE_OWNERSHIP_CONFLICT',
+          'DRIVE_OWNERSHIP_UNKNOWN',
+          'DRIVE_NATIVE_SESSION_UNRESUMABLE',
           'DRIVE_RESTORE_FAILED',
         ]),
       );

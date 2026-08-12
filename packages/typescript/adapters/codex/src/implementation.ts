@@ -50,6 +50,7 @@ import {
   gitDiffPath,
   isRestoreDriveAttachReason,
   AgentOwnedSessionError,
+  NativeSessionUnresumableError,
   OwnershipConflictError,
   type AgentBackend,
   type AttachOptions,
@@ -132,6 +133,8 @@ const CODEX_SYNC_WATCH_MS = Math.max(250, Number(process.env.COSYNCING_CODEX_SYN
 const CODEX_SYNC_DROP_GRACE_POLLS = Math.max(1, Number(process.env.COSYNCING_CODEX_SYNC_DROP_GRACE_POLLS ?? 2) || 2);
 const CODEX_DEFAULT_PERMISSION_MODE = 'ask-permission';
 const CODEX_RECENT_COMPLETED_TURN_LIMIT = 32;
+const CODEX_RESUME_START_TIMEOUT_MS = 30_000;
+const CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS = 2_000;
 type CodexTurnRunState = { kind: 'hydrating' } | { kind: 'unknown' } | { kind: 'idle' } | { kind: 'active'; turnId: string };
 /** A live owner the adapter may ask to re-derive its run state from exact native evidence (R0c.4). */
 type CodexRepairableOwner = {
@@ -140,6 +143,32 @@ type CodexRepairableOwner = {
 };
 type BootstrapQueuedMessage = { method: string; params: any; rpcId?: number | string };
 type CodexCompletedTurnEvidence = { params: any; emitted: boolean };
+export type CodexLoadedThreadDecision = 'loaded' | 'absent' | 'unknown';
+
+/** Redacted, bounded attach diagnostics. No rollout paths, cwd, prompts, transcript
+ *  bodies, credentials, or dynamic-tool schemas are admitted to this shape. */
+export interface CodexAttachDiagnostic {
+  event: 'daemon-loaded-probe' | 'transport-selected' | 'rpc-stage' | 'child-lifecycle';
+  threadId: string;
+  outcome?: string;
+  transport?: CodexTransport;
+  stage?: 'initialize' | 'thread/resume' | 'turn/start';
+  pid?: number;
+  pendingRpcCount?: number;
+  nativeCode?: string;
+  message?: string;
+}
+
+export type CodexAttachDiagnosticReporter = (diagnostic: CodexAttachDiagnostic) => void;
+
+function emitCodexAttachDiagnostic(diagnostic: CodexAttachDiagnostic): void {
+  if (!truthyEnv(process.env.COSYNCING_CODEX_ATTACH_DIAGNOSTICS)) return;
+  try {
+    console.error(`[codex-attach] ${JSON.stringify(diagnostic)}`);
+  } catch {
+    /* diagnostics never change attach behavior */
+  }
+}
 
 /** Default mode for a session with NO recorded approval/reviewer/sandbox settings (fresh app-created threads,
  *  never-turned rollouts): maintainer wants approve-for-me, not the daemon's config default of "ask"
@@ -170,7 +199,18 @@ export class CodexAdapter implements AgentBackend {
     scanCodexTuiPresence?: (sockPath: string, fresh?: boolean) => Promise<CodexTuiScan>;
     reportManagedStart?: ManagedRuntimeStartReporter;
     reportDaemonOwnership?: CodexDaemonOwnershipReporter;
+    reportAttachDiagnostic?: CodexAttachDiagnosticReporter;
+    resumeStartupTimeoutMs?: number;
+    resumeProcessStopTimeoutMs?: number;
   } = {}) {}
+
+  private reportAttachDiagnostic(diagnostic: CodexAttachDiagnostic): void {
+    try {
+      (this.options.reportAttachDiagnostic ?? emitCodexAttachDiagnostic)(diagnostic);
+    } catch {
+      /* diagnostics never change attach behavior */
+    }
+  }
 
   async isAvailable(): Promise<boolean> {
     return existsSync(SESSIONS_ROOT) || resolveBin('codex') !== null;
@@ -570,7 +610,7 @@ export class CodexAdapter implements AgentBackend {
 
   /** Native rename via `thread/name/set` — propagates to the codex TUI/session index, not just our
    *  roster alias (issues-part2 rename check). Short-lived app-server RPC; the rollout stays put. */
-  async renameSession(sessionId: string, title: string | null): Promise<void> {
+  async renameSession(sessionId: string, title: string | null): Promise<SessionInfo> {
     const path = dec(sessionId);
     const meta = readSessionMeta(path);
     const threadId = meta?.id ? String(meta.id) : rolloutUuid(path);
@@ -580,6 +620,36 @@ export class CodexAdapter implements AgentBackend {
     await withCodexAppServerRpc(cwd, async (rpc) => {
       await rpc('thread/name/set', { threadId, name }, 10000);
     });
+    const st = statSafe(path);
+    const originTag = codexSessionOrigin(meta);
+    const agentOwned = codexAgentOwned(originTag.origin);
+    const canResume = resolveBin('codex') !== null;
+    const terminalSyncHint = this.syncHint(threadId, cwd, undefined, agentOwned);
+    // thread/name/set acknowledges success but returns no Thread. The submitted
+    // normalized name is therefore the immediate native title authority; do
+    // not rediscover the index and risk returning its delayed old value.
+    return {
+      id: sessionId,
+      tool: this.id,
+      title: name,
+      cwd,
+      ...originTag,
+      nativeId: threadId,
+      status: 'idle',
+      attachMode: 'observe',
+      createdAt: timestampToMs(meta?.timestamp) ?? st?.birthtimeMs ?? st?.ctimeMs,
+      updatedAt: st?.mtimeMs,
+      terminalSyncHint,
+      control: codexControlState({
+        canResume,
+        driveState: 'observing',
+        agentOwned,
+        terminalSyncActive: false,
+        terminalSyncAction: 'join',
+        terminalSyncHint,
+        syncEnabled: this.capabilities.supportsLiveAttach,
+      }),
+    };
   }
 
   /** Native fork via app-server `thread/fork` — forks the loaded rollout into a NEW thread (new rollout
@@ -697,7 +767,21 @@ export class CodexAdapter implements AgentBackend {
     if (mode === 'live' && !this.capabilities.supportsLiveAttach) {
       throw new Error('Codex sync server mode is not enabled; set COSYNCING_CODEX_SYNC_SERVER=1 after configuring the app-server daemon.');
     }
-    const liveLoaded = this.capabilities.supportsLiveAttach ? await this.isLiveLoaded(threadId) : false;
+    const loadedDecision = this.capabilities.supportsLiveAttach
+      ? await this.liveLoadedDecision(threadId, mode === 'resume' || mode === 'live')
+      : 'absent';
+    this.reportAttachDiagnostic({
+      event: 'daemon-loaded-probe',
+      threadId,
+      outcome: loadedDecision,
+    });
+    if ((mode === 'resume' || mode === 'live') && loadedDecision === 'unknown') {
+      throw new OwnershipConflictError(
+        'Codex daemon ownership could not be verified. This session stays in Observe; no private app-server was started.',
+        'daemon-ownership-unknown',
+      );
+    }
+    const liveLoaded = loadedDecision === 'loaded';
     if (mode === 'live' && !liveLoaded) {
       throw new Error('This Codex thread is not loaded in the managed app-server daemon; start or attach the terminal through Codex remote-control first.');
     }
@@ -798,7 +882,18 @@ export class CodexAdapter implements AgentBackend {
       await observeConn.start();
       return this.trackOwner(observeConn);
     }
-    const conn = new CodexResumeConnection(path, threadId, cwd, info, liveEligible ? 'daemon-proxy' : 'stdio');
+    const transport = liveEligible ? 'daemon-proxy' : 'stdio';
+    this.reportAttachDiagnostic({ event: 'transport-selected', threadId, transport });
+    const conn = new CodexResumeConnection(
+      path,
+      threadId,
+      cwd,
+      info,
+      transport,
+      (diagnostic) => this.reportAttachDiagnostic(diagnostic),
+      this.options.resumeStartupTimeoutMs,
+      this.options.resumeProcessStopTimeoutMs,
+    );
     await conn.start();
     return this.trackOwner(conn);
   }
@@ -934,13 +1029,32 @@ export class CodexAdapter implements AgentBackend {
     return activities;
   }
 
-  private async isLiveLoaded(threadId: string): Promise<boolean> {
+  private async liveLoadedDecision(threadId: string, requireCurrentProof = false): Promise<CodexLoadedThreadDecision> {
+    const socket = codexAppServerSock();
+    if (!this.options.queryLoadedThreadIds) {
+      if (!socket || !existsSync(socket)) return 'absent';
+      try {
+        if (!lstatSync(socket).isSocket()) return 'unknown';
+      } catch {
+        // We already observed an entry at this path. Failure to establish its
+        // type is not evidence that daemon ownership is absent.
+        return 'unknown';
+      }
+    }
     const cached = this.liveThreadCache;
-    if (cached && Date.now() - cached.at < LIVE_THREAD_CACHE_MS && cached.ids.has(threadId)) return true;
+    // Display discovery may reuse a short-lived cache. A Drive/take-over
+    // decision may not: cached non-membership cannot prove that a daemon did
+    // not load the thread after the snapshot was taken.
+    if (!requireCurrentProof && cached && Date.now() - cached.at < LIVE_THREAD_CACHE_MS) {
+      return cached.ids.has(threadId) ? 'loaded' : 'absent';
+    }
     try {
-      return (await this.refreshLiveLoadedThreadIds()).has(threadId);
+      return (await this.refreshLiveLoadedThreadIds()).has(threadId) ? 'loaded' : 'absent';
     } catch {
-      return cached?.ids.has(threadId) ?? false;
+      // A last-known loaded thread remains potentially owned even after the
+      // daemon stops answering. Cached non-membership is not equivalent: a
+      // failed current probe cannot prove the thread stayed absent.
+      return cached?.ids.has(threadId) ? 'loaded' : 'unknown';
     }
   }
 
@@ -2179,6 +2293,10 @@ async function drainStream(stream: ReadableStream<Uint8Array>): Promise<void> {
  *  tailed line and a history read of the same file time out against different clocks and publish two
  *  identities for one answer. */
 const ASSISTANT_PAIR_WAIT_MS = 150;
+/** How long a synthetic-baseline tail holds deferred lines after a capture ends WITHOUT adoption,
+ *  waiting for the attach sequence's next capture (indexed refusal → bounded tail). See
+ *  {@link CodexObserveConnection.captureHistorySnapshot}. */
+const CODEX_OBSERVE_DEFERRED_FLUSH_MS = 250;
 
 /** Re-read interval while a history read waits for a trailing assistant line's paired record. */
 const ROLLOUT_PAIR_SETTLE_POLL_MS = 25;
@@ -2338,26 +2456,55 @@ async function readObserveTailBaseline(path: string): Promise<ObserveTailBaselin
     fd = openSync(path, 'r');
     const before = fstatSync(fd);
     const size = before.size;
-    if (size > HISTORY_SNAPSHOT_MAX_SOURCE_BYTES) {
-      return {
-        size,
-        lineIndex: Math.min(size, Number.MAX_SAFE_INTEGER - 1),
-        context: {
-          turnId: undefined,
-          automaticApprovalDenials: 0,
-          toolNameByCallId: new Map(),
-        },
-        scanned: false,
-      };
-    }
-
-    let lineIndex = 0;
+    let startOffset = 0;
+    let startRecordIndex = 0;
     let openTaskTurnId: string | undefined;
-    const context: ActiveRolloutContext = {
+    let context: ActiveRolloutContext = {
       turnId: undefined,
       automaticApprovalDenials: 0,
       toolNameByCallId: new Map(),
     };
+    if (size > HISTORY_SNAPSHOT_MAX_SOURCE_BYTES) {
+      // Over the whole-source scan ceiling. A completed bounded-tail capture may have left an
+      // exact watermark for these same bytes: record count, enclosing turn, and prefix token at
+      // its stop position. Scanning only [watermark, EOF) then yields the SAME line base and turn
+      // context a full scan would, so live-tailed rows key identically to a history read — the
+      // synthetic byte base below survives only for a source no capture has ever completed on.
+      const watermark = codexTailPositions.get(`${before.dev}:${before.ino}`);
+      const delta = watermark ? size - watermark.size : Number.POSITIVE_INFINITY;
+      const usable = watermark
+        && codexTailWatermarkValid(watermark, before)
+        && delta <= HISTORY_SNAPSHOT_MAX_SOURCE_BYTES;
+      if (!usable) {
+        return {
+          size,
+          lineIndex: Math.min(size, Number.MAX_SAFE_INTEGER - 1),
+          context,
+          scanned: false,
+        };
+      }
+      const prefixProbe = Buffer.alloc(Math.min(watermark.prefixLength, size));
+      const prefixProbeBytes = prefixProbe.length > 0
+        ? readSync(fd, prefixProbe, 0, prefixProbe.length, 0)
+        : 0;
+      if (
+        prefixTokenOver(prefixProbe, prefixProbeBytes, watermark.prefixLength)
+          !== watermark.rewriteToken
+      ) {
+        return {
+          size,
+          lineIndex: Math.min(size, Number.MAX_SAFE_INTEGER - 1),
+          context,
+          scanned: false,
+        };
+      }
+      startOffset = watermark.size;
+      startRecordIndex = watermark.recordIndex;
+      context = cloneActiveRolloutContext(watermark.context);
+      openTaskTurnId = watermark.openTaskTurnId;
+    }
+
+    let lineIndex = startRecordIndex;
     const scan = await scanFileLinesAsync(fd, size, (raw, _start, _end, index) => {
       lineIndex = index + 1;
       // Folded from the SAME bytes that fix the tail boundary. The observe seed used to come from a
@@ -2371,7 +2518,10 @@ async function readObserveTailBaseline(path: string): Promise<ObserveTailBaselin
       const line = parseLineOrNull(raw);
       if (line) updateActiveRolloutContext(context, line);
       return true;
-    });
+      // The delta path skips oversized records exactly as the bounded-tail capture it resumes
+      // does, so both count record indices identically; the whole-source path keeps its
+      // established abort.
+    }, { startOffset, startRecordIndex, skipOversizedRecords: startOffset > 0 });
     if (scan === 'timed-out' || scan.recordOverflow || scan.bytes !== size) return undefined;
     // Source fencing: see {@link codexBaselineSourceIntact} for why the PATH, not the descriptor,
     // is the thing whose identity has to be checked.
@@ -2419,6 +2569,19 @@ async function readRolloutSegmentsSettled(path: string): Promise<string[]> {
   return segs;
 }
 
+/** Test-only capture gate: while the file named by COSYNCING_TEST_CODEX_CAPTURE_HOLD_FILE exists,
+ *  an observe capture waits before scanning, so a wire test can deterministically land an append
+ *  INSIDE the capture window (the cold-attach adoption race). Unset env → immediate no-op; the
+ *  wait is bounded so a leaked hold file cannot wedge a broker under test. */
+async function codexObserveCaptureTestHold(): Promise<void> {
+  const holdPath = process.env.COSYNCING_TEST_CODEX_CAPTURE_HOLD_FILE?.trim();
+  if (!holdPath) return;
+  const deadline = Date.now() + 10_000;
+  while (statSafe(holdPath) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 /**
  * A read-only observe connection: replays the rollout as history and live-follows appended lines.
  * Keys every message by its rollout line index so the history snapshot and any live-tailed line
@@ -2430,6 +2593,33 @@ class CodexObserveConnection implements SessionConnection {
   private offset = 0; // bytes consumed by the live tail
   private lineIndex = 0; // next rollout line number (history sets the base; the tail continues it)
   private tailBuf = '';
+  /** The baseline scan was refused (over-ceiling source, no watermark), so live keys sit on the
+   *  synthetic byte base and disagree with every history read of the same lines. Cleared when a
+   *  completed capture's watermark is adopted before the tail consumed anything. */
+  private baselineSynthetic = false;
+  /** A cold synthetic tail starts waiting before the watcher is installed, closing the small
+   *  subscribe -> first-capture gap as well as the capture itself. The first successful bounded
+   *  capture clears this by adopting its record-index watermark; a refused/failed attach gets the
+   *  bounded fallback below so a connection used outside the broker cannot wait forever. */
+  private initialCapturePending = false;
+  /** Lines the live tail has consumed since the baseline was fixed — adoption is only sound
+   *  while this is zero and no partial line is buffered. */
+  private tailLinesConsumed = 0;
+  /** Captures currently running against this connection. While one is in flight and a synthetic
+   *  baseline could still adopt its watermark, the tail DEFERS reading appended bytes: a line
+   *  drained mid-capture would go out under the synthetic byte base and permanently block
+   *  adoption — the cold-attach race on an over-ceiling source that is being written to. The
+   *  deferred bytes stay in the file; after adoption the tail resumes from the watermark, which
+   *  discards the capture-covered prefix and emits only the remainder under record-index keys. */
+  private captureInFlight = 0;
+  /** A watcher event arrived while the tail was deferring — drain once the capture settles. */
+  private deferredDrainPending = false;
+  /** Flush fallback armed when a capture ends WITHOUT adoption (refusal/failure): the attach
+   *  sequence usually runs another capture moments later (indexed refusal → bounded tail), and
+   *  flushing between them would put synthetic-keyed lines out and block that second capture's
+   *  adoption. The next capture cancels this; if none comes, the timer delivers the deferred
+   *  lines under the base the connection always had — bounded, never retained indefinitely. */
+  private deferredFlushTimer?: ReturnType<typeof setTimeout>;
   /** call_id → tool name + rich detail, accumulated live so a function_call_output can be enriched.
    *
    *  Bounded, because a long-lived observe connection would otherwise keep every
@@ -2513,6 +2703,7 @@ class CodexObserveConnection implements SessionConnection {
         const raw = baseline.openTaskTurnId ? 'working' : 'idle';
         this.info.status = qualifyCodexRolloutStatus(raw, await this.coherentSeedContext(raw));
       }
+      this.baselineSynthetic = !baseline.scanned;
     } else {
       const st = statSafe(this.path);
       this.offset = st?.size ?? 0;
@@ -2522,7 +2713,43 @@ class CodexObserveConnection implements SessionConnection {
         this.offset,
         Number.MAX_SAFE_INTEGER - 1,
       );
+      this.baselineSynthetic = true;
     }
+    // Arm before subscribe() can install the watcher. captureInFlight alone starts too late: the
+    // broker subscribes, then awaits source identity before it invokes the first capture, and an
+    // append in that gap used to escape under the synthetic byte base.
+    this.initialCapturePending = this.baselineSynthetic;
+  }
+
+  /**
+   * Adopt a just-completed capture's watermark in place of a synthetic baseline.
+   *
+   * An over-ceiling source fixes its tail base at the byte size, so every live-only key
+   * (`c<byteOffset>`) disagrees with the line-index key a history read gives the same record —
+   * the same message renders twice across a refresh. The attach that created this connection
+   * runs a bounded-tail capture moments later, and that capture knows the TRUE record count at
+   * its stop position. While the tail has consumed nothing, moving the base to the watermark is
+   * pure relabeling: bytes between the old offset and the watermark were delivered by that same
+   * capture as history, so the tail must skip them, and everything after keys identically to a
+   * later read. Once a single live line is out under the synthetic base, adoption would re-key
+   * the stream mid-flight — the window simply stays synthetic, exactly as before this path.
+   */
+  private adoptCaptureWatermark(): void {
+    if (!this.baselineSynthetic) return;
+    if (this.tailLinesConsumed > 0 || this.tailBuf !== '') return;
+    const st = statSafe(this.path);
+    if (!st) return;
+    const watermark = codexTailPositions.get(`${st.dev}:${st.ino}`);
+    if (!watermark || watermark.size < this.offset) return;
+    if (!codexTailWatermarkValid(watermark, st)) return;
+    this.offset = watermark.size;
+    this.lineIndex = watermark.recordIndex;
+    this.liveRuntime.primeActiveTurn(
+      watermark.context.turnId,
+      watermark.context.automaticApprovalDenials,
+    );
+    this.baselineSynthetic = false;
+    this.initialCapturePending = false;
   }
 
   subscribe(handler: AgentMessageHandler): Unsubscribe {
@@ -2636,10 +2863,52 @@ class CodexObserveConnection implements SessionConnection {
    *
    *  Asynchronous because the scan yields between chunks (H1c round 3): a large source costs this
    *  attach wall-clock time, never the broker's event loop. */
-  captureHistorySnapshot(
+  async captureHistorySnapshot(
     sink: HistorySnapshotSink,
   ): Promise<HistorySnapshotCapture | HistorySnapshotRefusal | undefined> {
-    return captureFileHistoryInto(this.path, sink, this.published);
+    this.captureInFlight += 1;
+    // A follow-up capture in the same attach sequence supersedes the refusal fallback below.
+    if (this.deferredFlushTimer) {
+      clearTimeout(this.deferredFlushTimer);
+      this.deferredFlushTimer = undefined;
+    }
+    try {
+      await codexObserveCaptureTestHold();
+      const captured = await captureFileHistoryInto(this.path, sink, this.published);
+      // A completed bounded-tail capture leaves an exact watermark; a synthetic over-ceiling
+      // baseline adopts it so this connection's live keys agree with the history it just served.
+      if (captured && !('refusal' in captured)) this.adoptCaptureWatermark();
+      return captured;
+    } finally {
+      this.captureInFlight -= 1;
+      if (this.captureInFlight === 0) {
+        if (!this.baselineSynthetic) {
+          // Adopted: the read starts at the capture's stop position — capture-covered bytes are
+          // discarded and the remainder goes out under record-index keys.
+          this.flushDeferredDrain();
+        } else if (this.initialCapturePending) {
+          // No adoption (refusal/failure). The attach path typically tries another capture
+          // immediately — an indexed refusal is followed by the bounded-tail capture — and it
+          // must find the tail still unfed or its watermark can never be adopted. Hold the
+          // deferred lines across that gap; release the initial hold on a short fallback if no
+          // capture comes. Arm this even when no watcher event has fired yet, or the first later
+          // append on a direct/refused connection would wait indefinitely.
+          this.deferredFlushTimer = setTimeout(() => {
+            this.deferredFlushTimer = undefined;
+            if (this.captureInFlight === 0) {
+              this.initialCapturePending = false;
+              this.flushDeferredDrain();
+            }
+          }, CODEX_OBSERVE_DEFERRED_FLUSH_MS);
+        }
+      }
+    }
+  }
+
+  private flushDeferredDrain(): void {
+    if (!this.deferredDrainPending) return;
+    this.deferredDrainPending = false;
+    if (this.watcher) this.drainTail();
   }
 
   getHistorySourceIdentity(): HistorySourceIdentity | undefined {
@@ -2668,6 +2937,23 @@ class CodexObserveConnection implements SessionConnection {
    *  a patch_apply_end/exec_command_end/function_call usually precedes the function_call_output, so
    *  the rolling liveEnrich map is populated in time; if not, the result just lacks a chip. */
   private drainTail(): void {
+    // A synthetic baseline that could still adopt an in-flight capture's watermark must not
+    // consume a line yet: doing so pins the synthetic byte base forever (adoptCaptureWatermark
+    // refuses once anything is out). Defer — the bytes are still in the file, and the capture's
+    // completion re-drains from whichever base survives (see captureHistorySnapshot).
+    if (
+      this.baselineSynthetic
+      && this.tailLinesConsumed === 0
+      && this.tailBuf === ''
+      && (
+        this.initialCapturePending
+        || this.captureInFlight > 0
+        || this.deferredFlushTimer !== undefined
+      )
+    ) {
+      this.deferredDrainPending = true;
+      return;
+    }
     let bytes: Buffer;
     try {
       const st = statSafe(this.path);
@@ -2682,6 +2968,7 @@ class CodexObserveConnection implements SessionConnection {
     while ((nl = this.tailBuf.indexOf('\n')) !== -1) {
       const raw = this.tailBuf.slice(0, nl);
       this.tailBuf = this.tailBuf.slice(nl + 1);
+      this.tailLinesConsumed += 1; // once a line is out, a synthetic base can no longer be re-keyed
       const idx = this.lineIndex++; // consume the index FIRST — a blank/malformed line still advances it,
       const ln = parseLineOrNull(raw); // exactly as getHistory's position-preserving parse does (key alignment)
       // A null slot is not a record, so it settles nothing: the held line keeps waiting for a real
@@ -2756,6 +3043,11 @@ class CodexObserveConnection implements SessionConnection {
   async close(): Promise<void> {
     this.watcher?.close();
     this.watcher = undefined;
+    if (this.deferredFlushTimer) {
+      clearTimeout(this.deferredFlushTimer);
+      this.deferredFlushTimer = undefined;
+    }
+    this.initialCapturePending = false;
     this.resolveDeferredAssistant(null); // last boundary: flush before the subscribers go away
     this.handlers.clear();
     this.liveEnrich.clear();
@@ -2768,6 +3060,125 @@ type PendingRpc = {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+
+function nativeRpcRejected(error: unknown): boolean {
+  return error instanceof Error && (error as Error & { rpcRejected?: unknown }).rpcRejected === true;
+}
+
+const NATIVE_SESSION_UNRESUMABLE_CODES = new Set([
+  'SESSION_NOT_RESUMABLE',
+  'THREAD_NOT_RESUMABLE',
+  'SESSION_UNRESUMABLE',
+  'THREAD_UNRESUMABLE',
+  'SESSION_APP_ONLY',
+  'THREAD_APP_ONLY',
+  'APP_ONLY_SESSION',
+  'APP_ONLY_THREAD',
+  'SESSION_RESUME_UNSUPPORTED',
+  'THREAD_RESUME_UNSUPPORTED',
+]);
+
+const NATIVE_OWNERSHIP_CONFLICT_CODES = new Set([
+  'ACTIVE_WRITER',
+  'SESSION_ACTIVE_WRITER',
+  'THREAD_ACTIVE_WRITER',
+  'SESSION_ALREADY_HAS_ACTIVE_WRITER',
+  'THREAD_ALREADY_HAS_ACTIVE_WRITER',
+]);
+
+function normalizedNativeSignal(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || undefined;
+}
+
+/** A native active-writer rejection is explicit session ownership evidence.
+ * Codex Desktop currently runs a private stdio app-server, so the separate
+ * shared daemon can truthfully report the thread absent even while Desktop
+ * retains its writer. In that case thread/resume is the first native boundary
+ * that can identify the conflict. Keep the match limited to exact structured
+ * signals or the observed native phrase; a generic -32600 remains retryable. */
+function nativeOwnershipConflictRejection(error: unknown): boolean {
+  if (!nativeRpcRejected(error)) return false;
+  const rpcError = error as Error & { rpcCode?: unknown; rpcData?: unknown };
+  const data = rpcError.rpcData && typeof rpcError.rpcData === 'object'
+    ? rpcError.rpcData as Record<string, unknown>
+    : undefined;
+  const signals = [data?.code, data?.reason, data?.kind];
+  if (signals.some((value) => {
+    const normalized = normalizedNativeSignal(value);
+    return normalized !== undefined && NATIVE_OWNERSHIP_CONFLICT_CODES.has(normalized);
+  })) return true;
+  return /\balready has an active writer\b/i.test(rpcError.message);
+}
+
+/** Only explicit native capability/rejection facts are permanent enough to
+ *  call a session unresumable. Generic JSON-RPC rejection, including internal
+ *  and invalid-request failures, remains a retryable Drive restore failure. */
+function nativeSessionUnresumableRejection(error: unknown): boolean {
+  if (!nativeRpcRejected(error)) return false;
+  const rpcError = error as Error & { rpcCode?: unknown; rpcData?: unknown };
+  if (rpcError.rpcCode === -32601) return true; // thread/resume method unsupported
+  const data = rpcError.rpcData && typeof rpcError.rpcData === 'object'
+    ? rpcError.rpcData as Record<string, unknown>
+    : undefined;
+  const signals = [rpcError.rpcCode, data?.code, data?.reason, data?.kind, data?.capability];
+  if (signals.some((value) => {
+    const normalized = normalizedNativeSignal(value);
+    return normalized !== undefined && NATIVE_SESSION_UNRESUMABLE_CODES.has(normalized);
+  })) return true;
+  return data?.appOnly === true || data?.resumable === false;
+}
+
+function diagnosticStrings(value: unknown, out = new Set<string>(), seen = new Set<object>()): Set<string> {
+  if (typeof value === 'string') {
+    if (value) out.add(value);
+    return out;
+  }
+  if (!value || typeof value !== 'object' || seen.has(value)) return out;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) diagnosticStrings(item, out, seen);
+    return out;
+  }
+  for (const item of Object.values(value as Record<string, unknown>)) diagnosticStrings(item, out, seen);
+  return out;
+}
+
+function nativeRpcDiagnostic(
+  error: unknown,
+  sensitiveValues: readonly unknown[] = [],
+): Pick<CodexAttachDiagnostic, 'nativeCode' | 'message'> {
+  const redactions = new Set<string>();
+  for (const value of sensitiveValues) diagnosticStrings(value, redactions);
+  let message = error instanceof Error ? error.message : compactText(error);
+  for (const sensitive of [...redactions].sort((a, b) => b.length - a.length)) {
+    message = message.split(sensitive).join('[redacted]');
+  }
+  if (!(error instanceof Error)) return { message: compactText(message) };
+  const rpcCode = (error as Error & { rpcCode?: unknown }).rpcCode;
+  return {
+    ...(rpcCode !== undefined ? { nativeCode: compactText(rpcCode) } : {}),
+    message: compactText(message),
+  };
+}
+
+async function boundedProcessExit(
+  proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'>,
+  timeoutMs: number,
+): Promise<{ exited: boolean; code?: number }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      proc.exited.then((code) => ({ exited: true as const, code })),
+      new Promise<{ exited: false }>((resolve) => {
+        timer = setTimeout(() => resolve({ exited: false }), Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 type PendingApproval = {
   rpcId: number | string;
@@ -3021,6 +3432,8 @@ class CodexResumeConnection implements SessionConnection {
   private liveRuntimeTurnCount = 0;
   private liveRuntimeUpdatedAt: number | undefined;
   private readonly countedLiveRuntimeTurns = new Set<string>();
+  private closeFlight: Promise<void> | undefined;
+  private firstRealTurnStart = true;
 
   constructor(
     private readonly path: string,
@@ -3028,7 +3441,18 @@ class CodexResumeConnection implements SessionConnection {
     private readonly cwd: string | undefined,
     readonly info: SessionInfo,
     private readonly transport: CodexTransport = 'stdio',
+    private readonly reportDiagnostic: CodexAttachDiagnosticReporter = emitCodexAttachDiagnostic,
+    private readonly startupTimeoutMs = CODEX_RESUME_START_TIMEOUT_MS,
+    private readonly processStopTimeoutMs = CODEX_RESUME_PROCESS_STOP_TIMEOUT_MS,
   ) {}
+
+  private diagnostic(diagnostic: Omit<CodexAttachDiagnostic, 'threadId'>): void {
+    try {
+      this.reportDiagnostic({ threadId: this.threadId, ...diagnostic });
+    } catch {
+      /* diagnostics never change connection behavior */
+    }
+  }
 
   private emit(m: AgentMessage): void {
     for (const h of this.handlers) {
@@ -3046,6 +3470,18 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async start(): Promise<void> {
+    try {
+      await this.startConnection();
+    } catch (error) {
+      // Startup owns every resource it creates until the final successful
+      // return. A rejected/timed-out initialize or resume therefore cannot
+      // escape with a child, socket, timer, or pending RPC behind it.
+      await this.close();
+      throw error;
+    }
+  }
+
+  private async startConnection(): Promise<void> {
     // Rollout evidence exists before either app-server transport reconnects. Admit its exact open
     // turn first so a weak thread/resume idle/notLoaded frame cannot manufacture an Idle gap. A
     // later exact matching terminal retires it through the same generic turn-id fence used for
@@ -3065,6 +3501,12 @@ class CodexResumeConnection implements SessionConnection {
         stderr: 'pipe',
         cwd: this.cwd && existsSync(this.cwd) ? this.cwd : undefined,
         env: { ...process.env },
+      });
+      this.diagnostic({
+        event: 'child-lifecycle',
+        transport: this.transport,
+        outcome: 'spawned',
+        pid: this.proc.pid,
       });
       const split = createJsonlSplitter((line) => this.onLine(line));
       void (async () => {
@@ -3098,10 +3540,23 @@ class CodexResumeConnection implements SessionConnection {
       })();
     }
 
-    await this.rpc('initialize', {
-      clientInfo: brokerClientInfo(),
-      capabilities: { experimentalApi: true, requestAttestation: false },
-    });
+    this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'initialize', outcome: 'started' });
+    try {
+      await this.rpc('initialize', {
+        clientInfo: brokerClientInfo(),
+        capabilities: { experimentalApi: true, requestAttestation: false },
+      }, this.startupTimeoutMs);
+      this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'initialize', outcome: 'succeeded' });
+    } catch (error) {
+      this.diagnostic({
+        event: 'rpc-stage',
+        transport: this.transport,
+        stage: 'initialize',
+        outcome: nativeRpcRejected(error) ? 'rejected' : 'failed-or-timed-out',
+        ...nativeRpcDiagnostic(error),
+      });
+      throw error;
+    }
     this.write({ method: 'initialized', params: {} });
     // Rejoin vs cold load: an already-loaded thread carries live settings someone may have explicitly
     // set (an app pick or a synced terminal) — trust the resume response. A COLD load initializes the
@@ -3116,13 +3571,49 @@ class CodexResumeConnection implements SessionConnection {
     } catch {
       /* fresh stdio server or older daemon: treat as a cold load */
     }
-    const resumed = await this.rpc('thread/resume', {
-      threadId: this.threadId,
-      path: this.path,
-      cwd: this.cwd,
-      // Requesting raw events during resume would create a second live content channel. Keep it off.
-      initialTurnsPage: { limit: 1, sortDirection: 'desc', itemsView: 'summary' },
-    });
+    this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'thread/resume', outcome: 'started' });
+    let resumed: any;
+    try {
+      resumed = await this.rpc('thread/resume', {
+        threadId: this.threadId,
+        path: this.path,
+        cwd: this.cwd,
+        // A resume response populates thread.turns by default. That made the
+        // 451 MB Computer Use session serialize and synchronously JSON.parse
+        // its complete native history on the broker event loop before the
+        // startup timer could fire. Ask the native protocol for metadata/live
+        // state only; the bounded page below retains the one recent turn used
+        // to seed run state. This is capability-driven for every thread, never
+        // a title, origin, content, or rollout-size classification.
+        excludeTurns: true,
+        // Requesting raw events during resume would create a second live content channel. Keep it off.
+        initialTurnsPage: { limit: 1, sortDirection: 'desc', itemsView: 'summary' },
+      }, this.startupTimeoutMs);
+      this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'thread/resume', outcome: 'succeeded' });
+    } catch (error) {
+      const rejected = nativeRpcRejected(error);
+      const facts = nativeRpcDiagnostic(error, [this.threadId, this.path, this.cwd]);
+      this.diagnostic({
+        event: 'rpc-stage',
+        transport: this.transport,
+        stage: 'thread/resume',
+        outcome: rejected ? 'rejected' : 'failed-or-timed-out',
+        ...facts,
+      });
+      if (nativeOwnershipConflictRejection(error)) {
+        throw new OwnershipConflictError(
+          'Codex refused Take over because this session already has an active writer.',
+          'native-active-writer',
+        );
+      }
+      if (nativeSessionUnresumableRejection(error)) {
+        throw new NativeSessionUnresumableError(
+          `Codex could not resume this session for app control: ${facts.message ?? 'the native runtime rejected thread/resume'}`,
+          facts.nativeCode,
+        );
+      }
+      throw error;
+    }
     await this.applyResumedThreadState(resumed);
     if (resumed?.model) {
       this.info.currentModel = {
@@ -3182,6 +3673,13 @@ class CodexResumeConnection implements SessionConnection {
     this.refreshSyncHint();
     this.bootstrapApplying = false;
     await this.flushBootstrapQueue();
+    this.diagnostic({
+      event: 'child-lifecycle',
+      transport: this.transport,
+      outcome: 'start-complete',
+      pid: this.proc?.pid,
+      pendingRpcCount: this.pendingRpc.size,
+    });
   }
 
   /** Cold load only: push the rollout tail's approval/reviewer/sandbox/model settings into the freshly loaded
@@ -3254,12 +3752,15 @@ class CodexResumeConnection implements SessionConnection {
   private makeCodexRpcError(payload: unknown): Error {
     if (payload && typeof payload === 'object') {
       const rpcErr = payload as { message?: unknown; code?: unknown; data?: unknown };
-      const err: Error & { rpcCode?: unknown; rpcData?: unknown } = new Error(String(rpcErr.message ?? payload));
+      const err: Error & { rpcCode?: unknown; rpcData?: unknown; rpcRejected?: true } = new Error(String(rpcErr.message ?? payload));
       err.rpcCode = rpcErr.code;
       err.rpcData = rpcErr.data;
+      err.rpcRejected = true;
       return err;
     }
-    return new Error(String(payload));
+    const err: Error & { rpcRejected?: true } = new Error(String(payload));
+    err.rpcRejected = true;
+    return err;
   }
 
   private onLine(line: string): void {
@@ -3757,6 +4258,8 @@ class CodexResumeConnection implements SessionConnection {
     const mode = permissionMode !== undefined ? codexPermissionMode(permissionMode, this.baselineSandboxPolicy) : undefined;
     const expectedTurnRunVersion = this.turnRunStateVersion;
     const expectedTurnRunState = this.turnRunState;
+    const captureFirstTurnStart = this.firstRealTurnStart;
+    this.firstRealTurnStart = false;
     this.turnStartPending = true;
     try {
       const started: any = await this.rpc('turn/start', {
@@ -3787,6 +4290,15 @@ class CodexResumeConnection implements SessionConnection {
         else this.markUnknown();
       }
     } catch (err) {
+      if (captureFirstTurnStart) {
+        this.diagnostic({
+          event: 'rpc-stage',
+          transport: this.transport,
+          stage: 'turn/start',
+          outcome: nativeRpcRejected(err) ? 'rejected' : 'failed-or-timed-out',
+          ...nativeRpcDiagnostic(err, [this.threadId, this.cwd, clientUserMessageId, content]),
+        });
+      }
       if (this.turnRunStateMatches(expectedTurnRunVersion, expectedTurnRunState)) {
         this.markUnknown();
         const reconcileVersion = this.turnRunStateVersion;
@@ -4646,6 +5158,13 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async close(): Promise<void> {
+    if (this.closeFlight) return this.closeFlight;
+    const closing = this.closeResources();
+    this.closeFlight = closing;
+    return closing;
+  }
+
+  private async closeResources(): Promise<void> {
     try {
       if (this.transport === 'stdio' && this.activeTurnId()) this.write({ id: ++this.reqId, method: 'turn/interrupt', params: { threadId: this.threadId, turnId: this.activeTurnId() } });
     } catch {
@@ -4657,13 +5176,52 @@ class CodexResumeConnection implements SessionConnection {
     this.activeWaitingPlaceholders.clear();
     this.skills.clear();
     this.published.clear(); // line indices only mean anything to the connection that published them
+    this.bootstrapApplying = false;
+    this.bootstrapQueue = [];
+    this.pendingPromptStarts = 0;
+    this.turnStartPending = false;
     this.markIdle();
-    for (const p of this.pendingRpc.values()) clearTimeout(p.timer);
+    for (const p of this.pendingRpc.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error('Codex connection closed.'));
+    }
     this.pendingRpc.clear();
-    this.proc?.kill();
+    const proc = this.proc;
+    if (proc) await this.stopSpawnedProcess(proc);
     this.proc = undefined;
     this.daemon?.close();
     this.daemon = undefined;
+  }
+
+  private async stopSpawnedProcess(proc: Bun.Subprocess<'pipe', 'pipe', 'pipe'>): Promise<void> {
+    this.diagnostic({
+      event: 'child-lifecycle',
+      transport: this.transport,
+      outcome: 'close-requested',
+      pid: proc.pid,
+      pendingRpcCount: this.pendingRpc.size,
+    });
+    try {
+      proc.kill();
+    } catch {
+      /* already exited */
+    }
+    let exit = await boundedProcessExit(proc, this.processStopTimeoutMs);
+    if (!exit.exited) {
+      try {
+        proc.kill(9);
+      } catch {
+        /* already exited */
+      }
+      exit = await boundedProcessExit(proc, this.processStopTimeoutMs);
+    }
+    this.diagnostic({
+      event: 'child-lifecycle',
+      transport: this.transport,
+      outcome: exit.exited ? `exited:${String(exit.code)}` : 'exit-timeout',
+      pid: proc.pid,
+      pendingRpcCount: this.pendingRpc.size,
+    });
   }
 }
 
@@ -5117,6 +5675,11 @@ class CodexRuntimeTracker {
   private readonly order: string[] = [];
   private lastUserMessageKey: string | undefined;
   private lastAssistantMessageKey: string | undefined;
+  /** Legacy Codex writes an assistant event immediately before the response item for the same
+   * text. Newer rollouts omit that event and retain only the response item. Remember only the last
+   * real record's legacy text so the next response item is suppressed when it is the duplicate
+   * half of a dual-emission pair, while a new-only response remains visible. */
+  private pendingLegacyAssistantText: string | undefined;
   /**
    * turnId → user messages seen inside it, oldest first.
    *
@@ -5218,6 +5781,26 @@ class CodexRuntimeTracker {
 
   get currentTurnId(): string | undefined {
     return this.activeTurnId;
+  }
+
+  /** Consume the possible dual-emission pair from the preceding real record.
+   *
+   * Calling this for every real record deliberately clears the candidate on any intervening
+   * record. Blank/malformed slots never call the mapper, matching the rollout pair rules used for
+   * identity adoption. */
+  consumeLegacyAssistantPair(record: any): boolean {
+    const pending = this.pendingLegacyAssistantText;
+    this.pendingLegacyAssistantText = undefined;
+    if (pending === undefined) return false;
+    const payload = record?.payload;
+    return record?.type === 'response_item'
+      && payload?.type === 'message'
+      && payload?.role === 'assistant'
+      && responseItemText(payload) === pending;
+  }
+
+  expectLegacyAssistantPair(text: string): void {
+    this.pendingLegacyAssistantText = text;
   }
 
   /** Records one automatic denial only while a turn is open. */
@@ -5558,6 +6141,7 @@ export function mapLine(
 ): AgentMessage[] {
   const p = ln?.payload;
   if (!p) return [];
+  const duplicateLegacyAssistantPair = runtime.consumeLegacyAssistantPair(ln);
   const key = `c${lineIndex}`;
   const ts = lineTimestampMs(ln);
   const transition = runtime.noteTurnTransition(rolloutTurnTransition(ln));
@@ -5592,6 +6176,7 @@ export function mapLine(
         // the client stored the first, and re-deciding is how one answer becomes two rows.
         const textKey = published ? published.adopt(lineIndex, decided) : decided;
         runtime.recordAssistant(textKey);
+        runtime.expectLegacyAssistantPair(text);
         return [{ type: 'model-output', text, final: true, key: textKey }];
       }
       case 'agent_reasoning': {
@@ -5680,6 +6265,19 @@ export function mapLine(
   }
   if (ln.type === 'response_item') {
     switch (p.type) {
+      case 'message': {
+        if (p.role !== 'assistant' || duplicateLegacyAssistantPair) return [];
+        const text = responseItemText(p);
+        if (!text) return [];
+        const nativeId = p.id == null ? '' : String(p.id);
+        const turnId = runtime.currentTurnId;
+        const decided = nativeId && turnId
+          ? codexItemTextKey(turnId, nativeId, 't')
+          : key;
+        const textKey = published ? published.adopt(lineIndex, decided) : decided;
+        runtime.recordAssistant(textKey);
+        return [{ type: 'model-output', text, final: true, key: textKey }];
+      }
       // apply_patch et al. arrive as custom_tool_call (NOT function_call) — both are tool calls.
       case 'function_call': {
         if (p.name === 'update_plan') {
@@ -5741,7 +6339,7 @@ export function mapLine(
         }];
       }
       default:
-        return []; // message / reasoning → covered by event_msg/agent_message + agent_reasoning
+        return []; // reasoning → covered by event_msg/agent_reasoning
     }
   }
   return [];
@@ -7836,14 +8434,21 @@ export function enrichEntryBytes(entry: CodexEnrich | undefined): number {
 }
 
 type ScanOutcome = {
-  /** Bytes consumed from the file. */
+  /** End position of the scan in the file — equals the requested size on a complete pass. */
   bytes: number;
-  /** SHA-256 over exactly those bytes, as read. */
+  /** SHA-256 over exactly the bytes read this pass (from `startOffset` to `bytes`). */
   digest: Buffer;
   /** A record exceeded {@link HISTORY_SNAPSHOT_MAX_RECORD_BYTES}. Terminal. */
   recordOverflow: boolean;
   /** Oversized records passed over instead, when the caller allowed skipping. */
   skippedRecords: number;
+  /** Record index the next appended record would take — the scan's line-count watermark. */
+  nextRecordIndex: number;
+  /** True when the scan ended exactly at a newline, so a later pass may resume at `bytes`.
+   *  A final record with no trailing newline (or a discarded oversized tail) is a torn
+   *  boundary: resuming there would read the rest of that line as a new record and shift
+   *  every later index. */
+  endedAtRecordBoundary: boolean;
 };
 
 /** Compact native paging metadata retained after a Codex index build.
@@ -8262,17 +8867,26 @@ function* scanFileLineChunks(
     end: number,
     index: number,
   ) => boolean,
-  options: { skipOversizedRecords?: boolean } = {},
+  options: {
+    skipOversizedRecords?: boolean;
+    /** Resume a prior complete pass: read from this byte (a record boundary), not from 0. */
+    startOffset?: number;
+    /** Record index of the first record at `startOffset`, so indices stay file-absolute. */
+    startRecordIndex?: number;
+  } = {},
 ): Generator<void, ScanOutcome, void> {
   const skipOversized = options.skipOversizedRecords === true;
-  const chunk = Buffer.alloc(Math.min(HISTORY_SNAPSHOT_CHUNK_BYTES, Math.max(size, 1)));
+  const startOffset = options.startOffset ?? 0;
+  const chunk = Buffer.alloc(
+    Math.min(HISTORY_SNAPSHOT_CHUNK_BYTES, Math.max(size - startOffset, 1)),
+  );
   const digest = createHash('sha256');
   /** Byte segments of the current partial record, copied out of the reused chunk buffer. */
   let heldParts: Buffer[] = [];
   let heldBytes = 0;
-  let read = 0;
-  let recordStart = 0;
-  let recordIndex = 0;
+  let read = startOffset;
+  let recordStart = startOffset;
+  let recordIndex = options.startRecordIndex ?? 0;
   let skipped = 0;
   /** Inside an oversized record: consume to its newline without retaining it. */
   let discarding = false;
@@ -8281,6 +8895,8 @@ function* scanFileLineChunks(
     digest: digest.digest(),
     recordOverflow,
     skippedRecords: skipped,
+    nextRecordIndex: recordIndex,
+    endedAtRecordBoundary: heldBytes === 0 && !discarding,
   });
   let firstChunk = true;
   while (read < size) {
@@ -8383,7 +8999,12 @@ async function scanFileLinesAsync(
   fd: number,
   size: number,
   onLine: (raw: string, start: number, end: number, index: number) => boolean,
-  options: { skipOversizedRecords?: boolean; deadline?: number } = {},
+  options: {
+    skipOversizedRecords?: boolean;
+    deadline?: number;
+    startOffset?: number;
+    startRecordIndex?: number;
+  } = {},
 ): Promise<ScanOutcome | 'timed-out'> {
   const scan = scanFileLineChunks(fd, size, onLine, options);
   for (;;) {
@@ -8424,6 +9045,113 @@ export interface CaptureFileHistoryHooks {
   beforePageRecordReads?: () => void;
   /** Overrides {@link HISTORY_TAIL_READ_MAX_ELAPSED_MS} so the abort is deterministically testable. */
   maxElapsedMs?: number;
+  /** Reports the byte range each capture pass actually read — O(delta) evidence for tests. */
+  onScanRange?: (startOffset: number, endOffset: number) => void;
+}
+
+/**
+ * Where a completed bounded-tail capture stopped, plus the mapping state frozen at that byte.
+ *
+ * Keyed by the sink instance the rows were streamed into: the state below is only meaningful
+ * for continuing THAT sink, because the sink holds the corresponding retained window and
+ * latest-wins projections. A different sink must pay a full scan, and a collected sink lets
+ * this state be collected with it — the WeakMap is the lifecycle contract.
+ */
+type CodexTailCaptureResume = {
+  /** `${dev}:${ino}` of the captured source. */
+  sourceDevIno: string;
+  /** Hash of the first {@link HISTORY_SOURCE_REWRITE_PREFIX_BYTES} (or fewer) bytes at capture. */
+  rewriteToken: string;
+  /** How many bytes that token covered, so a grown file recomputes over the same window. */
+  prefixLength: number;
+  /** Byte position the capture consumed to — always a record boundary. */
+  size: number;
+  /** Post-capture stat, so a same-size rewrite (mtime/ctime moved) invalidates the resume. */
+  mtimeMs: number;
+  ctimeMs: number;
+  /** Record index the next appended record takes. */
+  recordIndex: number;
+  /** Cumulative oversized records skipped across the original capture and every resume. */
+  skippedRecords: number;
+  enrichStore: CodexEnrichStore;
+  runtime: CodexRuntimeTracker;
+  /** Observe-tail turn inheritance state at `size`, folded alongside the mapping pass. */
+  context: ActiveRolloutContext;
+  openTaskTurnId?: string;
+};
+
+const codexTailCaptureResumes = new WeakMap<HistorySnapshotSink, CodexTailCaptureResume>();
+
+/**
+ * Sinks this function has streamed any prefix into.
+ *
+ * A tail sink without usable resume state (a torn final record, a failed pass) must never be
+ * scanned into from byte zero again — every retained row would be fed twice. Membership here
+ * with no resume entry is answered with the retriable `undefined`, and the caller retries on
+ * a fresh sink.
+ */
+const codexTailFedSinks = new WeakSet<HistorySnapshotSink>();
+
+/**
+ * Byte/record watermark of the newest completed bounded-tail capture per source.
+ *
+ * Sink-independent on purpose: {@link readObserveTailBaseline} consults it so an
+ * over-ceiling observe tail can fix its boundary at the TRUE record count (and inherit
+ * the enclosing turn) by scanning only the bytes appended since the last capture,
+ * instead of falling back to the synthetic byte-based line base that keys the same
+ * message differently live than a history read does.
+ */
+type CodexTailPosition = {
+  rewriteToken: string;
+  prefixLength: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  recordIndex: number;
+  context: ActiveRolloutContext;
+  openTaskTurnId?: string;
+};
+
+const CODEX_TAIL_POSITION_LIMIT = 8;
+const codexTailPositions = new Map<string, CodexTailPosition>();
+
+function storeCodexTailPosition(devIno: string, position: CodexTailPosition): void {
+  codexTailPositions.delete(devIno);
+  codexTailPositions.set(devIno, position);
+  while (codexTailPositions.size > CODEX_TAIL_POSITION_LIMIT) {
+    const oldest = codexTailPositions.keys().next().value;
+    if (oldest === undefined) break;
+    codexTailPositions.delete(oldest);
+  }
+}
+
+function cloneActiveRolloutContext(context: ActiveRolloutContext): ActiveRolloutContext {
+  return {
+    turnId: context.turnId,
+    automaticApprovalDenials: context.automaticApprovalDenials,
+    toolNameByCallId: new Map(context.toolNameByCallId),
+  };
+}
+
+/** Hash the same prefix window a stored token covered, so growth cannot fake a rewrite. */
+function prefixTokenOver(prefix: Buffer, prefixBytes: number, length: number): string {
+  return createHash('sha256')
+    .update(prefix.subarray(0, Math.min(prefixBytes, length)))
+    .digest('base64url');
+}
+
+/** Whether a stored watermark still describes a pure append of the statted source. */
+function codexTailWatermarkValid(
+  stored: { size: number; mtimeMs: number; ctimeMs: number },
+  stat: { size: number; mtimeMs: number; ctimeMs: number },
+): boolean {
+  if (stat.size < stored.size) return false;
+  // A write that did not grow the file is a rewrite hazard, exactly as the capture's own
+  // post-scan revalidation treats it.
+  if (stat.size === stored.size && (stat.mtimeMs !== stored.mtimeMs || stat.ctimeMs !== stored.ctimeMs)) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -8479,6 +9207,30 @@ export async function captureFileHistoryInto(
     const prefix = Buffer.alloc(Math.min(HISTORY_SOURCE_REWRITE_PREFIX_BYTES, size));
     const prefixBytes = prefix.length > 0 ? readSync(fd, prefix, 0, prefix.length, 0) : 0;
 
+    // Append-only continuation (H1d). A sink this function already streamed a prefix into may
+    // come back for the bytes appended since: the resume state frozen for exactly that sink
+    // proves where the prior pass stopped and what the mapper knew there, so both passes read
+    // only [resume.size, size). Anything short of proof — a different file, a shrink, a prefix
+    // rewrite, a same-size metadata move — is answered with the ordinary retriable `undefined`:
+    // this sink already holds rows, so a full re-scan into it would double every one of them.
+    const devIno = `${stat.dev}:${stat.ino}`;
+    const resume = tailOnly ? codexTailCaptureResumes.get(sink) : undefined;
+    if (resume) codexTailCaptureResumes.delete(sink);
+    if (tailOnly && !resume && codexTailFedSinks.has(sink)) return undefined;
+    if (tailOnly) codexTailFedSinks.add(sink);
+    let startOffset = 0;
+    let startRecordIndex = 0;
+    let carriedSkips = 0;
+    if (resume) {
+      const appendOnly = resume.sourceDevIno === devIno
+        && codexTailWatermarkValid(resume, stat)
+        && prefixTokenOver(prefix, prefixBytes, resume.prefixLength) === resume.rewriteToken;
+      if (!appendOnly) return undefined;
+      startOffset = resume.size;
+      startRecordIndex = resume.recordIndex;
+      carriedSkips = resume.skippedRecords;
+    }
+
     hooks?.beforeFirstPass?.();
 
     // Pass 1 — tool enrichment, under its own count and retained-byte ceilings.
@@ -8488,7 +9240,7 @@ export async function captureFileHistoryInto(
     const callRecords = new Map<string, number[]>();
     let callRefCount = 0;
     let nativeIndexOverflow = false;
-    const enrichStore = new CodexEnrichStore();
+    const enrichStore = resume?.enrichStore ?? new CodexEnrichStore();
     const enrich = enrichStore.entries;
     let enrichOverflow = false;
     const enrichScan = await scanFileLinesAsync(fd, size, (
@@ -8547,8 +9299,9 @@ export async function captureFileHistoryInto(
         return false;
       }
       return true;
-    }, { skipOversizedRecords: tailOnly, deadline });
+    }, { skipOversizedRecords: tailOnly, deadline, startOffset, startRecordIndex });
     if (enrichScan === 'timed-out') return { refusal: 'resource-limit' };
+    hooks?.onScanRange?.(startOffset, enrichScan.bytes);
     if (
       enrichScan.recordOverflow
       || enrichOverflow
@@ -8574,7 +9327,18 @@ export async function captureFileHistoryInto(
     hooks?.betweenPasses?.();
 
     // Pass 2 — map and emit. Resident: one record, its lookahead, and the run tracker.
-    const runtime = new CodexRuntimeTracker();
+    const runtime = resume?.runtime ?? new CodexRuntimeTracker();
+    // Folded beside the mapping so an over-ceiling observe tail can later inherit the
+    // enclosing turn and the exact record count from this capture instead of a synthetic
+    // byte-based line base (see {@link readObserveTailBaseline}).
+    const tailContext = resume
+      ? cloneActiveRolloutContext(resume.context)
+      : {
+          turnId: undefined,
+          automaticApprovalDenials: 0,
+          toolNameByCallId: new Map<string, string>(),
+        };
+    let tailOpenTaskTurnId = resume?.openTaskTurnId;
     let pending: { record: any; index: number } | undefined;
     let refused = false;
     const emit = (record: any, at: number, next: any): boolean => {
@@ -8605,20 +9369,33 @@ export async function captureFileHistoryInto(
       return true;
     };
     const mapScan = await scanFileLinesAsync(fd, size, (raw, _start, _end, at) => {
+      if (tailOnly) {
+        const marker = rolloutTaskMarker(raw);
+        if (marker?.kind === 'start') tailOpenTaskTurnId = marker.turnId;
+        else if (
+          marker?.kind === 'terminal'
+          && (tailOpenTaskTurnId === undefined || tailOpenTaskTurnId === marker.turnId)
+        ) {
+          tailOpenTaskTurnId = undefined;
+        }
+      }
       const record = parseLineOrNull(raw);
       if (!record) return true;
+      if (tailOnly) updateActiveRolloutContext(tailContext, record);
       if (pending && !emit(pending.record, pending.index, record)) return false;
       pending = { record, index: at };
       return true;
-    }, { skipOversizedRecords: tailOnly, deadline });
+    }, { skipOversizedRecords: tailOnly, deadline, startOffset, startRecordIndex });
     if (mapScan === 'timed-out') return { refusal: 'resource-limit' };
     if (mapScan.recordOverflow) return { refusal: 'resource-limit' };
+    hooks?.onScanRange?.(startOffset, mapScan.bytes);
     // Both passes decide skips from byte lengths alone, so a disagreement means
     // the file moved between them — retriable, never a silently different prefix.
     if (enrichScan.skippedRecords !== mapScan.skippedRecords) return undefined;
     if (refused) return { refusal: 'resource-limit' };
     if (pending && !emit(pending.record, pending.index, undefined)) return { refusal: 'resource-limit' };
     if (readerBuilder?.exceededBudget) return { refusal: 'resource-limit' };
+    const totalSkippedRecords = carriedSkips + mapScan.skippedRecords;
     // The skip count is trustworthy from here, and every pending accepted
     // message has now reached the sink. Suppress only after that final flush:
     // when the skipped record is last, suppressing first lets the preceding old
@@ -8661,13 +9438,41 @@ export async function captureFileHistoryInto(
     });
     const reader = readerBuilder?.finish(identity);
     if (wantsLocations && !reader) return { refusal: 'resource-limit' };
+    // Freeze the watermark for this sink and for later observe baselines — but only at a clean
+    // record boundary. A torn final line would make a resumed pass read the rest of that line
+    // as a new record and shift every later index; leaving no resume entry makes the next
+    // capture on this sink answer `undefined`, and the caller retries on a fresh sink.
+    if (tailOnly && mapScan.endedAtRecordBoundary) {
+      const watermark = {
+        rewriteToken: identity.rewriteToken,
+        prefixLength: prefixBytes,
+        size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+        recordIndex: mapScan.nextRecordIndex,
+      };
+      codexTailCaptureResumes.set(sink, {
+        sourceDevIno: devIno,
+        ...watermark,
+        skippedRecords: totalSkippedRecords,
+        enrichStore,
+        runtime,
+        context: tailContext,
+        ...(tailOpenTaskTurnId !== undefined ? { openTaskTurnId: tailOpenTaskTurnId } : {}),
+      });
+      storeCodexTailPosition(devIno, {
+        ...watermark,
+        context: cloneActiveRolloutContext(tailContext),
+        ...(tailOpenTaskTurnId !== undefined ? { openTaskTurnId: tailOpenTaskTurnId } : {}),
+      });
+    }
     return {
       identity,
       ...(reader ? { reader } : {}),
-      // Both passes agreed on this count above, so it describes the prefix and not one reading of
-      // it. Carried outward so the frame can admit that some records inside the window were never
-      // read (H1c round 3, finding 5).
-      ...(mapScan.skippedRecords > 0 ? { skippedRecords: mapScan.skippedRecords } : {}),
+      // Both passes agreed on this count above, so it describes the captured prefix across the
+      // original pass and every resume of it. Carried outward so the frame can admit that some
+      // records inside the window were never read (H1c round 3, finding 5).
+      ...(totalSkippedRecords > 0 ? { skippedRecords: totalSkippedRecords } : {}),
     };
   } catch (error) {
     // An allocation or string-length failure is a bound this source cannot satisfy, not a source

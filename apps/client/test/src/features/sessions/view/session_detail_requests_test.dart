@@ -98,6 +98,161 @@ void main() {
     );
 
     testWidgets(
+      'permission title, body, and actions share one selectable box',
+      (
+        tester,
+      ) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-one-box',
+                  'permission': 'disk.write',
+                  'reason': 'Save the report',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        final action = find.byKey(
+          const Key('session-detail-permission-approve-perm-one-box'),
+        );
+        await tester.ensureVisible(action);
+        final card = find.ancestor(of: action, matching: find.byType(Card));
+        expect(card, findsOneWidget);
+        expect(
+          find.descendant(of: card, matching: find.text('Permission request')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: card,
+            matching: find.text('reason: Save the report'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(of: action, matching: find.byType(SelectionArea)),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: card, matching: find.byType(SelectableText)),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('question title, input, and actions share one selectable box', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          MessageWireEvent(
+            seq: 1,
+            message: AgentMessage(
+              type: AgentMessageType.questionRequest,
+              raw: {
+                'type': 'question-request',
+                'requestId': 'question-one-box',
+                'questions': [
+                  {'question': 'Which server should run this?'},
+                ],
+              },
+            ),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      final action = find.byKey(
+        const Key(
+          'session-detail-question-answer-button-question-one-box',
+        ),
+      );
+      await tester.ensureVisible(action);
+      final card = find.ancestor(of: action, matching: find.byType(Card));
+      expect(card, findsOneWidget);
+      expect(
+        find.descendant(of: card, matching: find.text('Question')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: card,
+          matching: find.text('Which server should run this?'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: card, matching: find.byType(TextField)),
+        findsOneWidget,
+      );
+      expect(
+        find.ancestor(of: action, matching: find.byType(SelectionArea)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('request actions use pointer and touch target heights', (
+      tester,
+    ) async {
+      for (final testCase in const [
+        (TargetPlatform.linux, 32.0),
+        (TargetPlatform.windows, 32.0),
+        (TargetPlatform.android, 40.0),
+        (TargetPlatform.iOS, 40.0),
+      ]) {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-target',
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+            theme: buildAppTheme(
+              themeSpecById(kDefaultThemeId).light,
+              Brightness.light,
+            ).copyWith(platform: testCase.$1),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final action = find.byKey(
+          const Key('session-detail-permission-approve-perm-target'),
+        );
+        await tester.ensureVisible(action);
+        expect(
+          tester.getSize(action).height,
+          testCase.$2,
+          reason: '${testCase.$1}',
+        );
+      }
+    });
+
+    testWidgets(
       'keeps permission actions actionable after submit failure '
       'and shows failure text',
       (tester) async {

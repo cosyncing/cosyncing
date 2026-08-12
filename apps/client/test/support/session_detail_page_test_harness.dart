@@ -429,6 +429,7 @@ final class RecordingSpeechOutput implements SpeechOutput {
 
   final List<String> spokenMessageKeys = <String>[];
   final List<String> spokenTexts = <String>[];
+  final List<double> rateCalls = <double>[];
   int disposeCallCount = 0;
   final _states = StreamController<SpeechOutputState>.broadcast();
 
@@ -463,6 +464,9 @@ final class RecordingSpeechOutput implements SpeechOutput {
     spokenTexts.add(utterances.map((utterance) => utterance.text).join(' '));
     _emit(SpeechOutputSpeaking(messageKey));
   }
+
+  @override
+  Future<void> setRate(double rate) async => rateCalls.add(rate);
 
   @override
   Future<void> pause() async {

@@ -1,9 +1,12 @@
 /// Coarse broker reachability/authorization outcome.
 ///
-/// These three states are deliberately distinct because each needs different
+/// These four states are deliberately distinct because each needs different
 /// UX. Conflating "broker is down" with "broker rejected your credential"
 /// trains users to re-paste a credential that was never the problem.
 enum BrokerGateStatus {
+  /// No saved server profile is currently selected.
+  unselected,
+
   /// The broker answered an authenticated request successfully.
   connected,
 
@@ -40,7 +43,13 @@ class BrokerGateState {
     this.machine,
     this.detail,
     this.brokerUrl,
+    this.profileId,
+    this.profileDisplayName,
   });
+
+  /// No saved server profile is currently selected.
+  const BrokerGateState.unselected()
+    : this(status: BrokerGateStatus.unselected);
 
   /// The broker answered an authenticated request.
   const BrokerGateState.connected({String? machine, Uri? brokerUrl})
@@ -53,12 +62,18 @@ class BrokerGateState {
   /// The broker could not be reached.
   ///
   /// [detail] carries transport diagnostics and never contains secrets.
-  const BrokerGateState.unreachable({String? detail, Uri? brokerUrl})
-    : this(
-        status: BrokerGateStatus.unreachable,
-        detail: detail,
-        brokerUrl: brokerUrl,
-      );
+  const BrokerGateState.unreachable({
+    String? detail,
+    Uri? brokerUrl,
+    String? profileId,
+    String? profileDisplayName,
+  }) : this(
+         status: BrokerGateStatus.unreachable,
+         detail: detail,
+         brokerUrl: brokerUrl,
+         profileId: profileId,
+         profileDisplayName: profileDisplayName,
+       );
 
   /// The broker rejected the request with HTTP 401.
   const BrokerGateState.unauthorized({
@@ -87,6 +102,27 @@ class BrokerGateState {
   /// The broker endpoint the probe targeted, when known.
   final Uri? brokerUrl;
 
+  /// Stable identity of the saved profile evaluated by this probe.
+  final String? profileId;
+
+  /// Saved display name evaluated by this probe.
+  final String? profileDisplayName;
+
+  /// Binds a transport result to the exact saved profile it evaluated.
+  BrokerGateState bindProfile({
+    required String id,
+    required String displayName,
+    required Uri baseUri,
+  }) => BrokerGateState(
+    status: status,
+    credentialIssue: credentialIssue,
+    machine: machine,
+    detail: detail,
+    brokerUrl: baseUri,
+    profileId: id,
+    profileDisplayName: displayName,
+  );
+
   /// Whether the app may operate normally.
   bool get isConnected => status == BrokerGateStatus.connected;
 
@@ -103,5 +139,6 @@ class BrokerGateState {
   @override
   String toString() =>
       'BrokerGateState(status: $status, credentialIssue: $credentialIssue, '
-      'machine: $machine, detail: $detail, brokerUrl: $brokerUrl)';
+      'machine: $machine, detail: $detail, brokerUrl: $brokerUrl, '
+      'profileId: $profileId, profileDisplayName: $profileDisplayName)';
 }

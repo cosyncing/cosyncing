@@ -56,7 +56,9 @@ class ReadAloudAction extends ConsumerWidget {
     final identity = resolveReadAloudIdentity(message)!;
     final state = ref.watch(readAloudControllerProvider);
 
-    if (!state.capabilities.synthesis) return const SizedBox.shrink();
+    if (!state.capabilities.canAttemptSynthesis) {
+      return const SizedBox.shrink();
+    }
 
     final activeKey = state.activeMessageKey;
     final isActive = activeKey == identity;

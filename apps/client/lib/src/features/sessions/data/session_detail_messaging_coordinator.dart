@@ -262,7 +262,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     }
     if (!request.isValidBrokerRequest) {
       state = state.copyWith(
-        error: 'Plan action does not match the current broker policy.',
+        error: 'Plan action does not match the current server policy.',
       );
       return false;
     }

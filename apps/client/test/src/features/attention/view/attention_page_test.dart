@@ -67,7 +67,7 @@ void main() {
 
     final emptyBody = find.text(
       'Action requests, background run results, runtime updates, quota '
-      'warnings, and broker health notices appear here.',
+      'warnings, and server health notices appear here.',
     );
     expect(emptyBody, findsOneWidget);
     expect(

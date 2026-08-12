@@ -87,7 +87,23 @@ export interface SetupDiagnosisContext {
   readText(path: string, maxBytes?: number): { ok: true; text: string } | { ok: false; reason: 'missing' | 'unreadable' | 'too-large' };
   readPackageVersion(executable: string, packageNames: readonly string[]): string | undefined;
   runReadOnly(executable: string, args: readonly string[], timeoutMs?: number): Promise<SetupCommandProbe>;
-  fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number): Promise<SetupHttpProbe>;
+  /**
+   * `maxBytes` caps the DECODED body; over it the probe reports `invalid-response`, never `unreachable`,
+   * because the endpoint did answer. Omit it for probing — the default suits a health check. Supply it
+   * only to read a response whose size follows the operator's data rather than the protocol, such as this
+   * broker's own session roster, which grows with use and cannot be bounded by a probe-sized ceiling.
+   *
+   * It REQUESTS a ceiling; the implementation decides one. Every implementation must cap it at its own
+   * finite maximum and must treat a non-finite or non-positive request as the default rather than as
+   * permission to read without limit — otherwise one caller's `Infinity` or `NaN` removes the boundary
+   * for a response this side does not control.
+   */
+  fetchJson(
+    url: string,
+    headers?: Readonly<Record<string, string>>,
+    timeoutMs?: number,
+    maxBytes?: number,
+  ): Promise<SetupHttpProbe>;
   probeTcp(host: string, port: number, timeoutMs?: number): Promise<'open' | 'closed' | 'unknown'>;
   displayPath(path: string): string;
 }
@@ -338,6 +354,29 @@ export class OwnershipConflictError extends Error {
 export function isOwnershipConflictError(error: unknown): error is OwnershipConflictError {
   return error instanceof OwnershipConflictError
     || (error instanceof Error && error.name === 'OwnershipConflictError' && 'conflict' in error);
+}
+
+/** A native resume request rejected the session before an app-side owner was
+ *  admitted. Unlike {@link OwnershipConflictError}, this is not evidence of a
+ *  competing writer: the native runtime itself declined to resume the thread.
+ *
+ *  The broker maps this to a distinct structured attach refusal and then
+ *  falls back to Observe on the same socket. */
+export class NativeSessionUnresumableError extends Error {
+  constructor(
+    message: string,
+    /** Bounded native JSON-RPC code when one was supplied. */
+    public readonly nativeCode?: string,
+  ) {
+    super(message);
+    this.name = 'NativeSessionUnresumableError';
+  }
+}
+
+/** Cross-realm-safe predicate for packaged/link-workspace adapter boundaries. */
+export function isNativeSessionUnresumableError(error: unknown): error is NativeSessionUnresumableError {
+  return error instanceof NativeSessionUnresumableError
+    || (error instanceof Error && error.name === 'NativeSessionUnresumableError');
 }
 
 /** A session-scoped action was refused because the session is owned by the agent

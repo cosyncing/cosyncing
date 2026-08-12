@@ -5,6 +5,7 @@ import {
   inspectBrokerToken,
   readBrokerToken,
 } from './credentials.ts';
+import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
 import { inspectInstallState } from './install-state.ts';
 import { PRODUCT_IDENTITY } from './product.ts';
@@ -16,6 +17,11 @@ import {
   terminalQrWidth,
 } from './terminal-qr.ts';
 import { SYSTEMD_SERVICE_NAME } from './service-manager.ts';
+import {
+  probeAdvertisedEndpointOnce,
+  resolveTailscaleFallbackAddresses,
+  type AdvertisedEndpointDirectProbe,
+} from './tailscale-serve.ts';
 import { APP_PATH } from './web-routes.ts';
 
 const RESPONSE_LIMIT = 256 * 1024;
@@ -73,6 +79,12 @@ export interface OperatorCommandDependencies {
   columns?: () => number | undefined;
   confirmRevoke?: (peerId: string) => Promise<boolean>;
   confirmAnother?: (paired: number) => Promise<boolean>;
+  /** Seams for the advertised endpoint's DNS-independent retry; production resolves all of this itself.
+   *  Prefer supplying `diagnosisContext` over `advertisedFallbackAddresses`: the context still runs the
+   *  real `tailscale status --json` resolution, so a test built on it fails if that wiring is removed. */
+  diagnosisContext?: SetupDiagnosisContext;
+  advertisedFallbackAddresses?: readonly string[];
+  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }
 
 interface LocalBrokerAccess {
@@ -209,8 +221,40 @@ async function verifyAdvertisedBroker(
       'configuration',
     );
   }
+  let unreachable: OperatorCommandError;
+  try {
+    assertBrokerHealth(
+      await request(dependencies, access, '/api/health', {}, false, advertised),
+      access,
+      true,
+    );
+    return;
+  } catch (error) {
+    // Only a transport failure earns the retry. An identity mismatch means the endpoint answered and
+    // answered wrongly, which no amount of re-routing fixes and which must stay a refusal.
+    if (!(error instanceof OperatorCommandError) || error.kind !== 'unreachable') throw error;
+    unreachable = error;
+  }
+
+  // The advertised NAME did not connect. Ask this node's own Tailscale addresses the same question, still
+  // presenting and validating the advertised hostname, so pairing works on a host whose MagicDNS does not
+  // resolve. Only the health check moves: the QR still carries the hostname, never an address literal,
+  // because the paired device has to reach this broker by name from wherever it is.
+  const context = dependencies.diagnosisContext ?? createSetupDiagnosisContext();
+  const addresses = dependencies.advertisedFallbackAddresses
+    ?? await resolveTailscaleFallbackAddresses(context);
+  if (addresses.length === 0) throw unreachable;
+  const probe = await probeAdvertisedEndpointOnce({
+    // The name is already known to be unreachable; this context short-circuits re-asking it so the retry
+    // spends its whole budget on the addresses.
+    context: { ...context, fetchJson: async () => ({ status: 'unreachable' }) },
+    advertisedUrl: advertised,
+    fallbackAddresses: addresses,
+    ...(dependencies.advertisedDirectProbe ? { directProbe: dependencies.advertisedDirectProbe } : {}),
+  });
+  if (probe.status === 'unreachable') throw unreachable;
   assertBrokerHealth(
-    await request(dependencies, access, '/api/health', {}, false, advertised),
+    { ok: probe.status === 'ok', status: probe.statusCode ?? 0, json: probe.json },
     access,
     true,
   );
@@ -418,6 +462,9 @@ export async function runPairCommand(
   };
   try {
     const access = localAccess(home);
+    const pairingLinkLabel = readSetupState(home).language === 'zh-Hans'
+      ? '配对链接'
+      : 'Pairing link';
     await verifyLocalBroker(dependencies, access);
     await verifyAdvertisedBroker(dependencies, access);
     const advertisedUrl = access.config.broker.advertisedUrl!;
@@ -432,8 +479,11 @@ export async function runPairCommand(
             + 'A QR that wraps cannot be scanned, so here is the pairing link instead — open it on the '
             + `device, or widen the terminal to ${fit.width} columns and run ${options.invocation} pair again.\n`,
         );
-        options.stdout.write(`${offer.qr}\n`);
       }
+      // The QR and the selectable link are two renderings of the exact same
+      // one-use payload. Always print the link: paste works on every client,
+      // including desktop platforms without an in-app camera scanner.
+      options.stdout.write(`${pairingLinkLabel}: ${offer.qr}\n`);
       options.stdout.write(
         `${fit.fits ? 'Scan' : 'Open'} before ${offer.expiresAt}. This pairing offer is one-use and expires in five minutes.\n`,
       );

@@ -30,6 +30,8 @@ export interface CandidatePairArgs {
   allowDirtyWebReview?: boolean;
 }
 
+export const CANDIDATE_CREDENTIAL_FIELD_LABEL = 'Server token';
+
 function usage(): never {
   console.error(
     'Usage: bun run scripts/broker/release/verify-candidate-pair.ts '
@@ -546,7 +548,7 @@ async function probeBuiltClient(options: {
       };
     })()`);
     const tokenFieldReady = await waitFor(async () =>
-      (await semanticPoint('Broker token')) !== null
+      (await semanticPoint(CANDIDATE_CREDENTIAL_FIELD_LABEL)) !== null
     );
     if (!tokenFieldReady) {
       const diagnostics = await evaluate(`(() => ({
@@ -567,7 +569,7 @@ async function probeBuiltClient(options: {
         }`,
       );
     }
-    await clickLabel('Broker token');
+    await clickLabel(CANDIDATE_CREDENTIAL_FIELD_LABEL);
     await send('Input.insertText', { text: options.token });
     await clickLabel('Save token');
     // The save button starts an async secure-store/profile mutation followed by a gate refresh. A fixed
@@ -576,7 +578,7 @@ async function probeBuiltClient(options: {
     // removed only after the save and refresh have completed successfully, making it the user-visible commit
     // witness rather than an estimate of how long persistence ought to take.
     const credentialCommitted = await waitFor(async () =>
-      (await semanticPoint('Broker token')) === null, 30_000);
+      (await semanticPoint(CANDIDATE_CREDENTIAL_FIELD_LABEL)) === null, 30_000);
     if (!credentialCommitted) {
       const diagnostics = await evaluate(`(() => ({
         url: location.href,

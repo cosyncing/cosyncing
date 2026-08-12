@@ -690,7 +690,9 @@ class AttachConflictWireEvent extends WireEvent {
   final String reason;
 
   /// Stable broker code: `DRIVE_OWNERSHIP_CONFLICT` when ownership facts deny
-  /// the restore, `DRIVE_RESTORE_FAILED` for a non-ownership attach failure.
+  /// the restore, `DRIVE_OWNERSHIP_UNKNOWN` when daemon ownership cannot be
+  /// verified, `DRIVE_NATIVE_SESSION_UNRESUMABLE` when the native runtime
+  /// rejects resume, or `DRIVE_RESTORE_FAILED` for another attach failure.
   final String code;
 
   /// Human-readable conflict detail from the broker/adapter.

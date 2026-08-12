@@ -71,11 +71,13 @@ function outroEntries(access: Readonly<SetupAccessReport>, text: SetupMessages):
   push('access', access.webApp
     ? (access.brokerListening ? text.outroOpenHere(here) : text.outroOpenHereAfterStart(here))
     : (access.brokerListening ? text.outroPairPageHere(here) : text.outroPairPageHereAfterStart(here)));
+  push('access', text.outroLocalServerAddress(access.loopbackUrl));
   if (access.tailscaleUrl) {
     const tailnet = browserClientUrl(access.tailscaleUrl);
     push('access', access.webApp
       ? (access.brokerListening ? text.outroOpenTailnet(tailnet) : text.outroOpenTailnetAfterStart(tailnet))
       : (access.brokerListening ? text.outroPairPageTailnet(tailnet) : text.outroPairPageTailnetAfterStart(tailnet)));
+    push('access', text.outroTailnetServerAddress(access.tailscaleUrl));
   }
   if (!access.tailscaleUrl) push('access', text.outroLoopbackOnly);
   push('access', text.outroShortCommand(PRODUCT_IDENTITY.aliasBinary, [
@@ -197,10 +199,9 @@ export function createClackSetupPresenter(): SetupPresenter {
       note(external, text().networkTitle);
     },
     showBlockers(issues): void {
-      // Blocking issues carry doctor's English summary and remediation verbatim; only the label around them
-      // is translated, because an operator pasting a blocker into a bug report should paste the real one.
       for (const issue of issues) {
-        log.error(text().blocker({ summary: issue.summary, remediation: issue.remediation }));
+        const rendered = issue.localized?.[language] ?? issue;
+        log.error(text().blocker({ summary: rendered.summary, remediation: rendered.remediation }));
       }
     },
     async confirmManagedRuntime(): Promise<SetupPromptResult<boolean>> {
@@ -210,10 +211,31 @@ export function createClackSetupPresenter(): SetupPresenter {
         initialValue: true,
       }));
     },
+    async confirmLegacyPiBridge(inspection): Promise<SetupPromptResult<boolean>> {
+      return cancelled(await confirm({
+        message: text().legacyPiBridgeConfirm(inspection.piBridge.path),
+        initialValue: false,
+      }));
+    },
     async confirmAgentSkill(inspection): Promise<SetupPromptResult<boolean>> {
       return cancelled(await confirm({
         message: text().agentSkillConfirm,
         initialValue: inspection.setupState.agentSkillRequested !== false,
+      }));
+    },
+    async confirmLegacyAgentSkill(inspection): Promise<SetupPromptResult<boolean>> {
+      return cancelled(await confirm({
+        message: text().legacyAgentSkillConfirm(
+          inspection.agentSkills
+            .filter((target) => target.status === 'known-legacy')
+            .map((target) => target.path)
+            .join(', '),
+        ),
+        // Defaults Yes because this prompt only ever describes skills whose bytes match a published
+        // predecessor EXACTLY — declining leaves a stale skill behind and ends setup, which is the wrong
+        // default for the one case with nothing to lose. Drifted, unknown, and unreadable skills never
+        // reach this question: they are blocking issues that fail closed and are never overwritten.
+        initialValue: true,
       }));
     },
     async confirmOpencodeShim(inspection): Promise<SetupPromptResult<boolean>> {
@@ -345,6 +367,8 @@ export interface NonInteractiveSetupOptions {
   enableTailscaleServe: boolean;
   installAgentSkill: boolean;
   opencodeShim: OpencodeShimSignal;
+  replaceLegacyPiBridge?: boolean;
+  upgradeLegacyAgentSkill?: boolean;
   /** Caller-forced language. Unset means the persisted choice, then COSYNCING_SETUP_LANG, then English —
    *  `setup --yes` has no prompt to answer, so it never invents a language the operator did not declare. */
   language?: SetupLanguage;
@@ -358,6 +382,8 @@ export function createNonInteractiveSetupPresenter(
     enableTailscaleServe: false,
     installAgentSkill: true,
     opencodeShim: 'unset',
+    replaceLegacyPiBridge: false,
+    upgradeLegacyAgentSkill: false,
   },
 ): SetupPresenter {
   const line = (value: string): void => writer.write(`${value}\n`);
@@ -412,7 +438,9 @@ export function createNonInteractiveSetupPresenter(
       for (const issue of issues) line(`[error] ${issue.code}: ${issue.summary} Fix: ${issue.remediation}`);
     },
     async confirmManagedRuntime(): Promise<boolean> { return options.acceptManagedRuntimeOwnership; },
+    async confirmLegacyPiBridge(): Promise<boolean> { return options.replaceLegacyPiBridge === true; },
     async confirmAgentSkill(): Promise<boolean> { return options.installAgentSkill; },
+    async confirmLegacyAgentSkill(): Promise<boolean> { return options.upgradeLegacyAgentSkill === true; },
     async confirmOpencodeShim(inspection): Promise<boolean> {
       return resolveOpencodeShim(inspection);
     },

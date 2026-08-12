@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/controller/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/controller/new_session_launch_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/data/session_detail_state.dart';
@@ -20,9 +21,11 @@ import 'package:cosyncing_client/src/features/sessions/model/session_roster_proj
 import 'package:cosyncing_client/src/features/sessions/view/new_session_launch.dart';
 import 'package:cosyncing_client/src/features/sessions/view/new_session_sheet.dart';
 import 'package:cosyncing_client/src/features/sessions/view/open_sessions_tab_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/view/retained_session_pages.dart';
 import 'package:cosyncing_client/src/features/sessions/view/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_detail_page.dart';
 import 'package:cosyncing_client/src/features/sessions/view/session_list_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/view/sessions_empty_state.dart';
 import 'package:cosyncing_client/src/features/sessions/view/workspace_split_sash.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -304,9 +307,12 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   /// Deliberately not [_refreshNow]: a background tick is silent by contract,
   /// and pressing Refresh must both force a fetch and be visible in the one
   /// slot that reports it.
-  void _refreshRequested() {
+  Future<void> _refreshRequested() async {
     if (!mounted) return;
-    unawaited(ref.read(sessionListControllerProvider.notifier).load());
+    await Future.wait<void>([
+      ref.read(sessionListControllerProvider.notifier).load(),
+      ref.read(sessionCreationReadyProvider.notifier).refresh(),
+    ]);
   }
 
   @override
@@ -332,10 +338,39 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
     final listState = ref.watch(sessionListControllerProvider);
+    final hasActiveBrokerClient = ref
+        .watch(brokerClientProvider)
+        .maybeWhen(data: (client) => client != null, orElse: () => false);
+    final activeSource = RosterSource.of(
+      ref.watch(activeBrokerProfileProvider),
+    );
+    final creationAvailability = ref
+        .watch(sessionCreationReadyProvider)
+        .availabilityFor(activeSource);
+    final canCreateSession =
+        creationAvailability == SessionCreationAvailability.available;
+    final hasRosterSessions = ref.watch(rosterSessionsProvider).isNotEmpty;
+    final hasCompletedEmptyRoster =
+        listState.status == SessionListStatus.loaded && !hasRosterSessions;
+    final emptyRosterMessage = switch (creationAvailability) {
+      SessionCreationAvailability.checking =>
+        l10n.sessionsWorkspaceEmptyCreationChecking,
+      SessionCreationAvailability.available => l10n.sessionsWorkspaceEmpty,
+      SessionCreationAvailability.unavailable =>
+        l10n.sessionsWorkspaceEmptyCreationUnavailable,
+      SessionCreationAvailability.failed =>
+        l10n.sessionsWorkspaceEmptyCreationCheckFailed,
+    };
     final unreadCount = ref.watch(attentionUnreadCountProvider);
-    final open =
-        ref.watch(openSessionsControllerProvider).valueOrNull ??
-        const OpenSessionsState();
+    final openAsync = ref.watch(openSessionsControllerProvider);
+    // Never render a previous source's tab membership while the source-keyed
+    // controller is rehydrating. AsyncValue may retain its old value during a
+    // dependency reload; treating loading/error as empty is the presentation
+    // fence that prevents those identities from mounting against the new
+    // broker even for one frame.
+    final open = openAsync.isLoading || openAsync.hasError
+        ? const OpenSessionsState()
+        : openAsync.valueOrNull ?? const OpenSessionsState();
     final active = open.active;
     final buildDetail = widget.detailBuilder ?? _defaultDetail;
 
@@ -353,7 +388,9 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                     unreadCount: unreadCount,
                     unreadLabel: navBadgeLabel(unreadCount),
                     onExpand: _expandRoster,
-                    onNewSession: () => unawaited(_openNewSession()),
+                    onNewSession: canCreateSession
+                        ? () => unawaited(_openNewSession())
+                        : null,
                     onAttention: () => context.go(attentionRoute),
                     onSettings: () => context.go(settingsRoute),
                   )
@@ -367,6 +404,9 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                       open,
                       unreadCount,
                       rosterWidth,
+                      hasActiveBrokerClient,
+                      canCreateSession,
+                      emptyRosterMessage,
                     ),
                   ),
                   WorkspaceSplitSash(
@@ -394,11 +434,27 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                       ),
                       Expanded(
                         child: active == null
-                            ? _PaneMessage(
-                                icon: Icons.terminal_outlined,
-                                message: l10n.sessionsWorkspaceSelectPrompt,
-                              )
-                            : buildDetail(context, active),
+                            ? !hasActiveBrokerClient
+                                  ? const SessionsEmptyState(
+                                      hasActiveBrokerClient: false,
+                                      creationAvailability:
+                                          SessionCreationAvailability.checking,
+                                    )
+                                  : hasCompletedEmptyRoster
+                                  ? _PaneMessage(
+                                      icon: Icons.inbox_outlined,
+                                      message: emptyRosterMessage,
+                                    )
+                                  : _PaneMessage(
+                                      icon: Icons.terminal_outlined,
+                                      message:
+                                          l10n.sessionsWorkspaceSelectPrompt,
+                                    )
+                            : RetainedSessionPages(
+                                source: activeSource,
+                                open: open,
+                                builder: buildDetail,
+                              ),
                       ),
                     ],
                   ),
@@ -439,6 +495,9 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     OpenSessionsState open,
     int unreadCount,
     double rosterWidth,
+    bool hasActiveBrokerClient,
+    bool canCreateSession,
+    String emptyRosterMessage,
   ) {
     final l10n = AppLocalizations.of(context);
     final showSecondaryActions =
@@ -489,7 +548,9 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                 key: const Key('sessions-workspace-global-new'),
                 tooltip: l10n.newSessionTitle,
                 visualDensity: VisualDensity.compact,
-                onPressed: () => unawaited(_openNewSession()),
+                onPressed: canCreateSession
+                    ? () => unawaited(_openNewSession())
+                    : null,
                 icon: const Icon(Icons.add, size: 19),
               ),
               // R0b: the same slot, in the same top-right position, that
@@ -535,15 +596,17 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                         : identity.sessionId,
                   ),
                 ),
-            onNewProject: (project) =>
-                unawaited(_openNewSession(project: project)),
+            onNewProject: canCreateSession
+                ? (project) => unawaited(_openNewSession(project: project))
+                : null,
             onRenameProject: (project) =>
                 unawaited(renameProjectAliasFromList(context, ref, project)),
-            onRetry: () =>
-                ref.read(sessionListControllerProvider.notifier).load(),
+            onRetry: _refreshRequested,
             emptyState: _PaneMessage(
               icon: Icons.inbox_outlined,
-              message: l10n.sessionsWorkspaceEmpty,
+              message: !hasActiveBrokerClient
+                  ? l10n.sessionsEmptyBody
+                  : emptyRosterMessage,
             ),
           ),
         ),

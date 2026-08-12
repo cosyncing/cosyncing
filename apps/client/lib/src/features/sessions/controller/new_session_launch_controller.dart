@@ -124,7 +124,7 @@ final class NewSessionLaunchService {
     // profile's client under the captured id.
     final profile = _ref.read(activeBrokerProfileProvider);
     if (profile == null) {
-      throw StateError('Connect to a broker before creating a session.');
+      throw StateError('Connect to a server before creating a session.');
     }
     // The full (profile, endpoint) source, not the id alone: the intent and
     // provenance rows written below authorize a Drive attach, and an endpoint
@@ -133,7 +133,7 @@ final class NewSessionLaunchService {
     final source = RosterSource.ofProfile(profile);
     if (request.model != null && request.modelSource != source) {
       throw StateError(
-        'The selected model belongs to a different broker connection. '
+        'The selected model belongs to a different server connection. '
         'Refresh the model list and choose again.',
       );
     }
@@ -184,8 +184,8 @@ final class NewSessionLaunchService {
       // active one.
       if (RosterSource.of(_ref.read(activeBrokerProfileProvider)) != source) {
         throw StateError(
-          'The active broker changed while the session was being created. '
-          'Switch back to the previous broker to open it.',
+          'The active server changed while the session was being created. '
+          'Switch back to the previous server to open it.',
         );
       }
       return response.session;

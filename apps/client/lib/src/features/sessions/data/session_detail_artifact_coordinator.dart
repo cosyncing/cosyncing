@@ -358,7 +358,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
   _prepareTranscriptExportCoordinated() async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a broker before exporting transcripts.';
+      const message = 'Connect to a server before exporting transcripts.';
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(
@@ -421,7 +421,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
   Future<bool> _exportTranscriptCoordinated({required String nonce}) async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a broker before exporting transcripts.';
+      const message = 'Connect to a server before exporting transcripts.';
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(

@@ -190,7 +190,7 @@ class WorkspaceCollapsedRosterRail extends StatelessWidget {
   final VoidCallback onExpand;
 
   /// Called to start a new session.
-  final VoidCallback onNewSession;
+  final VoidCallback? onNewSession;
 
   /// Called to open the Attention inbox.
   final VoidCallback onAttention;

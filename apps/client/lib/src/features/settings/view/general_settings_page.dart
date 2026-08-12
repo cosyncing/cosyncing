@@ -2,6 +2,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
+import 'package:cosyncing_client/src/features/voice/controller/read_aloud_rate_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -20,6 +21,7 @@ class GeneralSettingsPage extends ConsumerWidget {
     final l10n = AppLocalizations.of(context);
     final showDebugViews =
         ref.watch(debugViewsControllerProvider).value ?? false;
+    final readAloudRate = ref.watch(readAloudRateControllerProvider);
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.settingsCategoryGeneralTitle)),
@@ -56,6 +58,37 @@ class GeneralSettingsPage extends ConsumerWidget {
                   onTap: () => context.push(transfersRoute),
                 ),
               ],
+            ),
+            const SizedBox(height: 16),
+            SettingsSection(
+              key: const Key('settings-read-aloud-section'),
+              title: l10n.settingsReadAloudTitle,
+              child: ListTile(
+                key: const Key('settings-read-aloud-rate'),
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.record_voice_over_outlined),
+                title: Text(l10n.readAloudSpeed),
+                subtitle: Text(l10n.settingsReadAloudSpeedSubtitle),
+                trailing: DropdownButton<double>(
+                  key: const Key('settings-read-aloud-rate-menu'),
+                  value: readAloudRate.value ?? kDefaultReadAloudRate,
+                  onChanged: readAloudRate.isLoading
+                      ? null
+                      : (rate) {
+                          if (rate == null) return;
+                          ref
+                              .read(readAloudRateControllerProvider.notifier)
+                              .setRate(rate);
+                        },
+                  items: [
+                    for (final rate in kReadAloudRates)
+                      DropdownMenuItem(
+                        value: rate,
+                        child: Text(formatReadAloudRate(rate)),
+                      ),
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: 16),
             SettingsSection(

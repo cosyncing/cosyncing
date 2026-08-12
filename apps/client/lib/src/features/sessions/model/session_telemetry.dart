@@ -88,7 +88,11 @@ final class SessionTelemetry {
   }
 
   /// Whether any token reading has arrived.
-  bool get hasTokens => totalTokens != null;
+  bool get hasTokens =>
+      inputTokens != null ||
+      outputTokens != null ||
+      cacheReadTokens != null ||
+      cacheWriteTokens != null;
 
   /// Whether any context reading has arrived.
   bool get hasContext => contextPercent != null;
@@ -97,7 +101,12 @@ final class SessionTelemetry {
   bool get hasRuntime => totalRuntimeMs != null;
 
   /// Whether this snapshot carries nothing worth showing.
-  bool get isEmpty => !hasTokens && !hasContext && !hasRuntime;
+  bool get isEmpty =>
+      !hasTokens &&
+      !hasContext &&
+      !hasRuntime &&
+      cost == null &&
+      turnCount == null;
 
   /// Whether context pressure warrants a warning treatment.
   ///

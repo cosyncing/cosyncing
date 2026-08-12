@@ -18,10 +18,11 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
 readonly REPO_ROOT="$(pwd -P)"
-readonly REVIEW_PORT="${COSYNCING_REVIEW_PORT:-7734}"
+readonly REVIEW_PORT="${COSYNCING_REVIEW_PORT:-17734}"
+readonly INSTALLED_BROKER_PORT=7734
 readonly REVIEW_HOST="${COSYNCING_REVIEW_HOST:-127.0.0.1}"
-readonly REVIEW_STATE_HOME="${COSYNCING_REVIEW_STATE_HOME:-${HOME}/.cosyncing}"
-readonly REVIEW_CACHE_DIR="${COSYNCING_REVIEW_CACHE_DIR:-${HOME}/.cache/cosyncing}"
+readonly REVIEW_STATE_HOME="${COSYNCING_REVIEW_STATE_HOME:-${REPO_ROOT}/output/review/state}"
+readonly REVIEW_CACHE_DIR="${COSYNCING_REVIEW_CACHE_DIR:-${REPO_ROOT}/output/review/cache}"
 readonly WEB_ROOT="${REPO_ROOT}/apps/client/build/web"
 readonly LOG_DIR="${REPO_ROOT}/output/broker"
 readonly LOG_FILE="${LOG_DIR}/broker.log"
@@ -47,9 +48,9 @@ usage() {
   echo
   echo "Optional review overrides:"
   echo "  COSYNCING_REVIEW_HOST       Default: 127.0.0.1"
-  echo "  COSYNCING_REVIEW_PORT       Default: 7734"
-  echo "  COSYNCING_REVIEW_STATE_HOME Default: \$HOME/.cosyncing"
-  echo "  COSYNCING_REVIEW_CACHE_DIR  Default: \$HOME/.cache/cosyncing"
+  echo "  COSYNCING_REVIEW_PORT       Default: 17734"
+  echo "  COSYNCING_REVIEW_STATE_HOME Default: <repo>/output/review/state"
+  echo "  COSYNCING_REVIEW_CACHE_DIR  Default: <repo>/output/review/cache"
 }
 
 die() {
@@ -102,6 +103,8 @@ done
   die "COSYNCING_REVIEW_PORT must be an integer"
 (( REVIEW_PORT >= 1 && REVIEW_PORT <= 65535 )) ||
   die "COSYNCING_REVIEW_PORT must be between 1 and 65535"
+(( REVIEW_PORT != INSTALLED_BROKER_PORT )) ||
+  die "COSYNCING_REVIEW_PORT cannot use installed broker port ${INSTALLED_BROKER_PORT}; managed Codex and OpenCode runtimes are not isolated"
 [[ "${REVIEW_STATE_HOME}" = /* ]] ||
   die "COSYNCING_REVIEW_STATE_HOME must be absolute"
 [[ "${REVIEW_CACHE_DIR}" = /* ]] ||
@@ -112,10 +115,21 @@ for command in bun curl jq ps readlink setsid ss; do
     die "required command not found: ${command}"
 done
 
-listener_pids() {
-  ss -H -ltnp "sport = :${REVIEW_PORT}" 2>/dev/null |
+listener_pids_for_port() {
+  local port="$1"
+  ss -H -ltnp "sport = :${port}" 2>/dev/null |
     sed -nE 's/.*pid=([0-9]+).*/\1/p' |
     sort -u
+}
+
+listener_pids() {
+  listener_pids_for_port "${REVIEW_PORT}"
+}
+
+assert_no_installed_broker_collision() {
+  if [[ -n "$(ss -H -ltn "sport = :${INSTALLED_BROKER_PORT}" 2>/dev/null)" ]]; then
+    die "refusing review startup while port ${INSTALLED_BROKER_PORT} has an active listener; stop the installed cosyncing broker first because review and installed brokers share managed Codex and OpenCode runtimes"
+  fi
 }
 
 process_belongs_to_checkout() {
@@ -307,6 +321,10 @@ verify_served_app() {
       die "served client asset is missing: ${asset}"
   done
 }
+
+# State/cache/port isolation is insufficient while both brokers can still own the same managed agent
+# runtimes. Refuse before builds, process stops, directory creation, or any other review mutation.
+assert_no_installed_broker_collision
 
 if "${build_artifacts}"; then
   step "Build broker"

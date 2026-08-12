@@ -122,6 +122,9 @@ import {
   TAILSCALE_SERVE_OWNERSHIP_MARKER,
   TAILSCALE_SERVE_RESOURCE_ID,
   TailscaleServeProvider,
+  probeAdvertisedEndpointOnce,
+  resolveTailscaleFallbackAddresses,
+  type AdvertisedEndpointDirectProbe,
   type TailscaleServeInspection,
   type TailscaleBackendState,
   type TailscaleServeProviderOptions,
@@ -141,6 +144,8 @@ export interface LifecycleBaseOptions {
   /** The external runtime that executes it, for distributions that have one. Absent for a native build. */
   runtimePath?: string;
   context?: SetupDiagnosisContext;
+  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
+  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
   systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
   tailscaleProviderFactory?: (options: TailscaleServeProviderOptions) => TailscaleServeRouteProvider;
   runner?: ServiceCommandRunner;
@@ -199,8 +204,13 @@ export interface LifecycleStatusReport {
     /** Persisted/effective sync configuration where the adapter exposes it (currently Codex). */
     syncEnabled?: boolean;
   }>;
-  sessions: { total: number; active: number } | null;
-  updates: { pending: number } | null;
+  /**
+   * Counts, or why there are none. `'unreadable'` means the broker answered and the answer could not be
+   * used; `null` means nothing answered. A reader that treats both as "broker unavailable" reports the
+   * wrong cause — the roster outgrowing a read ceiling is not an unreachable broker.
+   */
+  sessions: { total: number; active: number } | 'unreadable' | null;
+  updates: { pending: number } | 'unreadable' | null;
   detailCodes: string[];
 }
 
@@ -421,9 +431,18 @@ async function endpointIdentity(
   context: SetupDiagnosisContext,
   url: string | undefined,
   machine: string | undefined,
+  /** This node's own Tailscale addresses — supplied only for the ADVERTISED endpoint, whose hostname is
+   *  the one that can fail to resolve. Loopback needs no fallback and must never get one. */
+  fallbackAddresses: readonly string[] = [],
+  directProbe?: AdvertisedEndpointDirectProbe,
 ): Promise<'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch'> {
   if (!url || !machine) return 'unconfigured';
-  const response = await context.fetchJson(new URL('/api/health', url).toString());
+  const response = await probeAdvertisedEndpointOnce({
+    context,
+    advertisedUrl: url,
+    fallbackAddresses,
+    ...(directProbe ? { directProbe } : {}),
+  });
   if (response.status !== 'ok') return 'unreachable';
   const body = response.json && typeof response.json === 'object' && !Array.isArray(response.json)
     ? response.json as Record<string, unknown>
@@ -462,18 +481,70 @@ async function awaitEndpointIdentity(options: {
   return identity;
 }
 
+/**
+ * Body ceiling for the session roster read, and for that read alone.
+ *
+ * The shared diagnosis fetch defaults to 256 KiB, which is the right size for PROBING an endpoint and the
+ * wrong size for READING this broker's own roster. `/api/sessions` carries every session row, so it grows
+ * with use rather than with the protocol: 2.4k sessions already produce ~3 MB, twelve times that default.
+ * Past it the read failed and status reported "broker unavailable" about a broker that was answering
+ * correctly — and it got likelier the more the operator used the product.
+ *
+ * This is deliberately a ceiling and not a removal of the limit. Beyond it the read still fails, but it now
+ * fails as `unreadable`, which says what actually happened.
+ *
+ * It belongs to the roster and is handed to that call explicitly. The sibling status reads are bounded by
+ * the protocol and stay on the probe defaults: `status` issues all three concurrently, so a budget applied
+ * to the command rather than the call let one invocation accept three times this.
+ */
+const SESSION_ROSTER_BODY_LIMIT = 16 * 1024 * 1024;
+
+/** The same roster took 2.8s of the shared 3s probe default, so it was marginal on time as well as size. */
+const SESSION_ROSTER_TIMEOUT_MS = 15_000;
+
+/**
+ * One authenticated status read.
+ *
+ * `unavailable` and `unreadable` are kept apart on purpose. Collapsing them is what produced the defect
+ * this type exists to prevent: an oversized body was reported as an unavailable broker, which points the
+ * operator at restarting a service that is running correctly.
+ */
+type StatusRead =
+  | { readonly outcome: 'ok'; readonly json: unknown }
+  /** Nothing answered: no config, no usable token, or nothing on the socket. */
+  | { readonly outcome: 'unavailable' }
+  /** The broker answered and the answer could not be used — too large, malformed, or an HTTP error. */
+  | { readonly outcome: 'unreadable' };
+
+/**
+ * How much one status endpoint is allowed to cost. Omitted fields take the shared probe defaults.
+ *
+ * Per call rather than per command, because only ONE of these endpoints returns operator data.
+ * Granting the roster's allowance to all three let a single `status` accept up to three times it
+ * across concurrent responses, for two documents whose size is fixed by the protocol and could
+ * never have needed it.
+ */
+interface StatusReadBudget {
+  readonly timeoutMs?: number;
+  readonly maxBytes?: number;
+}
+
 async function authenticatedJson(
   env: LifecycleEnvironment,
   path: string,
-): Promise<unknown | undefined> {
-  if (!env.config) return undefined;
+  budget: StatusReadBudget = {},
+): Promise<StatusRead> {
+  if (!env.config) return { outcome: 'unavailable' };
   const tokenInspection = inspectBrokerToken(brokerTokenPath(env.home));
-  if (tokenInspection.status !== 'ok') return undefined;
+  if (tokenInspection.status !== 'ok') return { outcome: 'unavailable' };
   const response = await env.context.fetchJson(
     new URL(path, env.config.broker.internalUrl).toString(),
     { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(tokenInspection.path) },
+    budget.timeoutMs,
+    budget.maxBytes,
   );
-  return response.status === 'ok' ? response.json : undefined;
+  if (response.status === 'ok') return { outcome: 'ok', json: response.json };
+  return { outcome: response.status === 'unreachable' ? 'unavailable' : 'unreadable' };
 }
 
 export async function collectLifecycleStatus(options: LifecycleBaseOptions): Promise<LifecycleStatusReport> {
@@ -481,13 +552,27 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
   const serviceStatus = env.provider ? await env.provider.inspect() : undefined;
   const [internal, advertised, agentsRaw, sessionsRaw, updatesRaw] = await Promise.all([
     endpointIdentity(env.context, env.config?.broker.internalUrl, env.config?.broker.machineLabel),
-    endpointIdentity(env.context, env.config?.broker.advertisedUrl, env.config?.broker.machineLabel),
+    (async () => endpointIdentity(
+      env.context,
+      env.config?.broker.advertisedUrl,
+      env.config?.broker.machineLabel,
+      env.config?.broker.advertisedUrl ? await resolveTailscaleFallbackAddresses(env.context) : [],
+      options.advertisedDirectProbe,
+    ))(),
     authenticatedJson(env, '/api/agents'),
-    authenticatedJson(env, '/api/sessions'),
+    // The only endpoint here whose response size follows the operator's data rather than the
+    // protocol, and so the only one that gets the larger allowance.
+    authenticatedJson(env, '/api/sessions', {
+      timeoutMs: SESSION_ROSTER_TIMEOUT_MS,
+      maxBytes: SESSION_ROSTER_BODY_LIMIT,
+    }),
     authenticatedJson(env, '/api/agent-runtime-updates'),
   ]);
-  const agents = Array.isArray(agentsRaw)
-    ? agentsRaw.flatMap((candidate): LifecycleStatusReport['agents'] => {
+  // Agents stays a bare array: its size follows the number of INSTALLED adapters, so unlike the roster it
+  // cannot outgrow the read ceiling and has no oversized case to distinguish.
+  const agentRows = agentsRaw.outcome === 'ok' ? agentsRaw.json : undefined;
+  const agents = Array.isArray(agentRows)
+    ? agentRows.flatMap((candidate): LifecycleStatusReport['agents'] => {
         if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
         const row = candidate as Record<string, unknown>;
         if (typeof row.id !== 'string') return [];
@@ -500,27 +585,30 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
         }];
       })
     : [];
-  const sessionsArray = Array.isArray(sessionsRaw)
-    ? sessionsRaw
-    : sessionsRaw && typeof sessionsRaw === 'object' && Array.isArray((sessionsRaw as Record<string, unknown>).sessions)
-      ? (sessionsRaw as { sessions: unknown[] }).sessions
+  const sessionsBody = sessionsRaw.outcome === 'ok' ? sessionsRaw.json : undefined;
+  const sessionsArray = Array.isArray(sessionsBody)
+    ? sessionsBody
+    : sessionsBody && typeof sessionsBody === 'object' && Array.isArray((sessionsBody as Record<string, unknown>).sessions)
+      ? (sessionsBody as { sessions: unknown[] }).sessions
       : undefined;
-  const sessions = sessionsArray
+  // A body that answered but did not parse into rows is unreadable too, not absent: the broker replied.
+  const sessions: LifecycleStatusReport['sessions'] = sessionsArray
     ? {
         total: sessionsArray.length,
         active: sessionsArray.filter((candidate) => candidate && typeof candidate === 'object'
           && ['active', 'working', 'waiting'].includes(String((candidate as Record<string, unknown>).status))).length,
       }
-    : null;
-  const updateRows = Array.isArray(updatesRaw)
-    ? updatesRaw
-    : updatesRaw && typeof updatesRaw === 'object' && Array.isArray((updatesRaw as Record<string, unknown>).updates)
-      ? (updatesRaw as { updates: unknown[] }).updates
+    : sessionsRaw.outcome === 'unavailable' ? null : 'unreadable';
+  const updatesBody = updatesRaw.outcome === 'ok' ? updatesRaw.json : undefined;
+  const updateRows = Array.isArray(updatesBody)
+    ? updatesBody
+    : updatesBody && typeof updatesBody === 'object' && Array.isArray((updatesBody as Record<string, unknown>).updates)
+      ? (updatesBody as { updates: unknown[] }).updates
       : undefined;
-  const updates = updateRows
+  const updates: LifecycleStatusReport['updates'] = updateRows
     ? { pending: updateRows.filter((candidate) => candidate && typeof candidate === 'object'
       && (candidate as Record<string, unknown>).pending === true).length }
-    : null;
+    : updatesRaw.outcome === 'unavailable' ? null : 'unreadable';
   const detailCodes: string[] = [];
   if (!env.install.committed) detailCodes.push(`installation-${env.install.reason}`);
   if (!env.config) detailCodes.push('broker-config-invalid');

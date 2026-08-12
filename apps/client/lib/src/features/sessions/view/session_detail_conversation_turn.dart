@@ -56,7 +56,9 @@ class _ConversationTurnFooter extends ConsumerWidget {
     final errorHere =
         output is SpeechOutputError && output.messageKey == _speechKey;
     final pauseResume = readAloud.capabilities.pauseResume;
-    final canReadAloud = turn.hasModelText && readAloud.capabilities.synthesis;
+    final activeHere = speakingHere || pausedHere;
+    final canReadAloud =
+        turn.hasModelText && readAloud.capabilities.canAttemptSynthesis;
     final summary = turn.runSummary;
     final runtimeLine = summary == null
         ? null
@@ -122,6 +124,35 @@ class _ConversationTurnFooter extends ConsumerWidget {
               actionKey: const Key('conversation-turn-read-aloud'),
               onPressed: onPrimary,
             ),
+            if (activeHere)
+              SizedBox.square(
+                dimension: 40,
+                child: PopupMenuButton<double>(
+                  key: const Key('conversation-turn-read-aloud-rate'),
+                  tooltip: l10n.readAloudSpeed,
+                  initialValue: readAloud.rate,
+                  onSelected: (rate) => unawaited(
+                    ref
+                        .read(readAloudControllerProvider.notifier)
+                        .setRate(rate),
+                  ),
+                  itemBuilder: (context) => [
+                    for (final rate in kReadAloudRates)
+                      PopupMenuItem(
+                        value: rate,
+                        child: Text(formatReadAloudRate(rate)),
+                      ),
+                  ],
+                  child: Center(
+                    child: Text(
+                      formatReadAloudRate(readAloud.rate),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             if (showStop)
               _TurnFooterAction(
                 icon: Icons.stop_circle_outlined,
@@ -292,10 +323,25 @@ class _TurnTelemetryContent extends StatelessWidget {
           l10n.sessionTurnTelemetryExecutionRuntimeLabel,
           _formatTurnDuration(ms),
         ),
-      if (summary?.totalTokens case final total?)
+      if (summary?.inputTokens case final value?)
         _TurnTelemetryRow(
-          l10n.sessionTurnTelemetryTokensLabel,
-          _turnTokenBreakdown(l10n, summary!) ?? '$total',
+          l10n.sessionDetailTelemetryInput,
+          '$value',
+        ),
+      if (summary?.outputTokens case final value?)
+        _TurnTelemetryRow(
+          l10n.sessionDetailTelemetryOutput,
+          '$value',
+        ),
+      if (summary?.cacheReadTokens case final value?)
+        _TurnTelemetryRow(
+          l10n.sessionDetailTelemetryCacheRead,
+          '$value',
+        ),
+      if (summary?.cacheWriteTokens case final value?)
+        _TurnTelemetryRow(
+          l10n.sessionDetailTelemetryCacheWrite,
+          '$value',
         ),
       if (summary?.cost case final cost?)
         _TurnTelemetryRow(
@@ -328,49 +374,51 @@ class _TurnTelemetryContent extends StatelessWidget {
 
     final hasAttributable = summary != null || turn.distinctToolCallCount > 0;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (!hasAttributable)
-          Text(
-            l10n.sessionTurnTelemetryEmpty,
-            key: const Key('conversation-turn-telemetry-empty'),
-            style: theme.textTheme.bodyMedium,
-          ),
-        for (final row in rows)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(
-                  width: 132,
-                  child: Text(
-                    row.label,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+    return SelectionArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!hasAttributable)
+            Text(
+              l10n.sessionTurnTelemetryEmpty,
+              key: const Key('conversation-turn-telemetry-empty'),
+              style: theme.textTheme.bodyMedium,
+            ),
+          for (final row in rows)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 132,
+                    child: Text(
+                      row.label,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-                Expanded(
-                  child: Text(row.value, style: theme.textTheme.bodyMedium),
-                ),
-              ],
-            ),
-          ),
-        if (turn.isPartial)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              l10n.sessionTurnTelemetryPartial,
-              key: const Key('conversation-turn-telemetry-partial'),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+                  Expanded(
+                    child: Text(row.value, style: theme.textTheme.bodyMedium),
+                  ),
+                ],
               ),
             ),
-          ),
-      ],
+          if (turn.isPartial)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                l10n.sessionTurnTelemetryPartial,
+                key: const Key('conversation-turn-telemetry-partial'),
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -390,24 +438,6 @@ String _turnStatusLabel(AppLocalizations l10n, ConversationRunStatus status) =>
       ConversationRunStatus.running => l10n.sessionTurnStatusRunning,
       ConversationRunStatus.unknown => l10n.sessionTurnStatusUnknown,
     };
-
-String? _turnTokenBreakdown(
-  AppLocalizations l10n,
-  ConversationTurnRunSummary summary,
-) {
-  final total = summary.totalTokens;
-  if (total == null) return null;
-  final parts = <String>[
-    if (summary.inputTokens case final v?) l10n.sessionTurnTokensInput('$v'),
-    if (summary.outputTokens case final v?) l10n.sessionTurnTokensOutput('$v'),
-    if (summary.cacheReadTokens case final v?)
-      l10n.sessionTurnTokensCacheRead('$v'),
-    if (summary.cacheWriteTokens case final v?)
-      l10n.sessionTurnTokensCacheWrite('$v'),
-  ];
-  if (parts.isEmpty) return '$total';
-  return '$total (${parts.join(' · ')})';
-}
 
 String _formatTurnDuration(int milliseconds) {
   if (milliseconds < 1000) return '${milliseconds}ms';

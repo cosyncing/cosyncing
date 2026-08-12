@@ -1,3 +1,4 @@
+import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
@@ -9,11 +10,15 @@ import 'package:cosyncing_client/src/features/sessions/data/data.dart';
 import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/data/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/view/session_detail_page.dart';
 import 'package:cosyncing_client/src/features/sessions/view/sessions_branch_screen.dart';
 import 'package:cosyncing_client/src/features/sessions/view/sessions_page.dart';
 import 'package:cosyncing_client/src/features/sessions/view/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
+import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
+import 'package:cosyncing_client/src/platform/speech/speech_output_factory.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,7 +65,9 @@ void main() {
             createdAt: DateTime(2026),
           ),
         ),
-        brokerClientProvider.overrideWith((ref) async => null),
+        brokerClientProvider.overrideWith(
+          (ref) async => BrokerClient(baseUrl: 'http://test'),
+        ),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -106,6 +113,7 @@ void main() {
   // /sessions, Compact pushes /sessions/<tool>/<id> — and nothing bridged them.
   group('SessionsBranchScreen width transitions', () {
     late GoRouter router;
+    var useRealDetailRoute = false;
 
     // Resize the view rather than re-pumping a fresh ProviderScope: rebuilding
     // the scope would tear down and recreate every provider, which is a
@@ -121,7 +129,10 @@ void main() {
       });
     }
 
-    Widget buildRouted({required OpenSessionsStore store}) {
+    Widget buildRouted({
+      required OpenSessionsStore store,
+      List<Override> overrides = const [],
+    }) {
       return ProviderScope(
         overrides: [
           sessionListControllerProvider.overrideWith(
@@ -151,6 +162,7 @@ void main() {
             ),
           ),
           brokerClientProvider.overrideWith((ref) async => null),
+          ...overrides,
         ],
         child: MaterialApp.router(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -165,6 +177,7 @@ void main() {
     }
 
     setUp(() {
+      useRealDetailRoute = false;
       router = GoRouter(
         initialLocation: '/sessions',
         routes: [
@@ -174,8 +187,20 @@ void main() {
             routes: [
               GoRoute(
                 path: ':tool/:id',
-                builder: (context, state) =>
-                    const Scaffold(body: Text('detail stub')),
+                builder: (context, state) {
+                  if (!useRealDetailRoute) {
+                    return const Scaffold(body: Text('detail stub'));
+                  }
+                  final tool = state.pathParameters['tool'] ?? '';
+                  final sessionId = state.pathParameters['id'] ?? '';
+                  return SessionDetailPage(
+                    key: ValueKey<SessionDetailKey>(
+                      SessionDetailKey(tool: tool, sessionId: sessionId),
+                    ),
+                    tool: tool,
+                    sessionId: sessionId,
+                  );
+                },
               ),
             ],
           ),
@@ -215,6 +240,59 @@ void main() {
       );
       expect(find.text('detail stub'), findsOneWidget);
     });
+
+    testWidgets(
+      'repeated breakpoint crossings preserve a real open detail '
+      'without an exception',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        useRealDetailRoute = true;
+        var speechOutputFactoryCalls = 0;
+        final store = _FakeOpenSessionsStore()
+          ..saved['p1'] = const OpenSessionsSnapshot(
+            refs: [
+              SessionRef(
+                tool: 'claude',
+                id: 'a',
+                title: 'First',
+                status: SessionStatus.idle,
+              ),
+            ],
+            activeKey: 'claude/a',
+          );
+
+        resize(tester, const Size(1100, 800));
+        await tester.pumpWidget(
+          buildRouted(
+            store: store,
+            overrides: [
+              speechOutputFactoryProvider.overrideWithValue(() {
+                speechOutputFactoryCalls++;
+                return const UnavailableSpeechOutput();
+              }),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(SessionDetailPage), findsOneWidget);
+
+        for (var crossing = 0; crossing < 6; crossing++) {
+          resize(
+            tester,
+            crossing.isEven ? const Size(400, 800) : const Size(1100, 800),
+          );
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+        }
+        expect(
+          speechOutputFactoryCalls,
+          1,
+          reason: 'responsive route swaps must reuse the platform TTS owner',
+        );
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
     testWidgets('stays on the roster when nothing is open', (tester) async {
       final store = _FakeOpenSessionsStore();

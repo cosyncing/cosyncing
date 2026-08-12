@@ -236,7 +236,7 @@ class ManagedRuntimeController
   Future<_ManagedRuntimeAdmissionScope> _requireApiContext() async {
     final context = await _resolveApiContext();
     if (context == null) {
-      throw StateError('Connect to a broker first');
+      throw StateError('Connect to a server first');
     }
     final admission = _ManagedRuntimeAdmissionScope(context);
     _ensureCurrent(admission);

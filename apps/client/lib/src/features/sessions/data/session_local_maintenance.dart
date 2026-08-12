@@ -236,7 +236,7 @@ final class SessionLocalMaintenance {
       return await database.transaction(() async {
         final claimed = await _claimOutboxRowFailed(
           clientMessageId,
-          'Send window expired before the broker confirmed delivery.',
+          'Send window expired before the server confirmed delivery.',
         );
         if (claimed == 0) {
           // A broker receipt landed between the candidate SELECT and this
