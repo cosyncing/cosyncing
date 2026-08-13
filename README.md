@@ -16,8 +16,7 @@
 <p align="center">
   <a href="https://cosyncing.github.io/">Website</a> ·
   <a href="#install">Install</a> ·
-  <a href="#the-web-client">Web client</a> ·
-  <a href="#platform-support">Platforms</a> ·
+  <a href="#client">Client</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="README.zh-CN.md">简体中文</a>
@@ -34,9 +33,6 @@
 </p>
 
 ---
-
-**Code anywhere. Sync everywhere.**
-
 Synchronize your agents — from CLI to GUI, from desktop to phone. Pick up right where you left
 off, anywhere. cosyncing keeps your coding agents in sync across your own network.
 
@@ -58,11 +54,18 @@ One protocol covers all four. Per-agent control differs, and Claude Code session
 until you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
 installation, and [adapter support](docs/protocol/adapter-support.md) for the capability matrix.
 
-## Install
+## Prerequisites
 
-> [!IMPORTANT]
-> cosyncing requires [Bun](https://bun.sh) 1.3.8 or newer. The npm package does not bundle Bun;
-> install it before installing cosyncing.
+Supported cross-device use requires [Tailscale](https://tailscale.com/) on the server and client
+devices. The server requires [Bun](https://bun.sh) 1.3.8 or newer to run cosyncing and Node.js/npm
+to install and update it.
+[Tokdash](https://github.com/JingbiaoMei/tokdash) is optional but strongly recommended for quota
+tracking and warnings.
+
+See [installation prerequisites](docs/installation/prerequisites.md) for Linux and macOS commands,
+WSL notes, and Tokdash setup.
+
+## Install
 
 The package contains one JavaScript application bundle and the web client. Supported broker hosts
 are Linux x64, Linux arm64, and Apple Silicon macOS; on Windows, run the broker inside WSL.
@@ -80,6 +83,8 @@ Open a new login shell, then configure the service:
 
 ```bash
 cosyncing setup
+
+# After setup, use cosy as the shorthand for cosyncing
 cosy restart
 cosy doctor
 cosy status
@@ -89,16 +94,18 @@ cosy pair
 `setup` inspects the machine, shows exactly what it will change, and applies the whole plan or none
 of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service that runs that
 copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
-committed. After setup, the examples use the installed `cosy` shorthand for routine commands;
-`cosyncing` remains valid too.
+committed.
 
-To update, move the package with your package manager and then re-run setup, which re-copies the new
-application and reconciles the service:
+To update, let npm replace the global package, then re-run setup so cosyncing copies the new
+application into its managed service and reconciles the installation:
 
 ```bash
 npm update --global cosyncing
-cosyncing setup
+cosy setup
 ```
+
+`cosy update` reports this package-manager-owned update path; it does not run npm or modify the
+global package.
 
 `cosy pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
 `cosy devices list` lists paired devices, and `cosy devices revoke <id>` revokes one.
@@ -106,13 +113,43 @@ cosyncing setup
 After setup, `cosy doctor` diagnoses the machine without changing it, and `cosy status` summarizes
 install, service, agents, and sessions.
 
-## The web client
+## Client
 
 The packaged Flutter web app is served by your own broker at `/cosy/`; it does not fetch application
 code from a third-party host at runtime. Setup prints the URL; open it in any browser that can reach
-the broker. The first packaged Android and desktop client downloads are still being prepared.
+the broker. Android and desktop clients are available from
+[GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest).
+The iOS client will follow later through TestFlight.
 
-## Platform support
+<p align="center">
+  <a href="https://cosyncing.github.io/demo/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/workspace.png">
+      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/workspace.png"
+           alt="cosyncing landscape workspace with a session roster beside a live conversation" width="620">
+    </picture>
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/sessions.png">
+      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/sessions.png"
+           alt="cosyncing portrait client with sessions grouped by project and live status" width="180">
+    </picture>
+  </a>
+</p>
+
+<p align="center"><b>From CLI to GUI, live and in sync</b></p>
+
+<p align="center">
+  <a href="https://cosyncing.github.io/#sync">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.github.io/assets/sync/sync-demo-light.gif"
+           alt="cosyncing app and agent CLI staying in sync through takeover and a permission request" width="830">
+    </picture>
+  </a>
+</p>
 
 **Server** — the broker runs on:
 

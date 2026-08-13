@@ -21,8 +21,7 @@
 <p align="center">
   <a href="https://cosyncing.github.io/zh/">官网</a> ·
   <a href="#安装">安装</a> ·
-  <a href="#网页客户端">网页客户端</a> ·
-  <a href="#平台支持">平台支持</a> ·
+  <a href="#客户端">客户端</a> ·
   <a href="docs/README.md">文档</a> ·
   <a href="CONTRIBUTING.md">参与贡献</a> ·
   <a href="README.md">English</a>
@@ -31,8 +30,8 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)"
-            srcset="apps/client/assets/brand/marketing/social-banner-zh-1200x630.png">
-    <img src="apps/client/assets/brand/marketing/play-feature-zh-1024x500.png"
+            srcset="apps/client/assets/brand/marketing/social-banner-zh-1280x640.png">
+    <img src="apps/client/assets/brand/marketing/social-banner-light-zh-1280x640.png"
          alt="代码随处。同步无界。智能体照常运转，你持续前行。"
          width="830">
   </picture>
@@ -40,7 +39,6 @@
 
 ---
 
-**代码随处。同步无界。**
 
 让智能体从 CLI 到 GUI、从桌面到手机保持同步。无论身在何处，都能从上次停下的地方继续。
 cosyncing 让编码智能体通过你自己的网络保持同步。
@@ -63,11 +61,17 @@ Claude Code 的会话在接管之前保持只读。版本与安装方法见
 [支持的智能体](docs/supported_agents/README.md)，逐项能力见
 [适配器支持](docs/protocol/adapter-support.md)（均为英文）。
 
-## 安装
+## 前置要求
 
-> [!IMPORTANT]
-> cosyncing 需要 [Bun](https://bun.sh) 1.3.8 或更高版本。npm 包不内置 Bun；请先安装 Bun，
-> 再安装 cosyncing。
+受支持的跨设备使用需要服务器与客户端设备安装 [Tailscale](https://tailscale.com/)，服务器还需要
+[Bun](https://bun.sh) 1.3.8 或更高版本来运行 cosyncing，并需要 Node.js/npm 来安装和更新。
+强烈建议安装
+[Tokdash](https://github.com/JingbiaoMei/tokdash)，用于配额跟踪与预警。
+
+Linux、macOS 命令、WSL 注意事项与 Tokdash 配置见
+[安装前置要求](docs/installation/prerequisites.md)（英文）。
+
+## 安装
 
 该发行包包含一个 JavaScript 应用包和网页客户端。受支持的 Broker 主机为 Linux x64、Linux arm64
 与 Apple Silicon macOS；Windows 上请在 WSL 内运行 Broker。
@@ -85,6 +89,8 @@ npm install --global cosyncing
 
 ```bash
 cosyncing setup
+
+# setup 完成后，使用 cosy 作为 cosyncing 的简写
 cosy restart
 cosy doctor
 cosy status
@@ -93,28 +99,58 @@ cosy pair
 
 `setup` 会检查这台机器，展示将要做的全部变更，然后要么整体应用、要么完全不动。它把 Broker
 复制到 `~/.cosyncing/bin/cosyncing`，安装用户服务（由你的 Bun 运行该副本），并打印你的 Broker
-地址。在 setup 提交之前，Broker 拒绝启动。setup 完成后，下文的日常命令使用已安装的 `cosy`
-简写；完整的 `cosyncing` 命令仍然有效。
+地址。在 setup 提交之前，Broker 拒绝启动。
 
-更新时，先用包管理器更新发行包，再重新运行 setup —— 后者会重新复制新的应用并协调服务：
+更新时，先让 npm 更新全局包，再重新运行 setup；setup 会把新应用复制到托管服务并协调安装状态：
 
 ```bash
 npm update --global cosyncing
-cosyncing setup
+cosy setup
 ```
+
+`cosy update` 会报告这条由包管理器负责的更新路径；它不会代替用户运行 npm，也不会修改全局包。
 
 `cosy pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
 `cosy devices list` 列出已配对设备，`cosy devices revoke <id>` 撤销指定设备。
 
 setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇总安装、服务、智能体与会话的状态。
 
-## 网页客户端
+## 客户端
 
 发行包内的 Flutter 网页应用由你自己的 Broker 在 `/cosy/` 提供；运行时不会从第三方主机
-拉取应用代码。setup 会打印访问地址；任何能连到 Broker 的浏览器都可以打开。首批 Android
-与桌面客户端发行包仍在准备中。
+拉取应用代码。setup 会打印访问地址；任何能连到 Broker 的浏览器都可以打开。Android 与桌面
+客户端可从 [GitHub Releases](https://github.com/cosyncing/cosyncing/releases/latest) 下载。
+iOS 客户端将在后续通过 TestFlight 发布。
 
-## 平台支持
+<p align="center">
+  <a href="https://cosyncing.github.io/demo/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/workspace.png">
+      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/workspace.png"
+           alt="cosyncing 横屏工作区：会话列表与实时对话并排显示" width="620">
+    </picture>
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/sessions.png">
+      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/sessions.png"
+           alt="cosyncing 竖屏客户端：会话按项目归组并显示实时状态" width="180">
+    </picture>
+  </a>
+</p>
+
+<p align="center"><b>从 CLI 到 GUI，保持实时同步</b></p>
+
+<p align="center">
+  <a href="https://cosyncing.github.io/zh/#sync">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.github.io/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.github.io/assets/sync/sync-demo-light.gif"
+           alt="cosyncing 应用与智能体 CLI 在接管和权限请求期间保持实时同步" width="830">
+    </picture>
+  </a>
+</p>
 
 **Broker 宿主机**
 

@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-08.
+Last updated: 2026-08-13.
 
 ## Publication state
 
@@ -32,9 +32,12 @@ contract. Capabilities remain adapter-specific and are reported by the broker
 rather than inferred by the client. Setup, status, doctor, repair, restart, and
 uninstall share the persisted setup language and receipt-owned resource model.
 
-Packaged setup supports a local-only broker without Tailscale or Tokdash.
-Tailscale Serve and Tokdash are optional, consented integrations. The web app
-is mounted at `/cosy`; paired mobile/tablet clients receive per-device
+The supported cross-device installation path requires Tailscale on the server
+and clients. Packaged setup retains loopback-only operation for local diagnosis,
+but it is not the documented cross-device path. Tokdash quota tracking remains
+optional and consented: setup reuses an existing instance or, when pipx is
+available, can install and configure one without making broker installation
+depend on it. The web app is mounted at `/cosy`; paired clients receive per-device
 credentials, while the raw broker token remains a full-authority bootstrap
 credential.
 
@@ -43,7 +46,7 @@ credential.
 The public tree passes the required source-content policy with every retained
 binary pinned to reviewed content. Hosted Linux, Android, macOS, iOS simulator,
 Windows, web, broker, contract, and reusable-package jobs pass. The deterministic
-broker aggregate contains 61 registered sub-suites.
+broker aggregate contains 66 registered sub-suites.
 
 The local complete check passes every registered gate. Source architecture
 ceilings remain for production entry points, session-detail production code,
@@ -62,13 +65,11 @@ ships one self-contained JavaScript application bundle executed by a Bun runtime
 the operator installs separately, with no embedded runtime and no compiled
 executable — see
 [npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
-`.github/workflows/npm-publish.yml` builds, verifies, and can submit that
-package to npm's staging queue, but a dispatch alone stages nothing: it
-additionally requires the canonical repository at an exact `npm-v<version>`
-tag, a matching version input, the literal `PUBLISH` confirmation, and approval
-of the protected `npm-production` environment. Even a staged version is not
-installable until a maintainer approves it on npmjs.com with 2FA. Nothing has
-been published; the npm name still holds a `0.0.1` placeholder.
+`.github/workflows/npm-publish.yml` builds, verifies, and submits releases
+through npm's protected staging and 2FA approval flow. The current JavaScript
+package is `cosyncing@0.2.0`. Flutter-only Android, Linux, Apple Silicon macOS,
+and Windows client downloads are published separately in the GitHub client
+release; iOS/TestFlight remains deferred.
 
 The release workflows fail closed unless the protected
 `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` variable is exactly `true`. Keep it
