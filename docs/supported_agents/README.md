@@ -24,7 +24,10 @@ supported.
 
 ## Requirements
 
-- Bun 1.3.8 or newer runs cosyncing itself.
+- Complete the shared [installation prerequisites](../installation/prerequisites.md):
+  Tailscale for supported cross-device use and Bun 1.3.8 or newer for the
+  broker host. Node.js/npm installs and updates cosyncing. Tokdash is optional
+  but strongly recommended for quota tracking and warnings.
 - Every agent you want cosyncing to manage must meet the version in the table
   above.
 - Pi's actual Node interpreter must satisfy the installed Pi package's
@@ -90,11 +93,16 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 exec zsh -l
 ```
 
-At the new prompt, install only the npm-managed tools you want:
+At the new prompt, install only the npm-managed agents you want:
 
 ```bash
 npm install --global --ignore-scripts @earendil-works/pi-coding-agent
 npm install --global @anthropic-ai/claude-code
+```
+
+Install cosyncing with npm:
+
+```bash
 npm install --global cosyncing
 ```
 
