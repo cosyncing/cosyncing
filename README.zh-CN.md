@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="https://cosyncing.github.io/zh/">官网</a> ·
+  <a href="https://cosyncing.com/zh/">官网</a> ·
   <a href="#安装">安装</a> ·
   <a href="#客户端">客户端</a> ·
   <a href="docs/README.md">文档</a> ·
@@ -123,17 +123,17 @@ setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇�
 iOS 客户端将在后续通过 TestFlight 发布。
 
 <p align="center">
-  <a href="https://cosyncing.github.io/demo/">
+  <a href="https://cosyncing.com/demo/">
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/workspace.png">
-      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/workspace.png"
+              srcset="https://cosyncing.com/assets/shots/demo/real/dark/workspace.png">
+      <img src="https://cosyncing.com/assets/shots/demo/real/light/workspace.png"
            alt="cosyncing 横屏工作区：会话列表与实时对话并排显示" width="620">
     </picture>
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/sessions.png">
-      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/sessions.png"
+              srcset="https://cosyncing.com/assets/shots/demo/real/dark/sessions.png">
+      <img src="https://cosyncing.com/assets/shots/demo/real/light/sessions.png"
            alt="cosyncing 竖屏客户端：会话按项目归组并显示实时状态" width="180">
     </picture>
   </a>
@@ -142,11 +142,11 @@ iOS 客户端将在后续通过 TestFlight 发布。
 <p align="center"><b>从 CLI 到 GUI，保持实时同步</b></p>
 
 <p align="center">
-  <a href="https://cosyncing.github.io/zh/#sync">
+  <a href="https://cosyncing.com/zh/#sync">
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/sync/sync-demo-dark.gif">
-      <img src="https://cosyncing.github.io/assets/sync/sync-demo-light.gif"
+              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
            alt="cosyncing 应用与智能体 CLI 在接管和权限请求期间保持实时同步" width="830">
     </picture>
   </a>
