@@ -88,6 +88,8 @@ async function run(command: string[], options: {
   env?: NodeJS.ProcessEnv;
   stage?: string;
   timeoutMs?: number;
+  timeoutAttempts?: number;
+  beforeTimeoutRetry?: () => void;
 } = {}): Promise<{
   exitCode: number;
   stdout: string;
@@ -95,23 +97,35 @@ async function run(command: string[], options: {
 }> {
   const stage = options.stage ?? command.slice(0, 3).join(' ');
   const timeoutMs = options.timeoutMs ?? 20_000;
-  console.log(`STAGE ${stage} start (deadline ${timeoutMs}ms)`);
-  const child = await runSupervised(command, {
-    cwd: options.cwd ?? ROOT,
-    env: options.env ?? hermeticEnvironment(),
-    timeoutMs,
-    maxBufferBytes: 8 << 20,
-    isolateProcessGroup: !insideSupervisedProcessGroup(),
-  });
-  console.log(
-    `STAGE ${stage} done exit=${child.exitCode} timedOut=${child.timedOut} strays=${child.strays}`,
-  );
-  if (child.timedOut || child.strays) {
-    throw new Error(
-      `${stage} ${child.timedOut ? `timed out after ${timeoutMs}ms` : 'left subprocesses behind'}`,
+  const timeoutAttempts = options.timeoutAttempts ?? 1;
+  for (let attempt = 1; attempt <= timeoutAttempts; attempt += 1) {
+    console.log(
+      `STAGE ${stage} start (deadline ${timeoutMs}ms, attempt ${attempt}/${timeoutAttempts})`,
     );
+    const child = await runSupervised(command, {
+      cwd: options.cwd ?? ROOT,
+      env: options.env ?? hermeticEnvironment(),
+      timeoutMs,
+      maxBufferBytes: 8 << 20,
+      isolateProcessGroup: !insideSupervisedProcessGroup(),
+    });
+    console.log(
+      `STAGE ${stage} done exit=${child.exitCode} timedOut=${child.timedOut} strays=${child.strays}`,
+    );
+    if (child.strays) {
+      throw new Error(`${stage} left subprocesses behind`);
+    }
+    if (child.timedOut) {
+      if (attempt < timeoutAttempts) {
+        options.beforeTimeoutRetry?.();
+        console.log(`RETRY ${stage} after bounded compiler timeout`);
+        continue;
+      }
+      throw new Error(`${stage} timed out after ${timeoutMs}ms`);
+    }
+    return { exitCode: child.exitCode, stdout: child.stdout, stderr: child.stderr };
   }
-  return { exitCode: child.exitCode, stdout: child.stdout, stderr: child.stderr };
+  throw new Error(`${stage} exhausted its timeout attempts`);
 }
 
 function artifactScript(version: string, target: ReleaseTarget, commit: string, buildDate: string): string {
@@ -192,6 +206,27 @@ cp "$FAKE_RELEASE_ROOT/\${URL##*/}" "$OUT"
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-release-supply-chain-'));
 try {
+  const timeoutRetryMarker = join(root, 'timeout-retry-marker');
+  let timeoutRetryCleanupCalls = 0;
+  const timeoutRetryControl = await run([
+    'bash',
+    '-c',
+    'if [ ! -e "$1" ]; then touch "$1"; while :; do :; done; fi',
+    'timeout-retry-control',
+    timeoutRetryMarker,
+  ], {
+    stage: 'timeout-retry-control',
+    timeoutMs: 100,
+    timeoutAttempts: 2,
+    beforeTimeoutRetry: () => {
+      timeoutRetryCleanupCalls += 1;
+    },
+  });
+  check(
+    'a supervised compiler timeout gets one bounded retry after cleanup',
+    timeoutRetryControl.exitCode === 0 && timeoutRetryCleanupCalls === 1,
+  );
+
   const hostedMacHome = ['', 'Users', 'runner'].join('/');
   const scanContext = {
     root: '/fixture/checkout',
@@ -604,10 +639,14 @@ exec /usr/bin/openssl "$@"
   const first = await run([...buildArgs, '--outfile', firstPath], {
     stage: 'reproducibility-build-first',
     timeoutMs: 60_000,
+    timeoutAttempts: 2,
+    beforeTimeoutRetry: () => rmSync(firstPath, { force: true }),
   });
   const second = await run([...buildArgs, '--outfile', secondPath], {
     stage: 'reproducibility-build-second',
     timeoutMs: 60_000,
+    timeoutAttempts: 2,
+    beforeTimeoutRetry: () => rmSync(secondPath, { force: true }),
   });
   if (first.exitCode !== 0 || second.exitCode !== 0 || !existsSync(firstPath) || !existsSync(secondPath)) {
     const detail = [
