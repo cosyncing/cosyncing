@@ -5,7 +5,7 @@
 // Drives the ACTUAL release web build (`--base-href /cosy/`) in headless
 // Chromium over CDP, mounted under /cosy/ by a deterministic local server, and
 // records navigation-response -> first-shell-paint -> first-Flutter-frame
-// timings plus screenshots for each scenario.
+// timings for each scenario.
 //
 //   bun run client:build:web
 //   node scripts/client/tests/test-startup-shell-browser.mjs \
@@ -16,7 +16,7 @@
 //        retry-bound, base-path.
 //
 // Exits non-zero if any assertion fails. Uses no private session content: the
-// broker is never started, so every capture is the app's own startup surface.
+// broker is never started, so every observation is the app's own startup surface.
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -580,11 +580,6 @@ async function newPage({ colorScheme = "light", width = 1280, height = 860 } = {
         }
       }
     },
-    async shot(name) {
-      const { data } = await send("Page.captureScreenshot", { format: "png" });
-      await writeFile(join(OUT, `${name}.png`), Buffer.from(data, "base64"));
-      return Buffer.from(data, "base64").length;
-    },
     async waitFor(expression, { timeout = 30000, interval = 60 } = {}) {
       const started = Date.now();
       for (;;) {
@@ -686,33 +681,30 @@ const SHELL_PAINT_PROBE = `(() => {
 
 const cases = {};
 
-/// Captures the shell in its LOADING state: the bootstrap is stalled rather
+/// Verifies the shell in its LOADING state: the bootstrap is stalled rather
 /// than blocked, because a blocked script trips the error listener at once and
-/// the failure state is a different capture (see `bootstrap-failure`).
-async function captureImmediateShell(scheme, expectedBackground) {
+/// the failure state is a different case (see `bootstrap-failure`).
+async function verifyImmediateShell(scheme, expectedBackground) {
   control.stallMs.set("flutter_bootstrap.js", 30000);
   const page = await newPage({ colorScheme: scheme });
   await page.goto(BASE);
   await page.waitFor(`!!document.getElementById('cosyncing-startup-shell')`);
   const probe = await page.eval(SHELL_PAINT_PROBE);
-  const bytes = await page.shot(`shell-${scheme}`);
-
   check(probe.shellPresent, `${scheme}: branded shell paints before Flutter runs`);
   check(
     probe.shellState === "booting",
-    `${scheme}: the capture is the loading state (got ${probe.shellState})`,
+    `${scheme}: the observed shell is the loading state (got ${probe.shellState})`,
   );
   check(
     probe.background === expectedBackground,
     `${scheme}: canvas matches the app canvas (got ${probe.background})`,
   );
-  check(bytes > 0, `${scheme}: screenshot captured`);
   timings[scheme] = probe;
   await page.close();
 }
 
-cases.light = () => captureImmediateShell("light", "rgb(242, 245, 244)");
-cases.dark = () => captureImmediateShell("dark", "rgb(11, 14, 20)");
+cases.light = () => verifyImmediateShell("light", "rgb(242, 245, 244)");
+cases.dark = () => verifyImmediateShell("dark", "rgb(11, 14, 20)");
 
 cases["bootstrap-failure"] = async () => {
   control.block.add("flutter_bootstrap.js");
@@ -728,7 +720,6 @@ cases["bootstrap-failure"] = async () => {
     text: document.getElementById('cosyncing-startup-shell-status').textContent,
     retry: document.getElementById('cosyncing-startup-shell-retry')?.textContent ?? null,
   })`);
-  await page.shot("bootstrap-failure");
 
   check(waited !== null, "failure: the shell reaches its bounded failed state");
   check(state.retry === "Retry", `failure: a plain retry action is offered (got ${state.retry})`);
@@ -763,7 +754,6 @@ cases["retry-bound"] = async () => {
     await page.eval(`document.getElementById('cosyncing-startup-shell-retry').click(); true`);
     await sleep(700);
   }
-  await page.shot("retry-exhausted");
   const finalText = await page.eval(
     `document.getElementById('cosyncing-startup-shell-status').textContent`,
   );
@@ -798,7 +788,6 @@ cases.normal = async () => {
     { timeout: 60000 },
   );
   const frameAt = Date.now() - started;
-  await page.shot("startup-normal");
   const flutterPresent = await page.eval(
     `!!document.querySelector('flt-glass-pane, flutter-view, flt-scene-host')`,
   );
@@ -819,7 +808,6 @@ cases.transition = async () => {
   const page = await newPage();
   await page.goto(BASE);
   await page.waitFor(`!!document.getElementById('cosyncing-startup-shell')`);
-  await page.shot("transition-before");
 
   // Sample the document background across the handover. A white frame would
   // show up here as a colour that is neither the canvas nor transparent.
@@ -837,7 +825,6 @@ cases.transition = async () => {
     }
     return seen;
   })()`);
-  await page.shot("transition-after");
 
   const backgrounds = new Set(samples.map((s) => s.background));
   check(
@@ -864,7 +851,6 @@ cases.delayed = async () => {
   const shellAt = Date.now() - started;
   await sleep(650);
   const midway = await page.eval(SHELL_PAINT_PROBE);
-  await page.shot("startup-delayed");
   const goneAfter = await page.waitFor(
     `!document.getElementById('cosyncing-startup-shell')`,
     { timeout: 90000 },
@@ -905,7 +891,6 @@ cases.slow3g = async () => {
     { timeout: 15000 },
   );
   const probe = await page.eval(SHELL_PAINT_PROBE);
-  await page.shot("startup-slow3g");
 
   check(probe.shellPresent, "slow3g: the initial HTML shell covers the slow start");
   check(
@@ -932,7 +917,6 @@ cases["empty-cache"] = async () => {
   const gone = await page.waitFor(`!document.getElementById('cosyncing-startup-shell')`, {
     timeout: 60000,
   });
-  await page.shot("startup-empty-cache");
   // Registration is deferred to `load`, and install is asynchronous after it.
   const installed = await page.waitFor(
     `caches.keys().then((names) => names.some((n) => n.startsWith('cosyncing-app:')))`,
@@ -981,7 +965,6 @@ cases["offline-repeat"] = async () => {
   const gone = await page.waitFor(`!document.getElementById('cosyncing-startup-shell')`, {
     timeout: 90000,
   });
-  await page.shot("startup-offline-repeat");
 
   check(shellAt !== null, "offline-repeat: the cached shell paints with no network");
   check(gone !== null, "offline-repeat: Flutter starts from cached assets while offline");
@@ -1028,7 +1011,6 @@ cases["corrupt-cache"] = async () => {
     `document.getElementById('cosyncing-startup-shell')?.dataset.state === 'failed'`,
     { timeout: 40000 },
   );
-  await page.shot("corrupt-cache");
   const recoverable = await page.eval(
     `document.getElementById('cosyncing-startup-shell-retry')?.textContent ?? null`,
   );
@@ -1158,7 +1140,6 @@ cases["new-version"] = async () => {
     whileOpen.oldBundleStillCached,
     "new-version: the open client's own bundle is still served from its build",
   );
-  await openClient.shot("new-version-update-ready");
 
   // The old client goes away. The browser now activates the replacement.
   await openClient.close();
@@ -1175,7 +1156,6 @@ cases["new-version"] = async () => {
     { timeout: 40000 },
   );
   const after = await page.eval(`caches.keys()`);
-  await page.shot("new-version");
 
   check(before.includes(oldCacheName), "new-version: the old cache existed");
   check(swapped !== null, "new-version: the next navigation gets the new build");
@@ -1383,8 +1363,6 @@ cases["update-handoff"] = async () => {
       historyLength: history.length,
     })`),
   ]);
-  await first.shot("update-handoff-first");
-  await second.shot("update-handoff-second");
 
   check(firstBack !== null, "update-handoff: the root tab returned under the new build");
   check(secondBack !== null, "update-handoff: the deep-linked tab returned under the new build");
@@ -1498,7 +1476,6 @@ cases["scope-isolation"] = async () => {
     caches: await caches.keys(),
     registrations: (await navigator.serviceWorker.getRegistrations()).map((r) => r.scope),
   }))()`);
-  await page.shot("scope-isolation");
 
   const neighbourScope = `http://127.0.0.1:${port}/other-app/`;
   check(
@@ -1548,7 +1525,6 @@ cases["base-path"] = async () => {
   const deepShell = await deep.waitFor(`!!document.getElementById('cosyncing-startup-shell')`, {
     timeout: 30000,
   });
-  await deep.shot("base-path-deep-link");
   await deep.close();
 
   check(baseHref.endsWith("/cosy/"), `base-path: base href is /cosy/ (got ${baseHref})`);
