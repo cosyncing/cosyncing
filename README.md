@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://cosyncing.github.io/">Website</a> ·
+  <a href="https://cosyncing.com/">Website</a> ·
   <a href="#install">Install</a> ·
   <a href="#client">Client</a> ·
   <a href="docs/README.md">Docs</a> ·
@@ -122,17 +122,17 @@ the broker. Android and desktop clients are available from
 The iOS client will follow later through TestFlight.
 
 <p align="center">
-  <a href="https://cosyncing.github.io/demo/">
+  <a href="https://cosyncing.com/demo/">
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/workspace.png">
-      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/workspace.png"
+              srcset="https://cosyncing.com/assets/shots/demo/real/dark/workspace.png">
+      <img src="https://cosyncing.com/assets/shots/demo/real/light/workspace.png"
            alt="cosyncing landscape workspace with a session roster beside a live conversation" width="620">
     </picture>
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/shots/demo/real/dark/sessions.png">
-      <img src="https://cosyncing.github.io/assets/shots/demo/real/light/sessions.png"
+              srcset="https://cosyncing.com/assets/shots/demo/real/dark/sessions.png">
+      <img src="https://cosyncing.com/assets/shots/demo/real/light/sessions.png"
            alt="cosyncing portrait client with sessions grouped by project and live status" width="180">
     </picture>
   </a>
@@ -141,11 +141,11 @@ The iOS client will follow later through TestFlight.
 <p align="center"><b>From CLI to GUI, live and in sync</b></p>
 
 <p align="center">
-  <a href="https://cosyncing.github.io/#sync">
+  <a href="https://cosyncing.com/#sync">
     <picture>
       <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.github.io/assets/sync/sync-demo-dark.gif">
-      <img src="https://cosyncing.github.io/assets/sync/sync-demo-light.gif"
+              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
            alt="cosyncing app and agent CLI staying in sync through takeover and a permission request" width="830">
     </picture>
   </a>
