@@ -565,7 +565,7 @@
       "command": ["bun","run","test:web-browser:built"],
       "focusedDiagnostics": [["bun","run","test:web-startup-shell"],["bun","run","test:web-artifact-session-isolation"],["bun","run","test:web-client-upgrade"],["bun","run","test:client-browser-platform"]],
       "dependencies": ["client"],
-      "expectedArtifacts": [{"path":"output/check/logs/web-browser.log","kind":"log"},{"path":"output/artifact-session-isolation/artifact-card-light.png","kind":"artifact"},{"path":"output/artifact-session-isolation/artifact-card-dark.png","kind":"artifact"}],
+      "expectedArtifacts": [{"path":"output/check/logs/web-browser.log","kind":"log"},{"path":"output/artifact-session-isolation/verdict.json","kind":"report"}],
       "timeoutClass": "medium",
       "resourceClass": "standard",
       "platformExclusions": ["physical-multi-host-real-agent"],

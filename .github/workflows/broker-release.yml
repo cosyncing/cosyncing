@@ -45,6 +45,11 @@ jobs:
           flutter-version: 3.44.3
           channel: stable
           cache: true
+      - name: Install hosted verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
       - run: bun install --frozen-lockfile
       - name: Require an exact clean broker version tag
         shell: bash
@@ -53,6 +58,16 @@ jobs:
           test "$GITHUB_REF_NAME" = "broker-v$VERSION"
           test -z "$(git status --porcelain --untracked-files=normal)"
       - run: bun run check
+      - name: Preserve broker-release verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: broker-release-check-${{ github.run_id }}
+          path: |
+            output/check
+            output/artifact-session-isolation
+          if-no-files-found: warn
+          retention-days: 7
 
   prepare-draft:
     needs: gate

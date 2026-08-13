@@ -63,11 +63,19 @@ export function gateOutcome(input: GateOutcomeInput): GateOutcome {
 
   // A gate that produced no evidence has not run, whatever its exit code said.
   if (input.missingArtifacts.length > 0) {
-    requirement = 'required';
-    status = 'fail';
-    summary = `FAIL missing expected artifact(s): ${
+    const previousFailure = status === 'fail';
+    const previousDiagnosis = summary.replace(/^(?:FAIL|WARN)\s+/, '');
+    const missing = `missing expected artifact(s): ${
       input.missingArtifacts.join(', ')
     }`;
+    requirement = 'required';
+    status = 'fail';
+    // Evidence absence is additional diagnosis. It must not erase the child
+    // assertion, timeout, or advisory drift that explains why production
+    // stopped before writing that evidence.
+    summary = previousFailure
+      ? `FAIL ${previousDiagnosis}; ${missing}`
+      : `FAIL ${missing}`;
   }
 
   // Last, and unconditional: a gate that leaves processes behind has not

@@ -38,3 +38,13 @@ jobs:
           npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - name: Preserve nightly verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: nightly-check-${{ github.run_id }}
+          path: |
+            output/check
+            output/artifact-session-isolation
+          if-no-files-found: warn
+          retention-days: 7
