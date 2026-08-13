@@ -4,6 +4,7 @@
 require 'digest'
 require 'open3'
 require 'pathname'
+require_relative 'check-flutter-goldens'
 
 ROOT = Pathname.new(__dir__).join('../..').cleanpath
 Dir.chdir(ROOT)
@@ -68,6 +69,10 @@ abort 'git ls-files --cached failed' unless cached_status.success?
 tracked_paths = {}
 cached.split("\0").reject(&:empty?).each { |entry| tracked_paths[entry] = true }
 failures = []
+golden_policy = FlutterGoldenPolicy.validate(root: ROOT)
+FlutterGoldenPolicy.print_report(golden_policy, root: ROOT)
+golden_policy.failures.each { |failure| fail!(failure, failures) }
+registered_goldens = golden_policy.accepted_paths.to_h { |path| [path, true] }
 workflow_mode = File.read(WORKFLOW_MODE_PATH, encoding: 'UTF-8').strip
 unless workflow_mode == 'public-hosted'
   fail!("unsupported workflow mode: #{workflow_mode}", failures)
@@ -112,6 +117,7 @@ paths.each do |path|
   }
   fail!("Zone.Identifier remnant: #{path}", failures) if path.include?('Zone.Identifier')
   next unless File.file?(path)
+  next if registered_goldens[path]
 
   bytes = File.binread(path)
   fail!("oversized tracked text file (#{bytes.bytesize} bytes): #{path}", failures) if
@@ -155,7 +161,7 @@ paths.each do |path|
   end
 end
 
-(allowlist.keys - seen_binaries.keys).each do |path|
+(allowlist.keys - seen_binaries.keys - registered_goldens.keys).each do |path|
   fail!("stale binary allowlist entry: #{path}", failures)
 end
 

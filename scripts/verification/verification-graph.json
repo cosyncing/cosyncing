@@ -264,6 +264,8 @@
       "platformExclusions": [],
       "sourceOwners": [
         "scripts/ci/audit-workflows.sh",
+        "scripts/ci/classify-docs-only.rb",
+        "scripts/ci/tests/test-docs-only-policy.rb",
         ".github/workflow-mode",
         ".github/workflows/broker-release-gate.yml",
         ".github/workflows/broker-release-promote.yml",
@@ -289,6 +291,8 @@
       "platformExclusions": [],
       "sourceOwners": [
         "scripts/ci/check-public-tree.rb",
+        "scripts/ci/check-flutter-goldens.rb",
+        "scripts/ci/flutter-golden-registry.json",
         "scripts/ci/public-binary-allowlist.sha256",
         "scripts/ci/public-content-exceptions.sha256",
         ".github/workflow-mode"
@@ -308,6 +312,8 @@
       "platformExclusions": [],
       "sourceOwners": [
         "scripts/ci/check-public-tree.rb",
+        "scripts/ci/check-flutter-goldens.rb",
+        "scripts/ci/flutter-golden-registry.json",
         "scripts/ci/tests/test-public-tree-policy.rb"
       ]
     },
@@ -529,7 +535,7 @@
         {"id":"opencode-completion-fence","claimId":"broker.opencode-completion","command":["bun","run","test:opencode-completion-fence"],"sourceOwners":["scripts/broker/tests/opencode/test-opencode-completion-fence.ts"]},
         {"id":"control-boundaries","claimId":"broker.control-boundaries","command":["bun","run","test:broker-control-boundaries"],"sourceOwners":["scripts/broker/tests/broker/test-control-boundaries.ts"]},
         {"id":"artifact-session-isolation","claimId":"broker.artifact-session-isolation","command":["bun","run","test:broker-artifact-session-isolation"],"timeoutClass":"medium","sourceOwners":["scripts/broker/tests/broker/test-artifact-session-isolation.ts","packages/typescript/broker/src/artifact-store.ts","packages/typescript/broker/src/hub.ts"]},
-        {"id":"release-supply-chain","claimId":"release.supply-chain","command":["bun","run","test:release-supply-chain"],"timeoutClass":"long","sourceOwners":["scripts/broker/tests/broker/test-release-supply-chain.ts","scripts/release/tests/test-release-checkpoint-lifecycle.ts","scripts/broker/tests/broker/test-release-web-sidecar.ts","scripts/broker/tests/broker/test-release-candidate-verifier.ts"]},
+        {"id":"release-supply-chain","claimId":"release.supply-chain","command":["bun","run","test:release-supply-chain"],"timeoutClass":"long","sourceOwners":["scripts/broker/release/candidate-browser-startup.ts","scripts/broker/release/verify-candidate-pair.ts","scripts/broker/tests/broker/test-release-supply-chain.ts","scripts/release/tests/test-release-checkpoint-lifecycle.ts","scripts/broker/tests/broker/test-release-web-sidecar.ts","scripts/broker/tests/broker/test-release-candidate-verifier.ts"]},
         {"id":"broker-update-contract","claimId":"broker.update-contract","command":["bun","run","test:broker-update-contract"],"sourceOwners":["scripts/broker/tests/broker/test-update-contract.ts"]},
         {"id":"real-evidence-schema","claimId":"evidence.real-host-schema","command":["bun","run","test:broker-real-host-evidence"],"sourceOwners":["scripts/broker/tests/broker/test-real-host-evidence.ts","scripts/broker/acceptance/real-host-evidence.ts"]},
         {"id":"pi-tool-result","claimId":"broker.pi-tool-result","command":["bun","run","test:pi-tool-result"],"sourceOwners":["scripts/broker/tests/pi/test-tool-result-enrich.ts"]},
@@ -625,7 +631,7 @@
       "timeoutClass": "long",
       "resourceClass": "heavyweight",
       "platformExclusions": ["release-publication","cross-platform-builds","physical-multi-host-real-agent"],
-      "sourceOwners": ["scripts/release/verify-release-checkpoint.ts"]
+      "sourceOwners": ["scripts/release/verify-release-checkpoint.ts","scripts/broker/release/candidate-browser-startup.ts","scripts/broker/release/verify-candidate-pair.ts"]
     },
     {
       "id": "dart-broker-contract-dependencies",

@@ -21,6 +21,9 @@ import {
   committedInstallState,
   writeInstallState,
 } from '../../../packages/typescript/broker/src/install-state.ts';
+import {
+  withCandidateParityBrowser,
+} from './candidate-browser-startup.ts';
 
 export interface CandidatePairArgs {
   broker: string;
@@ -324,80 +327,10 @@ async function probeBuiltClient(options: {
   identity: any;
   brokerContract: any;
 }): Promise<void> {
-  mkdirSync(options.browserHome, { recursive: true });
-  const browser = Bun.spawn([
-    chromeHeadlessShell(),
-    '--no-sandbox',
-    '--disable-gpu',
-    '--disable-dev-shm-usage',
-    '--headless',
-    '--remote-debugging-port=0',
-    '--remote-allow-origins=*',
-    `--user-data-dir=${options.browserHome}`,
-    '--window-size=1280,900',
-    'about:blank',
-  ], {
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const browserStdout = drainProcessOutput(browser.stdout);
-  const browserStderr = drainProcessOutput(browser.stderr);
-  let socket: WebSocket | undefined;
-  try {
-    const activePortPath = join(options.browserHome, 'DevToolsActivePort');
-    let cdpPort: number | undefined;
-    for (let attempt = 0; attempt < 100 && cdpPort === undefined; attempt += 1) {
-      if (browser.exitCode !== null) break;
-      if (existsSync(activePortPath)) {
-        const candidate = Number(
-          readFileSync(activePortPath, 'utf8').split(/\r?\n/, 1)[0],
-        );
-        if (Number.isSafeInteger(candidate)
-            && candidate >= 1 && candidate <= 65_535) {
-          cdpPort = candidate;
-          break;
-        }
-      }
-      await Bun.sleep(100);
-    }
-    if (cdpPort === undefined) {
-      throw new Error('candidate parity browser did not publish its bound port');
-    }
-    const endpoint = `http://127.0.0.1:${cdpPort}`;
-    let browserReady = false;
-    for (let attempt = 0; attempt < 100 && !browserReady; attempt += 1) {
-      if (browser.exitCode !== null) break;
-      try {
-        browserReady = (await fetch(
-          `${endpoint}/json/version`,
-          { signal: AbortSignal.timeout(1_000) },
-        )).ok;
-      } catch {
-        await Bun.sleep(100);
-      }
-    }
-    if (!browserReady) {
-      throw new Error('candidate parity browser did not start');
-    }
-    const target = await (
-      await fetch(`${endpoint}/json/new?about:blank`, { method: 'PUT' })
-    ).json() as any;
-    socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise<void>((resolveOpen, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('candidate CDP socket timed out')),
-        10_000,
-      );
-      socket!.addEventListener('open', () => {
-        clearTimeout(timer);
-        resolveOpen();
-      });
-      socket!.addEventListener('error', () => {
-        clearTimeout(timer);
-        reject(new Error('candidate CDP socket failed'));
-      });
-    });
+  await withCandidateParityBrowser({
+    executable: chromeHeadlessShell(),
+    profileRoot: options.browserHome,
+  }, async ({ socket }) => {
     let nextId = 0;
     const pending = new Map<
       number,
@@ -725,16 +658,7 @@ async function probeBuiltClient(options: {
     if (compatibilityNotice) {
       throw new Error('built app rendered a false compatibility notice');
     }
-  } finally {
-    socket?.close();
-    browser.kill();
-    await browser.exited;
-    const [stdout, stderr] = await Promise.all([browserStdout, browserStderr]);
-    if (browser.exitCode !== 0 && browser.exitCode !== 143) {
-      const detail = `${stdout}\n${stderr}`.trim().slice(-1_000);
-      if (detail) console.error(`candidate browser output: ${detail}`);
-    }
-  }
+  });
 }
 
 export function webIdentityMatchesCandidate(
