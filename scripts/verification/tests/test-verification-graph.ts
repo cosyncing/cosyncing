@@ -204,6 +204,16 @@ expectMutation(
   },
   /completeness anchor.*web-browser/i,
 );
+expectMutation(
+  'web browser verdict removal',
+  (value) => {
+    const browser = value.gates.find((gate) => gate.id === 'web-browser')!;
+    browser.expectedArtifacts = browser.expectedArtifacts.filter(
+      (artifact) => artifact.path !== 'output/artifact-session-isolation/verdict.json',
+    );
+  },
+  /completeness anchor binding mismatch.*web-browser/i,
+);
 
 // A gate's requirement decides whether its red blocks the release, so it is
 // part of the anchored binding. Demoting a required gate to advisory leaves
@@ -257,6 +267,16 @@ expectMutation(
     { ...execution, requirement: 'required' as const, advisoryBaseline: 'public-tree' },
     packageScripts,
   );
+  const withVerdict = verificationBindingFingerprint(
+    {
+      ...execution,
+      requirement: 'required' as const,
+      expectedArtifacts: [
+        { path: 'output/browser/verdict.json', kind: 'report' as const },
+      ],
+    },
+    packageScripts,
+  );
   assert(
     asRequired !== asAdvisory,
     'two bindings differing only in requirement must fingerprint differently',
@@ -264,6 +284,10 @@ expectMutation(
   assert(
     asRequired !== withBaseline,
     'attaching an advisory baseline must change the fingerprint',
+  );
+  assert(
+    asRequired !== withVerdict,
+    'attaching an evidence contract must change the fingerprint',
   );
   // Sub-suites declare no requirement. Their bindings must stay distinguishable
   // from a gate's, and stable across this composition change.
@@ -439,6 +463,52 @@ try {
   assert(
     missing.requirement === 'required' && missing.summary.includes('output/x.json'),
     'a gate that produced no evidence has not run',
+  );
+
+  const failedAndMissing = gateOutcome({
+    ...base,
+    success: false,
+    observedSummary: 'browser click timed out',
+    missingArtifacts: ['output/browser/verdict.json'],
+  });
+  assert(
+    failedAndMissing.summary.includes('browser click timed out')
+      && failedAndMissing.summary.includes('output/browser/verdict.json'),
+    `missing evidence must not mask the command failure (${failedAndMissing.summary})`,
+  );
+
+  const timedOutAndMissing = gateOutcome({
+    ...base,
+    success: false,
+    timedOut: true,
+    missingArtifacts: ['output/browser/verdict.json'],
+  });
+  assert(
+    timedOutAndMissing.summary.includes('timed out after 120000ms (short)')
+      && timedOutAndMissing.summary.includes('output/browser/verdict.json'),
+    `missing evidence must not mask the timeout (${timedOutAndMissing.summary})`,
+  );
+
+  const advisoryAndMissing = gateOutcome({
+    ...base,
+    declaredRequirement: 'advisory',
+    success: false,
+    baseline: {
+      matches: false,
+      added: 1,
+      removed: 0,
+      expectedCount: 2,
+      actualCount: 3,
+    },
+    missingArtifacts: ['output/browser/verdict.json'],
+  });
+  assert(
+    advisoryAndMissing.status === 'fail'
+      && advisoryAndMissing.requirement === 'required'
+      && advisoryAndMissing.summary.startsWith('FAIL ')
+      && advisoryAndMissing.summary.includes('advisory baseline changed')
+      && advisoryAndMissing.summary.includes('output/browser/verdict.json'),
+    `missing evidence must promote advisory drift without masking it (${advisoryAndMissing.summary})`,
   );
 
   // A leak outranks a missing artifact: both are required failures, but the

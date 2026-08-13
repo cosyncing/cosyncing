@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "acceptedBase": "acb302df9603399b30f94d8551aea9f52d0a69af",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
@@ -99,123 +99,123 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:203f1c75ac7b394993f80519a7c6ef03d295bdc3df41111b5121bdff61ebc772"
+      "fingerprint": "sha256:a4e3ca92cd440e9cbb055716667fe9574c03860f15240eaf0bc5b4193054383f"
     },
     {
       "id": "capabilities",
-      "fingerprint": "sha256:77ad4dc3ad1cfd92a57fe94aba7b9421466a111f0f6870ceb6ae50d7c988cc34"
+      "fingerprint": "sha256:72e83a3b7fd1181b381a60ab7e36fd30441c5a14e7cda8054f0faba88c2cd616"
     },
     {
       "id": "client",
-      "fingerprint": "sha256:09581299ed6bad6e4aa8938de64a4bc8f81f103901f46db6d92c5d24a55d28b2"
+      "fingerprint": "sha256:af5d4b4fdf9d0032539b4ddae3ad3928ca8e4166b5e5310bf9e7240d5142d79f"
     },
     {
       "id": "contract",
-      "fingerprint": "sha256:ab3aada476119353f2f9463e73c594baeccd84d4a500e0711649eebfbb36cc62"
+      "fingerprint": "sha256:130713a189be5bd0fd2807a0f03487413893ef18de756bb166a0fe54c0969591"
     },
     {
       "id": "contract-history",
-      "fingerprint": "sha256:1e60dfa96a34c4b4ff5036f3c2469a116cd814b2991f08d81b87e55942f69379"
+      "fingerprint": "sha256:966e3e5ff30acf400c73adeceaad007d65ce90c4b47159f225b86e90167a2144"
     },
     {
       "id": "dart-broker-client-analyze",
-      "fingerprint": "sha256:75596578cd67ec53ebbbe73275817bfef4393481e853fbc82f8fa24d753aa52a"
+      "fingerprint": "sha256:739b352487502d5dca34043fafea1e19c24a1e18be00058d1f1e2ac558de00ef"
     },
     {
       "id": "dart-broker-client-dependencies",
-      "fingerprint": "sha256:cca2c244013ec30dfed34be21bf376d8c0ff36d6459fc19ecf30c1c418517d6a"
+      "fingerprint": "sha256:5db667a52aaf7c7220ea33906a351bba11d6d0b5bbfdddf35d053f8171150fa2"
     },
     {
       "id": "dart-broker-client-flutter-analyze",
-      "fingerprint": "sha256:bb338618e200223cd986550241603bbadea40af0e440535484277a9d1e166614"
+      "fingerprint": "sha256:d5a65f1d8952bc76d81991615e2197ccf1356a30e87af73745a7805b6c87bfe2"
     },
     {
       "id": "dart-broker-client-flutter-dependencies",
-      "fingerprint": "sha256:621886d25e8e1e96acd369188bf206cced3de7971097350b5bf5649c7cba4df3"
+      "fingerprint": "sha256:c4788d5e11a298cfbce7f5181cca24651692f80aa436ab3a850a60daea49cf38"
     },
     {
       "id": "dart-broker-client-flutter-test",
-      "fingerprint": "sha256:d45fd3637e9278c573a7cd24d6189e2a5e65d85a4bf2ce603191825168567223"
+      "fingerprint": "sha256:decf7893f4875854c9300ea1662a6ba26347d8ae133241c9606188ccdf71f2b2"
     },
     {
       "id": "dart-broker-client-test",
-      "fingerprint": "sha256:41274e306f37a3df4d4866b1cb89de8423430a02a8c593b8056f87aa7040d1bf"
+      "fingerprint": "sha256:553184888195e7ee2062db1b3b4555d7cd9e6d8eab7b01049400c969fce9a814"
     },
     {
       "id": "dart-broker-contract-analyze",
-      "fingerprint": "sha256:56b80ac79cb0a3bcd5514561411d0211dc85304e6642e8c454e432503b5b5388"
+      "fingerprint": "sha256:4bacf11b6193670689905add04a149c4cc2b6f02061c69b1abc2efcd4f84cfc9"
     },
     {
       "id": "dart-broker-contract-dependencies",
-      "fingerprint": "sha256:03db1f86e0564776d7514455805f5e7c9d36bdda3e53f43a1b7d24df472aff12"
+      "fingerprint": "sha256:3ec50c8ec19c1562eb9e542f9bdafd695ce6f058153bfecbed1b81c256d5b927"
     },
     {
       "id": "dart-broker-contract-test",
-      "fingerprint": "sha256:b450b7f4f1312da9562f5d75600b841f202f79e67c33ebdf55488ff2b6b0f2eb"
+      "fingerprint": "sha256:d839a61dea400831446aea06b31efa51d068b095c61cc8ce995c8e4d6fb38329"
     },
     {
       "id": "dart-broker-crypto-analyze",
-      "fingerprint": "sha256:9250b26cbe1bf2ce78b271c030f5f564a4f29604bbe60dfe8b46695d7f0ec3b6"
+      "fingerprint": "sha256:56768a6ed88834f7516269b3c13d6f14bf96c0ae34833b3482a036fc489101f1"
     },
     {
       "id": "dart-broker-crypto-dependencies",
-      "fingerprint": "sha256:21ca5aec1f0e286a4702ac1fc7817f78477099455b956d216b6fb2c6692e0db8"
+      "fingerprint": "sha256:a4db0138e195ca591bace7052117b27a3b7881188b71558d4f1a60b31583b44b"
     },
     {
       "id": "dart-broker-crypto-test",
-      "fingerprint": "sha256:a4b098a4ea8dda4a03b2b27c145aafe0150f93f0fd498d7766aeff89de3e42b3"
+      "fingerprint": "sha256:758f1c485429e468eed94e1438f7e21ba272ad1cf3fb99cdf29b2ef0df56352a"
     },
     {
       "id": "diff-hygiene",
-      "fingerprint": "sha256:fe15454e0802f7339e4583b56a11b7a94a77f5212cb055535ed9993451553df9"
+      "fingerprint": "sha256:b5d148ff98bfaed8d9695d4d53067fa111b0b53d74e2c61ea55a5a0a21ca96b5"
     },
     {
       "id": "public-tree",
-      "fingerprint": "sha256:fd7a26c53ea3730a3da652e51e737938ab02413e1197742e955fdf81b8b37198"
+      "fingerprint": "sha256:340b8189d504927c5c165e1ad1be69fef01963378fc814df1a16de891ec439ce"
     },
     {
       "id": "public-tree-policy",
-      "fingerprint": "sha256:ba63b002ffdd6ca78d05ef420b4d03f3bf14413a21d10753dd9f8c47c95692d3"
+      "fingerprint": "sha256:13b4e72142a53db51a295c4c892b8ec255678a4783ed25a8c6ac5f471a2257d6"
     },
     {
       "id": "release-candidate-pair",
-      "fingerprint": "sha256:138f781a80ccb27accbe4da0ccd39c2fe590f2d105ed45f01c0a390874e2304f"
+      "fingerprint": "sha256:051d1a328366f162cf4a3b07005e4ca6689bffe17b22a661120b979a91e16b02"
     },
     {
       "id": "source-boundaries",
-      "fingerprint": "sha256:1d3c01c869a92ee4ba30a2de66b85e22e7335b202b19459387701b43f8b7c593"
+      "fingerprint": "sha256:771be2fafa24d757cf7bd0c5b641ae5e1c91a32086c4162b6f12aa5da8912c73"
     },
     {
       "id": "source-stability",
-      "fingerprint": "sha256:bf1f99a8b1d1de28783431ff79418b140938ca03f0d6a97e4b234750184d37b8"
+      "fingerprint": "sha256:6cdbe0e56e7552f99f75b9094e6ebdd0e16c1ef06c13c5278af1948ff7d50244"
     },
     {
       "id": "support-matrix",
-      "fingerprint": "sha256:83904b49811ac417456164330bd3ed73f28a2aa95aae6ba0c41755837cb3ed24"
+      "fingerprint": "sha256:99c4f89c8f94778a115c693013d8441b16fe09dd39b82f67477f288bfd660270"
     },
     {
       "id": "trace-manifest",
-      "fingerprint": "sha256:a38ad64760b9162887d20b5662c3e3d43687fa606930b18e6be083aa5cbb34f5"
+      "fingerprint": "sha256:4da29c4d42d3035497be59d023ca9f2056332e0b84c628fee8df3efd534832d0"
     },
     {
       "id": "verification-inventory",
-      "fingerprint": "sha256:41db8571737ac0ede141abd9823922dbce29152fbb021e2200a9e851ddc375c4"
+      "fingerprint": "sha256:73f0c2656eb4a76107b3e431cca55a6ba4c1ed5567caa51d7c49b6b4d916be7e"
     },
     {
       "id": "web-browser",
-      "fingerprint": "sha256:3e05859e47407f18525f0fb291454e9c891e62566d88a78232ac62d94c811326"
+      "fingerprint": "sha256:5d37c68682f02fb9fb82f949b08b4c1f946717b5000859c6f522f9f6c332e593"
     },
     {
       "id": "web-cache",
-      "fingerprint": "sha256:dfb9c416eaf03498177d7a776c32ee7e67c64012f794046fb1570ad1ba723c0d"
+      "fingerprint": "sha256:53ed338b729136b190e2f04bb7512503901022dccc0a6418905060b89c95dcd7"
     },
     {
       "id": "web-update-handoff",
-      "fingerprint": "sha256:cc2a72b77b5424c278329850e13f5cba37f33aedf95e64962b1f92d5f384dc88"
+      "fingerprint": "sha256:5cfc8e57421bca1892a74f64d07a990aa9cd2b05e62eddef2251e08ba91a1fc8"
     },
     {
       "id": "workflow-policy",
-      "fingerprint": "sha256:e0cdc66c650b5444b0c80191e3ba0e6dc0b3e79c0caa7ef23b9f8a52f3de64dc"
+      "fingerprint": "sha256:5f40e6750f63e1a9e0dd90a13ea91a3b7680a6e043902d06db353f6d5919e8df"
     }
   ],
   "requiredBrokerSubSuiteBindings": [

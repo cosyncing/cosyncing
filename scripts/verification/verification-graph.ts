@@ -176,20 +176,17 @@ function packageScriptClosure(
 /**
  * Binds what a gate runs to what its result is allowed to mean.
  *
- * `requirement` and `advisoryBaseline` are part of the fingerprint because
- * they decide how a red gate counts against the release. Without them a gate
- * could be demoted from required to advisory, or have its advisory
- * interpretation changed by a different baseline, and the anchor would still
- * validate — the execution binding would be untouched while the verdict's
- * meaning quietly shifted. A baseline on a required gate never excuses its
- * failures; it is bound here because it governs advisory interpretation.
+ * `requirement`, `advisoryBaseline`, and `expectedArtifacts` are part of the
+ * fingerprint because they decide how a gate's result counts against the
+ * release. Without them a gate could be demoted, reinterpreted, or allowed to
+ * pass without its committed evidence while the anchor still validated.
  *
  * Callers pass the EFFECTIVE requirement, not the declared one, so a gate that
  * omits the field and a gate that spells out "required" agree.
  *
- * Broker sub-suites carry no requirement of their own. They leave both keys
- * undefined, `JSON.stringify` drops them, and their fingerprints are the same
- * bytes they were before these inputs existed.
+ * Broker sub-suites carry no requirement or artifact contract of their own.
+ * They leave those keys undefined, `JSON.stringify` drops them, and their
+ * fingerprints stay byte-identical across this composition change.
  */
 export function verificationBindingFingerprint(
   binding: {
@@ -199,6 +196,7 @@ export function verificationBindingFingerprint(
     claimIds: string[];
     requirement?: Requirement;
     advisoryBaseline?: string;
+    expectedArtifacts?: ExpectedArtifact[];
   },
   packageScripts: Record<string, string>,
 ): string {
@@ -210,6 +208,11 @@ export function verificationBindingFingerprint(
     sourceOwners: [...binding.sourceOwners].sort(),
     requirement: binding.requirement,
     advisoryBaseline: binding.advisoryBaseline,
+    expectedArtifacts: binding.expectedArtifacts === undefined
+      ? undefined
+      : [...binding.expectedArtifacts].sort((left, right) =>
+        `${left.path}\0${left.kind}`.localeCompare(`${right.path}\0${right.kind}`)
+      ),
   });
   return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
 }
@@ -371,7 +374,7 @@ export function validateVerificationGraph(
   if (!anchor) {
     errors.push('verification completeness anchor is missing');
   } else {
-    if (anchor.schemaVersion !== 3) {
+    if (anchor.schemaVersion !== 4) {
       errors.push('verification completeness anchor has unsupported schemaVersion');
     }
     if (!/^[0-9a-f]{40}$/.test(anchor.acceptedBase)) {
@@ -483,6 +486,7 @@ export function validateVerificationGraph(
         claimIds: gate.claimIds,
         requirement: gate.requirement ?? 'required',
         advisoryBaseline: gate.advisoryBaseline,
+        expectedArtifacts: gate.expectedArtifacts,
       }, packageScripts);
       if (fingerprint !== binding.fingerprint) {
         errors.push(

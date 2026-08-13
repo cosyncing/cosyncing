@@ -42,11 +42,15 @@ const fingerprint = (
     claimIds: string[];
     requirement?: 'required' | 'advisory';
     advisoryBaseline?: string;
+    expectedArtifacts?: Array<{
+      path: string;
+      kind: 'log' | 'report' | 'directory' | 'artifact';
+    }>;
   },
 ): string => verificationBindingFingerprint(binding, packageScripts);
 
 const anchor = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   acceptedBase,
   requiredClaimIds: graph.claims.map((claim) => claim.id).sort(),
   requiredGateBindings: graph.gates
@@ -59,6 +63,7 @@ const anchor = {
         claimIds: gate.claimIds,
         requirement: gate.requirement ?? 'required',
         advisoryBaseline: gate.advisoryBaseline,
+        expectedArtifacts: gate.expectedArtifacts,
       }),
     }))
     .sort((left, right) => left.id.localeCompare(right.id)),

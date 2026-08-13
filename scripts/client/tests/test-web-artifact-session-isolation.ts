@@ -14,7 +14,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,6 +34,9 @@ import {
 const REPOSITORY_ROOT = resolve(import.meta.dir, '../../..');
 const WEB_BUILD = join(REPOSITORY_ROOT, 'apps/client/build/web');
 const OUTPUT = join(REPOSITORY_ROOT, 'output/artifact-session-isolation');
+const LIGHT_SCREENSHOT = join(OUTPUT, 'artifact-card-light.png');
+const DARK_SCREENSHOT = join(OUTPUT, 'artifact-card-dark.png');
+const VERDICT = join(OUTPUT, 'verdict.json');
 const BROWSER_ARGS = [
   '--disable-gpu',
   '--disable-software-rasterizer',
@@ -283,6 +288,15 @@ async function newBrowserContext(
 
 assert(Bun.file(join(WEB_BUILD, 'index.html')).size > 0, 'Run bun run client:build:web first');
 mkdirSync(OUTPUT, { recursive: true });
+// Evidence belongs to this invocation. Leaving previous-run files in place
+// could let a failed browser command satisfy the outer gate with stale output.
+for (const target of [LIGHT_SCREENSHOT, DARK_SCREENSHOT, VERDICT]) {
+  rmSync(target, { force: true });
+}
+const evidenceStage = mkdtempSync(join(OUTPUT, '.evidence-'));
+const stagedLightScreenshot = join(evidenceStage, 'artifact-card-light.png');
+const stagedDarkScreenshot = join(evidenceStage, 'artifact-card-dark.png');
+const stagedVerdict = join(evidenceStage, 'verdict.json');
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-web-artifact-isolation-'));
 const fixtureA = join(root, 'broker-a');
 const fixtureB = join(root, 'broker-b');
@@ -464,7 +478,7 @@ try {
   await page.unroute('**/api/sessions/pi/*/artifact/*');
 
   await page.screenshot({
-    path: join(OUTPUT, 'artifact-card-light.png'),
+    path: stagedLightScreenshot,
     fullPage: true,
   });
 
@@ -496,7 +510,7 @@ try {
   await openRosterSession(darkPage, brokerA.origin, 'Artifact owner', ownerId);
   await waitForArtifact(darkPage);
   await darkPage.screenshot({
-    path: join(OUTPUT, 'artifact-card-dark.png'),
+    path: stagedDarkScreenshot,
     fullPage: true,
   });
 
@@ -504,9 +518,38 @@ try {
     !/favicon|Failed to load resource.*503/i.test(message)
   );
   assert.deepEqual(materialErrors, [], `browser errors: ${materialErrors.join(' | ')}`);
+
+  for (const screenshot of [stagedLightScreenshot, stagedDarkScreenshot]) {
+    assert(statSync(screenshot).size > 0, `browser evidence is empty: ${screenshot}`);
+  }
+  // The two PNGs remain optional visual diagnostics. verdict.json is the
+  // atomic commit witness consumed by the required gate: it appears only
+  // after both current-run screenshots and every functional assertion pass.
+  renameSync(stagedLightScreenshot, LIGHT_SCREENSHOT);
+  renameSync(stagedDarkScreenshot, DARK_SCREENSHOT);
+  writeFileSync(stagedVerdict, `${JSON.stringify({
+    schemaVersion: 1,
+    status: 'pass',
+    test: 'web-artifact-session-isolation',
+    assertions: [
+      'exact-session-ownership',
+      'restart-replay',
+      'bounded-download',
+      'transient-retry',
+      'exact-download-bytes',
+      'broker-origin-isolation',
+      'browser-console-clean',
+    ],
+    screenshots: [
+      'artifact-card-light.png',
+      'artifact-card-dark.png',
+    ],
+  }, null, 2)}\n`);
+  renameSync(stagedVerdict, VERDICT);
   console.log('PASS real Flutter-web artifact ownership, cache, retry, download, reload, and broker switch');
-  console.log(`EVIDENCE ${join(OUTPUT, 'artifact-card-light.png')}`);
-  console.log(`EVIDENCE ${join(OUTPUT, 'artifact-card-dark.png')}`);
+  console.log(`EVIDENCE ${VERDICT}`);
+  console.log(`OPTIONAL EVIDENCE ${LIGHT_SCREENSHOT}`);
+  console.log(`OPTIONAL EVIDENCE ${DARK_SCREENSHOT}`);
 } finally {
   await lightContext?.close();
   await darkContext?.close();
@@ -514,5 +557,6 @@ try {
   await stopBroker(brokerB);
   await leaseA.release().catch(() => undefined);
   await leaseB.release().catch(() => undefined);
+  rmSync(evidenceStage, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 }

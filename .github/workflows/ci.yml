@@ -47,7 +47,9 @@ jobs:
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
         with:
           name: repository-check-${{ github.run_id }}
-          path: output/check
+          path: |
+            output/check
+            output/artifact-session-isolation
           if-no-files-found: warn
           retention-days: 7
 
