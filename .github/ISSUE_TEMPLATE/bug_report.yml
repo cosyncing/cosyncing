@@ -1,0 +1,102 @@
+name: Bug report
+description: Report a reproducible defect in the broker, client, or an agent adapter
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where does the bug show up?
+      options:
+        - Broker
+        - Client - Android
+        - Client - iOS
+        - Client - desktop (Linux / macOS / Windows)
+        - Client - web
+        - Agent adapter
+        - Protocol / transport
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent involved
+      options:
+        - Claude Code
+        - Codex
+        - OpenCode
+        - Pi
+        - Multiple agents
+        - Not agent-specific
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the incorrect behavior and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the broker with `...`
+        2. Pair the client / open agent X session
+        3. Do `...`
+        4. See error
+    validations:
+      required: true
+
+  - type: input
+    id: broker-version
+    attributes:
+      label: Broker version
+      description: From the broker startup banner or `npm ls -g cosyncing`.
+      placeholder: "e.g. 0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Client version
+      description: Release tag or in-app version. Skip if the bug is broker-only.
+      placeholder: "e.g. v0.3.0"
+
+  - type: dropdown
+    id: broker-os
+    attributes:
+      label: Broker host OS
+      options:
+        - Linux
+        - macOS
+        - WSL
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: >-
+        Broker console output and client-side errors. Redact pairing keys,
+        tokens, and anything else private before pasting. Wrap in ```.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am on the latest stable broker and client releases.
+          required: false

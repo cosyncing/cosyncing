@@ -1,0 +1,52 @@
+name: Feature request
+description: Suggest a feature or enhancement for cosyncing
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The use case or pain point this would address.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the solution you'd like
+      description: What should happen, and how should it work?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agents
+    attributes:
+      label: Agents affected
+      description: Choose all that apply.
+      multiple: true
+      options:
+        - Claude Code
+        - Codex
+        - OpenCode
+        - Pi
+        - Agent-agnostic
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you have tried or other approaches you rejected.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: >-
+            This works without a hosted service between client and broker
+            (cosyncing stays local-first / self-hosted).
+          required: false
