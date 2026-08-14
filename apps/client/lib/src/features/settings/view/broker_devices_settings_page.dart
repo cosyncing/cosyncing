@@ -8,7 +8,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/view/broker_profil
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_connection_gate.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/broker_credential_notice_text.dart';

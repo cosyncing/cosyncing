@@ -31,12 +31,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/product.ts';
 import {
   SUPPORTED_BROKER_PACKAGE_CPU,
   SUPPORTED_BROKER_PACKAGE_OS,
   supportedBrokerHostList,
-} from '../../packages/typescript/broker/src/supported-hosts.ts';
+} from '../../packages/typescript/broker/src/installation/supported-hosts.ts';
 import {
   createCompiledSoftwareInventory,
   createJavaScriptThirdPartyNotices,
@@ -72,7 +72,7 @@ function requiredBunRange(): string {
  * The web sidecar's directory, relative to the package root.
  *
  * A packaged broker resolves its web root as `dirname(<application>)/cosyncing-web-<version>`
- * (resolveFlutterWebRoot in packages/typescript/broker/src/runtime-assets.ts). The application is this
+ * (resolveFlutterWebRoot in packages/typescript/broker/src/runtime/runtime-assets.ts). The application is this
  * package's own `bin/cosyncing` — there is no longer a swap that could move it elsewhere — so the sidecar
  * sits beside it and one directory serves every host.
  */
@@ -347,7 +347,7 @@ const PACKAGE_COMMON = Object.freeze({
  * lifecycle script to do, and an install script that can swap an executable is precisely the mechanism this
  * migration removed. `os`/`cpu` exclude Windows, which npm can express; Intel macOS cannot be excluded by
  * those fields without also excluding Apple Silicon, so the product refuses it at diagnosis instead (see
- * packages/typescript/broker/src/supported-hosts.ts).
+ * packages/typescript/broker/src/installation/supported-hosts.ts).
  */
 function packageManifest(version: string, web: boolean): Record<string, unknown> {
   return {

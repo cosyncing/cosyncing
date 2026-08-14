@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 
 const ROOT = resolve(import.meta.dir, '../../..');
 const BUN_LICENSE_PATH = join(ROOT, 'docs/legal/bun-1.3.8-LICENSE.md');

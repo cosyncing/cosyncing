@@ -106,7 +106,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/crypto/test-pairing-key-store.ts',
+    file: 'packages/typescript/broker/test/crypto/test-pairing-key-store.ts',
     title: 'crypto pairing key-store regression suite',
     coverage: [
       { fn: 'F16', level: 'L0', agents: 'all', note: 'local persisted identity/exchange keys, QR private-key omission, DataKey wrap/unwrap wrong-key rejection' },
@@ -147,7 +147,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/opencode/test-opencode.ts',
+    file: 'packages/typescript/broker/test/opencode/test-opencode.ts',
     title: 'OpenCode integration suite including file input/output',
     coverage: [
       { fn: 'F12', level: 'L2', agents: ['opencode'], note: 'single and multi-file upload reaches the agent' },
@@ -155,7 +155,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/opencode/test-opencode-private.ts',
+    file: 'packages/typescript/adapters/opencode/test/test-opencode-private.ts',
     title: 'OpenCode private Drive runtime and streaming suite',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['opencode'], note: 'raw run answer/tool/token lanes' },
@@ -163,7 +163,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/pi/test-pi.ts',
+    file: 'packages/typescript/broker/test/pi/test-pi.ts',
     title: 'Pi integration suite including file input/output',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['pi'], note: 'Pi JSONL/RPC text/thinking lanes' },
@@ -172,7 +172,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/pi/test-tool-result-enrich.ts',
+    file: 'packages/typescript/broker/test/pi/test-tool-result-enrich.ts',
     title: 'Pi tool-result, bridge option, approval, question, and runtime suite',
     coverage: [
       { fn: 'F05', level: 'L2', agents: ['pi'], note: 'diff/path/exit/truncation enrichment' },
@@ -183,7 +183,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/codex/rollout.ts',
+    file: 'packages/typescript/broker/test/codex/rollout.ts',
     title: 'Codex rollout mapping and runtime suite',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['codex'], note: '0.146 new-only, legacy-only, and dual-emission assistant text across cold history and live follow' },
@@ -192,7 +192,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/codex/resume-fake.ts',
+    file: 'packages/typescript/broker/test/codex/resume-fake.ts',
     title: 'Codex fake app-server resume, model, permissions, and lifecycle suite',
     coverage: [
       { fn: 'F01', level: 'L2', agents: ['codex'], note: 'native create/resume metadata through fake app-server' },
@@ -204,7 +204,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/codex/resume.ts',
+    file: 'packages/typescript/broker/test/codex/resume.ts',
     title: 'Codex live resume suite including file input',
     optIn: true,
     coverage: [
@@ -212,7 +212,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/claude/test-claude-drive-surface.ts',
+    file: 'packages/typescript/adapters/claude/test/test-claude-drive-surface.ts',
     title: 'Claude Drive surface including native file and image input',
     coverage: [
       { fn: 'F03', level: 'L2', agents: ['claude'], note: 'Drive prompt and stop command with stubbed process' },
@@ -221,7 +221,7 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/claude/test-claude-jsonl.ts',
+    file: 'packages/typescript/adapters/claude/test/test-claude-jsonl.ts',
     title: 'Claude transcript mapping, streaming lanes, tool enrichment, and token suite',
     coverage: [
       { fn: 'F04', level: 'L2', agents: ['claude'], note: 'model-output/thinking/tool lane mapping from JSONL' },
@@ -230,21 +230,21 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
-    file: 'scripts/broker/tests/claude/test-claude-resume.ts',
+    file: 'packages/typescript/adapters/claude/test/test-claude-resume.ts',
     title: 'Claude resume/Drive control suite',
     coverage: [
       { fn: 'F14', level: 'L2', agents: ['claude'], note: 'Drive/resume/freshness and live drive behavior' },
     ],
   },
   {
-    file: 'scripts/broker/tests/claude/test-claude-artifacts.ts',
+    file: 'packages/typescript/adapters/claude/test/test-claude-artifacts.ts',
     title: 'Claude SendUserFile and inline artifact suite',
     coverage: [
       { fn: 'F13', level: 'L2', agents: ['claude'], note: 'SendUserFile and inline image file-artifact mapping' },
     ],
   },
   {
-    file: 'scripts/broker/tests/claude/test-claude-tmux-ornaments.ts',
+    file: 'packages/typescript/broker/test/claude/test-claude-tmux-ornaments.ts',
     title: 'Claude tmux ornament classifier fixture suite',
     coverage: [
       { fn: 'F04', level: 'L0', agents: ['claude'], note: 'collapsed thought timer classified as TUI chrome while structured thinking remains canonical' },

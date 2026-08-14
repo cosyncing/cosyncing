@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "agent": "codex",
   "version": "0.142.5",
-  "_adapterRefs_note": "adapterRefs is a DOCUMENTATION-ONLY field (no gate greps/validates it). These use grep-recoverable symbol/RPC-string tokens rather than line numbers so a reader can still find the code after edits shift lines — Fable review 2026-07-08 #3. The older opencode/pi manifests still use line numbers.",
+  "_adapterRefs_note": "adapterRefs is a documentation-only field. References use grep-recoverable symbols and RPC tokens rather than line numbers so they survive ordinary edits.",
   "capabilities": [
     {
       "schemaVersion": 1,
@@ -12,8 +12,8 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (discoverSessions)", "packages/typescript/adapters/codex/src/index.ts (rolloutFacts)"],
-      "traceRefs": ["scripts/broker/tests/codex/rollout.ts", "scripts/broker/tests/codex/resume.ts"]
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (discoverSessions)", "packages/typescript/adapters/codex/src/implementation.ts (rolloutFacts)"],
+      "traceRefs": ["packages/typescript/broker/test/codex/rollout.ts", "packages/typescript/broker/test/codex/resume.ts"]
     },
     {
       "schemaVersion": 1,
@@ -23,8 +23,8 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (attach)", "packages/typescript/adapters/codex/src/index.ts (rpc('thread/resume'))"],
-      "traceRefs": ["scripts/broker/tests/codex/resume.ts", "scripts/broker/tests_traces/codex-true-sync-trace.ts"]
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (attach)", "packages/typescript/adapters/codex/src/implementation.ts (rpc('thread/resume'))"],
+      "traceRefs": ["packages/typescript/broker/test/codex/resume.ts", "scripts/broker/tests_traces/codex-true-sync-trace.ts"]
     },
     {
       "schemaVersion": 1,
@@ -34,7 +34,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('thread/loaded/list'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('thread/loaded/list'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-true-sync-trace.ts"]
     },
     {
@@ -45,7 +45,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('turn/start'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('turn/start'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
     },
     {
@@ -56,7 +56,7 @@
       "version": "0.142.5",
       "mappedStatus": "partial",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('turn/steer'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('turn/steer'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
     },
     {
@@ -67,7 +67,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (turn/interrupt)"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (turn/interrupt)"],
       "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
     },
     {
@@ -78,7 +78,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('model/list'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('model/list'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-real-native-model-change-trace.ts"]
     },
     {
@@ -89,7 +89,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('config/read'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('config/read'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-display-trace.ts"]
     },
     {
@@ -100,7 +100,7 @@
       "version": "0.142.5",
       "mappedStatus": "partial",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('skills/list'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('skills/list'))"],
       "traceRefs": ["scripts/broker/tests_traces/codex-surface-contract-trace.ts"]
     },
     {
@@ -111,8 +111,8 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (rpc('thread/compact/start'))"],
-      "traceRefs": ["scripts/broker/tests/codex/broker-control-mode.ts"]
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (rpc('thread/compact/start'))"],
+      "traceRefs": ["packages/typescript/broker/test/codex/broker-control-mode.ts"]
     },
     {
       "schemaVersion": 1,
@@ -122,7 +122,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (case 'turn/plan/updated')"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (case 'turn/plan/updated')"],
       "traceRefs": ["scripts/broker/tests_traces/codex-broad-real-tui-surface-trace.ts"]
     },
     {
@@ -133,7 +133,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (subagentActivity)"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (subagentActivity)"],
       "traceRefs": ["scripts/broker/tests_traces/codex-surface-contract-trace.ts"]
     },
     {
@@ -144,7 +144,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L1", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (ExecCommandApproval / ApplyPatchApproval → permission-request)"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (ExecCommandApproval / ApplyPatchApproval → permission-request)"],
       "traceRefs": ["scripts/broker/tests_traces/codex-app-answer-trace.ts", "scripts/broker/tests_traces/codex-app-answer-real-tui-trace.ts"]
     },
     {
@@ -155,8 +155,8 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (createSession)", "packages/typescript/adapters/codex/src/index.ts (createCodexThread)"],
-      "traceRefs": ["scripts/broker/tests/codex/resume.ts"]
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (createSession)", "packages/typescript/adapters/codex/src/implementation.ts (createCodexThread)"],
+      "traceRefs": ["packages/typescript/broker/test/codex/resume.ts"]
     },
     {
       "schemaVersion": 1,
@@ -166,7 +166,7 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (renameSession)", "packages/typescript/adapters/codex/src/index.ts (rpc('thread/name/set'))"],
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (renameSession)", "packages/typescript/adapters/codex/src/implementation.ts (rpc('thread/name/set'))"],
       "traceRefs": ["scripts/broker/tests/app/test-web-ui-components.ts"]
     },
     {
@@ -177,8 +177,8 @@
       "version": "0.142.5",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/codex/src/index.ts (forkSession)", "packages/typescript/adapters/codex/src/index.ts (forkCodexThread)"],
-      "traceRefs": ["scripts/broker/tests/codex/test-codex-fork.ts"]
+      "adapterRefs": ["packages/typescript/adapters/codex/src/implementation.ts (forkSession)", "packages/typescript/adapters/codex/src/implementation.ts (forkCodexThread)"],
+      "traceRefs": ["packages/typescript/adapters/codex/test/test-codex-fork.ts"]
     }
   ]
 }

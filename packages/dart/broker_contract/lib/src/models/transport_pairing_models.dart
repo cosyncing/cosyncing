@@ -1,7 +1,7 @@
 /// Typed models for broker transport pairing accept responses.
 ///
 /// Mirrors the broker W11 accept route in
-/// `packages/typescript/broker/src/transport-pairing.ts`:
+/// `packages/typescript/broker/src/transport/transport-pairing.ts`:
 /// `POST /api/transport/pairings/:id/accept`.
 ///
 /// Governing doc: docs/protocol/contract-sync.md

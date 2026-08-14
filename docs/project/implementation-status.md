@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-13.
+Last updated: 2026-08-14.
 
 ## Publication state
 
@@ -48,9 +48,11 @@ binary pinned to reviewed content. Hosted Linux, Android, macOS, iOS simulator,
 Windows, web, broker, contract, and reusable-package jobs pass. The deterministic
 broker aggregate contains 66 registered sub-suites.
 
-The local complete check passes every registered gate. Source architecture
-ceilings remain for production entry points, session-detail production code,
-and renderers; test and harness files are not rejected solely for line count.
+The local complete check covers every registered gate. Source architecture is
+enforced through package dependency direction, adapter isolation, public
+facades, platform boundaries, generated-contract checks, and focused behavior
+suites. Files have no line-count ceiling; production modules are grouped by
+owned broker domain and Flutter user capability instead.
 
 ## Release state
 

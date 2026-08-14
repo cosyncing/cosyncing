@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "agent": "opencode",
   "version": "1.16.2",
+  "_adapterRefs_note": "adapterRefs is a documentation-only field. References use grep-recoverable symbols and endpoint tokens rather than line numbers so they survive ordinary edits.",
   "capabilities": [
     {
       "schemaVersion": 1,
@@ -11,8 +12,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:309", "packages/typescript/adapters/opencode/src/index.ts:335"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.discoverSessions)"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -22,8 +23,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:640", "packages/typescript/adapters/opencode/src/index.ts:1132", "packages/typescript/adapters/opencode/src/index.ts:1258"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeObserveConnection.getHistory, OpenCodeConnection.getHistory)"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -33,8 +34,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:666"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.createSession)"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -44,8 +45,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1059", "packages/typescript/adapters/opencode/src/index.ts:1659"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (getHistory, '/message')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -55,8 +56,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1531"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (sendPrompt, 'prompt_async')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -66,8 +67,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1647"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, '/summarize')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -77,8 +78,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1674"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, '/revert')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -88,8 +89,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1680"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, '/unrevert')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -99,8 +100,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1686"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, '/abort')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -110,8 +111,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1691"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, POST '/share')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -121,8 +122,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1702"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, DELETE '/share')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -132,8 +133,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1709"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (runCommand, '/command')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -143,8 +144,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:398"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.discoverSessions, '/project')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -154,7 +155,7 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:534", "packages/typescript/adapters/opencode/src/index.ts:1144"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (pendingMessages, '/question')"],
       "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
     },
     {
@@ -165,7 +166,7 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1595"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (answerQuestion)"],
       "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
     },
     {
@@ -176,7 +177,7 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1604"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (rejectQuestion)"],
       "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
     },
     {
@@ -187,7 +188,7 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:534", "packages/typescript/adapters/opencode/src/index.ts:1164"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (pendingMessages, '/permission')"],
       "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
     },
     {
@@ -198,7 +199,7 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1585"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (respondPermission)"],
       "traceRefs": ["scripts/broker/tests_traces/opencode-app-answer-trace.ts"]
     },
     {
@@ -209,8 +210,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1572"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (listAgents, '/agent')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -220,8 +221,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1611"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (listCommands, '/command')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -231,8 +232,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1545"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (listModels, '/api/model')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts"]
     },
     {
       "schemaVersion": 1,
@@ -242,8 +243,8 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1208", "packages/typescript/adapters/opencode/src/index.ts:1823"],
-      "traceRefs": ["scripts/broker/tests/opencode/test-opencode-control.ts", "scripts/broker/tests_traces/opencode-true-sync-trace.ts"]
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts ('/global/event')"],
+      "traceRefs": ["packages/typescript/adapters/opencode/test/test-opencode-control.ts", "scripts/broker/tests_traces/opencode-true-sync-trace.ts"]
     },
     {
       "schemaVersion": 1,
@@ -254,7 +255,7 @@
       "mappedStatus": "not-applicable",
       "evidencePresent": ["D"],
       "adapterRefs": ["scripts/broker/capabilities/collect-opencode-live.ts"],
-      "traceRefs": ["scripts/broker/tests/capabilities/test-capabilities.ts"],
+      "traceRefs": ["packages/typescript/broker/test/capabilities/test-capabilities.ts"],
       "deliberateExclusionReason": "collector/version source only, not user-facing app behavior"
     },
     {
@@ -266,7 +267,7 @@
       "mappedStatus": "not-applicable",
       "evidencePresent": ["D"],
       "adapterRefs": ["scripts/broker/capabilities/collect-opencode-live.ts", "scripts/broker/capabilities/check-discovery-drift.ts"],
-      "traceRefs": ["scripts/broker/tests/capabilities/test-capabilities.ts"],
+      "traceRefs": ["packages/typescript/broker/test/capabilities/test-capabilities.ts"],
       "deliberateExclusionReason": "discovery source document, not user-facing app behavior"
     },
     {
@@ -277,9 +278,9 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:696", "packages/typescript/broker/src/main.ts:977"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.renameSession)"],
       "traceRefs": [
-        "scripts/broker/tests/opencode/test-opencode-control.ts",
+        "packages/typescript/adapters/opencode/test/test-opencode-control.ts",
         "scripts/broker/tests/app/test-web-ui-components.ts",
         "scripts/broker/tests/app/test-web-ui-static.ts"
       ]
@@ -292,9 +293,9 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:716", "packages/typescript/broker/src/main.ts:1108"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.forkSession)"],
       "traceRefs": [
-        "scripts/broker/tests/opencode/test-opencode-control.ts"
+        "packages/typescript/adapters/opencode/test/test-opencode-control.ts"
       ]
     },
     {
@@ -305,9 +306,9 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:1551", "packages/typescript/adapters/opencode/src/index.ts:2589", "apps/poc-ui/public/app.js:3931"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (normalizeOpenCodeProviderCatalog, listModels)", "apps/poc-ui/public/app.js (modelVariantKey)"],
       "traceRefs": [
-        "scripts/broker/tests/opencode/test-opencode-control.ts",
+        "packages/typescript/adapters/opencode/test/test-opencode-control.ts",
         "scripts/broker/tests/app/test-web-ui-components.ts",
         "scripts/broker/tests/app/test-web-ui-static.ts"
       ]
@@ -320,10 +321,10 @@
       "version": "1.16.2",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/opencode/src/index.ts:743", "packages/typescript/broker/src/r2-export.ts", "packages/typescript/broker/src/r2-redactor.ts", "packages/typescript/broker/src/main.ts:1160"],
+      "adapterRefs": ["packages/typescript/adapters/opencode/src/implementation.ts (OpenCodeAdapter.exportTranscript)", "packages/typescript/broker/src/security/r2-export.ts", "packages/typescript/broker/src/security/r2-redactor.ts"],
       "traceRefs": [
-        "scripts/broker/tests/security-r2/test-r2-export.ts",
-        "scripts/broker/tests/security-r2/test-r2-redactor.ts",
+        "packages/typescript/broker/test/security-r2/test-r2-export.ts",
+        "packages/typescript/broker/test/security-r2/test-r2-redactor.ts",
         "scripts/broker/tests/app/test-web-ui-components.ts"
       ]
     },

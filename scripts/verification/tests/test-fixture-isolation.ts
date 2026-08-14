@@ -10,8 +10,8 @@ import {
   isolatedBrokerFixtureEnvironment,
   settledProcessOutput,
   waitForBrokerHealth,
-} from '../../broker/tests/helpers/isolated-broker-fixture.ts';
-import { scanSource } from '../audit-suite-isolation.ts';
+} from '../../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
+import { entryPointsFor, scanSource } from '../audit-suite-isolation.ts';
 
 let checks = 0;
 function assert(condition: unknown, message: string): asserts condition {
@@ -221,6 +221,18 @@ const rulesOf = (source: string): string[] =>
   [...new Set(scanSource(source, 'fixture.ts').map((hazard) => hazard.rule))].sort();
 
 {
+  const packageEntryPoints = entryPointsFor([
+    'bun',
+    'run',
+    'packages/typescript/broker/test/broker/test-tool-semantics.ts',
+  ]);
+  assert(
+    packageEntryPoints.some((path) =>
+      path.endsWith('packages/typescript/broker/test/broker/test-tool-semantics.ts')
+    ),
+    'the isolation audit must resolve package-owned test entry points',
+  );
+
   const multiline = rulesOf(
     "const child = Bun.spawn(['bun', 'x'], {\n"
       + '  env: {\n'

@@ -173,11 +173,11 @@ const _reviewedLiteralByLocation = <String>{
 
   // Developer-only Debug surface. This class lives in the Files/Terminal part
   // file, so path-based Debug exclusion cannot identify it.
-  'lib/src/features/sessions/view/session_detail_files_terminal.dart::'
+  'lib/src/features/sessions/detail/session_detail_files_terminal.dart::'
       'Session identity',
-  'lib/src/features/sessions/view/session_detail_files_terminal.dart::'
+  'lib/src/features/sessions/detail/session_detail_files_terminal.dart::'
       r'${state.tool} / ${state.sessionId}',
-  'lib/src/features/sessions/view/session_detail_files_terminal.dart::'
+  'lib/src/features/sessions/detail/session_detail_files_terminal.dart::'
       'Inline schedule freshness',
 
   // Pure dynamic data/technical notation. The words around these values are
@@ -186,47 +186,47 @@ const _reviewedLiteralByLocation = <String>{
       r'+${additions ?? 0} −${deletions ?? 0}',
   'lib/src/features/sessions/renderers/tool_message_cards.dart::'
       r'${widget.detail.label}: $visibleText',
-  'lib/src/features/sessions/view/cached_roster_pane.dart::'
+  'lib/src/features/sessions/roster/cached_roster_pane.dart::'
       r'${group.rootCount}',
-  'lib/src/features/sessions/view/new_session_sheet.dart::'
+  'lib/src/features/sessions/list/new_session_sheet.dart::'
       r'$projectContextLabel · ${widget.initialDirectory}',
-  'lib/src/features/sessions/view/session_detail_chrome.dart::'
+  'lib/src/features/sessions/detail/session_detail_chrome.dart::'
       r'$label: $value',
-  'lib/src/features/sessions/view/session_detail_live_cards.dart::'
+  'lib/src/features/sessions/detail/session_detail_live_cards.dart::'
       r'+${widget.additionalCount}',
-  'lib/src/features/sessions/view/session_detail_live_cards.dart::'
+  'lib/src/features/sessions/detail/session_detail_live_cards.dart::'
       r'${widget.item.done ?? 0}/${widget.item.total}',
-  'lib/src/features/sessions/view/session_detail_slash_palette.dart::'
+  'lib/src/features/sessions/detail/session_detail_slash_palette.dart::'
       r'/$name',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${_sessionDetailTransferDirectionLabel( l10n, transfer.direction, )}: ${transfer.fileName}',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.fileNameLabel}: ${transfer.fileName}',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.pathLabel}: $localPath',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.fileNameLabel}: ${preview.displayName}',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.pathLabel}: ${preview.path}',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.mimeTypeLabel}: ${preview.mimeType}',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.artifactKeyLabel}: $artifactKey',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.hashLabel}: $contentHash',
-  'lib/src/features/sessions/view/session_detail_transfers_artifacts.dart::'
+  'lib/src/features/sessions/detail/session_detail_transfers_artifacts.dart::'
       r'${l10n.sizeLabel}: ${l10n.bytesCount(size)}',
-  'lib/src/features/sessions/view/session_detail_view_menu.dart::'
+  'lib/src/features/sessions/detail/session_detail_view_menu.dart::'
       r'$count',
-  'lib/src/features/sessions/view/session_list_pane.dart::'
+  'lib/src/features/sessions/list/session_list_pane.dart::'
       r'${group.rootCount}',
-  'lib/src/features/sessions/view/session_list_pane.dart::'
+  'lib/src/features/sessions/list/session_list_pane.dart::'
       r'$count',
-  'lib/src/features/sessions/view/session_list_pane.dart::'
+  'lib/src/features/sessions/list/session_list_pane.dart::'
       r'$childCount',
-  'lib/src/features/sessions/view/sessions_page.dart::'
+  'lib/src/features/sessions/list/sessions_page.dart::'
       r'${machineState.machines.length}',
-  'lib/src/features/sessions/view/sessions_page.dart::'
+  'lib/src/features/sessions/list/sessions_page.dart::'
       r'${session.tool} ·',
   'lib/src/features/transfers/view/transfer_manager_page.dart::'
       r'${l10n.fileNameLabel}: ${transfer.fileName}',

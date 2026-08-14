@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
-import 'package:cosyncing_client/src/features/sessions/model/session_roster_projection.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_visibility_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';

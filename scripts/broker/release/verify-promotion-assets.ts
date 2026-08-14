@@ -3,11 +3,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import {
   verifyReleaseManifest,
   verifyReleasePairing,
-} from '../../../packages/typescript/broker/src/release-upgrade.ts';
+} from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,

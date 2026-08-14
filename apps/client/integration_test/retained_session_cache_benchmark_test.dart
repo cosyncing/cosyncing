@@ -1,8 +1,8 @@
 import 'package:broker_contract/broker_contract.dart';
-import 'package:cosyncing_client/src/features/sessions/data/open_sessions_controller.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
-import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
-import 'package:cosyncing_client/src/features/sessions/view/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

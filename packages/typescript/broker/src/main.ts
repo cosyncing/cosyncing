@@ -2,9 +2,9 @@ import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import {
   installBrokerSignalHandlers,
   startBrokerRuntime,
-} from './runtime.ts';
+} from './runtime/runtime.ts';
 
-export * from './runtime.ts';
+export * from './runtime/runtime.ts';
 
 if (import.meta.main) {
   try {

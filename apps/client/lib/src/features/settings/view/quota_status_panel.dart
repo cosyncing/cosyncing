@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 
 /// Remaining-percent threshold at or under which a quota row reads as a
 /// warning. Matches the broker's quota-warning evaluator
-/// (`packages/typescript/broker/src/tokdash-quota.ts`).
+/// (`packages/typescript/broker/src/installation/tokdash-quota.ts`).
 const double quotaWarningRemainingPercent = 25;
 
 /// Remaining-percent threshold at or under which a quota row reads as

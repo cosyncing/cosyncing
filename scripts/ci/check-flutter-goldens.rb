@@ -10,7 +10,7 @@ module FlutterGoldenPolicy
   APPROVED_ROOTS = %w[
     apps/client/test/src/features/attention/view/goldens
     apps/client/test/src/features/sessions/renderers/goldens
-    apps/client/test/src/features/sessions/view/goldens
+    apps/client/test/src/features/sessions/detail/goldens
     apps/client/test/src/features/settings/view/goldens
   ].freeze
   MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -90,8 +90,8 @@ module FlutterGoldenPolicy
       ]
     },
     'attachment-composer' => {
-      owner: 'apps/client/test/src/features/sessions/view/session_detail_prompt_composer_test.dart',
-      root: 'apps/client/test/src/features/sessions/view/goldens',
+      owner: 'apps/client/test/src/features/sessions/detail/session_detail_prompt_composer_test.dart',
+      root: 'apps/client/test/src/features/sessions/detail/goldens',
       names: %w[
         attachment_composer_dark_delivery_failure.png
         attachment_composer_light_ready.png
@@ -103,8 +103,8 @@ module FlutterGoldenPolicy
       ]
     },
     'observe-composer' => {
-      owner: 'apps/client/test/src/features/sessions/view/session_detail_control_test.dart',
-      root: 'apps/client/test/src/features/sessions/view/goldens',
+      owner: 'apps/client/test/src/features/sessions/detail/session_detail_control_test.dart',
+      root: 'apps/client/test/src/features/sessions/detail/goldens',
       names: %w[
         observe_composer_compact_dark_zh.png
         observe_composer_compact_light_en.png
@@ -116,8 +116,8 @@ module FlutterGoldenPolicy
       ]
     },
     'status-panel' => {
-      owner: 'apps/client/test/src/features/sessions/view/session_detail_status_clarity_test.dart',
-      root: 'apps/client/test/src/features/sessions/view/goldens',
+      owner: 'apps/client/test/src/features/sessions/detail/session_detail_status_clarity_test.dart',
+      root: 'apps/client/test/src/features/sessions/detail/goldens',
       names: STATUS_PANEL_NAMES,
       fragments: [
         "('compact', Size(420, 900))",

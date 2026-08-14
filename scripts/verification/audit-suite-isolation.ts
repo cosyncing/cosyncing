@@ -189,10 +189,10 @@ const packageScripts: Record<string, string> =
  * Commands are either `bun run <path>` or `bun run <package-script>`, and a
  * package script can chain several entry points with `&&`.
  */
-function entryPointsFor(command: string[]): string[] {
+export function entryPointsFor(command: string[]): string[] {
   const expand = (text: string, depth: number): string[] => {
     if (depth > 4) return [];
-    const paths = [...text.matchAll(/(scripts\/[A-Za-z0-9._\/-]+\.(?:ts|mjs))/g)]
+    const paths = [...text.matchAll(/((?:scripts|packages)\/[A-Za-z0-9._\/-]+\.(?:ts|mjs))/g)]
       .map((match) => join(ROOT, match[1]));
     if (paths.length > 0) return paths;
     return [...text.matchAll(/(?:bun|npm)\s+run\s+([A-Za-z0-9:_-]+)/g)]

@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { ArtifactStore } from '../../../packages/typescript/broker/src/artifact-store.ts';
+import { ArtifactStore } from '../../../packages/typescript/broker/src/artifacts/artifact-store.ts';
 
 interface Assertion {
   name: string;

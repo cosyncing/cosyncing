@@ -22,7 +22,7 @@ mistaken for upstream 0.7.1. Bump `N` on every fork change.
 returns `true` for every `DragEvent`. Declaring the platform is enough to
 consume Android drag/drop, and this app renders no Android drop target. The
 `android/` directory and the `android:` platform entry are both gone.
-`apps/client/test/src/features/sessions/view/desktop_drop_platform_boundary_test.dart`
+`apps/client/test/src/features/sessions/attachments/desktop_drop_platform_boundary_test.dart`
 fails if either returns.
 
 **Web registrar replaced.** `lib/desktop_drop_web.dart` registers no global

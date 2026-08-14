@@ -27,13 +27,13 @@ import { CLIENT_CONTRACT_SOURCE_FILES, renderClientContract } from './lib/client
 
 const ROOT = join(import.meta.dir, '..', '..');
 const CORE_TS = join(ROOT, 'packages/typescript/protocol/src/index.ts');
-const MAIN_TS = join(ROOT, 'packages/typescript/broker/src/runtime.ts');
-const HUB_TS = join(ROOT, 'packages/typescript/broker/src/hub.ts');
-const R2_EXPORT_TS = join(ROOT, 'packages/typescript/broker/src/r2-export.ts');
-const HISTORY_DELTA_TS = join(ROOT, 'packages/typescript/broker/src/history-delta.ts');
-const CLIENT_MESSAGE_POLICY_TS = join(ROOT, 'packages/typescript/broker/src/client-message-policy.ts');
-const PROTOCOL_JOURNAL_TS = join(ROOT, 'packages/typescript/broker/src/protocol-journal.ts');
-const DRIVE_ATTACH_REFUSAL_TS = join(ROOT, 'packages/typescript/broker/src/drive-attach-refusal.ts');
+const MAIN_TS = join(ROOT, 'packages/typescript/broker/src/runtime/runtime.ts');
+const HUB_TS = join(ROOT, 'packages/typescript/broker/src/sessions/hub.ts');
+const R2_EXPORT_TS = join(ROOT, 'packages/typescript/broker/src/security/r2-export.ts');
+const HISTORY_DELTA_TS = join(ROOT, 'packages/typescript/broker/src/sessions/history-delta.ts');
+const CLIENT_MESSAGE_POLICY_TS = join(ROOT, 'packages/typescript/broker/src/sessions/client-message-policy.ts');
+const PROTOCOL_JOURNAL_TS = join(ROOT, 'packages/typescript/broker/src/sessions/protocol-journal.ts');
+const DRIVE_ATTACH_REFUSAL_TS = CLIENT_MESSAGE_POLICY_TS;
 
 function readText(path: string): string {
   return readFileSync(path, 'utf8');

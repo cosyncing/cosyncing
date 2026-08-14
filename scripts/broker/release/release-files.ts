@@ -19,13 +19,13 @@ import {
   verifyReleasePairing,
   type ReleaseArtifact,
   type ReleaseManifest,
-} from '../../../packages/typescript/broker/src/release-upgrade.ts';
+} from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
   type PublishedSchemaVersions,
-} from '../../../packages/typescript/broker/src/build-info.ts';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/broker/src/product.ts';
+} from '../../../packages/typescript/broker/src/runtime/build-info.ts';
+import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import {
   createCompiledSoftwareInventory,
   createSpdxSoftwareBom,

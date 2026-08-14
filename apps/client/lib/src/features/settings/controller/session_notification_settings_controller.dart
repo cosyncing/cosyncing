@@ -1,5 +1,5 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_local_notification_adapter.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_local_notification_adapter.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

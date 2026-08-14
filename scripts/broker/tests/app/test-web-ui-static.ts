@@ -10,12 +10,12 @@ const ROOT = join(import.meta.dir, '../../../..');
 const app = readFileSync(join(ROOT, 'apps/poc-ui/public/app.js'), 'utf8');
 const html = readFileSync(join(ROOT, 'apps/poc-ui/public/index.html'), 'utf8');
 const broker = readFileSync(join(ROOT, 'packages/typescript/broker/src/main.ts'), 'utf8');
-const clientMessagePolicy = readFileSync(join(ROOT, 'packages/typescript/broker/src/client-message-policy.ts'), 'utf8');
-const wsLimits = readFileSync(join(ROOT, 'packages/typescript/broker/src/ws-limits.ts'), 'utf8');
-const hub = readFileSync(join(ROOT, 'packages/typescript/broker/src/hub.ts'), 'utf8');
+const clientMessagePolicy = readFileSync(join(ROOT, 'packages/typescript/broker/src/sessions/client-message-policy.ts'), 'utf8');
+const wsLimits = readFileSync(join(ROOT, 'packages/typescript/broker/src/transport/http-contracts.ts'), 'utf8');
+const hub = readFileSync(join(ROOT, 'packages/typescript/broker/src/sessions/hub.ts'), 'utf8');
 const core = readFileSync(join(ROOT, 'packages/typescript/adapter-api/src/index.ts'), 'utf8');
-const artifactStore = readFileSync(join(ROOT, 'packages/typescript/broker/src/artifact-store.ts'), 'utf8');
-const historyDelta = readFileSync(join(ROOT, 'packages/typescript/broker/src/history-delta.ts'), 'utf8');
+const artifactStore = readFileSync(join(ROOT, 'packages/typescript/broker/src/artifacts/artifact-store.ts'), 'utf8');
+const historyDelta = readFileSync(join(ROOT, 'packages/typescript/broker/src/sessions/history-delta.ts'), 'utf8');
 const agentActivitySource = app.slice(
   app.indexOf('function agentActivity(m)'),
   app.indexOf('function bubble(cls', app.indexOf('function agentActivity(m)')),
@@ -549,7 +549,7 @@ check(
 );
 check(
   'explicit send_file targets active drive/live connection before observe fallback',
-  /getConn\(tool: string, id: string\)[\s\S]*this\.key\(tool, id, 'resume'\)[\s\S]*this\.key\(tool, id, 'live'\)[\s\S]*this\.key\(tool, id\)/.test(readFileSync(join(ROOT, 'packages/typescript/broker/src/hub.ts'), 'utf8')),
+  /getConn\(tool: string, id: string\)[\s\S]*this\.key\(tool, id, 'resume'\)[\s\S]*this\.key\(tool, id, 'live'\)[\s\S]*this\.key\(tool, id\)/.test(readFileSync(join(ROOT, 'packages/typescript/broker/src/sessions/hub.ts'), 'utf8')),
 );
 check(
   'transcript autoscroll respects user scroll position',

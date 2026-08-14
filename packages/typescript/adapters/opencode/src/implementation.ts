@@ -295,7 +295,7 @@ function firstAssistantPartKey(parts: any[] | undefined): string | undefined {
 
 /**
  * Resolve an `OPENCODE_URL` to the base origin this adapter talks to, pinning the default port `:4096` for
- * LOCAL hosts that omit a port. The broker-managed serve (broker/src/opencode-serve.ts) launches/probes a
+ * LOCAL hosts that omit a port. The managed serve (adapter-opencode/src/managed-server.ts) launches/probes a
  * portless local URL on `:4096`; the adapter and that serve share the SAME `OPENCODE_URL`, so the adapter
  * must resolve to the SAME base or its REST/SSE calls would hit the implicit port (`:80`/`:443`) while the
  * serve listens on `:4096` — True Sync would silently fail. Non-local or malformed URLs are returned trimmed
@@ -320,6 +320,9 @@ export class OpenCodeAdapter implements AgentBackend {
   readonly id = 'opencode';
   readonly displayName = 'OpenCode';
   readonly capabilities = CAPS;
+  readonly integration = {
+    managedRuntime: { kind: 'server', failureJournal: true },
+  } as const;
   /** Native transcript export is JSON via `opencode export` (read generically by the broker R2 gate). */
   readonly transcriptExportFormat = 'json' as const;
   private readonly baseUrl: string;

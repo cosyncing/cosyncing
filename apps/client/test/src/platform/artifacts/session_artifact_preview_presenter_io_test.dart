@@ -1,7 +1,7 @@
 import 'dart:io';
 
-import 'package:cosyncing_client/src/features/sessions/data/session_artifact_file_service.dart';
-import 'package:cosyncing_client/src/features/sessions/view/session_artifact_preview_result.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
 import 'package:cosyncing_client/src/platform/artifacts/session_artifact_preview_presenter_io.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;

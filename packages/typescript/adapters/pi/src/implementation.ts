@@ -16,7 +16,10 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -112,21 +115,83 @@ export {
 } from './bridge-asset.ts';
 
 export interface PiBridgeAssetInspection {
-  status: 'missing' | 'owned' | 'legacy-marker' | 'unowned' | 'unreadable';
+  status: 'missing' | 'owned' | 'legacy-marker' | 'unowned' | 'unsafe' | 'unreadable';
   expectedSha256: string;
   actualSha256?: string;
   path: string;
   requiresConfirmation: boolean;
 }
 
+interface PiBridgePathInspection {
+  status: 'missing' | 'safe' | 'unsafe' | 'unreadable';
+  stat?: ReturnType<typeof lstatSync>;
+}
+
+/** Inspect every path component without following symlinks or opening a non-regular leaf. */
+function inspectPiBridgePath(path: string): PiBridgePathInspection {
+  const absolute = resolve(path);
+  const components: string[] = [];
+  let cursor = absolute;
+  while (true) {
+    components.push(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  components.reverse();
+
+  try {
+    for (const component of components) {
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(component);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' };
+        throw error;
+      }
+      if (stat.isSymbolicLink()) return { status: 'unsafe' };
+      if (component === absolute) {
+        return stat.isFile() ? { status: 'safe', stat } : { status: 'unsafe' };
+      }
+      if (!stat.isDirectory()) return { status: 'unsafe' };
+    }
+    return { status: 'missing' };
+  } catch {
+    return { status: 'unreadable' };
+  }
+}
+
 /** Exact current content proves ownership; exact known legacy content may be offered for confirmed migration. */
 export function inspectPiBridgeAsset(agentDir = PI_AGENT_DIR): PiBridgeAssetInspection {
   const path = join(agentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
-  if (!existsSync(path)) {
+  const preflight = inspectPiBridgePath(path);
+  if (preflight.status === 'missing') {
     return { status: 'missing', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: false };
   }
+  if (preflight.status === 'unsafe') {
+    return { status: 'unsafe', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+  }
+  if (preflight.status === 'unreadable' || !preflight.stat) {
+    return { status: 'unreadable', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+  }
+
+  let fd: number | undefined;
   try {
-    const content = readFileSync(path, 'utf8');
+    // O_NONBLOCK prevents a raced-in FIFO/device from blocking open. O_NOFOLLOW rejects a raced-in leaf symlink.
+    fd = openSync(resolve(path), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) {
+      return { status: 'unsafe', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+    }
+    const rechecked = inspectPiBridgePath(path);
+    if (rechecked.status === 'unsafe') {
+      return { status: 'unsafe', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+    }
+    if (rechecked.status !== 'safe' || !rechecked.stat
+        || opened.dev !== rechecked.stat.dev || opened.ino !== rechecked.stat.ino) {
+      return { status: 'unreadable', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+    }
+    const content = readFileSync(fd, 'utf8');
     const actualSha256 = createHash('sha256').update(content).digest('hex');
     if (actualSha256 === PI_BRIDGE_EMBEDDED_SHA256) {
       return { status: 'owned', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, actualSha256, path, requiresConfirmation: false };
@@ -140,8 +205,15 @@ export function inspectPiBridgeAsset(agentDir = PI_AGENT_DIR): PiBridgeAssetInsp
       path,
       requiresConfirmation: true,
     };
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      return { status: 'unsafe', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+    }
     return { status: 'unreadable', expectedSha256: PI_BRIDGE_EMBEDDED_SHA256, path, requiresConfirmation: true };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* inspection remains fail-closed */ }
+    }
   }
 }
 
@@ -2295,7 +2367,7 @@ export interface PiToolResultParts {
  * SAME diffstat / exit-code / truncation chips for Pi that it already does for OpenCode — instead of
  * an opaque text blob (the audit's shared-surface tool-result-mapping gap). Shared by BOTH Pi paths:
  * the resume adapter (live `tool_execution_end` + history) and the live bridge
- * (broker/src/pi-bridge.ts), so neither drops detail. Pi's edit tool returns `details.diff`/`.patch`;
+ * (adapter-pi/src/bridge.ts), so neither drops detail. Pi's edit tool returns `details.diff`/`.patch`;
  * bash returns `details.truncation`/`.fullOutputPath` and embeds the exit code in the error text
  * ("Command exited with code N"); the file path comes from the originating tool-call args.
  */
@@ -2383,7 +2455,7 @@ function piToolFamily(toolName: string): 'command' | 'file-read' | 'search' | 'w
  * Pi tool call/result → the canonical normalized family.
  *
  * Shared by BOTH Pi surfaces (the resume adapter's live/history mapping and the
- * live bridge in broker/src/pi-bridge.ts) so neither invents its own parsing.
+ * live bridge in adapter-pi/src/bridge.ts) so neither invents its own parsing.
  * `details` is absent on a still-running call, which yields the call-time fields
  * plus a `running` state.
  */

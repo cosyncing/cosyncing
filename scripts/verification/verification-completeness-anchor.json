@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "acb302df9603399b30f94d8551aea9f52d0a69af",
+  "acceptedBase": "15acb4898aef1a6a55d7cdbd8ee42688a0f29d7e",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -103,7 +103,7 @@
     },
     {
       "id": "capabilities",
-      "fingerprint": "sha256:72e83a3b7fd1181b381a60ab7e36fd30441c5a14e7cda8054f0faba88c2cd616"
+      "fingerprint": "sha256:1372befe7c341cd9a94cc640dc9d860cbf687bfa61eb7921cee91943f5deed3b"
     },
     {
       "id": "client",
@@ -221,87 +221,87 @@
   "requiredBrokerSubSuiteBindings": [
     {
       "id": "adapter-discovery-bounds",
-      "fingerprint": "sha256:9c54647fc22e3522adfee7db0be6cda26d48226eb49bac654cff7875de3a8c91"
+      "fingerprint": "sha256:148836c12a57ba0663024e7213c6aeb86e3104ceb2c901fd74bbc29ccc68fdd5"
     },
     {
       "id": "agent-create-readiness",
-      "fingerprint": "sha256:6b13f464eef9a75435055216eda521d628312995b61286a112bc256955bd31fd"
+      "fingerprint": "sha256:36de11384e1245765c2fb864076370b0d41d8e72216f9a360ef05f7cb542d344"
     },
     {
       "id": "app-send-echo-correlation",
-      "fingerprint": "sha256:83e22d920069cd45f946298d3bb881c1a8d92147a2813f2a95d3868ece453bf9"
+      "fingerprint": "sha256:34ad7d04ad8d6a9579b570ca9b9b953ece5c6db81ad1f9f33431ca7e60cf8a66"
     },
     {
       "id": "application-identity",
-      "fingerprint": "sha256:e97a4537e87cfbc76137613332d30b2a8e0f1c6af1933d34f56bc9f04acefaff"
+      "fingerprint": "sha256:830ebe891595159c542070b20954fd4d18d16626868367c50513cc299ea3ed6e"
     },
     {
       "id": "artifact-session-isolation",
-      "fingerprint": "sha256:46cfc11a8f336a8cf194b1b06a924a93af6726824ed5e8677f2ed7a26ea1f53c"
+      "fingerprint": "sha256:01dc379e3024a80df17378a093c54a10f2204a6ddce64d6b646d05fb19a08480"
     },
     {
       "id": "attach-message-identity",
-      "fingerprint": "sha256:4023fbee37caf2a8acc0b0747ef5bc5c6e9e6ae0a350d6a207c3f28a10804a29"
+      "fingerprint": "sha256:523a4e5857b100eac432f09dfe05b3702aefa5f1da2e234a09f50c7342a59413"
     },
     {
       "id": "attention-bulk-dismiss",
-      "fingerprint": "sha256:cbb90d63012a426adb27855853b7e917007b4a456e32673d6e761b1110d78687"
+      "fingerprint": "sha256:d322c0936555398f2e0102865a54ac0206f8ebba5506f85f90c22711c3a9dbd1"
     },
     {
       "id": "broker-surface",
-      "fingerprint": "sha256:81e678c7f03ed1d50f092767af506b92dd13fc8b5f23b6d697d22bafd278e317"
+      "fingerprint": "sha256:a1ad557b18ad2734a2e2e5d404fb969dda05f5459f5b33aad7f2077ab23fdacd"
     },
     {
       "id": "broker-update-contract",
-      "fingerprint": "sha256:8729890719ba30da43cb97de59418e3676cc7051b381fede1114b8aedcda0c99"
+      "fingerprint": "sha256:6b23aeef25478db8c4a45c104174bdfa43d05b8e45c6633cc610a405b4b4eef1"
     },
     {
       "id": "claude-hooks",
-      "fingerprint": "sha256:9bd35e1aa98675375ee87e639a1a12943fd0d90a89707190c2b4984b12251c9a"
+      "fingerprint": "sha256:61db0641061f5909e0f924c1fd2332c15f83cbb2a54ca65745fe3cb57e66467b"
     },
     {
       "id": "claude-hooks-surface",
-      "fingerprint": "sha256:375613cada90d0c03aa3cc79678226df76012f15d593d9e3bfb38f29af6e78ca"
+      "fingerprint": "sha256:4b17ed9f17b220690ca7078c58011c3f5d4034373641acffc8cc3ac7156f59c8"
     },
     {
       "id": "claude-transcript-mapping",
-      "fingerprint": "sha256:3802a94179dbe2b210b963ffb42683ae8a331291d92c443abf431f5a4b06209f"
+      "fingerprint": "sha256:c94b663f2eaef615424b92d45d4ee0bff0a304aa457e1bb241abe2c99ab05836"
     },
     {
       "id": "cli-package-boundary",
-      "fingerprint": "sha256:25e2fcabd1d8960a764da1f0be6f89a93521611d3958545e5ffca80a505b30d4"
+      "fingerprint": "sha256:af0d804a5c3b7317775e790dc05de844c6befecb528c86f93e8e28a25fb0cfd4"
     },
     {
       "id": "codex-loaded-watch",
-      "fingerprint": "sha256:8358d989907853d8ab6d899eefe950b4404cd6b4f3aeb128c2cac12f1a8225e9"
+      "fingerprint": "sha256:ec79a4986caa7786f7c3a4305b987f89f66d75c492ac25e33a10964ee3ebddc3"
     },
     {
       "id": "codex-loaded-watch-unknown",
-      "fingerprint": "sha256:1dbc42744a21e5e6f3b2551d17d7f750057cd19c2966adeed98a316d5e7a0597"
+      "fingerprint": "sha256:614adbd889d85b7dcf03018e2057865f5e579950d2e5d9c85bea21615bba7746"
     },
     {
       "id": "codex-permissions",
-      "fingerprint": "sha256:b42e8f778ea37738fd75265ce8e21158463539c679b997c2898918217c47b711"
+      "fingerprint": "sha256:59566a6d5a2f6b03b638c8a2a9453fd42b0442c2327e240df5cec0cf20c6374d"
     },
     {
       "id": "codex-rollout-mapping",
-      "fingerprint": "sha256:c73dc24e6630fcd92ef01e62dcfbf2b56a12500902e59b6d77bdf0e93d00508f"
+      "fingerprint": "sha256:efe4bb770583b498322d4e5432a6e47b23caf9618d0b2aa3e771de54c6e7a917"
     },
     {
       "id": "codex-sync-enabler",
-      "fingerprint": "sha256:7cc48c256902a0105a89f428504c80b29be7940744a78644527fee5dd043d684"
+      "fingerprint": "sha256:df347081c1691d7eedfda97c1fb31feb2f02aed614034ba90a63beebfbbde266"
     },
     {
       "id": "codex-terminal-control",
-      "fingerprint": "sha256:043cd705fb3c2f9f2c5d56352e577f8fb658d2aefb1b4cf14862ec1b69447f1d"
+      "fingerprint": "sha256:7ababb9dee68dbf5d26267c141629e1736745f08976c1fa14347c9050e8f4444"
     },
     {
       "id": "codex-tui-presence",
-      "fingerprint": "sha256:d4b6169cd85b7dfdc6e235d9d31a4db072a29f711a65bf8e870732cde2dcde64"
+      "fingerprint": "sha256:09cc04e7704c2ff727cef098ef7cde574b9913e61545c23e258bae5d95d30644"
     },
     {
       "id": "compiled-assets",
-      "fingerprint": "sha256:23b89baaea2776851be3dadf0422dbbabcc0f0225852eca965770b3804f93b64"
+      "fingerprint": "sha256:9d644a726cc5e61f7dd9b315528a784d5c68d168c4ed8015a3085fa6ff03c907"
     },
     {
       "id": "conformance",
@@ -309,167 +309,167 @@
     },
     {
       "id": "control-boundaries",
-      "fingerprint": "sha256:fd1ca967d7a72c193ee51f3f707a5b8ac1a48f3da22b485aa064381d962c1a4a"
+      "fingerprint": "sha256:906ccc40678be7f92519d79654ec413b175918f03a815070767fb7954269a837"
     },
     {
       "id": "diff-body-reference",
-      "fingerprint": "sha256:d24134ca78d9a59e04065b0130e366324759adb297391e84bd92a0379a09dd1e"
+      "fingerprint": "sha256:4279bc80750826e958ebaeef9ed7fbfd9c67b57dc4efafc5efd4d061b90163b7"
     },
     {
       "id": "diff-reference-wire",
-      "fingerprint": "sha256:5c468fc8194eed28a4c57a8f3731da5c4806e41180a0aa700fed06ac48854ea7"
+      "fingerprint": "sha256:cf28a443974bb1a18f5d7b01e17a4a5a2df538f24af27864c80791e302018c3e"
     },
     {
       "id": "draft-durability",
-      "fingerprint": "sha256:0ddb4bc8dd075c8d3153fa0a0bf7c50d95e826079a2c624a0e13b9423c37270c"
+      "fingerprint": "sha256:e105b4a60d02405d92b2cb9a50c3e20f2e500fb382c31a8689e917f090a73f28"
     },
     {
       "id": "draft-sync-fanout",
-      "fingerprint": "sha256:bb1ecd231fb55b988eadf39d6d1cc78c7c401ef558d97c76fa1adfd4ad915bd6"
+      "fingerprint": "sha256:c3d4c80f142dfb3eb8e2cb953a6945106e683941af185f72e085a6f782ff3849"
     },
     {
       "id": "draft-two-client-wire",
-      "fingerprint": "sha256:fcf2fe1605a86525eaae3251746a9aa2a3af76e6e974268ddeafea15f2cc0b93"
+      "fingerprint": "sha256:8c4aa20991fbb243d4aed34b2cfccf791659d17bd6bda48730d0d0f2e93a14cb"
     },
     {
       "id": "drive-restore-arbitration",
-      "fingerprint": "sha256:03b48d417e38cdea2be03253bcf5f03d5190ac8bc27752c6aa1f88cb6c112327"
+      "fingerprint": "sha256:25eda2b533dd1d89c5229f411deb2726a1f5008f9bd7fcfc0d507edb3aa4891b"
     },
     {
       "id": "fork-agent-owned",
-      "fingerprint": "sha256:dcfd8c9dc329a512241cd291301f573de16bed6a78fa18d86f7a660b79acd429"
+      "fingerprint": "sha256:d1e2226426efad1d7b6e50e1cd2abebb837501c068b1f724801042719f697af6"
     },
     {
       "id": "history-capture-liveness",
-      "fingerprint": "sha256:67e5c850ad878fe61771bc2f59d5094393e44b9c9f861ca2b3d60dc976c6a1e4"
+      "fingerprint": "sha256:63f9112cdfbe86f018929103b40f90eb53717382be9aaa0208d525cf95d6fbcd"
     },
     {
       "id": "history-page-cache",
-      "fingerprint": "sha256:f5295ab22cd0321eb445010c3319c8c70b25da8b259f11ee900e2426f52d5fe1"
+      "fingerprint": "sha256:4f1b00fca4e82768a55a2e659c4606791c88c327388cd085f64e4497e217e6eb"
     },
     {
       "id": "history-paging-wire",
-      "fingerprint": "sha256:ed92e9c2296195ecfd1dd390bd7e0d93ed1ecae0c0a3194979d8b316afea7b7f"
+      "fingerprint": "sha256:d29a4fa5004335beb236fef9392ed835ce18aa569b9d4923d55d2531959a02d2"
     },
     {
       "id": "history-refusal-tail",
-      "fingerprint": "sha256:603cb800cd338e0e4b754e1439a9d858ac436034841b9540a983a3b17bb1fdf5"
+      "fingerprint": "sha256:5adb01b816fa963894f00ee5a5695316e68c5be5ed3cf54fbe27e41caf9d30f5"
     },
     {
       "id": "history-refusal-wire",
-      "fingerprint": "sha256:ee0b3dce235547217eda5befc915841e886d5e1f2b693f8e9773f49ee6e16925"
+      "fingerprint": "sha256:2678bbefabcad20253e14acf538e384b0320610e47678573ef92b39e5fde735a"
     },
     {
       "id": "lifecycle",
-      "fingerprint": "sha256:1a84a2a49f0c2006bff826645c2355d6c19a23398dbce357dd02e2f2448e979d"
+      "fingerprint": "sha256:915143d5ad7bb7fda0d5c5c4ddd1e77a191ea9dacb6326c0a0595b3db011a201"
     },
     {
       "id": "live-session-coherence",
-      "fingerprint": "sha256:1d55cb80b46cd9786593854505c964a5f00ac477dfe5fe75523dee42d11d3222"
+      "fingerprint": "sha256:82f3ce11e22bd872e78253978adddfb90599ac73292b265a0e013b86d97d52dc"
     },
     {
       "id": "model-session-creation",
-      "fingerprint": "sha256:983f50989f6ac2d7956049f66c8de514ae600e167ebacdde7961b099f2bed7e2"
+      "fingerprint": "sha256:cfc11f0e6944c6c45f7482a1a318d1ccc327bd66836f6293eef287638e0f6d51"
     },
     {
       "id": "npm-package",
-      "fingerprint": "sha256:70c388dcfed32f8b10fe13b992d715c80bcfc4c44d0f7817e1fc0afb02e4633a"
+      "fingerprint": "sha256:0d8ca40f7739bce208fc5023d6d76293b75d196562a9984af6df1d50427f4b5c"
     },
     {
       "id": "opencode-completion-fence",
-      "fingerprint": "sha256:1116dd3a7458ed702f2e36801d1ea240de0ce18378f0d94db9cdf43f9ad6de6b"
+      "fingerprint": "sha256:b32680b6a8829d96acc7af3eccbe225b6e8cc854f7f538b4cfe522a1788269cb"
     },
     {
       "id": "opencode-file-changes",
-      "fingerprint": "sha256:1587ca8c1e3f36f8696e87103250c25734c112afb933b1a66a87b2c9e60264a7"
+      "fingerprint": "sha256:1186610f65cf32686c696c18759ff98e2c8725f38608751c29c792bf8863f123"
     },
     {
       "id": "opencode-message-identity",
-      "fingerprint": "sha256:4ef1ba70ed1b4a68bb1273fdbfca6a17c049c3e13617023e0a832a4e23c2f9f6"
+      "fingerprint": "sha256:902ec998d17c0f9df7357528c9b293a672820a68a572387907c93b6e0f97de68"
     },
     {
       "id": "opencode-retry-detail",
-      "fingerprint": "sha256:efa5909a340872e61e71e495881b4af7289d25c4b2bee87b19c2d7b4e2141a3c"
+      "fingerprint": "sha256:02072fd92eb010e01cba69168e143ecf5a1247dd54b8b23047494e25aae531c2"
     },
     {
       "id": "opencode-shim-runtime",
-      "fingerprint": "sha256:9f2ff42be8a926269a552939871b7a8321a05ae087cf179671cac9d04179a7c3"
+      "fingerprint": "sha256:152dda0033df86468bd3a9e672874d16d14207011ff6a16cbcfccc2f4d6e0931"
     },
     {
       "id": "opencode-shim-symmetry",
-      "fingerprint": "sha256:a081e353467afa3a997df185cf5d537c14c7829f2ac6ca73d7423277bb034d15"
+      "fingerprint": "sha256:f907a7d330e050f00a56490c40b7d6988e6642226e863447303de6ecc3021751"
     },
     {
       "id": "pi-bridge-reload",
-      "fingerprint": "sha256:cadb0569129fb1d24d0648e1cb5f8bfed5354b48057af22cb013f8f2c1e5b571"
+      "fingerprint": "sha256:642a3c58d6bfae5b8ebd3557caf71f2d0fbfa96cad26c51d39389df88c6e4fd1"
     },
     {
       "id": "pi-runtime-readiness",
-      "fingerprint": "sha256:c754a5c3b8f5255740cfba3a2fc89b69d208b5514405e0f4304932d3c4a2ffd1"
+      "fingerprint": "sha256:66fcfbc7b206671a99b20985fcd00d5492f61c763cb19befb24af27e82c8a81e"
     },
     {
       "id": "pi-tool-result",
-      "fingerprint": "sha256:16311bf527b669cfe81cb49e3d0c5baeda2aaa2a83fed547ee1de6c86be6da4b"
+      "fingerprint": "sha256:4cf7a3e677ff01c2012e3fafcfaa96981dbed03ffac526710ca814dcb33b3d41"
     },
     {
       "id": "protocol-journal",
-      "fingerprint": "sha256:2644efe8c0c2ba1567e22be0b3abf6aa0e4d4ddfc81ecf5499b6f91b39abdac6"
+      "fingerprint": "sha256:97283933adc93a54e0e070fd51db9e44423b8ccd263b1be678ffb9ff55c30ba7"
     },
     {
       "id": "real-evidence-schema",
-      "fingerprint": "sha256:8d865318e1ee922829c0a0515cb51f2d3af1cb0d387dc373c9cc1d7e967e6493"
+      "fingerprint": "sha256:b8f7bdad71ab1348c47db9af54adf59d630783a7255eae8ead3e0d1a9fed601a"
     },
     {
       "id": "release-supply-chain",
-      "fingerprint": "sha256:0b73de86db076f75044fec2310a1d10244efbba5359e1977263711889d2dfa46"
+      "fingerprint": "sha256:5019387b25ec7eb4dbc4b208fcbea1a58d0c4b1d0e4a17253ec8dd79716abac0"
     },
     {
       "id": "request-resolution-hygiene",
-      "fingerprint": "sha256:775d6d0e65521747ecca1f33a411b89f114e42137f27df67905b64bc181daadc"
+      "fingerprint": "sha256:02087bdcd699fe9c7a471bb7969ce80fed14c3bf76a4229a4f099bfd04671f46"
     },
     {
       "id": "restart-message-identity",
-      "fingerprint": "sha256:5a61e39d6ca96477e5d8a4615c9863eed1c887408dc11997cc35bda7d2006bb1"
+      "fingerprint": "sha256:1585f7aeb8512f4ae422783c22cdb70af957b30e8c01dfea21d04ec4f64c66b2"
     },
     {
       "id": "roster-publication-qualification",
-      "fingerprint": "sha256:cee1fac6fbbae52dc57e01e1eff0ff45e93c71d79f37d6833f829a19410ff5cf"
+      "fingerprint": "sha256:48550a167216db7b4e3b83c153e655f6bc75ee5a5e32918e141f94cd33e2bbd7"
     },
     {
       "id": "roster-revision",
-      "fingerprint": "sha256:66150b14142742f3d1d8a5842469bbf442c0fae585dbee71ff59f53765db8bfd"
+      "fingerprint": "sha256:12aeda7b479e39aad3b4ca855b7c5956fd01eedcd36e1eaa7a1243fcdf3b98cc"
     },
     {
       "id": "roster-watcher-publication-live",
-      "fingerprint": "sha256:1599cdf40094d5fe608433084ae5a026a93419d59d69c1b71824a07370e09f10"
+      "fingerprint": "sha256:716c0e3e42face9ba820fa72c2e6dd8054589fd149ddaffc2e2d616080cb7e5b"
     },
     {
       "id": "session-truth-conformance",
-      "fingerprint": "sha256:98da6bd3e756275ee2125c36f27dddc955b80c02b7866d6fc002f3160b38726b"
+      "fingerprint": "sha256:382925fca8e830757bb2041befd11cd07704b08cc30a4d1e4158bf80de62ed32"
     },
     {
       "id": "state-security",
-      "fingerprint": "sha256:45e97a585a4f66a7961ad5e8bef406f333d21b2ab08805105d467670b0b801ef"
+      "fingerprint": "sha256:03d1ac2b6cdae04da322733408c8ccf5febdfb65e5627182e854b84853d94feb"
     },
     {
       "id": "sync-degraded-integration",
-      "fingerprint": "sha256:371331b528c259d39524bd287e05f30965cb85526d9bb81992756b6dfe8ba2c4"
+      "fingerprint": "sha256:ed044fba4ca289b48600253acba94bad181a537987aad410b50341137ac8a35b"
     },
     {
       "id": "systemd-fixtures",
-      "fingerprint": "sha256:0bf8a3cfb439db7ea117c3cb55bf05717d2fae9768cd4f70ef53278f839b73bd"
+      "fingerprint": "sha256:b281c83e4adb752b1f911557b4f41155e541d1a7e5947694ddc21b75d476aec2"
     },
     {
       "id": "tailscale-pairing",
-      "fingerprint": "sha256:5143b829be7d48d95e6b2386e6f6755bdbd03ab192c15cf501c50d1203f9770d"
+      "fingerprint": "sha256:5ed804581d32f523030e35b19d0e1b7de90a4aa2450c7016d05885a00b56ccd0"
     },
     {
       "id": "tool-semantics",
-      "fingerprint": "sha256:5891f874ec2c3c8fee19a22586ab1e234402e567d4640ccd798732428d41bb5d"
+      "fingerprint": "sha256:a0ec2d0ce0131c1f944eeae82d088b699ecb92e013b1b305072b1f10e442c19c"
     },
     {
       "id": "transactional-setup",
-      "fingerprint": "sha256:4a59a620289dd213a2250b308b36ed5f40f93c7065dfceda3c1ae82f1cb64dc4"
+      "fingerprint": "sha256:f762bee6452a024b2d0f523d735e56ee3a08923e996cdf2c772561bc8520b3a0"
     },
     {
       "id": "typecheck",
@@ -477,11 +477,11 @@
     },
     {
       "id": "web-origin",
-      "fingerprint": "sha256:6499592506d106ac0a2620aace42b4b77f833a9f19ed2f94aaa2e9961a8af0af"
+      "fingerprint": "sha256:7463e5f2ea580ac9daf2279e96cfe3b94147f08bb7c44116caaf50a42f22a1df"
     },
     {
       "id": "zero-agent-doctor",
-      "fingerprint": "sha256:229ed2a8429afd12c62c1c918482564615e8ed4c205676d70f6f55b24b2ad17f"
+      "fingerprint": "sha256:387c1f7f42c5f76711b092c3c3c1bc10318d0de1a9bbf4b0669d3c7695daca88"
     }
   ]
 }

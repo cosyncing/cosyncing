@@ -1,7 +1,9 @@
 # Scenario trace tests
 
-This directory holds product-level trace tests. These are separate from `scripts/broker/tests`, which are
-unit and adapter integration tests.
+This directory holds product-level trace tests. Deterministic broker and adapter
+unit/integration tests live under `packages/typescript/broker/test/`.
+`scripts/broker/tests/` retains only browser-app, physical-host, and
+release/distribution harnesses.
 
 The first committed pieces are a catalog and a dry-run runner:
 

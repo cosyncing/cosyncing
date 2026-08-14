@@ -14,7 +14,7 @@ import 'package:cosyncing_client/src/features/connection/controller/broker_gate_
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_gate_state.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/session_notification_settings_controller.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';

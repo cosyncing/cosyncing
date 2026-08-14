@@ -6,7 +6,7 @@
   "sources": [
     {
       "id": "claude-hooks-schema-2.1.203",
-      "source_url": "Claude Code hooks contract (PreToolUse/UserPromptSubmit/Stop/SessionStart/SessionEnd) — settings.json hooks schema + packages/typescript/broker/src/claude-hooks.ts, verified against claude 2.1.203, 2026-07-08. No single machine-readable registry: docs + installed hook plumbing.",
+      "source_url": "Claude Code hooks contract (PreToolUse/UserPromptSubmit/Stop/SessionStart/SessionEnd) — settings.json hooks schema + packages/typescript/adapters/claude/src/hooks.ts + packages/typescript/adapters/claude/hook/cosyncing-hook.ts, verified against claude 2.1.203, 2026-07-08. No single machine-readable registry: docs + installed hook plumbing.",
       "checksum": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
       "trust_level": "local-help"
     },

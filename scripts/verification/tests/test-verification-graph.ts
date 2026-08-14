@@ -73,7 +73,7 @@ assert(
   'direct aggregate execution must not inherit broker state or listener overrides',
 );
 const fixturePath =
-  'scripts/broker/tests/pi/test-pi-bridge-reload.ts';
+  'packages/typescript/broker/test/pi/test-pi-bridge-reload.ts';
 const fixtureSource = await Bun.file(join(ROOT, fixturePath)).text();
 const fixtureMutationErrors = validateFixtureIsolationSources(ROOT, {
   [fixturePath]: fixtureSource.replaceAll(

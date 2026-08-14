@@ -59,11 +59,34 @@ for (const entry of TRACE_MANIFEST) {
 }
 
 const knownCapabilities = new Set<string>();
+let adapterRefCount = 0;
+
+function validateAdapterRef(manifestPath: string, capabilityId: string, ref: unknown): void {
+  if (typeof ref !== 'string' || !ref) {
+    failed++;
+    console.error(`FAIL ${manifestPath} ${capabilityId} has an invalid adapterRef`);
+    return;
+  }
+  adapterRefCount++;
+  if (/:[0-9]+(?:\b|$)/.test(ref)) {
+    failed++;
+    console.error(`FAIL ${manifestPath} ${capabilityId} uses a line-number adapterRef: ${ref}`);
+  }
+  const sourcePath = ref.match(/^([A-Za-z0-9_./-]+)(?:\s+\(|:[^/]|$)/)?.[1];
+  if (!sourcePath || !existsSync(sourcePath)) {
+    failed++;
+    console.error(`FAIL ${manifestPath} ${capabilityId} references a missing adapter source: ${ref}`);
+  }
+}
+
 function loadCapabilityIdsFromJson(path: string): void {
   if (!existsSync(path)) return;
   const parsed = JSON.parse(readFileSync(path, 'utf8'));
   for (const cap of parsed.capabilities ?? []) {
     if (typeof cap?.id === 'string') knownCapabilities.add(cap.id);
+    for (const ref of cap?.adapterRefs ?? []) {
+      validateAdapterRef(path, String(cap?.id ?? '<unknown>'), ref);
+    }
   }
   for (const gap of parsed.openGaps ?? []) {
     if (typeof gap?.capabilityId === 'string') knownCapabilities.add(gap.capabilityId);
@@ -178,5 +201,6 @@ if (actual !== expected) {
 }
 console.log(`✓ generated support matrix block matches ${matrixPath}`);
 console.log(`✓ ${capabilityRefCount} capability references validated`);
+console.log(`✓ ${adapterRefCount} adapter source references validated`);
 
 console.log('\nPASS');

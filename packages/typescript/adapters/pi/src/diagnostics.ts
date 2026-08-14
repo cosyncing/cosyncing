@@ -19,7 +19,7 @@ export const PI_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
 });
 
 export interface PiBridgeDiagnosticInspection {
-  status: 'missing' | 'owned' | 'legacy-marker' | 'unowned' | 'unreadable';
+  status: 'missing' | 'owned' | 'legacy-marker' | 'unowned' | 'unsafe' | 'unreadable';
   path: string;
   requiresConfirmation: boolean;
 }
@@ -96,6 +96,15 @@ function bridgeCheck(context: SetupDiagnosisContext, inspection: PiBridgeDiagnos
         summary: 'The Pi bridge target contains unowned content and will not be overwritten.',
         evidence: { path, requiresConfirmation: true },
         remediation: { kind: 'manual', message: 'Back up or relocate the existing extension, then rerun `cosyncing repair`.' },
+      };
+    case 'unsafe':
+      return {
+        id: 'pi.bridge-asset',
+        status: 'fail',
+        detailCode: 'bridge-unsafe',
+        summary: 'The Pi bridge target has an unsafe filesystem type or symlinked path.',
+        evidence: { path },
+        remediation: { kind: 'command', message: 'Repair Pi bridge ownership and permissions.', command: 'cosyncing repair' },
       };
     case 'unreadable':
     default:

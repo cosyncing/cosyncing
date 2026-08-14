@@ -10,6 +10,6 @@
  *
  *   bun run scripts/client/print-web-handoff.ts
  */
-import { WEB_HANDOFF_DOCUMENT } from '../../packages/typescript/broker/src/web-handoff.ts';
+import { WEB_HANDOFF_DOCUMENT } from '../../packages/typescript/broker/src/artifacts/web-handoff.ts';
 
 process.stdout.write(WEB_HANDOFF_DOCUMENT);

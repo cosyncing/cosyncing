@@ -1,6 +1,6 @@
 import 'package:broker_contract/broker_contract.dart';
-import 'package:cosyncing_client/src/features/sessions/data/roster_snapshot_store.dart';
-import 'package:cosyncing_client/src/features/sessions/model/session_roster_identity.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
 
 /// Roster snapshot storage with no database behind it.
 ///

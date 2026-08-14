@@ -1,4 +1,4 @@
-import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 
 final class InMemorySessionLiveStateViewStore
     implements SessionLiveStateViewStore {

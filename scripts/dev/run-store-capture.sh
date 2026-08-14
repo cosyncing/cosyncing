@@ -197,7 +197,7 @@ start_broker() {
     source "$1/env.sh"
     set +a
     export PORT="$2" HOST=127.0.0.1 COSYNCING_WEB_DIR="$3/apps/client/build/web"
-    exec bun run "$3/packages/typescript/broker/src/cli.ts" broker --dev-bypass-first-run
+    exec bun run "$3/packages/typescript/broker/src/cli/cli.ts" broker --dev-bypass-first-run
   ' _ "${FIXTURE_ROOT}" "${PORT}" "${REPO_ROOT}" "${pgid_file}" >>"${LOG_DIR}/fixture-broker.log" 2>&1 &
   BROKER_PGID=""
   BROKER_PID=""
