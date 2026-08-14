@@ -69,7 +69,7 @@ executable — see
 [npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
 `.github/workflows/npm-publish.yml` builds, verifies, and submits releases
 through npm's protected staging and 2FA approval flow. The current JavaScript
-package is `cosyncing@0.2.0`. Flutter-only Android, Linux, Apple Silicon macOS,
+package is `cosyncing@0.3.0`. Flutter-only Android, Linux, Apple Silicon macOS,
 and Windows client downloads are published separately in the GitHub client
 release; iOS/TestFlight remains deferred.
 
