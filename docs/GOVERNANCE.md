@@ -19,7 +19,7 @@ CODEOWNERS requested for review.
 
 Only maintainers may create protected release tags, approve signing
 environments, or promote stable releases. Security reports follow
-[SECURITY.md](SECURITY.md); embargoed details stay private until coordinated
+[SECURITY.md](../SECURITY.md); embargoed details stay private until coordinated
 disclosure is safe.
 
 Governance changes use the same pull-request and review process as source

@@ -1,7 +1,7 @@
 # Support and compatibility
 
 Use GitHub Discussions for usage questions and GitHub Issues for reproducible
-defects. Security reports follow [SECURITY.md](SECURITY.md).
+defects. Security reports follow [SECURITY.md](../SECURITY.md).
 
 The latest stable client and broker are supported. The wire protocol accepts an
 equal contract revision and a one-revision overlap when each side's declared

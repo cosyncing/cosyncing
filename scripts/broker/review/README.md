@@ -1,16 +1,16 @@
 # Web review harness (`/cosy/`)
 
-The **default way to visually verify the Flutter web client** the broker serves at `/cosy/`. It renders
-the app in a **headful** browser under a virtual X display (Xvfb) and emits a machine-readable verdict
-plus a screenshot — designed so a coding agent (or you) can drop it into a review loop and branch on the
-result.
+This optional visual diagnostic renders the Flutter web client served at
+`/cosy/` in a **headful** browser under a virtual X display (Xvfb). It emits a
+machine-readable verdict and a screenshot for an interactive review loop. The
+repository's automated browser gates remain the required regression checks;
+see [public build and test instructions](../../../docs/development/build-test.md).
 
 ## Why headful + Xvfb
 
-Headless Chrome **cannot** paint Flutter's CanvasKit/WebGL canvas in this WSL2 container — the compositor
-wedges (screenshot + `evaluate` hang), while plain DOM pages screenshot fine. Headful Chrome on a real
-(virtual) display works. WSLg headful hangs at launch; **Xvfb is the reliable path**. Background:
-`docs/architecture/monorepo.md` §11.
+Headless Chrome **cannot** paint Flutter's CanvasKit/WebGL canvas reliably in
+this WSL2 container: the compositor can wedge while plain DOM pages still work.
+Headful Chrome on a virtual display is the established path for this diagnostic.
 
 ## Prerequisite (one time)
 
@@ -20,13 +20,30 @@ sudo apt install -y xvfb
 
 Also needs Python Playwright with the full Chromium build (already present in this repo's env).
 
+## Broker safety
+
+Passing an existing broker URL does not start or stop a broker. The harness only
+loads `/cosy/`, waits for the roster request, checks health, and captures the
+rendered result.
+
+Auto-launch starts a full source broker. A different port and data directory do
+not isolate host-global Codex/OpenCode processes, sockets, shims, or session
+ownership. Do not auto-launch it beside the packaged production broker or
+another review broker. First identify the listeners and owning working
+directories, then use an explicit maintenance window: stop the packaged service,
+run this diagnostic, stop its source broker, and restore the packaged service.
+Never kill an unresolved listener. The harness's Claude-hook and OpenCode
+autoserve flags reduce side effects but do not make simultaneous full brokers
+safe.
+
 ## Usage (run from the repo root)
 
 ```bash
-# Auto-launch a broker on a client build, review /cosy/, then tear it down:
+# During an explicit maintenance window, auto-launch a source broker on a
+# client build, review /cosy/, then tear it down:
 COSYNCING_WEB_DIR="$PWD/apps/client/build/web" scripts/broker/review/web-review.sh
 
-# Or review an already-running broker:
+# Or review an already-running broker without launching another one:
 scripts/broker/review/web-review.sh http://127.0.0.1:7734
 ```
 

@@ -27,6 +27,6 @@ runners. Maintainers may request platform-specific evidence. Do not add
 credentials, private URLs, machine paths, generated logs, screenshots, or agent
 workspace files to a pull request.
 
-See [public build and test instructions](docs/development/build-test.md), the
-[fork workflow](docs/development/fork-workflow.md), and the
+See [public build and test instructions](development/build-test.md), the
+[fork workflow](development/fork-workflow.md), and the
 [compatibility policy](SUPPORT.md).
