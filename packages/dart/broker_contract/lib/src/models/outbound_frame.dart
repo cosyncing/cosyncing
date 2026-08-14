@@ -489,6 +489,15 @@ abstract final class OutboundFrame {
     if (clientMessageId != null) 'clientMessageId': clientMessageId,
   };
 
+  /// Requests terminal handoff from the current Drive socket.
+  ///
+  /// The broker refuses while any peer driver remains and otherwise migrates
+  /// this socket to Observe before closing the shared Resume owner.
+  static Map<String, dynamic> handoff({required String clientMessageId}) => {
+    'kind': 'handoff',
+    'clientMessageId': clientMessageId,
+  };
+
   /// Approve or reject a permission request.
   ///
   /// [decision] is typically `'approve'` or `'reject'`.

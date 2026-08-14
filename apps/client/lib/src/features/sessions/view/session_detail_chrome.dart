@@ -478,6 +478,11 @@ String _controlPillStateName({
       Icons.sports_esports_outlined,
       scheme.primary,
     ),
+    SessionControlPill.driverActive => (
+      l10n.sessionControlDriverActive,
+      Icons.sports_esports_outlined,
+      scheme.tertiary,
+    ),
     SessionControlPill.syncAvailable => (
       l10n.sessionControlSyncAvailable,
       Icons.sync,
@@ -718,7 +723,7 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
     // frozen at open time — so `willFork` and the pill stay honest if the
     // terminal quits/reopens while the sheet is up.
     final state = watchQualifiedDetail(ref, widget.sessionKey);
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     final freshness = SessionDetailFreshnessPresentation.fromState(state);
     final restoringDrive =
         state.driveRestorePhase == SessionDriveRestorePhase.restoring;
@@ -1206,7 +1211,7 @@ Future<bool> _confirmAndTakeOver(
 
   while (context.mounted) {
     final state = readQualifiedDetail(ref, sessionKey);
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (state.connectionStatus != SessionDetailConnectionStatus.connected ||
         state.compatibilityReadOnly ||
         !control.canTakeOver) {
@@ -1243,9 +1248,7 @@ Future<bool> _confirmAndTakeOver(
     return false;
   }
   final latestState = readQualifiedDetail(ref, sessionKey);
-  final latestControl = SessionControlView.fromSessionInfo(
-    latestState.sessionInfo,
-  );
+  final latestControl = SessionControlView.fromSessionDetailState(latestState);
   if (latestState.connectionStatus != SessionDetailConnectionStatus.connected ||
       !latestControl.canTakeOver ||
       (latestControl.willFork && !confirmedFork)) {
@@ -1310,7 +1313,7 @@ class _TakeOverConfirmDialogState
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final state = watchQualifiedDetail(ref, widget.sessionKey);
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     final actionable =
         state.connectionStatus == SessionDetailConnectionStatus.connected &&
         control.canTakeOver;
@@ -1390,6 +1393,8 @@ String _controlStatusDescription(
   return switch (control.pill) {
     SessionControlPill.synced => l10n.sessionControlSyncedDescription,
     SessionControlPill.driving => l10n.sessionControlDrivingDescription,
+    SessionControlPill.driverActive =>
+      l10n.sessionControlDriverActiveDescription,
     SessionControlPill.syncAvailable =>
       l10n.sessionControlSyncAvailableDescription,
     SessionControlPill.observing => l10n.sessionControlObservingDescription,

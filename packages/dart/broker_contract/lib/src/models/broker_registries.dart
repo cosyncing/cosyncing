@@ -190,6 +190,9 @@ const List<String> brokerErrorCodes = <String>[
   'DRIVE_OWNERSHIP_UNKNOWN',
   'DRIVE_NATIVE_SESSION_UNRESUMABLE',
   'DRIVE_RESTORE_FAILED',
+  'JOIN_OWNER_NOT_FOUND',
+  'JOIN_OWNER_STALE',
+  'JOIN_NOT_SUPPORTED',
   'SCHEDULE_CRON_INVALID',
   'SCHEDULE_INVALID',
   'SCHEDULE_INVALID_STATE',
@@ -235,6 +238,7 @@ const List<String> brokerClientMessageKinds = <String>[
   'reject-question',
   'command',
   'set-agent',
+  'handoff',
   'ack',
   'nack',
 ];

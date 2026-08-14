@@ -895,7 +895,7 @@ extension SessionDetailDrafts on SessionDetailController {
   /// pre-echo base revision and be rejected as stale — it is published from
   /// [_settleDraftPublish] once the broker's answer has moved the base.
   Future<bool> _publishLocalDraft(SessionLocalDraft draft) async {
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (state.compatibilityReadOnly || !control.canPrompt) {
       // Observing/reconnecting windows keep the row dirty and durable, but
       // shared-draft publication is a broker mutation. It resumes only after

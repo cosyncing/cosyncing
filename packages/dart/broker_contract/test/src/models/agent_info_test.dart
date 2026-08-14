@@ -13,6 +13,7 @@ void main() {
           'supportsObserve': true,
           'supportsResume': true,
           'supportsLiveAttach': true,
+          'supportsCrossClientDriveSharing': true,
           'supportsNativeArtifact': true,
           'supportsNativeFileInput': true,
           'supportsModelSwitch': true,
@@ -36,6 +37,7 @@ void main() {
       expect(agent.canClone, isFalse);
       expect(agent.canTranscriptExport, isTrue);
       expect(agent.syncEnabled, isTrue);
+      expect(agent.capabilities.supportsCrossClientDriveSharing, isTrue);
     });
 
     test('fromJson defaults missing capability flags to false', () {
@@ -66,6 +68,10 @@ void main() {
       expect(agent.canFork, isFalse);
       expect(agent.canClone, isFalse);
       expect(agent.canTranscriptExport, isFalse);
+      expect(
+        agent.capabilities.supportsCrossClientDriveSharing,
+        isFalse,
+      );
     });
 
     test('fromJson defaults canCreateSession to false when missing', () {

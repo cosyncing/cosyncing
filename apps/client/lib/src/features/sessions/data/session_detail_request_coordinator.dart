@@ -94,7 +94,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
       );
       return false;
     }
-    if (!SessionControlView.fromSessionInfo(state.sessionInfo).canMutate) {
+    if (!SessionControlView.fromSessionDetailState(state).canMutate) {
       state = state.copyWith(
         error: 'Switching agents requires a Drive or sync session.',
       );
@@ -318,7 +318,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
           }
           continue;
         }
-        final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+        final control = SessionControlView.fromSessionDetailState(state);
         if (!_canReplayOutboxMessage(message, control)) {
           continue;
         }

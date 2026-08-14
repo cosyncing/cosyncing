@@ -866,6 +866,16 @@ void main() {
         expect(frame['clientMessageId'], clientMessageId);
       });
 
+      test('sendHandoff sends an idempotent control frame', () async {
+        await connection.connect();
+        connection.sendHandoff(clientMessageId: 'cm-handoff');
+
+        expect(jsonDecode(adapter.sentFrames.last), {
+          'kind': 'handoff',
+          'clientMessageId': 'cm-handoff',
+        });
+      });
+
       test('explicit clientMessageId is reused for retry frames', () async {
         await connection.connect();
         await flush();
@@ -1139,6 +1149,33 @@ void main() {
       );
 
       test(
+        'join-existing carries and then clears the exact owner revision',
+        () async {
+          const revision = SessionOwnerRevision(epoch: 'broker-epoch', seq: 14);
+          await connection.reattach(
+            mode: 'resume',
+            reason: 'join-existing',
+            ownerRevision: revision,
+          );
+          await flush();
+
+          var query = Uri.parse(streamUrl!).queryParameters;
+          expect(query['reason'], 'join-existing');
+          expect(query['ownerEpoch'], 'broker-epoch');
+          expect(query['ownerSeq'], '14');
+          expect(connection.ownerRevision?.seq, 14);
+
+          connection.disarmDriveAuthority();
+          expect(connection.ownerRevision, isNull);
+          await connection.reattach();
+          await flush();
+          query = Uri.parse(streamUrl!).queryParameters;
+          expect(query.containsKey('ownerEpoch'), isFalse);
+          expect(query.containsKey('ownerSeq'), isFalse);
+        },
+      );
+
+      test(
         'drop-triggered reconnect preserves the drive-attach reason',
         () async {
           await connection.reattach(mode: 'resume', reason: 'lease-restore');
@@ -1153,6 +1190,34 @@ void main() {
           final query = Uri.parse(streamUrl!).queryParameters;
           expect(query['mode'], 'resume');
           expect(query['reason'], 'lease-restore');
+        },
+      );
+
+      test(
+        'drop-triggered join reconnect preserves the exact owner revision',
+        () async {
+          const revision = SessionOwnerRevision(
+            epoch: 'join-reconnect-epoch',
+            seq: 27,
+          );
+          await connection.reattach(
+            mode: 'resume',
+            reason: 'join-existing',
+            ownerRevision: revision,
+          );
+          await flush();
+
+          adapter.simulateDisconnect();
+          await flush();
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          await flush();
+
+          expect(connection.state, SessionConnectionState.connected);
+          final query = Uri.parse(streamUrl!).queryParameters;
+          expect(query['mode'], 'resume');
+          expect(query['reason'], 'join-existing');
+          expect(query['ownerEpoch'], 'join-reconnect-epoch');
+          expect(query['ownerSeq'], '27');
         },
       );
 
@@ -1200,17 +1265,26 @@ void main() {
       test(
         'attach-conflict disarms the authority request before reconnect',
         () async {
-          await connection.reattach(mode: 'resume', reason: 'takeover');
+          await connection.reattach(
+            mode: 'resume',
+            reason: 'join-existing',
+            ownerRevision: const SessionOwnerRevision(
+              epoch: 'owner-before-conflict',
+              seq: 9,
+            ),
+          );
           await flush();
 
           adapter.simulateMessage({
             'kind': 'attach-conflict',
             'requestedMode': 'resume',
-            'reason': 'takeover',
-            'code': 'DRIVE_OWNERSHIP_CONFLICT',
-            'message': 'A terminal owns this session.',
+            'reason': 'join-existing',
+            'code': 'JOIN_OWNER_STALE',
+            'message': 'The owner changed.',
           });
           await flush();
+
+          expect(connection.ownerRevision, isNull);
 
           adapter.simulateDisconnect();
           await flush();

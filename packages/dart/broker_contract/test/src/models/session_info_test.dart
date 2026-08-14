@@ -42,6 +42,10 @@ void main() {
             'label': 'Synced',
           },
         },
+        'sessionOwner': {
+          'revision': {'epoch': 'broker-process-1', 'seq': 7},
+          'state': 'drive',
+        },
       };
 
       final session = SessionInfo.fromJson(json);
@@ -61,6 +65,9 @@ void main() {
       expect(session.control!.drive.state, DriveState.observing);
       expect(session.control!.drive.willFork, isTrue);
       expect(session.control!.terminalSync.active, isTrue);
+      expect(session.sessionOwner?.state, SessionOwnerState.drive);
+      expect(session.sessionOwner?.revision.epoch, 'broker-process-1');
+      expect(session.sessionOwner?.revision.seq, 7);
     });
 
     test('fromJson handles null fields', () {
@@ -82,6 +89,37 @@ void main() {
       expect(session.parentThreadId, isNull);
       expect(session.nativeId, isNull);
       expect(session.control, isNull);
+      expect(session.sessionOwner, isNull);
+    });
+
+    test('owner projection round-trips and future states fail open', () {
+      final known = SessionInfo.fromJson({
+        'id': 'session-owner',
+        'tool': 'pi',
+        'title': 'Owner projection',
+        'status': 'idle',
+        'attachMode': 'observe',
+        'sessionOwner': {
+          'revision': {'epoch': 'epoch-a', 'seq': 12},
+          'state': 'terminal-sync',
+        },
+      });
+      final future = SessionInfo.fromJson({
+        'id': 'session-future-owner',
+        'tool': 'pi',
+        'title': 'Future owner projection',
+        'status': 'idle',
+        'attachMode': 'observe',
+        'sessionOwner': {
+          'revision': {'epoch': 'epoch-b', 'seq': 1},
+          'state': 'future-owner',
+        },
+      });
+
+      final restored = SessionInfo.fromJson(known.toJson());
+      expect(restored.sessionOwner?.state, SessionOwnerState.terminalSync);
+      expect(restored.sessionOwner?.revision.seq, 12);
+      expect(future.sessionOwner?.state, SessionOwnerState.unknown);
     });
 
     test(

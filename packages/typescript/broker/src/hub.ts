@@ -18,10 +18,15 @@ import type {
   ModeOption,
   ModelOption,
   SessionConnection,
+  SessionConnectionAuthority,
   SessionInfo,
+  SessionJoinExistingAction,
+  SessionOwnerProjection,
+  SessionOwnerRevision,
   SlashCommand,
   Unsubscribe,
 } from '@cosyncing/adapter-api';
+import { OwnershipConflictError } from '@cosyncing/adapter-api';
 import {
   artifactKeyFor,
   DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
@@ -33,6 +38,13 @@ import { capHistoryMessages } from './history-delta.ts';
 import type { SessionControlTransition } from './sync-degraded.ts';
 import type { LiveOverlayEntry } from './roster-overlay.ts';
 import { contradictsOwnerRunState, runStateRepairable } from './run-state-repair.ts';
+import {
+  activeOwnerState,
+  ActiveSessionOwnerRegistry,
+  JoinExistingError,
+  sessionConnectionAuthority,
+  sameOwnerRevision,
+} from './session-owner.ts';
 
 export type WireEvent =
   | {
@@ -41,7 +53,12 @@ export type WireEvent =
       clientVersion?: string;
       compatibility: BrokerClientCompatibility;
     }
-  | { kind: 'session'; info: SessionInfo }
+  | {
+      kind: 'session';
+      info: SessionInfo;
+      authority?: SessionConnectionAuthority;
+      joinExisting?: SessionJoinExistingAction;
+    }
   | {
       kind: 'history';
       messages: AgentMessage[];
@@ -134,7 +151,11 @@ function isWithin(base: string, target: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export type Client = (event: WireEvent) => void;
+export type Client = ((event: WireEvent) => void) & {
+  /** Atomically retarget the runtime socket when this subscriber moves to a
+   *  surviving wrapper. Callback-only fixture clients may omit it. */
+  onManagedConnChanged?: (managed: ManagedConn) => void;
+};
 
 export interface ManagedConnAttentionHooks {
   /** Live canonical frames only; history snapshots and initial roster discovery never enter here. */
@@ -304,6 +325,11 @@ export class ManagedConn {
     } catch {
       /* roster observation never changes the session stream */
     }
+    this.broadcastSessionProjection(info);
+  }
+
+  /** Re-publish session-level projection changes without feeding them back as adapter evidence. */
+  broadcastSessionProjection(info: SessionInfo = this.conn.info): void {
     for (const c of this.clients) c({ kind: 'session', info });
   }
 
@@ -816,6 +842,29 @@ export class ManagedConn {
     this.attentionHooks.onClientCountChanged?.(this.conn.info, this.clients.size);
   }
 
+  /** Move every subscriber to a surviving wrapper without closing its socket.
+   *  The callback retargets runtime mutation/release authority in the same JS
+   *  turn as fan-out membership, so no open socket retains this discarded
+   *  ManagedConn. */
+  moveClientsTo(target: ManagedConn): number {
+    if (target === this || this.clients.size === 0) return 0;
+    const moving = [...this.clients];
+    for (const client of moving) {
+      this.clients.delete(client);
+      target.clients.add(client);
+      client.onManagedConnChanged?.(target);
+    }
+    this.attentionHooks.onClientCountChanged?.(this.conn.info, this.clients.size);
+    target.attentionHooks.onClientCountChanged?.(target.conn.info, target.clients.size);
+    return moving.length;
+  }
+
+  /** Rebuild attached clients after their owner transport changed outside
+   *  replaceConnection(). */
+  refreshAttachedClients(): void {
+    if (this.clients.size > 0) void this.resync().catch(() => {});
+  }
+
   get clientCount(): number {
     return this.clients.size;
   }
@@ -906,6 +955,10 @@ export class Hub {
   private readonly attentionLeases = new Set<ManagedConn>();
   private readonly attentionLeaseDenied = new Set<ManagedConn>();
   private readonly maxZeroClientLeases: number;
+  /** One revision domain for session-level owner truth across every mode-scoped wrapper. */
+  private readonly sessionOwners = new ActiveSessionOwnerRegistry<ManagedConn>();
+  /** Session keys whose sole Drive owner is being closed for terminal handoff. */
+  private readonly terminalHandoffs = new Set<string>();
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -971,9 +1024,217 @@ export class Hub {
         }
       },
       onObservationLost: (info) => this.attentionHooks.onObservationLost?.(info),
-      onSessionInfo: (info) => this.attentionHooks.onSessionInfo?.(info),
+      onSessionInfo: (info) => this.handleSessionInfo(managed, info),
     }, this.draftStore);
     return managed;
+  }
+
+  private matchingConnections(
+    tool: string,
+    id: string,
+  ): Array<{ key: string; identity: ManagedConn; generation: SessionConnection; info: SessionInfo }> {
+    const matches: Array<{
+      key: string;
+      identity: ManagedConn;
+      generation: SessionConnection;
+      info: SessionInfo;
+    }> = [];
+    for (const [key, managed] of this.conns) {
+      if (managed.conn.info.tool === tool && managed.conn.info.id === id) {
+        matches.push({
+          key,
+          identity: managed,
+          generation: managed.conn,
+          info: managed.conn.info,
+        });
+      }
+    }
+    return matches;
+  }
+
+  private reconcileSessionOwner(
+    tool: string,
+    id: string,
+    fallbackInfo?: SessionInfo,
+    sourceManaged?: ManagedConn,
+  ): { projection: SessionOwnerProjection; owner?: { key: string; identity: ManagedConn; info: SessionInfo } } {
+    const { resolution, changed, previouslyKnown } = this.sessionOwners.reconcile(
+      tool,
+      id,
+      this.matchingConnections(tool, id),
+    );
+    if (changed) {
+      for (const candidate of this.matchingConnections(tool, id)) {
+        // The source ManagedConn's broadcast continues immediately after its
+        // hook returns. Publish only to siblings here so each socket receives
+        // one frame for this transition.
+        if (candidate.identity === sourceManaged) continue;
+        candidate.identity.broadcastSessionProjection(
+          this.withOwnerProjection(candidate.info, resolution.projection),
+        );
+      }
+      const source = resolution.owner?.info ?? fallbackInfo;
+      // Preserve native-incarnation publication ordering: the first managed
+      // connection for a never-seen adapter id is not itself a roster
+      // publication. Discovery/owner frames publish it after predecessor
+      // retirement. A previously projected session still publishes owner
+      // transitions immediately.
+      if (source && sourceManaged == null && previouslyKnown) {
+        try {
+          this.attentionHooks.onSessionInfo?.(
+            this.withOwnerProjection(source, resolution.projection),
+          );
+        } catch {
+          /* owner publication never changes connection lifecycle */
+        }
+      }
+    }
+    return resolution;
+  }
+
+  private handleSessionInfo(managed: ManagedConn, info: SessionInfo): void {
+    const resolution = this.reconcileSessionOwner(
+      info.tool,
+      info.id,
+      info,
+      managed,
+    );
+    try {
+      this.attentionHooks.onSessionInfo?.(
+        this.withOwnerProjection(info, resolution.projection),
+      );
+    } catch {
+      /* roster observation never changes the session stream */
+    }
+  }
+
+  private withOwnerProjection(info: SessionInfo, owner: SessionOwnerProjection): SessionInfo {
+    return {
+      ...info,
+      sessionOwner: {
+        revision: { ...owner.revision },
+        state: owner.state,
+      },
+    };
+  }
+
+  /** Current session-level owner truth for roster and Session Detail publication. */
+  projectSessionInfo(info: SessionInfo): SessionInfo {
+    const resolution = this.reconcileSessionOwner(info.tool, info.id, info);
+    return this.withOwnerProjection(info, resolution.projection);
+  }
+
+  /** Socket-local Session Detail envelope. Owner truth never grants this socket authority. */
+  sessionDetailFrame(
+    managed: ManagedConn,
+    allowJoinAction: boolean,
+    sourceInfo: SessionInfo = managed.conn.info,
+  ): Extract<WireEvent, { kind: 'session' }> {
+    const info = this.projectSessionInfo(sourceInfo);
+    const authority = sessionConnectionAuthority(managed.conn.info);
+    const resolution = this.reconcileSessionOwner(info.tool, info.id, info);
+    const backend = this.registry.get(info.tool);
+    const joinable =
+      allowJoinAction
+      && !authority.canMutate
+      && resolution.projection.state === 'drive'
+      && resolution.owner?.identity !== managed
+      && backend?.capabilities.supportsCrossClientDriveSharing === true;
+    return {
+      kind: 'session',
+      info,
+      authority,
+      ...(joinable
+        ? { joinExisting: { ownerRevision: { ...resolution.projection.revision } } }
+        : {}),
+    };
+  }
+
+  /** Atomically reuse the exact shareable Drive owner the client observed. Never calls attach. */
+  joinExisting(tool: string, id: string, expected: SessionOwnerRevision): ManagedConn {
+    if (this.disposed) throw new Error('hub is shutting down');
+    if (this.terminalHandoffs.has(this.key(tool, id))) {
+      throw new JoinExistingError('JOIN_OWNER_NOT_FOUND', 'The observed Drive owner is handing control to the terminal.');
+    }
+    const resolution = this.reconcileSessionOwner(tool, id);
+    const owner = resolution.owner;
+    if (!owner || resolution.projection.state !== 'drive') {
+      throw new JoinExistingError('JOIN_OWNER_NOT_FOUND', 'The observed Drive owner is no longer active.');
+    }
+    if (!sameOwnerRevision(resolution.projection.revision, expected)) {
+      throw new JoinExistingError('JOIN_OWNER_STALE', 'The session owner changed before this client joined it.');
+    }
+    const backend = this.registry.get(tool);
+    if (backend?.capabilities.supportsCrossClientDriveSharing !== true) {
+      throw new JoinExistingError('JOIN_NOT_SUPPORTED', 'This agent does not share Drive across clients.');
+    }
+    this.cancelEvict(owner.key);
+    this.attentionLeases.delete(owner.identity);
+    this.attentionLeaseDenied.delete(owner.identity);
+    this.reportEnsureBranch('join', owner.identity);
+    return owner.identity;
+  }
+
+  /** End the requesting socket's broker-owned Resume owner only when it is
+   *  the last attached driver. Peer drivers make the operation refuse; the
+   *  UI must never report terminal handoff while another foreground client
+   *  still holds the shared owner. */
+  async handoffToTerminal(
+    tool: string,
+    id: string,
+    requester: ManagedConn,
+  ): Promise<ManagedConn> {
+    if (this.disposed) throw new Error('hub is shutting down');
+    const sessionKey = this.key(tool, id);
+    const driveKey = this.key(tool, id, 'resume');
+    const driver = this.conns.get(driveKey);
+    if (!driver || driver !== requester || activeOwnerState(driver.conn.info) !== 'drive') {
+      throw new OwnershipConflictError(
+        'This socket no longer owns the active Drive session.',
+        'driver-changed',
+      );
+    }
+    if (driver.clientCount > 1) {
+      throw new OwnershipConflictError(
+        'Another foreground client is still driving this session. Close or hand off that client first.',
+        'peer-driver-active',
+      );
+    }
+    if (this.terminalHandoffs.has(sessionKey)) {
+      throw new OwnershipConflictError(
+        'Terminal handoff is already in progress for this session.',
+        'driver-changed',
+      );
+    }
+
+    this.terminalHandoffs.add(sessionKey);
+    try {
+      const observer = await this.ensure(tool, id);
+      if (this.conns.get(driveKey) !== driver || driver.clientCount > 1) {
+        throw new OwnershipConflictError(
+          'The shared Drive owner changed while terminal handoff was starting.',
+          'peer-driver-active',
+        );
+      }
+
+      // Keep owner truth and the requester on Drive until the native owner has
+      // actually closed. If close fails, the registered wrapper remains the
+      // honest authority and the caller receives a refusal instead of a
+      // fabricated owner=none transition.
+      await driver.conn.close();
+      this.cancelEvict(driveKey);
+      this.pinned.delete(driveKey);
+      this.attentionLeases.delete(driver);
+      this.attentionLeaseDenied.delete(driver);
+      this.conns.delete(driveKey);
+      const moved = driver.moveClientsTo(observer);
+      driver.detachLocal();
+      this.reconcileSessionOwner(tool, id, observer.conn.info);
+      if (moved > 0) observer.refreshAttachedClients();
+      return observer;
+    } finally {
+      this.terminalHandoffs.delete(sessionKey);
+    }
   }
 
   private handleRetentionChanged(managed: ManagedConn): void {
@@ -1023,8 +1284,10 @@ export class Hub {
         !this.pinned.has(key) &&
         !this.attentionLeases.has(managed)
       ) {
+        const fallbackInfo = structuredClone(managed.conn.info);
         this.conns.delete(key);
         this.attentionLeaseDenied.delete(managed);
+        this.reconcileSessionOwner(fallbackInfo.tool, fallbackInfo.id, fallbackInfo);
         managed.dispose().catch((error) => console.error('[hub] dispose failed', key, error));
       }
     }, this.graceMs);
@@ -1111,14 +1374,18 @@ export class Hub {
    *  owns a DISTINCT wrapper by design (see key()), but once a terminal becomes the true owner a
    *  surviving Drive wrapper would keep routing prompts to its broker-owned rival process while the
    *  terminal writes the same session, forking the conversation (issues-part2 items 3 and the codex
-   *  app-created re-flag). Preferring the client-bearing sibling WRAPPER keeps every attached
-   *  socket's ManagedConn reference valid; the caller then swaps its transport via
-   *  replaceConnection, which closes the rival process. */
+   *  app-created re-flag). A client-bearing sibling remains the preferred
+   *  wrapper, but every client on the losing wrapper is migrated with its
+   *  runtime authority target before that wrapper is disposed. The caller
+   *  then swaps the survivor's transport via replaceConnection, which closes
+   *  the rival process. */
   private foldModeScopedSiblings(key: string): void {
+    let changedInfo: SessionInfo | undefined;
     const sibPrefix = `${key}#`;
     for (const k of [...this.conns.keys()]) {
       if (!k.startsWith(sibPrefix)) continue;
       const sibling = this.conns.get(k)!;
+      changedInfo ??= structuredClone(sibling.conn.info);
       this.cancelEvict(k);
       this.conns.delete(k);
       this.pinned.delete(k);
@@ -1127,16 +1394,21 @@ export class Hub {
       const base = this.conns.get(key);
       if (!base) {
         this.conns.set(key, sibling); // the Drive wrapper becomes the canonical identity
-      } else if (base.clientCount === 0 && sibling.clientCount > 0) {
-        // clientless observe wrapper loses to the client-bearing Drive wrapper
+      } else if (sibling.clientCount > 0) {
+        // A client-bearing Drive wrapper survives. Move canonical Observe
+        // clients too; disposing their wrapper must not strand open sockets.
         this.cancelEvict(key);
         this.attentionLeases.delete(base);
         this.attentionLeaseDenied.delete(base);
+        base.moveClientsTo(sibling);
         void base.dispose().catch(() => {});
         this.conns.set(key, sibling);
       } else {
         void sibling.dispose().catch(() => {}); // no clients worth preserving → close the rival process
       }
+    }
+    if (changedInfo) {
+      this.reconcileSessionOwner(changedInfo.tool, changedInfo.id, changedInfo);
     }
   }
 
@@ -1154,12 +1426,14 @@ export class Hub {
       this.attentionLeases.delete(existing);
       this.attentionLeaseDenied.delete(existing);
       this.pinned.add(key);
+      this.reconcileSessionOwner(tool, id, existing.conn.info);
       return existing;
     }
     this.cancelEvict(key);
     const mc = this.createManaged(conn);
     this.conns.set(key, mc);
     this.pinned.add(key);
+    this.reconcileSessionOwner(tool, id, mc.conn.info);
     return mc;
   }
 
@@ -1183,6 +1457,8 @@ export class Hub {
       this.attentionLeaseDenied.delete(old);
       if (this.pinned.delete(oldKey)) this.pinned.add(newKey);
       this.cancelEvict(oldKey);
+      this.reconcileSessionOwner(tool, oldId, old.conn.info);
+      this.reconcileSessionOwner(tool, newId, existing.conn.info);
       return existing;
     }
     this.conns.delete(oldKey);
@@ -1190,6 +1466,8 @@ export class Hub {
     if (this.pinned.delete(oldKey)) this.pinned.add(newKey);
     this.cancelEvict(oldKey);
     old.updateInfo({ ...old.conn.info, id: newId });
+    this.reconcileSessionOwner(tool, oldId);
+    this.reconcileSessionOwner(tool, newId, old.conn.info);
     return old;
   }
 
@@ -1326,6 +1604,7 @@ export class Hub {
     this.attentionLeases.delete(mc);
     this.attentionLeaseDenied.delete(mc);
     const endedInfo = structuredClone(mc.conn.info);
+    this.reconcileSessionOwner(endedInfo.tool, endedInfo.id, endedInfo);
     for (const path of ['drive', 'terminal-sync'] as const) {
       const from = controlPathState(endedInfo, path);
       if (from !== 'active' && from !== 'available') continue;
@@ -1357,10 +1636,20 @@ export class Hub {
    *  selects a DRIVABLE owner distinct from the read-only observe owner of the same session.
    *  `reason` (additive) is the authenticated drive-attach intent forwarded to the adapter so
    *  restore-vs-takeover arbitration happens atomically inside the single owner-creating call —
-   *  it never changes the connection key, so concurrent restores still converge on one owner. */
+   *  it never changes the connection key, so concurrent restores still converge on one owner.
+   *  `join-existing` uses a dedicated operation and never reaches this path. */
   async ensure(tool: string, id: string, mode?: string, reason?: DriveAttachReason): Promise<ManagedConn> {
     if (this.disposed) throw new Error('hub is shutting down');
+    if (reason === 'join-existing') {
+      throw new Error('join-existing must use Hub.joinExisting with an owner revision');
+    }
     const key = this.key(tool, id, mode);
+    if (mode === 'resume' && this.terminalHandoffs.has(this.key(tool, id))) {
+      throw new OwnershipConflictError(
+        'This session is handing control to the terminal.',
+        'driver-changed',
+      );
+    }
     // A mode-scoped attach (?mode=resume) must JOIN an existing canonical connection that is already
     // the drivable owner, instead of spawning a rival broker-owned process on the same session:
     //  - a PINNED conn is a live terminal bridge — the terminal is the sole owner (issues-part2 item 3:
@@ -1406,6 +1695,7 @@ export class Hub {
       const mc = this.createManaged(conn);
       this.conns.set(key, mc);
       this.pending.delete(key);
+      this.reconcileSessionOwner(tool, id, mc.conn.info);
       this.reportEnsureBranch('create', mc);
       return mc;
     })();
@@ -1467,6 +1757,7 @@ export class Hub {
     this.pinned.clear();
     this.attentionLeases.clear();
     this.attentionLeaseDenied.clear();
+    this.terminalHandoffs.clear();
     await Promise.allSettled(managed.map((connection) => connection.dispose()));
   }
 }

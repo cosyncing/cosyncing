@@ -215,6 +215,124 @@ class SessionControlState {
   Map<String, dynamic> toJson() => _$SessionControlStateToJson(this);
 }
 
+/// State of the broker-selected session-level mutable owner.
+enum SessionOwnerState {
+  /// No active mutable owner exists.
+  @JsonValue('none')
+  none,
+
+  /// A broker-owned Drive connection is active.
+  @JsonValue('drive')
+  drive,
+
+  /// An active terminal-sync owner exists.
+  @JsonValue('terminal-sync')
+  terminalSync,
+
+  /// A newer owner kind not known to this client.
+  unknown,
+}
+
+/// One broker-process owner-projection revision.
+@JsonSerializable()
+class SessionOwnerRevision {
+  /// Creates a session owner revision.
+  const SessionOwnerRevision({required this.epoch, required this.seq});
+
+  /// Decodes a session owner revision.
+  factory SessionOwnerRevision.fromJson(Map<String, dynamic> json) =>
+      _$SessionOwnerRevisionFromJson(json);
+
+  /// Broker-process revision domain.
+  final String epoch;
+
+  /// Monotone sequence within [epoch].
+  final int seq;
+
+  /// Encodes this revision.
+  Map<String, dynamic> toJson() => _$SessionOwnerRevisionToJson(this);
+}
+
+/// Session-level mutable-owner truth. Never grants one socket authority.
+@JsonSerializable(explicitToJson: true)
+class SessionOwnerProjection {
+  /// Creates an owner projection.
+  const SessionOwnerProjection({required this.revision, required this.state});
+
+  /// Decodes an owner projection.
+  factory SessionOwnerProjection.fromJson(Map<String, dynamic> json) =>
+      _$SessionOwnerProjectionFromJson(json);
+
+  /// Monotone owner revision.
+  final SessionOwnerRevision revision;
+
+  /// Current owner kind.
+  @JsonKey(unknownEnumValue: SessionOwnerState.unknown)
+  final SessionOwnerState state;
+
+  /// Encodes this projection.
+  Map<String, dynamic> toJson() => _$SessionOwnerProjectionToJson(this);
+}
+
+/// Prompt authority of one authenticated Session Detail socket.
+enum SessionPromptAuthority {
+  /// No prompt-class input is accepted.
+  @JsonValue('none')
+  none,
+
+  /// Permission/question answers only; no new prompts.
+  @JsonValue('answer-only')
+  answerOnly,
+
+  /// Full prompt-class input.
+  @JsonValue('full')
+  full,
+
+  /// A newer authority kind not known to this client.
+  unknown,
+}
+
+/// Broker-derived mutation authority for one Session Detail connection.
+@JsonSerializable()
+class SessionConnectionAuthority {
+  /// Creates a connection authority projection.
+  const SessionConnectionAuthority({
+    required this.canMutate,
+    required this.prompt,
+  });
+
+  /// Decodes connection authority.
+  factory SessionConnectionAuthority.fromJson(Map<String, dynamic> json) =>
+      _$SessionConnectionAuthorityFromJson(json);
+
+  /// Whether permission/question mutations are accepted.
+  final bool canMutate;
+
+  /// Prompt-class authority.
+  @JsonKey(unknownEnumValue: SessionPromptAuthority.unknown)
+  final SessionPromptAuthority prompt;
+
+  /// Encodes this authority.
+  Map<String, dynamic> toJson() => _$SessionConnectionAuthorityToJson(this);
+}
+
+/// Revision-conditional action for reusing an existing Drive owner.
+@JsonSerializable(explicitToJson: true)
+class SessionJoinExistingAction {
+  /// Creates join-existing metadata.
+  const SessionJoinExistingAction({required this.ownerRevision});
+
+  /// Decodes join-existing metadata.
+  factory SessionJoinExistingAction.fromJson(Map<String, dynamic> json) =>
+      _$SessionJoinExistingActionFromJson(json);
+
+  /// Exact owner revision the join must still match.
+  final SessionOwnerRevision ownerRevision;
+
+  /// Encodes this action.
+  Map<String, dynamic> toJson() => _$SessionJoinExistingActionToJson(this);
+}
+
 /// Current model information for a session.
 @JsonSerializable()
 class SessionCurrentModel {
@@ -308,6 +426,7 @@ class SessionInfo {
     this.updatedAt,
     this.terminalSyncHint,
     this.control,
+    this.sessionOwner,
   });
 
   /// Creates a [SessionInfo] from a JSON map.
@@ -388,6 +507,9 @@ class SessionInfo {
 
   /// Explicit Observe+Drive and True Sync state.
   final SessionControlState? control;
+
+  /// Broker-selected session-level owner truth.
+  final SessionOwnerProjection? sessionOwner;
 
   /// Converts this [SessionInfo] to a JSON map.
   Map<String, dynamic> toJson() => _$SessionInfoToJson(this);

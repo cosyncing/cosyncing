@@ -16,9 +16,16 @@
  * B: with a pinned bridge, a later ?mode=resume ensure() JOINS it (no rival attach()).
  * C: adopt with both a clientless canonical wrapper AND a client-bearing Drive wrapper keeps the
  *    Drive wrapper and disposes the clientless one.
+ * C2: when BOTH wrappers have clients, adoption migrates both subscribers and their runtime targets
+ *     to the one bridge-backed survivor.
+ * C3: terminal handoff refuses while a peer driver remains, then moves the last requester to
+ *     Observe and closes Resume before returning.
  */
 import { Hub } from '../../../../packages/typescript/broker/src/hub.ts';
+import { ClientHandoffSequencer } from '../../../../packages/typescript/broker/src/client-handoff-sequencer.ts';
+import { activeOwnerState, JoinExistingError } from '../../../../packages/typescript/broker/src/session-owner.ts';
 import { AgentRegistry, type AgentMessage, type SessionConnection, type SessionInfo } from '../../../../packages/typescript/adapter-api/src/index.ts';
+import { opencodeControlState } from '../../../../packages/typescript/adapters/opencode/src/index.ts';
 
 let failures = 0;
 const check = (label: string, ok: boolean, extra = '') => {
@@ -41,6 +48,19 @@ function fakeConn(info: SessionInfo): SessionConnection & { closed: boolean; emi
   return conn;
 }
 const info = (id: string, attachMode: string): SessionInfo => ({ id, tool: 'pi', machine: 'test', title: 't', status: 'idle', attachMode } as SessionInfo);
+const controlledInfo = (
+  tool: string,
+  id: string,
+  attachMode: string,
+  driveState: 'driving' | 'observing',
+): SessionInfo => ({
+  ...info(id, attachMode),
+  tool,
+  control: {
+    drive: { supported: true, state: driveState },
+    terminalSync: { supported: false, syncAvailable: false, active: false },
+  },
+} as SessionInfo);
 
 // ── A: adopt folds the Drive wrapper ────────────────────────────────────────────────────────────
 {
@@ -118,6 +138,202 @@ const info = (id: string, attachMode: string): SessionInfo => ({ id, tool: 'pi',
   void mode;
 }
 
+// ── C2: both client-bearing wrappers converge onto the adopted bridge ──────────────────────────
+{
+  const registry = new AgentRegistry();
+  const observeConn = fakeConn(info('s3-both', 'observe'));
+  const driveConn = fakeConn(info('s3-both', 'resume'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => mode === 'resume' ? driveConn : observeConn,
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const observer = await hub.ensure('pi', 's3-both');
+  const driver = await hub.ensure('pi', 's3-both', 'resume');
+  const observeSeen: string[] = [];
+  const driveSeen: string[] = [];
+  let observeTarget = observer;
+  let driveTarget = driver;
+  const observeClient: any = (event: any) => {
+    if (event.kind === 'message') observeSeen.push(event.message?.message);
+  };
+  observeClient.onManagedConnChanged = (next: any) => { observeTarget = next; };
+  const driveClient: any = (event: any) => {
+    if (event.kind === 'message') driveSeen.push(event.message?.message);
+  };
+  driveClient.onManagedConnChanged = (next: any) => { driveTarget = next; };
+  observer.addClient(observeClient);
+  driver.addClient(driveClient);
+
+  const bridgeConn = fakeConn(info('s3-both', 'live'));
+  const adopted = hub.adopt('pi', 's3-both', bridgeConn);
+  bridgeConn.emit({ type: 'notice', message: 'shared terminal event' } as AgentMessage);
+
+  check('C2.1 the client-bearing Drive wrapper remains the bridge-backed survivor', adopted === driver);
+  check('C2.2 both runtime socket targets move to the survivor', observeTarget === adopted && driveTarget === adopted);
+  check('C2.3 both pre-adopt clients receive terminal events',
+    observeSeen.includes('shared terminal event') && driveSeen.includes('shared terminal event'));
+  check('C2.4 the discarded Observe transport and rival Drive process both close',
+    observeConn.closed && driveConn.closed);
+}
+
+// ── C3: terminal handoff refuses peers, then migrates the last Drive client ──────────────
+{
+  const registry = new AgentRegistry();
+  const observeConn = fakeConn(controlledInfo('pi', 's3-handoff', 'observe', 'observing'));
+  const driveConn = fakeConn(controlledInfo('pi', 's3-handoff', 'resume', 'driving'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => mode === 'resume' ? driveConn : observeConn,
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const observer = await hub.ensure('pi', 's3-handoff');
+  const driver = await hub.ensure('pi', 's3-handoff', 'resume');
+  const requesterSeen: string[] = [];
+  let requesterTarget = driver;
+  const requester: any = (event: any) => {
+    if (event.kind === 'message') requesterSeen.push(event.message?.message);
+  };
+  requester.onManagedConnChanged = (next: any) => { requesterTarget = next; };
+  const peer: any = (event: any) => {
+    void event;
+  };
+  driver.addClient(requester);
+  driver.addClient(peer);
+
+  let peerRefusal: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's3-handoff', driver);
+  } catch (error) {
+    peerRefusal = error;
+  }
+  check('C3.1 handoff refuses while another foreground driver remains',
+    peerRefusal instanceof Error && peerRefusal.message.includes('foreground client'));
+  check('C3.2 refusal leaves the shared Resume owner active', !driveConn.closed && requesterTarget === driver);
+
+  driver.removeClient(peer);
+  const handedOff = await hub.handoffToTerminal('pi', 's3-handoff', driver);
+  observeConn.emit({ type: 'notice', message: 'after shared handoff' } as AgentMessage);
+  const projected = hub.sessionDetailFrame(observer, true);
+
+  check('C3.3 last-client handoff returns the terminal-facing Observe wrapper', handedOff === observer);
+  check('C3.4 the requester moves to the Observe authority target', requesterTarget === observer);
+  check('C3.5 the shared Resume owner closes before handoff resolves', driveConn.closed);
+  check('C3.6 the migrated requester receives future Observe events', requesterSeen.includes('after shared handoff'));
+  check('C3.7 owner truth no longer reports Drive', projected.info.sessionOwner?.state === 'none');
+}
+
+// ── C4: a handoff fences new Drive acquisition until its native owner closes ───────────────────
+{
+  let releaseObserver!: () => void;
+  const observerGate = new Promise<void>((resolve) => { releaseObserver = resolve; });
+  let attachCalls = 0;
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's3-handoff-race', 'resume', 'driving'));
+  const observeConn = fakeConn(controlledInfo('pi', 's3-handoff-race', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => {
+      attachCalls++;
+      if (mode === 'resume') return driveConn;
+      await observerGate;
+      return observeConn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's3-handoff-race', 'resume');
+  driver.addClient(() => {});
+  const revision = hub.projectSessionInfo(driver.conn.info).sessionOwner!.revision;
+  const handoff = hub.handoffToTerminal('pi', 's3-handoff-race', driver);
+  await Promise.resolve();
+
+  let restoreBlocked = false;
+  try {
+    await hub.ensure('pi', 's3-handoff-race', 'resume', 'app-restore');
+  } catch {
+    restoreBlocked = true;
+  }
+  let joinCode = '';
+  try {
+    hub.joinExisting('pi', 's3-handoff-race', revision);
+  } catch (error) {
+    joinCode = error instanceof JoinExistingError ? error.code : String(error);
+  }
+  check('C4.1 a reason-tagged Drive attach cannot enter during terminal handoff', restoreBlocked);
+  check('C4.2 join-existing cannot acquire the owner during terminal handoff', joinCode === 'JOIN_OWNER_NOT_FOUND');
+  check('C4.3 fenced acquisitions perform no additional native attach', attachCalls === 2, `attachCalls=${attachCalls}`);
+
+  releaseObserver();
+  await handoff;
+  check('C4.4 the original handoff still closes the one Resume owner', driveConn.closed);
+  await hub.dispose();
+}
+
+// ── C5: a failed native close keeps the registered Drive owner truthful ────────────────────────
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's3-handoff-close-fail', 'resume', 'driving'));
+  driveConn.close = async () => { throw new Error('simulated close failure'); };
+  const observeConn = fakeConn(controlledInfo('pi', 's3-handoff-close-fail', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => mode === 'resume' ? driveConn : observeConn,
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's3-handoff-close-fail', 'resume');
+  let requesterTarget = driver;
+  const requester: any = () => {};
+  requester.onManagedConnChanged = (next: any) => { requesterTarget = next; };
+  driver.addClient(requester);
+
+  let closeFailure: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's3-handoff-close-fail', driver);
+  } catch (error) {
+    closeFailure = error;
+  }
+  const projected = hub.sessionDetailFrame(driver, true);
+  check('C5.1 native close failure is returned to the requester', closeFailure instanceof Error && closeFailure.message.includes('close failure'));
+  check('C5.2 failed close leaves the requester on the registered Drive wrapper', hub.getConn('pi', 's3-handoff-close-fail') === driver && requesterTarget === driver);
+  check('C5.3 failed close never fabricates owner=none', projected.info.sessionOwner?.state === 'drive');
+  await hub.dispose();
+}
+
+// ── C6: same-socket work cannot overlap or cross terminal handoff ───────────────────────────────
+{
+  const sequencer = new ClientHandoffSequencer();
+  const order: string[] = [];
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const first = sequencer.run(async () => {
+    order.push('first-start');
+    await firstGate;
+    order.push('first-end');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check('C6.1 active work is visible so runtime can refuse a late, unbounded handoff', sequencer.hasActiveWork && order.join(',') === 'first-start', `order=${order.join(',')}`);
+  releaseFirst();
+  await first;
+
+  let releaseHandoff!: () => void;
+  const handoffGate = new Promise<void>((resolve) => { releaseHandoff = resolve; });
+  const handoff = sequencer.run(async () => {
+    order.push('handoff-start');
+    await handoffGate;
+    order.push('handoff-end');
+  }, { handoff: true });
+  const after = sequencer.run(async () => { order.push('after'); });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check('C6.2 work accepted after handoff waits for socket retargeting', order.join(',') === 'first-start,first-end,handoff-start', `order=${order.join(',')}`);
+  releaseHandoff();
+  await Promise.all([handoff, after]);
+  check('C6.3 an accepted handoff is exclusive', order.join(',') === 'first-start,first-end,handoff-start,handoff-end,after', `order=${order.join(',')}`);
+}
+
 // ── D: ensure(?mode=resume) joins a bare conn that is ALREADY the driving owner ──────────────────
 // issues-part2 item 14: two app tabs on one opencode serve session. Tab 1 attached bare (the serve
 // conn reports drive:'driving'); tab 2 carried a sticky ?mode=resume — before this fix that minted an
@@ -128,7 +344,10 @@ const info = (id: string, attachMode: string): SessionInfo => ({ id, tool: 'pi',
   const liveInfo: SessionInfo = {
     ...info('s4', 'live'),
     tool: 'opencode',
-    control: { drive: { supported: true, state: 'driving' }, terminalSync: { supported: true, syncAvailable: true, active: false } },
+    control: opencodeControlState({
+      label: 'Sync with OpenCode terminal',
+      command: 'opencode attach http://127.0.0.1:4096 -s s4',
+    }),
   } as SessionInfo;
   registry.register({
     id: 'opencode', displayName: 'OpenCode', capabilities: {} as any,
@@ -138,6 +357,7 @@ const info = (id: string, attachMode: string): SessionInfo => ({ id, tool: 'pi',
   const hub = new Hub(registry, 15000);
   const bare = await hub.ensure('opencode', 's4'); // tab 1: bare attach, driving by default
   const resumed = await hub.ensure('opencode', 's4', 'resume'); // tab 2: sticky resume
+  check('D0 OpenCode shared-live keeps its terminal command on the join path', liveInfo.control?.terminalSync.action === 'join');
   check('D1 resume attach JOINS the bare driving owner (one identity, drafts mirror)', resumed === bare);
   check('D2 no rival run-conn spawned for the resume twin', attachCalls === 1, `attachCalls=${attachCalls}`);
   // The genuine resume flow must still get its own owner: a bare OBSERVE conn is not a driving owner.
@@ -256,6 +476,145 @@ const info = (id: string, attachMode: string): SessionInfo => ({ id, tool: 'pi',
   const resumed = await hub.ensure('codex', 's9', 'resume');
   check('G1 resume attach JOINS the bare live true-sync owner', resumed === bare);
   check('G2 no rival process was spawned for the resume twin', attachCalls === 1, `attachCalls=${attachCalls}`);
+}
+
+// ── H: Codex/Pi Session Detail exposes owner truth separately from socket authority ─────────────
+// A second client first lands on its own Observe connection. The broker advertises the existing
+// Drive owner and a revision-conditional join action, while keeping that Observe socket read-only.
+// Joining reuses the exact ManagedConn and never calls the adapter again.
+{
+  let attachCalls = 0;
+  const registry = new AgentRegistry();
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string, mode?: string) => {
+      attachCalls++;
+      return fakeConn(controlledInfo('pi', id, mode === 'resume' ? 'resume' : 'observe', mode === 'resume' ? 'driving' : 'observing'));
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's10', 'resume');
+  driver.addClient(() => {});
+  const observer = await hub.ensure('pi', 's10');
+  const frame = hub.sessionDetailFrame(observer, true);
+  const revision = frame.joinExisting?.ownerRevision;
+
+  check('H1 Session Detail reports the session-level Drive owner', frame.info.sessionOwner?.state === 'drive');
+  check('H2 the attached Observe socket remains explicitly read-only', frame.authority?.canMutate === false && frame.authority.prompt === 'none');
+  check('H3 a compatible foreground client receives an exact join-existing action', revision !== undefined);
+  const joined = hub.joinExisting('pi', 's10', revision!);
+  check('H4 join-existing reuses the exact active Drive wrapper', joined === driver);
+  check('H5 join-existing performs no native attach', attachCalls === 2, `attachCalls=${attachCalls}`);
+  const concurrent = await Promise.all([
+    Promise.resolve().then(() => hub.joinExisting('pi', 's10', revision!)),
+    Promise.resolve().then(() => hub.joinExisting('pi', 's10', revision!)),
+  ]);
+  check('H6 concurrent joins converge on one owner', concurrent[0] === driver && concurrent[1] === driver && attachCalls === 2);
+
+  let staleCode = '';
+  try {
+    hub.joinExisting('pi', 's10', { ...revision!, seq: revision!.seq + 1 });
+  } catch (error) {
+    staleCode = error instanceof JoinExistingError ? error.code : String(error);
+  }
+  check('H7 a stale owner revision fails closed', staleCode === 'JOIN_OWNER_STALE', `code=${staleCode}`);
+  check('H8 stale join performs no native attach', attachCalls === 2, `attachCalls=${attachCalls}`);
+
+  let genericJoinRejected = false;
+  try {
+    await hub.ensure('pi', 's10', 'resume', 'join-existing');
+  } catch {
+    genericJoinRejected = true;
+  }
+  check('H8b generic ensure cannot route join-existing into native attach',
+    genericJoinRejected && attachCalls === 2, `attachCalls=${attachCalls}`);
+
+  const replacement = fakeConn(controlledInfo('pi', 's10', 'resume', 'driving'));
+  const adopted = hub.adopt('pi', 's10', replacement);
+  const replacementFrame = hub.sessionDetailFrame(observer, true);
+  check('H9 replacing the native owner advances its revision even when state stays Drive',
+    adopted === driver
+      && replacementFrame.info.sessionOwner!.revision.seq > revision!.seq,
+    `before=${revision!.seq}, after=${replacementFrame.info.sessionOwner?.revision.seq}`);
+  let replacedCode = '';
+  try {
+    hub.joinExisting('pi', 's10', revision!);
+  } catch (error) {
+    replacedCode = error instanceof JoinExistingError ? error.code : String(error);
+  }
+  check('H10 a pre-replacement join is stale', replacedCode === 'JOIN_OWNER_STALE', `code=${replacedCode}`);
+}
+
+// ── I: Claude remains one-foreground-owner; no cross-client join action is advertised ───────────
+{
+  let attachCalls = 0;
+  const registry = new AgentRegistry();
+  registry.register({
+    id: 'claude', displayName: 'Claude Code', capabilities: { supportsCrossClientDriveSharing: false } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string, mode?: string) => {
+      attachCalls++;
+      return fakeConn(controlledInfo('claude', id, mode === 'resume' ? 'resume' : 'observe', mode === 'resume' ? 'driving' : 'observing'));
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  await hub.ensure('claude', 's11', 'resume');
+  const observer = await hub.ensure('claude', 's11');
+  const frame = hub.sessionDetailFrame(observer, true);
+  check('I1 Claude still publishes the existing owner truth', frame.info.sessionOwner?.state === 'drive');
+  check('I2 Claude Observe remains read-only', frame.authority?.canMutate === false);
+  check('I3 Claude receives no join-existing action', frame.joinExisting === undefined);
+  let unsupportedCode = '';
+  try {
+    hub.joinExisting('claude', 's11', frame.info.sessionOwner!.revision);
+  } catch (error) {
+    unsupportedCode = error instanceof JoinExistingError ? error.code : String(error);
+  }
+  check('I4 direct Claude join fails closed without native attach', unsupportedCode === 'JOIN_NOT_SUPPORTED' && attachCalls === 2,
+    `code=${unsupportedCode}, attachCalls=${attachCalls}`);
+}
+
+// ── J: attach mode is not owner proof, and owner disappearance is pushed to observers ───────────
+{
+  check('J1 attachMode=resume without active control is not an owner', activeOwnerState(info('mode-only-resume', 'resume')) === undefined);
+  check('J2 attachMode=live without active control is not an owner', activeOwnerState(info('mode-only-live', 'live')) === undefined);
+
+  let attachCalls = 0;
+  const registry = new AgentRegistry();
+  registry.register({
+    id: 'codex', displayName: 'Codex', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string, mode?: string) => {
+      attachCalls++;
+      return fakeConn(controlledInfo('codex', id, mode === 'resume' ? 'resume' : 'observe', mode === 'resume' ? 'driving' : 'observing'));
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('codex', 's12', 'resume');
+  const observer = await hub.ensure('codex', 's12');
+  const seen: any[] = [];
+  observer.addClient((event: any) => {
+    if (event.kind === 'session') seen.push(event.info.sessionOwner);
+  });
+  const before = hub.sessionDetailFrame(observer, true);
+  driver.updateInfo(controlledInfo('codex', 's12', 'resume', 'observing'));
+  const after = hub.sessionDetailFrame(observer, true);
+  check('J3 losing Drive republishes authoritative owner=none to matching observers',
+    after.info.sessionOwner?.state === 'none'
+      && after.info.sessionOwner.revision.seq > before.info.sessionOwner!.revision.seq
+      && seen.some((owner) => owner?.state === 'none'));
+  check('J4 roster/detail projection reads the same owner revision',
+    hub.projectSessionInfo(observer.conn.info).sessionOwner?.revision.seq === after.info.sessionOwner?.revision.seq);
+  let missingCode = '';
+  try {
+    hub.joinExisting('codex', 's12', before.joinExisting!.ownerRevision);
+  } catch (error) {
+    missingCode = error instanceof JoinExistingError ? error.code : String(error);
+  }
+  check('J5 a disappeared owner fails as not-found without native attach',
+    missingCode === 'JOIN_OWNER_NOT_FOUND' && attachCalls === 2,
+    `code=${missingCode}, attachCalls=${attachCalls}`);
 }
 
 console.log(failures ? `\nFAIL: ${failures} check(s) failed.` : '\nAll hub mode-fold checks passed.');

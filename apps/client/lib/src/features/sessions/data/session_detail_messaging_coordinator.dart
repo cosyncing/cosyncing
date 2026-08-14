@@ -26,7 +26,7 @@ extension _SessionDetailMessaging on SessionDetailController {
         connection != null &&
         state.connectionStatus == SessionDetailConnectionStatus.connected &&
         !state.compatibilityReadOnly &&
-        SessionControlView.fromSessionInfo(state.sessionInfo).canPrompt;
+        SessionControlView.fromSessionDetailState(state).canPrompt;
     if (!mutable) {
       return SessionInterruptOutcome.unavailable;
     }
@@ -267,7 +267,7 @@ extension _SessionDetailMessaging on SessionDetailController {
       return false;
     }
     final connection = _connection;
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected ||
         !control.canPrompt) {
@@ -308,7 +308,7 @@ extension _SessionDetailMessaging on SessionDetailController {
       return false;
     }
     final connection = _connection;
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected ||
         !control.canPrompt) {
@@ -502,7 +502,7 @@ extension _SessionDetailMessaging on SessionDetailController {
       );
       return false;
     }
-    if (!SessionControlView.fromSessionInfo(state.sessionInfo).canPrompt) {
+    if (!SessionControlView.fromSessionDetailState(state).canPrompt) {
       state = state.copyWith(
         error:
             'Action commands require a prompt-capable Drive or sync session.',

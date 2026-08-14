@@ -1399,6 +1399,7 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   int rejectQuestionCount = 0;
   int sendCommandCount = 0;
   int sendFileCount = 0;
+  int sendHandoffCount = 0;
   int disposeCount = 0;
   String? lastPrompt;
   String? lastDraft;
@@ -1460,7 +1461,11 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   }
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     reattachModes.add(mode);
     reattachReasons.add(reason);
     _setState(SessionDetailConnectionStatus.connecting);
@@ -1473,6 +1478,34 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   @override
   void disarmDriveAuthority() {
     disarmDriveAuthorityCount++;
+  }
+
+  @override
+  Future<void> sendHandoff({String? clientMessageId}) async {
+    sendHandoffCount++;
+    _eventController.add(
+      SessionWireEvent(
+        info: SessionInfo.fromJson({
+          'id': 'session-1',
+          'tool': 'claude',
+          'title': 'Control test',
+          'status': 'idle',
+          'attachMode': 'observe',
+          'control': {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          'sessionOwner': {
+            'revision': {'epoch': 'handoff-test', 'seq': 1},
+            'state': 'none',
+          },
+        }),
+      ),
+    );
   }
 
   void emitState(SessionDetailConnectionStatus state) => _setState(state);

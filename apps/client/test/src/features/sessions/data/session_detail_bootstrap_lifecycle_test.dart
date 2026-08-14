@@ -78,7 +78,11 @@ class HeldReattachSessionDetailConnection extends FakeSessionDetailConnection {
   final releaseReattach = Completer<void>();
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     reattachModes.add(mode);
     reattachReasons.add(reason);
     emitState(SessionDetailConnectionStatus.connecting);

@@ -629,6 +629,7 @@ class FakeSessionDetailConnection
   int disposeCount = 0;
   final List<String?> reattachModes = [];
   final List<String?> reattachReasons = [];
+  final List<SessionOwnerRevision?> reattachOwnerRevisions = [];
   int disarmDriveAuthorityCount = 0;
   int sendPromptCount = 0;
   int sendDraftCount = 0;
@@ -652,6 +653,7 @@ class FakeSessionDetailConnection
   int rejectQuestionCount = 0;
   int sendCommandCount = 0;
   int sendFileCount = 0;
+  int sendHandoffCount = 0;
   bool? lastReconnect;
   bool failNextPrompt = false;
   bool failNextPermissionDecision = false;
@@ -687,6 +689,7 @@ class FakeSessionDetailConnection
   String? lastFileName;
   String? lastFileData;
   String? lastFileMimeType;
+  String? lastHandoffClientMessageId;
   String? lastPermissionDecisionRequestId;
   String? lastPermissionDecision;
   String? lastSetAgent;
@@ -741,9 +744,14 @@ class FakeSessionDetailConnection
   }
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     reattachModes.add(mode);
     reattachReasons.add(reason);
+    reattachOwnerRevisions.add(ownerRevision);
     if (failNextReattach) {
       failNextReattach = false;
       throw Exception('reattach failed');
@@ -757,9 +765,18 @@ class FakeSessionDetailConnection
     disarmDriveAuthorityCount++;
   }
 
+  @override
+  Future<void> sendHandoff({String? clientMessageId}) async {
+    sendHandoffCount++;
+    lastHandoffClientMessageId = clientMessageId;
+  }
+
   void emitSessionControl(
     Map<String, dynamic> control, {
     String status = 'idle',
+    SessionOwnerProjection? sessionOwner,
+    SessionConnectionAuthority? authority,
+    SessionJoinExistingAction? joinExisting,
   }) {
     emitEvent(
       SessionWireEvent(
@@ -770,7 +787,10 @@ class FakeSessionDetailConnection
           'status': status,
           'attachMode': 'observe',
           'control': control,
+          if (sessionOwner != null) 'sessionOwner': sessionOwner.toJson(),
         }),
+        authority: authority,
+        joinExisting: joinExisting,
       ),
     );
   }

@@ -517,7 +517,11 @@ final class _LifecycleConnection extends FakeSessionDetailConnection {
   }
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     await super.reattach(mode: mode, reason: reason);
     _publishBootstrap(driving: mode == 'resume');
   }

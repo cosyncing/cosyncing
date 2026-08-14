@@ -525,9 +525,9 @@ void main() {
       );
     });
 
-    test('BROKER_ERROR_CODES has 99 entries and typed readiness failures', () {
+    test('BROKER_ERROR_CODES has 102 entries and typed control failures', () {
       final codes = _registryFromSnapshot(snapshotSource, 'BROKER_ERROR_CODES');
-      expect(codes, hasLength(99));
+      expect(codes, hasLength(102));
       expect(codes, isNot(contains('DUPLICATE_CLIENT_MESSAGE_ID')));
       expect(
         codes,
@@ -543,6 +543,9 @@ void main() {
           'DRIVE_OWNERSHIP_UNKNOWN',
           'DRIVE_NATIVE_SESSION_UNRESUMABLE',
           'DRIVE_RESTORE_FAILED',
+          'JOIN_OWNER_NOT_FOUND',
+          'JOIN_OWNER_STALE',
+          'JOIN_NOT_SUPPORTED',
           'HISTORY_PAGE_RESOURCE_LIMIT',
           // H1b: a source that moved while it was indexed is retriable, and is
           // reported separately from a measured resource limit.
@@ -565,7 +568,7 @@ void main() {
           'SESSION_AGENT_OWNED',
         ]),
       );
-      expect(brokerErrorCodes, hasLength(99));
+      expect(brokerErrorCodes, hasLength(102));
     });
 
     test('ack and nack are typed wire frame and client message kinds', () {

@@ -1331,7 +1331,11 @@ final class _CancellableAttachConnection extends FakeSessionDetailConnection {
   Future<void> connect() => _beginAttempt();
 
   @override
-  Future<void> reattach({String? mode, String? reason}) {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) {
     reattachModes.add(mode);
     reattachReasons.add(reason);
     return _beginAttempt();

@@ -26,15 +26,12 @@ export type AttachMode =
   | 'resume' // continue a saved session as a broker-owned process
   | 'observe'; // read-only transcript tail; always available, zero-config
 
-/** Why an authenticated client is asking for a `mode=resume` attach. Additive: a
- *  mode-only attach (no reason) keeps the pre-existing hard-fail behavior. With a
- *  reason, the broker arbitrates ownership atomically at the attach boundary and
- *  answers a denied restore with a structured `attach-conflict` frame plus an
- *  Observe fallback on the same socket instead of a generic socket failure. */
+/** Why an authenticated client is asking for a `mode=resume` attach. */
 export const DRIVE_ATTACH_REASONS = [
   'create', // first attach of a session the app just created (broker-issued one-shot intent)
   'app-restore', // reopen from the durable app-created control preference (no TTL)
   'lease-restore', // reopen a terminal-created session inside the 30-minute takeover lease
+  'join-existing', // join the exact app-owned Drive connection named by an owner revision
   'takeover', // an explicit, user-confirmed Take over
 ] as const;
 
@@ -1293,6 +1290,9 @@ export const BROKER_ERROR_CODES = [
   'DRIVE_OWNERSHIP_UNKNOWN',
   'DRIVE_NATIVE_SESSION_UNRESUMABLE',
   'DRIVE_RESTORE_FAILED',
+  'JOIN_OWNER_NOT_FOUND',
+  'JOIN_OWNER_STALE',
+  'JOIN_NOT_SUPPORTED',
   'SCHEDULE_CRON_INVALID',
   'SCHEDULE_INVALID',
   'SCHEDULE_INVALID_STATE',
@@ -1339,6 +1339,7 @@ export const BROKER_CLIENT_MESSAGE_KINDS = [
   'reject-question',
   'command',
   'set-agent',
+  'handoff',
   'ack',
   'nack',
 ] as const;
@@ -1378,6 +1379,9 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * Revision 12 adds `DRIVE_OWNERSHIP_UNKNOWN` and
  * `DRIVE_NATIVE_SESSION_UNRESUMABLE` so reason-tagged Drive refusals preserve
  * their distinct ownership and native-capability meanings end to end.
+ * Revision 13 separates session-level owner truth from connection-local
+ * mutation authority, adds revision-conditional existing-Drive joins, and
+ * gives terminal handoff an acknowledged client message.
  * The registry-derived {@link BROKER_CONTRACT_SURFACE_HASH} does not move for
  * the revision-10 additions: none adds a route, frame kind, message type or
  * error code, which is
@@ -1386,7 +1390,7 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * compatible, so the client minimum does not move. Raise the minimum only
  * after every supported store client has crossed the corresponding revision.
  */
-export const BROKER_CONTRACT_REVISION = 12 as const;
+export const BROKER_CONTRACT_REVISION = 13 as const;
 export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 0 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 
@@ -1813,6 +1817,9 @@ export interface AgentCapabilities {
   supportsObserve: boolean;
   supportsResume: boolean;
   supportsLiveAttach: boolean;
+  /** An authenticated foreground client may reuse an existing broker-owned Drive connection.
+   *  Optional and false by default so older/third-party adapters never gain sharing implicitly. */
+  supportsCrossClientDriveSharing?: boolean;
   /** Agent has a native "send file to user" signal (vs filesystem-detect only). */
   supportsNativeArtifact: boolean;
   /** Accepts native binary/image input (vs path-reference fallback only). */
@@ -1917,6 +1924,29 @@ export interface SessionControlState {
   terminalSync: SessionTerminalSync;
 }
 
+/** One broker-process owner-projection revision. Sequence values compare only within one epoch. */
+export interface SessionOwnerRevision {
+  epoch: string;
+  seq: number;
+}
+
+/** Session-level mutable-owner truth. This is display/discovery state, never socket authority. */
+export interface SessionOwnerProjection {
+  revision: SessionOwnerRevision;
+  state: 'none' | 'drive' | 'terminal-sync';
+}
+
+/** Mutation authority of one authenticated Session Detail socket. */
+export interface SessionConnectionAuthority {
+  canMutate: boolean;
+  prompt: 'none' | 'answer-only' | 'full';
+}
+
+/** Foreground action metadata for reusing the exact Drive owner the client observed. */
+export interface SessionJoinExistingAction {
+  ownerRevision: SessionOwnerRevision;
+}
+
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
 export interface SessionInfo {
@@ -1981,6 +2011,8 @@ export interface SessionInfo {
   terminalSyncHint?: { label: string; command: string; note?: string };
   /** Explicit Observe+Drive and True Sync state. New UI should prefer this over attachMode. */
   control?: SessionControlState;
+  /** Broker-derived session owner truth. Absence means unsupported/unknown; `none` is authoritative. */
+  sessionOwner?: SessionOwnerProjection;
 }
 
 /**

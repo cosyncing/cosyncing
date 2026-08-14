@@ -154,6 +154,95 @@ void main() {
       expect(view.canMutate, isFalse);
     });
 
+    test(
+      'shareable remote Drive is truthful but keeps this socket read-only',
+      () {
+        const revision = SessionOwnerRevision(epoch: 'broker-1', seq: 3);
+        final view = SessionControlView.fromSessionDetail(
+          info: SessionInfo(
+            id: 'session-1',
+            tool: 'pi',
+            title: 'Shared Pi session',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+            control: _control(driveState: DriveState.observing),
+            sessionOwner: const SessionOwnerProjection(
+              revision: revision,
+              state: SessionOwnerState.drive,
+            ),
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+          joinExisting: const SessionJoinExistingAction(
+            ownerRevision: revision,
+          ),
+        );
+
+        expect(view.pill, SessionControlPill.driverActive);
+        expect(view.action, SessionControlAction.none);
+        expect(view.canMutate, isFalse);
+        expect(view.canPrompt, isFalse);
+        expect(view.canTakeOver, isFalse);
+      },
+    );
+
+    test('Claude-shaped Observe remains unchanged without a join action', () {
+      final view = SessionControlView.fromSessionDetail(
+        info: SessionInfo(
+          id: 'session-1',
+          tool: 'claude',
+          title: 'Claude session',
+          status: SessionStatus.idle,
+          attachMode: AttachMode.observe,
+          control: _control(driveState: DriveState.observing),
+          sessionOwner: const SessionOwnerProjection(
+            revision: SessionOwnerRevision(epoch: 'broker-1', seq: 3),
+            state: SessionOwnerState.drive,
+          ),
+        ),
+        authority: const SessionConnectionAuthority(
+          canMutate: false,
+          prompt: SessionPromptAuthority.none,
+        ),
+        joinExisting: null,
+      );
+
+      expect(view.pill, SessionControlPill.observing);
+      expect(view.action, SessionControlAction.takeOver);
+      expect(view.canMutate, isFalse);
+      expect(view.canPrompt, isFalse);
+    });
+
+    test('explicit socket authority overrides stale local Driving control', () {
+      const revision = SessionOwnerRevision(epoch: 'broker-1', seq: 4);
+      final view = SessionControlView.fromSessionDetail(
+        info: SessionInfo(
+          id: 'session-1',
+          tool: 'codex',
+          title: 'Codex session',
+          status: SessionStatus.idle,
+          attachMode: AttachMode.observe,
+          control: _control(driveState: DriveState.driving),
+          sessionOwner: const SessionOwnerProjection(
+            revision: revision,
+            state: SessionOwnerState.drive,
+          ),
+        ),
+        authority: const SessionConnectionAuthority(
+          canMutate: false,
+          prompt: SessionPromptAuthority.none,
+        ),
+        joinExisting: const SessionJoinExistingAction(
+          ownerRevision: revision,
+        ),
+      );
+
+      expect(view.pill, SessionControlPill.driverActive);
+      expect(view.canPrompt, isFalse);
+    });
+
     test('neither provable: disabled with reason', () {
       final view = SessionControlView.fromControl(
         _control(

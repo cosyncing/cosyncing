@@ -151,6 +151,16 @@ void main() {
       );
     });
 
+    test('handoff requires a stable client message id', () {
+      expect(
+        OutboundFrame.handoff(clientMessageId: 'cm-handoff'),
+        <String, dynamic>{
+          'kind': 'handoff',
+          'clientMessageId': 'cm-handoff',
+        },
+      );
+    });
+
     test('answer creates correct frame with string[][]', () {
       final frame = OutboundFrame.answer('req-2', [
         ['yes'],

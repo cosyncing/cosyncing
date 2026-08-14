@@ -1,9 +1,10 @@
 import 'package:broker_client/broker_client.dart';
+import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=12&minimumBrokerRevision=2&'
-    'contractSurfaceHash=fnv1a32%3Af2eb77a8';
+    'clientVersion=0.0.0-dev&contractRevision=13&minimumBrokerRevision=2&'
+    'contractSurfaceHash=fnv1a32%3A095f3c3c';
 
 void main() {
   group('EndpointResolver', () {
@@ -363,6 +364,33 @@ void main() {
           ),
           'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?$_identityQuery',
         );
+      });
+
+      test('includes owner revision only for join-existing', () {
+        const revision = SessionOwnerRevision(epoch: 'broker/epoch', seq: 9);
+        final join = Uri.parse(
+          resolver.streamEndpoint(
+            'pi',
+            'session-123',
+            mode: 'resume',
+            reason: 'join-existing',
+            ownerRevision: revision,
+          ),
+        ).queryParameters;
+        expect(join['ownerEpoch'], 'broker/epoch');
+        expect(join['ownerSeq'], '9');
+
+        final restore = Uri.parse(
+          resolver.streamEndpoint(
+            'pi',
+            'session-123',
+            mode: 'resume',
+            reason: 'app-restore',
+            ownerRevision: revision,
+          ),
+        ).queryParameters;
+        expect(restore.containsKey('ownerEpoch'), isFalse);
+        expect(restore.containsKey('ownerSeq'), isFalse);
       });
 
       test('includes since query param', () {

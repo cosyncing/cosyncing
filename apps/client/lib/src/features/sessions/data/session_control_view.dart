@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/sessions/data/session_detail_state.dart';
 
 /// The single ownership fact surfaced as one status pill (the oracle's §1
 /// "what the user sees" row).
@@ -13,6 +14,9 @@ enum SessionControlPill {
 
   /// `drive.state == driving` — the app owns an app-side continuation.
   driving,
+
+  /// A shareable app Drive owner exists, but this socket remains read-only.
+  driverActive,
 
   /// `terminalSync.syncAvailable && !active` — joinable now or via one command.
   syncAvailable,
@@ -78,6 +82,28 @@ class SessionControlView {
       SessionControlView.fromControl(
         info?.control,
         launchSurface: info?.launchSurface,
+        sessionOwner: info?.sessionOwner,
+      );
+
+  /// Derives a detail view using broker-projected socket authority/action data.
+  factory SessionControlView.fromSessionDetail({
+    required SessionInfo? info,
+    required SessionConnectionAuthority? authority,
+    required SessionJoinExistingAction? joinExisting,
+  }) => SessionControlView.fromControl(
+    info?.control,
+    launchSurface: info?.launchSurface,
+    sessionOwner: info?.sessionOwner,
+    authority: authority,
+    joinExisting: joinExisting,
+  );
+
+  /// Derives the complete Session Detail view from connection-qualified state.
+  factory SessionControlView.fromSessionDetailState(SessionDetailState state) =>
+      SessionControlView.fromSessionDetail(
+        info: state.sessionInfo,
+        authority: state.connectionAuthority,
+        joinExisting: state.joinExisting,
       );
 
   /// Derives the view from the raw [SessionControlState].
@@ -88,6 +114,9 @@ class SessionControlView {
   factory SessionControlView.fromControl(
     SessionControlState? control, {
     SessionLaunchSurface? launchSurface,
+    SessionOwnerProjection? sessionOwner,
+    SessionConnectionAuthority? authority,
+    SessionJoinExistingAction? joinExisting,
   }) {
     if (control == null) {
       return const SessionControlView(
@@ -110,25 +139,41 @@ class SessionControlView {
     // card kinds (approve/answer/reject-question) ride the broader canMutate.
     final driveMutable = drive.supported && driving;
     final syncMutable = sync.supported && sync.active;
-    final answerOnly = syncMutable && sync.input == _answerOnly;
-    final canMutate = driveMutable || syncMutable;
-    final canPrompt = driveMutable || (syncMutable && !answerOnly);
+    final legacyAnswerOnly = syncMutable && sync.input == _answerOnly;
+    final canMutate = authority?.canMutate ?? (driveMutable || syncMutable);
+    final canPrompt = authority == null
+        ? driveMutable || (syncMutable && !legacyAnswerOnly)
+        : authority.canMutate &&
+              authority.prompt == SessionPromptAuthority.full;
+    final answerOnly = authority == null
+        ? legacyAnswerOnly
+        : authority.canMutate &&
+              authority.prompt == SessionPromptAuthority.answerOnly;
+    final syncActiveHere = syncMutable && (authority == null || canMutate);
+    final driveActiveHere = driveMutable && (authority == null || canPrompt);
+    final shareableDriverActive =
+        !canMutate &&
+        joinExisting != null &&
+        sessionOwner?.state == SessionOwnerState.drive;
 
     // Precedence (oracle): sync-active > driving > sync-available > observing
     // > neither. Sync and Drive are mutually exclusive display states.
     final SessionControlPill pill;
     final SessionControlAction action;
-    if (syncMutable) {
+    if (syncActiveHere) {
       // Synced shows no button; the composer is live unless answer-only, in
       // which case the cards stay actionable but the composer is gated off.
       pill = SessionControlPill.synced;
       action = SessionControlAction.none;
-    } else if (driveMutable) {
+    } else if (driveActiveHere) {
       pill = SessionControlPill.driving;
       // Older brokers omit the additive terminal action. Preserve the
       // established Drive behavior in that case: copying the resume command
       // hands ownership back to the terminal.
       action = terminalAction ?? SessionControlAction.handoff;
+    } else if (shareableDriverActive) {
+      pill = SessionControlPill.driverActive;
+      action = SessionControlAction.none;
     } else if (sync.supported && sync.syncAvailable) {
       pill = SessionControlPill.syncAvailable;
       action = terminalAction ?? SessionControlAction.join;
@@ -153,7 +198,8 @@ class SessionControlView {
       // availability is a capability, not ownership; it must never leave
       // Join as the only path (CR1).
       canTakeOver:
-          !syncMutable &&
+          !syncActiveHere &&
+          !shareableDriverActive &&
           drive.supported &&
           drive.state == DriveState.observing,
       reason: drive.reason ?? sync.reason,

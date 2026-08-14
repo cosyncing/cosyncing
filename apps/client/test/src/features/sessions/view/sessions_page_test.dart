@@ -1289,10 +1289,17 @@ class _NeverConnectsSessionDetailConnection implements SessionDetailConnection {
   Future<void> close({bool reconnect = false}) async {}
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {}
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {}
 
   @override
   void disarmDriveAuthority() {}
+
+  @override
+  Future<void> sendHandoff({String? clientMessageId}) async {}
 
   @override
   Future<void> connect() async {}

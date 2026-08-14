@@ -68,7 +68,7 @@ void main() {
       required bool hasCommand,
       required String action,
       required bool optionalBeforeSheet,
-      required bool expectReattachNull,
+      required bool expectHandoff,
       String? launchSurface,
       bool? behind,
       String? label,
@@ -135,7 +135,8 @@ void main() {
           find.byKey(const Key('session-detail-status-copy-command')),
         );
         await tester.pumpAndSettle();
-        expect(connection.reattachModes, expectReattachNull ? [null] : isEmpty);
+        expect(connection.reattachModes, isEmpty);
+        expect(connection.sendHandoffCount, expectHandoff ? 1 : 0);
       }
     }
 
@@ -377,7 +378,7 @@ void main() {
           status: null,
           hasCommand: false,
           action: 'join',
-          expectReattachNull: false,
+          expectHandoff: false,
           optionalBeforeSheet: false,
         );
       },
@@ -394,7 +395,7 @@ void main() {
           hasCommand: true,
           action: 'join',
           launchSurface: 'app',
-          expectReattachNull: false,
+          expectHandoff: false,
           optionalBeforeSheet: true,
         );
       },
@@ -409,7 +410,7 @@ void main() {
           status: null,
           hasCommand: true,
           action: 'join',
-          expectReattachNull: false,
+          expectHandoff: false,
           optionalBeforeSheet: false,
         );
       },
@@ -425,7 +426,7 @@ void main() {
           hasCommand: true,
           action: 'join',
           behind: true,
-          expectReattachNull: false,
+          expectHandoff: false,
           optionalBeforeSheet: false,
         );
       },
@@ -441,7 +442,7 @@ void main() {
           hasCommand: true,
           action: 'handoff',
           label: 'Resume in terminal',
-          expectReattachNull: true,
+          expectHandoff: true,
           optionalBeforeSheet: false,
         );
       },
@@ -1414,7 +1415,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(connection.reattachModes, [null]);
+      expect(connection.reattachModes, isEmpty);
+      expect(connection.sendHandoffCount, 1);
+      expect(connection.disarmDriveAuthorityCount, 1);
     });
 
     testWidgets('failed clipboard write does not hand control back', (
@@ -1521,7 +1524,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(connection.reattachModes, [null]);
+      expect(connection.reattachModes, isEmpty);
+      expect(connection.sendHandoffCount, 1);
+      expect(connection.disarmDriveAuthorityCount, 1);
     });
 
     testWidgets('ownership actions disable while the stream reconnects', (

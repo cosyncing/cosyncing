@@ -60,6 +60,33 @@ enum SessionDetailAttachIntent {
   interactive,
 }
 
+SessionInfo _admitSessionOwnerProjection(
+  SessionInfo? previous,
+  SessionInfo incoming,
+) {
+  final held = previous?.sessionOwner;
+  final next = incoming.sessionOwner;
+  if (held == null) return incoming;
+  if (next != null &&
+      (held.revision.epoch != next.revision.epoch ||
+          next.revision.seq >= held.revision.seq)) {
+    return incoming;
+  }
+  return SessionInfo.fromJson({
+    ...incoming.toJson(),
+    'sessionOwner': held.toJson(),
+  });
+}
+
+bool _joinMatchesOwner(
+  SessionJoinExistingAction? action,
+  SessionOwnerProjection? owner,
+) =>
+    action != null &&
+    owner != null &&
+    action.ownerRevision.epoch == owner.revision.epoch &&
+    action.ownerRevision.seq == owner.revision.seq;
+
 /// Controller for one live session detail shell.
 ///
 /// Owns the [SessionDetailConnection] lifecycle and exposes only typed
@@ -79,10 +106,13 @@ class SessionDetailController
   Completer<bool>? _attachmentPromptResult;
 
   /// The drive-attach reason of the in-flight/last resume request (`create`,
-  /// `app-restore`, `lease-restore`, or `takeover`); null when no Drive was
-  /// requested. Settled by the broker's arbitration answer.
+  /// `app-restore`, `lease-restore`, `join-existing`, or `takeover`); null when
+  /// no Drive was requested. Settled by the broker's arbitration answer.
   String? _requestedDriveReason;
+  String? _lastJoinExistingRevision;
   Completer<bool>? _takeoverResult;
+  Completer<bool>? _handoffResult;
+  String? _handoffClientMessageId;
 
   /// The exact broker — (profile, endpoint) — this connection was established
   /// against, and the ONE provenance this controller holds.
@@ -275,6 +305,7 @@ class SessionDetailController
       }
       unawaited(_localDraftSubscription?.cancel());
       _completeTakeover(false);
+      _completeHandoff(false);
       unawaited(_stateSub?.cancel());
       unawaited(_eventSub?.cancel());
       final connection = _connection;
@@ -447,6 +478,7 @@ class SessionDetailController
     _clearHistoryPageTracking();
     _requestedDriveReason = null;
     _establishedAttachIntent = null;
+    _lastJoinExistingRevision = null;
 
     final previousStateSub = _stateSub;
     final previousEventSub = _eventSub;
@@ -521,6 +553,10 @@ class SessionDetailController
       // stream. It does not change broker authority and therefore needs no
       // socket reset, history bootstrap, or replay.
       _establishedAttachIntent = SessionDetailAttachIntent.interactive;
+      final joinExisting = state.joinExisting;
+      if (joinExisting != null) {
+        await _joinExistingDriver(joinExisting);
+      }
       return;
     }
 
@@ -568,6 +604,62 @@ class SessionDetailController
       ? kDriveAttachReasonCreate
       : _driveRestoreReason(source.storageKey);
 
+  Future<void> _joinExistingDriver(
+    SessionJoinExistingAction action,
+  ) async {
+    final intent = _attachInFlightIntent ?? _establishedAttachIntent;
+    final connection = _connection;
+    final revision = action.ownerRevision;
+    final revisionKey = '${revision.epoch}:${revision.seq}';
+    if (_disposed ||
+        intent != SessionDetailAttachIntent.interactive ||
+        connection == null ||
+        state.connectionStatus != SessionDetailConnectionStatus.connected ||
+        state.compatibilityReadOnly ||
+        (state.connectionAuthority?.canMutate ?? false) ||
+        _lastJoinExistingRevision == revisionKey) {
+      return;
+    }
+    _lastJoinExistingRevision = revisionKey;
+    _requestedDriveReason = kDriveAttachReasonJoinExisting;
+    state = state.copyWith(
+      driveRestorePhase: SessionDriveRestorePhase.restoring,
+      clearDriveRestoreConflict: true,
+      clearError: true,
+    );
+    try {
+      // Retryable mutations were authored under an earlier socket/owner
+      // generation. They carry no owner revision, so replaying them after a
+      // join could send an old prompt into another client's current driver.
+      await _retireRetryableOutboxForControlChange();
+      if (_disposed ||
+          !identical(_connection, connection) ||
+          (_attachInFlightIntent ?? _establishedAttachIntent) !=
+              SessionDetailAttachIntent.interactive) {
+        return;
+      }
+      await connection.reattach(
+        mode: 'resume',
+        reason: kDriveAttachReasonJoinExisting,
+        ownerRevision: revision,
+      );
+      if (_disposed || !identical(_connection, connection)) return;
+      state = state.copyWith(connectionStatus: connection.state);
+    } on Object catch (error) {
+      if (!identical(_connection, connection)) return;
+      _requestedDriveReason = null;
+      connection.disarmDriveAuthority();
+      state = state.copyWith(
+        connectionStatus: connection.state,
+        driveRestorePhase: SessionDriveRestorePhase.idle,
+        error: userFacingMessage(
+          error,
+          lead: "Couldn't restore control of this session.",
+        ),
+      );
+    }
+  }
+
   Future<void> _resetConnectionForProfileSwitch() async {
     // Fields are taken and cleared BEFORE any await for the same reason as in
     // `_listen`: a superseding attach may interleave with a superseded body,
@@ -579,6 +671,7 @@ class SessionDetailController
     _eventSub = null;
     _connection = null;
     _establishedAttachIntent = null;
+    _lastJoinExistingRevision = null;
     // Cancels are fire-and-forget. Removing a broadcast listener takes effect
     // synchronously; the returned future is only the RETIRED subscription's
     // teardown ceremony, and nothing owned by the retired broker may delay
@@ -690,6 +783,7 @@ class SessionDetailController
     _stopBootstrapForManualDisconnect();
     _requestedDriveReason = null;
     _establishedAttachIntent = null;
+    _lastJoinExistingRevision = null;
     await _clearDriveIntentBestEffort();
     final connection = _connection;
     if (connection == null) {
@@ -715,7 +809,7 @@ class SessionDetailController
   /// `willFork`); the caller must show the confirm first. No-op when detached.
   Future<bool> takeOver() async {
     final connection = _connection;
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
@@ -811,13 +905,13 @@ class SessionDetailController
     }
   }
 
-  /// Hands control back to the terminal: re-attaches in Observe mode so the
-  /// broker-owned drive process stops contesting ownership (the un-drive
-  /// mechanic invoked when the user copies the resync command). No-op if not
-  /// attached.
+  /// Hands control back to the terminal when this is the sole foreground
+  /// Drive client. The broker refuses while a peer still shares the owner;
+  /// on success it migrates this socket to Observe and closes Resume before
+  /// publishing confirmation.
   Future<bool> handoffToTerminal() async {
     final connection = _connection;
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
@@ -841,15 +935,41 @@ class SessionDetailController
     try {
       await _retireRetryableOutboxForControlChange();
       _requestedDriveReason = null;
-      await _clearDriveIntentBestEffort();
-      await connection.reattach();
+      final result = Completer<bool>();
+      _handoffResult = result;
+      final clientMessageId = _nextClientMessageId();
+      _handoffClientMessageId = clientMessageId;
+      await connection.sendHandoff(clientMessageId: clientMessageId);
       if (connection.state != SessionDetailConnectionStatus.connected) {
+        _completeHandoff(false);
         state = state.copyWith(error: 'Terminal handoff could not reconnect.');
         return false;
       }
+      final confirmed = await result.future.timeout(
+        ref.read(sessionTakeoverConfirmTimeoutProvider),
+        onTimeout: () {
+          if (identical(_handoffResult, result)) {
+            _handoffResult = null;
+            _handoffClientMessageId = null;
+          }
+          return false;
+        },
+      );
+      if (!confirmed) {
+        state = state.copyWith(
+          error: 'The server did not confirm terminal handoff.',
+        );
+        return false;
+      }
+      // The WebSocket itself was migrated in place. Disarm its prior Resume
+      // query state so a later transport drop reconnects to bare Observe
+      // instead of silently recreating Drive after a successful handoff.
+      connection.disarmDriveAuthority();
+      await _clearDriveIntentBestEffort();
       _establishedAttachIntent = null;
       return true;
     } on Object catch (e) {
+      _completeHandoff(false);
       state = state.copyWith(
         error: userFacingMessage(
           e,
@@ -897,6 +1017,12 @@ class SessionDetailController
         return;
       }
       final store = ref.read(sessionDriveIntentStoreProvider);
+      if (requestedReason == kDriveAttachReasonJoinExisting) {
+        // Joining another client's active Drive proves no local creation or
+        // takeover provenance. Reconnect remains conditional on that exact
+        // broker owner revision instead of creating an unbounded local claim.
+        return;
+      }
       if (requestedReason == kDriveAttachReasonTakeover ||
           requestedReason == kDriveAttachReasonLeaseRestore) {
         // Successful Drive attach: start or slide the takeover lease. The
@@ -922,6 +1048,15 @@ class SessionDetailController
   void _completeTakeover(bool succeeded) {
     final result = _takeoverResult;
     _takeoverResult = null;
+    if (result != null && !result.isCompleted) {
+      result.complete(succeeded);
+    }
+  }
+
+  void _completeHandoff(bool succeeded) {
+    final result = _handoffResult;
+    _handoffResult = null;
+    _handoffClientMessageId = null;
     if (result != null && !result.isCompleted) {
       result.complete(succeeded);
     }
@@ -1290,18 +1425,37 @@ class SessionDetailController
         _commandProgressTimer = null;
       }
       final previousSessionStatus = state.sessionInfo?.status;
-      final previousControl = SessionControlView.fromSessionInfo(
-        state.sessionInfo,
+      final previousControl = SessionControlView.fromSessionDetail(
+        info: state.sessionInfo,
+        authority: state.connectionAuthority,
+        joinExisting: state.joinExisting,
       );
       final sessionInfo = switch (event) {
-        SessionWireEvent(:final info) => info,
+        SessionWireEvent(:final info) => _admitSessionOwnerProjection(
+          state.sessionInfo,
+          info,
+        ),
         MessageWireEvent(:final message) => _foldStatusMessage(
           state.sessionInfo,
           message,
         ),
         _ => state.sessionInfo,
       };
-      final nextControl = SessionControlView.fromSessionInfo(sessionInfo);
+      final connectionAuthority = event is SessionWireEvent
+          ? event.authority
+          : state.connectionAuthority;
+      final joinExisting =
+          event is SessionWireEvent &&
+              _joinMatchesOwner(event.joinExisting, sessionInfo?.sessionOwner)
+          ? event.joinExisting
+          : event is SessionWireEvent
+          ? null
+          : state.joinExisting;
+      final nextControl = SessionControlView.fromSessionDetail(
+        info: sessionInfo,
+        authority: connectionAuthority,
+        joinExisting: joinExisting,
+      );
       if (event is SessionWireEvent) {
         if (previousControl.pill != nextControl.pill ||
             previousControl.canPrompt != nextControl.canPrompt) {
@@ -1447,6 +1601,11 @@ class SessionDetailController
             ? state.transcriptResetGeneration + 1
             : null,
         sessionInfo: sessionInfo,
+        connectionAuthority: connectionAuthority,
+        clearConnectionAuthority:
+            event is SessionWireEvent && connectionAuthority == null,
+        joinExisting: joinExisting,
+        clearJoinExisting: event is SessionWireEvent && joinExisting == null,
         interruptPhase: effectiveInterruptPhase,
         optimisticPrompts: optimisticAfterEvent.prompts,
         transcriptClientKeys: optimisticAfterEvent.clientKeys,
@@ -1483,12 +1642,22 @@ class SessionDetailController
         // Replaying on the bare `connected` transition can race ahead of that
         // frame and send into Observe using stale pre-reattach ownership.
         unawaited(_replayRetryableOutbox());
-        unawaited(_syncDriveIntent(event.info));
+        unawaited(_syncDriveIntent(sessionInfo!));
+        if (_handoffResult != null) {
+          final ownerState = sessionInfo.sessionOwner?.state;
+          if (ownerState == SessionOwnerState.none ||
+              ownerState == SessionOwnerState.terminalSync) {
+            _completeHandoff(true);
+          }
+        }
+        if (joinExisting != null) {
+          unawaited(_joinExistingDriver(joinExisting));
+        }
         if (!previousControl.canPrompt && nextControl.canPrompt) {
           _onDraftMutationAuthorityGained();
         }
         if (state.driveRestorePhase == SessionDriveRestorePhase.conflict &&
-            SessionControlView.fromSessionInfo(event.info).canMutate) {
+            nextControl.canMutate) {
           // The denial note must survive the broker's ordinary Observe
           // fallback frames (attach-conflict is immediately followed by the
           // fallback session frame). It clears only when the app genuinely
@@ -1499,13 +1668,18 @@ class SessionDetailController
             clearDriveRestoreConflict: true,
           );
         }
+      } else if (event is NackWireEvent &&
+          event.clientMessageId == _handoffClientMessageId) {
+        _completeHandoff(false);
       } else if (event is AttachConflictWireEvent) {
         // Structured arbitration answer: the broker denied the restore and
         // continued this socket as Observe. Stop claiming Drive, keep the
         // provenance — only explicit user exits erase it — and surface the
         // machine reason so the manual Take over path stays discoverable.
         _requestedDriveReason = null;
+        connection.disarmDriveAuthority();
         _completeTakeover(false);
+        _completeHandoff(false);
         state = state.copyWith(
           driveRestorePhase: SessionDriveRestorePhase.conflict,
           driveRestoreConflict: SessionDriveRestoreConflict(
@@ -1516,8 +1690,11 @@ class SessionDetailController
         );
       } else if (event is EndedWireEvent) {
         _requestedDriveReason = null;
+        _completeHandoff(false);
         _establishedAttachIntent = null;
         unawaited(_clearDriveIntentBestEffort());
+      } else if (event is ErrorWireEvent && _handoffResult != null) {
+        _completeHandoff(false);
       }
       _enqueueTranscriptPersistence(event);
       if (event is DraftWireEvent) {

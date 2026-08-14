@@ -457,7 +457,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     // ride the broader canMutate and are handled in the transcript surface.
     return connected &&
         !state.compatibilityReadOnly &&
-        SessionControlView.fromSessionInfo(state.sessionInfo).canPrompt;
+        SessionControlView.fromSessionDetailState(state).canPrompt;
   }
 
   void _onPromptChanged() {
@@ -2065,7 +2065,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         (state.sessionInfo == null
             ? l10n.sessionDetailTitleOpening
             : l10n.sessionDetailTitleUntitled);
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     final detailFreshness = SessionDetailFreshnessPresentation.fromState(state);
     final isSubView = _view != _SessionDetailView.chat;
 

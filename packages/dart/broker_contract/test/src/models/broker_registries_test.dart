@@ -52,8 +52,8 @@ void main() {
   });
 
   group('brokerErrorCodes', () {
-    test('has 99 entries', () {
-      expect(brokerErrorCodes, hasLength(99));
+    test('has 102 entries', () {
+      expect(brokerErrorCodes, hasLength(102));
     });
 
     test('includes temporary session creation unavailability', () {
@@ -71,6 +71,17 @@ void main() {
           'DRIVE_OWNERSHIP_UNKNOWN',
           'DRIVE_NATIVE_SESSION_UNRESUMABLE',
           'DRIVE_RESTORE_FAILED',
+        ]),
+      );
+    });
+
+    test('includes revision-conditional join refusal codes', () {
+      expect(
+        brokerErrorCodes,
+        containsAll(<String>[
+          'JOIN_OWNER_NOT_FOUND',
+          'JOIN_OWNER_STALE',
+          'JOIN_NOT_SUPPORTED',
         ]),
       );
     });
@@ -148,14 +159,14 @@ void main() {
   });
 
   group('brokerClientMessageKinds', () {
-    test('has 13 entries', () {
-      expect(brokerClientMessageKinds, hasLength(13));
+    test('has 14 entries', () {
+      expect(brokerClientMessageKinds, hasLength(14));
     });
 
-    test('includes ack and nack', () {
+    test('includes handoff, ack, and nack', () {
       expect(
         brokerClientMessageKinds,
-        containsAll(<String>['ack', 'nack']),
+        containsAll(<String>['handoff', 'ack', 'nack']),
       );
     });
   });

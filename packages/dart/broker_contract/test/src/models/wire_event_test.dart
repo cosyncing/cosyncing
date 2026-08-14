@@ -81,6 +81,38 @@ void main() {
           'session-1',
         );
       });
+
+      test('round-trips socket authority and revision-conditional join', () {
+        final json = {
+          'kind': 'session',
+          'info': {
+            'id': 'session-1',
+            'tool': 'pi',
+            'title': 'Test',
+            'status': 'idle',
+            'attachMode': 'observe',
+            'sessionOwner': {
+              'revision': {'epoch': 'broker-1', 'seq': 4},
+              'state': 'drive',
+            },
+          },
+          'authority': {'canMutate': false, 'prompt': 'none'},
+          'joinExisting': {
+            'ownerRevision': {'epoch': 'broker-1', 'seq': 4},
+          },
+        };
+
+        final event = WireEvent.fromJson(json) as SessionWireEvent;
+        expect(event.authority?.canMutate, isFalse);
+        expect(event.authority?.prompt, SessionPromptAuthority.none);
+        expect(event.joinExisting?.ownerRevision.epoch, 'broker-1');
+        expect(event.joinExisting?.ownerRevision.seq, 4);
+
+        final restored = WireEvent.fromJson(event.toJson()) as SessionWireEvent;
+        expect(restored.info.sessionOwner?.state, SessionOwnerState.drive);
+        expect(restored.authority?.prompt, SessionPromptAuthority.none);
+        expect(restored.joinExisting?.ownerRevision.seq, 4);
+      });
     });
 
     group('HistoryWireEvent', () {

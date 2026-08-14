@@ -81,6 +81,7 @@ class AgentCapabilities {
     required this.supportsNativeFileInput,
     required this.supportsModelSwitch,
     required this.permissionGranularity,
+    this.supportsCrossClientDriveSharing = false,
   });
 
   /// Creates an [AgentCapabilities] from a JSON map.
@@ -101,6 +102,10 @@ class AgentCapabilities {
 
   /// Whether the agent supports live attach.
   final bool supportsLiveAttach;
+
+  /// Whether an authenticated foreground client may reuse an existing Drive.
+  @JsonKey(defaultValue: false)
+  final bool supportsCrossClientDriveSharing;
 
   /// Whether the agent has a native "send file to user" signal.
   final bool supportsNativeArtifact;

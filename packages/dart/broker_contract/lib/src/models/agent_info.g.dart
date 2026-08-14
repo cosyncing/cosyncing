@@ -25,23 +25,27 @@ AgentCapabilities _$AgentCapabilitiesFromJson(Map<String, dynamic> json) =>
         _$PermissionGranularityEnumMap,
         json['permissionGranularity'],
       ),
+      supportsCrossClientDriveSharing:
+          json['supportsCrossClientDriveSharing'] as bool? ?? false,
     );
 
-Map<String, dynamic> _$AgentCapabilitiesToJson(AgentCapabilities instance) =>
-    <String, dynamic>{
-      'integrationKind': _$IntegrationKindEnumMap[instance.integrationKind]!,
-      'attachModes': instance.attachModes
-          .map((e) => _$AttachModeEnumMap[e]!)
-          .toList(),
-      'supportsObserve': instance.supportsObserve,
-      'supportsResume': instance.supportsResume,
-      'supportsLiveAttach': instance.supportsLiveAttach,
-      'supportsNativeArtifact': instance.supportsNativeArtifact,
-      'supportsNativeFileInput': instance.supportsNativeFileInput,
-      'supportsModelSwitch': instance.supportsModelSwitch,
-      'permissionGranularity':
-          _$PermissionGranularityEnumMap[instance.permissionGranularity]!,
-    };
+Map<String, dynamic> _$AgentCapabilitiesToJson(
+  AgentCapabilities instance,
+) => <String, dynamic>{
+  'integrationKind': _$IntegrationKindEnumMap[instance.integrationKind]!,
+  'attachModes': instance.attachModes
+      .map((e) => _$AttachModeEnumMap[e]!)
+      .toList(),
+  'supportsObserve': instance.supportsObserve,
+  'supportsResume': instance.supportsResume,
+  'supportsLiveAttach': instance.supportsLiveAttach,
+  'supportsCrossClientDriveSharing': instance.supportsCrossClientDriveSharing,
+  'supportsNativeArtifact': instance.supportsNativeArtifact,
+  'supportsNativeFileInput': instance.supportsNativeFileInput,
+  'supportsModelSwitch': instance.supportsModelSwitch,
+  'permissionGranularity':
+      _$PermissionGranularityEnumMap[instance.permissionGranularity]!,
+};
 
 const _$IntegrationKindEnumMap = {
   IntegrationKind.httpSse: 'http-sse',
@@ -71,11 +75,11 @@ AgentInfo _$AgentInfoFromJson(Map<String, dynamic> json) => AgentInfo(
     json['capabilities'] as Map<String, dynamic>,
   ),
   canCreateSession: json['canCreateSession'] as bool? ?? false,
-  canSelectModelAtCreation: json['canSelectModelAtCreation'] as bool? ?? false,
   canRenameNative: json['canRenameNative'] as bool? ?? false,
   canFork: json['canFork'] as bool? ?? false,
   canClone: json['canClone'] as bool? ?? false,
   canTranscriptExport: json['canTranscriptExport'] as bool? ?? false,
+  canSelectModelAtCreation: json['canSelectModelAtCreation'] as bool? ?? false,
   syncEnabled: json['syncEnabled'] as bool?,
 );
 

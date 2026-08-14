@@ -1088,6 +1088,7 @@ function codexCapabilities(): AgentCapabilities {
     supportsObserve: true,
     supportsResume: true,
     supportsLiveAttach: live,
+    supportsCrossClientDriveSharing: true,
     supportsNativeArtifact: false,
     supportsNativeFileInput: true,
     supportsModelSwitch: true,

@@ -1008,6 +1008,7 @@ class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
     final stateLabel = switch (widget.control.pill) {
       SessionControlPill.synced => l10n.sessionControlSynced,
       SessionControlPill.driving => l10n.sessionControlDriving,
+      SessionControlPill.driverActive => l10n.sessionControlDriverActive,
       SessionControlPill.syncAvailable => l10n.sessionControlSyncAvailable,
       SessionControlPill.observing => l10n.sessionControlObserving,
       SessionControlPill.unavailable => l10n.sessionControlUnavailable,
@@ -1018,6 +1019,7 @@ class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
       SessionControlPill.synced => Icons.sync,
       SessionControlPill.syncAvailable when !takeOverOnly => Icons.sync,
       SessionControlPill.syncAvailable => Icons.visibility_outlined,
+      SessionControlPill.driverActive => Icons.sports_esports_outlined,
       _ => Icons.block_outlined,
     };
 
