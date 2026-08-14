@@ -18,7 +18,7 @@
   <a href="#install">Install</a> ·
   <a href="#client">Client</a> ·
   <a href="docs/README.md">Docs</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="docs/CONTRIBUTING.md">Contributing</a> ·
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
@@ -53,6 +53,10 @@ hosted service between the client and the broker.
 One protocol covers all four. Per-agent control differs, and Claude Code sessions open read-only
 until you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
 installation, and [adapter support](docs/protocol/adapter-support.md) for the capability matrix.
+
+Foreground clients can join the same broker-owned Codex or Pi Drive session without starting a
+second native Resume. Claude Code keeps its Observe/Take-over flow on another client, while OpenCode
+keeps its shared-live behavior. Background Observe connections stay read-only.
 
 ## Prerequisites
 
@@ -179,9 +183,9 @@ Windows-host Tailscale cannot proxy WSL loopback.
 The broker runs on your machine, under your account. Broker state is stored there; session content
 is sent only to authenticated clients over the network you choose. cosyncing operates no hosted
 service in that connection path and includes no analytics or advertising telemetry. Optional
-features contact only the services they name, such as Tailscale Serve, local Tokdash quota data, and
-the signed release channel. Packaged broker updates accept only verified signed manifests; see
-[broker release and signing](docs/release/broker-release-signing.md).
+features contact only the services they name, such as Tailscale Serve and local Tokdash quota data.
+The npm-installed broker does not silently replace itself: npm owns package updates, and `cosy setup`
+reconciles the installed service after an update.
 
 Report vulnerabilities through GitHub private vulnerability reporting, per [SECURITY.md](SECURITY.md).
 
@@ -211,9 +215,9 @@ Regenerate broker-owned client contracts with `bun run contract:generate`. CI ru
 `bun run contract:check` and fails on a stale snapshot.
 
 Start with [docs/README.md](docs/README.md) and [build and test](docs/development/build-test.md).
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening
+Read [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) before opening
 a change; contributions use fork-and-pull-request and require a signed-off commit. Usage questions
-go to GitHub Discussions and reproducible defects to GitHub Issues — see [SUPPORT.md](SUPPORT.md).
+go to GitHub Discussions and reproducible defects to GitHub Issues — see [SUPPORT.md](docs/SUPPORT.md).
 Installs from a predecessor client start fresh; see
 [local data and upgrades](docs/development/data-and-upgrades.md).
 

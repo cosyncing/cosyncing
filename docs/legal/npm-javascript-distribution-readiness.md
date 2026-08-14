@@ -5,6 +5,11 @@ package. It is not legal advice and it does not authorize anything that
 [Compiled broker distribution readiness](binary-distribution-readiness.md)
 governs.
 
+Status: **released**. The npm `latest` version is published only through the
+protected trusted-publisher and staged-approval path described below. Check the
+registry when an exact current version is required; this control record does
+not duplicate mutable release metadata.
+
 ## What is distributed
 
 One npm package named `cosyncing`, containing:
@@ -25,19 +30,26 @@ and no install or postinstall script.
 ## What is not distributed
 
 The package contains no Bun runtime, no JavaScriptCore, no WebKit, and no
-compiled broker executable for any platform. Bun is a prerequisite the operator
-installs separately, exactly as Node.js is for an ordinary npm CLI.
+compiled broker executable for any platform. Bun remains a runtime prerequisite
+that the operator installs separately.
 
-This is the material difference from the previous npm design, which published
-per-platform packages carrying `bun build --compile` executables. Those embed a
+This is the material difference from the abandoned native npm design, which
+would have carried per-platform `bun build --compile` executables. Those embed a
 copy of the Bun runtime, which is what engages the static-linking and relinking
 conditions recorded in the compiled-distribution control.
 
+Bun's documentation distinguishes the two outputs: `target: "bun"` produces a
+JavaScript bundle intended for the Bun runtime, while `--compile` produces a
+standalone executable containing a copy of that runtime:
+
+- [Bun bundler targets](https://bun.sh/docs/bundler#target)
+- [Bun single-file executables](https://bun.sh/docs/bundler/executables)
+
 ## Third-party notices
 
-Removing the embedded runtime removes Bun's notice obligation from this
-artifact. It does not remove the ordinary obligation to carry notices for the
-JavaScript dependencies that are bundled into the application.
+The generated notices do not list Bun because Bun is not a component of this
+artifact. The package still carries notices for the JavaScript dependencies
+bundled into the application.
 
 `createJavaScriptThirdPartyNotices` in
 `scripts/broker/release/software-inventory.ts` emits `THIRD_PARTY_NOTICES.txt`
@@ -134,22 +146,22 @@ is provable from the tree:
 2. the `npm-production` GitHub environment has required reviewers **and** a
    deployment branch/tag rule limiting it to `npm-v*` tags.
 
-As of 2026-08-08, (2) is **not configured**: the live `npm-production`
-environment has no deployment branch/tag policy. Configuring it is a release
-blocker, not a recommendation. Before the first staging run, in GitHub →
-Settings → Environments → `npm-production`, set deployment branches and tags to
-"Selected branches and tags" with the single tag pattern `npm-v*`.
+The required `npm-production` configuration is environment review plus a custom
+deployment tag rule for `npm-v*`. A production release has completed the
+trusted staged-publishing and interactive approval path. Registry-side trusted-
+publisher permissions remain external state and must be checked before each
+release.
 
 The in-repository guard `scripts/ci/require-canonical-npm-release.sh` enforces
-the repository and the exact release tag regardless of (2), so the missing
-environment rule cannot by itself publish from an arbitrary branch. The rule is
-still required: it stops a stray dispatch before the environment's reviewers
-are ever asked, instead of relying on a guard deep inside the job they already
-approved. Confirm (1) on npmjs.com at the same time.
+the repository and exact release tag independently of the external settings.
+This defense remains required: it stops a stray dispatch before the
+environment's reviewers are asked. Confirm the registry-side trusted publisher
+on npmjs.com before each release.
 
-## Status
+## Ongoing release rule
 
-Reviewed and implemented; not published. The npm name currently holds a `0.0.1`
-placeholder release. Two owner actions precede the first staging run: the
-`npm-v*` deployment tag rule above, and confirmation of the staging-only
-trusted publisher. Publishing the real package is the owner's decision.
+Every new version must use the protected trusted-publisher workflow and staged
+approval path. Never publish manually, reuse a version, or add a compiled
+executable to this package. Any change that redistributes a runtime or native
+component, or changes the bundled third-party closure, requires a fresh
+engineering and licence review before publication.

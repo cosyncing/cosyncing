@@ -39,6 +39,12 @@ idle Desktop session that no longer has an active writer can be resumed by
 cosyncing. The native resume result, not the session title, origin, size, or
 contents, decides whether control can transfer.
 
+Multiple foreground cosyncing clients can join the same broker-owned Codex
+Drive session. A later client reuses the broker's current session owner rather
+than starting another native Resume, while each connection keeps its own
+mutation authority. Background Observe connections remain read-only and do not
+join or start model work.
+
 Live two-way terminal sync is available for Codex CLI sessions joined to the
 managed daemon with the **Sync with a terminal** command shown by cosyncing
 (`codex resume --remote ...`). A plain Codex Desktop session and a plain

@@ -16,12 +16,6 @@ then use `cosy pair` to authorize the client.
   contents prove that cosyncing owns it; user edits and unsafe targets remain
   protected.
 
-## Known issue
-
-Codex transcript events can still appear slightly out of order in some
-multi-client sessions. This release does not claim to resolve that separate
-ordering and compare-and-swap investigation.
-
 ## Downloads
 
 - **Android:** `cosyncing-client-*-android.apk` is signed with cosyncing's

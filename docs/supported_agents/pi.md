@@ -41,8 +41,16 @@ cosy doctor
 ```
 
 Setup installs cosyncing's Pi bridge after Pi passes these checks. It does not
-install Pi or replace Node. The legacy `@mariozechner/pi-coding-agent` package
-name is still recognized for existing installations, but new installations
-should use the current `@earendil-works/pi-coding-agent` package.
+install Pi or replace Node. An older packaged bridge updates automatically only
+when its receipt, target, and current contents prove that cosyncing owns it.
+Missing or invalid receipts, user edits, symlinks, unsafe targets, and changes
+detected during replacement fail closed and require operator action. Doctor
+reports an owned stale bridge as an actionable warning.
+
+Multiple foreground cosyncing clients can join the same broker-owned Pi Drive
+session without starting another native Resume. Background Observe connections
+remain read-only. The legacy `@mariozechner/pi-coding-agent` package name is
+still recognized for existing installations, but new installations should use
+the current `@earendil-works/pi-coding-agent` package.
 
 See the [official Pi installation guide](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md).
