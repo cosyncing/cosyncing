@@ -5,7 +5,7 @@
  *
  * This is the Codex analog of claude-app-answer-trace.ts. Codex's permission flow is app-server (resume) only — it
  * is not a durable rollout record — so the deterministic path points the broker at a FAKE `codex` binary via
- * COSYNCING_CODEX_BIN (the same technique scripts/broker/tests/codex/resume-fake.ts uses). The fake speaks just enough of the
+ * COSYNCING_CODEX_BIN (the same technique packages/typescript/broker/test/codex/resume-fake.ts uses). The fake speaks just enough of the
  * app-server JSON-RPC to complete the resume handshake, then emits a native model-change notification and
  * proactively raises an exec-command approval, a user-input question, and a second exec-command approval
  * that the app denies. The fake records each response.

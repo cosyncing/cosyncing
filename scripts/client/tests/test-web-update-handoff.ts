@@ -32,7 +32,7 @@ import {
   WEB_HANDOFF_DOCUMENT,
   WEB_HANDOFF_MAX_ROUTE_CHARS,
   WEB_HANDOFF_PATH,
-} from '../../../packages/typescript/broker/src/web-handoff.ts';
+} from '../../../packages/typescript/broker/src/artifacts/web-handoff.ts';
 
 const ORIGIN = 'https://broker.example';
 const SCOPE = `${ORIGIN}/cosy/`;

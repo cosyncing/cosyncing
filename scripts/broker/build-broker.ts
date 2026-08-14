@@ -20,7 +20,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/product.ts';
 import {
   BROKER_CONTRACT,
   PUBLISHED_SCHEMA_VERSIONS,
@@ -171,7 +171,7 @@ const stagingDirectory = mkdtempSync(resolve('output', `.${PRODUCT_IDENTITY.prod
 const stagedBinary = join(stagingDirectory, PRODUCT_IDENTITY.primaryBinary);
 try {
   const result = await Bun.build({
-    entrypoints: [resolve('packages/typescript/broker/src/cli.ts')],
+    entrypoints: [resolve('packages/typescript/broker/src/cli/cli.ts')],
     compile: { outfile: stagedBinary, target: options.compileTarget as Bun.Build.CompileTarget },
     define: buildDefines({
       identity: { version, commit, buildDate, dirty },

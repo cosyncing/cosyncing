@@ -6,7 +6,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/data/secure_creden
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_credential.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 

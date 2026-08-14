@@ -17,7 +17,7 @@
  */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../packages/typescript/protocol/src/product.ts';
 import {
   BROKER_CONTRACT,
   PUBLISHED_SCHEMA_VERSIONS,
@@ -121,10 +121,10 @@ const identity = resolveBuildIdentity(options);
 
 mkdirSync(dirname(options.outfile), { recursive: true });
 const result = await Bun.build({
-  entrypoints: [resolve('packages/typescript/broker/src/cli.ts')],
+  entrypoints: [resolve('packages/typescript/broker/src/cli/cli.ts')],
   target: 'bun',
   // No `compile:` key. Adding one would embed the Bun runtime and turn this into the native distribution,
-  // which is exactly what the npm lane must never publish; scripts/broker/tests/broker/test-npm-package.ts
+  // which is exactly what the npm lane must never publish; scripts/broker/tests/release/test-npm-package.ts
   // asserts the produced artifact is text with a Bun shebang and no ELF/Mach-O header.
   outdir: dirname(options.outfile),
   naming: { entry: '[dir]/[name].[ext]' },

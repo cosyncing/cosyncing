@@ -8,8 +8,8 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_inb
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:cosyncing_client/src/features/attention/model/attention_inbox.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

@@ -6,7 +6,7 @@
  * OpenCode is driven over HTTP/SSE against a reachable `opencode serve`; a shared-server session is already
  * app-drivable (control.drive.state === 'driving'), so NO takeover is needed — opening the session is enough. This
  * points the broker at a FAKE opencode server (in-process Bun.serve, OPENCODE_URL) — the same technique
- * scripts/broker/tests/opencode/test-opencode-control.ts uses — that emits a `permission.v2.asked` and a `question.v2.asked`
+ * packages/typescript/adapters/opencode/test/test-opencode-control.ts uses — that emits a `permission.v2.asked` and a `question.v2.asked`
  * on `/global/event` shortly after the connection subscribes, and records the `POST /permission/<id>/reply` +
  * `POST /question/<id>/reply` the app's Allow / Submit produce.
  *

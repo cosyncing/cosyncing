@@ -16,12 +16,11 @@ import 'package:cosyncing_client/src/features/broker_profiles/data/broker_profil
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/data.dart';
-import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
-import 'package:cosyncing_client/src/features/sessions/data/workspace_prefs_store.dart';
-import 'package:cosyncing_client/src/features/sessions/model/session_ref.dart';
-import 'package:cosyncing_client/src/features/sessions/view/session_detail_page.dart';
-import 'package:cosyncing_client/src/features/sessions/view/sessions_workspace.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_notification_settings_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/ui_preferences_store.dart';
@@ -70,7 +69,7 @@ void main() {
 
     test('session widgets use centralized route helpers', () {
       final source = File(
-        'lib/src/features/sessions/view/sessions_page.dart',
+        'lib/src/features/sessions/list/sessions_page.dart',
       ).readAsStringSync();
 
       expect(source, isNot(contains("context.go('/sessions/")));

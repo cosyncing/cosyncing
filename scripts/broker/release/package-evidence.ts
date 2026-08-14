@@ -13,8 +13,8 @@ import {
   BUILD_INFO_SCHEMA_VERSION,
   PUBLISHED_SCHEMA_VERSIONS,
   type BuildInfo,
-} from '../../../packages/typescript/broker/src/build-info.ts';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/broker/src/product.ts';
+} from '../../../packages/typescript/broker/src/runtime/build-info.ts';
+import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import { BROKER_CONTRACT } from '../../../packages/typescript/protocol/src/index.ts';
 import {
   KNOWN_RELEASE_TARGETS,

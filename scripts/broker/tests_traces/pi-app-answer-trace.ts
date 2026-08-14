@@ -5,7 +5,7 @@
  *
  * Pi true-sync is the BRIDGE: an in-session extension POSTs events to `/pi/bridge/events` and long-polls
  * `/pi/bridge/commands` for the app's actions. So — exactly like Claude's hook endpoints — the test plays the
- * extension over that HTTP wire (the same wire scripts/broker/tests/pi/test-pi-bridge-reload.ts uses): `hello` adopts a
+ * extension over that HTTP wire (the same wire packages/typescript/broker/test/pi/test-pi-bridge-reload.ts uses): `hello` adopts a
  * pinned live bridge session (surfaced in the roster via the hub's live snapshot, no disk file needed; no Drive
  * takeover — it's already synced), `events` pushes the permission + question (they replay on attach via the
  * bridge's pendingFrames), and after the app's Allow / Submit, `commands` drains the queued decisions we assert.
@@ -19,7 +19,7 @@
  *     Pi emits only in RPC mode — never to a TUI extension), so a synced Pi session keeps interactive questions
  *     terminal-only; the wire is forward-ready and the extension now handles a stray `answer`/`reject-question`
  *     gracefully (clears the card, posts an honest notice) instead of dropping it. The Pi RESUME path answers
- *     questions for real (covered by scripts/broker/tests/pi/test-pi-observe.ts + the resume adapter's RPC handling).
+ *     questions for real (covered by packages/typescript/adapters/pi/test/test-pi-observe.ts + the resume adapter's RPC handling).
  *
  *   bun run scripts/broker/tests_traces/pi-app-answer-trace.ts
  */

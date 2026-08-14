@@ -1,7 +1,7 @@
 import 'dart:convert';
 
-import 'package:cosyncing_client/src/features/sessions/data/open_sessions_store.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

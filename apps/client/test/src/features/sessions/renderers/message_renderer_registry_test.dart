@@ -6,12 +6,12 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/soft_minimalist_theme.dart';
-import 'package:cosyncing_client/src/features/sessions/model/session_transcript_display.dart';
-import 'package:cosyncing_client/src/features/sessions/model/tool_display_mode.dart';
 // The canonical renderer import exceeds the style line width; keep the stable
 // package path for boundary-safe package import resolution.
 // ignore: lines_longer_than_80_chars
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

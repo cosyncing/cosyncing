@@ -28,7 +28,7 @@ import assert from 'node:assert/strict';
 
 import { chromium, type Page } from 'playwright-core';
 
-import { WEB_HANDOFF_DOCUMENT } from '../../../packages/typescript/broker/src/web-handoff.ts';
+import { WEB_HANDOFF_DOCUMENT } from '../../../packages/typescript/broker/src/artifacts/web-handoff.ts';
 import { BROKER_CONTRACT } from '../../../packages/typescript/protocol/src/index.ts';
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, '../../..');

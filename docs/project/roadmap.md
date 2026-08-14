@@ -1,6 +1,6 @@
 # Roadmap
 
-Last updated: 2026-08-08.
+Last updated: 2026-08-14.
 
 This roadmap contains open work only. Completed predecessor milestones are not
 repeated as future work. Each item must name an owner, an activation condition,
@@ -112,7 +112,6 @@ item; other adapters remain D-06.
 | D-04: production remote wake | client/platform and privacy maintainers | Remote wake becomes an advertised capability and deployment ownership exists |
 | D-05: PTY/SSH and remote workspace mutation | broker/security and client maintainers | Authorization, containment, audit, and recovery models are approved |
 | D-06: additional adapters other than Kimi | adapter maintainer | A launch requirement or community proposal includes conformance and trajectory evidence budget |
-| D-07: full broker/runtime/adapter hotspot responsibility decomposition beyond entrypoint and line-count ratchets | component maintainers | Public-release invariants pass or a hotspot blocks correctness or review |
 | D-08: health fallback and detail UI enhancements | broker and client maintainers | The core compatibility/health contract is stable |
 | D-09: task-list canonicalization, universal session surfaces, and timestamp/runtime semantics, including the OpenCode context-meter, Pi context-stat, and Pi live-output telemetry follow-ups | protocol, adapter, and client maintainers | A verified cross-adapter inconsistency affects a supported claim |
 | D-10: quota interruption continuation | broker and client maintainers | Product semantics and adapter support are approved |

@@ -21,6 +21,13 @@ Regenerate the anchor with `bun run verification:generate-completeness-anchor
 -- --accepted-base <commit>` after an approved graph change; do not edit its
 fingerprints by hand.
 
+Completeness anchors are repository-lineage-local. A private-lineage anchor
+must never be copied unchanged into the separately initialized public checkout.
+Before opening a public PR, regenerate the transferred anchor in that checkout
+with `--accepted-base` set to a commit that already belongs to the public
+lineage, then run verification there. Validation intentionally fails when the
+accepted base does not resolve or is not an ancestor of the candidate.
+
 ## Canonical entry points
 
 `bun run check` is the unchanged-source, current-host cumulative gate. It reads
@@ -163,7 +170,7 @@ reports never claim the last category.
 ## Fixture isolation
 
 Pi and Claude broker fixtures use
-`scripts/broker/tests/helpers/isolated-broker-fixture.ts`. It constructs child
+`packages/typescript/broker/test/helpers/isolated-broker-fixture.ts`. It constructs child
 environments from a small process-runtime allowlist, replaces HOME, XDG,
 broker, Claude, and Pi roots with throwaway directories, and then applies
 explicit fixture values. Provider credentials, helpers, endpoints, proxies,

@@ -8,7 +8,7 @@
  * pre-start so the common path never restarts (FU-3).
  *
  * Replacements (run these instead):
- *   - scripts/broker/tests/codex/broker-control-mode.ts        — the decoupled Codex enabler contract (+ FU-3 pre-start)
+ *   - packages/typescript/broker/test/codex/broker-control-mode.ts        — the decoupled Codex enabler contract (+ FU-3 pre-start)
  *   - scripts/broker/tests_traces/sync-refactor-dom-probe.ts   — real-Chromium DOM: no #controlMode, one #control (D29)
  *   - scripts/broker/tests/app/test-web-ui-static.ts / test-web-ui-components.ts — one-button surface
  *

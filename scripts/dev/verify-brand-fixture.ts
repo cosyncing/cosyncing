@@ -191,7 +191,7 @@ const CAPTURE_CAUSED = new Map<string, CaptureCaused>([
         severity: 'action-required',
         title: 'Repeated broker authentication failures',
         summary: 'Several requests failed broker authentication in a short period.',
-        // The tracker stores no address, path, or session (security-attention.ts), so a
+        // The tracker stores no address, path, or session (attention-policy.ts), so a
         // security-alert that names one did not come from the enrolment gap.
         agent: '',
         sessionId: '',

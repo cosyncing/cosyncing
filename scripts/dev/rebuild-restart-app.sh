@@ -140,7 +140,7 @@ process_belongs_to_checkout() {
   cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null)" || return 1
   command_line="$(tr '\0' ' ' <"/proc/${pid}/cmdline")"
   [[ "${cwd}" == "${REPO_ROOT}" ]] || return 1
-  [[ "${command_line}" == *"packages/typescript/broker/src/cli.ts broker"* ||
+  [[ "${command_line}" == *"packages/typescript/broker/src/cli/cli.ts broker"* ||
     "${command_line}" == *"bun run broker"* ]]
 }
 

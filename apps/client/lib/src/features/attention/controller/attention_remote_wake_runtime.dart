@@ -14,8 +14,8 @@ import 'package:cosyncing_client/src/features/attention/data/attention_feed_sett
 import 'package:cosyncing_client/src/features/attention/data/attention_repository.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

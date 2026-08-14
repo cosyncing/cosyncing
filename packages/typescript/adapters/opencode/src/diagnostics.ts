@@ -1,7 +1,6 @@
 import { join } from 'node:path';
 import {
   diagnoseBinaryVersion,
-  diagnoseManagedRuntimeFailure,
   type AgentMinimumVersion,
   type AgentSetupDiagnosis,
   type SetupCheck,
@@ -98,7 +97,6 @@ export async function diagnoseOpenCodeSetup(
   const checks: SetupCheck[] = [
     ...binary.checks,
     storageCheck(context, dataDirectory(context, options.dataDir), !!binary.executable),
-    diagnoseManagedRuntimeFailure(context, 'opencode', 'OpenCode'),
   ];
 
   const server = normalizedServerUrl(options.baseUrl || context.env.OPENCODE_URL?.trim() || 'http://127.0.0.1:4096');

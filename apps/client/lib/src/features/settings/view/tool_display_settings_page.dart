@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/features/sessions/model/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

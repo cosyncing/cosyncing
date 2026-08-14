@@ -709,10 +709,10 @@ export function validateVerificationGraph(
 }
 
 const ISOLATED_BROKER_FIXTURES = [
-  'scripts/broker/tests/pi/test-tool-result-enrich.ts',
-  'scripts/broker/tests/pi/test-pi-bridge-reload.ts',
-  'scripts/broker/tests/claude/test-claude-hooks.ts',
-  'scripts/broker/tests/claude/test-claude-hooks-surface.ts',
+  'packages/typescript/broker/test/pi/test-tool-result-enrich.ts',
+  'packages/typescript/broker/test/pi/test-pi-bridge-reload.ts',
+  'packages/typescript/broker/test/claude/test-claude-hooks.ts',
+  'packages/typescript/broker/test/claude/test-claude-hooks-surface.ts',
 ];
 
 export function validateFixtureIsolationSources(
@@ -731,7 +731,7 @@ export function validateFixtureIsolationSources(
     }
   }
   const toolResultPath =
-    'scripts/broker/tests/pi/test-tool-result-enrich.ts';
+    'packages/typescript/broker/test/pi/test-tool-result-enrich.ts';
   const toolResult = sourceOverrides[toolResultPath]
     ?? readFileSync(resolve(root, toolResultPath), 'utf8');
   if (!toolResult.includes('freshModuleSpecifier')) {

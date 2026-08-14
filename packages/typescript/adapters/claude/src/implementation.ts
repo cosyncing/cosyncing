@@ -4202,7 +4202,7 @@ export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, task
 //   <uuid>/subagents/workflows/wf_<id>/journal.jsonl   a LIVE workflow (no top-level json yet)
 // The activity dir is just the transcript path minus '.jsonl' (the <uuid>/ dir sits beside it). We
 // translate these into canonical `agent-activity` frames; the UI never sees a Claude tool name. Schema
-// verified against real sessions — see scripts/broker/tests/claude/test-claude-activity.ts + the impl log.
+// verified against real sessions — see packages/typescript/adapters/claude/test/test-claude-activity.ts + the impl log.
 
 type ActivityMsg = Extract<AgentMessage, { type: 'agent-activity' }>;
 /** An activity frame plus a `src` stat key, so a watcher can skip unchanged files (getHistory maps `.msg`). */

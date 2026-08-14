@@ -12,7 +12,7 @@ import 'package:cosyncing_client/src/features/attention/view/foreground_attentio
 import 'package:cosyncing_client/src/features/attention/view/visible_attention_session_scope.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

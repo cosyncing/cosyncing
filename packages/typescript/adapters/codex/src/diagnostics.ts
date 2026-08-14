@@ -1,7 +1,6 @@
 import { join } from 'node:path';
 import {
   diagnoseBinaryVersion,
-  diagnoseManagedRuntimeFailure,
   type AgentMinimumVersion,
   type AgentSetupDiagnosis,
   type SetupCheck,
@@ -205,8 +204,6 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
       });
     }
   }
-  checks.push(diagnoseManagedRuntimeFailure(context, 'codex', 'Codex'));
-
   if (context.platform === 'darwin') {
     const ps = context.resolveExecutable(CODEX_MAC_PS_PATH);
     const lsof = context.resolveExecutable(CODEX_MAC_LSOF_PATH);

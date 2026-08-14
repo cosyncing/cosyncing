@@ -9,11 +9,11 @@
 import { createPublicKey } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PUBLISHED_SCHEMA_VERSIONS } from '../../../packages/typescript/broker/src/build-info.ts';
+import { PUBLISHED_SCHEMA_VERSIONS } from '../../../packages/typescript/broker/src/runtime/build-info.ts';
 import {
   isDistributionKind,
   type DistributionKind,
-} from '../../../packages/typescript/broker/src/application-identity.ts';
+} from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import { BROKER_CONTRACT } from '../../../packages/typescript/protocol/src/index.ts';
 
 export interface ReleaseChannelInputs {

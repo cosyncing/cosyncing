@@ -1,4 +1,4 @@
-import 'package:cosyncing_client/src/features/sessions/model/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

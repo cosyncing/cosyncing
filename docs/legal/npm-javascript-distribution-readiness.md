@@ -55,7 +55,7 @@ that every applicable obligation is satisfied; that judgment is the owner's.
 ## Supported hosts
 
 `linux-x64`, `linux-arm64`, and `darwin-arm64`, single-sourced in
-`packages/typescript/broker/src/supported-hosts.ts`.
+`packages/typescript/broker/src/installation/supported-hosts.ts`.
 
 A universal JavaScript bundle runs anywhere a supported Bun runs, so the
 supported set is now stated and enforced rather than implied by which compiled
@@ -81,14 +81,14 @@ implemented and is out of scope for this record.
 
 These properties are checked, not asserted:
 
-- `scripts/broker/tests/broker/test-npm-package.ts` — one staged package, no
+- `scripts/broker/tests/release/test-npm-package.ts` — one staged package, no
   platform packages or dependency fields, no install script, a Bun-shebang
   JavaScript entry, no ELF/Mach-O/PE member anywhere in the tarball, a real
   offline global install running both command names, the bundled `/cosy/` client
   resolving, the upgrade refusal, README contents, and byte-identical rebuilds
   from pinned inputs. It also proves the builder refuses a compiled artifact —
   including a real one built by the native builder.
-- `scripts/broker/tests/broker/test-application-identity.ts` — the application
+- `packages/typescript/broker/test/broker/test-application-identity.ts` — the application
   and the runtime never collapse into one path.
 - `scripts/ci/audit-workflows.sh` — the npm workflow may not reference the native
   builder or `--compile`, may not carry a stored npm credential, and may not

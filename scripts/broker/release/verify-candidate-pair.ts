@@ -13,14 +13,14 @@ import { join, resolve } from 'node:path';
 import {
   defaultBrokerConfig,
   writeBrokerConfig,
-} from '../../../packages/typescript/broker/src/configuration.ts';
+} from '../../../packages/typescript/broker/src/runtime/configuration.ts';
 import {
   ensureInstallationCredentials,
-} from '../../../packages/typescript/broker/src/credentials.ts';
+} from '../../../packages/typescript/broker/src/security/credentials.ts';
 import {
   committedInstallState,
   writeInstallState,
-} from '../../../packages/typescript/broker/src/install-state.ts';
+} from '../../../packages/typescript/broker/src/installation/install-state.ts';
 import {
   withCandidateParityBrowser,
 } from './candidate-browser-startup.ts';

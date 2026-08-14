@@ -4,7 +4,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/data.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/transfers/data/local_transfer_file_opener.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';

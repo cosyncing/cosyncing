@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /** Refuse candidate assembly unless the draft release contains exactly the native staging inputs. */
 import { resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/broker/src/product.ts';
+import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import {
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,

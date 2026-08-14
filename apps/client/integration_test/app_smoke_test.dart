@@ -1,8 +1,8 @@
 import 'package:cosyncing_client/src/app/app.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/data.dart';
-import 'package:cosyncing_client/src/features/sessions/view/sessions_workspace.dart';
+import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';

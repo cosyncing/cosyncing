@@ -217,7 +217,7 @@ void main() {
 
     test('the notification sink uses the dedicated silhouette', () {
       final adapter = File(
-        'lib/src/features/sessions/data/session_local_notification_adapter.dart',
+        'lib/src/features/sessions/detail/session_local_notification_adapter.dart',
       ).readAsStringSync();
       expect(adapter, contains("androidDefaultIcon: 'ic_notification'"));
     });

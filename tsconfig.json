@@ -2,7 +2,9 @@
   "extends": "./tsconfig.base.json",
   "include": [
     "packages/typescript/*/src/**/*.ts",
+    "packages/typescript/*/test/**/*.ts",
     "packages/typescript/adapters/*/src/**/*.ts",
+    "packages/typescript/adapters/*/test/**/*.ts",
     "scripts/broker/**/*.ts"
   ]
 }

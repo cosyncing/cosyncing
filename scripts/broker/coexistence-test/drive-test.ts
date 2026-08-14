@@ -6,7 +6,8 @@
  * This is the fallback question after the sync/channel finding: the live channel can DISPLAY a permission
  * prompt but cannot ANSWER it (not on Anthropic's curated allowlist). So is Drive the one Claude control
  * mode that actually works? Drive is `-p` (non-interactive) — no TTY — so we drive it via stdin/stdout,
- * mirroring ClaudeResumeConnection's exact argv (packages/typescript/adapters/claude/src/index.ts ~502-503):
+ * mirroring ClaudeResumeConnection's exact argv in
+ * packages/typescript/adapters/claude/src/implementation.ts:
  *   NEW session:      claude -p --session-id <uuid> --output-format stream-json --input-format stream-json …
  *   EXISTING (drive): claude -p --resume <uuid> --fork-session --output-format stream-json --input-format … --verbose
  *

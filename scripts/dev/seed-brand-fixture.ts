@@ -32,7 +32,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileS
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { AttentionStore } from '../../packages/typescript/broker/src/attention-store.ts';
+import { AttentionStore } from '../../packages/typescript/broker/src/attention/attention-store.ts';
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(`--${name}`);

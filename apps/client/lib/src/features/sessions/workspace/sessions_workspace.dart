@@ -1,0 +1,722 @@
+import 'dart:async';
+
+import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/nav_badge_label.dart';
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
+import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
+import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_page.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/new_session_launch.dart';
+import 'package:cosyncing_client/src/features/sessions/list/new_session_launch_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/new_session_sheet.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_freshness.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
+import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+/// Builds the detail pane for the active [SessionRef].
+typedef SessionDetailPaneBuilder =
+    Widget Function(BuildContext context, SessionRef ref);
+
+/// The Expanded two-pane Sessions surface: a persistent roster on the left, the
+/// opened-session tab strip and the active session's detail on the right.
+///
+/// Selecting a roster row opens it in the working set (the list keeps its
+/// scroll position — the win over push-nav). The detail pane is injected via
+/// [detailBuilder] so the router can supply the real detail surface; the
+/// default embeds [SessionDetailPage] in its app-bar-free workspace mode.
+///
+/// See `docs/architecture/client-ui.md`.
+class SessionsWorkspace extends ConsumerStatefulWidget {
+  /// Creates the two-pane Sessions workspace.
+  const SessionsWorkspace({this.detailBuilder, super.key});
+
+  /// Default width of the roster pane, and the width Home/double-click resets
+  /// to.
+  static const double defaultListPaneWidth = 320;
+
+  /// Width of the roster pane.
+  ///
+  /// Retained as the historical name for [defaultListPaneWidth]; the split is
+  /// user-adjustable, so this is only the starting point.
+  static const double listPaneWidth = defaultListPaneWidth;
+
+  /// Narrowest roster the user can drag to — the "sliver roster" floor, where
+  /// names truncate hard but status dots and project grouping still scan.
+  static const double minListPaneWidth = 120;
+
+  /// Widest roster the user can drag to.
+  static const double maxListPaneWidth = 480;
+
+  /// Dragging the pointer past this collapses the roster. The 20dp dead zone
+  /// between [minListPaneWidth] and here is what separates "narrowest roster"
+  /// from "close it".
+  static const double collapseSnapWidth = 100;
+
+  /// The detail pane's workable minimum: the roster never grows past
+  /// `windowWidth - detailMinPaneWidth`.
+  static const double detailMinPaneWidth = 480;
+
+  /// How long a resize settles before it is written to the store.
+  static const Duration resizePersistDebounce = Duration(milliseconds: 300);
+
+  /// Roster width below which the header sheds its secondary destinations, so
+  /// a sliver roster degrades instead of overflowing its action row.
+  ///
+  /// Kept as low as the compact icon buttons actually fit (they need ~120dp
+  /// plus the row's 18dp padding, plus the shared freshness slot), because
+  /// dropping Attention and Settings costs reachability: at Expanded width the
+  /// roster header and the collapsed rail are the only routes to them.
+  ///
+  /// R0b added the roster's shared refresh/status slot to this row. It is a
+  /// primary affordance — it is the only place the roster states that its rows
+  /// are stale — so it never sheds; the threshold moved up by its footprint
+  /// instead.
+  static const double compactHeaderWidth = 152 + RosterFreshnessSlot.slotExtent;
+
+  /// Foreground compatibility refresh interval.
+  ///
+  /// Current brokers keep the roster converged through the revision feed.
+  /// While that feed is healthy, this timer's silent load returns before
+  /// repository or network access. The tick remains as a fallback for older
+  /// brokers and an inactive feed, and is cancelled whenever the app is hidden.
+  static const Duration rosterPollInterval = Duration(seconds: 15);
+
+  /// Supplies the detail pane for the active session; defaults to
+  /// [SessionDetailPage].
+  final SessionDetailPaneBuilder? detailBuilder;
+
+  @override
+  ConsumerState<SessionsWorkspace> createState() => _SessionsWorkspaceState();
+}
+
+class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
+    with WidgetsBindingObserver {
+  Timer? _pollTimer;
+  Timer? _persistTimer;
+  NewSessionLaunchRequest? _newSessionLaunch;
+
+  /// Roster width when open. Kept meaningful while [_collapsed] so reopening
+  /// restores the width the user last chose rather than the default.
+  double _rosterWidth = SessionsWorkspace.defaultListPaneWidth;
+
+  /// Whether the roster is closed.
+  ///
+  /// Starts closed, and only [_restoreSplit] can open it — a saved record
+  /// saying the roster was expanded. Defaulting the other way would flash the
+  /// 320dp roster for a frame before the async store read collapsed it, and
+  /// because restoring never writes, a user who keeps the roster closed keeps
+  /// null prefs forever and would see that flash on *every* launch, not just
+  /// the first.
+  bool _collapsed = true;
+
+  /// Raw pointer position during a drag, tracked separately from [_rosterWidth]
+  /// so clamping at the floor cannot swallow further leftward movement — that
+  /// is what lets a slow drag still reach the collapse snap.
+  double _dragWidth = SessionsWorkspace.defaultListPaneWidth;
+
+  /// Width the in-flight collapse drag began from; reopening restores this
+  /// rather than the floor the pointer dragged through.
+  double _dragStartWidth = SessionsWorkspace.defaultListPaneWidth;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Trigger the initial roster load, like SessionsPage does for the drill-in
+    // route, so the workspace is self-sufficient when rendered at /sessions.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        ref.read(sessionListControllerProvider.notifier).load();
+      }
+    });
+    unawaited(_restoreSplit());
+    _startPolling();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _persistTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Restores the persisted split, or opens collapsed on a genuine first run.
+  ///
+  /// A null record means the user has never set a split. Product wants the
+  /// roster closed until they ask for it, so that case collapses while keeping
+  /// [SessionsWorkspace.defaultListPaneWidth] as the reopen width. A store that
+  /// cannot be read is treated the same way rather than wedging the workspace.
+  Future<void> _restoreSplit() async {
+    WorkspaceRosterPrefs? saved;
+    try {
+      saved = await ref.read(workspacePrefsStoreProvider).loadRoster();
+    } on Object {
+      saved = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (saved == null) {
+        _collapsed = true;
+        _rosterWidth = SessionsWorkspace.defaultListPaneWidth;
+      } else {
+        _collapsed = saved.collapsed;
+        _rosterWidth = saved.width;
+      }
+      _dragWidth = _rosterWidth;
+      _dragStartWidth = _rosterWidth;
+    });
+  }
+
+  /// Clamps a roster width to 120–480dp, and never past `available - 480` so
+  /// the detail pane keeps a workable minimum. A window too narrow to satisfy
+  /// both pins the roster to its floor.
+  double _clampWidth(double width, double available) {
+    var upper = SessionsWorkspace.maxListPaneWidth;
+    final windowUpper = available - SessionsWorkspace.detailMinPaneWidth;
+    if (windowUpper < upper) upper = windowUpper;
+    if (upper < SessionsWorkspace.minListPaneWidth) {
+      upper = SessionsWorkspace.minListPaneWidth;
+    }
+    return width.clamp(SessionsWorkspace.minListPaneWidth, upper);
+  }
+
+  void _onDragStart() {
+    _dragStartWidth = _rosterWidth;
+    _dragWidth = _rosterWidth;
+  }
+
+  void _onDragDelta(double dx, double available) {
+    _dragWidth += dx;
+    setState(() {
+      if (_dragWidth < SessionsWorkspace.collapseSnapWidth) {
+        if (!_collapsed) {
+          _collapsed = true;
+          _rosterWidth = _dragStartWidth;
+        }
+        return;
+      }
+      _collapsed = false;
+      _rosterWidth = _clampWidth(_dragWidth, available);
+    });
+  }
+
+  void _onDragEnd() => _schedulePersist();
+
+  /// Reset to the default split — double-click on the sash, or Home.
+  void _resetSplit() {
+    setState(() {
+      _collapsed = false;
+      _rosterWidth = SessionsWorkspace.defaultListPaneWidth;
+      _dragWidth = _rosterWidth;
+    });
+    _schedulePersist();
+  }
+
+  void _stepSplit(double delta, double available) {
+    setState(() {
+      _collapsed = false;
+      _rosterWidth = _clampWidth(_rosterWidth + delta, available);
+      _dragWidth = _rosterWidth;
+    });
+    _schedulePersist();
+  }
+
+  void _expandRoster() {
+    setState(() {
+      _collapsed = false;
+      _dragWidth = _rosterWidth;
+    });
+    _schedulePersist();
+  }
+
+  /// Debounces the write so a drag persists once it settles, not per pixel.
+  void _schedulePersist() {
+    _persistTimer?.cancel();
+    _persistTimer = Timer(
+      SessionsWorkspace.resizePersistDebounce,
+      () => unawaited(_persistSplit()),
+    );
+  }
+
+  Future<void> _persistSplit() async {
+    if (!mounted) return;
+    final prefs = WorkspaceRosterPrefs(
+      width: _rosterWidth,
+      collapsed: _collapsed,
+    );
+    try {
+      await ref.read(workspacePrefsStoreProvider).saveRoster(prefs);
+    } on Object {
+      // Best effort: a layout preference is never worth surfacing an error for.
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        // On web this fires for `visibilitychange`. Refetch immediately rather
+        // than waiting out the poll interval: returning to the tab is exactly
+        // when the roster is most likely stale and most visibly wrong.
+        _refreshNow();
+        _startPolling();
+      case AppLifecycleState.inactive:
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _pollTimer?.cancel();
+        _pollTimer = null;
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(
+      SessionsWorkspace.rosterPollInterval,
+      (_) => _refreshNow(),
+    );
+  }
+
+  void _refreshNow() {
+    if (!mounted) return;
+    unawaited(ref.read(sessionRosterResumeRefreshProvider)());
+  }
+
+  /// The shared status slot's explicit user action.
+  ///
+  /// Deliberately not [_refreshNow]: a background tick is silent by contract,
+  /// and pressing Refresh must both force a fetch and be visible in the one
+  /// slot that reports it.
+  Future<void> _refreshRequested() async {
+    if (!mounted) return;
+    await Future.wait<void>([
+      ref.read(sessionListControllerProvider.notifier).load(),
+      ref.read(sessionCreationReadyProvider.notifier).refresh(),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Reload once a real broker client arrives: the active profile (notably the
+    // web same-origin default) hydrates asynchronously and the first load can
+    // race it (mirrors SessionsPage). Also keep tab metadata live as the roster
+    // refreshes.
+    ref
+      ..listen(brokerClientProvider, (previous, next) {
+        final hadClient = previous?.valueOrNull != null;
+        final hasClient = next.valueOrNull != null;
+        if (!hadClient && hasClient && mounted) {
+          ref.read(sessionListControllerProvider.notifier).load();
+        }
+      })
+      // Open-tab metadata reads the same overlaid rows the roster renders, so a
+      // tab's status can never disagree with its row or with the open detail.
+      ..listen(rosterSessionsProvider, (_, next) {
+        ref.read(openSessionsControllerProvider.notifier).refreshMetadata(next);
+      });
+
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    final listState = ref.watch(sessionListControllerProvider);
+    final hasActiveBrokerClient = ref
+        .watch(brokerClientProvider)
+        .maybeWhen(data: (client) => client != null, orElse: () => false);
+    final activeSource = RosterSource.of(
+      ref.watch(activeBrokerProfileProvider),
+    );
+    final creationAvailability = ref
+        .watch(sessionCreationReadyProvider)
+        .availabilityFor(activeSource);
+    final canCreateSession =
+        creationAvailability == SessionCreationAvailability.available;
+    final hasRosterSessions = ref.watch(rosterSessionsProvider).isNotEmpty;
+    final hasCompletedEmptyRoster =
+        listState.status == SessionListStatus.loaded && !hasRosterSessions;
+    final emptyRosterMessage = switch (creationAvailability) {
+      SessionCreationAvailability.checking =>
+        l10n.sessionsWorkspaceEmptyCreationChecking,
+      SessionCreationAvailability.available => l10n.sessionsWorkspaceEmpty,
+      SessionCreationAvailability.unavailable =>
+        l10n.sessionsWorkspaceEmptyCreationUnavailable,
+      SessionCreationAvailability.failed =>
+        l10n.sessionsWorkspaceEmptyCreationCheckFailed,
+    };
+    final unreadCount = ref.watch(attentionUnreadCountProvider);
+    final openAsync = ref.watch(openSessionsControllerProvider);
+    // Never render a previous source's tab membership while the source-keyed
+    // controller is rehydrating. AsyncValue may retain its old value during a
+    // dependency reload; treating loading/error as empty is the presentation
+    // fence that prevents those identities from mounting against the new
+    // broker even for one frame.
+    final open = openAsync.isLoading || openAsync.hasError
+        ? const OpenSessionsState()
+        : openAsync.valueOrNull ?? const OpenSessionsState();
+    final active = open.active;
+    final buildDetail = widget.detailBuilder ?? _defaultDetail;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final available = constraints.maxWidth;
+        final rosterWidth = _clampWidth(_rosterWidth, available);
+        return Stack(
+          children: [
+            Row(
+              children: [
+                if (_collapsed)
+                  WorkspaceCollapsedRosterRail(
+                    separatorColor: tokens.separator,
+                    unreadCount: unreadCount,
+                    unreadLabel: navBadgeLabel(unreadCount),
+                    onExpand: _expandRoster,
+                    onNewSession: canCreateSession
+                        ? () => unawaited(_openNewSession())
+                        : null,
+                    onAttention: () => context.go(attentionRoute),
+                    onSettings: () => context.go(settingsRoute),
+                  )
+                else ...[
+                  SizedBox(
+                    key: const Key('workspace-roster-pane'),
+                    width: rosterWidth,
+                    child: _buildRoster(
+                      context,
+                      listState,
+                      open,
+                      unreadCount,
+                      rosterWidth,
+                      hasActiveBrokerClient,
+                      canCreateSession,
+                      emptyRosterMessage,
+                    ),
+                  ),
+                  WorkspaceSplitSash(
+                    key: const Key('workspace-split-sash'),
+                    separatorColor: tokens.separator,
+                    onDragStart: _onDragStart,
+                    onDragDelta: (dx) => _onDragDelta(dx, available),
+                    onDragEnd: _onDragEnd,
+                    onReset: _resetSplit,
+                    onStep: (delta) => _stepSplit(delta, available),
+                  ),
+                ],
+                Expanded(
+                  child: Column(
+                    children: [
+                      OpenSessionsTabStrip(
+                        refs: open.refs,
+                        activeKey: open.activeKey,
+                        onSelect: (key) => ref
+                            .read(openSessionsControllerProvider.notifier)
+                            .activate(key),
+                        onClose: (key) => ref
+                            .read(openSessionsControllerProvider.notifier)
+                            .close(key),
+                      ),
+                      Expanded(
+                        child: active == null
+                            ? !hasActiveBrokerClient
+                                  ? const SessionsEmptyState(
+                                      hasActiveBrokerClient: false,
+                                      creationAvailability:
+                                          SessionCreationAvailability.checking,
+                                    )
+                                  : hasCompletedEmptyRoster
+                                  ? _PaneMessage(
+                                      icon: Icons.inbox_outlined,
+                                      message: emptyRosterMessage,
+                                    )
+                                  : _PaneMessage(
+                                      icon: Icons.terminal_outlined,
+                                      message:
+                                          l10n.sessionsWorkspaceSelectPrompt,
+                                    )
+                            : RetainedSessionPages(
+                                source: activeSource,
+                                open: open,
+                                builder: buildDetail,
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (_newSessionLaunch case final NewSessionLaunchRequest request)
+              Positioned.fill(
+                child: NewSessionLaunchPage(
+                  key: ValueKey<NewSessionLaunchRequest>(request),
+                  request: request,
+                  onCreate: (request) =>
+                      ref.read(newSessionLaunchServiceProvider).create(request),
+                  onOpen: _prepareCreatedSessionDestination,
+                  onConnect: _prepareCreatedSessionConnection,
+                  onComplete: _openCreatedSession,
+                  onBack: _finishNewSessionLaunch,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Builds the roster pane.
+  ///
+  /// [rosterWidth] governs how much of the header survives: a sliver roster has
+  /// no room for three action buttons beside the title, and a `RenderFlex`
+  /// overflow there would be a visible break rather than a graceful narrow
+  /// state. Below [SessionsWorkspace.compactHeaderWidth] the secondary
+  /// destinations (Attention, Settings) drop out — both remain reachable from
+  /// the app's primary navigation — and New session, the roster's own action,
+  /// stays.
+  Widget _buildRoster(
+    BuildContext context,
+    SessionListState listState,
+    OpenSessionsState open,
+    int unreadCount,
+    double rosterWidth,
+    bool hasActiveBrokerClient,
+    bool canCreateSession,
+    String emptyRosterMessage,
+  ) {
+    final l10n = AppLocalizations.of(context);
+    final showSecondaryActions =
+        rosterWidth >= SessionsWorkspace.compactHeaderWidth;
+    final sessions = ref.watch(rosterSessionsProvider);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 7, 6, 7),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      l10n.sessionsTitle,
+                      // A sliver roster leaves the title very little room; let
+                      // it ellipsize rather than wrap the header taller.
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ],
+                ),
+              ),
+              if (showSecondaryActions) ...[
+                IconButton(
+                  key: const Key('sessions-workspace-attention'),
+                  tooltip: l10n.notificationsTitle,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => context.go(attentionRoute),
+                  icon: Badge(
+                    isLabelVisible: unreadCount > 0,
+                    label: Text(navBadgeLabel(unreadCount)),
+                    child: const Icon(Icons.notifications_outlined),
+                  ),
+                ),
+                IconButton(
+                  key: const Key('sessions-workspace-settings'),
+                  tooltip: l10n.settingsTitle,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => context.go(settingsRoute),
+                  icon: const Icon(Icons.settings_outlined),
+                ),
+              ],
+              IconButton.filledTonal(
+                key: const Key('sessions-workspace-global-new'),
+                tooltip: l10n.newSessionTitle,
+                visualDensity: VisualDensity.compact,
+                onPressed: canCreateSession
+                    ? () => unawaited(_openNewSession())
+                    : null,
+                icon: const Icon(Icons.add, size: 19),
+              ),
+              // R0b: the same slot, in the same top-right position, that
+              // Compact renders — so a rotation or resize never moves it and
+              // never leaves two indicators describing one transition.
+              RosterFreshnessSlot(
+                presentation: RosterFreshnessPresentation.fromListState(
+                  listState,
+                ),
+                onRefresh: _refreshRequested,
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: SessionListPane(
+            queryWindow:
+                ref.watch(sessionRosterWindowProvider).valueOrNull ??
+                SessionRosterQueryWindow.last7Days,
+            onQueryWindowChanged: (window) => unawaited(
+              ref.read(sessionRosterWindowProvider.notifier).setWindow(window),
+            ),
+            sessions: sessions,
+            status: listState.status,
+            error: listState.error,
+            cachedRoster: listState.cachedRoster,
+            activeKey: open.activeKey,
+            onOpen: (session) => ref
+                .read(openSessionsControllerProvider.notifier)
+                .open(SessionRef.fromSession(session)),
+            // A cached row opens on its exact identity, with the tab's status
+            // left explicitly UNKNOWN — the snapshot stores no activity, so
+            // there is nothing truthful to put there. `refreshMetadata` fills
+            // it in as soon as the authoritative roster lands.
+            onOpenCached: (identity) => ref
+                .read(openSessionsControllerProvider.notifier)
+                .open(
+                  SessionRef.cachedIdentity(
+                    tool: identity.tool,
+                    id: identity.sessionId,
+                    title: identity.title.isNotEmpty
+                        ? identity.title
+                        : identity.sessionId,
+                  ),
+                ),
+            onNewProject: canCreateSession
+                ? (project) => unawaited(_openNewSession(project: project))
+                : null,
+            onRenameProject: (project) =>
+                unawaited(renameProjectAliasFromList(context, ref, project)),
+            onRetry: _refreshRequested,
+            emptyState: _PaneMessage(
+              icon: Icons.inbox_outlined,
+              message: !hasActiveBrokerClient
+                  ? l10n.sessionsEmptyBody
+                  : emptyRosterMessage,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _openNewSession({SessionProjectGroup? project}) async {
+    final result = await showNewSessionSheet(
+      context,
+      initialDirectory: project?.cwd ?? '',
+      projectName: project?.label,
+      onImmediateLaunch: _beginNewSessionLaunch,
+    );
+    if (!mounted || result == null) return;
+    switch (result) {
+      case ImmediateNewSessionResult():
+        // The callback already started this before the sheet's exit animation.
+        // Replaying the result could create a duplicate if a very fast launch
+        // completed before the bottom-sheet route finished dismissing.
+        return;
+      case ScheduledNewSessionResult(:final schedule):
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              AppLocalizations.of(context).sessionScheduledFor(
+                DateTime.fromMillisecondsSinceEpoch(schedule.at).toString(),
+              ),
+            ),
+          ),
+        );
+    }
+  }
+
+  void _beginNewSessionLaunch(NewSessionLaunchRequest request) {
+    if (!mounted || _newSessionLaunch != null) return;
+    setState(() => _newSessionLaunch = request);
+  }
+
+  Future<void> _prepareCreatedSessionDestination(SessionInfo _) =>
+      Future<void>.value();
+
+  void _openCreatedSession(SessionInfo session) {
+    if (!mounted) return;
+    // Keep the embedded detail and its background Observe supervisor out of
+    // the provider family until the launch-owned reason-tagged Resume attach
+    // has completed. Opening here still happens while NewSessionLaunchPage
+    // holds its handoff lease through the destination's first rendered frame.
+    ref
+        .read(openSessionsControllerProvider.notifier)
+        .open(SessionRef.fromSession(session));
+    setState(() => _newSessionLaunch = null);
+    // The create response is authoritative: never wait for the roster before
+    // opening it. Let the roster catch up silently in the background.
+    unawaited(
+      ref.read(sessionListControllerProvider.notifier).load(silent: true),
+    );
+  }
+
+  Future<NewSessionConnectionHandoff> _prepareCreatedSessionConnection(
+    SessionInfo session,
+  ) => ref.read(newSessionConnectionPreparerProvider)(
+    ProviderScope.containerOf(context, listen: false),
+    session,
+  );
+
+  void _finishNewSessionLaunch() {
+    if (!mounted || _newSessionLaunch == null) return;
+    setState(() => _newSessionLaunch = null);
+  }
+
+  static Widget _defaultDetail(BuildContext context, SessionRef ref) =>
+      SessionDetailPage(
+        key: ValueKey<SessionDetailKey>(
+          SessionDetailKey(tool: ref.tool, sessionId: ref.id),
+        ),
+        tool: ref.tool,
+        sessionId: ref.id,
+        embedded: true,
+      );
+}
+
+/// A centered icon + message used for the workspace's empty panes.
+class _PaneMessage extends StatelessWidget {
+  const _PaneMessage({required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 40, color: tokens.textTertiary),
+            const SizedBox(height: 12),
+            SelectableText(
+              message,
+              textAlign: TextAlign.center,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: tokens.textSecondary),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

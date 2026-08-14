@@ -6,11 +6,11 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/soft_minimalist_theme.dart';
+import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
 // The canonical renderer imports keep their stable package paths for
 // boundary-safe package import resolution.
-import 'package:cosyncing_client/src/features/sessions/model/session_transcript_display.dart';
-import 'package:cosyncing_client/src/features/sessions/model/tool_presentation.dart';
-import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/tool_presentation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

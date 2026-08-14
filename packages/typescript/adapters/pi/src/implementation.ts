@@ -2295,7 +2295,7 @@ export interface PiToolResultParts {
  * SAME diffstat / exit-code / truncation chips for Pi that it already does for OpenCode — instead of
  * an opaque text blob (the audit's shared-surface tool-result-mapping gap). Shared by BOTH Pi paths:
  * the resume adapter (live `tool_execution_end` + history) and the live bridge
- * (broker/src/pi-bridge.ts), so neither drops detail. Pi's edit tool returns `details.diff`/`.patch`;
+ * (adapter-pi/src/bridge.ts), so neither drops detail. Pi's edit tool returns `details.diff`/`.patch`;
  * bash returns `details.truncation`/`.fullOutputPath` and embeds the exit code in the error text
  * ("Command exited with code N"); the file path comes from the originating tool-call args.
  */
@@ -2383,7 +2383,7 @@ function piToolFamily(toolName: string): 'command' | 'file-read' | 'search' | 'w
  * Pi tool call/result → the canonical normalized family.
  *
  * Shared by BOTH Pi surfaces (the resume adapter's live/history mapping and the
- * live bridge in broker/src/pi-bridge.ts) so neither invents its own parsing.
+ * live bridge in adapter-pi/src/bridge.ts) so neither invents its own parsing.
  * `details` is absent on a still-running call, which yields the call-time fields
  * plus a `running` state.
  */

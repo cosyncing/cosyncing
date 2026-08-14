@@ -8,9 +8,9 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/url_normaliz
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/data/active_broker_profile_store.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
-import 'package:cosyncing_client/src/features/sessions/data/created_session_attach_intents.dart';
-import 'package:cosyncing_client/src/features/sessions/data/roster_snapshot_store.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_draft_store.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/created_session_attach_intents.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 

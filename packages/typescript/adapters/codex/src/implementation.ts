@@ -187,6 +187,9 @@ export class CodexAdapter implements AgentBackend {
   readonly id = 'codex';
   readonly displayName = 'Codex';
   readonly capabilities = codexCapabilities();
+  readonly integration = {
+    managedRuntime: { kind: 'process', failureJournal: true },
+  } as const;
   private liveThreadCache: { at: number; ids: Set<string> } | undefined;
   private liveActivityCache: { at: number; activities: Map<string, CodexThreadActivityStatus> } | undefined;
   /** Connections this adapter handed out and that are still open, for the R0c.4 owner self-check.

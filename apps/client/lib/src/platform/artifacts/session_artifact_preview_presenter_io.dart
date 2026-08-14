@@ -3,9 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_artifact_file_service.dart';
-import 'package:cosyncing_client/src/features/sessions/view/session_artifact_preview_html_policy.dart';
-import 'package:cosyncing_client/src/features/sessions/view/session_artifact_preview_result.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_result.dart';
 import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;

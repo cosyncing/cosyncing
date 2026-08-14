@@ -28,7 +28,7 @@ import {
   settledProcessOutput,
   waitForBrokerHealth,
   type ProcessOutputCapture,
-} from '../../broker/tests/helpers/isolated-broker-fixture.ts';
+} from '../../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, '../../..');
 const WEB_BUILD = join(REPOSITORY_ROOT, 'apps/client/build/web');

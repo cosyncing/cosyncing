@@ -1,6 +1,6 @@
 import 'package:cosyncing_client/src/features/attention/data/attention_feed_settings_store.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
-import 'package:cosyncing_client/src/features/sessions/data/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 
 /// Minimal lifecycle contract owned by the multi-profile coordinator.
 abstract interface class AttentionFeedRunner {

@@ -39,7 +39,7 @@ a maintainer workstation as CI infrastructure.
 | Public-safe lineage | A | curated export and fresh reviewed Git history |
 | Monorepo and hosted parity | A → B | consolidated workspaces and public-safe hosted gates |
 | Contract and compatibility | B | same-checkout export and client adoption |
-| Modular boundaries | B | dependency rules and named production hotspot ratchets |
+| Modular boundaries | B | dependency rules with broker domains, provider adapters, and Flutter capability ownership |
 | Evidence, docs, and local rehearsal | B | accurate public material and local candidate proof |
 | Source publication | C | public repository, website, branch rules, and fork PR proof |
 | Compiled release acceptance | C → D | legal approval, protected signing, candidate upgrade/rollback, stable promotion |
