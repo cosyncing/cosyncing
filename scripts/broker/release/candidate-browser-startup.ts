@@ -379,9 +379,10 @@ export async function launchCandidateParityBrowser(
         const port = cdpPort(evidence);
         if (port !== undefined) {
           const endpoint = `http://127.0.0.1:${port}`;
-          // A valid DevToolsActivePort is the retry boundary. Connection and
-          // every later CDP/product assertion get one chance only.
-          retryable = false;
+          // DevToolsActivePort can appear before the HTTP and WebSocket CDP
+          // endpoints accept connections. Keep that transport establishment
+          // inside the startup retry; withCandidateParityBrowser still runs
+          // every later product assertion exactly once after startup succeeds.
           const remaining = Math.max(1, startupTimeoutMs - (now() - started));
           socket = await connect(endpoint, remaining);
           let cleanupPromise: Promise<void> | undefined;

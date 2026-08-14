@@ -575,31 +575,39 @@ try {
   const root = browserTestRoot();
   const liveProcesses = new Set<CandidateBrowserProcess>();
   const failures: CandidateBrowserStartupFailure[] = [];
+  const profiles: string[] = [];
   let spawnCount = 0;
+  let connectCount = 0;
   try {
-    await expectFailure(
-      async () => await launchCandidateParityBrowser({
-        executable: '/test/cdp-failure-browser',
-        profileRoot: root,
-        spawn: (_executable, profile) => {
-          spawnCount += 1;
-          writeFileSync(join(profile, 'DevToolsActivePort'), '41236\n');
-          return fakeBrowserProcess({ liveProcesses });
-        },
-        connect: async () => {
+    const session = await launchCandidateParityBrowser({
+      executable: '/test/cdp-failure-browser',
+      profileRoot: root,
+      spawn: (_executable, profile) => {
+        spawnCount += 1;
+        profiles.push(profile);
+        writeFileSync(join(profile, 'DevToolsActivePort'), '41236\n');
+        return fakeBrowserProcess({ liveProcesses });
+      },
+      connect: async () => {
+        connectCount += 1;
+        if (connectCount === 1) {
           throw new Error('injected WebSocket failure');
-        },
-        reportFailure: (failure) => failures.push(failure),
-      }),
-      /CDP connection failed on attempt 1: injected WebSocket failure/,
-    );
-    assert.equal(spawnCount, 1);
+        }
+        return fakeSocket();
+      },
+      reportFailure: (failure) => failures.push(failure),
+    });
+    assert.equal(spawnCount, 2);
+    assert.equal(connectCount, 2);
+    assert.equal(new Set(profiles).size, 2);
     assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.attempt, 1);
     assert.equal(failures[0]!.devToolsActivePort.existed, true);
     assert.equal(failures[0]!.devToolsActivePort.contents, '41236\n');
+    await session.cleanup();
     assert.equal(liveProcesses.size, 0);
     assert.deepEqual(readdirSync(root), []);
-    console.log('PASS  WebSocket connection failure is not retried');
+    console.log('PASS  a transient CDP connection failure retries with a fresh profile');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
