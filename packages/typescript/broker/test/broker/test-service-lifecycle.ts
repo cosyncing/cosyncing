@@ -32,6 +32,7 @@ import {
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
   servicePathMatchesExpected,
+  SYSTEMD_MUTATION_TIMEOUT_MS,
   type DurableServiceProvider,
   type DurableServiceStatus,
   type ServiceCommandResult,
@@ -551,13 +552,21 @@ function setupOptions(options: {
 }
 
 class RecordingRunner implements ServiceCommandRunner {
-  readonly calls: Array<{ executable: string; args: readonly string[] }> = [];
+  readonly calls: Array<{
+    executable: string;
+    args: readonly string[];
+    timeoutMs?: number;
+  }> = [];
   enabled = false;
   active: 'active' | 'inactive' | 'failed' = 'inactive';
   lingering = false;
 
-  async run(executable: string, args: readonly string[]): Promise<ServiceCommandResult> {
-    this.calls.push({ executable, args: [...args] });
+  async run(
+    executable: string,
+    args: readonly string[],
+    timeoutMs?: number,
+  ): Promise<ServiceCommandResult> {
+    this.calls.push({ executable, args: [...args], timeoutMs });
     const command = args[0] === '--user' ? args[1] : args[0];
     if (command === 'is-enabled') {
       return { status: this.enabled ? 'ok' : 'error', exitCode: this.enabled ? 0 : 1, stdout: this.enabled ? 'enabled\n' : 'disabled\n', stderr: '' };
@@ -920,6 +929,18 @@ try {
         && runner.calls.every((call) => call.executable.startsWith('/')
           && !call.args.some((arg) => /[\0\r\n]/.test(arg))
           && !call.args.includes('sh') && !call.args.includes('-c')));
+    const stopCapableMutations = runner.calls.filter((call) => {
+      const command = call.args[1];
+      return command === 'stop'
+        || command === 'restart'
+        || (command === 'disable' && call.args.includes('--now'));
+    });
+    check('stop-capable systemd mutations outlast the service stop window without widening other commands',
+      stopCapableMutations.length === 3
+        && stopCapableMutations.every((call) => call.timeoutMs === SYSTEMD_MUTATION_TIMEOUT_MS)
+        && runner.calls
+          .filter((call) => !stopCapableMutations.includes(call))
+          .every((call) => call.timeoutMs === undefined));
 
     // The rendered artifact must meet REAL systemd at least once. No fake-provider seam can catch a unit
     // that parses but is rejected (or half-ignored) by systemd's own directive parsers — that class of bug

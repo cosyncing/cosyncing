@@ -42,6 +42,11 @@ export const LAUNCHD_SERVICE_FILENAME = `${LAUNCHD_SERVICE_LABEL}.plist`;
 export const LAUNCHD_PRINT_TIMEOUT_MS = 5_000;
 /** Overall wall-clock bound for waiting out one start/stop/restart transition, probe time included. */
 export const SERVICE_TRANSITION_TIMEOUT_MS = 30_000;
+/**
+ * systemd may wait through its own stop timeout before returning. Keep stop-capable mutations bounded, but
+ * above systemd's normal service-stop window so a successful late stop is not mistaken for a failed action.
+ */
+export const SYSTEMD_MUTATION_TIMEOUT_MS = 180_000;
 export const SERVICE_COMMAND_OUTPUT_LIMIT = 16 * 1024;
 
 export type DurableServiceProviderId = 'systemd' | 'launchd';
@@ -749,8 +754,11 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
       : [this.journalctlPath, '--user', '-u', SYSTEMD_SERVICE_NAME, '-n', String(request.lines), '--no-pager'];
   }
 
-  private async systemctl(args: readonly string[]): Promise<ServiceCommandResult> {
-    return this.runner.run(this.systemctlPath, ['--user', ...args]);
+  private async systemctl(
+    args: readonly string[],
+    timeoutMs?: number,
+  ): Promise<ServiceCommandResult> {
+    return this.runner.run(this.systemctlPath, ['--user', ...args], timeoutMs);
   }
 
   private async loginctl(args: readonly string[]): Promise<ServiceCommandResult> {
@@ -820,15 +828,24 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
   async stop(): Promise<void> {
     const status = await this.inspect();
     if (status.active === 'inactive') return;
-    requireCommand(await this.systemctl(['stop', SYSTEMD_SERVICE_NAME]), 'systemd-stop-failed');
+    requireCommand(
+      await this.systemctl(['stop', SYSTEMD_SERVICE_NAME], SYSTEMD_MUTATION_TIMEOUT_MS),
+      'systemd-stop-failed',
+    );
   }
 
   async restart(): Promise<void> {
-    requireCommand(await this.systemctl(['restart', SYSTEMD_SERVICE_NAME]), 'systemd-restart-failed');
+    requireCommand(
+      await this.systemctl(['restart', SYSTEMD_SERVICE_NAME], SYSTEMD_MUTATION_TIMEOUT_MS),
+      'systemd-restart-failed',
+    );
   }
 
   async uninstall(): Promise<void> {
-    await this.systemctl(['disable', '--now', SYSTEMD_SERVICE_NAME]);
+    await this.systemctl(
+      ['disable', '--now', SYSTEMD_SERVICE_NAME],
+      SYSTEMD_MUTATION_TIMEOUT_MS,
+    );
     for (const path of [this.definitionPath, this.environmentPath]) {
       if (!existsSync(path)) continue;
       assertNoSymlinkComponents(path, false);

@@ -392,6 +392,7 @@ try {
   const profiles: string[] = [];
   const failures: CandidateBrowserStartupFailure[] = [];
   const firstSignals: Array<NodeJS.Signals | number | undefined> = [];
+  const liveProcessesBeforeSpawn: number[] = [];
   let spawnCount = 0;
   try {
     const session = await launchCandidateParityBrowser({
@@ -402,6 +403,7 @@ try {
       terminationTimeoutMs: 3,
       outputDrainTimeoutMs: 3,
       spawn: (_executable, profile) => {
+        liveProcessesBeforeSpawn.push(liveProcesses.size);
         spawnCount += 1;
         profiles.push(profile);
         if (spawnCount === 2) {
@@ -418,6 +420,7 @@ try {
       reportFailure: (failure) => failures.push(failure),
     });
     assert.equal(spawnCount, 2);
+    assert.deepEqual(liveProcessesBeforeSpawn, [0, 0]);
     assert.equal(new Set(profiles).size, 2);
     assert.equal(failures.length, 1);
     assert.equal(failures[0]!.attempt, 1);
@@ -519,6 +522,9 @@ try {
   const liveProcesses = new Set<CandidateBrowserProcess>();
   const profiles: string[] = [];
   const failures: CandidateBrowserStartupFailure[] = [];
+  const liveProcessesBeforeSpawn: number[] = [];
+  let clock = 0;
+  let connectCount = 0;
   try {
     await expectFailure(
       async () => await launchCandidateParityBrowser({
@@ -527,14 +533,25 @@ try {
         startupTimeoutMs: 4,
         pollIntervalMs: 1,
         spawn: (_executable, profile) => {
+          liveProcessesBeforeSpawn.push(liveProcesses.size);
           profiles.push(profile);
+          writeFileSync(join(profile, 'DevToolsActivePort'), '41239\n');
           return fakeBrowserProcess({ liveProcesses });
         },
+        connect: async () => {
+          connectCount += 1;
+          throw new Error(`injected CDP connection failure ${connectCount}`);
+        },
+        now: () => clock,
+        sleep: async (milliseconds) => { clock += milliseconds; },
         reportFailure: (failure) => failures.push(failure),
       }),
       /failed after 2 attempts/,
     );
     assert.deepEqual(failures.map(({ attempt }) => attempt), [1, 2]);
+    assert.ok(failures.every(({ failure }) =>
+      failure.includes('last CDP connection error: injected CDP connection failure')));
+    assert.deepEqual(liveProcessesBeforeSpawn, [0, 0]);
     assert.equal(new Set(profiles).size, 2);
     assert.equal(liveProcesses.size, 0);
     assert.deepEqual(readdirSync(root), []);
@@ -582,6 +599,7 @@ try {
     const session = await launchCandidateParityBrowser({
       executable: '/test/cdp-failure-browser',
       profileRoot: root,
+      pollIntervalMs: 1,
       spawn: (_executable, profile) => {
         spawnCount += 1;
         profiles.push(profile);
@@ -597,17 +615,14 @@ try {
       },
       reportFailure: (failure) => failures.push(failure),
     });
-    assert.equal(spawnCount, 2);
+    assert.equal(spawnCount, 1);
     assert.equal(connectCount, 2);
-    assert.equal(new Set(profiles).size, 2);
-    assert.equal(failures.length, 1);
-    assert.equal(failures[0]!.attempt, 1);
-    assert.equal(failures[0]!.devToolsActivePort.existed, true);
-    assert.equal(failures[0]!.devToolsActivePort.contents, '41236\n');
+    assert.equal(new Set(profiles).size, 1);
+    assert.equal(failures.length, 0);
     await session.cleanup();
     assert.equal(liveProcesses.size, 0);
     assert.deepEqual(readdirSync(root), []);
-    console.log('PASS  a transient CDP connection failure retries with a fresh profile');
+    console.log('PASS  a transient CDP connection failure retries within the same live profile');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

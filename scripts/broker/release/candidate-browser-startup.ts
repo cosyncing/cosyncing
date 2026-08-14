@@ -367,6 +367,7 @@ export async function launchCandidateParityBrowser(
     let stderrPromise: Promise<string> | undefined;
     let socket: WebSocket | undefined;
     let retryable = true;
+    let lastCdpConnectionError: string | undefined;
     try {
       browser = spawn(options.executable, profile);
       stdoutPromise = drain(browser.stdout);
@@ -384,7 +385,22 @@ export async function launchCandidateParityBrowser(
           // inside the startup retry; withCandidateParityBrowser still runs
           // every later product assertion exactly once after startup succeeds.
           const remaining = Math.max(1, startupTimeoutMs - (now() - started));
-          socket = await connect(endpoint, remaining);
+          try {
+            socket = await connect(endpoint, remaining);
+          } catch (error) {
+            lastCdpConnectionError = error instanceof Error ? error.message : String(error);
+            if (browser.exitCode !== null) {
+              throw new Error(
+                `browser exited during CDP startup (${browser.exitCode}); `
+                  + `last CDP connection error: ${lastCdpConnectionError}`,
+              );
+            }
+            const waitRemaining = startupTimeoutMs - (now() - started);
+            if (waitRemaining > 0) {
+              await sleep(Math.min(pollIntervalMs, waitRemaining));
+            }
+            continue;
+          }
           let cleanupPromise: Promise<void> | undefined;
           return {
             socket,
@@ -423,7 +439,9 @@ export async function launchCandidateParityBrowser(
         }
         await sleep(pollIntervalMs);
       }
-      throw new Error('browser did not publish a usable CDP endpoint');
+      throw new Error(lastCdpConnectionError
+        ? `browser did not establish CDP before its startup deadline; last CDP connection error: ${lastCdpConnectionError}`
+        : 'browser did not publish a usable CDP endpoint');
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : String(error);
       const portEvidence = activePortEvidence(activePortPath);
