@@ -11,6 +11,7 @@
 
 ## Product and development
 
+- [Changelog](CHANGELOG.md)
 - [Monorepo architecture](architecture/monorepo.md)
 - [Client UI architecture](architecture/client-ui.md)
 - [Attention feed architecture](architecture/attention.md)
@@ -33,4 +34,4 @@
 - [Roadmap](project/roadmap.md)
 - [Third-party license inventory](legal/third-party-licenses.md)
 
-These files are public product and contributor documentation. 
+These files are public product and contributor documentation.
