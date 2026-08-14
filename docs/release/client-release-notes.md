@@ -3,21 +3,24 @@
 These are broker-independent Flutter clients. Install and run the broker first,
 then use `cosy pair` to authorize the client.
 
-## What's new in 0.2.0
+## What's new in 0.3.0
 
-- A unified Servers screen combines saved servers, direct connection, pairing,
-  health, and recovery actions.
-- Session tabs retain recent pages for faster switching, while roster status,
-  activity time, transcript messages, and Observe/Drive controls are clearer.
-- File artifacts are isolated by server and native session and include a bounded,
-  authenticated Download action.
-- Codex takeover failures remain read-only and explain why control was refused;
-  accepted Codex renames now propagate across the roster, header, tabs, refresh,
-  and restart.
-- Windows speech ownership and responsive-layout transitions no longer trigger
-  the native crash found during 0.1.0 acceptance.
-- OpenCode startup, Pi chronology and runtime readiness, large Codex sessions,
-  and broker setup/recovery received reliability fixes.
+- Secondary Codex and Pi clients can join the broker's current Drive owner
+  without starting another native Resume.
+- Session ownership is kept separate from each client's mutation authority;
+  stale ownership revisions and concurrent handoffs fail closed.
+- Background Observe connections remain read-only. Claude Code's secondary-client
+  behavior and OpenCode's shared-live behavior are unchanged.
+- Setup, repair, doctor, and uninstall share one receipt-based Pi bridge ownership
+  decision. A stale bridge updates automatically only when its receipt and current
+  contents prove that cosyncing owns it; user edits and unsafe targets remain
+  protected.
+
+## Known issue
+
+Codex transcript events can still appear slightly out of order in some
+multi-client sessions. This release does not claim to resolve that separate
+ordering and compare-and-swap investigation.
 
 ## Downloads
 
