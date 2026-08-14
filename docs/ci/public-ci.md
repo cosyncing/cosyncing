@@ -30,8 +30,12 @@ not a required merge check and does not replace packaged physical acceptance.
 Pull-request workflows have explicit read-only permissions, do not receive
 secrets, disable persisted checkout credentials, cancel stale runs, and never
 execute fork code on self-hosted infrastructure. Actions are pinned to full
-commit SHAs. Workflows are deliberately not path-filtered: cross-product and
-contract checks cannot be skipped by an incomplete path classification.
+commit SHAs. Required workflows are deliberately not path-filtered at the
+event level. A fail-closed classifier identifies documentation-only changes;
+those changes run the tracked public-tree policy while the expensive build,
+browser, package, and contract jobs are intentionally skipped. Both aggregate
+required jobs verify that every expected child was skipped before accepting
+that lightweight path. Any unrecognized or mixed path takes the full profile.
 
 ## Release workflows
 
@@ -39,14 +43,25 @@ Release candidate and stable promotion are separate maintainer-controlled
 workflows. Only jobs that create or edit a GitHub Release receive
 `contents: write`; signing secrets are scoped to protected environments.
 Actions artifacts are not a distribution channel or cross-workflow state store.
-Broker binaries stage directly in a draft GitHub Release and only the verified
-final asset set is eligible for publication.
+
+The npm workflow rebuilds and verifies one exact JavaScript package, then may
+submit it to npm's staging queue through trusted publishing. Protected
+environment review and a separate interactive npm approval are both required
+before it becomes installable. The client workflows build Android, Linux,
+macOS, and Windows assets into a matching prerelease; stable promotion verifies
+and publishes that exact accepted asset set without rebuilding it. Compiled
+broker binaries use their own draft-release candidate and stable-promotion
+workflows.
 
 The compiled-release workflows are intentionally unusable until the legal and
 signing prerequisites in
 [broker release and signing](../release/broker-release-signing.md) are met.
 Source CI and local package tests do not satisfy that approval gate.
 
-CI logs follow the repository's GitHub retention setting. No workflow uploads
-test logs by default. Release assets follow GitHub Release retention and are
-cryptographically inventoried by the release workflow.
+CI job logs follow the repository's GitHub retention setting. The main,
+nightly, and client-release gates upload `output/check` verification evidence
+for seven days when it exists. The npm verification job uploads the exact
+candidate tarball for its staging job. These short-lived Actions artifacts are
+diagnostic or same-run handoff material, not a public distribution channel.
+Release assets follow GitHub Release retention and are cryptographically
+inventoried by the release workflow.

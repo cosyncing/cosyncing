@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="许可证：Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0F766E">
-  <img alt="Broker 宿主机：Linux x64/arm64、Apple 芯片 macOS" src="https://img.shields.io/badge/broker-Linux%20%C2%B7%20macOS-0F766E">
+  <img alt="Broker 宿主机：macOS、WSL、Linux" src="https://img.shields.io/badge/broker-macOS%20%C2%B7%20WSL%20%C2%B7%20Linux-0F766E">
   <img alt="客户端：Android、iOS、Linux、macOS、Windows、浏览器" src="https://img.shields.io/badge/clients-6%20platforms-0F766E">
 </p>
 
@@ -23,7 +23,7 @@
   <a href="#安装">安装</a> ·
   <a href="#客户端">客户端</a> ·
   <a href="docs/README.md">文档</a> ·
-  <a href="CONTRIBUTING.md">参与贡献</a> ·
+  <a href="docs/CONTRIBUTING.md">参与贡献</a> ·
   <a href="README.md">English</a>
 </p>
 
@@ -50,16 +50,19 @@ Broker 运行在智能体所在的那台机器上，负责观察它们的会话�
 ## 支持的智能体
 
 <p>
-  <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-D97757?logo=claude&logoColor=white">
-  <img alt="Codex" src="https://img.shields.io/badge/Codex-10A37F">
-  <img alt="OpenCode" src="https://img.shields.io/badge/OpenCode-586069?logo=opencode&logoColor=white">
-  <img alt="Pi" src="https://img.shields.io/badge/Pi-586069?logo=pi&logoColor=white">
+  <a href="https://www.claude.com/product/claude-code" title="Claude Code"><img src="docs/assets/agents/pills/claude.png" alt="Claude Code" height="34"></a>
+  <a href="https://openai.com/codex/" title="Codex"><img src="docs/assets/agents/pills/codex.png" alt="Codex" height="34"></a>
+  <a href="https://opencode.ai/" title="OpenCode"><img src="docs/assets/agents/pills/opencode.png" alt="OpenCode" height="34"></a>
+  <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
 </p>
 
 四者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
 Claude Code 的会话在接管之前保持只读。版本与安装方法见
 [支持的智能体](docs/supported_agents/README.md)，逐项能力见
 [适配器支持](docs/protocol/adapter-support.md)（均为英文）。
+
+前台客户端可以加入同一个由 Broker 托管的 Codex 或 Pi Drive 会话，而不会再次启动原生 Resume。
+Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
 
 ## 前置要求
 
@@ -178,9 +181,8 @@ Tailscale 无法代理 WSL 的回环地址。
 
 Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储在那台机器上；会话内容只会通过
 你选择的网络发送给已认证的客户端。cosyncing 不在连接路径中运营托管服务，也不含分析或广告
-遥测。可选功能只会联系其明确说明的服务，例如 Tailscale Serve、本机 Tokdash 配额数据与签名
-发行通道。发行版 Broker 只接受经过验证的签名清单；见
-[broker release and signing](docs/release/broker-release-signing.md)（英文）。
+遥测。可选功能只会联系其明确说明的服务，例如 Tailscale Serve 与本机 Tokdash 配额数据。通过 npm
+安装的 Broker 不会静默替换自身：npm 负责更新软件包，更新后由 `cosy setup` 协调托管服务。
 
 安全漏洞请通过 GitHub 私密漏洞报告提交，流程见 [SECURITY.md](SECURITY.md)。
 
@@ -210,9 +212,9 @@ bun run client:test
 
 入口文档是 [docs/README.md](docs/README.md) 与
 [build and test](docs/development/build-test.md)。提交改动前请阅读
-[CONTRIBUTING.md](CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)；贡献采用
+[CONTRIBUTING.md](docs/CONTRIBUTING.md) 与 [CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md)；贡献采用
 fork + Pull Request 流程，每个提交需要 `git commit -s` 签署。使用问题走 GitHub
-Discussions，可复现的缺陷走 GitHub Issues——见 [SUPPORT.md](SUPPORT.md)。从前代客户端
+Discussions，可复现的缺陷走 GitHub Issues——见 [SUPPORT.md](docs/SUPPORT.md)。从前代客户端
 迁移的安装会重新开始，见 [local data and upgrades](docs/development/data-and-upgrades.md)。
 （贡献者文档目前均为英文。）
 
