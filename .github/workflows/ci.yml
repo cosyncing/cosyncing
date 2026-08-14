@@ -18,8 +18,31 @@ env:
   FLUTTER_VERSION: 3.44.3
 
 jobs:
+  changes:
+    name: classify docs-only changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths fail closed
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: ruby scripts/ci/classify-docs-only.rb
+      - name: Enforce public-tree policy for docs-only changes
+        if: ${{ steps.classify.outputs.docs_only == 'true' }}
+        run: ruby scripts/ci/check-public-tree.rb
+
   current-host:
     name: current-host release verification
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -55,6 +78,8 @@ jobs:
 
   linux-android:
     name: ${{ matrix.target }} build
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -89,6 +114,8 @@ jobs:
 
   apple:
     name: ${{ matrix.target }} build
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: macos-15
     timeout-minutes: 60
     defaults:
@@ -115,6 +142,8 @@ jobs:
 
   windows:
     name: Windows build
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: windows-2025
     timeout-minutes: 60
     defaults:
@@ -135,12 +164,19 @@ jobs:
   required:
     name: CI required
     if: ${{ always() }}
-    needs: [current-host, linux-android, apple, windows]
+    needs: [changes, current-host, linux-android, apple, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every CI gate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
         run: |
-          test "$(jq -r '[.[].result] | all(. == "success")' <<< "$NEEDS_JSON")" = true
+          test "$(jq -r '.changes.result' <<< "$NEEDS_JSON")" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$(jq -r '[to_entries[] | select(.key != "changes") | .value.result] | all(. == "skipped")' <<< "$NEEDS_JSON")" = true
+            echo 'Documentation-only change: build, browser, package, and verification jobs were intentionally skipped.'
+          else
+            test "$(jq -r '[to_entries[] | select(.key != "changes") | .value.result] | all(. == "success")' <<< "$NEEDS_JSON")" = true
+          fi

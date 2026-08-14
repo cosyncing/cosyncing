@@ -171,15 +171,15 @@
     },
     {
       "id": "public-tree",
-      "fingerprint": "sha256:340b8189d504927c5c165e1ad1be69fef01963378fc814df1a16de891ec439ce"
+      "fingerprint": "sha256:11bb408f481e314ce9fcc0c7b4b07cde39bab543ee1dba840e11392e23a566be"
     },
     {
       "id": "public-tree-policy",
-      "fingerprint": "sha256:13b4e72142a53db51a295c4c892b8ec255678a4783ed25a8c6ac5f471a2257d6"
+      "fingerprint": "sha256:9f15662e2d1da5ede1ba732788ce1a2ed0af8262f6561ae5ddd30b0e00ce7eb4"
     },
     {
       "id": "release-candidate-pair",
-      "fingerprint": "sha256:051d1a328366f162cf4a3b07005e4ca6689bffe17b22a661120b979a91e16b02"
+      "fingerprint": "sha256:17a762e3a9415c139ffdecca61b547096e5c8aa7547fcfbc913eb8becdf13fb3"
     },
     {
       "id": "source-boundaries",
@@ -215,7 +215,7 @@
     },
     {
       "id": "workflow-policy",
-      "fingerprint": "sha256:5f40e6750f63e1a9e0dd90a13ea91a3b7680a6e043902d06db353f6d5919e8df"
+      "fingerprint": "sha256:ba4eb2345b9fb72952ee59f55485d40d837f0042b550b3b8e014b5d6749c5339"
     }
   ],
   "requiredBrokerSubSuiteBindings": [
@@ -421,7 +421,7 @@
     },
     {
       "id": "release-supply-chain",
-      "fingerprint": "sha256:8ed06568b115853211779ef45b493f62da6fd7afa39cad638ac5d3965f8a4858"
+      "fingerprint": "sha256:0b73de86db076f75044fec2310a1d10244efbba5359e1977263711889d2dfa46"
     },
     {
       "id": "request-resolution-hygiene",

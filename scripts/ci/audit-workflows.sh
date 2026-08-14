@@ -320,4 +320,6 @@ for workflow in ci.yml nightly.yml; do
   }
 done
 
+ruby scripts/ci/tests/test-docs-only-policy.rb
+
 echo 'PASS: the canonical public-hosted workflows satisfy runner, path, permission, release, and action-pin policy.'

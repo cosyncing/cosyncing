@@ -51,6 +51,7 @@
     "contract:revision-check": "bun run scripts/contracts/check-revision-history.ts",
     "test:contract-revision-history": "bun run scripts/contracts/test-revision-history.ts",
     "ci:audit-workflows": "bash scripts/ci/audit-workflows.sh",
+    "test:docs-only-policy": "ruby scripts/ci/tests/test-docs-only-policy.rb",
     "ci:check-public-tree": "ruby scripts/ci/check-public-tree.rb",
     "test:public-tree-policy": "ruby scripts/ci/tests/test-public-tree-policy.rb",
     "ci:check-boundaries": "bash scripts/ci/check-boundaries.sh",

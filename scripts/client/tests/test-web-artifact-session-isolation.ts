@@ -168,18 +168,64 @@ async function openRosterSession(
   await page.setViewportSize({ width: 800, height: 1000 });
   await page.goto(`${origin}/cosy/#/sessions`, { waitUntil: 'domcontentloaded' });
   await waitForFlutter(page);
-  const rowTitle = page.getByRole('button', { name: title, exact: false });
-  // A durable compact working set may restore its last detail route after the
-  // hash navigation wins. Follow the app's real Back control in that case;
-  // waiting on a roster row while still on Detail makes the concurrency gate
-  // timing-dependent without exercising a different product path.
-  const detailBack = page.getByRole('button', { name: 'Back', exact: true });
-  if (await detailBack.isVisible().catch(() => false)) {
-    await detailBack.click();
+  // Flutter can replace a semantics row while a roster refresh is painting.
+  // Durable route restoration can also return to Detail after the initial
+  // roster navigation. Re-resolve both controls on every bounded attempt so a
+  // restored route or refreshed roster cannot strand the test on a stale node.
+  const expectedRoute = `/sessions/pi/${sessionId}`;
+  const clickDeadline = Date.now() + 30_000;
+  let clickFailure: unknown;
+  let openedExpectedRoute = false;
+  while (Date.now() < clickDeadline) {
+    if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
+      openedExpectedRoute = true;
+      break;
+    }
+    try {
+      const operationTimeout = () => Math.max(
+        1,
+        Math.min(5_000, clickDeadline - Date.now()),
+      );
+      const detailBack = page.getByRole('button', {
+        name: 'Back',
+        exact: true,
+      });
+      if (await detailBack.isVisible().catch(() => false)) {
+        await detailBack.click({ timeout: operationTimeout() });
+      }
+      if (Date.now() >= clickDeadline) {
+        throw new Error('roster-session retry deadline elapsed after Back');
+      }
+
+      const rowTitle = page.getByRole('button', {
+        name: title,
+        exact: false,
+      });
+      if (!(await rowTitle.first().isVisible().catch(() => false))) {
+        throw new Error(`roster row ${JSON.stringify(title)} is not visible`);
+      }
+      await rowTitle.first().click({
+        force: true,
+        timeout: operationTimeout(),
+      });
+      await page.waitForURL(
+        (url) => decodeURIComponent(url.hash).includes(expectedRoute),
+        { timeout: operationTimeout() },
+      );
+      clickFailure = undefined;
+      openedExpectedRoute = true;
+      break;
+    } catch (error) {
+      clickFailure = error;
+      if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
+        clickFailure = undefined;
+        openedExpectedRoute = true;
+        break;
+      }
+      if (Date.now() < clickDeadline) await page.waitForTimeout(100);
+    }
   }
-  try {
-    await rowTitle.first().waitFor({ timeout: 30_000 });
-  } catch (error) {
+  if (!openedExpectedRoute) {
     const labels = await page.locator('[aria-label]').evaluateAll((elements) =>
       elements.map((element) => element.getAttribute('aria-label')).filter(Boolean)
     );
@@ -192,36 +238,9 @@ async function openRosterSession(
     );
     const text = await page.locator('body').innerText().catch(() => '');
     throw new Error(
-      `${String(error)}\nURL ${page.url()}\nARIA ${JSON.stringify(labels)}\nROLES ${JSON.stringify(roles)}\nTEXT ${text.slice(0, 4_000)}`,
-    );
-  }
-  // Flutter can replace a semantics row while a roster refresh is painting.
-  // Treat locating, clicking, and witnessing the exact destination as one
-  // bounded operation instead of retaining a semantic node across the refresh.
-  const expectedRoute = `/sessions/pi/${sessionId}`;
-  const clickDeadline = Date.now() + 30_000;
-  let clickFailure: unknown;
-  while (Date.now() < clickDeadline) {
-    try {
-      await rowTitle.first().click({ force: true, timeout: 5_000 });
-      await page.waitForURL(
-        (url) => decodeURIComponent(url.hash).includes(expectedRoute),
-        { timeout: 5_000 },
-      );
-      clickFailure = undefined;
-      break;
-    } catch (error) {
-      clickFailure = error;
-      if (decodeURIComponent(new URL(page.url()).hash).includes(expectedRoute)) {
-        clickFailure = undefined;
-        break;
-      }
-      await page.waitForTimeout(100);
-    }
-  }
-  if (clickFailure != null) {
-    throw new Error(
-      `Could not open roster session ${title} (${sessionId}): ${String(clickFailure)}`,
+      `Could not open roster session ${title} (${sessionId}): ${String(clickFailure)}`
+        + `\nURL ${page.url()}\nARIA ${JSON.stringify(labels)}`
+        + `\nROLES ${JSON.stringify(roles)}\nTEXT ${text.slice(0, 4_000)}`,
     );
   }
   // Session Detail records the compact destination in the durable working set.

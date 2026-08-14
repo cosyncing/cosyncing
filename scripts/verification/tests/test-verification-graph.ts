@@ -226,6 +226,55 @@ expectMutation(
   },
   /completeness anchor binding mismatch.*public-tree/i,
 );
+expectMutation(
+  'Flutter golden registry input removal',
+  (value) => {
+    const registry = 'scripts/ci/flutter-golden-registry.json';
+    for (const gateId of ['public-tree', 'public-tree-policy']) {
+      const gate = value.gates.find((item) => item.id === gateId)!;
+      gate.sourceOwners = gate.sourceOwners.filter((owner) => owner !== registry);
+    }
+  },
+  /completeness anchor binding mismatch.*public-tree/i,
+);
+expectMutation(
+  'docs-only workflow verdict input removal',
+  (value) => {
+    const owners = new Set([
+      'scripts/ci/classify-docs-only.rb',
+      'scripts/ci/tests/test-docs-only-policy.rb',
+    ]);
+    const gate = value.gates.find((item) => item.id === 'workflow-policy')!;
+    gate.sourceOwners = gate.sourceOwners.filter((owner) => !owners.has(owner));
+  },
+  /completeness anchor binding mismatch.*workflow-policy/i,
+);
+expectMutation(
+  'candidate browser release-gate input removal',
+  (value) => {
+    const owners = new Set([
+      'scripts/broker/release/candidate-browser-startup.ts',
+      'scripts/broker/release/verify-candidate-pair.ts',
+    ]);
+    const gate = value.gates.find((item) => item.id === 'release-candidate-pair')!;
+    gate.sourceOwners = gate.sourceOwners.filter((owner) => !owners.has(owner));
+  },
+  /completeness anchor binding mismatch.*release-candidate-pair/i,
+);
+expectMutation(
+  'candidate browser release-sub-suite input removal',
+  (value) => {
+    const owners = new Set([
+      'scripts/broker/release/candidate-browser-startup.ts',
+      'scripts/broker/release/verify-candidate-pair.ts',
+    ]);
+    const suite = value.gates
+      .find((gate) => gate.id === 'broker-deterministic')!
+      .subSuites!.find((item) => item.id === 'release-supply-chain')!;
+    suite.sourceOwners = suite.sourceOwners.filter((owner) => !owners.has(owner));
+  },
+  /completeness anchor binding mismatch.*release-supply-chain/i,
+);
 // The same protection must not be specific to one gate.
 expectMutation(
   'gate requirement demotion is generic',
