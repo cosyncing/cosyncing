@@ -7,24 +7,17 @@
   </picture>
 </p>
 
-<p align="center">
-  <b>代码随处。同步无界。</b><br>
-  智能体照常运转，你持续前行。
-</p>
+<p align="center"><b>从 CLI 到 GUI，保持实时同步</b></p>
 
 <p align="center">
-  <img alt="许可证：Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0F766E">
-  <img alt="Broker 宿主机：macOS、WSL、Linux" src="https://img.shields.io/badge/broker-macOS%20%C2%B7%20WSL%20%C2%B7%20Linux-0F766E">
-  <img alt="客户端：Android、iOS、Linux、macOS、Windows、浏览器" src="https://img.shields.io/badge/clients-6%20platforms-0F766E">
-</p>
-
-<p align="center">
-  <a href="https://cosyncing.com/zh/">官网</a> ·
-  <a href="#安装">安装</a> ·
-  <a href="#客户端">客户端</a> ·
-  <a href="docs/README.md">文档</a> ·
-  <a href="docs/CONTRIBUTING.md">参与贡献</a> ·
-  <a href="README.md">English</a>
+  <a href="https://cosyncing.com/zh/#sync">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
+           alt="cosyncing 应用与智能体 CLI 在接管和权限请求期间保持实时同步" width="830">
+    </picture>
+  </a>
 </p>
 
 <p align="center">
@@ -37,13 +30,22 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://cosyncing.com/zh/">官网</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#客户端">客户端</a> ·
+  <a href="docs/README.md">文档</a> ·
+  <a href="docs/CONTRIBUTING.md">参与贡献</a> ·
+  <a href="README.md">English</a>
+</p>
+
 ---
 
 
-让智能体从 CLI 到 GUI、从桌面到手机保持同步。无论身在何处，都能从上次停下的地方继续。
+同步并掌控你的智能体——从 CLI 到 GUI、从桌面到手机。无论身在何处，都能从上次停下的地方继续。
 cosyncing 让编码智能体通过你自己的网络保持同步。
 
-Broker 运行在智能体所在的那台机器上，负责观察它们的会话，并提供一个客户端：会话按项目归组，
+Broker 运行在智能体工作的那台机器上，负责观察它们的会话，并提供一个客户端：会话按项目归组，
 各自带着完整的对话记录、diff、命令，以及智能体正在等待你回应的提问。你可以阅读会话、回答提问，
 或者直接接管。不需要注册账号，客户端与 Broker 之间也不经过我们运营的任何服务。
 
@@ -142,24 +144,12 @@ iOS 客户端将在后续通过 TestFlight 发布。
   </a>
 </p>
 
-<p align="center"><b>从 CLI 到 GUI，保持实时同步</b></p>
-
-<p align="center">
-  <a href="https://cosyncing.com/zh/#sync">
-    <picture>
-      <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
-      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
-           alt="cosyncing 应用与智能体 CLI 在接管和权限请求期间保持实时同步" width="830">
-    </picture>
-  </a>
-</p>
-
 **Broker 宿主机**
 
 <p>
-  <img alt="Linux x64 与 arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
   <img alt="Apple 芯片 macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
+  <img alt="通过 WSL 运行的 Windows" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Linux x64 与 arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
 **客户端** — 源码与 CI 覆盖六个平台：
