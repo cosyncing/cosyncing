@@ -44,6 +44,10 @@ import {
   createSetupActionCatalog,
   type SetupActionInputs,
 } from '../../src/installation/setup-actions.ts';
+import {
+  inspectPiBridgeOwnership,
+  piBridgeOwnershipPrecondition,
+} from '../../src/installation/pi-bridge-ownership.ts';
 import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
 import { readSetupState, writeSetupState } from '../../src/installation/setup-state.ts';
 import type { SetupTransactionContext } from '../../src/installation/setup-transaction.ts';
@@ -169,9 +173,12 @@ function shimArgs(m: Machine): [string, number] {
 
 /** Realistic inputs that enable every catalog-installed integration, so the catalog emits its full id set. */
 function fullActionInputsFor(m: Machine): SetupActionInputs {
+  const inputs = actionInputsFor(m);
+  const piBridge = inspectPiBridgeOwnership(inspectInstallState(m.home), inputs.piAgentDir);
   return {
-    ...actionInputsFor(m),
+    ...inputs,
     installPiBridge: true,
+    piBridgePrecondition: piBridgeOwnershipPrecondition(piBridge),
     agentSkillTargets: agentSkillTargets(m.context),
     installAgentSkill: true,
     installMetadata: {
