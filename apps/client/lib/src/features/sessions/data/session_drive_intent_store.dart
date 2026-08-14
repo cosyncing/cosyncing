@@ -19,6 +19,9 @@ const String kDriveAttachReasonAppRestore = 'app-restore';
 /// Wire value for a reopen inside the terminal-takeover sliding lease.
 const String kDriveAttachReasonLeaseRestore = 'lease-restore';
 
+/// Wire value for reusing the exact broker-owned Drive another client found.
+const String kDriveAttachReasonJoinExisting = 'join-existing';
+
 /// Wire value for an explicit, user-confirmed Take over.
 const String kDriveAttachReasonTakeover = 'takeover';
 

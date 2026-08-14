@@ -45,13 +45,21 @@ abstract interface class SessionDetailConnection {
   /// Re-attaches under a new control mode — `resume` to Drive (Take over), or
   /// null to Observe (hand back to the terminal). [reason] carries the
   /// drive-attach intent for a resume attach (`create`, `app-restore`,
-  /// `lease-restore`, or `takeover`); null keeps the legacy mode-only attach.
-  Future<void> reattach({String? mode, String? reason});
+  /// `lease-restore`, `join-existing`, or `takeover`); null keeps the legacy
+  /// mode-only attach. [ownerRevision] is required only for `join-existing`.
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  });
 
   /// Drops any pending drive mode/reason so the next automatic reconnect
   /// attaches as Observe. Called when an explicit takeover fails or times out
   /// unconfirmed; it must never be silently retried by the transport.
   void disarmDriveAuthority();
+
+  /// Requests terminal handoff from this exact Drive socket.
+  Future<void> sendHandoff({String? clientMessageId});
 
   /// Sends a user prompt.
   ///
@@ -221,11 +229,23 @@ class BrokerSessionDetailConnection
       _inner.close(reconnect: reconnect);
 
   @override
-  Future<void> reattach({String? mode, String? reason}) =>
-      _inner.reattach(mode: mode, reason: reason);
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) => _inner.reattach(
+    mode: mode,
+    reason: reason,
+    ownerRevision: ownerRevision,
+  );
 
   @override
   void disarmDriveAuthority() => _inner.disarmDriveAuthority();
+
+  @override
+  Future<void> sendHandoff({String? clientMessageId}) async {
+    _inner.sendHandoff(clientMessageId: clientMessageId);
+  }
 
   @override
   Future<void> sendPrompt(

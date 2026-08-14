@@ -22,8 +22,9 @@
  *  F: a mode-only attach (no reason) reaches the adapter without attach options — the
  *     legacy compatibility path.
  *  G: the REAL WebSocket path against a spawned broker with the real Codex adapter —
- *     upgrade-time reason validation, the structured `attach-conflict` frame, the
- *     in-socket Observe fallback, and proof that no Resume owner process is spawned.
+ *     upgrade-time reason validation, current-socket terminal handoff, the structured
+ *     `attach-conflict` frame, the in-socket Observe fallback, and proof that a denied
+ *     restore spawns no additional Resume owner process.
  */
 import {
   captureProcessOutput,
@@ -319,17 +320,22 @@ await hub.dispose();
   // live TUI resuming this exact thread against a DIFFERENT daemon socket.
   const procRoot = join(home, 'proc');
   const bootUptimeSec = 5_000;
-  mkdirSync(join(procRoot, '4242'), { recursive: true });
+  mkdirSync(procRoot, { recursive: true });
   writeFileSync(join(procRoot, 'uptime'), `${bootUptimeSec}.00 20000.00\n`);
-  writeFileSync(
-    join(procRoot, '4242', 'cmdline'),
-    `${['codex', 'resume', '--remote', `unix://${join(home, 'other-daemon.sock')}`, threadUuid].join('\0')}\0`,
-  );
-  symlinkSync(workDir, join(procRoot, '4242', 'cwd'));
-  writeFileSync(
-    join(procRoot, '4242', 'stat'),
-    `4242 (codex tui) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 ${(bootUptimeSec - 60) * 100} 0 0`,
-  );
+  const competingProcDir = join(procRoot, '4242');
+  const writeCompetingOwner = () => {
+    mkdirSync(competingProcDir, { recursive: true });
+    writeFileSync(
+      join(competingProcDir, 'cmdline'),
+      `${['codex', 'resume', '--remote', `unix://${join(home, 'other-daemon.sock')}`, threadUuid].join('\0')}\0`,
+    );
+    symlinkSync(workDir, join(competingProcDir, 'cwd'));
+    writeFileSync(
+      join(competingProcDir, 'stat'),
+      `4242 (codex tui) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 ${(bootUptimeSec - 60) * 100} 0 0`,
+    );
+  };
+  writeCompetingOwner();
 
   // Every codex CLI invocation logs its argv. A Resume owner is specifically
   // `codex app-server --stdio` (broker version/status probes also run the CLI
@@ -352,19 +358,23 @@ for await (const chunk of Bun.stdin.stream()) {
     buffer = buffer.slice(newline + 1);
     if (!raw) continue;
     const message = JSON.parse(raw);
-    if (message.method === 'initialize' || message.method === 'thread/name/set') {
+    if (message.method === 'initialize' || message.method === 'thread/name/set' || message.method === 'thread/settings/update') {
       console.log(JSON.stringify({ id: message.id, result: {} }));
+    } else if (message.method === 'thread/loaded/list') {
+      console.log(JSON.stringify({ id: message.id, result: { data: [], nextCursor: null } }));
+    } else if (message.method === 'thread/resume') {
+      console.log(JSON.stringify({ id: message.id, result: { thread: { id: ${JSON.stringify(threadUuid)}, name: 'fake', status: { type: 'idle' } }, model: 'fake-model', modelProvider: 'fake-provider' } }));
     }
   }
 }
 `,
   );
   chmodSync(fakeBin, 0o755);
-  const resumeOwnerSpawned = () => {
+  const resumeOwnerSpawnCount = () => {
     try {
-      return readFileSync(invocationLog, 'utf8').split('\n').some((line) => line.includes('app-server --stdio'));
+      return readFileSync(invocationLog, 'utf8').split('\n').filter((line) => line.includes('app-server --stdio')).length;
     } catch {
-      return false;
+      return 0;
     }
   };
 
@@ -443,6 +453,68 @@ for await (const chunk of Bun.stdin.stream()) {
     check('G2 an unknown attach reason is rejected before the upgrade', badReason.status === 400);
     const reasonWithoutMode = await fetch(`${base}${streamPath}?token=${token}&reason=app-restore`);
     check('G3 a reason without mode=resume is rejected before the upgrade', reasonWithoutMode.status === 400);
+    const joinWithoutRevision = await fetch(
+      `${base}${streamPath}?token=${token}&mode=resume&reason=join-existing`,
+    );
+    check('G3b join-existing without an owner revision is rejected before the upgrade', joinWithoutRevision.status === 400);
+    const revisionOnRestore = await fetch(
+      `${base}${streamPath}?token=${token}&mode=resume&reason=app-restore&ownerEpoch=epoch&ownerSeq=1`,
+    );
+    check('G3c owner revisions are accepted only for join-existing', revisionOnRestore.status === 400);
+    const unauthenticatedJoin = await fetch(
+      `${base}${streamPath}?mode=resume&reason=join-existing&ownerEpoch=epoch&ownerSeq=1`,
+    );
+    check('G3d join-existing retains the authenticated Resume credential boundary', unauthenticatedJoin.status === 401);
+
+    // Temporarily remove the simulated terminal owner so this fixture can
+    // establish one real Drive socket and exercise the handoff message. The
+    // competing owner is restored before the denial checks below.
+    daemon.configure({ ignoreMethods: [] });
+    rmSync(competingProcDir, { recursive: true, force: true });
+    const handoffFrames = await new Promise<any[]>((resolve, reject) => {
+      const seen: any[] = [];
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=takeover`,
+      );
+      let requested = false;
+      const timer = setTimeout(() => {
+        ws.close();
+        resolve(seen);
+      }, 15_000);
+      ws.onmessage = (event) => {
+        try {
+          const frame = JSON.parse(String(event.data));
+          seen.push(frame);
+          if (!requested && frame.kind === 'session' && frame.authority?.canMutate === true) {
+            requested = true;
+            ws.send(JSON.stringify({ kind: 'handoff', clientMessageId: 'handoff-wire-1' }));
+          }
+        } catch {
+          /* ignore non-JSON frames */
+        }
+        if (seen.some((frame) => frame.kind === 'ack' && frame.clientMessageId === 'handoff-wire-1')
+          && seen.some((frame) => frame.kind === 'session' && frame.info?.sessionOwner?.state === 'none')) {
+          clearTimeout(timer);
+          ws.close();
+          resolve(seen);
+        }
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        ws.close();
+        reject(new Error('handoff websocket failed'));
+      };
+    });
+    check(
+      'G3e current-socket handoff is acknowledged only after owner truth leaves Drive',
+      handoffFrames.some((frame) => frame.kind === 'ack' && frame.clientMessageId === 'handoff-wire-1')
+        && handoffFrames.some((frame) => frame.kind === 'session' && frame.info?.sessionOwner?.state === 'none')
+        && !handoffFrames.some((frame) => frame.kind === 'nack'),
+      JSON.stringify(handoffFrames),
+    );
+    daemon.configure({ ignoreMethods: ['initialize'] });
+    writeCompetingOwner();
+    const resumeSpawnsAfterHandoff = resumeOwnerSpawnCount();
 
     const frames = await wsFrames(
       `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=app-restore`,
@@ -475,7 +547,8 @@ for await (const chunk of Bun.stdin.stream()) {
       'G6b exactly one structured refusal was sent before the Observe fallback',
       frames.filter((frame) => frame.kind === 'attach-conflict').length === 1,
     );
-    check('G7 no Resume owner process was spawned by the denied restore', !resumeOwnerSpawned());
+    check('G7 the denied restore spawned no additional Resume owner process',
+      resumeOwnerSpawnCount() === resumeSpawnsAfterHandoff);
 
     const bareFrames = await wsFrames(
       `ws://127.0.0.1:${port}${streamPath}?token=${token}`,
@@ -485,7 +558,8 @@ for await (const chunk of Bun.stdin.stream()) {
       'G8 a later bare attach joins cleanly with no conflict frame',
       bareFrames.some((f) => f.kind === 'session') && bareFrames.every((f) => f.kind !== 'attach-conflict'),
     );
-    check('G9 the bare attach spawned no Resume owner either', !resumeOwnerSpawned());
+    check('G9 the bare attach spawned no Resume owner either',
+      resumeOwnerSpawnCount() === resumeSpawnsAfterHandoff);
 
     // Keep one Observe client attached while the native rename runs. Its
     // second session frame must carry the accepted title immediately; waiting

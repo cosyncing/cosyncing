@@ -20,6 +20,8 @@ import {
   evaluateBrokerClientCompatibility,
   isAgentOwnedSessionError,
   isHistorySnapshotRefusal,
+  isOwnershipConflictError,
+  OwnershipConflictError,
   isSessionCreateTemporarilyUnavailableError,
   SessionCreateTemporarilyUnavailableError,
   type AggregatedMachines,
@@ -44,6 +46,7 @@ import {
   type ScheduleUpdate,
   type SessionConnection,
   type SessionInfo,
+  type SessionOwnerRevision,
 } from '@cosyncing/adapter-api';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
@@ -177,6 +180,8 @@ import { BUILD_INFO, buildFingerprint } from './build-info.ts';
 import { currentApplicationIdentity } from './application-identity.ts';
 import { serveWebHandoff, WEB_HANDOFF_PATH } from './web-handoff.ts';
 import { driveAttachRefusalCode } from './drive-attach-refusal.ts';
+import { canMutateSession, canPromptSession } from './session-owner.ts';
+import { ClientHandoffSequencer } from './client-handoff-sequencer.ts';
 import { APP_MOUNT_PATH, APP_PATH } from './web-routes.ts';
 import {
   ClientMessagePolicyError,
@@ -770,7 +775,7 @@ const hub = new Hub(registry, 15000, artifactStore, {
 const nativePublicationAuthority = new NativeIncarnationPublicationAuthority();
 const rosterPublication = createRosterPublicationBoundary({
   liveOwners: () => hub.liveSnapshot(),
-  publish: observeRosterViews,
+  publish: (info) => observeRosterViews(hub.projectSessionInfo(info)),
   acceptWatcher: (info) => nativePublicationAuthority.acceptsWatcher(info),
   onWatcherAccepted: rememberLatestSessionInfo,
   reconcile: (info) => hub.refreshExternalSession(decorateSession({ ...info, machine: MACHINE })),
@@ -1531,7 +1536,9 @@ async function discoverLocalSessions(
       sessions.push({ ...info, machine: MACHINE, status });
     }
   }
-  const decorated = sessionMetadata.applyAll(sessions.map((s) => ({ ...s, machine: MACHINE })));
+  const decorated = sessionMetadata
+    .applyAll(sessions.map((s) => ({ ...s, machine: MACHINE })))
+    .map((session) => hub.projectSessionInfo(session));
   for (const session of decorated) rememberLatestSessionInfo(session);
   decorated.sort((a, b) => statusRank(a) - statusRank(b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   if (windowMs === undefined) {
@@ -1625,9 +1632,10 @@ interface WsData {
   /** Attach mode from `?mode=` (default observe). `resume` opens a DRIVABLE connection (own Hub owner)
    *  — entered only on explicit user action ("Drive"), so opening a session never auto-drives it. */
   mode?: string;
-  /** Authenticated drive-attach intent from `?reason=` (resume only). Enables atomic broker-side
-   *  ownership arbitration with a structured `attach-conflict` + Observe fallback on denial. */
+  /** Authenticated drive-attach intent from `?reason=` (resume only). */
   reason?: DriveAttachReason;
+  /** Exact owner projection an authenticated `join-existing` request is conditional on. */
+  expectedOwnerRevision?: SessionOwnerRevision;
   /** Browser cache cursor; broker returns only newer durable history when valid. */
   since?: string;
   /** Requested initial durable-history tail (defaults to broker max when omitted). */
@@ -1642,6 +1650,8 @@ interface WsData {
   uploadIdentity: string;
   /** Negotiated before the Hub attach; hard incompatibility forces this socket to Observe. */
   compatibility: BrokerClientCompatibility;
+  /** An actual shared/peer credential was supplied; loopback's credential-less baseline is false. */
+  credentialAuthenticated: boolean;
   clientVersion?: string;
   client?: Client;
   mc?: ManagedConn;
@@ -1651,6 +1661,8 @@ interface WsData {
   pendingInbound?: string[];
   /** Serializes PROMPTS so they reach the agent in order (and spaced — see routeInbound). */
   sendChain?: Promise<void>;
+  /** Ordinary controls stay concurrent; handoff alone is an exclusive socket boundary. */
+  handoffSequencer?: ClientHandoffSequencer;
   /** Timestamp of the last prompt sent, to space rapid sends (opencode reorders <~250ms apart). */
   lastPromptAt?: number;
   /** Cancels the bounded attach-time picker refresh as soon as this socket closes. */
@@ -2102,26 +2114,12 @@ async function buildCurrentHistoryPageCache(options: {
   return cache ? { kind: 'cache', cache } : failure;
 }
 
-function canMutateSession(info: SessionInfo): boolean {
-  const c = info.control;
-  return !!(c && ((c.drive.supported && c.drive.state === 'driving') || (c.terminalSync.supported && c.terminalSync.active)));
-}
-
-/** Can this session accept a NEW PROMPT (vs only permission/question ANSWERS)? An 'answer-only' terminal-sync
- *  (Claude hooks: no live-prompt-inject path) accepts answers but not prompts — so a crafted prompt/file/command
- *  frame is rejected at the broker too, not just disabled in the UI. */
-function canPromptSession(info: SessionInfo): boolean {
-  const c = info.control;
-  if (!c) return false;
-  if (c.drive.supported && c.drive.state === 'driving') return true;
-  return !!(c.terminalSync.supported && c.terminalSync.active && c.terminalSync.input !== 'answer-only');
-}
 function isPromptClientMessage(kind: unknown): boolean {
   return kind === 'prompt' || kind === 'file' || kind === 'command' || kind === 'plan-action' || kind === 'artifact-interaction';
 }
 
 function isMutatingClientMessage(kind: unknown): boolean {
-  return kind === 'prompt' || kind === 'file' || kind === 'approve' || kind === 'answer' || kind === 'reject-question' || kind === 'command' || kind === 'plan-action' || kind === 'artifact-interaction' || kind === 'set-agent';
+  return kind === 'prompt' || kind === 'file' || kind === 'approve' || kind === 'answer' || kind === 'reject-question' || kind === 'command' || kind === 'plan-action' || kind === 'artifact-interaction' || kind === 'set-agent' || kind === 'handoff';
 }
 
 function pendingReplayKey(message: AgentMessage): string | undefined {
@@ -2317,12 +2315,39 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
     } satisfies WireEvent));
     return;
   }
+  const sequencer = ws.data.handoffSequencer ??= new ClientHandoffSequencer();
+  if (msg?.kind === 'handoff') {
+    if (sequencer.hasActiveWork) {
+      // A slow command can legitimately run longer than the client's handoff
+      // confirmation timeout. Refuse now instead of queuing a transfer that
+      // would execute after the UI already reported failure.
+      void handleClientMessage(
+        ws,
+        msg,
+        new OwnershipConflictError(
+          'Another operation on this client is still being delivered. Retry terminal handoff after it settles.',
+          'peer-driver-active',
+        ),
+      );
+    } else {
+      void sequencer.run(() => handleClientMessage(ws, msg), { handoff: true });
+    }
+    return;
+  }
   // set-agent rides the same serialized chain as prompts so "switch to plan, then send" cannot
-  // race the switch behind the prompt it was meant to govern.
+  // race the switch behind the prompt it was meant to govern. The handoff sequencer registers the
+  // queued operation immediately, so a later handoff waits for it; normal concurrency is unchanged.
   if (msg?.kind === 'prompt' || msg?.kind === 'plan-action' || msg?.kind === 'artifact-interaction' || msg?.kind === 'set-agent') {
-    ws.data.sendChain = (ws.data.sendChain ?? Promise.resolve()).then(() => handleClientMessage(ws, msg));
+    const task = sequencer.run(
+      () => handleClientMessage(ws, msg),
+      { after: ws.data.sendChain ?? Promise.resolve() },
+    );
+    ws.data.sendChain = task.then(
+      () => undefined,
+      () => undefined,
+    );
   } else {
-    void handleClientMessage(ws, msg);
+    void sequencer.run(() => handleClientMessage(ws, msg));
   }
 }
 
@@ -2501,7 +2526,11 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
 }
 
 /** Run one client→broker message (prompt/approve/…). Errors are reported, never silently dropped. */
-async function handleClientMessage(ws: ServerWebSocket<WsData>, msg: any): Promise<void> {
+async function handleClientMessage(
+  ws: ServerWebSocket<WsData>,
+  msg: any,
+  preflightError?: unknown,
+): Promise<void> {
   const mc = ws.data.mc;
   if (!mc || !msg) return;
   await handleManagedClientMessage(mc, msg, (event) => ws.send(JSON.stringify(event)), {
@@ -2509,6 +2538,7 @@ async function handleClientMessage(ws: ServerWebSocket<WsData>, msg: any): Promi
     setLastPromptAt: (value) => { ws.data.lastPromptAt = value; },
     journalScope: { identity: ws.data.identity, tool: ws.data.tool, sessionId: ws.data.id },
     uploadIdentity: ws.data.uploadIdentity,
+    preflightError,
   });
 }
 
@@ -2522,6 +2552,7 @@ async function handleManagedClientMessage(
     setLastPromptAt?: (value: number) => void;
     journalScope?: ProtocolJournalScope;
     uploadIdentity?: string;
+    preflightError?: unknown;
   } = {},
 ): Promise<void> {
   const clientMessageId = parseClientMessageId(msg?.clientMessageId);
@@ -2529,7 +2560,7 @@ async function handleManagedClientMessage(
     send({ kind: 'nack', code: 'BAD_CLIENT_MESSAGE_ID', message: 'clientMessageId must be a short ASCII token' });
     return;
   }
-  if ((msg?.kind === 'plan-action' || msg?.kind === 'artifact-interaction') && !clientMessageId) {
+  if ((msg?.kind === 'plan-action' || msg?.kind === 'artifact-interaction' || msg?.kind === 'handoff') && !clientMessageId) {
     send({ kind: 'nack', code: 'BAD_CLIENT_MESSAGE_ID', message: `${msg.kind} requires clientMessageId` });
     return;
   }
@@ -2567,6 +2598,9 @@ async function handleManagedClientMessage(
    *  on the exact record its prompt sent instead of unconditionally emptying whatever is there. */
   let draftClearRevision = 0;
   try {
+    if (promptTiming.preflightError !== undefined) {
+      throw promptTiming.preflightError;
+    }
     // Read-only Observe is enforced at the broker boundary as well as in the UI. Disabled buttons are
     // advisory; crafted WS frames must not mutate a terminal-owned session. Governing contract:
     // docs/architecture/client-ui.md
@@ -2582,24 +2616,27 @@ async function handleManagedClientMessage(
     if (isPromptClientMessage(msg.kind) && !canPromptSession(mc.conn.info)) {
       throw new Error('this synced session answers prompts and questions only — send new messages in its terminal');
     }
-    if (msg.kind === 'artifact-interaction') {
-      const forbiddenEnvelopeFields = [
-        'session', 'sessionId', 'tool', 'name', 'path', 'text', 'prompt', 'credentials',
-        'permission', 'decision', 'model', 'agent', 'permissionMode',
-      ];
-      if (forbiddenEnvelopeFields.some((field) => Object.prototype.hasOwnProperty.call(msg, field))) {
-        throw new ClientMessagePolicyError(
-          'ARTIFACT_INTERACTION_INVALID',
-          'artifact interaction contains a forbidden control field',
-        );
+    if (msg.kind === 'handoff') {
+      await hub.handoffToTerminal(mc.conn.info.tool, mc.conn.info.id, mc);
+    } else {
+      if (msg.kind === 'artifact-interaction') {
+        const forbiddenEnvelopeFields = [
+          'session', 'sessionId', 'tool', 'name', 'path', 'text', 'prompt', 'credentials',
+          'permission', 'decision', 'model', 'agent', 'permissionMode',
+        ];
+        if (forbiddenEnvelopeFields.some((field) => Object.prototype.hasOwnProperty.call(msg, field))) {
+          throw new ClientMessagePolicyError(
+            'ARTIFACT_INTERACTION_INVALID',
+            'artifact interaction contains a forbidden control field',
+          );
+        }
       }
-    }
-    const permissionMode = await validateRequestedPermissionMode(
-      mc.conn,
-      Object.prototype.hasOwnProperty.call(msg, 'permissionMode'),
-      msg.permissionMode,
-    );
-    if (msg.kind === 'prompt') {
+      const permissionMode = await validateRequestedPermissionMode(
+        mc.conn,
+        Object.prototype.hasOwnProperty.call(msg, 'permissionMode'),
+        msg.permissionMode,
+      );
+      if (msg.kind === 'prompt') {
       // space rapid prompts so opencode keeps their order (this runs inside the serialized chain)
       const gap = MIN_PROMPT_GAP_MS - (Date.now() - (promptTiming.lastPromptAt?.() ?? 0));
       if (gap > 0) await new Promise((r) => setTimeout(r, gap));
@@ -2830,14 +2867,15 @@ async function handleManagedClientMessage(
       // Surface requester-facing feedback (e.g. "Reverted last message") so a successful
       // action reads as success, never as a dropped/failed input. Goes only to the actor.
       if (res && res.notice) send({ kind: 'notice', message: res.notice });
-    } else if (msg.kind === 'set-agent') {
+      } else if (msg.kind === 'set-agent') {
       // Switch the session's active agent/mode (e.g. opencode build↔plan) WITHOUT starting a turn.
       // Validated against the adapter's advertised agents; fails closed when unsupported. The
       // confirmation the client renders is the adapter's own `sessionInfo{currentAgent}` update —
       // the broker fabricates nothing.
       const agent = await validateRequestedAgent(mc.conn, msg.agent);
       await mc.conn.setAgent!(agent);
-      recordAndBroadcastManagedAppMutation(mc);
+        recordAndBroadcastManagedAppMutation(mc);
+      }
     }
     if (clientMessageId) {
       resultForId = {
@@ -2858,7 +2896,19 @@ async function handleManagedClientMessage(
     }
   } catch (err) {
     const message = String(err);
-    if (err instanceof ClientMessagePolicyError) {
+    if (isOwnershipConflictError(err) && msg?.kind === 'handoff') {
+      resultForId = {
+        kind: 'nack',
+        code: driveAttachRefusalCode(err),
+        message,
+        ...(clientMessageId ? { clientMessageId } : {}),
+      };
+      try {
+        send(resultForId);
+      } catch {
+        /* ignore */
+      }
+    } else if (err instanceof ClientMessagePolicyError) {
       resultForId = {
         kind: 'nack',
         code: err.code,
@@ -3684,6 +3734,22 @@ server = Bun.serve<WsData>({
       if (requestedReason !== undefined && requestedMode !== 'resume') {
         return json({ ok: false, code: 'BAD_PARAM', error: 'attach reason requires mode=resume' }, 400);
       }
+      const ownerEpoch = url.searchParams.get('ownerEpoch')?.trim() || undefined;
+      const ownerSeqRaw = url.searchParams.get('ownerSeq');
+      let expectedOwnerRevision: SessionOwnerRevision | undefined;
+      if (requestedReason === 'join-existing') {
+        const ownerSeq = ownerSeqRaw == null ? Number.NaN : Number(ownerSeqRaw);
+        if (!ownerEpoch
+          || ownerEpoch.length > 128
+          || /[\0\r\n]/.test(ownerEpoch)
+          || !Number.isSafeInteger(ownerSeq)
+          || ownerSeq < 0) {
+          return json({ ok: false, code: 'BAD_PARAM', error: 'join-existing requires a valid ownerEpoch and ownerSeq' }, 400);
+        }
+        expectedOwnerRevision = { epoch: ownerEpoch, seq: ownerSeq };
+      } else if (ownerEpoch !== undefined || ownerSeqRaw !== null) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'owner revision requires reason=join-existing' }, 400);
+      }
       const compatibility = evaluateBrokerClientCompatibility(clientContract.client);
       const mode = compatibility.readOnly ? 'observe' : requestedMode;
       const reason = mode === 'resume' ? (requestedReason as DriveAttachReason | undefined) : undefined;
@@ -3696,6 +3762,7 @@ server = Bun.serve<WsData>({
           id: decodeURIComponent(ws[2]!),
           mode,
           ...(reason ? { reason } : {}),
+          ...(expectedOwnerRevision ? { expectedOwnerRevision } : {}),
           since,
           historyLimit,
           artifactMode,
@@ -3703,6 +3770,7 @@ server = Bun.serve<WsData>({
           identity: requestCredentialIdentity(req, url),
           uploadIdentity: requestUploadIdentity(req, url),
           compatibility,
+          credentialAuthenticated: credentialAuthenticated(req, url),
           ...(clientContract.clientVersion ? { clientVersion: clientContract.clientVersion } : {}),
         },
       });
@@ -5225,7 +5293,7 @@ server = Bun.serve<WsData>({
     // partial record. Compression is opportunistic; image/base64-heavy histories may not shrink much.
     // Target design: docs/architecture/client-ui.md
     async open(ws) {
-      const { tool, id, reason, since, artifactMode, publicBrokerUrl } = ws.data;
+      const { tool, id, reason, expectedOwnerRevision, since, artifactMode, publicBrokerUrl } = ws.data;
       const sessionOptionsAbort = new AbortController();
       ws.data.sessionOptionsAbort = sessionOptionsAbort;
       let mode = ws.data.mode;
@@ -5237,8 +5305,12 @@ server = Bun.serve<WsData>({
               ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message, publicBrokerUrl) }
               : ev.kind === 'history'
                 ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages, publicBrokerUrl) }
-                : ev.kind === 'session'
-                  ? { ...ev, info: decorateSession(ev.info) }
+                : ev.kind === 'session' && ws.data.mc
+                  ? hub.sessionDetailFrame(
+                    ws.data.mc,
+                    ws.data.credentialAuthenticated && !compatibility.readOnly,
+                    decorateSession(ev.info),
+                  )
                 : ev;
           const status = ws.send(JSON.stringify(prepared));
           if (status === 0) {
@@ -5270,7 +5342,9 @@ server = Bun.serve<WsData>({
           // The Hub call is the single atomic ownership decision: it joins a pinned/driving/live
           // owner, dedupes concurrent restores onto one in-flight attach, and otherwise asks the
           // adapter — which arbitrates the reason (restore fails closed, takeover keeps its policy).
-          mc = await hub.ensure(tool, id, mode, reason);
+          mc = mode === 'resume' && reason === 'join-existing'
+            ? hub.joinExisting(tool, id, expectedOwnerRevision!)
+            : await hub.ensure(tool, id, mode, reason);
         } catch (err) {
           // A DENIED reason-tagged resume answers with a structured conflict frame and continues
           // as an Observe-class attach on the SAME socket, so the client keeps its provenance and
@@ -5296,6 +5370,15 @@ server = Bun.serve<WsData>({
         let historyDone = false;
         const queue: WireEvent[] = [];
         const client: Client = (ev) => (historyDone ? sendRaw(ev) : queue.push(ev));
+        client.onManagedConnChanged = (next) => {
+          // Hub wrapper folds preserve this WebSocket. Retarget both inbound
+          // mutation authority and close/release bookkeeping before the old
+          // wrapper is disposed.
+          mc = next;
+          ws.data.mc = next;
+          ws.data.sessionOptionsAbort?.abort();
+          ws.data.sessionOptionsAbort = undefined;
+        };
         ws.data.client = client;
         mc.addClient(client); // subscribe BEFORE the snapshot so nothing in the gap is dropped
         // Capture the in-flight streamed text NOW (atomic with addClient — no await between), so a

@@ -32,6 +32,9 @@ const _$DriveStateEnumMap = {
 
 SessionTerminalSync _$SessionTerminalSyncFromJson(Map<String, dynamic> json) =>
     SessionTerminalSync(
+      supported: json['supported'] as bool,
+      syncAvailable: json['syncAvailable'] as bool,
+      active: json['active'] as bool,
       behind: json['behind'] as bool?,
       presence: $enumDecodeNullable(
         _$TerminalSyncPresenceEnumMap,
@@ -43,9 +46,6 @@ SessionTerminalSync _$SessionTerminalSyncFromJson(Map<String, dynamic> json) =>
         json['action'],
         unknownValue: TerminalSyncAction.unknown,
       ),
-      supported: json['supported'] as bool,
-      syncAvailable: json['syncAvailable'] as bool,
-      active: json['active'] as bool,
       label: json['label'] as String?,
       command: json['command'] as String?,
       note: json['note'] as String?,
@@ -99,6 +99,81 @@ Map<String, dynamic> _$SessionControlStateToJson(
   'terminalSync': instance.terminalSync.toJson(),
 };
 
+SessionOwnerRevision _$SessionOwnerRevisionFromJson(
+  Map<String, dynamic> json,
+) => SessionOwnerRevision(
+  epoch: json['epoch'] as String,
+  seq: (json['seq'] as num).toInt(),
+);
+
+Map<String, dynamic> _$SessionOwnerRevisionToJson(
+  SessionOwnerRevision instance,
+) => <String, dynamic>{'epoch': instance.epoch, 'seq': instance.seq};
+
+SessionOwnerProjection _$SessionOwnerProjectionFromJson(
+  Map<String, dynamic> json,
+) => SessionOwnerProjection(
+  revision: SessionOwnerRevision.fromJson(
+    json['revision'] as Map<String, dynamic>,
+  ),
+  state: $enumDecode(
+    _$SessionOwnerStateEnumMap,
+    json['state'],
+    unknownValue: SessionOwnerState.unknown,
+  ),
+);
+
+Map<String, dynamic> _$SessionOwnerProjectionToJson(
+  SessionOwnerProjection instance,
+) => <String, dynamic>{
+  'revision': instance.revision.toJson(),
+  'state': _$SessionOwnerStateEnumMap[instance.state]!,
+};
+
+const _$SessionOwnerStateEnumMap = {
+  SessionOwnerState.none: 'none',
+  SessionOwnerState.drive: 'drive',
+  SessionOwnerState.terminalSync: 'terminal-sync',
+  SessionOwnerState.unknown: 'unknown',
+};
+
+SessionConnectionAuthority _$SessionConnectionAuthorityFromJson(
+  Map<String, dynamic> json,
+) => SessionConnectionAuthority(
+  canMutate: json['canMutate'] as bool,
+  prompt: $enumDecode(
+    _$SessionPromptAuthorityEnumMap,
+    json['prompt'],
+    unknownValue: SessionPromptAuthority.unknown,
+  ),
+);
+
+Map<String, dynamic> _$SessionConnectionAuthorityToJson(
+  SessionConnectionAuthority instance,
+) => <String, dynamic>{
+  'canMutate': instance.canMutate,
+  'prompt': _$SessionPromptAuthorityEnumMap[instance.prompt]!,
+};
+
+const _$SessionPromptAuthorityEnumMap = {
+  SessionPromptAuthority.none: 'none',
+  SessionPromptAuthority.answerOnly: 'answer-only',
+  SessionPromptAuthority.full: 'full',
+  SessionPromptAuthority.unknown: 'unknown',
+};
+
+SessionJoinExistingAction _$SessionJoinExistingActionFromJson(
+  Map<String, dynamic> json,
+) => SessionJoinExistingAction(
+  ownerRevision: SessionOwnerRevision.fromJson(
+    json['ownerRevision'] as Map<String, dynamic>,
+  ),
+);
+
+Map<String, dynamic> _$SessionJoinExistingActionToJson(
+  SessionJoinExistingAction instance,
+) => <String, dynamic>{'ownerRevision': instance.ownerRevision.toJson()};
+
 SessionCurrentModel _$SessionCurrentModelFromJson(Map<String, dynamic> json) =>
     SessionCurrentModel(
       providerID: json['providerID'] as String,
@@ -139,12 +214,12 @@ SessionInfo _$SessionInfoFromJson(Map<String, dynamic> json) => SessionInfo(
   tool: json['tool'] as String,
   title: json['title'] as String,
   status: $enumDecode(_$SessionStatusEnumMap, json['status']),
+  attachMode: $enumDecode(_$AttachModeEnumMap, json['attachMode']),
   launchSurface: $enumDecodeNullable(
     _$SessionLaunchSurfaceEnumMap,
     json['launchSurface'],
     unknownValue: SessionLaunchSurface.unknown,
   ),
-  attachMode: $enumDecode(_$AttachModeEnumMap, json['attachMode']),
   lineageId: json['lineageId'] as String?,
   liveUuid: json['liveUuid'] as String?,
   machine: json['machine'] as String?,
@@ -176,6 +251,11 @@ SessionInfo _$SessionInfoFromJson(Map<String, dynamic> json) => SessionInfo(
   control: json['control'] == null
       ? null
       : SessionControlState.fromJson(json['control'] as Map<String, dynamic>),
+  sessionOwner: json['sessionOwner'] == null
+      ? null
+      : SessionOwnerProjection.fromJson(
+          json['sessionOwner'] as Map<String, dynamic>,
+        ),
 );
 
 Map<String, dynamic> _$SessionInfoToJson(SessionInfo instance) =>
@@ -203,6 +283,7 @@ Map<String, dynamic> _$SessionInfoToJson(SessionInfo instance) =>
       'updatedAt': instance.updatedAt,
       'terminalSyncHint': instance.terminalSyncHint?.toJson(),
       'control': instance.control?.toJson(),
+      'sessionOwner': instance.sessionOwner?.toJson(),
     };
 
 const _$SessionStatusEnumMap = {
@@ -211,17 +292,17 @@ const _$SessionStatusEnumMap = {
   SessionStatus.idle: 'idle',
 };
 
+const _$AttachModeEnumMap = {
+  AttachMode.live: 'live',
+  AttachMode.resume: 'resume',
+  AttachMode.observe: 'observe',
+};
+
 const _$SessionLaunchSurfaceEnumMap = {
   SessionLaunchSurface.app: 'app',
   SessionLaunchSurface.terminal: 'terminal',
   SessionLaunchSurface.ide: 'ide',
   SessionLaunchSurface.unknown: 'unknown',
-};
-
-const _$AttachModeEnumMap = {
-  AttachMode.live: 'live',
-  AttachMode.resume: 'resume',
-  AttachMode.observe: 'observe',
 };
 
 const _$SessionOriginEnumMap = {

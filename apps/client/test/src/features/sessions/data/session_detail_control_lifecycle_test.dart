@@ -337,6 +337,209 @@ void main() {
     );
 
     test(
+      'Pi background Observe joins the exact existing driver only after '
+      'promotion',
+      () async {
+        const piKey = SessionDetailKey(tool: 'pi', sessionId: 'session-1');
+        const revision = SessionOwnerRevision(epoch: 'broker-epoch', seq: 8);
+        keepSessionDetailAlive(container, piKey);
+        final controller = container.read(
+          sessionDetailControllerProvider(piKey).notifier,
+        );
+
+        await fakeOutboxRepository.upsert(
+          SessionOutboxMessage.create(
+            sessionKey: piKey,
+            brokerProfileId: fakeControllerBrokerScope(),
+            clientMessageId: 'ca.retry.before-join',
+            kind: SessionOutboxMessageKind.prompt,
+            payload: const {'text': 'belongs to the earlier owner'},
+          ).copyWith(status: SessionOutboxMessageStatus.retryable),
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: revision,
+            state: SessionOwnerState.drive,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+          joinExisting: const SessionJoinExistingAction(
+            ownerRevision: revision,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+
+        expect(fakeConnection.reattachModes, isEmpty);
+        expect(
+          SessionControlView.fromSessionDetailState(
+            container.read(sessionDetailControllerProvider(piKey)),
+          ).pill,
+          SessionControlPill.driverActive,
+        );
+
+        await controller.attach();
+        expect(fakeConnection.reattachModes, ['resume']);
+        expect(fakeConnection.reattachReasons, ['join-existing']);
+        expect(
+          fakeConnection.reattachOwnerRevisions.single?.epoch,
+          'broker-epoch',
+        );
+        expect(fakeConnection.reattachOwnerRevisions.single?.seq, 8);
+        expect(
+          fakeOutboxRepository.messageById('ca.retry.before-join')?.status,
+          SessionOutboxMessageStatus.failed,
+          reason: 'ownerless retry rows must never cross a join boundary',
+        );
+        expect(fakeConnection.sendPromptCount, 0);
+
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'driving', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: revision,
+            state: SessionOwnerState.drive,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: true,
+            prompt: SessionPromptAuthority.full,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        expect(
+          fakeDriveIntentStore.intents,
+          isNot(contains('pi/session-1')),
+          reason: 'joining does not invent app-created local provenance',
+        );
+
+        // A repeated frame for the same owner revision cannot start a loop.
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: revision,
+            state: SessionOwnerState.drive,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+          joinExisting: const SessionJoinExistingAction(
+            ownerRevision: revision,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        expect(fakeConnection.reattachModes, hasLength(1));
+      },
+    );
+
+    test(
+      'lower same-epoch owner frames cannot reintroduce a stale join',
+      () async {
+        const piKey = SessionDetailKey(tool: 'pi', sessionId: 'session-1');
+        keepSessionDetailAlive(container, piKey);
+        final controller = container.read(
+          sessionDetailControllerProvider(piKey).notifier,
+        );
+        await controller.attach();
+
+        void emitOwner(int seq, {bool offerJoin = true}) {
+          final revision = SessionOwnerRevision(
+            epoch: 'broker-epoch',
+            seq: seq,
+          );
+          fakeConnection.emitSessionControl(
+            const {
+              'drive': {'state': 'observing', 'supported': true},
+              'terminalSync': {
+                'supported': false,
+                'syncAvailable': false,
+                'active': false,
+              },
+            },
+            sessionOwner: SessionOwnerProjection(
+              revision: revision,
+              state: SessionOwnerState.drive,
+            ),
+            authority: const SessionConnectionAuthority(
+              canMutate: false,
+              prompt: SessionPromptAuthority.none,
+            ),
+            joinExisting: offerJoin
+                ? SessionJoinExistingAction(ownerRevision: revision)
+                : null,
+          );
+        }
+
+        emitOwner(10, offerJoin: false);
+        await drainSessionDetailMicrotasks();
+        emitOwner(9);
+        await drainSessionDetailMicrotasks();
+
+        final state = container.read(sessionDetailControllerProvider(piKey));
+        expect(state.sessionInfo?.sessionOwner?.revision.seq, 10);
+        expect(state.joinExisting, isNull);
+        expect(fakeConnection.reattachModes, isEmpty);
+
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: SessionOwnerRevision(
+              epoch: 'restarted-broker',
+              seq: 0,
+            ),
+            state: SessionOwnerState.none,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        final restarted = container.read(
+          sessionDetailControllerProvider(piKey),
+        );
+        expect(
+          restarted.sessionInfo?.sessionOwner?.revision.epoch,
+          'restarted-broker',
+        );
+        expect(restarted.sessionInfo?.sessionOwner?.revision.seq, 0);
+      },
+    );
+
+    test(
       'interactive promotion without Drive provenance keeps the Observe socket',
       () async {
         keepSessionDetailAlive(container, key);
@@ -366,7 +569,7 @@ void main() {
       },
     );
 
-    test('handoffToTerminal re-attaches in Observe mode (null)', () async {
+    test('handoffToTerminal uses the current Drive socket', () async {
       fakeDriveIntentStore.seedTakeover('claude', 'session-1');
       keepSessionDetailAlive(container, key);
       final controller = container.read(
@@ -374,6 +577,7 @@ void main() {
       );
       await controller.attach();
       fakeConnection.reattachModes.clear();
+      fakeConnection.reattachReasons.clear();
       fakeConnection.emitSessionControl(const {
         'drive': {'state': 'driving', 'supported': true},
         'terminalSync': {
@@ -384,12 +588,129 @@ void main() {
       });
       await Future<void>.delayed(Duration.zero);
 
-      final succeeded = await controller.handoffToTerminal();
+      final handoff = controller.handoffToTerminal();
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.sendHandoffCount, 1);
+      expect(fakeConnection.lastHandoffClientMessageId, isNotNull);
+      fakeConnection.emitSessionControl(
+        const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        },
+        sessionOwner: const SessionOwnerProjection(
+          revision: SessionOwnerRevision(epoch: 'handoff-epoch', seq: 2),
+          state: SessionOwnerState.none,
+        ),
+        authority: const SessionConnectionAuthority(
+          canMutate: false,
+          prompt: SessionPromptAuthority.none,
+        ),
+      );
+      final succeeded = await handoff;
 
       expect(succeeded, isTrue);
-      expect(fakeConnection.reattachModes, [null]);
+      expect(fakeConnection.reattachModes, isEmpty);
+      expect(fakeConnection.disarmDriveAuthorityCount, 1);
       expect(fakeDriveIntentStore.intents, isNot(contains('claude/session-1')));
     });
+
+    test(
+      'handoff does not report success while Drive remains active',
+      () async {
+        fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        final handoff = controller.handoffToTerminal();
+        await Future<void>.delayed(Duration.zero);
+        fakeConnection.emitEvent(
+          NackWireEvent(
+            code: 'DRIVE_OWNERSHIP_CONFLICT',
+            message: 'Another foreground client is still driving.',
+            clientMessageId: fakeConnection.lastHandoffClientMessageId,
+          ),
+        );
+
+        expect(await handoff, isFalse);
+        expect(fakeConnection.disarmDriveAuthorityCount, 0);
+        expect(
+          fakeDriveIntentStore.intents['claude/session-1'],
+          SessionDriveProvenanceKind.terminalTakeover,
+        );
+      },
+    );
+
+    test(
+      'unknown owner truth cannot confirm a pending handoff',
+      () async {
+        fakeDriveIntentStore.seedTakeover('claude', 'session-1');
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach();
+        fakeConnection.emitSessionControl(const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        var completed = false;
+        final handoff = controller.handoffToTerminal();
+        unawaited(handoff.whenComplete(() => completed = true));
+        await Future<void>.delayed(Duration.zero);
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: SessionOwnerRevision(epoch: 'future-owner', seq: 1),
+            state: SessionOwnerState.unknown,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+        );
+        await drainSessionDetailMicrotasks();
+        expect(completed, isFalse);
+
+        fakeConnection.emitEvent(
+          NackWireEvent(
+            code: 'DRIVE_OWNERSHIP_CONFLICT',
+            message: 'The owner kind is not understood.',
+            clientMessageId: fakeConnection.lastHandoffClientMessageId,
+          ),
+        );
+        expect(await handoff, isFalse);
+        expect(fakeConnection.disarmDriveAuthorityCount, 0);
+      },
+    );
 
     test(
       'restore provenance retires stale outbox before the reason attach',
@@ -731,7 +1052,27 @@ void main() {
         });
         await Future<void>.delayed(Duration.zero);
 
-        expect(await controller.handoffToTerminal(), isTrue);
+        final handoff = controller.handoffToTerminal();
+        await Future<void>.delayed(Duration.zero);
+        fakeConnection.emitSessionControl(
+          const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          },
+          sessionOwner: const SessionOwnerProjection(
+            revision: SessionOwnerRevision(epoch: 'handoff-epoch', seq: 3),
+            state: SessionOwnerState.none,
+          ),
+          authority: const SessionConnectionAuthority(
+            canMutate: false,
+            prompt: SessionPromptAuthority.none,
+          ),
+        );
+        expect(await handoff, isTrue);
         expect(
           fakeDriveIntentStore.intents,
           isNot(contains('claude/session-1')),
@@ -797,10 +1138,30 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       fakeDriveIntentStore.failClear = true;
 
-      final succeeded = await controller.handoffToTerminal();
+      final handoff = controller.handoffToTerminal();
+      await Future<void>.delayed(Duration.zero);
+      fakeConnection.emitSessionControl(
+        const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        },
+        sessionOwner: const SessionOwnerProjection(
+          revision: SessionOwnerRevision(epoch: 'handoff-epoch', seq: 4),
+          state: SessionOwnerState.none,
+        ),
+        authority: const SessionConnectionAuthority(
+          canMutate: false,
+          prompt: SessionPromptAuthority.none,
+        ),
+      );
+      final succeeded = await handoff;
 
       expect(succeeded, isTrue);
-      expect(fakeConnection.reattachModes, [null]);
+      expect(fakeConnection.reattachModes, isEmpty);
     });
 
     test('takeOver is a no-op before attach', () async {

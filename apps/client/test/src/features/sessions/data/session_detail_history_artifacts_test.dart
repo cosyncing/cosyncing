@@ -2072,11 +2072,19 @@ class _BlockingHistoryPageConnection
   );
 
   @override
-  Future<void> reattach({String? mode, String? reason}) =>
-      connection.reattach(mode: mode, reason: reason);
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) => connection.reattach(mode: mode, reason: reason);
 
   @override
   void disarmDriveAuthority() => connection.disarmDriveAuthority();
+
+  @override
+  Future<void> sendHandoff({String? clientMessageId}) async {
+    await connection.sendHandoff(clientMessageId: clientMessageId);
+  }
 
   @override
   Future<void> sendPrompt(

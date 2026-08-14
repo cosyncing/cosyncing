@@ -85,6 +85,7 @@ const CAPS: AgentCapabilities = {
   supportsObserve: true,
   supportsResume: true,
   supportsLiveAttach: true, // per-session active only when the Pi bridge extension has hello'd
+  supportsCrossClientDriveSharing: true,
   supportsNativeArtifact: false,
   supportsNativeFileInput: true, // images in prompt
   supportsModelSwitch: true,

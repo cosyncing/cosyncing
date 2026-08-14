@@ -158,6 +158,7 @@ const Map<String, BrokerContractAdoption> brokerClientMessageAdoption = {
   'reject-question': _adopted,
   'command': _adopted,
   'set-agent': _adopted,
+  'handoff': _adopted,
   'ack': _adopted,
   'nack': _adopted,
 };

@@ -52,6 +52,7 @@ class SessionConnection {
     String artifactMode = 'reference',
     String? mode,
     String? reason,
+    SessionOwnerRevision? ownerRevision,
     int initialHistory = _defaultInitialHistory,
     WebSocketAdapter Function(String url)? adapterFactory,
   }) : _resolver = resolver,
@@ -60,6 +61,7 @@ class SessionConnection {
        _artifactMode = artifactMode,
        _mode = mode,
        _reason = reason,
+       _ownerRevision = ownerRevision,
        _initialHistory = initialHistory,
        _adapterFactory = adapterFactory ?? WebSocketAdapter.new;
 
@@ -76,16 +78,21 @@ class SessionConnection {
   /// by [reattach] and applied on the next (re)connect's `streamEndpoint`.
   String? _mode;
 
-  /// Drive-attach intent accompanying a `resume` attach (`create`,
-  /// `app-restore`, `lease-restore`, or `takeover`). Additive: null keeps the
-  /// legacy mode-only attach. Mutated by [reattach] alongside [_mode].
+  /// Drive-attach intent accompanying resume (`create`, `app-restore`,
+  /// `lease-restore`, `join-existing`, or `takeover`).
   String? _reason;
+
+  /// Owner revision accompanying a `join-existing` request only.
+  SessionOwnerRevision? _ownerRevision;
 
   /// The current attach control mode (null = Observe).
   String? get mode => _mode;
 
   /// The current drive-attach reason (null = mode-only attach).
   String? get reason => _reason;
+
+  /// Exact owner revision the current join-existing attach is conditional on.
+  SessionOwnerRevision? get ownerRevision => _ownerRevision;
 
   WebSocketAdapter? _adapter;
   StreamSubscription<Object?>? _messageSub;
@@ -210,6 +217,7 @@ class SessionConnection {
         _sessionId,
         mode: _mode,
         reason: _reason,
+        ownerRevision: _ownerRevision,
         ticket: _cursor,
         initialHistory: _initialHistory,
         artifactMode: _artifactMode,
@@ -431,6 +439,13 @@ class SessionConnection {
     return id;
   }
 
+  /// Requests terminal handoff on this exact Drive socket.
+  String sendHandoff({String? clientMessageId}) {
+    final id = _resolveClientMessageId(clientMessageId);
+    _sendFrame(OutboundFrame.handoff(clientMessageId: id));
+    return id;
+  }
+
   /// Closes the connection.
   ///
   /// Set [reconnect] to `true` to allow automatic reconnect.
@@ -446,14 +461,20 @@ class SessionConnection {
   /// Re-attaches the stream under a new control [mode] — `resume` to Drive
   /// (Take over), null to Observe (hand back). [reason] carries the
   /// drive-attach intent for a `resume` attach so the broker can arbitrate
-  /// ownership atomically; null keeps the legacy mode-only attach. Closes the
-  /// current socket and reconnects; the fresh `connect()` bumps the generation
-  /// so any late disconnect from the old socket is ignored. The history cursor
-  /// is kept so the broker resumes from where we were.
-  Future<void> reattach({String? mode, String? reason}) async {
+  /// ownership atomically; [ownerRevision] qualifies `join-existing` only.
+  /// Null keeps the legacy mode-only attach. Closes the current socket and
+  /// reconnects; the fresh `connect()` bumps the generation so any late
+  /// disconnect from the old socket is ignored. The history cursor is kept so
+  /// the broker resumes from where we were.
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     if (_disposed) return;
     _mode = mode;
     _reason = reason;
+    _ownerRevision = reason == 'join-existing' ? ownerRevision : null;
     await close();
     await connect();
   }
@@ -465,6 +486,7 @@ class SessionConnection {
   void disarmDriveAuthority() {
     _mode = null;
     _reason = null;
+    _ownerRevision = null;
   }
 
   /// Releases all resources. Cannot be reused after this.
@@ -618,6 +640,7 @@ class SessionConnection {
         // the same authority request on a later transport reconnect.
         _mode = null;
         _reason = null;
+        _ownerRevision = null;
       case ErrorWireEvent():
       case NoticeWireEvent():
       case UnknownWireEvent():
@@ -665,6 +688,7 @@ class SessionConnection {
           _sessionId,
           mode: _mode,
           reason: _reason,
+          ownerRevision: _ownerRevision,
           ticket: _cursor,
           initialHistory: _initialHistory,
           artifactMode: _artifactMode,

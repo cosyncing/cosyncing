@@ -137,7 +137,7 @@ class _ChatPanel extends ConsumerWidget {
       );
     }
 
-    final control = SessionControlView.fromSessionInfo(state.sessionInfo);
+    final control = SessionControlView.fromSessionDetailState(state);
     final mutationEnabled =
         isConnected && !state.compatibilityReadOnly && control.canPrompt;
     final canSendPrompt =

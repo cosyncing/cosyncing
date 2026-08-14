@@ -1872,7 +1872,7 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
     // broker rejects the answer, so the buttons stay inert here too. — WP2.
     final canMutate =
         !widget.state.compatibilityReadOnly &&
-        SessionControlView.fromSessionInfo(widget.state.sessionInfo).canMutate;
+        SessionControlView.fromSessionDetailState(widget.state).canMutate;
     final inlineWidgets = <Widget>[
       for (final schedule in inlineState.schedules)
         InlineScheduledMessageCard(

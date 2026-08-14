@@ -406,7 +406,11 @@ final class _GatedCloseConnection extends ScriptedSessionDetailConnection {
   int reattachCount = 0;
 
   @override
-  Future<void> reattach({String? mode, String? reason}) async {
+  Future<void> reattach({
+    String? mode,
+    String? reason,
+    SessionOwnerRevision? ownerRevision,
+  }) async {
     reattachCount++;
     await super.reattach(mode: mode, reason: reason);
   }

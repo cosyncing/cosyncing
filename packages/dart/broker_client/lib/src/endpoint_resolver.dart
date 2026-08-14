@@ -255,6 +255,7 @@ class EndpointResolver {
     String id, {
     String? mode,
     String? reason,
+    SessionOwnerRevision? ownerRevision,
     String? since,
     String? ticket,
     int? initialHistory,
@@ -280,6 +281,10 @@ class EndpointResolver {
     // Drive-attach intent is additive and resume-only: the broker rejects a
     // reason without mode=resume, so never emit one on an Observe attach.
     if (reason != null && mode == 'resume') params['reason'] = reason;
+    if (reason == 'join-existing' && ownerRevision != null) {
+      params['ownerEpoch'] = ownerRevision.epoch;
+      params['ownerSeq'] = '${ownerRevision.seq}';
+    }
     if (since != null) params['since'] = since;
     if (ticket != null) params['ticket'] = ticket;
     if (initialHistory != null) params['initialHistory'] = '$initialHistory';

@@ -1140,6 +1140,7 @@ export function opencodeControlState(terminalSyncHint: SessionInfo['terminalSync
           // `opencode attach …` — sync is AVAILABLE but not yet active.
           syncAvailable: true,
           active: false,
+          action: 'join',
           label: terminalSyncHint?.label ?? 'Sync with OpenCode terminal',
           command: terminalSyncHint?.command,
           note: terminalSyncHint?.note,

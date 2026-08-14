@@ -113,10 +113,14 @@ jobs:
           cache: true
       - run: bun install --frozen-lockfile
       - name: Install canonical parity browser
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cosyncing-playwright
         run: npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
       - run: flutter pub get
         working-directory: apps/client
       - name: Build and verify one immutable candidate pair
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/cosyncing-playwright
         shell: bash
         run: |
           COMMIT="$(git rev-parse HEAD)"

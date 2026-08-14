@@ -130,18 +130,45 @@ class HelloWireEvent extends WireEvent {
 
 /// `{ kind: 'session', info: SessionInfo }` — the first frame on attach.
 class SessionWireEvent extends WireEvent {
-  const SessionWireEvent({required this.info});
+  const SessionWireEvent({
+    required this.info,
+    this.authority,
+    this.joinExisting,
+  });
 
   factory SessionWireEvent.fromJson(Map<String, dynamic> json) {
+    final authority = json['authority'];
+    final joinExisting = json['joinExisting'];
     return SessionWireEvent(
       info: SessionInfo.fromJson(json['info'] as Map<String, dynamic>),
+      authority: authority is Map<Object?, Object?>
+          ? SessionConnectionAuthority.fromJson(
+              Map<String, dynamic>.from(authority),
+            )
+          : null,
+      joinExisting: joinExisting is Map<Object?, Object?>
+          ? SessionJoinExistingAction.fromJson(
+              Map<String, dynamic>.from(joinExisting),
+            )
+          : null,
     );
   }
 
   final SessionInfo info;
 
+  /// Broker-derived authority of this Session Detail socket.
+  final SessionConnectionAuthority? authority;
+
+  /// Authenticated action metadata for joining an existing Drive owner.
+  final SessionJoinExistingAction? joinExisting;
+
   @override
-  Map<String, dynamic> toJson() => {'kind': 'session', 'info': info.toJson()};
+  Map<String, dynamic> toJson() => {
+    'kind': 'session',
+    'info': info.toJson(),
+    if (authority != null) 'authority': authority!.toJson(),
+    if (joinExisting != null) 'joinExisting': joinExisting!.toJson(),
+  };
 }
 
 /// `{ kind: 'history', messages, reset?, cursor? }` — durable history replay.

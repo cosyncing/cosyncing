@@ -295,6 +295,8 @@ class SessionDetailState {
     this.events = const [],
     this.transcriptWindow = const TranscriptHistoryWindow.uninitialized(),
     this.sessionInfo,
+    this.connectionAuthority,
+    this.joinExisting,
     this.agentActions,
     this.error,
     this.renameSessionActionState = const SessionActionState.idle(),
@@ -365,6 +367,12 @@ class SessionDetailState {
 
   /// Most recent session info frame, if received.
   final SessionInfo? sessionInfo;
+
+  /// Broker-derived authority of this Session Detail socket.
+  final SessionConnectionAuthority? connectionAuthority;
+
+  /// Revision-conditional existing-Drive action offered to this socket.
+  final SessionJoinExistingAction? joinExisting;
 
   /// Capability-gated REST actions available for this session's agent.
   final SessionAgentActions? agentActions;
@@ -715,6 +723,8 @@ class SessionDetailState {
     List<WireEvent>? events,
     TranscriptHistoryWindow? transcriptWindow,
     SessionInfo? sessionInfo,
+    SessionConnectionAuthority? connectionAuthority,
+    SessionJoinExistingAction? joinExisting,
     SessionAgentActions? agentActions,
     String? error,
     SessionActionState? renameSessionActionState,
@@ -739,6 +749,8 @@ class SessionDetailState {
     SessionTransientRetryStatus? transientRetryStatus,
     bool clearError = false,
     bool clearSessionInfo = false,
+    bool clearConnectionAuthority = false,
+    bool clearJoinExisting = false,
     bool clearArtifactActionStates = false,
     bool clearStagedAttachments = false,
     bool clearOptimisticPrompts = false,
@@ -757,6 +769,12 @@ class SessionDetailState {
       events: events == null ? this.events : List.unmodifiable(events),
       transcriptWindow: transcriptWindow ?? this.transcriptWindow,
       sessionInfo: clearSessionInfo ? null : sessionInfo ?? this.sessionInfo,
+      connectionAuthority: clearSessionInfo || clearConnectionAuthority
+          ? null
+          : connectionAuthority ?? this.connectionAuthority,
+      joinExisting: clearSessionInfo || clearJoinExisting
+          ? null
+          : joinExisting ?? this.joinExisting,
       agentActions: agentActions ?? this.agentActions,
       error: clearError ? null : error ?? this.error,
       renameSessionActionState:
