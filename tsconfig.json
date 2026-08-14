@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./output/cache/tsconfig.tsbuildinfo"
+  },
   "include": [
     "packages/typescript/*/src/**/*.ts",
     "packages/typescript/*/test/**/*.ts",

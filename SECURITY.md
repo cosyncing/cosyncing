@@ -17,6 +17,7 @@ Maintainers will acknowledge a complete report within seven days and coordinate
 disclosure after a fix or mitigation is available. This is a target, not a
 service-level agreement.
 
-Release manifests and broker binaries must be verified through the documented
-signing flow. A package-registry publication is not a supported broker update
-channel.
+Compiled broker binaries must be verified through the documented signing flow.
+The non-embedded npm JavaScript distribution uses protected trusted publishing
+and the package-manager-owned update path documented in
+[npm distribution readiness](docs/legal/npm-javascript-distribution-readiness.md).

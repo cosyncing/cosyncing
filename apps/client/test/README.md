@@ -1,25 +1,29 @@
-# Tests
+# Flutter tests
 
-Flutter unit and widget tests belong here.
+The client test tree mirrors production ownership under `lib/src/`.
 
-Expected first tests:
+- `src/` contains unit and widget tests grouped by app, feature, local-state,
+  and platform ownership.
+- `contract/` locks the broker/client wire surface and generated-model use.
+- `web/` and `web_only/` cover browser-specific startup and implementations.
+- `brand/` validates tracked brand assets.
+- `tool/` covers developer validation tools.
+- `support/` contains shared fakes, stores, finders, and page/controller
+  harnesses; it is not production code.
 
-- broker URL/host/port normalization;
-- connection form validation;
-- broker health probe states;
-- protocol contract coverage once broker models are copied/generated.
+Run the complete client suite from the repository root:
 
-## Contract Tests
+```bash
+bun run client:test
+```
 
-- `test/contract/contract_conformance_test.dart` — focused smoke-conservative
-  conformance tests for protocol shape parity.
-- Verifies that:
-  - the protocol audit still documents the current canonical `WireEvent.kind`
-    values,
-  - `WireEvent.fromJson` decodes each canonical kind,
-  - checked-in broker core snapshot exposes all canonical `AgentMessage.type`
-    values through `CANONICAL_MESSAGE_TYPES`,
-  - each non-unknown `AgentMessageType` has a renderer/fallback policy, and
-  - client-to-broker frame kinds/fields stay aligned with outbound frame
-    builders and semantic broker core methods.
-- `flutter test test/contract/` is the dedicated contract-gate entrypoint.
+Run the focused contract gate from `apps/client/`:
+
+```bash
+flutter test test/contract/
+```
+
+The contract tests verify canonical event and message kinds, typed decoding,
+renderer or fallback coverage, outbound frame fields, and alignment with the
+broker's semantic surface. Real-browser and release harnesses remain under the
+root `scripts/` tree rather than this unit/widget test directory.
