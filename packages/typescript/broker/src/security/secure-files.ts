@@ -40,6 +40,16 @@ function assertOwned(stat: Stats, target: string): void {
   if (uid !== undefined && stat.uid !== uid) throw new SecurePathError('wrong-owner', target);
 }
 
+/** `existsSync` follows symlinks and therefore reports a broken symlink as absent; ownership checks need lstat. */
+function lstatIfPresent(target: string): Stats | undefined {
+  try {
+    return lstatSync(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 /** Reject symlinks in every existing component without requiring ownership of shared ancestors such as /tmp. */
 export function assertNoSymlinkComponents(target: string, includeLeaf = true): void {
   if (!isAbsolute(target)) throw new SecurePathError('not-absolute', target);
@@ -80,8 +90,8 @@ export interface SecureFileInspection {
 export function inspectOwnerOnlyFile(target: string): SecureFileInspection {
   try {
     assertNoSymlinkComponents(target, false);
-    if (!existsSync(target)) return { status: 'missing', path: target };
-    const stat = lstatSync(target);
+    const stat = lstatIfPresent(target);
+    if (!stat) return { status: 'missing', path: target };
     if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
     if (!stat.isFile()) throw new SecurePathError('not-file', target);
     assertOwned(stat, target);
@@ -108,6 +118,8 @@ export function readOwnerOnlyText(target: string): string {
 export interface AtomicWriteOptions {
   mode?: number;
   preserveMode?: boolean;
+  /** Final caller-owned precondition, run after the replacement bytes are durable and immediately before rename. */
+  beforeReplace?: () => void;
 }
 
 /**
@@ -124,8 +136,9 @@ export function atomicWriteOwnerOnly(
   ensureOwnerOnlyDirectory(parent);
 
   let mode = options.mode ?? 0o600;
-  if (existsSync(target)) {
-    const stat = lstatSync(target);
+  const existing = lstatIfPresent(target);
+  if (existing) {
+    const stat = existing;
     if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
     if (!stat.isFile()) throw new SecurePathError('not-file', target);
     assertOwned(stat, target);
@@ -143,7 +156,13 @@ export function atomicWriteOwnerOnly(
     // Recheck immediately before replacement. rename replaces a leaf symlink rather than following it, but an
     // explicit rejection keeps the ownership contract visible and catches directory swaps.
     assertNoSymlinkComponents(target, false);
-    if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+    if (lstatIfPresent(target)?.isSymbolicLink()) {
+      throw new SecurePathError('symlink', target);
+    }
+    options.beforeReplace?.();
+    // The callback may perform filesystem/receipt reads. Recheck the path components once more after it.
+    assertNoSymlinkComponents(target, false);
+    if (lstatIfPresent(target)?.isSymbolicLink()) {
       throw new SecurePathError('symlink', target);
     }
     renameSync(temp, target);

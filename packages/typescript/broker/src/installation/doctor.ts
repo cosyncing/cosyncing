@@ -32,7 +32,12 @@ import {
   readBrokerToken,
 } from '../security/credentials.ts';
 import { durableStateLayout, inspectDurableSchemas } from '../security/durable-state.ts';
-import { inspectInstallState, installedBinaryPath, type InstalledResourceRecord } from './install-state.ts';
+import {
+  inspectInstallState,
+  installedBinaryPath,
+  type InstalledResourceRecord,
+  type InstallStateInspection,
+} from './install-state.ts';
 import type { RuntimeAssetReport } from '../runtime/runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
 import { isSupportedBrokerHost, supportedBrokerHostList } from './supported-hosts.ts';
@@ -73,6 +78,7 @@ import {
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
+import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
 
 export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
 
@@ -1342,6 +1348,58 @@ async function diagnoseAgents(
   }));
 }
 
+/** Overlay broker receipt/safety evidence onto the adapter's provider-specific bridge content check. */
+function reconcilePiBridgeDoctorDiagnosis(
+  context: SetupDiagnosisContext,
+  install: InstallStateInspection,
+  diagnoses: readonly AgentSetupDiagnosis[],
+): AgentSetupDiagnosis[] {
+  const pi = diagnoses.find((diagnosis) => diagnosis.agent === 'pi');
+  if (!pi || !pi.checks.some((check) => check.id === 'pi.bridge-asset')) return [...diagnoses];
+  const piAgentDir = context.env.PI_CODING_AGENT_DIR?.trim() || join(context.homeDir, '.pi', 'agent');
+  const decision = inspectPiBridgeOwnership(install, piAgentDir);
+  let replacement: SetupCheck | undefined;
+  if (decision.status === 'owned-stale') {
+    replacement = {
+      id: 'pi.bridge-asset',
+      status: 'warn',
+      detailCode: 'bridge-owned-stale',
+      summary: 'The installed Pi bridge is a receipt-proven older packaged version.',
+      evidence: { path: context.displayPath(decision.bridge.path) },
+      remediation: remediation(
+        'cosyncing setup',
+        'Run setup or repair to refresh the package-owned Pi bridge.',
+      ),
+    };
+  } else if (decision.status === 'receipt-invalid') {
+    replacement = {
+      id: 'pi.bridge-asset',
+      status: 'fail',
+      detailCode: 'bridge-receipt-invalid',
+      summary: 'The Pi bridge receipt does not prove ownership of the installed target.',
+      evidence: { path: context.displayPath(decision.bridge.path) },
+      remediation: {
+        kind: 'manual',
+        message: 'Preserve the bridge and reconcile its install receipt before setup or repair.',
+      },
+    };
+  } else if (decision.status === 'unsafe' || decision.status === 'unreadable') {
+    replacement = {
+      id: 'pi.bridge-asset',
+      status: 'fail',
+      detailCode: decision.status === 'unsafe' ? 'bridge-unsafe' : 'bridge-unreadable',
+      summary: 'The Pi bridge target cannot be inspected safely.',
+      evidence: { path: context.displayPath(decision.bridge.path) },
+      remediation: remediation('cosyncing repair', 'Repair Pi bridge ownership and permissions.'),
+    };
+  }
+  if (!replacement) return [...diagnoses];
+  return diagnoses.map((diagnosis) => diagnosis !== pi ? diagnosis : {
+    ...diagnosis,
+    checks: diagnosis.checks.map((check) => check.id === replacement.id ? replacement : check),
+  });
+}
+
 function summarize(sections: readonly DoctorSection[]): Record<SetupCheckStatus, number> {
   const result: Record<SetupCheckStatus, number> = { pass: 0, warn: 0, fail: 0, skip: 0 };
   for (const section of sections) {
@@ -1363,11 +1421,12 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     new CodexAdapter(),
     new ClaudeAdapter(),
   ];
+  const installedResources = inspectInstallState(home);
   // Resolved before the service checks because the durable service PATH is derived from it: setup records
   // the validated runtime's directory there, and the check below must reconstruct the same expectation.
   const identity = dependencies.applicationIdentity
     ?? currentApplicationIdentity(dependencies.buildInfo.distribution, `${import.meta.dir}/cli.ts`);
-  const [agents, service, installedService, tailscale] = await Promise.all([
+  const [adapterDiagnoses, service, installedService, tailscale] = await Promise.all([
     diagnoseAgents(dependencies.context, adapters),
     serviceChecks(dependencies.context, host.wsl),
     installedBrokerServiceChecks(dependencies.context, home, identity.runtimePath),
@@ -1377,6 +1436,11 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
       config.status === 'ok' ? config.config.broker.internalUrl : defaultBrokerConfig().broker.internalUrl,
     ),
   ]);
+  const agents = reconcilePiBridgeDoctorDiagnosis(
+    dependencies.context,
+    installedResources,
+    adapterDiagnoses,
+  );
   const endpoints = await endpointAndRuntimeChecks({
     context: dependencies.context,
     config,
@@ -1391,7 +1455,6 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   // Read from the receipt's own target, so this inspects the file the installer actually wrote rather than
   // a path recomputed here — the same rule every other receipt-owned resource check follows.
   const serviceProvider = durableServiceProviderId(dependencies.context.platform);
-  const installedResources = inspectInstallState(home);
   const serviceDefinitionReceipt = (installedResources.committed ? installedResources.state.resources : [])
     .find((resource: InstalledResourceRecord) => resource.id === serviceDefinitionResourceId({ id: serviceProvider }));
   const serviceRuntimePath = serviceDefinitionReceipt

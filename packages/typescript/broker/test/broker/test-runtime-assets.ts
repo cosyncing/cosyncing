@@ -11,6 +11,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -480,6 +481,28 @@ try {
   const unrelated = inspectPiBridgeAsset(agentDir);
   check('unrelated Pi content is preserved as unowned and requires confirmation',
     unrelated.status === 'unowned' && unrelated.requiresConfirmation);
+
+  const symlinkTarget = join(ownershipRoot, 'symlink-target.ts');
+  writeFileSync(symlinkTarget, PI_BRIDGE_EMBEDDED_SOURCE);
+  rmSync(bridge);
+  symlinkSync(symlinkTarget, bridge);
+  const symlinkLeaf = inspectPiBridgeAsset(agentDir);
+
+  const parentSymlinkAgentDir = join(ownershipRoot, 'parent-symlink-agent');
+  const parentSymlinkTarget = join(ownershipRoot, 'real-extensions');
+  mkdirSync(join(parentSymlinkTarget, 'cosyncing-bridge'), { recursive: true });
+  writeFileSync(join(parentSymlinkTarget, 'cosyncing-bridge', 'index.ts'), PI_BRIDGE_EMBEDDED_SOURCE);
+  mkdirSync(parentSymlinkAgentDir, { recursive: true });
+  symlinkSync(parentSymlinkTarget, join(parentSymlinkAgentDir, 'extensions'), 'dir');
+  const symlinkParent = inspectPiBridgeAsset(parentSymlinkAgentDir);
+
+  const nonRegularAgentDir = join(ownershipRoot, 'non-regular-agent');
+  mkdirSync(join(nonRegularAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts'), { recursive: true });
+  const nonRegular = inspectPiBridgeAsset(nonRegularAgentDir);
+  check('Pi bridge inspection rejects symlink leaves, symlinked parents, and non-regular files before reading',
+    symlinkLeaf.status === 'unsafe'
+      && symlinkParent.status === 'unsafe'
+      && nonRegular.status === 'unsafe');
 
   const claudeSettings = join(ownershipRoot, 'claude', 'settings.json');
   mkdirSync(join(ownershipRoot, 'claude'), { recursive: true });

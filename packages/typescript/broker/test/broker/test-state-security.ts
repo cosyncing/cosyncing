@@ -373,6 +373,16 @@ try {
     check('interrupted-write debris cannot truncate the atomically replaced durable file',
       parsed.generation === 2 && parsed.payload.length === 100_000);
 
+    const guarded = join(home, 'guarded.json');
+    atomicWriteOwnerOnly(guarded, '{"generation":1}\n');
+    assert.throws(() => atomicWriteOwnerOnly(guarded, '{"generation":2}\n', {
+      beforeReplace: () => { throw new Error('fixture final precondition changed'); },
+    }), /fixture final precondition changed/);
+    const guardedTemps = readdirSync(home).filter((entry) => entry.startsWith('guarded.json.tmp-'));
+    check('a failed final atomic-write precondition preserves the target and removes proposed temporary bytes',
+      readFileSync(guarded, 'utf8') === '{"generation":1}\n' && guardedTemps.length === 0,
+      guardedTemps.join(','));
+
     const victim = join(root, 'secret-victim');
     writeFileSync(victim, 'preserve');
     rmSync(target);

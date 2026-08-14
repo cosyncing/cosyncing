@@ -822,6 +822,39 @@ try {
       repaired.exitCode === 4 && readFileSync(piPath, 'utf8') === '// unrelated user extension\n');
   }
 
+  // A prior packaged bridge is ordinary owned-stale state when its committed receipt proves the exact
+  // safe bytes at the canonical target. Repair refreshes both the file and receipt without legacy consent.
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged bridge comment\n`;
+    atomicWriteOwnerOnly(piPath, priorPackaged, { mode: 0o600 });
+    const install = inspectInstallState(m.home);
+    if (!install.committed) throw new Error('fixture install missing');
+    install.state.resources.push({
+      id: 'pi-bridge',
+      kind: 'agent-integration',
+      target: piPath,
+      ownership: { proof: 'package-hash', installedSha256: hash(priorPackaged) },
+    });
+    writeInstallState(install.state, m.home);
+    const plan = await inspectRepair(baseOptions(m));
+    const repaired = await runRepair({
+      ...baseOptions(m),
+      confirmed: true,
+      allowLegacyIntegrations: false,
+    });
+    const after = inspectInstallState(m.home);
+    check('repair refreshes a receipt-proven stale Pi bridge and updates its receipt',
+      plan.actions.some((action) => action.id === 'pi-bridge.refresh' && !action.legacy)
+        && repaired.exitCode === 0
+        && readFileSync(piPath, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && after.committed
+        && after.state.resources.some((item) => item.id === 'pi-bridge'
+          && item.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256),
+      `${repaired.exitCode}:${repaired.detailCode}`);
+  }
+
   // Dual native skill targets follow receipt/hash ownership for repair and uninstall.
   {
     const m = machine({ binaryHash: true }); cleanup.push(m.root);
@@ -1203,6 +1236,32 @@ try {
     });
     check('uninstall preserves a manually modified Pi bridge and retains retry evidence',
       uninstalled.exitCode === 4 && existsSync(piPath) && inspectInstallState(m.home).committed);
+  }
+
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const piPath = join(m.piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged uninstall fixture\n`;
+    atomicWriteOwnerOnly(piPath, priorPackaged, { mode: 0o600 });
+    const inspection = inspectInstallState(m.home);
+    if (!inspection.committed) throw new Error('fixture install missing');
+    inspection.state.resources.push({
+      id: 'pi-bridge',
+      kind: 'agent-integration',
+      target: piPath,
+      ownership: { proof: 'package-hash', installedSha256: hash(priorPackaged) },
+    });
+    writeInstallState(inspection.state, m.home);
+    const plan = await inspectUninstall({ ...baseOptions(m), purgeData: false });
+    const uninstalled = await runUninstall({
+      ...baseOptions(m), confirmed: true, allowLegacyIntegrations: false,
+      purgeData: false, purgeConfirmed: false,
+    });
+    check('uninstall applies the same receipt-proven stale Pi ownership decision',
+      plan.actions.some((action) => action.id === 'pi-bridge.remove' && !action.legacy)
+        && uninstalled.exitCode === 0
+        && !existsSync(piPath),
+      `${uninstalled.exitCode}:${uninstalled.detailCode}`);
   }
 
   // A forged or corrupted binary receipt cannot redirect repair/uninstall outside the product bin directory.

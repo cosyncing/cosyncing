@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 /** No-effects doctor, minimum-version matrix, topology, and redaction acceptance. */
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   mkdirSync,
@@ -63,6 +64,12 @@ import {
   setupFailureDiagnosticPath,
 } from '../../src/installation/setup-transaction.ts';
 import { inspectRuntimeAssets } from '../../src/runtime/runtime-assets.ts';
+import {
+  committedInstallState,
+  writeInstallState,
+} from '../../src/installation/install-state.ts';
+import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
+import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/index.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 const observedDoctorChecks: SetupCheck[] = [];
@@ -433,6 +440,49 @@ try {
   check('Pi unowned bridge collision is preserved and visibly blocks replacement',
     piBridge.status === 'fail' && piBridge.detailCode === 'bridge-unowned-collision' &&
       piBridge.evidence?.requiresConfirmation === true && !!piBridge.remediation);
+
+  {
+    const userHome = join(testRoot, 'pi-owned-stale-doctor');
+    const stateHome = join(userHome, '.cosyncing');
+    const piAgentDir = join(userHome, '.pi', 'agent');
+    const bridge = join(piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged bridge comment\n`;
+    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
+    const install = committedInstallState('2026-07-17T00:00:00.000Z');
+    install.resources.push({
+      id: 'pi-bridge',
+      kind: 'agent-integration',
+      target: bridge,
+      ownership: {
+        proof: 'package-hash',
+        installedSha256: createHash('sha256').update(priorPackaged).digest('hex'),
+      },
+    });
+    writeInstallState(install, stateHome);
+    const diagnosisAdapter = {
+      id: 'pi',
+      displayName: 'Pi',
+      diagnoseSetup: async () => piCollision,
+    } as unknown as AgentBackend;
+    const report = observeDoctorReport(await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: fakeContext({
+        homeDir: userHome,
+        env: { PI_CODING_AGENT_DIR: piAgentDir },
+      }),
+      assetReport: inspectRuntimeAssets(),
+      adapters: [diagnosisAdapter],
+      stateHome,
+    }));
+    const ownedStale = report.sections.flatMap((section) => section.checks)
+      .find((candidate) => candidate.id === 'pi.bridge-asset');
+    check('doctor reports a receipt-proven stale Pi bridge as an actionable warning, not an unowned collision',
+      ownedStale?.status === 'warn'
+        && ownedStale.detailCode === 'bridge-owned-stale'
+        && ownedStale.remediation?.message.includes('setup or repair') === true,
+      `${ownedStale?.status}:${ownedStale?.detailCode}`);
+  }
 
   const claudeLegacy = await diagnoseClaudeSetup(fakeContext({
     executables: { claude: '/fixture/bin/claude' },

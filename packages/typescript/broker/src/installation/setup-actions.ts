@@ -72,6 +72,11 @@ import {
   inspectDurableStatePermissionRepair,
   type DurableStatePermissionRepair,
 } from '../security/durable-state.ts';
+import {
+  inspectPiBridgeOwnership,
+  piBridgeOwnershipPrecondition,
+  piBridgeReplaceable,
+} from './pi-bridge-ownership.ts';
 
 interface FileSnapshot {
   target: string;
@@ -99,6 +104,8 @@ export interface SetupActionInputs {
   installPiBridge: boolean;
   /** Separate consent to replace only the exact preceding packaged Pi bridge. */
   replaceLegacyPiBridge?: boolean;
+  /** Locked-plan identity that both apply and the final atomic replacement callback must still observe. */
+  piBridgePrecondition?: string;
   /** Current-schema, owner-held files whose only defect is a loose mode. */
   durableStatePermissionRepairs?: readonly DurableStatePermissionRepair[];
   agentSkillTargets: readonly AgentSkillTarget[];
@@ -409,24 +416,24 @@ export function createSetupStateAction(inputs: SetupActionInputs): SetupTransact
 
 export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
   const target = inspectPiBridgeAsset(inputs.piAgentDir).path;
+  const assertReplacementPrecondition = (): void => {
+    if (!inputs.piBridgePrecondition) throw new Error('Pi bridge replacement precondition is missing');
+    const decision = inspectPiBridgeOwnership(inspectInstallState(inputs.home), inputs.piAgentDir);
+    if (!piBridgeReplaceable(decision)
+        || piBridgeOwnershipPrecondition(decision) !== inputs.piBridgePrecondition
+        || (decision.status === 'legacy-unreceipted' && inputs.replaceLegacyPiBridge !== true)) {
+      throw new Error('Pi bridge target or receipt changed after planning');
+    }
+  };
   return {
     id: 'pi-bridge.install',
     prepare: (context) => snapshotSetupFiles(context, 'pi-bridge.install', [target]),
     apply: () => {
-      const inspection = inspectPiBridgeAsset(inputs.piAgentDir);
-      if (inspection.status === 'owned') return {
-        resources: [{
-          id: 'pi-bridge',
-          kind: 'agent-integration',
-          target,
-          ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
-        } satisfies InstalledResourceRecord],
-      };
-      if (inspection.status !== 'missing'
-          && !(inspection.status === 'legacy-marker' && inputs.replaceLegacyPiBridge === true)) {
-        throw new Error('Pi bridge target is not safely replaceable');
-      }
-      atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+      assertReplacementPrecondition();
+      atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, {
+        mode: 0o600,
+        beforeReplace: assertReplacementPrecondition,
+      });
       return {
         resources: [{
           id: 'pi-bridge',
@@ -695,6 +702,7 @@ export function setupActionContentHash(inputs: SetupActionInputs): string {
     setupState: inputs.setupState,
     installPiBridge: inputs.installPiBridge,
     replaceLegacyPiBridge: inputs.replaceLegacyPiBridge,
+    piBridgePrecondition: inputs.piBridgePrecondition,
     durableStatePermissionRepairs: inputs.durableStatePermissionRepairs,
     agentSkillTargets: inputs.agentSkillTargets,
     installAgentSkill: inputs.installAgentSkill,

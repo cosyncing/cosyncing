@@ -102,6 +102,10 @@ import {
   assertNoSymlinkComponents,
   atomicWriteOwnerOnly,
 } from '../security/secure-files.ts';
+import {
+  inspectPiBridgeOwnership,
+  piBridgeOwnershipPrecondition,
+} from './pi-bridge-ownership.ts';
 import { readSetupTransactionJournal } from './setup-transaction.ts';
 import {
   isDurableServiceChoice,
@@ -226,7 +230,7 @@ export interface LifecycleCommandResult {
 
 export interface RepairPlan {
   schemaVersion: 1;
-  actions: Array<{ id: string; summary: string; legacy: boolean }>;
+  actions: Array<{ id: string; summary: string; legacy: boolean; precondition?: string }>;
   blockers: Array<{ detailCode: string; summary: string }>;
   warnings: Array<{ detailCode: string; summary: string }>;
 }
@@ -242,7 +246,7 @@ export interface RepairOptions extends LifecycleBaseOptions {
 
 export interface UninstallPlan {
   schemaVersion: 1;
-  actions: Array<{ id: string; target: string; legacy: boolean }>;
+  actions: Array<{ id: string; target: string; legacy: boolean; precondition?: string }>;
   warnings: Array<{ detailCode: string; summary: string }>;
   /**
    * Informational disconnection notices shown before confirmation (e.g. live synced sessions that will drop
@@ -966,11 +970,34 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
       actions.push({ id: 'credentials.reconcile', summary: 'Reconcile owner-only broker and Pi-scoped credentials with the internal URL.', legacy: false });
     }
   }
-  const pi = inspectPiBridgeAsset(env.piAgentDir);
-  const piReceipt = env.install.committed ? resource(env.install.state, 'pi-bridge') : undefined;
-  if (pi.status === 'missing' && piReceipt) actions.push({ id: 'pi-bridge.install', summary: 'Restore the receipt-owned packaged Pi bridge.', legacy: false });
-  else if (pi.status === 'legacy-marker') actions.push({ id: 'pi-bridge.replace-legacy', summary: 'Replace the marker-owned repo-era Pi bridge after explicit confirmation.', legacy: true });
-  else if (pi.status === 'unowned' || pi.status === 'unreadable') warnings.push({ detailCode: `pi-bridge-${pi.status}`, summary: 'Preserve the unknown or modified Pi bridge and provide manual guidance.' });
+  const pi = inspectPiBridgeOwnership(env.install, env.piAgentDir);
+  if (pi.status === 'missing' && pi.receiptMatchesCurrentPackage) {
+    actions.push({
+      id: 'pi-bridge.install',
+      summary: 'Restore the receipt-owned packaged Pi bridge.',
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(pi),
+    });
+  } else if (pi.status === 'owned-stale') {
+    actions.push({
+      id: 'pi-bridge.refresh',
+      summary: 'Refresh the receipt-owned Pi bridge to this build\'s packaged version.',
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(pi),
+    });
+  } else if (pi.status === 'legacy-unreceipted') {
+    actions.push({
+      id: 'pi-bridge.replace-legacy',
+      summary: 'Replace the marker-owned repo-era Pi bridge after explicit confirmation.',
+      legacy: true,
+      precondition: piBridgeOwnershipPrecondition(pi),
+    });
+  } else if (!['missing', 'owned-current'].includes(pi.status)) {
+    warnings.push({
+      detailCode: `pi-bridge-${pi.status}`,
+      summary: 'Preserve the unknown, modified, unsafe, or incorrectly receipted Pi bridge.',
+    });
+  }
 
   for (const target of env.agentSkills) {
     const receipt = matchingAgentSkillReceipt(env, target);
@@ -1129,8 +1156,25 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
       } else if (action.id === 'credentials.reconcile') {
         snapshots.push(snapshot(brokerTokenPath(env.home)), snapshot(piIntegrationPath(env.home)));
         ensureInstallationCredentials({ home: env.home, internalUrl: env.config.broker.internalUrl });
-      } else if (action.id === 'pi-bridge.install' || action.id === 'pi-bridge.replace-legacy') {
-        const target = inspectPiBridgeAsset(env.piAgentDir).path;
+      } else if (action.id === 'pi-bridge.install'
+          || action.id === 'pi-bridge.refresh'
+          || action.id === 'pi-bridge.replace-legacy') {
+        const inspectReplacement = () => inspectPiBridgeOwnership(inspectInstallState(env.home), env.piAgentDir);
+        const assertReplacementPrecondition = () => {
+          const current = inspectReplacement();
+          const allowed = action.id === 'pi-bridge.install'
+            ? current.status === 'missing' && current.receiptMatchesCurrentPackage
+            : action.id === 'pi-bridge.refresh'
+              ? current.status === 'owned-stale'
+              : current.status === 'legacy-unreceipted';
+          if (!allowed || !action.precondition
+              || piBridgeOwnershipPrecondition(current) !== action.precondition) {
+            throw new Error('pi-bridge-repair-precondition-changed');
+          }
+        };
+        assertReplacementPrecondition();
+        const before = inspectReplacement();
+        const target = before.bridge.path;
         snapshots.push(snapshot(target));
         const legacyMayContainSharedCredential = action.id.endsWith('legacy')
           && /(?:COSYNCING_TOKEN|x-cosyncing-token)/i.test(readFileSync(target, 'utf8'));
@@ -1142,7 +1186,13 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
             rotateBrokerToken: true,
           });
         }
-        atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+        atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, {
+          mode: 0o600,
+          beforeReplace: assertReplacementPrecondition,
+        });
+        if (inspectPiBridgeAsset(env.piAgentDir).status !== 'owned') {
+          throw new Error('pi-bridge-repair-verify-failed');
+        }
         nextState = mergeResources(nextState, [{
           id: 'pi-bridge', kind: 'agent-integration', target,
           ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
@@ -1285,7 +1335,8 @@ function safeRemoveRegular(path: string, expectedSha256?: string): boolean {
   if (!existsSync(path)) return true;
   assertNoSymlinkComponents(path, false);
   const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isFile()) return false;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (stat.isSymbolicLink() || !stat.isFile() || (uid !== undefined && stat.uid !== uid)) return false;
   if (expectedSha256 && sha256(readFileSync(path)) !== expectedSha256) return false;
   unlinkSync(path);
   return true;
@@ -1384,10 +1435,27 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
   }
   if (matchingTailscaleReceipt(env) && env.tailscale.route === 'desired') actions.push({ id: 'tailscale.remove', target: tailscaleRouteReceiptTarget(env.tailscale), legacy: false });
   else if (env.install.committed && resource(env.install.state, TAILSCALE_SERVE_RESOURCE_ID)) warnings.push({ detailCode: 'tailscale-route-drift-preserved', summary: 'The receipt route drifted and will be preserved.' });
-  const pi = inspectPiBridgeAsset(env.piAgentDir);
-  if (pi.status === 'owned') actions.push({ id: 'pi-bridge.remove', target: pi.path, legacy: false });
-  else if (pi.status === 'legacy-marker') actions.push({ id: 'pi-bridge.remove-legacy', target: pi.path, legacy: true });
-  else if (pi.status !== 'missing') warnings.push({ detailCode: `pi-bridge-${pi.status}-preserved`, summary: 'The modified or unknown Pi bridge will be preserved.' });
+  const pi = inspectPiBridgeOwnership(env.install, env.piAgentDir);
+  if (pi.status === 'owned-current' || pi.status === 'owned-stale') {
+    actions.push({
+      id: 'pi-bridge.remove',
+      target: pi.bridge.path,
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(pi),
+    });
+  } else if (pi.status === 'legacy-unreceipted') {
+    actions.push({
+      id: 'pi-bridge.remove-legacy',
+      target: pi.bridge.path,
+      legacy: true,
+      precondition: piBridgeOwnershipPrecondition(pi),
+    });
+  } else if (pi.status !== 'missing') {
+    warnings.push({
+      detailCode: `pi-bridge-${pi.status}-preserved`,
+      summary: 'The modified, unsafe, or incorrectly receipted Pi bridge will be preserved.',
+    });
+  }
   for (const target of env.agentSkills) {
     const receipt = matchingAgentSkillReceipt(env, target);
     const anyReceipt = env.install.committed ? resource(env.install.state, target.resourceId) : undefined;
@@ -1672,16 +1740,21 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           await env.tailscaleProvider.removePrivateHttpsRoot();
           retainedResources = retainedResources.filter((item) => item.id !== TAILSCALE_SERVE_RESOURCE_ID);
         } else if (action.id === 'pi-bridge.remove' || action.id === 'pi-bridge.remove-legacy') {
-          const inspection = inspectPiBridgeAsset(env.piAgentDir);
-          const allowed = inspection.status === 'owned' || (action.id.endsWith('legacy') && inspection.status === 'legacy-marker');
-          if (!allowed) throw new Error('pi-bridge-drift');
-          let expectedSha256 = PI_BRIDGE_EMBEDDED_SHA256;
-          if (inspection.status === 'legacy-marker') {
-            const legacyBytes = readFileSync(inspection.path);
+          const inspection = inspectPiBridgeOwnership(inspectInstallState(env.home), env.piAgentDir);
+          const allowed = action.id.endsWith('legacy')
+            ? inspection.status === 'legacy-unreceipted'
+            : inspection.status === 'owned-current' || inspection.status === 'owned-stale';
+          if (!allowed || !action.precondition
+              || piBridgeOwnershipPrecondition(inspection) !== action.precondition) {
+            throw new Error('pi-bridge-drift');
+          }
+          let expectedSha256 = inspection.bridge.actualSha256 ?? PI_BRIDGE_EMBEDDED_SHA256;
+          if (inspection.status === 'legacy-unreceipted') {
+            const legacyBytes = readFileSync(inspection.bridge.path);
             if (!legacyBytes.toString('utf8').includes(PI_BRIDGE_LEGACY_MARKER)) throw new Error('pi-bridge-drift');
             expectedSha256 = sha256(legacyBytes);
           }
-          if (!safeRemoveRegular(inspection.path, expectedSha256)) throw new Error('pi-bridge-drift');
+          if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('pi-bridge-drift');
           retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
         } else if (action.id.startsWith('agent-skill.remove.')) {
           const targetId = action.id.slice('agent-skill.remove.'.length);

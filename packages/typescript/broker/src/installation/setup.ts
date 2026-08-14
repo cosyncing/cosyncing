@@ -59,6 +59,10 @@ import {
   type AgentSkillInspection,
 } from './agent-skill.ts';
 import {
+  decidePiBridgeOwnership,
+  piBridgeOwnershipPrecondition,
+} from './pi-bridge-ownership.ts';
+import {
   inspectOpencodeShim,
   inspectRcFile,
   opencodeShimActualSha256,
@@ -719,15 +723,17 @@ export async function inspectSetupEnvironment(options: {
     });
   }
   const pi = agents.find((agent) => agent.id === 'pi');
-  if (pi?.state === 'supported' && ['unowned', 'unreadable'].includes(piBridge.status)) {
+  const piBridgeOwnership = decidePiBridgeOwnership(installState, piBridge);
+  if (pi?.state === 'supported'
+      && ['unowned', 'receipt-invalid', 'unsafe', 'unreadable'].includes(piBridgeOwnership.status)) {
     issues.push({
-      code: `pi-bridge-${piBridge.status}`,
-      summary: 'The Pi bridge target cannot be replaced safely during first-time setup.',
-      remediation: `Move or back up ${piBridge.path}, then rerun setup; setup replaces only an exact known legacy bridge after confirmation.`,
+      code: `pi-bridge-${piBridgeOwnership.status}`,
+      summary: 'The Pi bridge target cannot be replaced safely.',
+      remediation: `Reconcile or back up ${piBridge.path}, then rerun setup; setup replaces only a receipt-proven packaged bridge or an exact unreceipted legacy bridge after confirmation.`,
       localized: {
         'zh-Hans': {
-          summary: '现有 Pi bridge 不是可证明属于 cosyncing 的已知旧版，安装不会覆盖。',
-          remediation: `请先移动或备份 ${piBridge.path}，再重新运行安装。只有内容完全匹配已知旧版且得到确认时，安装才会替换。`,
+          summary: '现有 Pi bridge 无法安全替换，安装不会覆盖。',
+          remediation: `请先明确处理或备份 ${piBridge.path}，再重新运行安装。安装会自动更新由收据证明归属的发行包副本；没有归属收据的已知旧版只有在内容完全匹配并得到确认后才会替换。`,
         },
       },
     });
@@ -1097,18 +1103,26 @@ export function buildSetupPlan(options: {
       reversible: true,
     }));
   }
+  const piBridgeOwnership = decidePiBridgeOwnership(
+    options.inspection.installState,
+    options.inspection.piBridge,
+  );
   const installPiBridge = options.inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
-    && (options.inspection.piBridge.status === 'missing'
-      || (options.inspection.piBridge.status === 'legacy-marker' && options.choices.replaceLegacyPiBridge === true));
+    && (piBridgeOwnership.status === 'missing'
+      || piBridgeOwnership.status === 'owned-stale'
+      || (piBridgeOwnership.status === 'legacy-unreceipted' && options.choices.replaceLegacyPiBridge === true));
   if (installPiBridge) {
-    const replacingLegacy = options.inspection.piBridge.status === 'legacy-marker';
+    const replacingLegacy = piBridgeOwnership.status === 'legacy-unreceipted';
+    const refreshingStale = piBridgeOwnership.status === 'owned-stale';
     actions.push(planned({
       kind: 'pi-bridge',
       path: options.inspection.piBridge.path,
       ...(replacingLegacy ? { replaceLegacy: true } : {}),
     }, {
       id: 'pi-bridge.install',
-      title: replacingLegacy ? 'Replace the known legacy Pi bridge' : 'Install packaged Pi bridge',
+      title: replacingLegacy
+        ? 'Replace the known legacy Pi bridge'
+        : refreshingStale ? 'Refresh the packaged Pi bridge' : 'Install packaged Pi bridge',
       reversible: true,
     }));
   }
@@ -1472,6 +1486,12 @@ function actionInputs(options: {
     piAgentDir: options.inspection.piAgentDir,
     installPiBridge: options.plan.installPiBridge,
     replaceLegacyPiBridge: options.plan.choices.replaceLegacyPiBridge,
+    piBridgePrecondition: options.plan.installPiBridge
+      ? piBridgeOwnershipPrecondition(decidePiBridgeOwnership(
+          options.inspection.installState,
+          options.inspection.piBridge,
+        ))
+      : undefined,
     durableStatePermissionRepairs: options.inspection.durableStatePermissionRepairs ?? [],
     agentSkillTargets: options.inspection.agentSkills,
     installAgentSkill: options.plan.choices.installAgentSkill,
@@ -1935,7 +1955,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   };
   const existingPlan = buildSetupPlan({ inspection, choices: existingChoices, now: dependencies.now });
   const legacyPiMigrationPending = inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
-    && inspection.piBridge.status === 'legacy-marker';
+    && decidePiBridgeOwnership(inspection.installState, inspection.piBridge).status === 'legacy-unreceipted';
   const legacyAgentSkillMigrationPending = existingChoices.installAgentSkill
     && inspection.agentSkills.some((target) => target.status === 'known-legacy');
   const existingBlockingIssues = existingPlan.blockingIssues.filter((issue) =>

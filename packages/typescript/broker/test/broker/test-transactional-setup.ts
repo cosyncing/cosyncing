@@ -99,6 +99,7 @@ import {
   AGENT_SKILL_SOURCE,
 } from '../../src/installation/agent-skill.ts';
 import {
+  PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
 } from '../../../adapters/pi/src/implementation.ts';
 import {
@@ -134,6 +135,10 @@ const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 function check(name: string, ok: boolean, detail?: string): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+function sha256(value: string | Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 const FIXED_DATE = new Date('2026-07-17T12:00:00.000Z');
@@ -1882,6 +1887,151 @@ try {
         && !presenter.calls.includes('legacy-pi')
         && readFileSync(bridge, 'utf8') === modified,
       `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+
+  // A committed package-hash receipt upgrades the prior packaged bridge automatically. The receipt, safe
+  // file bytes, and canonical target form one ownership proof; any missing or mismatched part fails closed.
+  {
+    const machine = join(root, 'pi-owned-stale-setup');
+    const { context, bridge } = supportedPiFixture(machine);
+    const home = join(machine, '.cosyncing');
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged comment\n`;
+    atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
+    const install = inspectInstallState(home);
+    if (!install.committed) throw new Error('fixture install missing');
+    install.state.resources.find((item) => item.id === 'pi-bridge')!.ownership.installedSha256 = sha256(priorPackaged);
+    writeInstallState(install.state, home);
+
+    const presenter = new ScriptedPresenter();
+    const refreshed = await runSetup(setupOptions(machine, presenter, { context }));
+    const after = inspectInstallState(home);
+    check('receipt-proven prior packaged Pi bridge refreshes through setup without a legacy prompt',
+      refreshed.status === 'complete'
+        && refreshed.actions.includes('pi-bridge.install')
+        && !presenter.calls.includes('legacy-pi')
+        && readFileSync(bridge, 'utf8') === PI_BRIDGE_EMBEDDED_SOURCE
+        && after.committed
+        && after.state.resources.some((item) => item.id === 'pi-bridge'
+          && item.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256),
+      `${refreshed.status}:${presenter.calls.join(',')}`);
+  }
+  {
+    const machine = join(root, 'pi-user-edit');
+    const { context, bridge } = supportedPiFixture(machine);
+    await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const edited = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// user edit\n`;
+    atomicWriteOwnerOnly(bridge, edited, { mode: 0o600 });
+    const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    check('a Pi bridge edited after installation remains blocked and untouched',
+      blocked.status === 'blocked'
+        && blocked.issueCodes?.includes('pi-bridge-receipt-invalid') === true
+        && readFileSync(bridge, 'utf8') === edited,
+      `${blocked.status}:${blocked.issueCodes?.join(',')}`);
+  }
+  {
+    const outcomes: string[] = [];
+    for (const receiptCase of ['missing', 'wrong-target', 'mismatched'] as const) {
+      const machine = join(root, `pi-stale-${receiptCase}`);
+      const { context, bridge } = supportedPiFixture(machine);
+      const home = join(machine, '.cosyncing');
+      await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+      const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// ${receiptCase} prior package\n`;
+      atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
+      const install = inspectInstallState(home);
+      if (!install.committed) throw new Error('fixture install missing');
+      const receiptIndex = install.state.resources.findIndex((item) => item.id === 'pi-bridge');
+      const receipt = install.state.resources[receiptIndex]!;
+      if (receiptCase === 'missing') install.state.resources.splice(receiptIndex, 1);
+      else if (receiptCase === 'wrong-target') {
+        receipt.target = join(machine, 'other', 'index.ts');
+        receipt.ownership.installedSha256 = sha256(priorPackaged);
+      } else receipt.ownership.installedSha256 = sha256('different packaged bytes');
+      writeInstallState(install.state, home);
+      const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+      outcomes.push(`${receiptCase}:${blocked.status}:${blocked.issueCodes?.join(',')}`);
+      if (blocked.status !== 'blocked' || readFileSync(bridge, 'utf8') !== priorPackaged) {
+        outcomes.push(`${receiptCase}:unexpected-mutation`);
+      }
+    }
+    check('missing, wrong-target, and mismatched Pi receipts cannot authorize a stale bridge refresh',
+      outcomes.length === 3 && outcomes.every((outcome) => outcome.includes(':blocked:')),
+      outcomes.join(' | '));
+  }
+  {
+    const outcomes: string[] = [];
+    for (const unsafeCase of ['loose-mode', 'symlink', 'broken-symlink'] as const) {
+      const machine = join(root, `pi-unsafe-${unsafeCase}`);
+      const { context, bridge } = supportedPiFixture(machine);
+      await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+      if (unsafeCase === 'loose-mode') {
+        chmodSync(bridge, 0o644);
+      } else if (unsafeCase === 'symlink') {
+        const userFile = join(machine, 'user-owned-extension.ts');
+        writeFileSync(userFile, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+        rmSync(bridge);
+        symlinkSync(userFile, bridge);
+      } else {
+        rmSync(bridge);
+        symlinkSync(join(machine, 'missing-extension.ts'), bridge);
+      }
+      const blocked = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+      outcomes.push(`${unsafeCase}:${blocked.status}:${blocked.issueCodes?.join(',')}`);
+      if (unsafeCase === 'symlink' && !statSync(join(machine, 'user-owned-extension.ts')).isFile()) {
+        outcomes.push('symlink:target-removed');
+      }
+    }
+    check('unsafe-mode, symlinked, and broken-symlink Pi bridge targets remain blocked',
+      outcomes.length === 3
+        && outcomes.every((outcome) => outcome.includes(':blocked:pi-bridge-unsafe')),
+      outcomes.join(' | '));
+  }
+  {
+    const outcomes: string[] = [];
+    for (const changed of ['file', 'receipt'] as const) {
+      const machine = join(root, `pi-toctou-${changed}`);
+      const { context, bridge } = supportedPiFixture(machine);
+      const home = join(machine, '.cosyncing');
+      await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+      const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior package for ${changed} race\n`;
+      atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
+      const install = inspectInstallState(home);
+      if (!install.committed) throw new Error('fixture install missing');
+      install.state.resources.find((item) => item.id === 'pi-bridge')!.ownership.installedSha256 = sha256(priorPackaged);
+      writeInstallState(install.state, home);
+      const factory = (inputs: SetupActionInputs) => {
+        const catalog = createSetupActionCatalog(inputs);
+        return {
+          ...catalog,
+          actions: catalog.actions.map((action): SetupTransactionAction => action.id !== 'pi-bridge.install'
+            ? action
+            : {
+                ...action,
+                apply(actionContext) {
+                  if (changed === 'file') {
+                    atomicWriteOwnerOnly(bridge, `${priorPackaged}// concurrent edit\n`, { mode: 0o600 });
+                  } else {
+                    const concurrent = inspectInstallState(home);
+                    if (!concurrent.committed) throw new Error('fixture install missing');
+                    concurrent.state.resources.find((item) => item.id === 'pi-bridge')!
+                      .ownership.installedSha256 = sha256('concurrent receipt');
+                    writeInstallState(concurrent.state, home);
+                  }
+                  return action.apply(actionContext);
+                },
+              }),
+        };
+      };
+      const failed = await runSetup(setupOptions(
+        machine,
+        new ScriptedPresenter(),
+        { context, actionCatalogFactory: factory },
+      ));
+      outcomes.push(`${changed}:${failed.status}:${readFileSync(bridge, 'utf8') === priorPackaged}`);
+    }
+    check('file or Pi receipt changes between planning and replacement abort and roll back bridge bytes',
+      outcomes.every((outcome) => /:(failed|blocked):true$/.test(outcome)),
+      outcomes.join(' | '));
   }
 
   // Supported Pi gets the exact package-owned bridge; no migration question is introduced.
