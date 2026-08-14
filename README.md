@@ -7,20 +7,24 @@
   </picture>
 </p>
 
-<p align="center">
-  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0F766E">
-  <img alt="Server: macOS, WSL, Linux" src="https://img.shields.io/badge/server-macOS%20%C2%B7%20WSL%20%C2%B7%20Linux-0F766E">
-  <img alt="Clients: Android, iOS, Linux, macOS, Windows, web" src="https://img.shields.io/badge/clients-Android%20%C2%B7%20iOS%20%C2%B7%20Linux%20%C2%B7%20macOS%20%C2%B7%20Windows%20%C2%B7%20web-0F766E">
-</p>
+
+
+
+
+<p align="center"><b>From CLI to GUI, live and in sync</b></p>
 
 <p align="center">
-  <a href="https://cosyncing.com/">Website</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#client">Client</a> ·
-  <a href="docs/README.md">Docs</a> ·
-  <a href="docs/CONTRIBUTING.md">Contributing</a> ·
-  <a href="README.zh-CN.md">简体中文</a>
+  <a href="https://cosyncing.com/#sync">
+    <picture>
+      <source media="(prefers-color-scheme: dark)"
+              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
+      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
+           alt="cosyncing app and agent CLI staying in sync through takeover and a permission request" width="830">
+    </picture>
+  </a>
 </p>
+
+
 
 <p align="center">
   <picture>
@@ -32,11 +36,21 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://cosyncing.com/">Website</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#client">Client</a> ·
+  <a href="docs/README.md">Docs</a> ·
+  <a href="docs/CONTRIBUTING.md">Contributing</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 ---
-Synchronize your agents — from CLI to GUI, from desktop to phone. Pick up right where you left
+
+Synchronize and control your agents — from CLI to GUI, from desktop to phone. Pick up right where you left
 off, anywhere. cosyncing keeps your coding agents in sync across your own network.
 
-The broker runs on the machine where your agents already work. It watches their sessions and serves
+The broker runs on the machine where your agents work. It watches their sessions and serves
 a client that shows each one — grouped by project, with its transcript, diffs, commands, and any
 prompt waiting on you. Read a session, answer a prompt, or take over. No account to create, no
 hosted service between the client and the broker.
@@ -142,18 +156,6 @@ The iOS client will follow later through TestFlight.
   </a>
 </p>
 
-<p align="center"><b>From CLI to GUI, live and in sync</b></p>
-
-<p align="center">
-  <a href="https://cosyncing.com/#sync">
-    <picture>
-      <source media="(prefers-color-scheme: dark)"
-              srcset="https://cosyncing.com/assets/sync/sync-demo-dark.gif">
-      <img src="https://cosyncing.com/assets/sync/sync-demo-light.gif"
-           alt="cosyncing app and agent CLI staying in sync through takeover and a permission request" width="830">
-    </picture>
-  </a>
-</p>
 
 **Server** — the broker runs on:
 
