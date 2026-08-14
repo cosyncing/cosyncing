@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/cosyncing/cosyncing/discussions
+    about: Usage questions and setup help go here, not in issues.
+  - name: Security reports
+    url: https://github.com/cosyncing/cosyncing/security/advisories/new
+    about: Suspected vulnerabilities are reported privately per SECURITY.md. Do not open a public issue.
+  - name: Docs
+    url: https://github.com/cosyncing/cosyncing/tree/main/docs
+    about: Supported agents, protocol, and setup guides.
