@@ -130,6 +130,40 @@ void main() {
       },
     );
 
+    test(
+      'fromJson degrades an unknown attach mode instead of throwing',
+      () {
+        // Same failure class as the integration kind above, on a different
+        // field: `attachModes` decodes per element, so a mode added after this
+        // client was built would abort the whole roster rather than cost the
+        // one entry carrying it. The KNOWN modes beside it must survive.
+        final json = {
+          'id': 'an-agent-from-the-future',
+          'displayName': 'Future Agent',
+          'capabilities': {
+            'integrationKind': 'http-sse',
+            'attachModes': ['observe', 'teleport', 'live'],
+            'supportsObserve': true,
+            'supportsResume': false,
+            'supportsLiveAttach': true,
+            'supportsNativeArtifact': false,
+            'supportsNativeFileInput': false,
+            'supportsModelSwitch': false,
+            'permissionGranularity': 'none',
+          },
+          'canCreateSession': false,
+        };
+
+        final agent = AgentInfo.fromJson(json);
+        expect(agent.capabilities.attachModes, [
+          AttachMode.observe,
+          AttachMode.unknown,
+          AttachMode.live,
+        ]);
+        expect(agent.capabilities.integrationKind, IntegrationKind.httpSse);
+      },
+    );
+
     test('a roster keeps its known rows when one row has an unknown kind', () {
       // The whole point of the fallback: one undecodable row must cost exactly
       // itself. This is the shape the client actually decodes — a list.

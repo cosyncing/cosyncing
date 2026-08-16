@@ -96,8 +96,27 @@ check('one overlap revision behind nudges the client without disabling control',
 // So the gate is load-bearing, not cosmetic: flipping Kimi registration on by
 // default BREAKS this claim for every client below revision 14, and that flip
 // must not happen until the supported-client floor has crossed it.
+//
+// Revision 15 is additive in the ORDINARY sense, and deliberately so — it is
+// the contrast that shows why 14 needed its own argument. It adds three
+// OPTIONAL fields to an existing object (`SessionDriveControl.handoffAvailable`,
+// `takeoverAvailable`, `takeoverMode`); it adds no route, frame kind, message
+// type, error code, or enumerated wire VALUE. A revision-14 client decodes that
+// object with `@JsonSerializable()` defaults, which ignore unrecognized keys, so
+// it sees exactly what it saw before.
+//
+// `takeoverMode` is typed as an `AttachMode`, but every value the broker can put
+// there — `live`, `resume` — already existed at revision 14. The new
+// `AttachMode.unknown` member is a CLIENT-side fallback that no broker ever
+// emits; it exists so a FUTURE mode degrades one field to read-only instead of
+// aborting a session decode, which is the lesson revision 14 paid for.
+//
+// Each absent field also reproduces the prior behavior exactly: absent
+// `handoffAvailable` still offers handoff, absent `takeoverAvailable` still
+// falls back to `supported && observing`, absent `takeoverMode` still means
+// `resume`. So a pre-15 broker and a post-15 client agree with no negotiation.
 check('an installed previous-revision client remains writable against the additive current broker',
-  BROKER_CONTRACT.revision === 14
+  BROKER_CONTRACT.revision === 15
     && clientBehind.status === 'client-behind'
     && !clientBehind.readOnly);
 check('one-revision overlap remains writable despite the older surface hash',

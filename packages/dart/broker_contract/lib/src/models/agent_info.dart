@@ -56,6 +56,17 @@ enum AttachMode {
   /// Read-only transcript tail; always available, zero-config.
   @JsonValue('observe')
   observe,
+
+  /// A mode this client does not recognize.
+  ///
+  /// Reached only through `unknownEnumValue`, never sent by a broker. A future
+  /// mode must degrade one field rather than abort the surrounding decode — the
+  /// same argument as [IntegrationKind.unknown], applied where the consequence
+  /// is worse: aborting here would drop a whole session row.
+  ///
+  /// Treat it as READ-ONLY, and never echo it back into a reconnect request. A
+  /// client that cannot reason about a mode cannot ask to be attached in it.
+  unknown,
 }
 
 /// Permission granularity for an agent.
@@ -111,6 +122,13 @@ class AgentCapabilities {
   final IntegrationKind integrationKind;
 
   /// Supported attach modes, best-first.
+  ///
+  /// Decodes tolerantly per element, for the same reason
+  /// [integrationKind] does: `/api/agents` decodes as ONE list, so a mode added
+  /// after this client was built would otherwise abort the entire agent roster
+  /// rather than cost the one entry that carries it. An unrecognized member
+  /// lands on [AttachMode.unknown], which no caller can act on.
+  @JsonKey(unknownEnumValue: AttachMode.unknown)
   final List<AttachMode> attachModes;
 
   /// Whether the agent supports observe mode.
