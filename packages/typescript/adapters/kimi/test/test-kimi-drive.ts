@@ -1386,6 +1386,42 @@ try {
   }
 
   {
+    // TERMINAL HANDOFF REVOKES THE SAME ELIGIBILITY DEMOTION DOES.
+    //
+    // The hub calls `releaseDriveEligibility` after closing the native owner, so
+    // the observer it then builds cannot advertise Drive. If this path and
+    // demotion ever disagreed, one of them would leave a session that silently
+    // re-acquires Drive on the next attach with no user action — which is the
+    // whole reason handoff needs an adapter hook rather than just a closed
+    // connection. Asserted through the PUBLIC surface, so it holds whatever the
+    // internals are named.
+    const { adapter, conn } = await drivenSession();
+    const beforeRoster = await adapter.discoverSessions();
+    check('the owned session is drivable before handoff',
+      beforeRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === true,
+      JSON.stringify(beforeRoster.find((row) => row.id === CREATED_ID)?.control?.drive));
+
+    adapter.releaseDriveEligibility(CREATED_ID);
+
+    const afterRoster = await adapter.discoverSessions();
+    check('handoff revocation makes the session foreign on the roster',
+      afterRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === false,
+      JSON.stringify(afterRoster.find((row) => row.id === CREATED_ID)?.control?.drive));
+    const afterHandoff = await threw(() => adapter.attach(CREATED_ID, 'live'));
+    check('a handed-off session refuses a fresh live attach, exactly as a demoted one does',
+      isOwnershipConflictError(afterHandoff), `${afterHandoff?.name}`);
+
+    // Idempotent: the hub's contract allows a handoff after a demotion already
+    // revoked the same session, and a second call must be a no-op rather than a
+    // second state change.
+    adapter.releaseDriveEligibility(CREATED_ID);
+    const twiceRoster = await adapter.discoverSessions();
+    check('revoking twice is a no-op',
+      twiceRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === false);
+    await conn.close();
+  }
+
+  {
     // REST LEADS WS. The server ran this turn and its frames are simply behind
     // the disk re-fold; any owned-session frame in the interval proves the
     // server was alive and accounts for the row.

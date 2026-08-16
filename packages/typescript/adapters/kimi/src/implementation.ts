@@ -392,6 +392,33 @@ export class KimiAdapter implements AgentBackend {
   /** Create-time model requests, applied to their session's first prompt. Bounded. */
   private readonly pendingModels = new Map<string, PromptInput['model']>();
 
+  /**
+   * Drop a session's automatic Drive eligibility, and the create-time model
+   * request that only makes sense while we hold it.
+   *
+   * ONE body for two callers that must never disagree: a proven foreign writer
+   * (demotion) and the user handing control to the terminal. Both mean "this
+   * process may no longer drive this session on its own", and if they ever
+   * diverged, one of them would leave a session that re-acquires Drive on the
+   * next attach without anyone asking for it.
+   *
+   * Idempotent by construction — `Set.delete` and `Map.delete` on an absent key
+   * are no-ops — which is what the hub's contract for
+   * {@link AgentBackend.releaseDriveEligibility} requires: a handoff after a
+   * demotion has already revoked the same session must be a no-op, not a second
+   * state change.
+   */
+  private revokeDriveEligibility(sessionId: string): void {
+    this.ownedSessions.delete(sessionId);
+    this.pendingModels.delete(sessionId);
+  }
+
+  /** See {@link AgentBackend.releaseDriveEligibility}. Terminal handoff calls this after the native
+   *  owner has closed, so the observer the hub then builds cannot advertise Drive. */
+  releaseDriveEligibility(sessionId: string): void {
+    this.revokeDriveEligibility(sessionId);
+  }
+
   constructor(options: KimiAdapterOptions = {}) {
     this.options = options;
     this.env = options.env ?? process.env;
@@ -698,11 +725,10 @@ export class KimiAdapter implements AgentBackend {
       ...(pendingModel ? { pendingModel } : {}),
       // Demotion is the adapter's business too: the owned set is the single
       // source of drive eligibility, so a proven foreign writer has to remove
-      // the session from it or the next attach would drive it again.
-      onDemoted: (id) => {
-        this.ownedSessions.delete(id);
-        this.pendingModels.delete(id);
-      },
+      // the session from it or the next attach would drive it again. Shares one
+      // implementation with terminal handoff — the two must never disagree about
+      // what losing eligibility means.
+      onDemoted: (id) => this.revokeDriveEligibility(id),
       // The first successful prompt is the moment the request is spent; from
       // then on the session runs under whatever it settled on, and re-pinning
       // the create-time choice on a later attach would be the bug this replaces.

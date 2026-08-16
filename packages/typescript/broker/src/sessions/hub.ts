@@ -962,9 +962,36 @@ export class ManagedConn {
   }
 }
 
+/** An attach still in flight, tagged with the generation it began under. */
+interface PendingAttach {
+  generation: number;
+  promise: Promise<ManagedConn>;
+}
+
+/** An attach that began before this session's ownership changed and was
+ *  therefore refused at admission. Distinct from an adapter failure: the attach
+ *  itself succeeded, and re-attaching returns current state. */
+export class SupersededAttachError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SupersededAttachError';
+  }
+}
+
 export class Hub {
   private readonly conns = new Map<string, ManagedConn>();
-  private readonly pending = new Map<string, Promise<ManagedConn>>();
+  private readonly pending = new Map<string, PendingAttach>();
+
+  /** Monotone per-key attach generation, bumped whenever this session's
+   *  ownership changes under attaches that are already in flight — terminal
+   *  handoff retiring the mutable keys, or an adapter's Drive eligibility being
+   *  revoked on the bare one.
+   *
+   *  An attach that STARTED before the bump snapshotted an answer that no longer
+   *  holds, so it may not be admitted afterwards — not as a registered wrapper,
+   *  and not by another caller coalescing onto its in-flight promise. A registry
+   *  lookup cannot enforce that: `pending` is the state `conns` does not show. */
+  private readonly attachGeneration = new Map<string, number>();
   private disposed = false;
   /** Pending disposals: a connection with zero clients is torn down after a grace period. */
   private readonly evictTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1000,6 +1027,28 @@ export class Hub {
     return mode && mode !== 'observe' ? `${tool}:${id}#${mode}` : `${tool}:${id}`;
   }
 
+  /** The mutable owner terminal handoff is allowed to end, with the key it is registered under.
+   *
+   *  Deliberately NOT {@link getConn}. That one resolves `#resume ?? #live ?? bare` because a file
+   *  delivery just needs whichever connection is live, and its bare fallback is load-bearing: an
+   *  OpenCode bare conn can report `drive: 'driving'` and a Codex bare conn at `attachMode: 'live'`
+   *  IS the mutable path. Handoff must not inherit that fallback. The bare key is also where the
+   *  shared read-only observer lives, and the only thing standing between it and the close path
+   *  would be the drive-state assertion at the call site — one predicate away from ending the very
+   *  connection handoff is supposed to leave behind.
+   *
+   *  Ambiguity REFUSES rather than picking. If both `#resume` and `#live` exist, the session has two
+   *  mutable owners and no ordering between them is defensible: preferring either silently ends one
+   *  writer while the other keeps writing, which is the exact failure handoff exists to prevent.
+   *  Returning undefined lets the caller refuse before anything is mutated. */
+  private handoffOwner(tool: string, id: string): { key: string; managed: ManagedConn } | undefined {
+    const candidates = (['resume', 'live'] as const)
+      .map((mode) => ({ key: this.key(tool, id, mode) }))
+      .map(({ key }) => ({ key, managed: this.conns.get(key) }))
+      .filter((entry): entry is { key: string; managed: ManagedConn } => entry.managed !== undefined);
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
   private reportEnsureBranch(branch: 'create' | 'reuse' | 'join', managed: ManagedConn, inflight = false): void {
     if (!/^(1|true|yes|on)$/i.test(String(process.env.COSYNCING_CODEX_ATTACH_DIAGNOSTICS ?? '').trim())) return;
     const attachMode = managed.conn.info.attachMode;
@@ -1023,6 +1072,46 @@ export class Hub {
       clearTimeout(t);
       this.evictTimers.delete(key);
     }
+  }
+
+  /** Drop every hub-side record of the wrapper at `key` — eviction timer,
+   *  attention leases, registry row — with no await in between, so nothing can
+   *  observe a half-unregistered wrapper.
+   *
+   *  Deliberately does NOT touch `pinned`: a pinned key means a live terminal
+   *  bridge holds it, and whether that is the caller's to take down is the
+   *  caller's decision, never this helper's. */
+  private unregisterWrapper(key: string, managed: ManagedConn): void {
+    this.cancelEvict(key);
+    this.attentionLeases.delete(managed);
+    this.attentionLeaseDenied.delete(managed);
+    this.conns.delete(key);
+  }
+
+  private generationOf(key: string): number {
+    return this.attachGeneration.get(key) ?? 0;
+  }
+
+  /** Retire every attach begun before this moment for `key`: none of them may
+   *  register, and no later caller may coalesce onto one. */
+  private invalidateInFlightAttaches(key: string): void {
+    this.attachGeneration.set(key, this.generationOf(key) + 1);
+  }
+
+  /** Drop an in-flight record only while it is still the current one — a newer
+   *  attach may already have replaced it under the same key. */
+  private clearPending(key: string, entry: PendingAttach): void {
+    if (this.pending.get(key) === entry) this.pending.delete(key);
+  }
+
+  /** Settle a wrapper a failed handoff has already taken authority away from:
+   *  tell its clients the session ended, drop local fan-out, close best-effort.
+   *  Never throws — it runs on the failure path, where a second failure would
+   *  only hide the first. */
+  private settleHandoffCasualty(managed: ManagedConn): void {
+    managed.notifyEnded('terminal-handoff-failed');
+    managed.detachLocal();
+    void managed.conn.close().catch(() => { /* settling a failed handoff */ });
   }
 
   private keyForManaged(target: ManagedConn): string | undefined {
@@ -1195,10 +1284,26 @@ export class Hub {
     return owner.identity;
   }
 
-  /** End the requesting socket's broker-owned Resume owner only when it is
+  /** End the requesting socket's broker-owned mutable owner only when it is
    *  the last attached driver. Peer drivers make the operation refuse; the
    *  UI must never report terminal handoff while another foreground client
-   *  still holds the shared owner. */
+   *  still holds the shared owner.
+   *
+   *  Resolves the owner across `#resume` AND `#live` (see {@link handoffOwner}).
+   *  It used to look only under `#resume`, so a live-mode driver — kimi, dsh —
+   *  was never found and the call threw `driver-changed` unconditionally.
+   *
+   *  ORDER, and why every step sits where it does:
+   *
+   *    close → unregister + owner=none → revoke eligibility → build Observe → migrate
+   *
+   *  Building Observe first (the previous order) asks the adapter for a fresh
+   *  row while it still believes it owns the session, so an adapter with its own
+   *  eligibility record publishes a DRIVABLE observer — handoff would appear to
+   *  succeed and the next open would take Drive back with no user action.
+   *  Unregistering immediately after the close is what keeps a failure honest:
+   *  every later step can throw, and none of them may leave a closed wrapper
+   *  still registered as the Drive owner. */
   async handoffToTerminal(
     tool: string,
     id: string,
@@ -1206,14 +1311,16 @@ export class Hub {
   ): Promise<ManagedConn> {
     if (this.disposed) throw new Error('hub is shutting down');
     const sessionKey = this.key(tool, id);
-    const driveKey = this.key(tool, id, 'resume');
-    const driver = this.conns.get(driveKey);
-    if (!driver || driver !== requester || activeOwnerState(driver.conn.info) !== 'drive') {
+    const owner = this.handoffOwner(tool, id);
+    if (!owner || owner.managed !== requester || activeOwnerState(owner.managed.conn.info) !== 'drive') {
+      // Ambiguity lands here too: two mutable owners resolve to `undefined`, and
+      // refusing before any mutation is the only safe answer — see handoffOwner.
       throw new OwnershipConflictError(
         'This socket no longer owns the active Drive session.',
         'driver-changed',
       );
     }
+    const { key: driveKey, managed: driver } = owner;
     if (driver.clientCount > 1) {
       throw new OwnershipConflictError(
         'Another foreground client is still driving this session. Close or hand off that client first.',
@@ -1226,32 +1333,165 @@ export class Hub {
         'driver-changed',
       );
     }
+    // The observer this ends with has to be constructible BEFORE the native owner
+    // is closed. An adapter with no read-only surface — dsh serves one
+    // undifferentiated client contract and refuses every non-`live` attach —
+    // would otherwise lose its only owner to a handoff that then cannot build the
+    // connection meant to replace it. Read from the registered backend, never
+    // from client-supplied state: a stale or hostile client must not be able to
+    // talk the broker into stranding a session.
+    const backend = this.registry.get(tool);
+    if (!backend?.capabilities?.attachModes?.includes('observe')) {
+      throw new OwnershipConflictError(
+        'This agent has no read-only session to hand back to; handing off would leave nothing attached.',
+        'driver-changed',
+      );
+    }
 
     this.terminalHandoffs.add(sessionKey);
+    // Raising the fence is not enough on its own. `ensure` consults
+    // `terminalHandoffs` when the request STARTS, so a mutable attach that was
+    // already parked inside `backend.attach()` when the fence went up sails
+    // straight past it and registers a brand-new Drive owner — during the
+    // handoff, or after `finally` has cleared the fence. The bare-key
+    // invalidation below does not reach it: it began under a different key.
+    //
+    // So both mutable keys are retired here, at the same moment the fence goes
+    // up, and the admission check does the enforcing — which is what keeps it
+    // honest after the fence is gone. This is deliberately NOT scoped to
+    // adapters with adapter-owned eligibility: the fence protects every adapter,
+    // in whichever direction the alternate attach runs (registered `#live` with
+    // a parked `#resume`, or the reverse).
+    this.invalidateInFlightAttaches(this.key(tool, id, 'resume'));
+    this.invalidateInFlightAttaches(this.key(tool, id, 'live'));
     try {
-      const observer = await this.ensure(tool, id);
-      if (this.conns.get(driveKey) !== driver || driver.clientCount > 1) {
-        throw new OwnershipConflictError(
-          'The shared Drive owner changed while terminal handoff was starting.',
-          'peer-driver-active',
-        );
-      }
-
-      // Keep owner truth and the requester on Drive until the native owner has
-      // actually closed. If close fails, the registered wrapper remains the
-      // honest authority and the caller receives a refusal instead of a
-      // fabricated owner=none transition.
+      // Owner truth and the requester stay on Drive until the native owner has
+      // actually closed. A close failure changes nothing and the caller gets a
+      // refusal instead of a fabricated owner=none transition.
       await driver.conn.close();
-      this.cancelEvict(driveKey);
+
+      // From here authority is GONE, so it is published as gone immediately —
+      // synchronously, with no await in between. Anything that throws after this
+      // point settles through the catch below; nothing restores Drive.
       this.pinned.delete(driveKey);
-      this.attentionLeases.delete(driver);
-      this.attentionLeaseDenied.delete(driver);
-      this.conns.delete(driveKey);
-      const moved = driver.moveClientsTo(observer);
-      driver.detachLocal();
-      this.reconcileSessionOwner(tool, id, observer.conn.info);
-      if (moved > 0) observer.refreshAttachedClients();
-      return observer;
+      this.unregisterWrapper(driveKey, driver);
+      this.reconcileSessionOwner(tool, id);
+
+      let stale: ManagedConn | undefined;
+      try {
+        // Before the observer is built, not after: the adapter must not answer an
+        // observe attach while it still thinks it may drive this session.
+        //
+        // Fenced on BOTH sides, because an attach can be in flight rather than
+        // registered, and `stale` below only sees what finished registering. An
+        // attach parked mid-flight snapshotted the adapter's answer when it
+        // STARTED, so:
+        //   - the bump before covers one begun earlier — and, being outside the
+        //     try, it stands even if the hook mutates and then throws;
+        //   - the bump after covers one begun WHILE the hook ran, whose snapshot
+        //     is just as pre-revocation.
+        // Only an attach begun strictly after the hook settles may be admitted,
+        // which is also what stops our own replacement `ensure` from coalescing
+        // onto a promise that predates the revocation.
+        if (backend.releaseDriveEligibility) {
+          this.invalidateInFlightAttaches(sessionKey);
+          try {
+            await backend.releaseDriveEligibility(id);
+          } finally {
+            this.invalidateInFlightAttaches(sessionKey);
+          }
+        }
+
+        // A bare observer may ALREADY exist — a resident/background client on the
+        // same session is an ordinary topology. It was built while the session was
+        // still owned, so the control it captured says Drive is supported, and
+        // revocation changes the adapter's future answers rather than info already
+        // sitting on a live connection. Reusing it would hand control to the
+        // terminal and simultaneously tell the app it may take Drive back.
+        //
+        // So it is REPLACED, not reused, and its clients come along. The hub does
+        // not rewrite the control state itself: only the adapter knows what the
+        // post-revocation posture is, and a fresh attach is how it says so.
+        //
+        // Scoped to adapters that actually REVOKE. Without adapter-owned
+        // eligibility nothing about the adapter's answer changed, so an existing
+        // observer is not stale and replacing it would be churn — and would break
+        // the established identity guarantee that handoff returns the session's
+        // existing Observe wrapper for Codex, OpenCode and Pi.
+        //
+        // A PINNED wrapper is left alone — that is a live terminal bridge, which
+        // is already the authoritative terminal-owned answer.
+        stale = backend.releaseDriveEligibility && !this.pinned.has(sessionKey)
+          ? this.conns.get(sessionKey)
+          : undefined;
+        if (stale) this.unregisterWrapper(sessionKey, stale);
+
+        const observer = await this.ensure(tool, id);
+        const moved = driver.moveClientsTo(observer) + (stale?.moveClientsTo(observer) ?? 0);
+        driver.detachLocal();
+        const resolution = this.reconcileSessionOwner(tool, id, observer.conn.info);
+        if (moved > 0) {
+          // Publish the post-handoff owner truth to the clients that just moved,
+          // UNCONDITIONALLY. reconcileSessionOwner only broadcasts on a change,
+          // and the drive→none change was already published above — synchronously,
+          // at a moment when this session had no registered wrapper and therefore
+          // no audience. Without this the requester is acked and never told, and
+          // its UI keeps offering the Drive it just gave away.
+          //
+          // The same applies to a client carried over from a replaced observer:
+          // it changed wrappers without changing owner state, so `changed` is
+          // false for it too, and it would otherwise keep the pre-revocation row.
+          observer.broadcastSessionProjection(
+            this.withOwnerProjection(observer.conn.info, resolution.projection),
+          );
+          observer.refreshAttachedClients();
+        }
+        if (stale) {
+          // Best-effort, and deliberately last: the handoff has already succeeded
+          // by here — authority released, fresh truth published, clients migrated
+          // — so a stubborn native close must not turn that into a failure. The
+          // local teardown is what actually matters, and it cannot throw.
+          stale.detachLocal();
+          void stale.conn.close().catch(() => { /* replaced wrapper; nothing left to serve */ });
+        }
+        return observer;
+      } catch (error) {
+        // Authority was released and cannot be handed back. Tell the attached
+        // clients the session ended, drop local resources, and rethrow so the
+        // request is nacked. Never leave a socket fanning out from a ManagedConn
+        // whose connection is already closed. The driver's native conn already
+        // closed successfully above, so it is settled without a second close.
+        driver.notifyEnded('terminal-handoff-failed');
+        driver.detachLocal();
+
+        // Then the UNION of every observer wrapper this handoff disturbed,
+        // because the failure can land on either side of the swap:
+        //
+        //   - revocation itself mutated and THEN threw. `stale` was never
+        //     captured, so the pre-existing observer is still registered — and
+        //     still publishing the Drive the adapter has just taken away.
+        //   - or the replacement was already built and registered, and the
+        //     migration threw partway, leaving a fresh wrapper holding some of
+        //     the clients.
+        //
+        // Reading the registry HERE, instead of trusting a variable captured
+        // before the failure, is what makes those the same case. The pinned
+        // exclusion is the same one the success path applies: a live terminal
+        // bridge is not this handoff's to tear down.
+        const casualties = new Set<ManagedConn>();
+        if (stale) casualties.add(stale);
+        const registered = this.pinned.has(sessionKey) ? undefined : this.conns.get(sessionKey);
+        if (registered) {
+          this.unregisterWrapper(sessionKey, registered);
+          casualties.add(registered);
+        }
+        for (const casualty of casualties) this.settleHandoffCasualty(casualty);
+
+        // Republished once nothing is left registered: whatever the failure
+        // stranded, no wrapper may survive it still claiming Drive.
+        this.reconcileSessionOwner(tool, id);
+        throw error;
+      }
     } finally {
       this.terminalHandoffs.delete(sessionKey);
     }
@@ -1664,7 +1904,12 @@ export class Hub {
       throw new Error('join-existing must use Hub.joinExisting with an owner revision');
     }
     const key = this.key(tool, id, mode);
-    if (mode === 'resume' && this.terminalHandoffs.has(this.key(tool, id))) {
+    // BOTH mutable modes are fenced, not just resume. The fence exists so nothing
+    // re-acquires authority in the window where handoff has closed the native
+    // owner and is still building the observer; a `live` attach acquires exactly
+    // the same authority, so fencing only `resume` left the window open for every
+    // live-mode adapter.
+    if ((mode === 'resume' || mode === 'live') && this.terminalHandoffs.has(this.key(tool, id))) {
       throw new OwnershipConflictError(
         'This session is handing control to the terminal.',
         'driver-changed',
@@ -1701,29 +1946,47 @@ export class Hub {
       this.reportEnsureBranch('reuse', existing);
       return existing;
     }
+    // Coalescing is generation-scoped. An in-flight attach from an earlier
+    // generation began before this session's ownership changed, so joining it
+    // would inherit exactly the answer that change exists to retract — which
+    // includes the handoff's own replacement attach joining a stale observer.
+    const startedGeneration = this.generationOf(key);
     const inflight = this.pending.get(key);
-    if (inflight) {
-      const managed = await inflight;
+    if (inflight && inflight.generation === startedGeneration) {
+      const managed = await inflight.promise;
       this.reportEnsureBranch('reuse', managed, true);
       return managed;
     }
 
-    const p = (async () => {
+    const entry: PendingAttach = { generation: startedGeneration, promise: undefined as never };
+    entry.promise = (async () => {
       const backend = this.registry.get(tool);
       if (!backend) throw new Error(`unknown tool: ${tool}`);
       const conn = await backend.attach(id, mode as AttachMode | undefined, reason ? { reason } : undefined);
+      // Checked at ADMISSION, not at call time: the adapter snapshots what it
+      // may do when the attach starts, and the whole window between that
+      // snapshot and this line is the race. A connection from a retired
+      // generation is closed rather than registered — publishing it would
+      // reinstate authority the session has since given up.
+      if (this.generationOf(key) !== startedGeneration) {
+        this.clearPending(key, entry);
+        await conn.close().catch(() => { /* nothing was ever served from it */ });
+        throw new SupersededAttachError(
+          'This attach began before session ownership changed; attach again for current state.',
+        );
+      }
       const mc = this.createManaged(conn);
       this.conns.set(key, mc);
-      this.pending.delete(key);
+      this.clearPending(key, entry);
       this.reconcileSessionOwner(tool, id, mc.conn.info);
       this.reportEnsureBranch('create', mc);
       return mc;
     })();
-    this.pending.set(key, p);
+    this.pending.set(key, entry);
     try {
-      return await p;
+      return await entry.promise;
     } catch (err) {
-      this.pending.delete(key);
+      this.clearPending(key, entry);
       throw err;
     }
   }
@@ -1769,7 +2032,7 @@ export class Hub {
 
     // An attach that started before shutdown may still create and register a ManagedConn. Wait for
     // those constructors to settle before taking the final connection snapshot.
-    await Promise.allSettled([...this.pending.values()]);
+    await Promise.allSettled([...this.pending.values()].map((entry) => entry.promise));
     this.pending.clear();
 
     const managed = [...new Set(this.conns.values())];

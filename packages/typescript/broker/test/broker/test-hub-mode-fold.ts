@@ -184,7 +184,7 @@ const controlledInfo = (
   const observeConn = fakeConn(controlledInfo('pi', 's3-handoff', 'observe', 'observing'));
   const driveConn = fakeConn(controlledInfo('pi', 's3-handoff', 'resume', 'driving'));
   registry.register({
-    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true, attachModes: ['observe', 'resume'] } as any,
     isAvailable: async () => true, discoverSessions: async () => [],
     attach: async (_id: string, mode?: string) => mode === 'resume' ? driveConn : observeConn,
   } as any);
@@ -234,7 +234,7 @@ const controlledInfo = (
   const driveConn = fakeConn(controlledInfo('pi', 's3-handoff-race', 'resume', 'driving'));
   const observeConn = fakeConn(controlledInfo('pi', 's3-handoff-race', 'observe', 'observing'));
   registry.register({
-    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true, attachModes: ['observe', 'resume'] } as any,
     isAvailable: async () => true, discoverSessions: async () => [],
     attach: async (_id: string, mode?: string) => {
       attachCalls++;
@@ -279,7 +279,7 @@ const controlledInfo = (
   driveConn.close = async () => { throw new Error('simulated close failure'); };
   const observeConn = fakeConn(controlledInfo('pi', 's3-handoff-close-fail', 'observe', 'observing'));
   registry.register({
-    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true, attachModes: ['observe', 'resume'] } as any,
     isAvailable: async () => true, discoverSessions: async () => [],
     attach: async (_id: string, mode?: string) => mode === 'resume' ? driveConn : observeConn,
   } as any);
@@ -300,6 +300,673 @@ const controlledInfo = (
   check('C5.1 native close failure is returned to the requester', closeFailure instanceof Error && closeFailure.message.includes('close failure'));
   check('C5.2 failed close leaves the requester on the registered Drive wrapper', hub.getConn('pi', 's3-handoff-close-fail') === driver && requesterTarget === driver);
   check('C5.3 failed close never fabricates owner=none', projected.info.sessionOwner?.state === 'drive');
+  await hub.dispose();
+}
+
+// ── C7: handoff resolves a LIVE owner, not only a resume one ────────────────────────────────────
+// The defect this replaces: the owner lookup was hardcoded to `#resume`, and
+// `Hub.key` folds any non-observe mode onto `tool:id#<mode>`, so a live-mode
+// driver (kimi, dsh) could never be found and every handoff threw
+// `driver-changed`. Reproduced physically on 2026-08-16 against a real host.
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's7-live', 'live', 'driving'));
+  const observeConn = fakeConn(controlledInfo('pi', 's7-live', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => mode === 'live' ? driveConn : observeConn,
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's7-live', 'live');
+  let requesterTarget = driver;
+  const requester: any = () => {};
+  requester.onManagedConnChanged = (next: any) => { requesterTarget = next; };
+  driver.addClient(requester);
+
+  const handedOff = await hub.handoffToTerminal('pi', 's7-live', driver);
+  const projected = hub.sessionDetailFrame(handedOff, true);
+  check('C7.1 a live-mode owner is found and handed off', handedOff !== driver && driveConn.closed);
+  check('C7.2 the requester moves to the Observe wrapper', requesterTarget === handedOff);
+  check('C7.3 owner truth reports none after a live handoff', projected.info.sessionOwner?.state === 'none');
+  check('C7.4 the live key is unregistered', hub.getConn('pi', 's7-live') === handedOff);
+  await hub.dispose();
+}
+
+// ── C8: two mutable owners REFUSE rather than picking one ───────────────────────────────────────
+// Preferring either silently ends one writer while the other keeps writing —
+// exactly the divergence handoff exists to prevent. Refusal must happen before
+// anything is mutated.
+{
+  const registry = new AgentRegistry();
+  const resumeConn = fakeConn(controlledInfo('pi', 's8-ambiguous', 'resume', 'driving'));
+  const liveConn = fakeConn(controlledInfo('pi', 's8-ambiguous', 'live', 'driving'));
+  const observeConn = fakeConn(controlledInfo('pi', 's8-ambiguous', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'resume', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) =>
+      mode === 'resume' ? resumeConn : mode === 'live' ? liveConn : observeConn,
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const resumeOwner = await hub.ensure('pi', 's8-ambiguous', 'resume');
+  const liveOwner = await hub.ensure('pi', 's8-ambiguous', 'live');
+  resumeOwner.addClient(() => {});
+  liveOwner.addClient(() => {});
+
+  let refusal: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's8-ambiguous', resumeOwner);
+  } catch (error) {
+    refusal = error;
+  }
+  check('C8.1 an ambiguous owner set refuses', refusal instanceof Error);
+  check('C8.2 refusal closes NEITHER owner', !resumeConn.closed && !liveConn.closed);
+  check('C8.3 both owners remain registered', hub.getConn('pi', 's8-ambiguous') === resumeOwner);
+  await hub.dispose();
+}
+
+// ── C9: an adapter with no Observe surface refuses BEFORE its owner is closed ────────────────────
+// dsh serves one undifferentiated client contract and refuses every non-live
+// attach, so handing off would close its only owner and then fail to build the
+// connection meant to replace it. Read from the backend's own capabilities.
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('dsh', 's9-no-observe', 'live', 'driving'));
+  let observeAttempts = 0;
+  registry.register({
+    id: 'dsh', displayName: 'DSH', capabilities: { attachModes: ['live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => {
+      if (mode !== 'live') { observeAttempts++; throw new Error('dsh has no read-only observe attach'); }
+      return driveConn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('dsh', 's9-no-observe', 'live');
+  driver.addClient(() => {});
+
+  let refusal: unknown;
+  try {
+    await hub.handoffToTerminal('dsh', 's9-no-observe', driver);
+  } catch (error) {
+    refusal = error;
+  }
+  const projected = hub.sessionDetailFrame(driver, true);
+  check('C9.1 an adapter without observe refuses handoff', refusal instanceof Error);
+  check('C9.2 the refusal never closed the only owner', !driveConn.closed);
+  check('C9.3 no observe attach was even attempted', observeAttempts === 0);
+  check('C9.4 owner truth still reports drive', projected.info.sessionOwner?.state === 'drive');
+  await hub.dispose();
+}
+
+// ── C10: unregister is immediate, and revocation precedes the observer ───────────────────────────
+// Two orderings in one run, because both are load-bearing:
+//  - the drive wrapper must already be unregistered when revocation runs, so no
+//    failure after the close can leave a closed wrapper projecting Drive; and
+//  - revocation must precede the observe attach, or an adapter that still
+//    believes it owns the session publishes a DRIVABLE observer and the next
+//    open silently retakes Drive.
+{
+  const order: string[] = [];
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's10-order', 'live', 'driving'));
+  const observeConn = fakeConn(controlledInfo('pi', 's10-order', 'observe', 'observing'));
+  driveConn.close = async () => { order.push('close'); (driveConn as any).closed = true; };
+  let hub!: Hub;
+  let driveKeyStillRegistered = true;
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: (_id: string) => {
+      order.push('revoke');
+      // Observed from INSIDE revocation: the mutable owner is already gone.
+      driveKeyStillRegistered = hub.getConn('pi', 's10-order') !== undefined;
+    },
+    attach: async (_id: string, mode?: string) => {
+      order.push(mode === 'live' ? 'attach:live' : 'attach:observe');
+      return mode === 'live' ? driveConn : observeConn;
+    },
+  } as any);
+  hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's10-order', 'live');
+  driver.addClient(() => {});
+  await hub.handoffToTerminal('pi', 's10-order', driver);
+
+  check('C10.1 close precedes revocation precedes the observer',
+    order.join(',') === 'attach:live,close,revoke,attach:observe', order.join(','));
+  check('C10.2 the drive wrapper is unregistered before revocation runs', !driveKeyStillRegistered);
+  await hub.dispose();
+}
+
+// ── C11: a failure after authority is released settles completely ───────────────────────────────
+// Once the native owner is closed, Drive cannot be handed back. The requester
+// must be told the session ended and detached — never left fanning out from a
+// ManagedConn whose connection is already closed — and owner truth must not
+// claim Drive.
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's11-settle', 'live', 'driving'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: () => { throw new Error('revocation exploded'); },
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      throw new Error('observer must not be built after a failed revocation');
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's11-settle', 'live');
+  const seen: string[] = [];
+  const requester: any = (frame: any) => { seen.push(frame.kind); };
+  driver.addClient(requester);
+
+  let failure: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's11-settle', driver);
+  } catch (error) {
+    failure = error;
+  }
+  const projected = hub.sessionDetailFrame(driver, true);
+  check('C11.1 the failure reaches the caller', failure instanceof Error && (failure as Error).message.includes('revocation exploded'));
+  check('C11.2 the native owner really was closed', driveConn.closed);
+  check('C11.3 the requester is told the session ended', seen.includes('ended'));
+  check('C11.4 Drive is NOT restored', hub.getConn('pi', 's11-settle') === undefined);
+  check('C11.5 owner truth does not claim Drive', projected.info.sessionOwner?.state !== 'drive');
+  await hub.dispose();
+}
+
+// ── C12: a LIVE attach cannot enter during handoff either ───────────────────────────────────────
+// The fence guarded `resume` only, which left the window wide open for every
+// live-mode adapter — the same adapters C7 exists for.
+{
+  let releaseObserver!: () => void;
+  const observerGate = new Promise<void>((resolve) => { releaseObserver = resolve; });
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's12-fence', 'live', 'driving'));
+  const observeConn = fakeConn(controlledInfo('pi', 's12-fence', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      await observerGate;
+      return observeConn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const driver = await hub.ensure('pi', 's12-fence', 'live');
+  driver.addClient(() => {});
+  const handoff = hub.handoffToTerminal('pi', 's12-fence', driver);
+  await Promise.resolve();
+
+  let liveBlocked = false;
+  try {
+    await hub.ensure('pi', 's12-fence', 'live');
+  } catch {
+    liveBlocked = true;
+  }
+  check('C12.1 a live attach cannot acquire the owner during terminal handoff', liveBlocked);
+  releaseObserver();
+  await handoff;
+  await hub.dispose();
+}
+
+// ── C14: a PRE-EXISTING observer must not survive handoff with pre-revocation truth ─────────────
+// The topology is ordinary — a resident/background observer coexisting with the
+// #live owner — and it is the one case the other handoff checks miss, because
+// they all let Observe be constructed AFTER revocation.
+//
+// That older wrapper was built while the session was still owned, so its cached
+// control says `supported: true`. Revocation changes the ADAPTER's mind, not the
+// info already captured on a live connection, so reusing it would move the
+// foreground client onto a wrapper that still offers Drive — handing control to
+// the terminal and simultaneously telling the app it may take it back.
+//
+// Replacement is scoped to adapters that declare `releaseDriveEligibility`:
+// C3.3 pins the converse, that an adapter WITHOUT adapter-owned eligibility
+// still gets its existing Observe wrapper back by identity. Nothing about that
+// adapter's answer changed, so there is nothing to re-ask.
+{
+  const registry = new AgentRegistry();
+  let owned = true;
+  const observerInfo = () => ({
+    ...controlledInfo('pi', 's14-stale', 'observe', 'observing'),
+    control: {
+      drive: owned
+        ? { supported: true, state: 'observing' }
+        : { supported: false, state: 'observing', reason: 'terminal-owned' },
+      terminalSync: { supported: false, syncAvailable: false, active: false },
+    },
+  } as SessionInfo);
+  const driveConn = fakeConn(controlledInfo('pi', 's14-stale', 'live', 'driving'));
+  const observeConns: Array<ReturnType<typeof fakeConn>> = [];
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: () => { owned = false; },
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      const conn = fakeConn(observerInfo());
+      observeConns.push(conn);
+      return conn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  // A resident observer attaches FIRST, while the session is still owned.
+  const resident = await hub.ensure('pi', 's14-stale');
+  const residentSeen: string[] = [];
+  const residentFrames: any[] = [];
+  const residentClient: any = (frame: any) => { residentSeen.push(frame.kind); residentFrames.push(frame); };
+  let residentTarget = resident;
+  residentClient.onManagedConnChanged = (next: any) => { residentTarget = next; };
+  resident.addClient(residentClient);
+  check('C14.1 the resident observer starts out drivable', resident.conn.info.control?.drive.supported === true);
+
+  const driver = await hub.ensure('pi', 's14-stale', 'live');
+  let requesterTarget = driver;
+  const requester: any = () => {};
+  requester.onManagedConnChanged = (next: any) => { requesterTarget = next; };
+  driver.addClient(requester);
+
+  const handedOff = await hub.handoffToTerminal('pi', 's14-stale', driver);
+  const projected = hub.sessionDetailFrame(handedOff, true);
+  check('C14.2 the surviving observer publishes post-revocation truth',
+    handedOff.conn.info.control?.drive.supported === false,
+    JSON.stringify(handedOff.conn.info.control?.drive));
+  check('C14.3 the handed-off requester lands on that observer', requesterTarget === handedOff);
+  check('C14.4 the resident client is carried onto it too', residentTarget === handedOff);
+  check('C14.5 owner truth reports none', projected.info.sessionOwner?.state === 'none');
+  check('C14.6 the session is what getConn resolves', hub.getConn('pi', 's14-stale') === handedOff);
+  // Connection state is not client state. The carried-over resident had already
+  // been told Drive was available; it has to be told otherwise, or its UI keeps
+  // offering a Drive the adapter no longer grants.
+  const residentDrive = residentFrames
+    .filter((frame) => frame.kind === 'session')
+    .map((frame) => frame.info?.control?.drive?.supported);
+  check('C14.7 the carried-over resident is TOLD Drive is gone',
+    residentDrive.length > 0 && residentDrive.at(-1) === false, JSON.stringify(residentDrive));
+  await hub.dispose();
+}
+
+// ── C15: a failed observer replacement settles like any post-release failure ─────────────────────
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's15-replace-fail', 'live', 'driving'));
+  let observeAttaches = 0;
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: () => {},
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      observeAttaches++;
+      if (observeAttaches > 1) throw new Error('replacement observer failed');
+      return fakeConn(controlledInfo('pi', 's15-replace-fail', 'observe', 'observing'));
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  const resident = await hub.ensure('pi', 's15-replace-fail');
+  const residentSeen: string[] = [];
+  resident.addClient(((frame: any) => { residentSeen.push(frame.kind); }) as any);
+  const driver = await hub.ensure('pi', 's15-replace-fail', 'live');
+  const driverSeen: string[] = [];
+  driver.addClient(((frame: any) => { driverSeen.push(frame.kind); }) as any);
+
+  let failure: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's15-replace-fail', driver);
+  } catch (error) {
+    failure = error;
+  }
+  check('C15.1 the replacement failure reaches the caller', failure instanceof Error);
+  check('C15.2 the driver settles as ended', driverSeen.includes('ended'));
+  check('C15.3 the stale observer settles as ended too', residentSeen.includes('ended'));
+  check('C15.4 no wrapper is left registered claiming Drive',
+    hub.getConn('pi', 's15-replace-fail') === undefined);
+  await hub.dispose();
+}
+
+// ── C19/C20: an Observe attach begun BEFORE revocation is never admitted after it ────────────────
+// The dangerous generation is the one that is in flight, not the one that is
+// registered: an adapter snapshots what it may do when the attach STARTS, so a
+// bare attach parked on its HTTP call is carrying `supported: true` while
+// handoff revokes underneath it. It is invisible to `conns` — it lives only in
+// `pending` — so a registry lookup cannot fence it, and the handoff's own
+// replacement `ensure` would otherwise coalesce straight onto it.
+const parkedObserverCase = async (
+  label: 'C19' | 'C20',
+  revocationThrows: boolean,
+) => {
+  const session = revocationThrows ? 's20-park-throw' : 's19-park';
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', session, 'live', 'driving'));
+  const observeInfo = (supported: boolean) => ({
+    ...controlledInfo('pi', session, 'observe', 'observing'),
+    control: {
+      drive: supported
+        ? { supported: true, state: 'observing' }
+        : { supported: false, state: 'observing', reason: 'terminal-owned' },
+      terminalSync: { supported: false, syncAvailable: false, active: false },
+    },
+  } as SessionInfo);
+
+  let owned = true;
+  let unpark: () => void = () => {};
+  const parked = new Promise<void>((resolve) => { unpark = resolve; });
+  const snapshots: boolean[] = [];
+  let parkedConn: ReturnType<typeof fakeConn> | undefined;
+  let freshConn: ReturnType<typeof fakeConn> | undefined;
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: async () => {
+      owned = false;
+      if (revocationThrows) throw new Error('revocation half-applied');
+    },
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      // Snapshot eligibility the way a real adapter does — at the START of the
+      // attach — then block, exactly like an adapter awaiting its own host.
+      const snapshot = owned;
+      snapshots.push(snapshot);
+      const first = snapshots.length === 1;
+      if (first) await parked;
+      const conn = fakeConn(observeInfo(snapshot));
+      if (first) parkedConn = conn; else freshConn = conn;
+      return conn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  let backgroundError: unknown;
+  const background = hub.ensure('pi', session)
+    .then((mc) => mc, (error) => { backgroundError = error; return undefined; });
+  await Promise.resolve();
+  check(`${label}.1 the parked attach snapshotted PRE-revocation eligibility`,
+    snapshots.length === 1 && snapshots[0] === true, JSON.stringify(snapshots));
+
+  const driver = await hub.ensure('pi', session, 'live');
+  const driverSeen: string[] = [];
+  driver.addClient(((frame: any) => { driverSeen.push(frame.kind); }) as any);
+
+  let handedOff: any;
+  let failure: unknown;
+  try {
+    handedOff = await hub.handoffToTerminal('pi', session, driver);
+  } catch (error) {
+    failure = error;
+  }
+  // Release the parked generation only now — after handoff has finished — so
+  // its admission attempt lands squarely in the window the fence must cover.
+  unpark();
+  await background;
+  return {
+    hub, session, snapshots, parkedConn, freshConn, backgroundError, handedOff, failure, driverSeen,
+  };
+};
+
+{
+  const r = await parkedObserverCase('C19', false);
+  check('C19.2 handoff did not coalesce onto the parked generation',
+    r.snapshots.length === 2 && r.snapshots[1] === false, JSON.stringify(r.snapshots));
+  check('C19.3 the observer it returned is the post-revocation one',
+    r.handedOff?.conn === r.freshConn
+      && r.handedOff?.conn.info.control?.drive.supported === false,
+    JSON.stringify(r.handedOff?.conn.info.control?.drive));
+  check('C19.4 the parked generation is refused at admission',
+    r.backgroundError instanceof Error && (r.backgroundError as Error).name === 'SupersededAttachError',
+    String((r.backgroundError as Error | undefined)?.name));
+  check('C19.5 its connection is closed, not registered', r.parkedConn?.closed === true);
+  check('C19.6 the session still resolves to the post-revocation observer',
+    r.hub.getConn('pi', r.session) === r.handedOff);
+  await r.hub.dispose();
+}
+
+{
+  const r = await parkedObserverCase('C20', true);
+  check('C20.2 the half-applied revocation reaches the caller', r.failure instanceof Error);
+  check('C20.3 the parked generation is refused even though handoff failed',
+    r.backgroundError instanceof Error && (r.backgroundError as Error).name === 'SupersededAttachError',
+    String((r.backgroundError as Error | undefined)?.name));
+  check('C20.4 releasing it afterwards registers nothing',
+    r.hub.getConn('pi', r.session) === undefined);
+  check('C20.5 its connection is closed rather than leaked', r.parkedConn?.closed === true);
+  check('C20.6 the driver still settles as ended', r.driverSeen.includes('ended'));
+  await r.hub.dispose();
+}
+
+// ── C21/C22: a mutable attach parked BEFORE the fence never becomes a new Drive owner ────────────
+// C12 proves an attach STARTED during handoff is refused. This is the other
+// half: one already sitting in `pending` when the fence went up. `ensure` reads
+// `terminalHandoffs` at the start of the request, so that attach has already
+// cleared the fence check and would register a fresh Drive owner for a session
+// whose control has just been handed to the terminal — possibly after `finally`
+// clears the fence, leaving nothing behind to explain it.
+//
+// Run in BOTH directions: the registered owner can be either mutable mode, and
+// the parked rival is the other one.
+const parkedMutableCase = async (
+  label: 'C21' | 'C22',
+  ownerMode: 'resume' | 'live',
+  rivalMode: 'resume' | 'live',
+) => {
+  const session = `s-${label.toLowerCase()}-${ownerMode}-vs-${rivalMode}`;
+  const registry = new AgentRegistry();
+  const ownerConn = fakeConn(controlledInfo('pi', session, ownerMode, 'driving'));
+  let unpark: () => void = () => {};
+  const parked = new Promise<void>((resolve) => { unpark = resolve; });
+  let rivalStarted = false;
+  let rivalConn: ReturnType<typeof fakeConn> | undefined;
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'resume', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => {
+      if (mode === ownerMode) return ownerConn;
+      if (mode === rivalMode) {
+        rivalStarted = true;
+        await parked;
+        rivalConn = fakeConn(controlledInfo('pi', session, rivalMode, 'driving'));
+        return rivalConn;
+      }
+      return fakeConn(controlledInfo('pi', session, 'observe', 'observing'));
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const driver = await hub.ensure('pi', session, ownerMode);
+  driver.addClient((() => {}) as any);
+  let rivalError: unknown;
+  const rival = hub.ensure('pi', session, rivalMode)
+    .then((mc) => mc, (error) => { rivalError = error; return undefined; });
+  await Promise.resolve();
+  check(`${label}.1 the rival ${rivalMode} attach is in flight before the fence`, rivalStarted);
+
+  const handedOff = await hub.handoffToTerminal('pi', session, driver);
+  // Released only after handoff returned AND its `finally` cleared the fence, so
+  // the refusal cannot be coming from `terminalHandoffs`.
+  unpark();
+  await rival;
+
+  const projected = hub.sessionDetailFrame(handedOff, true);
+  check(`${label}.2 the superseded ${rivalMode} attach is refused`,
+    rivalError instanceof Error && (rivalError as Error).name === 'SupersededAttachError',
+    String((rivalError as Error | undefined)?.name));
+  check(`${label}.3 its connection is closed, never registered`, rivalConn?.closed === true);
+  check(`${label}.4 no new Drive owner exists`, hub.getConn('pi', session) === handedOff);
+  check(`${label}.5 owner truth stays off Drive`, projected.info.sessionOwner?.state === 'none',
+    String(projected.info.sessionOwner?.state));
+  await hub.dispose();
+};
+await parkedMutableCase('C21', 'live', 'resume');
+await parkedMutableCase('C22', 'resume', 'live');
+
+// ── C18: the migrated client is TOLD the session left Drive ──────────────────────────────────────
+// Owner truth is published synchronously the moment the drive wrapper is
+// unregistered — which is before the observer exists, so that broadcast reaches
+// nobody, and the later reconcile sees no change to announce. A client that is
+// acked and never told keeps rendering the Drive it just handed away; the real
+// -broker fixture caught this as "handoff is acknowledged only after owner truth
+// leaves Drive", and it belongs here where it is deterministic.
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's18-tell', 'resume', 'driving'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'resume'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string) => (mode === 'resume'
+      ? driveConn
+      : fakeConn(controlledInfo('pi', 's18-tell', 'observe', 'observing'))),
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const driver = await hub.ensure('pi', 's18-tell', 'resume');
+  const frames: any[] = [];
+  const requester: any = (frame: any) => { frames.push(frame); };
+  requester.onManagedConnChanged = () => {};
+  driver.addClient(requester);
+
+  await hub.handoffToTerminal('pi', 's18-tell', driver);
+  const ownerStates = frames
+    .filter((frame) => frame.kind === 'session')
+    .map((frame) => frame.info?.sessionOwner?.state);
+  check('C18.1 the handed-off client receives a session frame', ownerStates.length > 0,
+    JSON.stringify(frames.map((f) => f.kind)));
+  check('C18.2 it says owner truth left Drive', ownerStates.includes('none'),
+    JSON.stringify(ownerStates));
+  check('C18.3 and it is never told Drive is still supported',
+    frames.every((frame) => frame.kind !== 'session'
+      || frame.info?.sessionOwner?.state !== 'drive'));
+  await hub.dispose();
+}
+
+// ── C16: revocation that MUTATES and then throws still settles the observer it invalidated ───────
+// `stale` is captured after the revocation await, so on this path it is never
+// captured at all — yet eligibility is already gone and the pre-existing
+// observer's cached `supported: true` is already a lie. The failure settlement
+// therefore reads the registry rather than that variable.
+{
+  const registry = new AgentRegistry();
+  const revoked: string[] = [];
+  const driveConn = fakeConn(controlledInfo('pi', 's16-revoke-throw', 'live', 'driving'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: async (id: string) => {
+      revoked.push(id);
+      throw new Error('revocation half-applied');
+    },
+    attach: async (_id: string, mode?: string) => (mode === 'live'
+      ? driveConn
+      : fakeConn(controlledInfo('pi', 's16-revoke-throw', 'observe', 'observing'))),
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const resident = await hub.ensure('pi', 's16-revoke-throw');
+  const residentSeen: string[] = [];
+  resident.addClient(((frame: any) => { residentSeen.push(frame.kind); }) as any);
+  check('C16.1 the resident observer is registered claiming Drive',
+    resident.conn.info.control?.drive.supported === true);
+  const driver = await hub.ensure('pi', 's16-revoke-throw', 'live');
+  const driverSeen: string[] = [];
+  driver.addClient(((frame: any) => { driverSeen.push(frame.kind); }) as any);
+
+  let failure: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's16-revoke-throw', driver);
+  } catch (error) {
+    failure = error;
+  }
+  check('C16.2 the half-applied revocation reaches the caller', failure instanceof Error);
+  check('C16.3 eligibility really was mutated before it threw',
+    revoked.join(',') === 's16-revoke-throw', revoked.join(','));
+  check('C16.4 the driver settles as ended', driverSeen.includes('ended'));
+  check('C16.5 the observer that mutation invalidated settles too', residentSeen.includes('ended'));
+  check('C16.6 nothing is left registered for the session',
+    hub.getConn('pi', 's16-revoke-throw') === undefined);
+  await hub.dispose();
+}
+
+// ── C17: a migration that throws AFTER the replacement exists takes the replacement down too ─────
+// By the time client retargeting runs, the fresh observer is already built and
+// registered and is already holding part of the client set. Settling only the
+// two wrappers named before the failure would leave that replacement registered,
+// half-populated, and — since it was built post-revocation and reads correctly —
+// perfectly plausible.
+{
+  const registry = new AgentRegistry();
+  const driveConn = fakeConn(controlledInfo('pi', 's17-migrate-throw', 'live', 'driving'));
+  const observers: Array<ReturnType<typeof fakeConn>> = [];
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    releaseDriveEligibility: () => {},
+    attach: async (_id: string, mode?: string) => {
+      if (mode === 'live') return driveConn;
+      const conn = fakeConn(controlledInfo('pi', 's17-migrate-throw', 'observe', 'observing'));
+      observers.push(conn);
+      return conn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const resident = await hub.ensure('pi', 's17-migrate-throw');
+  const residentSeen: string[] = [];
+  resident.addClient(((frame: any) => { residentSeen.push(frame.kind); }) as any);
+  const driver = await hub.ensure('pi', 's17-migrate-throw', 'live');
+  const requesterSeen: string[] = [];
+  const requester: any = (frame: any) => { requesterSeen.push(frame.kind); };
+  requester.onManagedConnChanged = () => { throw new Error('client retarget exploded'); };
+  driver.addClient(requester);
+
+  let failure: unknown;
+  try {
+    await hub.handoffToTerminal('pi', 's17-migrate-throw', driver);
+  } catch (error) {
+    failure = error;
+  }
+  check('C17.1 the migration failure reaches the caller', failure instanceof Error);
+  check('C17.2 a replacement observer really had been built', observers.length === 2, `built ${observers.length}`);
+  // The requester was already moved onto the replacement when retargeting threw,
+  // so the replacement is the only wrapper that can still reach it.
+  check('C17.3 the half-migrated client is still told the session ended', requesterSeen.includes('ended'));
+  check('C17.4 the observer left behind settles as ended', residentSeen.includes('ended'));
+  check('C17.5 the replacement is unregistered too',
+    hub.getConn('pi', 's17-migrate-throw') === undefined);
+  check('C17.6 the replacement transport is closed', observers[1]?.closed === true);
+  await hub.dispose();
+}
+
+// ── C13: getConn keeps its own resolution, including the bare fallback ───────────────────────────
+// The handoff resolver is deliberately a SEPARATE helper. getConn answers a
+// different question — "whichever connection is live, for file delivery" — and
+// its bare fallback is load-bearing: an OpenCode bare conn can report
+// `drive: 'driving'` and a Codex bare conn at `attachMode: 'live'` IS the
+// mutable path. Folding the two would have taken that away.
+{
+  const registry = new AgentRegistry();
+  const bareConn = fakeConn(controlledInfo('pi', 's13-bare', 'observe', 'observing'));
+  const liveConn = fakeConn(controlledInfo('pi', 's13-live-pref', 'live', 'driving'));
+  const bareOther = fakeConn(controlledInfo('pi', 's13-live-pref', 'observe', 'observing'));
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (id: string, mode?: string) => {
+      if (id === 's13-bare') return bareConn;
+      return mode === 'live' ? liveConn : bareOther;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const bare = await hub.ensure('pi', 's13-bare');
+  check('C13.1 getConn still resolves a bare-only session', hub.getConn('pi', 's13-bare') === bare);
+
+  const bareFirst = await hub.ensure('pi', 's13-live-pref');
+  const live = await hub.ensure('pi', 's13-live-pref', 'live');
+  check('C13.2 getConn still prefers a mutable owner over the bare one',
+    hub.getConn('pi', 's13-live-pref') === live && bareFirst !== live);
   await hub.dispose();
 }
 
@@ -486,7 +1153,7 @@ const controlledInfo = (
   let attachCalls = 0;
   const registry = new AgentRegistry();
   registry.register({
-    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true } as any,
+    id: 'pi', displayName: 'Pi', capabilities: { supportsCrossClientDriveSharing: true, attachModes: ['observe', 'resume'] } as any,
     isAvailable: async () => true, discoverSessions: async () => [],
     attach: async (id: string, mode?: string) => {
       attachCalls++;
