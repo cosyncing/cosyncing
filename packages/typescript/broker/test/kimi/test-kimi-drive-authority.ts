@@ -47,6 +47,19 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 const SERVER_ID = 'srv_authority_fixture';
+/**
+ * The registry record's start time and the `/api/v1/meta` that binds to it,
+ * as upstream writes the pair: the meta id is a SIBLING of the registry id,
+ * never a copy. See the identity gate in `test-kimi-server.ts`.
+ */
+const SERVER_STARTED_AT = 1_786_657_461_604;
+const SERVER_META = {
+  server_version: '0.35.0',
+  server_id: 'api_authority_fixture',
+  started_at: new Date(SERVER_STARTED_AT + 200).toISOString(),
+  capabilities: { websocket: true },
+  dangerous_bypass_auth: false,
+};
 const CREATED_ID = 'session_authority_0001';
 const WORKSPACE = '/fixture/workspace';
 
@@ -69,7 +82,7 @@ const server = Bun.serve({
     if (request.headers.get('authorization') !== 'Bearer fixture-token') {
       return Response.json({ code: 40101, msg: 'unauthorized', data: null, request_id: 'r' }, { status: 401 });
     }
-    if (path === '/api/v1/meta') return Response.json(ok({ server_id: SERVER_ID }));
+    if (path === '/api/v1/meta') return Response.json(ok(SERVER_META));
     if (path === '/api/v2/sessions') {
       return Response.json(ok({
         items: [{
@@ -122,7 +135,7 @@ const server = Bun.serve({
 
 const baseUrl = `http://127.0.0.1:${server.port ?? 0}`;
 const scan: KimiInstanceScan = {
-  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0' }],
+  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
   stale: 0, invalid: 0, truncated: false,
 };
 

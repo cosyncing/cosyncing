@@ -28,7 +28,7 @@ import { KimiAdapter } from '../src/index.ts';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KimiReadOnlyHttp, type KimiInstanceScan } from '../src/server.ts';
+import { KimiReadOnlyHttp, decodeKimiInstanceRecord, type KimiInstanceScan } from '../src/server.ts';
 import {
   KIMI_WIRE_TAIL_CAP_BYTES,
   KIMI_WIRE_TICK_CAP_BYTES,
@@ -60,6 +60,7 @@ const FIXTURE = await Bun.file(new URL('./fixtures/kimi-0.35.0.json', import.met
   kimiVersion: string;
   sessionId: string;
   rest: Record<string, { code: number; msg: string; data: unknown }>;
+  instanceRecord: Record<string, unknown>;
 };
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -180,9 +181,19 @@ const server = Bun.serve({
 
 const listenPort = server.port ?? 0;
 const baseUrl = `http://127.0.0.1:${listenPort}`;
-const FIXTURE_SERVER_ID = (FIXTURE.rest.meta!.data as { server_id: string }).server_id;
+// The registry record AS CAPTURED, with only its address redirected at the
+// fake server. Its `server_id` is upstream's own and DIFFERS from the one the
+// captured `/api/v1/meta` echoes — deriving either from the other is what once
+// made an unsatisfiable identity gate look healthy across every Kimi suite.
+const FIXTURE_RECORD = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
 const scan: KimiInstanceScan = {
-  live: [{ baseUrl, port: listenPort, serverId: FIXTURE_SERVER_ID, hostVersion: FIXTURE.kimiVersion }],
+  live: [{
+    baseUrl,
+    port: listenPort,
+    serverId: FIXTURE_RECORD.serverId,
+    hostVersion: FIXTURE_RECORD.hostVersion,
+    startedAt: FIXTURE_RECORD.startedAt,
+  }],
   stale: 0,
   invalid: 0,
   truncated: false,
