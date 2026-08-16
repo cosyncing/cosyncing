@@ -13,6 +13,8 @@ import { CodexAdapter } from '@cosyncing/adapter-codex';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
 import { ClaudeAdapter } from '@cosyncing/adapter-claude';
+import { KimiAdapter, kimiRegistrationEnabled } from '@cosyncing/adapter-kimi';
+import { DshAdapter, dshRegistrationEnabled } from '@cosyncing/adapter-dsh';
 import type { BuildInfo } from '../runtime/build-info.ts';
 import {
   BUN_RUNTIME_OVERRIDE_VARIABLE,
@@ -1408,6 +1410,28 @@ function summarize(sections: readonly DoctorSection[]): Record<SetupCheckStatus,
   return result;
 }
 
+/**
+ * The adapters production doctor diagnoses. Kimi and dsh each ride the SAME
+ * rollout gate as their broker registration (see `runtime.ts`): doctor and
+ * setup must never advertise or diagnose an agent the running broker will not
+ * serve, and each gate reads the env the doctor was handed so the pairing is
+ * testable. Doctor describes the CURRENT (possibly foreground-enabled)
+ * environment, which is why it may legitimately diagnose a gated agent that
+ * setup still omits — see `agentSummaries`.
+ */
+export function defaultDoctorAdapters(
+  env: Readonly<Record<string, string | undefined>>,
+): readonly AgentBackend[] {
+  return [
+    new OpenCodeAdapter(),
+    new PiAdapter(),
+    new CodexAdapter(),
+    new ClaudeAdapter(),
+    ...(kimiRegistrationEnabled(env) ? [new KimiAdapter()] : []),
+    ...(dshRegistrationEnabled(env) ? [new DshAdapter()] : []),
+  ];
+}
+
 export async function collectDoctorReport(dependencies: DoctorDependencies): Promise<DoctorReport> {
   if (dependencies.context.effects !== 'forbidden') throw new Error('doctor requires a no-effects context');
   const home = dependencies.stateHome ?? setupStateHome();
@@ -1415,12 +1439,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   const brokerToken = inspectBrokerToken(join(home, 'secrets', 'broker-token'));
   const piIntegration = inspectPiIntegration(join(home, 'secrets', 'pi-integration.json'));
   const host = hostChecks(dependencies.context, dependencies.context.arch);
-  const adapters = dependencies.adapters ?? [
-    new OpenCodeAdapter(),
-    new PiAdapter(),
-    new CodexAdapter(),
-    new ClaudeAdapter(),
-  ];
+  const adapters = dependencies.adapters ?? defaultDoctorAdapters(dependencies.context.env);
   const installedResources = inspectInstallState(home);
   // Resolved before the service checks because the durable service PATH is derived from it: setup records
   // the validated runtime's directory there, and the check below must reconstruct the same expectation.

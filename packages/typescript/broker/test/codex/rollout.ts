@@ -2005,6 +2005,322 @@ await (async () => {
   }
 })();
 
+// ── 1k2. Codex 0.147 user-message compatibility: item_completed/UserMessage ─────────────
+// Codex 0.147 stopped writing `event_msg/user_message`: the prompt's only durable event is now
+// `item_completed` whose `item.type` is `UserMessage` (it carries `turn_id`, a native item id, and
+// `content: [{type:'text', …}]`), while `response_item/message` `role:'user'` still also carries
+// bootstrap/developer context that is NOT the prompt. These fixtures copy only that public record
+// shape; no path or text from the maintainer's recorded sessions enters the repository.
+{
+  // The durable prompt pair exactly as 0.147 writes it: the (ignored) response_item twin, then the
+  // authoritative completed item. `started_at_ms` is a fixed sanitized epoch, not a recorded one.
+  const userItemRows = (turnId: string, itemId: string, text: string, extraContent: any[] = []) => [
+    { type: 'response_item', payload: { type: 'message', role: 'user', id: itemId, content: [{ type: 'input_text', text }] } },
+    {
+      type: 'event_msg',
+      payload: {
+        type: 'item_completed',
+        thread_id: '00000000-0000-4000-8000-000000000147',
+        turn_id: turnId,
+        started_at_ms: 1_755_200_000_000,
+        completed_at_ms: 1_755_200_000_001,
+        item: { type: 'UserMessage', id: itemId, content: [{ type: 'text', text, text_elements: [] }, ...extraContent] },
+      },
+    },
+  ];
+  const assistantRows147 = (turnId: string, itemId: string, text: string) => [
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: '00000000-0000-4000-8000-000000000147', turn_id: turnId, item: { type: 'AgentMessage', id: itemId, content: [{ type: 'Text', text }], phase: 'final_answer' } } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', id: itemId, phase: 'final_answer', content: [{ type: 'output_text', text }] } },
+  ];
+  const turn147 = (turnId: string, prompt: string, ordinalTag: string) => [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
+    { type: 'response_item', payload: { type: 'message', role: 'developer', id: `dev_${ordinalTag}`, content: [{ type: 'input_text', text: 'bootstrap developer context' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', id: `boot_${ordinalTag}`, content: [{ type: 'input_text', text: 'bootstrap environment context' }] } },
+    { type: 'turn_context', payload: { turn_id: turnId, model: 'gpt-5.3-codex-spark' } },
+    ...userItemRows(turnId, `item_${ordinalTag}`, prompt),
+    ...assistantRows147(turnId, `msg_${ordinalTag}`, `answer ${ordinalTag}`),
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
+  ];
+  const promptsOf = (out: any[]) => out.filter((m: any) => m.type === 'user-message');
+
+  {
+    // New-only format — the 0.147 regression itself. Before the item_completed/UserMessage case
+    // this mapped to ZERO user rows (the bootstrap response_item is rightly ignored, the legacy
+    // event never arrives), which is exactly the observed failure: assistant output without the
+    // prompt that caused it.
+    const out = mapRollout([
+      { type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000147', cwd: '/tmp/x' } },
+      ...turn147('t147', 'new-format prompt', 'a0'),
+    ]) as any[];
+    const prompts = promptsOf(out);
+    check(
+      'Codex 0.147 new-only: item_completed/UserMessage maps to exactly one user-message',
+      prompts.length === 1 && prompts[0].text === 'new-format prompt',
+      JSON.stringify(prompts.map((p: any) => [p.key, p.text])),
+    );
+    check(
+      'Codex 0.147 new-only: the prompt rebuilds the canonical (turn, ordinal) identity',
+      prompts[0]?.key === 'codex:t147:u0' && prompts[0]?.turnId === 't147',
+      JSON.stringify(prompts[0]),
+    );
+    check(
+      'Codex 0.147 new-only: sentAt falls back to the completed item\'s started_at_ms',
+      prompts[0]?.sentAt === 1_755_200_000_000,
+      JSON.stringify(prompts[0]?.sentAt),
+    );
+    const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
+    check(
+      'Codex 0.147 new-only: the terminal run summary names the canonical opening prompt key',
+      done?.userMessageKey === 'codex:t147:u0',
+      JSON.stringify(done?.userMessageKey),
+    );
+    const answers = out.filter((m: any) => m.type === 'model-output');
+    check(
+      'Codex 0.147 new-only: item_completed/AgentMessage stays ignored (answer emitted once)',
+      answers.length === 1 && answers[0].key === 'codex:t147:msg_a0:t',
+      JSON.stringify(answers.map((m: any) => m.key)),
+    );
+  }
+
+  {
+    // Bootstrap-only: response_item role:user context with NO authoritative user completion must
+    // not fabricate a prompt bubble — the measured rollout has two role:user response items but
+    // only one real prompt.
+    const out = mapRollout([
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tboot' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', id: 'boot_only', content: [{ type: 'input_text', text: 'bootstrap environment context' }] } },
+      ...assistantRows147('tboot', 'msg_boot', 'unprompted answer'),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tboot' } },
+    ]) as any[];
+    check(
+      'Codex 0.147 bootstrap response_item role:user alone fabricates no user bubble',
+      promptsOf(out).length === 0,
+      JSON.stringify(promptsOf(out)),
+    );
+  }
+
+  {
+    // Legacy-only stays exactly as before this lane.
+    const out = mapRollout([
+      { type: 'turn_context', payload: { turn_id: 'tleg' } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tleg' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'legacy prompt' }] } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'legacy prompt' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'ok', phase: 'final_answer' } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_leg', phase: 'final_answer', content: [{ type: 'output_text', text: 'ok' }] } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tleg' } },
+    ]) as any[];
+    const prompts = promptsOf(out);
+    check(
+      'Codex 0.147 legacy-only keeps exactly one user-message with the same identity as before',
+      prompts.length === 1 && prompts[0].key === 'codex:tleg:u0' && prompts[0].text === 'legacy prompt',
+      JSON.stringify(prompts.map((p: any) => p.key)),
+    );
+  }
+
+  {
+    // Hypothetical dual format: one prompt written in BOTH durable forms must stay one row —
+    // in either order — while the pairing never crosses forms' boundaries wider than the
+    // prompt's own records.
+    for (const order of ['legacy-first', 'item-first'] as const) {
+      const twin = { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_dual', content: [{ type: 'input_text', text: 'dual prompt' }] } };
+      const legacy = { type: 'event_msg', payload: { type: 'user_message', message: 'dual prompt' } };
+      const item = {
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          turn_id: 'tdual',
+          started_at_ms: 1_755_200_000_000,
+          completed_at_ms: 1_755_200_000_001,
+          item: { type: 'UserMessage', id: 'item_dual', content: [{ type: 'text', text: 'dual prompt', text_elements: [] }] },
+        },
+      };
+      const out = mapRollout([
+        { type: 'turn_context', payload: { turn_id: 'tdual' } },
+        { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tdual' } },
+        ...(order === 'legacy-first' ? [twin, legacy, item] : [twin, item, legacy]),
+        ...assistantRows147('tdual', 'msg_dual', 'ok'),
+        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tdual' } },
+      ]) as any[];
+      const prompts = promptsOf(out);
+      const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
+      check(
+        `Codex 0.147 dual format (${order}) emits one logical user-message`,
+        prompts.length === 1 && prompts[0].key === 'codex:tdual:u0' && prompts[0].text === 'dual prompt',
+        JSON.stringify(prompts.map((p: any) => p.key)),
+      );
+      check(
+        `Codex 0.147 dual format (${order}) run summary still owns the canonical opening key`,
+        done?.userMessageKey === 'codex:tdual:u0',
+        JSON.stringify(done?.userMessageKey),
+      );
+    }
+  }
+
+  {
+    // TWO SEPARATE identical prompts — one legacy, one new-format, each preceded by its own
+    // response_item twin — must stay two rows. The twin after a durable form means a second
+    // prompt's representation is opening, so it must disarm the dual-format pairing; an earlier
+    // draft let a byte-equal twin bridge the pairing and collapsed this sequence into one row.
+    const out = mapRollout([
+      { type: 'turn_context', payload: { turn_id: 'tsep' } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tsep' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'same' }] } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'same' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_sep', content: [{ type: 'input_text', text: 'same' }] } },
+      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'tsep', started_at_ms: 1_755_200_000_000, completed_at_ms: 1_755_200_000_001, item: { type: 'UserMessage', id: 'item_sep', content: [{ type: 'text', text: 'same', text_elements: [] }] } } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tsep' } },
+    ]) as any[];
+    const prompts = promptsOf(out);
+    check(
+      'Codex 0.147 a legacy prompt and a separate identical new-format prompt stay u0 and u1',
+      prompts.length === 2 && prompts[0].key === 'codex:tsep:u0' && prompts[1].key === 'codex:tsep:u1',
+      JSON.stringify(prompts.map((p: any) => p.key)),
+    );
+  }
+
+  {
+    // Unknown-turn evidence never suppresses: a durable form whose enclosing turn cannot be
+    // matched to the other form's exact turn is not proof of one prompt, in either direction.
+    const legacyFirst = mapRollout([
+      { type: 'event_msg', payload: { type: 'user_message', message: 'orphan' } },
+      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'tx', item: { type: 'UserMessage', id: 'item_x', content: [{ type: 'text', text: 'orphan', text_elements: [] }] } } },
+    ]) as any[];
+    const itemFirst = mapRollout([
+      { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'ty', item: { type: 'UserMessage', id: 'item_y', content: [{ type: 'text', text: 'orphan', text_elements: [] }] } } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'orphan' } },
+    ]) as any[];
+    check(
+      'Codex 0.147 a turn-less legacy prompt is never paired away by an adjacent completed item',
+      promptsOf(legacyFirst).length === 2,
+      JSON.stringify(promptsOf(legacyFirst).map((p: any) => p.key)),
+    );
+    check(
+      'Codex 0.147 a completed item never pairs away an adjacent legacy prompt outside its turn',
+      promptsOf(itemFirst).length === 2,
+      JSON.stringify(promptsOf(itemFirst).map((p: any) => p.key)),
+    );
+  }
+
+  {
+    // Identity stays structural in the new format too: the same bytes sent in two different turns
+    // are two prompts with two distinct canonical keys.
+    const out = mapRollout([
+      ...turn147('t147a', 'same text', 'b1'),
+      ...turn147('t147b', 'same text', 'b2'),
+    ]) as any[];
+    const prompts = promptsOf(out);
+    check(
+      'Codex 0.147 two byte-identical prompts in different turns keep two distinct keys',
+      prompts.length === 2 && prompts[0].key === 'codex:t147a:u0' && prompts[1].key === 'codex:t147b:u0',
+      JSON.stringify(prompts.map((p: any) => p.key)),
+    );
+  }
+
+  {
+    // A mid-turn steer in the new format keeps its own ordinal — even byte-identical and adjacent
+    // to the opening prompt, which is the sharpest guard that dual-format pairing never becomes a
+    // text merge (same form twice is two real prompts, never a pair).
+    const out = mapRollout([
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'tsteer' } },
+      { type: 'turn_context', payload: { turn_id: 'tsteer' } },
+      ...userItemRows('tsteer', 'item_s0', 'do the thing'),
+      ...userItemRows('tsteer', 'item_s1', 'do the thing'),
+      ...assistantRows147('tsteer', 'msg_steer', 'ok'),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'tsteer' } },
+    ]) as any[];
+    const prompts = promptsOf(out);
+    const done = out.find((m: any) => m.type === 'run-summary' && m.status === 'done');
+    check(
+      'Codex 0.147 opening prompt and mid-turn steer keep ordinals u0 and u1',
+      prompts.length === 2 && prompts[0].key === 'codex:tsteer:u0' && prompts[1].key === 'codex:tsteer:u1',
+      JSON.stringify(prompts.map((p: any) => p.key)),
+    );
+    check(
+      'Codex 0.147 steered turn is still owned by the prompt that opened it',
+      done?.userMessageKey === 'codex:tsteer:u0',
+      JSON.stringify(done?.userMessageKey),
+    );
+  }
+
+  {
+    // Image content in the completed item keeps the live path's image-count behavior
+    // (`local_image` is the rollout spelling of the app-server's `localImage`).
+    const out = mapRollout([
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'timg' } },
+      ...userItemRows('timg', 'item_img', 'look at this', [{ type: 'local_image', path: '/tmp/fixture.png' }]),
+    ]) as any[];
+    const prompt = promptsOf(out)[0];
+    check(
+      'Codex 0.147 completed item image content maps to imageCount',
+      prompt?.imageCount === 1 && prompt?.text === 'look at this\n[image]',
+      JSON.stringify(prompt),
+    );
+  }
+}
+
+// ── 1k3. Codex 0.147 history/live-tail overlap: one prompt, one identity across both ─────
+await (async () => {
+  const dir = join('/tmp', `cosyncing-codex-0147-tail-${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'rollout-2026-08-15T00-00-00-00000000-0000-4000-8000-000000000147.jsonl');
+  const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+  writeFileSync(
+    path,
+    line({ type: 'session_meta', payload: { id: '00000000-0000-4000-8000-000000000147', cwd: dir } }) +
+      line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't147live' } }),
+  );
+
+  const messages: any[] = [];
+  const conn = await new CodexAdapter().attach(Buffer.from(path, 'utf8').toString('base64url'), 'observe');
+  const unsubscribe = conn.subscribe((m: any) => messages.push(m));
+  const prompts = () => messages.filter((m: any) => m.type === 'user-message');
+  const settle = async (predicate: () => boolean, ms: number) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return predicate();
+  };
+
+  try {
+    appendFileSync(
+      path,
+      [
+        { type: 'turn_context', payload: { turn_id: 't147live', model: 'gpt-5.3-codex-spark' } },
+        { type: 'response_item', payload: { type: 'message', role: 'user', id: 'item_live', content: [{ type: 'input_text', text: 'tailed prompt' }] } },
+        { type: 'event_msg', payload: { type: 'item_completed', turn_id: 't147live', started_at_ms: 1_755_200_000_000, completed_at_ms: 1_755_200_000_001, item: { type: 'UserMessage', id: 'item_live', content: [{ type: 'text', text: 'tailed prompt', text_elements: [] }] } } },
+        { type: 'event_msg', payload: { type: 'item_completed', turn_id: 't147live', item: { type: 'AgentMessage', id: 'msg_live147', content: [{ type: 'Text', text: 'tailed answer' }], phase: 'final_answer' } } },
+        { type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'msg_live147', phase: 'final_answer', content: [{ type: 'output_text', text: 'tailed answer' }] } },
+        { type: 'event_msg', payload: { type: 'task_complete', turn_id: 't147live' } },
+      ].map(line).join(''),
+    );
+    const tailed = await settle(() => prompts().length > 0 && messages.some((m: any) => m.type === 'run-summary' && m.status === 'done'), 4000);
+    check(
+      'Codex 0.147 live tail emits the new-format prompt once with the canonical identity',
+      tailed && prompts().length === 1 && prompts()[0].key === 'codex:t147live:u0',
+      JSON.stringify(prompts().map((p: any) => p.key)),
+    );
+    const doneLive = messages.find((m: any) => m.type === 'run-summary' && m.status === 'done');
+    check(
+      'Codex 0.147 live tail terminal summary owns the tailed prompt',
+      doneLive?.userMessageKey === 'codex:t147live:u0',
+      JSON.stringify(doneLive?.userMessageKey),
+    );
+    const replayPrompts = ((await conn.getHistory()) as any[]).filter((m: any) => m.type === 'user-message');
+    check(
+      'Codex 0.147 history replay re-derives the exact key the tail already published',
+      replayPrompts.length === 1 && replayPrompts[0].key === prompts()[0]?.key,
+      `history=${JSON.stringify(replayPrompts.map((p: any) => p.key))} live=${JSON.stringify(prompts().map((p: any) => p.key))}`,
+    );
+  } finally {
+    unsubscribe();
+    await conn.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 // ── 1b. live tail identity (CR4): the tail must decide identity exactly as a whole-file map does ──
 // The native id lives on the record AFTER the assistant event, which a tail has not read yet when it
 // reaches the event. Emitting immediately would key the same line differently here than getHistory()

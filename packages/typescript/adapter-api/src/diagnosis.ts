@@ -81,6 +81,24 @@ export interface SetupDiagnosisContext {
   resolveExecutable(command: string): string | undefined;
   inspectPath(path: string): SetupPathInspection;
   readText(path: string, maxBytes?: number): { ok: true; text: string } | { ok: false; reason: 'missing' | 'unreadable' | 'too-large' };
+  /**
+   * Bounded read-only directory listing: entry NAMES only (no stat, no
+   * recursion). `maxEntries` REQUESTS a ceiling; the implementation enforces
+   * its own finite maximum, treats a non-finite or non-positive request as
+   * the default rather than as permission to list without limit, and BOUNDS
+   * THE ITERATION itself — it never materializes the whole directory to slice
+   * it. The examined subset is sorted; entries beyond the ceiling are
+   * unexamined and reported via `truncated`, never silently. A truncated
+   * listing means the caller cannot claim to have seen the directory.
+   */
+  listDirectory(path: string, maxEntries?: number): { ok: true; names: readonly string[]; truncated: boolean } | { ok: false; reason: 'missing' | 'not-directory' | 'unreadable' };
+  /**
+   * Effect-free liveness probe for a recorded pid (signal-0 semantics: EPERM
+   * means the process exists under another user and counts as alive). Never
+   * delivers a real signal — this is the diagnosis-safe form of the probe an
+   * adapter needs to tell a live registry record from a stale one.
+   */
+  processAlive(pid: number): boolean;
   readPackageVersion(executable: string, packageNames: readonly string[]): string | undefined;
   runReadOnly(executable: string, args: readonly string[], timeoutMs?: number): Promise<SetupCommandProbe>;
   /**

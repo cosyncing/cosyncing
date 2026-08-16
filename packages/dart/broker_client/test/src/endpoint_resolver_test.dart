@@ -3,7 +3,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=13&minimumBrokerRevision=2&'
+    'clientVersion=0.0.0-dev&contractRevision=14&minimumBrokerRevision=2&'
     'contractSurfaceHash=fnv1a32%3A095f3c3c';
 
 void main() {

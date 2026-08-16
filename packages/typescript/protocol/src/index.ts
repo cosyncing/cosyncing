@@ -18,6 +18,7 @@ export type IntegrationKind =
   | 'jsonrpc-stdio' // Codex app-server, Pi --mode rpc
   | 'acp-stdio' // ACP (Zed) agents
   | 'sdk-callback' // Claude Agent SDK
+  | 'http-websocket' // Kimi Code: kimi web HTTP + WebSocket
   | 'pty-floor'; // raw PTY wrap (agentapi-style)
 
 /** How a client connects to a session. See docs/architecture/monorepo.md */
@@ -1382,15 +1383,25 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * Revision 13 separates session-level owner truth from connection-local
  * mutation authority, adds revision-conditional existing-Drive joins, and
  * gives terminal handoff an acknowledged client message.
+ * Revision 14 adds the `http-websocket` {@link IntegrationKind} member for Kimi
+ * Code's `kimi web` HTTP + WebSocket integration. A new member of an enumerated
+ * DTO field is a BREAKING read for any client that decodes it strictly, so the
+ * same revision gives the first-party client an `unknown` fallback member: an
+ * unrecognized future kind must degrade one roster row, never abort the whole
+ * roster decode. `/api/agents` is not revision-filtered, so a Kimi row reaches
+ * pre-14 clients unfiltered — which is exactly why broker registration of that
+ * adapter stays behind an explicit opt-in until every supported client has
+ * shipped the tolerant decoding.
  * The registry-derived {@link BROKER_CONTRACT_SURFACE_HASH} does not move for
- * the revision-10 additions: none adds a route, frame kind, message type or
- * error code, which is
+ * the revision-10 or revision-14 additions: none adds a route, frame kind,
+ * message type or error code, which is
  * exactly why the revision must: a structural DTO change is reviewable only if
- * it is numbered. All revision-5 through revision-12 additions are backward
- * compatible, so the client minimum does not move. Raise the minimum only
- * after every supported store client has crossed the corresponding revision.
+ * it is numbered. All revision-5 through revision-14 additions are backward
+ * compatible for a tolerant decoder, so the client minimum does not move. Raise
+ * the minimum only after every supported store client has crossed the
+ * corresponding revision.
  */
-export const BROKER_CONTRACT_REVISION = 13 as const;
+export const BROKER_CONTRACT_REVISION = 14 as const;
 export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 0 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 

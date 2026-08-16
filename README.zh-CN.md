@@ -66,6 +66,11 @@ Claude Code 的会话在接管之前保持只读。版本与安装方法见
 前台客户端可以加入同一个由 Broker 托管的 Codex 或 Pi Drive 会话，而不会再次启动原生 Resume。
 Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
 
+**实验性支持：** 源码贡献者可以试用暂定的
+[DeepSeek Harness](docs/supported_agents/dsh.md) 适配器。它连接到由操作者启动的 `dsh web`
+宿主，多个前台客户端可以共享对话记录和控制。该适配器默认关闭，安装后的 Broker 服务目前不会启用它；
+后台常驻订阅、模型选择、文件输入和部分消息显示仍待完善。
+
 ## 前置要求
 
 受支持的跨设备使用需要服务器与客户端设备安装 [Tailscale](https://tailscale.com/)，服务器还需要

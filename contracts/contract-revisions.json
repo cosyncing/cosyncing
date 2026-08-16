@@ -64,6 +64,13 @@
       "minimumClientRevision": 0,
       "clientMinimumBrokerRevision": 2,
       "change": "Session-level owner projection, socket-local mutation authority, revision-conditional cross-client Drive joins, and acknowledged terminal handoff."
+    },
+    {
+      "revision": 14,
+      "surfaceHash": "fnv1a32:095f3c3c",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "IntegrationKind gains http-websocket for Kimi Code, plus an unknown fallback member so a client degrades one unrecognized roster row instead of failing the whole roster decode."
     }
   ]
 }

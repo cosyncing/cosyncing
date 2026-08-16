@@ -22,9 +22,23 @@ enum IntegrationKind {
   @JsonValue('sdk-callback')
   sdkCallback,
 
+  /// Kimi Code: kimi web HTTP + WebSocket.
+  @JsonValue('http-websocket')
+  httpWebsocket,
+
   /// Raw PTY wrap (agentapi-style).
   @JsonValue('pty-floor')
   ptyFloor,
+
+  /// A kind this client build does not know.
+  ///
+  /// Never produced by the broker; it exists purely as the landing place for
+  /// `unknownEnumValue` on [AgentCapabilities.integrationKind]. Without it a
+  /// strict `$enumDecode` throws on the first unrecognized kind, and because
+  /// `/api/agents` is decoded as one list, that single row would abort the
+  /// WHOLE roster decode — a client would lose every agent because of one it
+  /// does not support. Degrading to this member costs one unusable row instead.
+  unknown,
 }
 
 /// Attach mode — how a client connects to a session.
@@ -89,6 +103,11 @@ class AgentCapabilities {
       _$AgentCapabilitiesFromJson(json);
 
   /// How the adapter talks to its underlying tool.
+  ///
+  /// Decodes tolerantly: a kind added after this client was built lands on
+  /// [IntegrationKind.unknown] instead of throwing, so one unsupported agent
+  /// costs its own row and not the entire roster.
+  @JsonKey(unknownEnumValue: IntegrationKind.unknown)
   final IntegrationKind integrationKind;
 
   /// Supported attach modes, best-first.

@@ -78,11 +78,26 @@ check('one overlap revision behind nudges the client without disabling control',
 // The literal is a deliberate tripwire, not a duplicate of the constant: every
 // revision bump must land here and re-argue that the new revision is additive
 // before the "previous-revision client stays writable" claim is renewed.
-// Revision 13 adds only additive owner, authority, capability, attach-reason,
-// and refusal fields. A released revision-12 client can ignore them and keeps
-// working unchanged, so the claim holds.
+// Revision 13 added only additive owner, authority, capability, attach-reason,
+// and refusal fields, which a released revision-12 client can ignore.
+//
+// Revision 14 is additive CONDITIONALLY, and the condition is what renews the
+// claim rather than the usual "new fields are ignorable" argument. It adds an
+// enumerated VALUE — `IntegrationKind: 'http-websocket'` — and a new value in a
+// closed enum is not ignorable: a revision-13 client that decodes roster rows
+// strictly throws on it, and because `/api/agents` decodes as one list, that
+// aborts the whole roster rather than one row. What keeps the claim true is
+// that the only producer of the new value, the Kimi adapter, is registered
+// behind an explicit default-off opt-in, so a default revision-14 broker never
+// emits it and a revision-13 client sees a byte-identical roster. Revision 14
+// also gives the first-party client the tolerant `unknown` fallback that makes
+// the value safe to serve.
+//
+// So the gate is load-bearing, not cosmetic: flipping Kimi registration on by
+// default BREAKS this claim for every client below revision 14, and that flip
+// must not happen until the supported-client floor has crossed it.
 check('an installed previous-revision client remains writable against the additive current broker',
-  BROKER_CONTRACT.revision === 13
+  BROKER_CONTRACT.revision === 14
     && clientBehind.status === 'client-behind'
     && !clientBehind.readOnly);
 check('one-revision overlap remains writable despite the older surface hash',

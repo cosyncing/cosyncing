@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "15acb4898aef1a6a55d7cdbd8ee42688a0f29d7e",
+  "acceptedBase": "bf7168850e1413896243d1318f411753943240d4",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -29,10 +29,25 @@
     "broker.draft-sync",
     "broker.draft-two-client",
     "broker.drive-restore",
+    "broker.dsh-attach-priming",
+    "broker.dsh-diagnosis",
+    "broker.dsh-drive",
+    "broker.dsh-mapping",
+    "broker.dsh-observe",
+    "broker.dsh-registration-gate",
+    "broker.dsh-transport",
     "broker.echo-correlation",
     "broker.fork-agent-owned",
     "broker.history-cache",
     "broker.history-paging",
+    "broker.kimi-attach-priming",
+    "broker.kimi-diagnosis",
+    "broker.kimi-drive",
+    "broker.kimi-drive-authority",
+    "broker.kimi-mapping",
+    "broker.kimi-observe",
+    "broker.kimi-read-only",
+    "broker.kimi-registration-gate",
     "broker.lifecycle",
     "broker.live-session-coherence",
     "broker.model-session-creation",
@@ -99,7 +114,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:a4e3ca92cd440e9cbb055716667fe9574c03860f15240eaf0bc5b4193054383f"
+      "fingerprint": "sha256:e28b02ee230953432979c0ab5f5fa8cf9f17e94bc3e380b65f63d510596b0eaf"
     },
     {
       "id": "capabilities",
@@ -336,6 +351,34 @@
       "fingerprint": "sha256:25eda2b533dd1d89c5229f411deb2726a1f5008f9bd7fcfc0d507edb3aa4891b"
     },
     {
+      "id": "dsh-attach-priming",
+      "fingerprint": "sha256:71705f66eb7bc96a27834cf2629f8e1fe35445729dace316f6aa180299327425"
+    },
+    {
+      "id": "dsh-diagnostics",
+      "fingerprint": "sha256:fd372dec8f47ff6b34403e45edeb5fa2d5301bd0989080db781e133d23a168bc"
+    },
+    {
+      "id": "dsh-drive",
+      "fingerprint": "sha256:f5d50a04dc227a068c91e09b7fa1ba3918815a59a83a60856a21d78777d027c4"
+    },
+    {
+      "id": "dsh-mapping",
+      "fingerprint": "sha256:a2d91ec60b9e4d46b8e40ef3fae479468abcc8b50d1fa357f183704927112595"
+    },
+    {
+      "id": "dsh-observe",
+      "fingerprint": "sha256:d9d182dd416e762e69957443c9a9add68a5a9364034850b8eaeb8619c807f719"
+    },
+    {
+      "id": "dsh-registration-gate",
+      "fingerprint": "sha256:f4980f2cd33fd7ea8b9818550d09fb4c4a9a963092f5d9cf523ffe4e3b20b986"
+    },
+    {
+      "id": "dsh-server",
+      "fingerprint": "sha256:d41544ba019e3f0f85ca7691d6795445372f281553de85da3f5af8d0f2d5d669"
+    },
+    {
       "id": "fork-agent-owned",
       "fingerprint": "sha256:d1e2226426efad1d7b6e50e1cd2abebb837501c068b1f724801042719f697af6"
     },
@@ -358,6 +401,38 @@
     {
       "id": "history-refusal-wire",
       "fingerprint": "sha256:2678bbefabcad20253e14acf538e384b0320610e47678573ef92b39e5fde735a"
+    },
+    {
+      "id": "kimi-attach-priming",
+      "fingerprint": "sha256:86c3114e2bae574b51f07870b7af5956619829dc7ebc232ae3cf16d64f605e11"
+    },
+    {
+      "id": "kimi-diagnostics",
+      "fingerprint": "sha256:d44d7eec1d9ab92a3d02083425a1f8ae8272d6b9e6dbde429e7febcc76a150cb"
+    },
+    {
+      "id": "kimi-drive",
+      "fingerprint": "sha256:dcc528a5e5b178f88bb604b331c0d6d550a92065f292b86ba859edb798d98812"
+    },
+    {
+      "id": "kimi-drive-authority",
+      "fingerprint": "sha256:db4f71338ff644e6317b945b005567cd491d83f5c50d1cff75ab767dc2dab7a4"
+    },
+    {
+      "id": "kimi-mapping",
+      "fingerprint": "sha256:e52427652bbd2be1b84c71dc35fe60630b364a6184df2340c8911996d73b6dba"
+    },
+    {
+      "id": "kimi-observe",
+      "fingerprint": "sha256:36d6e8fce7b990dfd096d8a290894991be4376a0116cc8f569338921864cd67a"
+    },
+    {
+      "id": "kimi-registration-gate",
+      "fingerprint": "sha256:f653313cc3b36d70f008b961f7aebc693c090ae76fe4aea5804439ccf0a09d05"
+    },
+    {
+      "id": "kimi-server",
+      "fingerprint": "sha256:eaa816c11054b4c5819687c896b62b815eba1e72c78eb8987de32c85f0772e53"
     },
     {
       "id": "lifecycle",

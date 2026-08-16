@@ -226,6 +226,131 @@ void main() {
     });
 
     test(
+      'new-session live instruction is foreground-only and consumed once',
+      () async {
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberLive(fakeControllerBrokerScope(), key);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        expect(fakeConnection.connectCount, 1);
+        expect(fakeConnection.reattachModes, isEmpty);
+
+        await controller.promoteBackgroundObserveToInteractive();
+        expect(fakeConnection.reattachModes, ['live']);
+        expect(fakeConnection.reattachReasons, [null]);
+        expect(
+          container
+              .read(createdSessionAttachIntentsProvider)
+              .takeMode(fakeControllerBrokerScope(), key),
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'fresh live roster row requests live only for interactive attach',
+      () async {
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Live owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.reattachModes, ['live']);
+        expect(fakeConnection.reattachReasons, [null]);
+      },
+    );
+
+    test('fresh live roster row cannot arm a background attach', () async {
+      container.read(sessionListControllerProvider);
+      fakeSessionListController.setSessions(const [
+        SessionInfo(
+          id: 'session-1',
+          tool: 'claude',
+          title: 'Live owner',
+          status: SessionStatus.idle,
+          attachMode: AttachMode.live,
+        ),
+      ]);
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+
+      await controller.attach(
+        intent: SessionDetailAttachIntent.backgroundObserve,
+      );
+      expect(fakeConnection.connectCount, 1);
+      expect(fakeConnection.reattachModes, isEmpty);
+
+      await controller.promoteBackgroundObserveToInteractive();
+      expect(fakeConnection.reattachModes, ['live']);
+    });
+
+    test('live demotion disarms reconnect authority', () async {
+      container
+          .read(createdSessionAttachIntentsProvider)
+          .rememberLive(fakeControllerBrokerScope(), key);
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+
+      fakeConnection.emitSessionControl(
+        const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        },
+        authority: const SessionConnectionAuthority(
+          canMutate: true,
+          prompt: SessionPromptAuthority.full,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.disarmDriveAuthorityCount, 0);
+
+      fakeConnection.emitSessionControl(
+        const {
+          'drive': {'state': 'observing', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        },
+        authority: const SessionConnectionAuthority(
+          canMutate: false,
+          prompt: SessionPromptAuthority.none,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.disarmDriveAuthorityCount, 1);
+    });
+
+    test(
       'new-session Connecting phase establishes Drive before handoff completes',
       () async {
         container

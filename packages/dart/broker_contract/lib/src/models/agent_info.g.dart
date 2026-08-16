@@ -11,6 +11,7 @@ AgentCapabilities _$AgentCapabilitiesFromJson(Map<String, dynamic> json) =>
       integrationKind: $enumDecode(
         _$IntegrationKindEnumMap,
         json['integrationKind'],
+        unknownValue: IntegrationKind.unknown,
       ),
       attachModes: (json['attachModes'] as List<dynamic>)
           .map((e) => $enumDecode(_$AttachModeEnumMap, e))
@@ -52,7 +53,9 @@ const _$IntegrationKindEnumMap = {
   IntegrationKind.jsonrpcStdio: 'jsonrpc-stdio',
   IntegrationKind.acpStdio: 'acp-stdio',
   IntegrationKind.sdkCallback: 'sdk-callback',
+  IntegrationKind.httpWebsocket: 'http-websocket',
   IntegrationKind.ptyFloor: 'pty-floor',
+  IntegrationKind.unknown: 'unknown',
 };
 
 const _$AttachModeEnumMap = {

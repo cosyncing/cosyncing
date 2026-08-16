@@ -188,6 +188,8 @@ function fakeContext(options: FakeContextOptions = {}): SetupDiagnosisContext {
     runReadOnly: options.runReadOnly ?? (async () => ({ status: 'ok', stdout: '', stderr: '' })),
     fetchJson: options.fetchJson ?? (async () => ({ status: 'unreachable' })),
     probeTcp: options.probeTcp ?? (async () => 'closed'),
+    listDirectory: () => ({ ok: false, reason: 'missing' } as const),
+    processAlive: () => false,
     displayPath: (path) => displayed(path, homeDir),
   };
 }
@@ -239,6 +241,8 @@ function makeFixtureContext(root: string, agent: MatrixAgent, version: string): 
     // Version fixtures must never depend on a developer's live servers or port allocation.
     fetchJson: async () => ({ status: 'unreachable' }),
     probeTcp: async () => 'closed',
+    listDirectory: () => ({ ok: false, reason: 'missing' } as const),
+    processAlive: () => false,
   };
 }
 

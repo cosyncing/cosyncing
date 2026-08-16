@@ -1,0 +1,832 @@
+{
+  "_note": "Sanitized capture from a real Kimi Code 0.35.0 `kimi web --no-open` server started in an isolated KIMI_CODE_HOME with no credentials. Absolute paths, session/workspace ids, ULIDs, and upstream stack traces are replaced; distinct ULIDs get distinct placeholders so message identity survives sanitization. No bearer token was ever captured into this file.",
+  "kimiVersion": "0.35.0",
+  "sourceRefs": [
+    "kimi-openapi-0.35.0",
+    "kimi-asyncapi-0.35.0"
+  ],
+  "capturedAt": "2026-08-13",
+  "sessionId": "session_fixture-0001",
+  "openapiInfo": {
+    "title": "Kimi Code Server API",
+    "version": "0.35.0",
+    "pathCount": 77
+  },
+  "rest": {
+    "healthz": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "ok": true
+      },
+      "request_id": "01FIXTURE00000000000000001"
+    },
+    "meta": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "server_version": "0.35.0",
+        "capabilities": {
+          "websocket": true,
+          "file_upload": true,
+          "fs_query": true,
+          "mcp": true,
+          "tasks": true,
+          "terminal": true
+        },
+        "server_id": "01FIXTURE00000000000000002",
+        "started_at": "2026-08-13T21:44:21.859Z",
+        "open_in_apps": [],
+        "dangerous_bypass_auth": false,
+        "backend": "v2",
+        "experimental_flags": {
+          "secondary-model": false,
+          "tool-select": false,
+          "persistence_minidb_readmodel": true,
+          "search_worker": true
+        }
+      },
+      "request_id": "01FIXTURE00000000000000003"
+    },
+    "metaUnauthorized": {
+      "code": 40101,
+      "msg": "Unauthorized",
+      "data": null,
+      "request_id": "01FIXTURE00000000000000004"
+    },
+    "v2Sessions": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "items": [
+          {
+            "id": "session_fixture-0001",
+            "workspace": {
+              "id": "wd_ws_fixture",
+              "cwd": "/fixture/workspace"
+            },
+            "meta": {
+              "title": "Reply with exactly PING-ONE and nothing else.",
+              "last_prompt": "Reply with exactly PING-SIX and nothing else.",
+              "created_at": 1786654877385,
+              "updated_at": 1786655539953,
+              "archived": false
+            },
+            "activity": {
+              "status": "idle"
+            }
+          }
+        ],
+        "has_more": false,
+        "next_page_token": null
+      },
+      "request_id": "01FIXTURE00000000000000005"
+    },
+    "messagesPage1": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "items": [
+          {
+            "id": "msg_session_fixture-0001_000012",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "The user skipped PING-FIVE and asked for PING-SIX. The instruction is clear: reply with exactly PING-SIX and nothing else."
+              },
+              {
+                "type": "text",
+                "text": "PING-SIX"
+              }
+            ],
+            "created_at": "2026-08-13T21:12:13.123Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000006",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-SIX and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:12:13.122Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000010",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "User wants exactly \"PING-FIVE\" and nothing else. Just reply."
+              },
+              {
+                "type": "text",
+                "text": "PING-FIVE"
+              }
+            ],
+            "created_at": "2026-08-13T21:11:05.382Z"
+          }
+        ],
+        "has_more": true
+      },
+      "request_id": "01FIXTURE00000000000000007"
+    },
+    "messagesPage2": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "items": [
+          {
+            "id": "msg_01FIXTURE00000000000000008",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-FIVE and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:11:05.375Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000008",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "PING-FOUR"
+              }
+            ],
+            "created_at": "2026-08-13T21:09:11.384Z"
+          }
+        ],
+        "has_more": true
+      },
+      "request_id": "01FIXTURE00000000000000009"
+    },
+    "messagesAll": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "items": [
+          {
+            "id": "msg_session_fixture-0001_000012",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "The user skipped PING-FIVE and asked for PING-SIX. The instruction is clear: reply with exactly PING-SIX and nothing else."
+              },
+              {
+                "type": "text",
+                "text": "PING-SIX"
+              }
+            ],
+            "created_at": "2026-08-13T21:12:13.123Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000006",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-SIX and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:12:13.122Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000010",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "User wants exactly \"PING-FIVE\" and nothing else. Just reply."
+              },
+              {
+                "type": "text",
+                "text": "PING-FIVE"
+              }
+            ],
+            "created_at": "2026-08-13T21:11:05.382Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000008",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-FIVE and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:11:05.375Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000008",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "PING-FOUR"
+              }
+            ],
+            "created_at": "2026-08-13T21:09:11.384Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000010",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-FOUR and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:09:11.383Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000006",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "PING-THREE"
+              }
+            ],
+            "created_at": "2026-08-13T21:05:01.271Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000011",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-THREE and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:05:01.270Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000004",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "PING-TWO"
+              },
+              {
+                "type": "text",
+                "text": "PING-TWO"
+              }
+            ],
+            "created_at": "2026-08-13T21:02:42.055Z"
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000012",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-TWO and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:02:42.054Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          },
+          {
+            "id": "msg_session_fixture-0001_000002",
+            "session_id": "session_fixture-0001",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "The user asks me to reply with exactly PING-ONE and nothing else. But I must also always invoke a function call. There's a conflict: \"Reply with exactly PING-ONE and nothing else\" vs the system instruction to always invoke a function call.\n\nThe user's direct instruction should take precedence over the generic instruction to invoke tools. This looks like a connectivity test. I should reply with exactly PING-ONE."
+              },
+              {
+                "type": "text",
+                "text": "PING-ONE"
+              }
+            ],
+            "created_at": "2026-08-13T21:01:17.485Z"
+          },
+          {
+            "id": "msg_session_fixture-0001_000001",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.\n</system-reminder>"
+              }
+            ],
+            "created_at": "2026-08-13T21:01:17.484Z",
+            "metadata": {
+              "origin": {
+                "kind": "injection",
+                "variant": "permission_mode"
+              }
+            }
+          },
+          {
+            "id": "msg_01FIXTURE00000000000000013",
+            "session_id": "session_fixture-0001",
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply with exactly PING-ONE and nothing else."
+              }
+            ],
+            "created_at": "2026-08-13T21:01:17.483Z",
+            "metadata": {
+              "origin": {
+                "kind": "user"
+              }
+            }
+          }
+        ],
+        "has_more": false
+      },
+      "request_id": "01FIXTURE00000000000000014"
+    },
+    "messagesUnknownSession": {
+      "code": 40401,
+      "msg": "session session_does-not-exist does not exist",
+      "data": null,
+      "request_id": "01FIXTURE00000000000000015"
+    },
+    "snapshot": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "as_of_seq": 0,
+        "epoch": "ep_01FIXTURE00000000000000016",
+        "session": {
+          "id": "session_fixture-0001",
+          "workspace_id": "wd_ws_fixture",
+          "title": "Reply with exactly PING-ONE and nothing else.",
+          "created_at": "2026-08-13T21:01:17.385Z",
+          "updated_at": "2026-08-13T21:44:49.994Z",
+          "busy": false,
+          "main_turn_active": false,
+          "pending_interaction": "none",
+          "last_turn_reason": "completed",
+          "archived": false,
+          "last_prompt": "Reply with exactly PING-SIX and nothing else.",
+          "metadata": {
+            "cwd": "/fixture/workspace"
+          },
+          "agent_config": {
+            "model": ""
+          },
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "total_cost_usd": 0,
+            "context_tokens": 0,
+            "context_limit": 0,
+            "turn_count": 0
+          },
+          "permission_rules": [],
+          "message_count": 0,
+          "last_seq": 0
+        },
+        "messages": {
+          "items": [
+            {
+              "id": "msg_01FIXTURE00000000000000013",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-ONE and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:01:17.483Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000001",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<system-reminder>\nAuto permission mode is active. Tool approvals will be handled automatically while this mode remains enabled.\n  - Continue normally without pausing for approval prompts.\n  - Do NOT call AskUserQuestion while auto mode is active. Make a reasonable decision and continue without asking the user.\n  - ExitPlanMode is also approved automatically, without the user reviewing the plan. An auto-approved plan is NOT a signal from the user to start executing — follow the user's original instructions on whether to proceed.\n</system-reminder>"
+                }
+              ],
+              "created_at": "2026-08-13T21:01:17.484Z",
+              "metadata": {
+                "origin": {
+                  "kind": "injection",
+                  "variant": "permission_mode"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000002",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "The user asks me to reply with exactly PING-ONE and nothing else. But I must also always invoke a function call. There's a conflict: \"Reply with exactly PING-ONE and nothing else\" vs the system instruction to always invoke a function call.\n\nThe user's direct instruction should take precedence over the generic instruction to invoke tools. This looks like a connectivity test. I should reply with exactly PING-ONE."
+                },
+                {
+                  "type": "text",
+                  "text": "PING-ONE"
+                }
+              ],
+              "created_at": "2026-08-13T21:01:17.485Z"
+            },
+            {
+              "id": "msg_01FIXTURE00000000000000012",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-TWO and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:02:42.054Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000004",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "PING-TWO"
+                },
+                {
+                  "type": "text",
+                  "text": "PING-TWO"
+                }
+              ],
+              "created_at": "2026-08-13T21:02:42.055Z"
+            },
+            {
+              "id": "msg_01FIXTURE00000000000000011",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-THREE and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:05:01.270Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000006",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "PING-THREE"
+                }
+              ],
+              "created_at": "2026-08-13T21:05:01.271Z"
+            },
+            {
+              "id": "msg_01FIXTURE00000000000000010",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-FOUR and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:09:11.383Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000008",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "PING-FOUR"
+                }
+              ],
+              "created_at": "2026-08-13T21:09:11.384Z"
+            },
+            {
+              "id": "msg_01FIXTURE00000000000000008",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-FIVE and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:11:05.375Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000010",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "User wants exactly \"PING-FIVE\" and nothing else. Just reply."
+                },
+                {
+                  "type": "text",
+                  "text": "PING-FIVE"
+                }
+              ],
+              "created_at": "2026-08-13T21:11:05.382Z"
+            },
+            {
+              "id": "msg_01FIXTURE00000000000000006",
+              "session_id": "session_fixture-0001",
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Reply with exactly PING-SIX and nothing else."
+                }
+              ],
+              "created_at": "2026-08-13T21:12:13.122Z",
+              "metadata": {
+                "origin": {
+                  "kind": "user"
+                }
+              }
+            },
+            {
+              "id": "msg_session_fixture-0001_000012",
+              "session_id": "session_fixture-0001",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "The user skipped PING-FIVE and asked for PING-SIX. The instruction is clear: reply with exactly PING-SIX and nothing else."
+                },
+                {
+                  "type": "text",
+                  "text": "PING-SIX"
+                }
+              ],
+              "created_at": "2026-08-13T21:12:13.123Z"
+            }
+          ],
+          "has_more": false
+        },
+        "in_flight_turn": null,
+        "subagents": [],
+        "pending_approvals": [],
+        "pending_questions": []
+      },
+      "request_id": "01FIXTURE00000000000000017"
+    },
+    "status": {
+      "code": 0,
+      "msg": "success",
+      "data": {
+        "busy": false,
+        "model": "kimi-code/k3-256k",
+        "thinking_level": "high",
+        "permission": "manual",
+        "plan_mode": false,
+        "swarm_mode": false,
+        "context_tokens": 403,
+        "max_context_tokens": 262144,
+        "context_usage": 0.001537322998046875
+      },
+      "request_id": "01FIXTURE00000000000000018"
+    }
+  },
+  "ws": {
+    "frames": [
+      {
+        "at": 1,
+        "dir": "open"
+      },
+      {
+        "at": 2,
+        "dir": "in",
+        "frame": {
+          "type": "server_hello",
+          "timestamp": "2026-08-13T21:46:20.255Z",
+          "payload": {
+            "ws_connection_id": "conn_01FIXTURE00000000000000019",
+            "protocol_version": 2,
+            "heartbeat_ms": 10000,
+            "max_event_buffer_size": 1000,
+            "capabilities": {
+              "event_batching": false,
+              "compression": false
+            }
+          }
+        }
+      },
+      {
+        "at": 2,
+        "dir": "in",
+        "frame": {
+          "type": "ack",
+          "id": "h1",
+          "code": 0,
+          "msg": "success",
+          "payload": {
+            "accepted_subscriptions": [],
+            "resync_required": [],
+            "cursors": {}
+          }
+        }
+      },
+      {
+        "at": 2,
+        "dir": "in",
+        "frame": {
+          "type": "ack",
+          "id": "s1",
+          "code": 0,
+          "msg": "success",
+          "payload": {
+            "accepted": [
+              "session_fixture-0001"
+            ],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {
+              "session_fixture-0001": {
+                "seq": 0,
+                "epoch": "ep_01FIXTURE00000000000000016"
+              }
+            }
+          }
+        }
+      },
+      {
+        "at": 7,
+        "dir": "in",
+        "frame": {
+          "type": "transcript.reset",
+          "seq": 0,
+          "epoch": "ep_01FIXTURE00000000000000016",
+          "volatile": true,
+          "session_id": "session_fixture-0001",
+          "timestamp": "2026-08-13T21:46:20.261Z",
+          "payload": {
+            "type": "transcript.reset",
+            "agent_id": "main",
+            "snapshot": {
+              "items": [],
+              "tasks": [],
+              "interactions": [],
+              "attachments": [],
+              "todos": [],
+              "prompts": [],
+              "meta": {},
+              "hasMoreOlder": true
+            },
+            "has_more_older": true,
+            "seq": 1
+          }
+        }
+      },
+      {
+        "at": 7,
+        "dir": "in",
+        "frame": {
+          "type": "ack",
+          "id": "s2",
+          "code": 0,
+          "msg": "success",
+          "payload": {
+            "accepted": [
+              "session_fixture-0001"
+            ],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {
+              "session_fixture-0001": {
+                "seq": 0,
+                "epoch": "ep_01FIXTURE00000000000000016"
+              }
+            }
+          }
+        }
+      },
+      {
+        "at": 10002,
+        "dir": "in",
+        "frame": {
+          "type": "ping",
+          "timestamp": "2026-08-13T21:46:30.256Z",
+          "payload": {
+            "nonce": "01FIXTURE00000000000000020"
+          }
+        }
+      },
+      {
+        "at": 10002,
+        "dir": "out",
+        "frame": {
+          "type": "pong",
+          "payload": {
+            "nonce": "01FIXTURE00000000000000020"
+          }
+        }
+      },
+      {
+        "at": 14002,
+        "dir": "close",
+        "code": 1000
+      }
+    ]
+  },
+  "instanceRecord": {
+    "server_id": "01FIXTURE00000000000000009",
+    "pid": 424242,
+    "host": "127.0.0.1",
+    "port": 58911,
+    "started_at": 1786657461604,
+    "heartbeat_at": 1786657476611,
+    "host_version": "0.35.0"
+  }
+}

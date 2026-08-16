@@ -424,6 +424,16 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     pi: 'Packaged in-session bridge when Pi is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
   };
+  // Setup advertises what the SERVICE IT INSTALLS will serve, and the durable
+  // service environment is a closed enumerated list that cannot carry
+  // COSYNCING_ENABLE_KIMI or COSYNCING_ENABLE_DSH (see
+  // brokerServiceEnvironmentEntries) — so a doctor report carrying a Kimi or
+  // dsh section (doctor describes the CURRENT, possibly foreground-enabled
+  // environment) must NOT surface here: setup would be advertising an agent the
+  // service it is about to install will not serve. This list stays closed —
+  // it is an allowlist, not a filter over the report — so a gated agent joins
+  // it only in the lifecycle round that persists its gate into the service
+  // environment. The registration-gate suites pin both omissions.
   return (['codex', 'opencode', 'pi', 'claude'] as const).map((id) => {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
     const binary = check(report, `${id}.binary`);

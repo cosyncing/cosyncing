@@ -173,25 +173,27 @@ extension _SessionDetailBootstrap on SessionDetailController {
       // provenance may authorize an automatic restore. Both are local facts —
       // the ownership decision itself is the broker's atomic reason-tagged
       // attach, so no roster or transcript is fetched here.
-      final driveReason = intent == SessionDetailAttachIntent.backgroundObserve
-          ? null
-          : await _interactiveDriveReason(source);
+      final attachRequest =
+          intent == SessionDetailAttachIntent.backgroundObserve
+          ? const _InteractiveAttachRequest()
+          : await _interactiveAttachRequest(source);
       if (!_isCurrentBootstrapAttempt(attempt) ||
           RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
         await _retireBootstrapAfterProfileChange(attempt);
         return;
       }
 
-      _requestedDriveReason = driveReason;
+      _requestedDriveReason = attachRequest.reason;
+      _liveAttachArmed = attachRequest.mode == 'live';
       state = state.copyWith(
         bootstrapState: state.bootstrapState.attachingSocket(
           attempt: attempt,
           hasCachedMessages: hasCachedMessages,
         ),
-        driveRestorePhase: driveReason == null
+        driveRestorePhase: attachRequest.reason == null
             ? state.driveRestorePhase
             : SessionDriveRestorePhase.restoring,
-        clearDriveRestoreConflict: driveReason != null,
+        clearDriveRestoreConflict: attachRequest.reason != null,
         clearError: true,
       );
       await _listen(connection, attempt);
@@ -201,12 +203,16 @@ extension _SessionDetailBootstrap on SessionDetailController {
         return;
       }
 
-      if (driveReason != null) {
+      if (attachRequest.mode != null) {
         // Restoring Drive is the same ownership boundary as an explicit Take
-        // over. Never let a retryable prompt from the previous owner replay
-        // into the restored owner (Claude would fork on that first send).
+        // over, and an explicit live attach also changes mutation authority.
+        // Never let a retryable prompt from the previous owner replay into the
+        // new owner (Claude would fork on that first send).
         await _retireRetryableOutboxForControlChange();
-        await connection.reattach(mode: 'resume', reason: driveReason);
+        await connection.reattach(
+          mode: attachRequest.mode,
+          reason: attachRequest.reason,
+        );
       } else if (existingConnection != null) {
         // Reset a reused connection to the bare Observe/shared-owner attach.
         // SessionConnection deliberately preserves its mode across network
@@ -412,10 +418,12 @@ extension _SessionDetailBootstrap on SessionDetailController {
       driveRestorePhase: SessionDriveRestorePhase.idle,
     );
     _requestedDriveReason = null;
+    _liveAttachArmed = false;
     _cancelInitialHistoryTimeout();
     _abortBootstrapActionRefresh(attempt: attempt);
     final connection = _connection;
     if (connection != null) {
+      connection.disarmDriveAuthority();
       _abandonBootstrapConnection(connection, attempt);
     }
   }

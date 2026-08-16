@@ -223,6 +223,9 @@ void main() {
         container
             .read(createdSessionAttachIntentsProvider)
             .rememberResume(scope, sessionKey);
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberLive(scope, sessionKey);
         // An unrelated profile's authority must survive the deletion.
         final otherProfile = BrokerProfile(
           id: 'other-broker',
@@ -299,6 +302,13 @@ void main() {
               .takeResume(scope, sessionKey),
           isFalse,
           reason: 'no one-shot Drive intent after delete → re-add',
+        );
+        expect(
+          container
+              .read(createdSessionAttachIntentsProvider)
+              .takeMode(scope, sessionKey),
+          isNull,
+          reason: 'no one-shot live intent after delete → re-add',
         );
         expect(
           await driveIntents.read(
