@@ -344,6 +344,20 @@ void main() {
         );
       });
 
+      test('includes readOnly query param when declared', () {
+        expect(
+          resolver.streamEndpoint('opencode', 'session-123', readOnly: true),
+          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?readOnly=1&$_identityQuery',
+        );
+      });
+
+      test('omits readOnly unless declared', () {
+        expect(
+          resolver.streamEndpoint('opencode', 'session-123'),
+          isNot(contains('readOnly')),
+        );
+      });
+
       test('includes reason query param only alongside mode=resume', () {
         expect(
           resolver.streamEndpoint(

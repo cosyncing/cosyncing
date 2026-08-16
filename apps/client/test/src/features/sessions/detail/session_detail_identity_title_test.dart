@@ -863,10 +863,19 @@ class _HeldSessionDetailConnection implements SessionDetailConnection {
   @override
   Future<void> close({bool reconnect = false}) async {}
 
+  bool requiredReadOnly = false;
+
+  @override
+  void requireReadOnly() => requiredReadOnly = true;
+
+  @override
+  bool get readOnly => requiredReadOnly;
+
   @override
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {}
 

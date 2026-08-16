@@ -83,6 +83,7 @@ class SessionControlView {
         info?.control,
         launchSurface: info?.launchSurface,
         sessionOwner: info?.sessionOwner,
+        attachMode: info?.attachMode,
       );
 
   /// Derives a detail view using broker-projected socket authority/action data.
@@ -90,12 +91,15 @@ class SessionControlView {
     required SessionInfo? info,
     required SessionConnectionAuthority? authority,
     required SessionJoinExistingAction? joinExisting,
+    bool socketReadOnly = false,
   }) => SessionControlView.fromControl(
     info?.control,
     launchSurface: info?.launchSurface,
     sessionOwner: info?.sessionOwner,
     authority: authority,
     joinExisting: joinExisting,
+    attachMode: info?.attachMode,
+    socketReadOnly: socketReadOnly,
   );
 
   /// Derives the complete Session Detail view from connection-qualified state.
@@ -104,6 +108,7 @@ class SessionControlView {
         info: state.sessionInfo,
         authority: state.connectionAuthority,
         joinExisting: state.joinExisting,
+        socketReadOnly: state.compatibilityReadOnly,
       );
 
   /// Derives the view from the raw [SessionControlState].
@@ -117,8 +122,16 @@ class SessionControlView {
     SessionOwnerProjection? sessionOwner,
     SessionConnectionAuthority? authority,
     SessionJoinExistingAction? joinExisting,
+    AttachMode? attachMode,
+    bool socketReadOnly = false,
   }) {
-    if (control == null) {
+    // An attach mode this contract revision does not know means the client
+    // cannot say what attaching to this session grants. It renders read-only
+    // immediately, without waiting for the broker's answer, so the window
+    // between connecting and the read-only re-attach landing is never a window
+    // where the composer is live. The broker enforcement is the authority; this
+    // is what makes the UI agree with it from the first frame.
+    if (control == null || attachMode == AttachMode.unknown) {
       return const SessionControlView(
         pill: SessionControlPill.unknown,
         action: SessionControlAction.disabled,
@@ -170,7 +183,17 @@ class SessionControlView {
       // Older brokers omit the additive terminal action. Preserve the
       // established Drive behavior in that case: copying the resume command
       // hands ownership back to the terminal.
-      action = terminalAction ?? SessionControlAction.handoff;
+      final resolved = terminalAction ?? SessionControlAction.handoff;
+      // `handoffAvailable: false` says this agent has no read-only session to
+      // hand back to — dsh serves one undifferentiated client contract and
+      // refuses every non-live attach — so the broker would refuse the call.
+      // Offering a button that can only fail is worse than offering none. An
+      // ABSENT field is an older broker, which must keep today's behavior.
+      action =
+          resolved == SessionControlAction.handoff &&
+              drive.handoffAvailable == false
+          ? SessionControlAction.none
+          : resolved;
     } else if (shareableDriverActive) {
       pill = SessionControlPill.driverActive;
       action = SessionControlAction.none;
@@ -179,7 +202,14 @@ class SessionControlView {
       action = terminalAction ?? SessionControlAction.join;
     } else if (drive.supported && drive.state == DriveState.observing) {
       pill = SessionControlPill.observing;
-      action = SessionControlAction.takeOver;
+      // The session is drivable, but not BY THIS SOCKET: a read-only attach
+      // renounced authority, and the read-only latch is monotone, so the
+      // re-attach a takeover would issue is still read-only and cannot
+      // succeed. The pill stays truthful about the session; the action does
+      // not offer a control that can only fail.
+      action = socketReadOnly
+          ? SessionControlAction.disabled
+          : SessionControlAction.takeOver;
     } else {
       pill = SessionControlPill.unavailable;
       action = SessionControlAction.disabled;
@@ -198,6 +228,7 @@ class SessionControlView {
       // availability is a capability, not ownership; it must never leave
       // Join as the only path (CR1).
       canTakeOver:
+          !socketReadOnly &&
           !syncActiveHere &&
           !shareableDriverActive &&
           drive.supported &&

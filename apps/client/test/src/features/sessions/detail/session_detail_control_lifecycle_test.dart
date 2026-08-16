@@ -279,6 +279,305 @@ void main() {
       },
     );
 
+    test(
+      'an unrecognized roster attach mode attaches read-only, not merely bare',
+      () async {
+        // The decode side is covered in broker_contract; this is the
+        // behavioural half. `AttachMode.unknown` is what a FUTURE broker mode
+        // decodes to, and the client cannot know what authority it carries.
+        //
+        // Omitting the mode is NOT sufficient and this is the test that says
+        // so: a bare attach is read-only for one adapter, refused by another,
+        // and full-authority for a third (opencode's shared serve is mutable
+        // however it was opened). So the client declares `readOnly` and the
+        // broker enforces it; asserting only the absent mode would lock in the
+        // weaker property.
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Future owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(
+          fakeConnection.requiredReadOnly,
+          isTrue,
+          reason: 'the declaration has to reach the broker to be enforced',
+        );
+        expect(
+          fakeConnection.reattachModes,
+          isEmpty,
+          reason: 'and it must not smuggle an unrecognized mode along with it',
+        );
+        expect(
+          fakeConnection.connectCount,
+          1,
+          reason:
+              'declared before connecting, so no mutable socket ever exists',
+        );
+      },
+    );
+
+    test(
+      'an unreadable attach mode dominates a pending create instruction',
+      () async {
+        // The two paths that carry the MOST authority were the two that used to
+        // skip the check, because both return before the roster is consulted.
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberLive(fakeControllerBrokerScope(), key);
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Future owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(
+          fakeConnection.reattachModes,
+          isEmpty,
+          reason: 'the create instruction must not become a live attach',
+        );
+        expect(
+          container
+              .read(createdSessionAttachIntentsProvider)
+              .takeMode(fakeControllerBrokerScope(), key),
+          'live',
+          reason: 'declining to act on the one-shot is not spending it',
+        );
+      },
+    );
+
+    test(
+      'an unreadable attach mode dominates a Drive restore',
+      () async {
+        container
+            .read(createdSessionAttachIntentsProvider)
+            .rememberResume(fakeControllerBrokerScope(), key);
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Future owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach();
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(
+          fakeConnection.reattachReasons,
+          isEmpty,
+          reason: 'no reason-tagged resume may ride an unreadable row',
+        );
+      },
+    );
+
+    test(
+      'an unreadable attach mode applies to a BACKGROUND attach too',
+      () async {
+        // A background attach asks for no authority, but it still opens a bare
+        // socket — and a bare socket is full-authority on some adapters.
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Future owner',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(fakeConnection.connectCount, 1);
+      },
+    );
+
+    test(
+      'a row that becomes unreadable DURING the restore lookup still attaches '
+      'read-only',
+      () async {
+        // The decision is taken before an async provenance read and used after
+        // it; a roster refresh inside that window used to dispatch resume with
+        // no declaration at all. The recheck sits immediately before dispatch,
+        // with nothing awaited in between.
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Readable for now',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+
+        final gate = fakeDriveIntentStore.holdNextRead();
+        final attaching = controller.attach();
+        await Future<void>.delayed(Duration.zero);
+
+        // The broker's answer changes while the lookup is parked.
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Now unreadable',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        gate.complete();
+        await attaching;
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(
+          fakeConnection.reattachModes,
+          isEmpty,
+          reason: 'the stale decision must not dispatch a resume attach',
+        );
+      },
+    );
+
+    test(
+      'a promote whose row becomes unreadable mid-flight declares read-only',
+      () async {
+        // Same race on the other dispatch path: a background attach promoted to
+        // interactive re-reads the roster around its own async lookup.
+        fakeDriveIntentStore.seedAppCreated('claude', 'session-1');
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Readable for now',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.observe,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+        expect(fakeConnection.requiredReadOnly, isFalse);
+
+        final gate = fakeDriveIntentStore.holdNextRead();
+        final promoting = controller.attach();
+        await Future<void>.delayed(Duration.zero);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Now unreadable',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        gate.complete();
+        await promoting;
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(
+          fakeConnection.reattachReadOnly,
+          contains(true),
+          reason: 'the promote must tell the broker, not just latch locally',
+        );
+      },
+    );
+
+    test(
+      'a row that becomes unreadable during OUTBOX RETIREMENT is caught too',
+      () async {
+        // The promote path rechecks before retiring the outbox, but retirement
+        // is itself an await — so the recheck that matters is the one after it,
+        // with nothing awaited before the dispatch.
+        container.read(sessionListControllerProvider);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Readable for now',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+          ),
+        ]);
+        keepSessionDetailAlive(container, key);
+        final controller = container.read(
+          sessionDetailControllerProvider(key).notifier,
+        );
+        await controller.attach(
+          intent: SessionDetailAttachIntent.backgroundObserve,
+        );
+
+        final gate = fakeOutboxRepository.holdNextRetryableLoad();
+        final promoting = controller.attach();
+        await Future<void>.delayed(Duration.zero);
+        fakeSessionListController.setSessions(const [
+          SessionInfo(
+            id: 'session-1',
+            tool: 'claude',
+            title: 'Now unreadable',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.unknown,
+          ),
+        ]);
+        gate.complete();
+        await promoting;
+
+        expect(fakeConnection.requiredReadOnly, isTrue);
+        expect(
+          fakeConnection.reattachModes,
+          isNot(contains('live')),
+          reason: 'the live attach decided before retirement must not dispatch',
+        );
+        expect(fakeConnection.reattachReadOnly, contains(true));
+      },
+    );
+
     test('fresh live roster row cannot arm a background attach', () async {
       container.read(sessionListControllerProvider);
       fakeSessionListController.setSessions(const [

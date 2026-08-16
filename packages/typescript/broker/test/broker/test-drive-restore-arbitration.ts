@@ -512,6 +512,90 @@ for await (const chunk of Bun.stdin.stream()) {
         && !handoffFrames.some((frame) => frame.kind === 'nack'),
       JSON.stringify(handoffFrames),
     );
+    // ── G3f: a socket that declares itself read-only is enforced as read-only ─
+    // Asked here, in the one window where this exact request DID produce a
+    // mutable driver (G3e above): same session, same daemon state, same
+    // `mode=resume&reason=takeover`. The only difference is the declaration, so
+    // a refusal cannot be blamed on the fixture having moved on.
+    //
+    // Omitting `mode` would not prove this. A bare attach is read-only for one
+    // adapter, refused by another, and full-authority for a third, so the
+    // client's silence cannot be the guarantee — the broker's enforcement is.
+    const resumeSpawnsBeforeReadOnly = resumeOwnerSpawnCount();
+    const readOnlyFrames = await new Promise<any[]>((resolve, reject) => {
+      const seen: any[] = [];
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=takeover&readOnly=1`,
+      );
+      let asked = false;
+      const timer = setTimeout(() => { ws.close(); resolve(seen); }, 15_000);
+      ws.onmessage = (event) => {
+        try {
+          const frame = JSON.parse(String(event.data));
+          seen.push(frame);
+          if (!asked && frame.kind === 'session') {
+            asked = true;
+            ws.send(JSON.stringify({ kind: 'prompt', text: 'this must be refused', clientMessageId: 'ro-1' }));
+          }
+        } catch {
+          /* ignore non-JSON frames */
+        }
+        if (seen.some((frame) => frame.kind === 'nack' && frame.clientMessageId === 'ro-1')) {
+          clearTimeout(timer);
+          ws.close();
+          resolve(seen);
+        }
+      };
+      ws.onerror = () => { clearTimeout(timer); ws.close(); reject(new Error('read-only websocket failed')); };
+    });
+    const readOnlySession = readOnlyFrames.find((frame) => frame.kind === 'session');
+    const readOnlyNack = readOnlyFrames.find((frame) => frame.kind === 'nack' && frame.clientMessageId === 'ro-1');
+    check('G3f a read-only socket is published without mutation authority',
+      readOnlySession?.authority?.canMutate === false && readOnlySession?.authority?.prompt === 'none',
+      JSON.stringify(readOnlySession?.authority));
+    check('G3f2 its prompt is refused at the broker boundary, not merely hidden in the UI',
+      !!readOnlyNack, JSON.stringify(readOnlyFrames.map((frame) => frame.kind)));
+    check('G3f3 the resume it asked for never spawned a Drive owner',
+      resumeOwnerSpawnCount() === resumeSpawnsBeforeReadOnly,
+      `${resumeSpawnsBeforeReadOnly} -> ${resumeOwnerSpawnCount()}`);
+    // The socket must not be offered controls it can never complete. The
+    // read-only latch is monotone on the client, so any re-attach a join or
+    // takeover issued would still be read-only — the offer could only fail.
+    check('G3f4 no join-existing action is published to a read-only socket',
+      readOnlyFrames.every((frame) => frame.kind !== 'session' || frame.joinExisting === undefined),
+      JSON.stringify(readOnlyFrames.find((frame) => frame.kind === 'session')?.joinExisting));
+    // Carried in the frame the client already reads, so it suppresses Take over
+    // and the composer without a new DTO field. The negotiated STATUS stays
+    // truthful: the contract is fine, it is this attach that renounced.
+    const readOnlyHello = readOnlyFrames.find((frame) => frame.kind === 'hello');
+    check('G3f5 the hello tells the client this socket is read-only, without claiming a contract mismatch',
+      readOnlyHello?.compatibility?.readOnly === true
+        && readOnlyHello?.compatibility?.status !== 'hard-incompatible'
+        && typeof readOnlyHello?.compatibility?.reason === 'string',
+      JSON.stringify(readOnlyHello?.compatibility));
+
+    // ── G3g: read-only DECLARED and genuinely incompatible at the same time ──
+    // Both can hold at once — an old client can also meet an attach mode it
+    // cannot read — and the incompatibility is the one the user can act on by
+    // updating. It must not be masked by the gentler declared-read-only
+    // wording, and the client must still be able to record it globally.
+    const bothFrames = await wsFrames(
+      `ws://127.0.0.1:${port}${streamPath}?token=${token}&readOnly=1`
+        + '&clientVersion=0.0.1&contractRevision=15&minimumBrokerRevision=999'
+        + '&contractSurfaceHash=fnv1a32:00000000',
+      (seen) => seen.some((frame) => frame.kind === 'session'),
+    );
+    const bothHello = bothFrames.find((frame) => frame.kind === 'hello');
+    const bothNotice = bothFrames.find((frame) => frame.kind === 'notice');
+    check('G3g the negotiated hard incompatibility survives the read-only declaration',
+      bothHello?.compatibility?.status === 'hard-incompatible'
+        && bothHello?.compatibility?.readOnly === true,
+      JSON.stringify(bothHello?.compatibility));
+    check('G3g2 the notice reports the incompatibility, not the milder declaration',
+      typeof bothNotice?.message === 'string'
+        && bothNotice.message.includes('incompatible'),
+      JSON.stringify(bothNotice?.message));
+
     daemon.configure({ ignoreMethods: ['initialize'] });
     writeCompetingOwner();
     const resumeSpawnsAfterHandoff = resumeOwnerSpawnCount();

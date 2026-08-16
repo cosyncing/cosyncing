@@ -115,6 +115,16 @@ check('one overlap revision behind nudges the client without disabling control',
 // `handoffAvailable` still offers handoff, absent `takeoverAvailable` still
 // falls back to `supported && observing`, absent `takeoverMode` still means
 // `resume`. So a pre-15 broker and a post-15 client agree with no negotiation.
+//
+// The revision carries one more additive thing that is not a DTO field: the
+// optional `readOnly=1` stream-query parameter, by which a client declares that
+// this socket must not be granted mutation authority. It is additive in the
+// same ordinary sense — no route is added, and a broker that does not know the
+// parameter ignores an unrecognized query key — and it is unreachable in the
+// mismatched direction rather than merely tolerated: an older client never
+// sends it, and an older broker never receives it, because a revision-15 client
+// sends it only on meeting an attach mode that no pre-15 broker can emit. It
+// therefore cannot change what any existing pairing does.
 check('an installed previous-revision client remains writable against the additive current broker',
   BROKER_CONTRACT.revision === 15
     && clientBehind.status === 'client-behind'

@@ -1407,6 +1407,15 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * `unknown` {@link AttachMode} member: an unrecognized future mode must degrade
  * to read-only, never abort the decode, and must never be echoed back into a
  * reconnect the client cannot reason about.
+ * Revision 15 also adds ONE optional stream-query parameter, `readOnly=1`, with
+ * which a client declares that this socket must not be granted mutation
+ * authority. It exists because degrading the decode is not by itself read-only
+ * behavior: a bare attach is read-only for one adapter, refused by another, and
+ * full-authority for a third, so only the broker can make "I cannot interpret
+ * this mode" mean the same thing everywhere. It is compatible in both
+ * directions without negotiation — an older client simply never sends it, and
+ * an older broker never receives it, because a revision-15 client sends it only
+ * on encountering an attach mode that no pre-15 broker can emit.
  * The registry-derived {@link BROKER_CONTRACT_SURFACE_HASH} does not move for
  * the revision-10, revision-14 or revision-15 additions: none adds a route,
  * frame kind, message type or error code, which is

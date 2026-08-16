@@ -939,6 +939,45 @@ await parkedMutableCase('C22', 'resume', 'live');
   await hub.dispose();
 }
 
+// ── C23: a read-only socket is not granted the authority its connection carries ──────────────────
+// The backend here is deliberately one whose BARE attach is mutable — the
+// opencode shared-serve shape, where attaching IS driving because the server is
+// the single writer. That is what makes "the client omitted `mode`" too weak a
+// guarantee: omission is read-only on one adapter, refused by another, and
+// full-authority here. A socket that declared it cannot reason about this
+// session's attach mode must not be handed that authority anyway.
+{
+  const registry = new AgentRegistry();
+  registry.register({
+    id: 'pi', displayName: 'Pi', capabilities: { attachModes: ['observe', 'live'] } as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    // No mode requested, and the connection still drives.
+    attach: async () => fakeConn(controlledInfo('pi', 's23-readonly', 'live', 'driving')),
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const bare = await hub.ensure('pi', 's23-readonly');
+  check('C23.1 the bare attach really is a mutable connection',
+    activeOwnerState(bare.conn.info) === 'drive');
+
+  const normal = hub.sessionDetailFrame(bare, true);
+  check('C23.2 an ordinary socket on it is granted mutation',
+    normal.authority?.canMutate === true && normal.authority?.prompt === 'full',
+    JSON.stringify(normal.authority));
+
+  const readOnly = hub.sessionDetailFrame(bare, true, bare.conn.info, true);
+  check('C23.3 a read-only socket is published as unable to mutate',
+    readOnly.authority?.canMutate === false && readOnly.authority?.prompt === 'none',
+    JSON.stringify(readOnly.authority));
+  check('C23.4 the underlying connection is untouched — this is SOCKET-local',
+    activeOwnerState(bare.conn.info) === 'drive'
+      && hub.sessionDetailFrame(bare, true).authority?.canMutate === true);
+  check('C23.5 the session row itself is not rewritten',
+    readOnly.info.control?.drive.state === 'driving',
+    JSON.stringify(readOnly.info.control?.drive));
+  await hub.dispose();
+}
+
 // ── C13: getConn keeps its own resolution, including the bare fallback ───────────────────────────
 // The handoff resolver is deliberately a SEPARATE helper. getConn answers a
 // different question — "whichever connection is live, for file delivery" — and

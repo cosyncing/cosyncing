@@ -2072,12 +2072,21 @@ class _BlockingHistoryPageConnection
     reconnect: reconnect,
   );
 
+  bool requiredReadOnly = false;
+
+  @override
+  void requireReadOnly() => requiredReadOnly = true;
+
+  @override
+  bool get readOnly => requiredReadOnly;
+
   @override
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
-  }) => connection.reattach(mode: mode, reason: reason);
+  }) => connection.reattach(mode: mode, reason: reason, readOnly: readOnly);
 
   @override
   void disarmDriveAuthority() => connection.disarmDriveAuthority();

@@ -554,6 +554,18 @@ function typesOf(messages: Array<{ type: string }>): string {
       && typeof session.control?.terminalSync.reason === 'string',
     JSON.stringify(session.control?.terminalSync),
   );
+  // Declared on the row, not left for the client to infer from `attachModes`.
+  // dsh advertises `live` as its only attach mode and refuses observe, so there
+  // is no read-only session for terminal handoff to leave attached — the broker
+  // refuses the call, and a client that offered the control anyway would be
+  // offering a guaranteed failure. Asserted on BOTH postures because a host
+  // going unreachable must not accidentally re-enable it.
+  check(
+    'every dsh row states that terminal handoff is unavailable',
+    session.control?.drive.handoffAvailable === false
+      && mapDshSession(summary, { driveSupported: false })!.control?.drive.handoffAvailable === false,
+    JSON.stringify(session.control?.drive),
+  );
   check('a row with no sessionId is refused', mapDshSession({}) === undefined);
   check(
     'a running session reports working, and an unreachable host drops DRIVE, never to a mislabeled observe',

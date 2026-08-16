@@ -20,6 +20,7 @@ void main() {
       String artifactMode = 'reference',
       String? mode,
       String? reason,
+      bool readOnly = false,
       int initialHistory = 100,
     }) {
       final resolver = EndpointResolver(baseUrl: baseUrl);
@@ -30,6 +31,7 @@ void main() {
         artifactMode: artifactMode,
         mode: mode,
         reason: reason,
+        readOnly: readOnly,
         initialHistory: initialHistory,
         adapterFactory: (url) {
           streamUrl = url;
@@ -922,6 +924,56 @@ void main() {
           );
         },
       );
+    });
+
+    group('read-only declaration', () {
+      // The declaration must survive the transport, not just the first attach.
+      // An automatic reconnect that silently dropped it would hand the socket
+      // back full authority at exactly the moment nobody is watching — and
+      // unlike `mode`/`reason`, there is no refusal frame that would reveal it.
+      test('rides every reconnect, not only the first attach', () async {
+        final connection = createConnection(readOnly: true);
+        await connection.connect();
+        await flush();
+        expect(streamUrl, contains('readOnly=1'));
+
+        streamUrl = '';
+        adapter.simulateDisconnect();
+        await flush();
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+        await flush();
+
+        expect(
+          streamUrl,
+          contains('readOnly=1'),
+          reason: 'the automatic reconnect must keep declaring it',
+        );
+        await connection.dispose();
+      });
+
+      test('is monotone — a later reattach cannot clear it', () async {
+        final connection = createConnection(readOnly: true);
+        await connection.connect();
+        await flush();
+
+        await connection.reattach();
+        await flush();
+        expect(
+          streamUrl,
+          contains('readOnly=1'),
+          reason: 'a re-attach that asks for nothing must not grant anything',
+        );
+        expect(connection.readOnly, isTrue);
+        await connection.dispose();
+      });
+
+      test('is absent unless asked for', () async {
+        final connection = createConnection();
+        await connection.connect();
+        await flush();
+        expect(streamUrl, isNot(contains('readOnly')));
+        await connection.dispose();
+      });
     });
 
     group('generation suppression', () {

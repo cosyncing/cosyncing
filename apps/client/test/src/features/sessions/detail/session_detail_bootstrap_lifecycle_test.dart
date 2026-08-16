@@ -81,6 +81,7 @@ class HeldReattachSessionDetailConnection extends FakeSessionDetailConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     reattachModes.add(mode);

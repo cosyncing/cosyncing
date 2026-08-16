@@ -1238,9 +1238,18 @@ export class Hub {
     managed: ManagedConn,
     allowJoinAction: boolean,
     sourceInfo: SessionInfo = managed.conn.info,
+    readOnly = false,
   ): Extract<WireEvent, { kind: 'session' }> {
     const info = this.projectSessionInfo(sourceInfo);
-    const authority = sessionConnectionAuthority(managed.conn.info);
+    // `readOnly` is the SOCKET's own declaration, so it overrides what the
+    // connection would otherwise grant. The connection can legitimately be a
+    // driving one — an opencode shared-serve attach is mutable however it was
+    // opened — and publishing its authority to a socket that asked not to have
+    // any is precisely the fail-open: the client would render a live composer
+    // for a session it told the broker it could not reason about.
+    const authority = readOnly
+      ? { canMutate: false, prompt: 'none' } as const
+      : sessionConnectionAuthority(managed.conn.info);
     const resolution = this.reconcileSessionOwner(info.tool, info.id, info);
     const backend = this.registry.get(info.tool);
     const joinable =

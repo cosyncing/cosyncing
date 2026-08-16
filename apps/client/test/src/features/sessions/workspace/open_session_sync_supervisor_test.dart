@@ -1335,6 +1335,7 @@ final class _CancellableAttachConnection extends FakeSessionDetailConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) {
     reattachModes.add(mode);

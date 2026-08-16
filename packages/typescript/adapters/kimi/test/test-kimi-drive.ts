@@ -421,9 +421,11 @@ const threw = async (work: () => Promise<unknown>): Promise<Error | undefined> =
  *
  *  - a DISTINCT socket, since the retired one stays in the array; and
  *  - one whose `open` handler has actually RUN, proven by `client_hello` — the
- *    first frame `openSocket` sends. A constructed-but-unopened socket has no
- *    listeners wired to the connection yet, and `observe.ts` silently drops
- *    frames delivered to a socket that is not `this.socket`.
+ *    first frame `openSocket` sends. Listeners are installed synchronously at
+ *    construction, so their presence proves nothing; `client_hello` is what
+ *    proves the open handler ran and this socket became the CURRENT usable
+ *    stream. `observe.ts` silently drops frames delivered to any socket that is
+ *    not `this.socket`.
  *
  * A fixed sleep cannot express this. Reopening is deferred to the poll tick,
  * and `restoreSocket` re-resolves the whole generation over HTTP — a real
@@ -578,6 +580,16 @@ try {
         && !!observeMutation,
       `${JSON.stringify(observing.info.control)} threw=${!!observeMutation}`);
     await observing.close();
+
+    // Kimi is the converse of dsh: it serves a real read-only observe
+    // connection (proven directly above), so handing Drive back to the terminal
+    // leaves the session attached rather than stranded. The declaration and the
+    // capability have to agree — a row claiming handoff on an agent the broker
+    // would refuse is exactly the mismatch this field exists to prevent.
+    check('a driving kimi row declares terminal handoff available, matching its observe capability',
+      live.info.control?.drive.handoffAvailable === true
+        && adapter.capabilities.attachModes?.includes('observe') === true,
+      `${JSON.stringify(live.info.control?.drive)} modes=${JSON.stringify(adapter.capabilities.attachModes)}`);
 
     const conflict = await threw(() => adapter.attach(FOREIGN_ID, 'live'));
     check('a foreign session refuses a live attach with the typed conflict',
