@@ -21,7 +21,7 @@
  */
 export {};
 import { KimiAdapter } from '../../../adapters/kimi/src/index.ts';
-import type { KimiInstanceScan } from '../../../adapters/kimi/src/server.ts';
+import { decodeKimiInstanceRecord, type KimiInstanceScan } from '../../../adapters/kimi/src/server.ts';
 import type { KimiObserveConnection, KimiSocketLike } from '../../../adapters/kimi/src/observe.ts';
 import { ManagedConn, type WireEvent } from '../../src/sessions/hub.ts';
 
@@ -31,6 +31,7 @@ const FIXTURE = await Bun.file(
   kimiVersion: string;
   sessionId: string;
   rest: Record<string, { code: number; msg: string; data: unknown }>;
+  instanceRecord: Record<string, unknown>;
 };
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -74,12 +75,17 @@ const server = Bun.serve({
 
 const listenPort = server.port ?? 0;
 const baseUrl = `http://127.0.0.1:${listenPort}`;
+// The registry record AS CAPTURED: its `server_id` is upstream's own and
+// differs from the one the captured `/api/v1/meta` echoes. Only the address is
+// redirected at the fake server.
+const FIXTURE_RECORD = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
 const scan: KimiInstanceScan = {
   live: [{
     baseUrl,
     port: listenPort,
-    serverId: (FIXTURE.rest.meta!.data as { server_id: string }).server_id,
-    hostVersion: FIXTURE.kimiVersion,
+    serverId: FIXTURE_RECORD.serverId,
+    hostVersion: FIXTURE_RECORD.hostVersion,
+    startedAt: FIXTURE_RECORD.startedAt,
   }],
   stale: 0,
   invalid: 0,

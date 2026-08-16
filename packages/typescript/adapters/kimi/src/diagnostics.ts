@@ -23,8 +23,11 @@ import {
 import {
   kimiServerTokenPath,
   resolveKimiHome,
+  bindKimiServerIdentity,
+  decodeKimiServerMeta,
   KIMI_DEFAULT_PORT,
   KIMI_INSTANCE_SCAN_MAX_FILES,
+  type KimiIdentityBinding,
   type KimiInstanceScan,
 } from './server.ts';
 
@@ -228,65 +231,92 @@ export async function diagnoseKimiSetup(
     `${instance.baseUrl}/api/v1/meta`,
     options.token ? { authorization: `Bearer ${options.token}` } : undefined,
   );
-  const payload = (meta.json as { data?: Record<string, unknown> } | undefined)?.data;
-  const serverVersion = typeof payload?.server_version === 'string' ? payload.server_version : undefined;
-  const websocket = (payload?.capabilities as { websocket?: unknown } | undefined)?.websocket === true;
-  // Doctor must apply the SAME identity gate the adapter does, or it would
-  // report a healthy, supported Kimi for a server the adapter then refuses to
-  // read. An absent or non-string `server_id` fails: unverifiable is not
-  // verified. (Same residuals as the adapter — the token is already sent by this
-  // point, and the check is not atomic with any later use.)
-  const reportedServerId = payload?.server_id;
-  if (meta.status === 'ok'
-      && (typeof reportedServerId !== 'string' || reportedServerId !== instance.serverId)) {
+  const payload = (meta.json as { data?: unknown } | undefined)?.data;
+  if (meta.status !== 'ok') {
     checks.push({
       id: 'kimi.server',
       status: 'fail',
-      detailCode: 'server-identity-mismatch',
-      summary: 'The Kimi server on this port is not the one its registry record describes.',
-      evidence: { url: instance.baseUrl },
-      remediation: {
-        kind: 'manual',
-        message: 'Stop the process on that port, or restart `kimi web --no-open` so the registry matches the running server.',
-      },
-    });
-    return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
-  }
-  if (meta.status === 'ok' && serverVersion && websocket) {
-    checks.push({
-      id: 'kimi.server',
-      status: 'pass',
-      detailCode: 'server-reachable',
-      summary: 'The Kimi local server is reachable and advertises the WebSocket surface.',
-      evidence: { url: instance.baseUrl, serverVersion },
-    });
-    if (payload?.dangerous_bypass_auth === true) {
-      checks.push({
-        id: 'kimi.server-auth',
-        status: 'fail',
-        detailCode: 'server-auth-bypassed',
-        summary: 'The running Kimi server has its bearer-token gate disabled.',
-        evidence: { url: instance.baseUrl },
-        remediation: {
-          kind: 'manual',
-          message: 'Restart the Kimi server without `--dangerous-bypass-auth`.',
-        },
-      });
-    }
-  } else {
-    checks.push({
-      id: 'kimi.server',
-      status: 'fail',
-      detailCode: meta.status === 'ok' ? 'server-capabilities-missing' : 'server-unauthorized',
-      summary: meta.status === 'ok'
-        ? 'The Kimi server did not advertise the capabilities this integration requires.'
-        : 'The Kimi server rejected the authenticated capability probe.',
+      detailCode: 'server-unauthorized',
+      summary: 'The Kimi server rejected the authenticated capability probe.',
       evidence: { url: instance.baseUrl },
       remediation: {
         kind: 'manual',
         message: 'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
       },
     });
+    return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
+  // Doctor must apply the SAME identity binding the adapter does, through the
+  // same function — a doctor with its own copy of the rule would report a
+  // healthy, supported Kimi for a server the adapter then refuses to read, or
+  // the reverse. (Same residuals as the adapter: the token is already spent by
+  // this point, and the binding is not atomic with any later use.)
+  const bound = bindKimiServerIdentity(instance, payload);
+  if (!bound.ok) {
+    checks.push({ id: 'kimi.server', status: 'fail', ...IDENTITY_FAILURE[bound.reason], evidence: { url: instance.baseUrl } });
+    return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
+  }
+  const decoded = decodeKimiServerMeta(payload);
+  if (!decoded?.websocket) {
+    checks.push({
+      id: 'kimi.server',
+      status: 'fail',
+      detailCode: 'server-capabilities-missing',
+      summary: 'The Kimi server did not advertise the capabilities this integration requires.',
+      evidence: { url: instance.baseUrl },
+      remediation: {
+        kind: 'manual',
+        message: 'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
+      },
+    });
+    return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
+  }
+  checks.push({
+    id: 'kimi.server',
+    status: 'pass',
+    detailCode: 'server-reachable',
+    summary: 'The Kimi local server is reachable and advertises the WebSocket surface.',
+    evidence: { url: instance.baseUrl, serverVersion: bound.identity.serverVersion },
+  });
   return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
 }
+
+/**
+ * One diagnosis per binding refusal. Total over the refusal union so a new
+ * binding rule cannot ship with doctor still describing it as the old one.
+ *
+ * `auth-bypassed` used to be an ADVISORY check pushed alongside a passing
+ * server. It is a failure now, and it replaces the pass rather than joining it:
+ * a server with its token gate disabled answers any caller, so the authenticated
+ * probe that "verified" it proved nothing at all.
+ */
+const IDENTITY_FAILURE: Record<
+  Exclude<KimiIdentityBinding, { ok: true }>['reason'],
+  { detailCode: string; summary: string; remediation: SetupCheck['remediation'] }
+> = {
+  'metadata-invalid': {
+    detailCode: 'server-metadata-invalid',
+    summary: 'The Kimi server answered its capability probe with metadata cosyncing cannot read.',
+    remediation: { kind: 'manual', message: 'Restart `kimi web --no-open`, then rerun doctor. If it recurs, this Kimi version may have changed its server metadata.' },
+  },
+  'auth-bypassed': {
+    detailCode: 'server-auth-bypassed',
+    summary: 'The running Kimi server has its bearer-token gate disabled, so answering cosyncing proves nothing about which server it is.',
+    remediation: { kind: 'manual', message: 'Restart the Kimi server without `--dangerous-bypass-auth`.' },
+  },
+  unbindable: {
+    detailCode: 'server-identity-unbindable',
+    summary: 'The Kimi instance registry record is missing the start time or version needed to tie it to the server answering on that port.',
+    remediation: { kind: 'manual', message: 'Restart `kimi web --no-open` so a current registry record is written, then rerun doctor.' },
+  },
+  'startup-mismatch': {
+    detailCode: 'server-identity-mismatch',
+    summary: 'The Kimi server on this port did not start when its registry record says it did.',
+    remediation: { kind: 'manual', message: 'Stop the process on that port, or restart `kimi web --no-open` so the registry matches the running server.' },
+  },
+  'version-mismatch': {
+    detailCode: 'server-version-mismatch',
+    summary: 'The Kimi server on this port reports a different version from the one its registry record records.',
+    remediation: { kind: 'manual', message: 'Restart `kimi web --no-open` so the registry matches the running server, then rerun doctor.' },
+  },
+};

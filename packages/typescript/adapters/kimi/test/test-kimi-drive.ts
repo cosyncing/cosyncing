@@ -64,6 +64,21 @@ function check(name: string, ok: boolean, detail = ''): void {
 // ── Fake kap-server ─────────────────────────────────────────────────────────
 
 const SERVER_ID = 'srv_drive_fixture';
+/**
+ * The registry record's start time, and the `/api/v1/meta` body that binds to
+ * it 200ms later — the shape upstream actually writes. The meta id is a
+ * SIBLING of the registry id, never a copy: see the identity gate in
+ * `test-kimi-server.ts` for why a fixture must never synthesize one from the
+ * other. Passing the gate is a precondition of this suite, not its subject.
+ */
+const SERVER_STARTED_AT = 1_786_657_461_604;
+const SERVER_META = {
+  server_version: '0.35.0',
+  server_id: 'api_drive_fixture',
+  started_at: new Date(SERVER_STARTED_AT + 200).toISOString(),
+  capabilities: { websocket: true },
+  dangerous_bypass_auth: false,
+};
 const CREATED_ID = 'session_created_0001';
 const FOREIGN_ID = 'session_foreign_0001';
 const WORKSPACE = '/fixture/workspace';
@@ -203,7 +218,7 @@ const server = Bun.serve({
         holdMeta = undefined;
         await parked;
       }
-      return Response.json(ok({ server_id: SERVER_ID }));
+      return Response.json(ok(SERVER_META));
     }
     if (path === '/api/v1/models') {
       return Response.json(ok({
@@ -289,7 +304,7 @@ const server = Bun.serve({
 
 const baseUrl = `http://127.0.0.1:${server.port ?? 0}`;
 const liveScan: KimiInstanceScan = {
-  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0' }],
+  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
   stale: 0, invalid: 0, truncated: false,
 };
 

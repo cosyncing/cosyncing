@@ -21,11 +21,12 @@
 export {};
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { diagnoseKimiSetup } from '../src/diagnostics.ts';
-import { KIMI_DEFAULT_PORT } from '../src/server.ts';
+import { KIMI_DEFAULT_PORT, decodeKimiInstanceRecord } from '../src/server.ts';
 
 const FIXTURE = await Bun.file(new URL('./fixtures/kimi-0.35.0.json', import.meta.url)).json() as {
   kimiVersion: string;
   rest: Record<string, { code: number; msg: string; data: unknown }>;
+  instanceRecord: Record<string, unknown>;
 };
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -43,7 +44,13 @@ const baseUrl = `http://127.0.0.1:${listenPort}`;
 // reads to the public-tree scan as a personal path leaking into the tree. The
 // fixture root is fictional, so build the paths from this constant instead.
 const FIXTURE_HOME = '/fixture/home';
-const FIXTURE_SERVER_ID = (FIXTURE.rest.meta!.data as { server_id: string }).server_id;
+// The registry record AS CAPTURED. Its `server_id` is upstream's own and is a
+// DIFFERENT ULID from the one the captured `/api/v1/meta` echoes: upstream
+// mints the two independently, so a fixture that derives either from the other
+// makes an unsatisfiable gate look healthy. Doctor's identity tests below run
+// against this record, not a synthesized one.
+const FIXTURE_RECORD = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
+const FIXTURE_META = FIXTURE.rest.meta!.data as Record<string, unknown>;
 
 function context(overrides: Partial<SetupDiagnosisContext> = {}): SetupDiagnosisContext {
   return {
@@ -76,7 +83,16 @@ const byId = (
   id: string,
 ) => report.checks.find((entry) => entry.id === id);
 
-const liveOne = { live: [{ baseUrl, port: listenPort, serverId: FIXTURE_SERVER_ID }], stale: 0, invalid: 0, truncated: false };
+const liveOne = {
+  live: [{
+    baseUrl,
+    port: listenPort,
+    serverId: FIXTURE_RECORD.serverId,
+    hostVersion: FIXTURE_RECORD.hostVersion,
+    startedAt: FIXTURE_RECORD.startedAt,
+  }],
+  stale: 0, invalid: 0, truncated: false,
+};
 
 // ── Healthy / absent / stale ────────────────────────────────────────────────
 
@@ -142,33 +158,64 @@ const bypass = await diagnoseKimiSetup(
   }),
   { instances: liveOne, token: 't' },
 );
-check('a bypassed auth gate fails the diagnosis',
-  byId(bypass, 'kimi.server-auth')?.status === 'fail');
+// A server answering with its token gate disabled answers ANY caller, so the
+// authenticated probe proved nothing about which server it is. That is a gate
+// refusal now, replacing the pass — not an advisory pushed alongside one.
+const bypassCheck = byId(bypass, 'kimi.server');
+check('a bypassed auth gate fails the diagnosis outright, with no passing server beside it',
+  bypassCheck?.status === 'fail'
+    && bypassCheck.detailCode === 'server-auth-bypassed'
+    && byId(bypass, 'kimi.server-auth') === undefined,
+  `${bypassCheck?.status}/${bypassCheck?.detailCode}`);
 
 // ── The identity gate, applied by doctor ────────────────────────────────────
 
-const metaWith = (serverId: unknown) => context({
+// Doctor must reach the SAME verdict as the adapter through the SAME binding
+// function, or a user gets a green doctor for a server every read then refuses.
+const metaPatched = (patch: (data: Record<string, unknown>) => Record<string, unknown>) => context({
   fetchJson: async (url: string) => {
     if (url.endsWith('/healthz')) return { status: 'ok' as const, json: FIXTURE.rest.healthz };
-    const data = { ...(FIXTURE.rest.meta!.data as Record<string, unknown>) };
-    if (serverId === undefined) delete data.server_id; else data.server_id = serverId;
-    return { status: 'ok' as const, json: { code: 0, data } };
+    return { status: 'ok' as const, json: { code: 0, data: patch({ ...FIXTURE_META }) } };
   },
 });
-for (const [label, serverId] of [
-  ['a wrong server id', 'someone-elses-server'],
-  ['an absent server id', undefined],
-  ['a non-string server id', 42],
+const drop = (key: string) => (data: Record<string, unknown>) => {
+  delete data[key];
+  return data;
+};
+for (const [label, patch, detailCode] of [
+  ['an absent server id', drop('server_id'), 'server-metadata-invalid'],
+  ['a non-string server id', (d: Record<string, unknown>) => ({ ...d, server_id: 42 }), 'server-metadata-invalid'],
+  ['an absent start time', drop('started_at'), 'server-metadata-invalid'],
+  ['a start time its record contradicts',
+    (d: Record<string, unknown>) => ({ ...d, started_at: new Date(FIXTURE_RECORD.startedAt! - 1).toISOString() }),
+    'server-identity-mismatch'],
+  ['a version its record contradicts',
+    (d: Record<string, unknown>) => ({ ...d, server_version: '9.9.9' }), 'server-version-mismatch'],
 ] as const) {
-  const report = await diagnoseKimiSetup(metaWith(serverId), { instances: liveOne, token: 't' });
+  const report = await diagnoseKimiSetup(metaPatched(patch), { instances: liveOne, token: 't' });
   const serverCheck = byId(report, 'kimi.server');
   check(`doctor fails on ${label}`,
-    serverCheck?.status === 'fail' && serverCheck.detailCode === 'server-identity-mismatch',
+    serverCheck?.status === 'fail' && serverCheck.detailCode === detailCode,
     `${serverCheck?.status}/${serverCheck?.detailCode}`);
 }
-const matched = await diagnoseKimiSetup(metaWith(FIXTURE_SERVER_ID), { instances: liveOne, token: 't' });
-check('doctor passes when the server id matches the registry record',
-  byId(matched, 'kimi.server')?.status === 'pass');
+const unbindable = await diagnoseKimiSetup(context(), {
+  instances: { ...liveOne, live: [{ baseUrl, port: listenPort, serverId: FIXTURE_RECORD.serverId }] },
+  token: 't',
+});
+const unbindableCheck = byId(unbindable, 'kimi.server');
+check('doctor fails when the registry record carries no start time to bind against',
+  unbindableCheck?.status === 'fail' && unbindableCheck.detailCode === 'server-identity-unbindable',
+  `${unbindableCheck?.status}/${unbindableCheck?.detailCode}`);
+
+// THE REGRESSION, on doctor's side: the captured record and the captured
+// metadata, unmodified — two different ids, one boot.
+check('the captured record id and the captured meta id DIFFER — siblings, not copies',
+  FIXTURE_RECORD.serverId !== FIXTURE_META.server_id,
+  `${FIXTURE_RECORD.serverId} vs ${String(FIXTURE_META.server_id)}`);
+const matched = await diagnoseKimiSetup(context(), { instances: liveOne, token: 't' });
+check('doctor passes on the CAPTURED record and metadata — the shape a real host serves',
+  byId(matched, 'kimi.server')?.status === 'pass',
+  `${byId(matched, 'kimi.server')?.status}/${byId(matched, 'kimi.server')?.detailCode}`);
 
 // ── An off-PATH install is INSTALLED, not missing ───────────────────────────
 
@@ -217,7 +264,9 @@ check('no diagnosis check carries the bearer token',
 
 {
   const registryDir = `${FIXTURE_HOME}/.kimi-code/server/instances`;
-  const record = { server_id: FIXTURE_SERVER_ID, pid: 4321, host: '127.0.0.1', port: listenPort };
+  // The CAPTURED record — upstream's own `server_id`, `started_at`, and
+  // `host_version` — with only the address and pid redirected at this fixture.
+  const record = { ...FIXTURE.instanceRecord, pid: 4321, host: '127.0.0.1', port: listenPort };
   const listedDirs: string[] = [];
   const probedPids: number[] = [];
   const readPaths: string[] = [];
@@ -264,7 +313,9 @@ check('no diagnosis check carries the bearer token',
 
 {
   const registryDir = `${FIXTURE_HOME}/.kimi-code/server/instances`;
-  const record = { server_id: FIXTURE_SERVER_ID, pid: 4321, host: '127.0.0.1', port: listenPort };
+  // The CAPTURED record — upstream's own `server_id`, `started_at`, and
+  // `host_version` — with only the address and pid redirected at this fixture.
+  const record = { ...FIXTURE.instanceRecord, pid: 4321, host: '127.0.0.1', port: listenPort };
   const probeHeaders: Array<Readonly<Record<string, string>> | undefined> = [];
   const tokenContext = (): SetupDiagnosisContext => context({
     listDirectory: (path: string) => (path === registryDir

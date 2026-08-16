@@ -177,7 +177,11 @@ const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
   none: 'no local Kimi server is running',
   ambiguous: 'several Kimi servers are running on this home; cosyncing will not guess which one owns the session',
   unreachable: 'the local Kimi server did not answer an authenticated capability probe',
-  'identity-mismatch': 'the Kimi server on this port is not the one its registry record describes',
+  'metadata-invalid': 'the local Kimi server answered its capability probe with metadata cosyncing cannot read',
+  'auth-bypassed': 'the local Kimi server has its bearer-token gate disabled, so answering cosyncing proves nothing about which server it is',
+  unbindable: 'the Kimi instance registry record is missing the start time or version cosyncing needs to tie it to the server answering on that port',
+  'startup-mismatch': 'the Kimi server on this port did not start when its registry record says it did',
+  'version-mismatch': 'the Kimi server on this port reports a different version from the one its registry record records',
   incomplete: 'the Kimi instance registry holds more records than the bounded scan examines; cosyncing will not pick a server from a partial view',
 };
 

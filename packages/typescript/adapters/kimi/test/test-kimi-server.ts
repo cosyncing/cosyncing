@@ -9,8 +9,14 @@
  * POST operations with no generic post, no other adapter source names a
  * mutating verb, and the socket's frame set excludes every mutating frame. The
  * rest asserts the gate fails CLOSED: no live server, several live servers, an
- * unreachable `/meta`, and a `server_id` that is absent, non-string, or wrong
- * all refuse, on every consuming path rather than on some of them.
+ * unreachable `/meta`, unreadable metadata, a disabled token gate, a record that
+ * cannot be bound, a start time outside the binding window, and a version the
+ * record contradicts all refuse, on every consuming path rather than on some of
+ * them — while the CAPTURED registry record paired with the CAPTURED `/meta`
+ * resolves, which is the case a synthesized fixture once hid. A newly observed
+ * generation that binds is ADOPTED on the very next call, never refused first;
+ * that is asserted too, because the absence of a pin is a decision, not an
+ * omission.
  *
  * Runs against a fake server replaying SANITIZED CAPTURES from a real Kimi Code
  * 0.35.0 `kimi web` instance (fixtures/kimi-0.35.0.json). No Kimi process, no
@@ -28,6 +34,7 @@ import {
   KIMI_DEFAULT_PORT,
   KIMI_INSTANCE_SCAN_MAX_FILES,
   KIMI_READ_ONLY_WS_FRAMES,
+  KIMI_STARTUP_BINDING_WINDOW_MS,
   boundedDirectoryListing,
   decodeKimiInstanceRecord,
   isKimiReadOnlyWsFrame,
@@ -75,6 +82,31 @@ const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+/**
+ * A registry record and the `/api/v1/meta` body that BINDS to it, for the blocks
+ * below whose subject is not identity — tokens, transports, reverification.
+ *
+ * Both sides come from one start time, so they agree the way a real host's do,
+ * and the two ids stay DIFFERENT, as upstream mints them. Passing the gate is a
+ * precondition of those blocks, not their subject; what matters is that they buy
+ * it with a REALISTIC pair rather than by making an identity comparison true by
+ * construction. See section 3 for what that cost the last time.
+ */
+const BOUND_STARTED_AT = 1_786_657_461_604;
+function boundInstance(serverId: string, baseUrl: string, port: number) {
+  return { baseUrl, port, serverId, hostVersion: FIXTURE.kimiVersion, startedAt: BOUND_STARTED_AT };
+}
+function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    server_version: FIXTURE.kimiVersion,
+    server_id: 'api-generation-id',
+    started_at: new Date(BOUND_STARTED_AT + 200).toISOString(),
+    capabilities: { websocket: true },
+    dangerous_bypass_auth: false,
+    ...extra,
+  };
 }
 
 // ── 1. Read-only guarantee (structural) ─────────────────────────────────────
@@ -352,20 +384,59 @@ function check(name: string, ok: boolean, detail = ''): void {
 //
 // Exercised directly here so its refusal reasons are pinned independently of
 // how any one adapter path happens to translate them.
+//
+// EVERY instance here is decoded from the CAPTURED registry record and paired
+// with the CAPTURED `/api/v1/meta`, exactly as upstream writes both. That is the
+// point of this block, not a stylistic preference. The previous version of this
+// suite built its instances by copying the meta `server_id` into a synthetic
+// registry record, which made "registry id equals meta id" true by construction
+// — so it proved the comparator and never once tested the premise. The premise
+// was false: upstream mints the two ids with separate `ulid()` calls, so they
+// never match on a real host, and the gate they justified rejected 100% of
+// genuine Kimi servers until a live host proved it. A fixture that synthesizes
+// either side of an identity check cannot fail that way. Do not reintroduce one.
 
 {
-  const instance = { baseUrl: 'http://127.0.0.1:1', port: 1, serverId: 'server-one' };
-  const gateClient = (serverId: unknown) => () => new KimiReadOnlyHttp({
-    baseUrl: instance.baseUrl,
-    fetchImpl: async () => ({
-      status: 200,
-      text: async () => JSON.stringify(
-        serverId === undefined
-          ? { code: 0, msg: 'success', data: {} }
-          : { code: 0, msg: 'success', data: { server_id: serverId } },
-      ),
-    }),
-  });
+  const record = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
+  const capturedMeta = FIXTURE.rest.meta!.data as Record<string, unknown>;
+  const registryStartedAt = record.startedAt!;
+  const metaStartedAtMs = Date.parse(capturedMeta.started_at as string);
+  const instance = {
+    baseUrl: `http://127.0.0.1:${record.port}`,
+    port: record.port,
+    serverId: record.serverId,
+    hostVersion: record.hostVersion,
+    startedAt: registryStartedAt,
+  };
+
+  // The captured pair, stated as the fact this suite rests on: two DIFFERENT
+  // ids, one boot. If a future capture makes them equal, this fails loudly here
+  // rather than quietly restoring the old false premise everywhere else.
+  check('the captured registry id and the captured meta id DIFFER — siblings, not copies',
+    record.serverId !== capturedMeta.server_id,
+    `${record.serverId} vs ${String(capturedMeta.server_id)}`);
+  check('the captured meta start follows the captured registry start, inside the binding window',
+    metaStartedAtMs >= registryStartedAt
+    && metaStartedAtMs - registryStartedAt <= KIMI_STARTUP_BINDING_WINDOW_MS,
+    `${metaStartedAtMs - registryStartedAt}ms`);
+
+  const gateClient = (patch?: (data: Record<string, unknown>) => Record<string, unknown>) => () =>
+    new KimiReadOnlyHttp({
+      baseUrl: instance.baseUrl,
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: patch ? patch({ ...capturedMeta }) : capturedMeta,
+          request_id: 'fixture',
+        }),
+      }),
+    });
+  const without = (key: string) => (data: Record<string, unknown>) => {
+    delete data[key];
+    return data;
+  };
   const unreachableClient = () => new KimiReadOnlyHttp({
     baseUrl: instance.baseUrl,
     fetchImpl: async () => {
@@ -373,7 +444,7 @@ function check(name: string, ok: boolean, detail = ''): void {
     },
   });
 
-  const none = await resolveVerifiedInstance({ live: [], stale: 0, invalid: 0, truncated: false }, gateClient('server-one'));
+  const none = await resolveVerifiedInstance({ live: [], stale: 0, invalid: 0, truncated: false }, gateClient());
   check('no live instance refuses with `none`', !none.ok && none.reason === 'none');
 
   // The 33-record shape end to end: one live server visible, truncation set.
@@ -381,7 +452,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   // never enumerated may describe ANOTHER live one.
   const incomplete = await resolveVerifiedInstance(
     { live: [instance], stale: 0, invalid: 0, truncated: true },
-    gateClient('server-one'),
+    gateClient(),
   );
   check('a truncated scan refuses with `incomplete`, even with one visible live server',
     !incomplete.ok && incomplete.reason === 'incomplete',
@@ -389,7 +460,7 @@ function check(name: string, ok: boolean, detail = ''): void {
 
   const ambiguous = await resolveVerifiedInstance(
     { live: [instance, { ...instance, serverId: 'server-two', port: 2 }], stale: 0, invalid: 0, truncated: false },
-    gateClient('server-one'),
+    gateClient(),
   );
   check('several live instances refuse with `ambiguous`',
     !ambiguous.ok && ambiguous.reason === 'ambiguous');
@@ -399,21 +470,105 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('an unanswerable /meta refuses with `unreachable`',
     !unreachable.ok && unreachable.reason === 'unreachable');
 
-  const absent = await resolveVerifiedInstance(one, gateClient(undefined));
-  check('an ABSENT server_id refuses — unverifiable is not verified',
-    !absent.ok && absent.reason === 'identity-mismatch');
+  // THE REGRESSION: the captured pair, unmodified, through the real gate.
+  const matched = await resolveVerifiedInstance(one, gateClient());
+  check('the CAPTURED registry record and the CAPTURED meta resolve — the shape a real host serves',
+    matched.ok && matched.instance.serverId === record.serverId,
+    matched.ok ? 'ok' : matched.reason);
+  check('the resolution reports BOTH ids, unconflated, plus the version that answered',
+    matched.ok
+    && matched.identity.registryServerId === record.serverId
+    && matched.identity.apiServerId === capturedMeta.server_id
+    && matched.identity.apiServerId !== matched.identity.registryServerId
+    && matched.identity.apiStartedAtMs === metaStartedAtMs
+    && matched.identity.serverVersion === record.hostVersion);
 
-  const nonString = await resolveVerifiedInstance(one, gateClient(42));
-  check('a non-string server_id refuses',
-    !nonString.ok && nonString.reason === 'identity-mismatch');
+  for (const field of ['server_id', 'server_version', 'started_at']) {
+    const dropped = await resolveVerifiedInstance(one, gateClient(without(field)));
+    check(`a /meta without ${field} refuses — unverifiable is not verified`,
+      !dropped.ok && dropped.reason === 'metadata-invalid',
+      dropped.ok ? 'resolved' : dropped.reason);
+  }
+  for (const [field, value] of [['server_id', 42], ['server_version', null], ['started_at', 'not-a-date']] as const) {
+    const malformed = await resolveVerifiedInstance(one, gateClient((data) => ({ ...data, [field]: value })));
+    check(`a malformed ${field} refuses`, !malformed.ok && malformed.reason === 'metadata-invalid');
+  }
 
-  const wrong = await resolveVerifiedInstance(one, gateClient('someone-elses-server'));
-  check('a contradicted server_id refuses',
-    !wrong.ok && wrong.reason === 'identity-mismatch');
+  // A server that answers ANY caller has not proved it is this user's server:
+  // the authenticated probe that "verified" it authenticated nothing.
+  const bypassed = await resolveVerifiedInstance(one,
+    gateClient((data) => ({ ...data, dangerous_bypass_auth: true })));
+  check('a server with its token gate disabled refuses with `auth-bypassed`',
+    !bypassed.ok && bypassed.reason === 'auth-bypassed');
 
-  const matched = await resolveVerifiedInstance(one, gateClient('server-one'));
-  check('a matching server_id resolves and pins that instance',
-    matched.ok && matched.instance.serverId === 'server-one');
+  // No `started_at` in the registry record leaves NOTHING tying it to the
+  // process answering, and the version alone would not: a replacement server
+  // almost certainly reports the same version.
+  const { startedAt: _unbound, ...unboundInstance } = instance;
+  const unbindable = await resolveVerifiedInstance(
+    { live: [unboundInstance], stale: 0, invalid: 0, truncated: false },
+    gateClient(),
+  );
+  check('a registry record with no start time refuses with `unbindable`',
+    !unbindable.ok && unbindable.reason === 'unbindable');
+
+  const late = await resolveVerifiedInstance(
+    { live: [{ ...instance, startedAt: registryStartedAt - KIMI_STARTUP_BINDING_WINDOW_MS - 1 }], stale: 0, invalid: 0, truncated: false },
+    gateClient(),
+  );
+  check('an API start beyond the window after the record refuses with `startup-mismatch`',
+    !late.ok && late.reason === 'startup-mismatch');
+
+  // The PREVIOUS server still holding the port while a newer `kimi web` writes
+  // a record and fails to bind: it reports a start from before that record.
+  const early = await resolveVerifiedInstance(
+    { live: [{ ...instance, startedAt: metaStartedAtMs + 1 }], stale: 0, invalid: 0, truncated: false },
+    gateClient(),
+  );
+  check('an API start BEFORE the record refuses — a predecessor still holding the port',
+    !early.ok && early.reason === 'startup-mismatch');
+
+  const versionDrift = await resolveVerifiedInstance(one,
+    gateClient((data) => ({ ...data, server_version: '9.9.9' })));
+  check('a server reporting a version its record does not refuses with `version-mismatch`',
+    !versionDrift.ok && versionDrift.reason === 'version-mismatch');
+
+  // A record without `host_version` is not an older shape to accommodate: every
+  // supported version writes it, so its absence is a record the gate cannot
+  // check, and skipping the comparison it enables would fail open.
+  const { hostVersion: _versionless, ...versionlessInstance } = instance;
+  const versionless = await resolveVerifiedInstance(
+    { live: [versionlessInstance], stale: 0, invalid: 0, truncated: false },
+    gateClient(),
+  );
+  check('a record without host_version refuses with `unbindable`',
+    !versionless.ok && versionless.reason === 'unbindable');
+
+  // The FAIL-OPEN EDGES, both reached by malformed input rather than by an
+  // attacker: a present-but-empty `host_version` must not decode into a record
+  // that merely looks unversioned, and a missing `dangerous_bypass_auth` must
+  // not read as "the token gate is on".
+  check('a present-but-empty host_version invalidates the whole record, rather than dropping the field',
+    decodeKimiInstanceRecord({ ...FIXTURE.instanceRecord, host_version: '' }) === undefined);
+  check('a present-but-malformed started_at invalidates the whole record',
+    decodeKimiInstanceRecord({ ...FIXTURE.instanceRecord, started_at: Number.NaN }) === undefined);
+  const bypassAbsent = await resolveVerifiedInstance(one, gateClient(without('dangerous_bypass_auth')));
+  check('a /meta without dangerous_bypass_auth refuses — a security field is never defaulted',
+    !bypassAbsent.ok && bypassAbsent.reason === 'metadata-invalid');
+  const bypassNonBoolean = await resolveVerifiedInstance(one,
+    gateClient((data) => ({ ...data, dangerous_bypass_auth: 'false' })));
+  check('a non-boolean dangerous_bypass_auth refuses rather than being coerced',
+    !bypassNonBoolean.ok && bypassNonBoolean.reason === 'metadata-invalid');
+
+  // NO CROSS-CALL PIN, asserted rather than assumed. A resolution carries no
+  // memory of the previous one, so an ordinary `kimi web` restart — a new API
+  // generation over a fresh registry record — resolves immediately instead of
+  // spending a refusal on whichever operation happened to run first.
+  const restarted = await resolveVerifiedInstance(one,
+    gateClient((data) => ({ ...data, server_id: `${String(data.server_id)}-next` })));
+  check('a new API generation resolves on its own merits — no operation is spent on a stale pin',
+    restarted.ok && restarted.identity.apiServerId === `${String(capturedMeta.server_id)}-next`,
+    restarted.ok ? 'ok' : restarted.reason);
 }
 
 // ── 4. The response-body ceiling ────────────────────────────────────────────
@@ -588,7 +743,7 @@ function check(name: string, ok: boolean, detail = ''): void {
       env: { KIMI_CODE_HOME: tokenHome },
       homeDir: '/fixture/home',
       instanceScan: () => ({
-        live: [{ baseUrl: 'http://127.0.0.1:1', port: 1, serverId: 'token-server' }],
+        live: [boundInstance('token-server', 'http://127.0.0.1:1', 1)],
         stale: 0, invalid: 0, truncated: false,
       }),
       fetchImpl: async (_url, init) => {
@@ -596,7 +751,7 @@ function check(name: string, ok: boolean, detail = ''): void {
         return {
           status: 200,
           text: async () => JSON.stringify({
-            code: 0, msg: 'success', data: { server_id: 'token-server', ok: true }, request_id: 'r',
+            code: 0, msg: 'success', data: boundMeta({ ok: true }), request_id: 'r',
           }),
         };
       },
@@ -625,7 +780,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   await new KimiAdapter({
     env: {}, homeDir: '/fixture/home',
     instanceScan: () => ({
-      live: [{ baseUrl: 'http://127.0.0.1:1', port: 1, serverId: 'injected-server' }],
+      live: [boundInstance('injected-server', 'http://127.0.0.1:1', 1)],
       stale: 0, invalid: 0, truncated: false,
     }),
     readToken: () => 'x'.repeat(tokenCeiling + 1),
@@ -634,7 +789,7 @@ function check(name: string, ok: boolean, detail = ''): void {
       return {
         status: 200,
         text: async () => JSON.stringify({
-          code: 0, msg: 'success', data: { server_id: 'injected-server', ok: true }, request_id: 'r',
+          code: 0, msg: 'success', data: boundMeta({ ok: true }), request_id: 'r',
         }),
       };
     },
@@ -653,7 +808,7 @@ function check(name: string, ok: boolean, detail = ''): void {
   const rotating = new KimiAdapter({
     env: {}, homeDir: '/fixture/home',
     instanceScan: () => ({
-      live: [{ baseUrl: 'http://127.0.0.1:1', port: 1, serverId: 'rotating-server' }],
+      live: [boundInstance('rotating-server', 'http://127.0.0.1:1', 1)],
       stale: 0, invalid: 0, truncated: false,
     }),
     readToken: () => `token-${(tokenReads += 1)}`,
@@ -663,7 +818,7 @@ function check(name: string, ok: boolean, detail = ''): void {
         status: 200,
         text: async () => JSON.stringify({
           code: 0, msg: 'success',
-          data: { server_id: 'rotating-server', items: [], has_more: false },
+          data: boundMeta({ items: [], has_more: false }),
           request_id: 'r',
         }),
       };
@@ -719,11 +874,11 @@ function check(name: string, ok: boolean, detail = ''): void {
       instanceScan: () => {
         scans += 1;
         return {
-          live: [{
-            baseUrl: `http://127.0.0.1:${8_000 + generation}`,
-            port: 8_000 + generation,
-            serverId: `wiring-server-${generation}`,
-          }],
+          live: [boundInstance(
+            `wiring-server-${generation}`,
+            `http://127.0.0.1:${8_000 + generation}`,
+            8_000 + generation,
+          )],
           stale: 0, invalid: 0, truncated: false,
         };
       },
@@ -734,7 +889,8 @@ function check(name: string, ok: boolean, detail = ''): void {
           status: 200,
           text: async () => JSON.stringify({
             code: 0, msg: 'success',
-            data: { server_id: `wiring-server-${generation}`, items: [], has_more: false },
+            // A restart is a NEW API generation, so its meta id moves too.
+            data: boundMeta({ server_id: `api-generation-${generation}`, items: [], has_more: false }),
             request_id: 'r',
           }),
         };
@@ -1195,8 +1351,8 @@ function check(name: string, ok: boolean, detail = ''): void {
 interface ServerLog { method: string; path: string }
 const requests: ServerLog[] = [];
 let sessionPages = 0;
-/** undefined = serve the captured meta; 'omit' = drop server_id; else substitute it. */
-let metaServerIdOverride: string | undefined;
+/** undefined = serve the captured meta verbatim; otherwise patch its `data` first. */
+let metaPatch: ((data: Record<string, unknown>) => Record<string, unknown>) | undefined;
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
@@ -1209,19 +1365,13 @@ const server = Bun.serve({
     const authorized = request.headers.get('authorization') === 'Bearer fixture-token';
     if (!authorized) return Response.json(FIXTURE.rest.metaUnauthorized, { status: 401 });
     if (url.pathname === '/api/v1/meta') {
-      if (metaServerIdOverride === 'omit') {
-        const data = { ...(FIXTURE.rest.meta!.data as Record<string, unknown>) };
-        delete data.server_id;
-        return Response.json({ code: 0, msg: 'success', data, request_id: 'fixture' });
-      }
-      if (metaServerIdOverride !== undefined) {
-        return Response.json({
-          code: 0, msg: 'success',
-          data: { ...(FIXTURE.rest.meta!.data as Record<string, unknown>), server_id: metaServerIdOverride },
-          request_id: 'fixture',
-        });
-      }
-      return Response.json(FIXTURE.rest.meta);
+      if (!metaPatch) return Response.json(FIXTURE.rest.meta);
+      return Response.json({
+        code: 0,
+        msg: 'success',
+        data: metaPatch({ ...(FIXTURE.rest.meta!.data as Record<string, unknown>) }),
+        request_id: 'fixture',
+      });
     }
     if (url.pathname === '/api/v2/sessions') {
       sessionPages += 1;
@@ -1240,9 +1390,21 @@ const server = Bun.serve({
 
 const listenPort = server.port ?? 0;
 const baseUrl = `http://127.0.0.1:${listenPort}`;
-const FIXTURE_SERVER_ID = (FIXTURE.rest.meta!.data as { server_id: string }).server_id;
+// The adapter paths below run against the registry record AS CAPTURED —
+// upstream's own `server_id`, `host_version`, and `started_at` — with only the
+// address redirected at the fake server on its ephemeral port. Deriving any of
+// those three from the served `/meta` instead is what let a gate that no real
+// host could pass look healthy across this whole suite.
+const FIXTURE_RECORD = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
+const fixtureInstance = {
+  baseUrl,
+  port: listenPort,
+  serverId: FIXTURE_RECORD.serverId,
+  hostVersion: FIXTURE_RECORD.hostVersion,
+  startedAt: FIXTURE_RECORD.startedAt,
+};
 const scan: KimiInstanceScan = {
-  live: [{ baseUrl, port: listenPort, serverId: FIXTURE_SERVER_ID, hostVersion: FIXTURE.kimiVersion }],
+  live: [fixtureInstance],
   stale: 0,
   invalid: 0,
   truncated: false,
@@ -1371,8 +1533,8 @@ try {
   // whichever sessions it loaded), so the adapter refuses instead of guessing.
   const twoLive: KimiInstanceScan = {
     live: [
-      { baseUrl, port: listenPort, serverId: FIXTURE_SERVER_ID },
-      { baseUrl, port: listenPort + 1, serverId: 'another-server' },
+      fixtureInstance,
+      { ...fixtureInstance, port: listenPort + 1, serverId: 'another-server' },
     ],
     stale: 0,
     invalid: 0,
@@ -1404,20 +1566,23 @@ try {
     await truncatedAdapter.attach('any').then(() => false, (error) =>
       error instanceof Error && error.message.includes('partial view')));
 
-  // A registry record proves only that SOME process holds the pid. The
-  // authenticated server id is the earliest identity check available, so a
-  // mismatch must refuse rather than read another server's sessions.
+  // A registry record proves only that SOME process holds the pid. The earliest
+  // identity evidence available is the authenticated metadata, so a server whose
+  // start time the record contradicts must refuse rather than read another
+  // server's sessions. NOTE what an impostor is here and what it is not: a
+  // registry `server_id` differing from the meta `server_id` is the NORMAL case
+  // on every real host, so it is not evidence of anything.
   const impostor = new KimiAdapter({
     env: {}, homeDir: '/fixture/home',
     instanceScan: () => ({
-      live: [{ baseUrl, port: listenPort, serverId: 'a-server-id-that-is-not-this-one' }],
+      live: [{ ...fixtureInstance, startedAt: FIXTURE_RECORD.startedAt! - KIMI_STARTUP_BINDING_WINDOW_MS - 1 }],
       stale: 0, invalid: 0, truncated: false,
     }),
     readToken: () => 'fixture-token',
   });
-  check('a server whose id contradicts its registry record is unavailable',
+  check('a server whose start time contradicts its registry record is unavailable',
     !(await impostor.isAvailable()));
-  check('a contradicted server id refuses attach',
+  check('a contradicted start time refuses attach',
     await impostor.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /registry record/.test(error.message)));
 
   // The gate must cover EVERY consuming path, not merely the first one checked.
@@ -1426,25 +1591,59 @@ try {
     instanceScan: () => scan,
     readToken: () => 'fixture-token',
   });
-  metaServerIdOverride = 'omit';
-  check('a /meta without server_id is unavailable, not trusted', !(await verified.isAvailable()));
-  check('a /meta without server_id yields no sessions',
+  const drop = (key: string) => (data: Record<string, unknown>) => {
+    delete data[key];
+    return data;
+  };
+  for (const field of ['server_id', 'server_version', 'started_at']) {
+    metaPatch = drop(field);
+    check(`a /meta without ${field} is unavailable, not trusted`, !(await verified.isAvailable()));
+    check(`a /meta without ${field} yields no sessions — discovery cannot fail open`,
+      (await verified.discoverSessions()).length === 0);
+    check(`a /meta without ${field} refuses attach`,
+      await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /cannot read/.test(error.message)));
+  }
+
+  metaPatch = (data) => ({ ...data, started_at: new Date(FIXTURE_RECORD.startedAt! - 1).toISOString() });
+  check('a server started before its record is unavailable', !(await verified.isAvailable()));
+  check('a server started before its record yields no sessions',
     (await verified.discoverSessions()).length === 0);
-  check('a /meta without server_id refuses attach',
+  check('a server started before its record refuses attach',
     await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /registry record/.test(error.message)));
 
-  metaServerIdOverride = 'a-different-server-entirely';
-  check('a wrong server_id is unavailable', !(await verified.isAvailable()));
-  check('a wrong server_id yields no sessions — discovery cannot fail open',
-    (await verified.discoverSessions()).length === 0);
-  check('a wrong server_id refuses attach',
-    await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /registry record/.test(error.message)));
+  metaPatch = (data) => ({ ...data, server_version: '9.9.9' });
+  check('a server whose version its record contradicts is unavailable', !(await verified.isAvailable()));
+  check('a contradicted version refuses attach',
+    await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /different version/.test(error.message)));
 
-  metaServerIdOverride = 123 as unknown as string; // non-string
+  metaPatch = (data) => ({ ...data, dangerous_bypass_auth: true });
+  check('a server with its token gate disabled is unavailable — its answer proves nothing',
+    !(await verified.isAvailable()));
+  check('a token-gate-disabled server refuses attach',
+    await verified.attach(FIXTURE.sessionId).then(() => false, (error: Error) => /token gate disabled/.test(error.message)));
+
+  metaPatch = (data) => ({ ...data, server_id: 123 });
   check('a non-string server_id is refused', !(await verified.isAvailable()));
-  metaServerIdOverride = undefined;
-  check('the verified path still works once identity matches',
+  metaPatch = undefined;
+  check('the verified path still works once the captured record and metadata bind',
     (await verified.isAvailable()) && (await verified.discoverSessions()).length > 0);
+
+  // A `kimi web` restarted under a live adapter. Every operation verifies the
+  // answering server against the registry record on its own, so the new
+  // generation is adopted immediately: no operation is spent refusing, and which
+  // operation would have paid — an invisible availability poll, or the user's
+  // attach — never becomes a coin flip.
+  const restarting = new KimiAdapter({
+    env: {}, homeDir: '/fixture/home',
+    instanceScan: () => scan,
+    readToken: () => 'fixture-token',
+  });
+  check('an adapter resolves the generation in front of it', await restarting.isAvailable());
+  metaPatch = (data) => ({ ...data, server_id: `${String(data.server_id)}-restarted` });
+  check('a restarted Kimi is adopted by the very next operation, not refused once first',
+    await restarting.isAvailable());
+  check('and by the one after it', await restarting.isAvailable());
+  metaPatch = undefined;
 
   const noServer = new KimiAdapter({
     env: {}, homeDir: '/fixture/home',

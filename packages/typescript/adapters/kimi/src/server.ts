@@ -68,6 +68,14 @@ export interface KimiInstanceRecord {
  * Decode one instance record. Returns undefined for anything that is not a
  * complete, plausible record: the registry is written by another product and a
  * partially-written or future-shaped file must never become a base URL.
+ *
+ * The optional fields are optional in SHAPE only. A field that is present but
+ * malformed — an empty `host_version`, a non-finite `started_at` — invalidates
+ * the whole record rather than being dropped, because dropping it produces a
+ * record that merely LOOKS like an older, sparser one, and the identity gate
+ * then skips the comparison that field enables. That is a fail-open edge reached
+ * by exactly the malformed input the check exists for. See
+ * {@link bindKimiServerIdentity}.
  */
 export function decodeKimiInstanceRecord(raw: unknown): KimiInstanceRecord | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
@@ -80,14 +88,24 @@ export function decodeKimiInstanceRecord(raw: unknown): KimiInstanceRecord | und
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
   if (typeof host !== 'string' || !host) return undefined;
   if (typeof port !== 'number' || !Number.isSafeInteger(port) || port <= 0 || port > 65535) return undefined;
+  const startedAt = record.started_at;
+  const heartbeatAt = record.heartbeat_at;
+  const hostVersion = record.host_version;
+  if (startedAt !== undefined && (typeof startedAt !== 'number' || !Number.isFinite(startedAt) || startedAt <= 0)) {
+    return undefined;
+  }
+  if (heartbeatAt !== undefined && (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt))) {
+    return undefined;
+  }
+  if (hostVersion !== undefined && (typeof hostVersion !== 'string' || !hostVersion)) return undefined;
   return {
     serverId,
     pid,
     host,
     port,
-    ...(typeof record.started_at === 'number' ? { startedAt: record.started_at } : {}),
-    ...(typeof record.heartbeat_at === 'number' ? { heartbeatAt: record.heartbeat_at } : {}),
-    ...(typeof record.host_version === 'string' ? { hostVersion: record.host_version } : {}),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(heartbeatAt === undefined ? {} : { heartbeatAt }),
+    ...(hostVersion === undefined ? {} : { hostVersion }),
   };
 }
 
@@ -123,8 +141,14 @@ export function pidIsLive(pid: number, kill: (pid: number, signal: number) => vo
 export interface KimiDiscoveredInstance {
   baseUrl: string;
   port: number;
+  /**
+   * The REGISTRY generation id (`server_id` in the record file). It is NOT the
+   * id `/api/v1/meta` echoes — see {@link bindKimiServerIdentity}.
+   */
   serverId: string;
   hostVersion?: string;
+  /** Registry `started_at`, epoch ms. The load-bearing half of the identity binding. */
+  startedAt?: number;
 }
 
 /**
@@ -288,6 +312,7 @@ export function scanKimiInstances(home: string, io: KimiInstanceScanIo): KimiIns
       port: record.port,
       serverId: record.serverId,
       ...(record.hostVersion ? { hostVersion: record.hostVersion } : {}),
+      ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
     });
   }
   return scan;
@@ -573,10 +598,215 @@ export function isKimiReadOnlyWsFrame(type: string): type is KimiReadOnlyWsFrame
 // ── Identity gate ───────────────────────────────────────────────────────────
 
 /** Why no server could be resolved, in machine terms. */
-export type KimiInstanceRefusal = 'none' | 'ambiguous' | 'unreachable' | 'identity-mismatch' | 'incomplete';
+export type KimiInstanceRefusal =
+  | 'none'
+  | 'ambiguous'
+  | 'unreachable'
+  | 'metadata-invalid'
+  | 'auth-bypassed'
+  | 'unbindable'
+  | 'startup-mismatch'
+  | 'version-mismatch'
+  | 'incomplete';
+
+/**
+ * `/api/v1/meta`, decoded down to the fields identity depends on.
+ *
+ * The bearer-gated shape, verbatim from a real 0.36.1 host:
+ * `{server_version, capabilities{…}, server_id, started_at, open_in_apps,
+ * dangerous_bypass_auth, backend, experimental_flags}`.
+ */
+export interface KimiServerMeta {
+  /**
+   * The API-generation id. Upstream mints this with its OWN `ulid()` call when
+   * it registers the `/api/v1` routes — it is a SIBLING of the registry id, not
+   * a copy of it, and the two never compare equal on a real host.
+   */
+  serverId: string;
+  serverVersion: string;
+  /** `started_at` (ISO-8601 on this surface) normalized to epoch ms. */
+  startedAtMs: number;
+  dangerousBypassAuth: boolean;
+  websocket: boolean;
+}
+
+/**
+ * Decode `/api/v1/meta`'s `data`. Returns undefined for anything that cannot
+ * carry an identity decision: this surface is written by another product, and a
+ * partially-shaped payload must fail the gate rather than skip half of it.
+ *
+ * `dangerous_bypass_auth` is REQUIRED to be a boolean rather than defaulted.
+ * Reading a missing or non-boolean value as `false` would turn metadata this
+ * decoder does not understand into an affirmative "the token gate is on" — a
+ * security-relevant field failing open on the exact input that proves the
+ * payload is not the shape this gate was written against. Every supported
+ * version (the 0.35.0 capture and a live 0.36.1 host) sends it.
+ */
+export function decodeKimiServerMeta(raw: unknown): KimiServerMeta | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const data = raw as Record<string, unknown>;
+  const serverId = data.server_id;
+  const serverVersion = data.server_version;
+  const startedAt = data.started_at;
+  const bypass = data.dangerous_bypass_auth;
+  if (typeof serverId !== 'string' || !serverId) return undefined;
+  if (typeof serverVersion !== 'string' || !serverVersion) return undefined;
+  if (typeof startedAt !== 'string' || !startedAt) return undefined;
+  if (typeof bypass !== 'boolean') return undefined;
+  const startedAtMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedAtMs)) return undefined;
+  const capabilities = data.capabilities;
+  return {
+    serverId,
+    serverVersion,
+    startedAtMs,
+    dangerousBypassAuth: bypass,
+    websocket: !!capabilities
+      && typeof capabilities === 'object'
+      && (capabilities as { websocket?: unknown }).websocket === true,
+  };
+}
+
+/**
+ * What a passed gate observed, reported rather than compared.
+ *
+ * Carries BOTH ids on purpose: they are independent identifiers minted at
+ * separate points in one startup, and conflating them is the defect this type
+ * exists to make impossible to reintroduce.
+ */
+export interface KimiServerIdentity {
+  /** `server_id` of the registry record that named this port. */
+  registryServerId: string;
+  /** `server_id` echoed by `/api/v1/meta`. Distinct from the registry id BY DESIGN. */
+  apiServerId: string;
+  /** `/api/v1/meta`'s `started_at`, epoch ms. */
+  apiStartedAtMs: number;
+  /** `server_version` the answering server reported. */
+  serverVersion: string;
+}
+
+/**
+ * How far after the registry record's `started_at` the API layer may report its
+ * own start and still be CONSISTENT with having booted alongside it.
+ *
+ * Consistent, not proven — read the ceiling for exactly what it is. The two
+ * timestamps are written by one process, milliseconds apart, in a fixed order:
+ * the registry record first, then the `/api/v1` routes recording their start.
+ * Two independent captures agree — 128 ms on a live 0.36.1 host and 255 ms in
+ * the captured 0.35.0 fixture — and in both, each `server_id`'s ULID time
+ * component equals its own `started_at` to the millisecond.
+ *
+ * What that buys is CORRELATION. It does not establish provenance: pid recycling
+ * and port reuse can both happen well inside a minute on a busy machine, so an
+ * unrelated process can in principle present a start time inside this window. A
+ * narrower ceiling would not fix that either — it would only trade a shrinking
+ * amount of correlation for a growing risk of refusing a genuine slow cold
+ * start, which is the failure this whole round exists to remove. The ceiling is
+ * therefore set for headroom against a slow start, and treated as
+ * defense-in-depth rather than as the thing that makes the answer trustworthy.
+ *
+ * The only complete fix is upstream: an identity echo that returns the registry
+ * `server_id` from `/api/v1/meta`. Until that exists, nothing in this file
+ * proves the answering process is the one that wrote the record.
+ */
+export const KIMI_STARTUP_BINDING_WINDOW_MS = 60_000;
+
+export type KimiIdentityBinding =
+  | { ok: true; identity: KimiServerIdentity }
+  | {
+    ok: false;
+    reason: 'metadata-invalid' | 'auth-bypassed' | 'unbindable' | 'startup-mismatch' | 'version-mismatch';
+  };
+
+/**
+ * Decide whether the server answering `/api/v1/meta` is the one the registry
+ * record describes. ONE implementation, called by both the adapter gate and
+ * doctor, because a doctor that bound identity differently would report a
+ * healthy Kimi for a server the adapter then refuses — or the reverse.
+ *
+ * WHY THIS IS NOT AN ID COMPARISON. The obvious check — registry `server_id`
+ * equals meta `server_id` — is not merely weak, it is unsatisfiable. Upstream
+ * mints the two with separate `ulid()` calls at separate points in startup, so
+ * they NEVER match on any real host. A gate written that way refuses every
+ * genuine Kimi server; this repository shipped exactly that, and it rejected
+ * 100% of real hosts until a live host proved it. The premise survived 547
+ * adapter checks because every fixture synthesized the registry record FROM the
+ * meta id, so the suite proved the comparator and never the premise. Any future
+ * change here must be tested against the captured record as upstream writes it.
+ *
+ * What is checkable instead is that the two are CONSISTENT with one startup:
+ *  - the registry record's `started_at` and the API layer's `started_at` are
+ *    written by one process in a fixed order, milliseconds apart, so the API
+ *    start must fall inside {@link KIMI_STARTUP_BINDING_WINDOW_MS} after it;
+ *  - the version the registry recorded must be the version answering now.
+ *
+ * Read that as correlation, not provenance. It narrows what can answer here; it
+ * does not prove the answering process wrote the record, and
+ * {@link KIMI_STARTUP_BINDING_WINDOW_MS} says why. The complete fix is upstream.
+ *
+ * Fails closed on:
+ *  - metadata that is absent, non-object, or missing/malformed `server_id`,
+ *    `server_version`, `started_at`, or `dangerous_bypass_auth`. Unverifiable is
+ *    not verified, and a security-relevant field is never defaulted.
+ *  - `dangerous_bypass_auth: true`. A server with its token gate disabled
+ *    answers ANY caller, so a successful authenticated request proves no
+ *    credential relationship — the gate's only evidence is gone. Refusing is
+ *    not a policy preference about the user's server; it is the gate declining
+ *    to treat an unowned answer as proof of ownership.
+ *  - a registry record missing `started_at` or `host_version`. Both exist on
+ *    every supported version, so a record without them is not an older shape to
+ *    accommodate — it is a record this gate cannot check, and skipping the
+ *    comparison it enables would fail open on exactly that input.
+ *  - an API start before the registry record's, or later than the window. The
+ *    early case is real: a PREVIOUS server still holding the port while a newer
+ *    `kimi web` writes a record and fails to bind reports a start from before
+ *    that record.
+ *
+ * There is deliberately NO cross-call identity pin. A pin is only ever a
+ * ONE-CALL ALARM: it refuses the next resolution that observes a changed
+ * generation and then has to stand down, or an ordinary `kimi web` restart would
+ * strand the adapter forever. Which call pays that refusal is arbitrary — an
+ * invisible availability poll can consume the whole alarm before any user action
+ * runs — so it does not preserve continuity for the operation that matters. It
+ * is an alarm, not a guarantee, and one that unrelated polling can spend.
+ *
+ * Note what a pin would NOT have bought either: the residual risks below allow a
+ * recycled pid on a reused port to present metadata that correlates with a stale
+ * record it never wrote, so passing this gate is not evidence of having written
+ * the record, with or without a pin. Replacement DURING a live
+ * connection is already handled where it belongs, by the connection's own
+ * generation handling (the reverifier and the `{seq, epoch}` cursor).
+ */
+export function bindKimiServerIdentity(
+  instance: KimiDiscoveredInstance,
+  meta: unknown,
+): KimiIdentityBinding {
+  const decoded = decodeKimiServerMeta(meta);
+  if (!decoded) return { ok: false, reason: 'metadata-invalid' };
+  if (decoded.dangerousBypassAuth) return { ok: false, reason: 'auth-bypassed' };
+  if (instance.startedAt === undefined || instance.hostVersion === undefined) {
+    return { ok: false, reason: 'unbindable' };
+  }
+  const elapsed = decoded.startedAtMs - instance.startedAt;
+  if (elapsed < 0 || elapsed > KIMI_STARTUP_BINDING_WINDOW_MS) {
+    return { ok: false, reason: 'startup-mismatch' };
+  }
+  if (instance.hostVersion !== decoded.serverVersion) {
+    return { ok: false, reason: 'version-mismatch' };
+  }
+  return {
+    ok: true,
+    identity: {
+      registryServerId: instance.serverId,
+      apiServerId: decoded.serverId,
+      apiStartedAtMs: decoded.startedAtMs,
+      serverVersion: decoded.serverVersion,
+    },
+  };
+}
 
 export type KimiVerifiedInstance =
-  | { ok: true; instance: KimiDiscoveredInstance; http: KimiReadOnlyHttp }
+  | { ok: true; instance: KimiDiscoveredInstance; http: KimiReadOnlyHttp; identity: KimiServerIdentity }
   | { ok: false; reason: KimiInstanceRefusal };
 
 /**
@@ -594,26 +824,34 @@ export type KimiVerifiedInstance =
  *    guess; and resolving per call let a discovery and the attach it led to land
  *    on different servers.
  *  - `/api/v1/meta` unreachable, unauthorized, or malformed.
- *  - `server_id` that is absent, non-string, or unequal to the registry record.
- *    ABSENCE FAILS: an unverifiable identity is not a verified one, and treating
- *    a silent server as trusted is precisely the fail-open this gate exists to
- *    prevent.
+ *  - metadata that cannot bind the answering server to the registry record it
+ *    was reached through. See {@link bindKimiServerIdentity} for every binding
+ *    case, for why this is NOT an id comparison, and for why there is no
+ *    cross-call generation pin.
  *
  * COST: one extra `/api/v1/meta` round-trip per operation. Deliberate — the
  * alternative is caching a verdict whose whole value is being current.
  *
- * TWO RESIDUAL RISKS, neither fixable at this version; do not read this gate as
+ * THREE RESIDUAL RISKS, none fixable at this version; do not read this gate as
  * stronger than it is:
  *  1. The bearer token is sent BEFORE identity can be checked. A registry record
  *     proves only that some process holds that pid, and the unauthenticated
  *     surface offers nothing to match against (`/api/v1/healthz` answers a bare
- *     `{ok:true}`; `server_id` lives behind the authenticated `/api/v1/meta`). A
- *     recycled pid on a reused port therefore receives one token before it is
- *     refused. Closing this needs an unauthenticated identity echo upstream.
+ *     `{ok:true}`; every identity field lives behind the authenticated
+ *     `/api/v1/meta`). A recycled pid on a reused port therefore receives one
+ *     token before it is refused. Closing this needs an unauthenticated identity
+ *     echo upstream.
  *  2. Verification and use are SEPARATE requests, so this is not atomic. A
  *     server replaced in the window between the `/meta` that verified it and the
  *     request that uses it would not be caught. The gate narrows that window to
  *     one round-trip; it does not eliminate it.
+ *  3. The binding is CIRCUMSTANTIAL, not an identity echo. Kimi exposes no way
+ *     to ask a running server which registry record it wrote, so this shows
+ *     "same version, started when the record says" rather than "the process that
+ *     wrote this record" — and pid and port can both be reused inside the
+ *     correlation window. An upstream request to return the registry id from
+ *     `/api/v1/meta` would replace all of it with one comparison; until then,
+ *     this is defense-in-depth and must not be described as proof of provenance.
  */
 export async function resolveVerifiedInstance(
   scan: KimiInstanceScan,
@@ -629,11 +867,9 @@ export async function resolveVerifiedInstance(
   if (live.length > 1) return { ok: false, reason: 'ambiguous' };
   const instance = live[0]!;
   const http = createClient(instance);
-  const meta = await http.getJson<{ server_id?: unknown }>('/api/v1/meta');
+  const meta = await http.getJson<unknown>('/api/v1/meta');
   if (!meta.ok) return { ok: false, reason: 'unreachable' };
-  const serverId = meta.data?.server_id;
-  if (typeof serverId !== 'string' || serverId !== instance.serverId) {
-    return { ok: false, reason: 'identity-mismatch' };
-  }
-  return { ok: true, instance, http };
+  const bound = bindKimiServerIdentity(instance, meta.data);
+  if (!bound.ok) return { ok: false, reason: bound.reason };
+  return { ok: true, instance, http, identity: bound.identity };
 }
