@@ -59,6 +59,8 @@ import {
   stopCodexDaemonEnsureProcess,
 } from '@cosyncing/adapter-codex';
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
+import { KimiAdapter, kimiRegistrationEnabled } from '@cosyncing/adapter-kimi';
+import { DshAdapter, dshRegistrationEnabled } from '@cosyncing/adapter-dsh';
 import { Hub, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
 import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../roster/roster-overlay.ts';
 import {
@@ -583,6 +585,38 @@ registry.register(new CodexAdapter({
   },
 })); // Codex — observe (rollout-JSONL tail); resume is a later increment
 registry.register(new ClaudeAdapter()); // Claude Code — observe (transcript-JSONL tail); resume/live are later increments
+// Kimi Code — observe for every session (kimi web HTTP + WS), plus Drive for
+// the ones cosyncing itself created BEHIND ITS OWN default-off gate
+// (COSYNCING_KIMI_DRIVE). Foreground clients explicitly request `mode=live`;
+// background resident tabs stay on the authority-free bare owner. A session
+// this broker process did not create stays
+// observe-only and fail-closed even with Drive on: a terminal `kimi -S` may own
+// it, and two writers silently fork one Kimi journal. A ROLLOUT GATE, NOT A
+// CAPABILITY DECISION: the adapter is finished and safe, but `/api/agents` is
+// not revision-filtered, so one kimi row makes a strict `$enumDecode` client
+// throw on the unknown integration kind — and because that aborts the WHOLE
+// roster decode, such a client loses every agent, Kimi installed or not. Stay
+// default-off until every supported client ships the tolerant decoding added
+// alongside this slice. Activation is foreground-only for now: the durable
+// service environment is a closed enumerated list that does not carry this
+// flag (see KIMI_ENABLE_ENV's contract), so a managed service cannot enable
+// Kimi until a later lifecycle round adds a persisted feature-gate path.
+if (kimiRegistrationEnabled()) registry.register(new KimiAdapter());
+// DeepSeek Harness — live-only Drive against an EXTERNAL `dsh web` host this
+// broker never starts, stops, or configures. dsh is server-first: one host
+// process owns the append-only session log and every client (its own browser UI
+// included) is a peer of it, so there is no ownership arbitration, no resume to
+// offer, and no observe mode — the host serves one undifferentiated client
+// contract, and calling a full-authority connection "observe" would be a lie.
+// Default-off for TWO reasons, either sufficient on its own: `/api/agents` is
+// not revision-filtered, so one dsh row makes a strict `$enumDecode` client
+// throw on `http-websocket` and lose its WHOLE roster; and with no host running
+// the row's every action fails, so it appears only where an operator has said
+// the host is there. Activation is foreground-only: the durable service
+// environment is a closed enumerated list that does not carry this flag (see
+// DSH_ENABLE_ENV's contract), so a managed service cannot enable dsh until a
+// later lifecycle round adds a persisted feature-gate path.
+if (dshRegistrationEnabled()) registry.register(new DshAdapter());
 
 let latestBrokerHealth: BrokerHealthSnapshot;
 let attentionService: AttentionService;
@@ -1579,6 +1613,13 @@ async function discoverMachineRosters(localBaseUrl: string): Promise<AggregatedM
 }
 
 function createdSessionAttachMode(info: SessionInfo): AttachMode | undefined {
+  // A live-only adapter needs an explicit #live owner: a bare connection is
+  // shared with background Observe clients and therefore cannot carry socket-
+  // local mutation authority. Returning the session's live instruction here
+  // lets the create response bridge that intent to exactly one foreground
+  // client attach. Existing live adapters are unchanged semantically; Hub
+  // folds #live onto an already-established canonical live owner.
+  if (info.attachMode === 'live') return 'live';
   const control = info.control;
   if (control?.terminalSync.active || control?.drive.state === 'driving') return undefined;
   if (control?.drive.supported && control.drive.state === 'observing') return 'resume';
@@ -5347,16 +5388,27 @@ server = Bun.serve<WsData>({
             ? hub.joinExisting(tool, id, expectedOwnerRevision!)
             : await hub.ensure(tool, id, mode, reason);
         } catch (err) {
-          // A DENIED reason-tagged resume answers with a structured conflict frame and continues
-          // as an Observe-class attach on the SAME socket, so the client keeps its provenance and
-          // shows honest ownership instead of a reconnect loop. A mode-only resume preserves the
-          // legacy error+close contract for older clients.
-          if (mode !== 'resume' || !reason) throw err;
-          const message = err instanceof Error ? err.message : String(err);
-          sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: driveAttachRefusalCode(err), message });
-          mode = undefined;
-          ws.data.mode = undefined; // close() must release the fallback owner's bare key
-          mc = await hub.ensure(tool, id);
+          if (mode === 'live' && isOwnershipConflictError(err)) {
+            // Live eligibility can change between the roster/create response
+            // and socket open. Fall back to the bare Observe owner on the SAME
+            // socket; the authoritative session frame disarms the client's
+            // retained live mode, preventing a reconnect loop. No new wire
+            // frame is needed: the read-only control reason is in that frame.
+            mode = undefined;
+            ws.data.mode = undefined;
+            mc = await hub.ensure(tool, id);
+          } else {
+            // A DENIED reason-tagged resume answers with a structured conflict frame and continues
+            // as an Observe-class attach on the SAME socket, so the client keeps its provenance and
+            // shows honest ownership instead of a reconnect loop. A mode-only resume preserves the
+            // legacy error+close contract for older clients.
+            if (mode !== 'resume' || !reason) throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: driveAttachRefusalCode(err), message });
+            mode = undefined;
+            ws.data.mode = undefined; // close() must release the fallback owner's bare key
+            mc = await hub.ensure(tool, id);
+          }
         }
         // If the socket closed during the (up to ~4s) attach, close() already ran with no
         // client registered, so it could not arm eviction. Release now and bail — otherwise

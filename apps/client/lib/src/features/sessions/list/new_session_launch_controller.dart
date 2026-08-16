@@ -111,7 +111,7 @@ final class NewSessionLaunchService {
 
   final Ref _ref;
 
-  /// Creates one session and preserves the broker's one-shot Resume intent.
+  /// Creates one session and preserves the broker's one-shot attach intent.
   ///
   /// Errors remain structured here. The page classifies and localizes them;
   /// raw diagnostics stay out of its primary reading path.
@@ -150,16 +150,14 @@ final class NewSessionLaunchService {
       // Intents and provenance are recorded under the broker that OWNS the
       // created session — the captured source — never under whatever
       // profile is active at write time.
+      final createdKey = SessionDetailKey(
+        tool: request.tool,
+        sessionId: response.session.id,
+      );
       if (response.attachMode == 'resume') {
         _ref
             .read(createdSessionAttachIntentsProvider)
-            .rememberResume(
-              source.storageKey,
-              SessionDetailKey(
-                tool: request.tool,
-                sessionId: response.session.id,
-              ),
-            );
+            .rememberResume(source.storageKey, createdKey);
         // The durable app-created control preference is written BEFORE
         // navigation so it survives an app restart or a first attach that
         // never reaches Driving. It has no TTL; only an explicit Handoff,
@@ -177,6 +175,14 @@ final class NewSessionLaunchService {
           // succeeded and the in-memory one-shot intent still drives the
           // first attach.
         }
+      } else if (response.attachMode == 'live') {
+        // `live` is a socket-local foreground instruction, not durable Resume
+        // provenance. Persisting it in the Drive intent store would turn a
+        // later restart into mode=resume, which live-only adapters must
+        // refuse. The fresh roster can offer live again when appropriate.
+        _ref
+            .read(createdSessionAttachIntentsProvider)
+            .rememberLive(source.storageKey, createdKey);
       }
       // Revalidate before the caller navigates: if the user switched brokers
       // mid-create, the session exists on the previous broker (with its

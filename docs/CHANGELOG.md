@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- A provisional, default-off DeepSeek Harness source adapter can connect to an
+  operator-started `dsh web` host for session discovery, history, and shared
+  foreground control.
+
+### Fixed
+
+- Codex 0.147 completed user-message records now appear in transcripts without
+  duplicating legacy user-message records.
+
 ## 0.3.0 — 2026-08-14
 
 ### Changed

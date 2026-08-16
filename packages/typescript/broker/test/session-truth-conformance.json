@@ -61,6 +61,24 @@
           "reviewed": "2026-08-04"
         }
       }
+    },
+    "KimiAdapter": {
+      "coverage": {
+        "native-identity": ["kimi-mapping"],
+        "terminal-authority": ["kimi-drive"],
+        "history-live-chronology": ["kimi-observe", "kimi-attach-priming"],
+        "replacement": ["kimi-drive", "kimi-observe"],
+        "hub-authority": ["kimi-attach-priming", "kimi-drive-authority"]
+      }
+    },
+    "DshAdapter": {
+      "coverage": {
+        "native-identity": ["dsh-mapping"],
+        "terminal-authority": ["dsh-observe", "dsh-attach-priming"],
+        "history-live-chronology": ["dsh-observe", "dsh-attach-priming"],
+        "replacement": ["dsh-observe", "dsh-attach-priming"],
+        "hub-authority": ["dsh-attach-priming"]
+      }
     }
   }
 }

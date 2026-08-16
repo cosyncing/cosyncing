@@ -40,6 +40,20 @@
         "@cosyncing/adapter-api": "workspace:*",
       },
     },
+    "packages/typescript/adapters/dsh": {
+      "name": "@cosyncing/adapter-dsh",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
+    "packages/typescript/adapters/kimi": {
+      "name": "@cosyncing/adapter-kimi",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
     "packages/typescript/adapters/opencode": {
       "name": "@cosyncing/adapter-opencode",
       "version": "0.0.0",
@@ -60,6 +74,8 @@
         "@cosyncing/adapter-api": "workspace:*",
         "@cosyncing/adapter-claude": "workspace:*",
         "@cosyncing/adapter-codex": "workspace:*",
+        "@cosyncing/adapter-dsh": "workspace:*",
+        "@cosyncing/adapter-kimi": "workspace:*",
         "@cosyncing/adapter-opencode": "workspace:*",
         "@cosyncing/adapter-pi": "workspace:*",
         "@cosyncing/crypto": "workspace:*",
@@ -99,6 +115,10 @@
     "@cosyncing/adapter-claude": ["@cosyncing/adapter-claude@workspace:packages/typescript/adapters/claude"],
 
     "@cosyncing/adapter-codex": ["@cosyncing/adapter-codex@workspace:packages/typescript/adapters/codex"],
+
+    "@cosyncing/adapter-dsh": ["@cosyncing/adapter-dsh@workspace:packages/typescript/adapters/dsh"],
+
+    "@cosyncing/adapter-kimi": ["@cosyncing/adapter-kimi@workspace:packages/typescript/adapters/kimi"],
 
     "@cosyncing/adapter-opencode": ["@cosyncing/adapter-opencode@workspace:packages/typescript/adapters/opencode"],
 

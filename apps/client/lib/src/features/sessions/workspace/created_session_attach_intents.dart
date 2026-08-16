@@ -5,8 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// One-shot attach intents returned by `POST /api/sessions/:tool`.
 ///
 /// Opening an ordinary roster row remains Observe-first. A newly-created row
-/// may instead carry the broker's explicit `attachMode: resume` instruction;
-/// this registry bridges that response to the detail controller exactly once.
+/// may instead carry the broker's explicit `attachMode: resume|live`
+/// instruction; this registry bridges that response to the detail controller
+/// exactly once.
 final createdSessionAttachIntentsProvider =
     Provider<CreatedSessionAttachIntents>((ref) {
       return CreatedSessionAttachIntents();
@@ -21,6 +22,7 @@ final createdSessionAttachIntentsProvider =
 /// another.
 final class CreatedSessionAttachIntents {
   final Set<String> _resume = <String>{};
+  final Set<String> _live = <String>{};
 
   static String _qualify(String brokerProfileId, SessionDetailKey key) =>
       '$brokerProfileId/${key.tool}/${key.sessionId}';
@@ -29,6 +31,23 @@ final class CreatedSessionAttachIntents {
   /// request Drive.
   void rememberResume(String brokerProfileId, SessionDetailKey key) =>
       _resume.add(_qualify(brokerProfileId, key));
+
+  /// Records that the next foreground attach for [key] on [brokerProfileId]
+  /// must request the adapter's existing live owner.
+  void rememberLive(String brokerProfileId, SessionDetailKey key) =>
+      _live.add(_qualify(brokerProfileId, key));
+
+  /// Consumes the broker's one-shot attach instruction for [key].
+  ///
+  /// A background Observe attach never calls this method, so opening a
+  /// resident tab in the background cannot consume or inherit mutation
+  /// authority intended for its later foreground attach.
+  String? takeMode(String brokerProfileId, SessionDetailKey key) {
+    final qualified = _qualify(brokerProfileId, key);
+    if (_live.remove(qualified)) return 'live';
+    if (_resume.remove(qualified)) return 'resume';
+    return null;
+  }
 
   /// Consumes a pending Drive attach for [key] on [brokerProfileId].
   bool takeResume(String brokerProfileId, SessionDetailKey key) =>
@@ -41,12 +60,17 @@ final class CreatedSessionAttachIntents {
   /// the same id (even the same endpoint) would otherwise consume a one-shot
   /// Drive instruction issued to the deleted profile. The scope key encodes
   /// `/`, so the first separator always ends the scope segment.
-  void forgetProfile(String profileId) => _resume.removeWhere((entry) {
-    final scopeEnd = entry.indexOf('/');
-    if (scopeEnd <= 0) return false;
-    return RosterSource.storageKeyBelongsToProfile(
-      entry.substring(0, scopeEnd),
-      profileId,
-    );
-  });
+  void forgetProfile(String profileId) {
+    bool belongsToProfile(String entry) {
+      final scopeEnd = entry.indexOf('/');
+      if (scopeEnd <= 0) return false;
+      return RosterSource.storageKeyBelongsToProfile(
+        entry.substring(0, scopeEnd),
+        profileId,
+      );
+    }
+
+    _resume.removeWhere(belongsToProfile);
+    _live.removeWhere(belongsToProfile);
+  }
 }

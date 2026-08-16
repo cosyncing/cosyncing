@@ -9,6 +9,8 @@
     "@cosyncing/adapter-pi": "workspace:*",
     "@cosyncing/adapter-codex": "workspace:*",
     "@cosyncing/adapter-claude": "workspace:*",
+    "@cosyncing/adapter-kimi": "workspace:*",
+    "@cosyncing/adapter-dsh": "workspace:*",
     "@cosyncing/crypto": "workspace:*",
     "@cosyncing/transport": "workspace:*",
     "@cosyncing/transport-wire": "workspace:*"

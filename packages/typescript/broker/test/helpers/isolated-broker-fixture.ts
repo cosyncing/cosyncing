@@ -75,6 +75,12 @@ export function isolatedBrokerFixtureEnvironment(
   const owned_endpoints = {
     OPENCODE_URL: UNROUTABLE_FIXTURE_ORIGIN,
     COSYNCING_TOKDASH_URL: UNROUTABLE_FIXTURE_ORIGIN,
+    // Same shape, same reason: the DeepSeek Harness base URL defaults to
+    // `127.0.0.1:3080`, which is exactly where a maintainer's own `dsh web`
+    // host listens. A fixture that merely omits the variable would reach that
+    // real host — discovering, attaching to, and (through Drive) able to write
+    // to the person's live sessions. Pinned unroutable so unset fails closed.
+    COSYNCING_DSH_BASE_URL: UNROUTABLE_FIXTURE_ORIGIN,
     // A fixture must never adopt or spawn a serve either: adoption is the same
     // leak by another route, and spawning leaves a process behind.
     COSYNCING_OPENCODE_NO_AUTOSERVE: '1',

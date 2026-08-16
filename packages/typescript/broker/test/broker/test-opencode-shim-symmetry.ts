@@ -87,6 +87,8 @@ function contextFor(userHome: string): SetupDiagnosisContext {
     async runReadOnly() { return { status: 'ok', exitCode: 0, stdout: '{}', stderr: '' }; },
     async fetchJson() { return { status: 'unreachable' }; },
     async probeTcp() { return 'closed'; },
+    listDirectory() { return { ok: false, reason: 'missing' } as const; },
+    processAlive() { return false; },
     displayPath: (path) => path,
   };
 }

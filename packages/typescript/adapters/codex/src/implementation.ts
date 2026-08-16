@@ -5684,6 +5684,14 @@ class CodexRuntimeTracker {
    * real record's legacy text so the next response item is suppressed when it is the duplicate
    * half of a dual-emission pair, while a new-only response remains visible. */
   private pendingLegacyAssistantText: string | undefined;
+  /** The user prompt most recently mapped from ONE of its two durable forms
+   * (`event_msg/user_message` legacy, `item_completed`/`UserMessage` since 0.147), held only while
+   * the OTHER form could still arrive as the IMMEDIATELY NEXT record. No local rollout carries
+   * both forms (34 new-format + 927 legacy files, zero mixed), so this is purely forward
+   * compatibility — and it is scoped exactly like the assistant pair above: the very next real
+   * record consumes it, one way or the other. Never a session- or turn-wide text match, which
+   * would merge two genuinely identical prompts. */
+  private pendingUserDualEmission: { form: 'legacy' | 'item'; text: string; turnId: string | undefined } | undefined;
   /**
    * turnId → user messages seen inside it, oldest first.
    *
@@ -5807,6 +5815,47 @@ class CodexRuntimeTracker {
     this.pendingLegacyAssistantText = text;
   }
 
+  /** Consume the possible OTHER durable form of the user prompt just mapped.
+   *
+   * Called for every real record, like {@link consumeLegacyAssistantPair}, and consumed by
+   * whatever arrives: only the DIRECTLY ADJACENT record can be the pair. A byte-equal
+   * `response_item/message` `role: 'user'` disarms it too — that twin precedes its own durable
+   * record in both formats, so seeing one after a durable form means a SECOND prompt's
+   * representation is opening, and letting the pairing survive it is how two genuinely identical
+   * prompts (one legacy, one new) collapsed into one row. Suppression also demands KNOWN, EQUAL
+   * turn evidence on both sides — a pending or record whose turn is unknown never suppresses.
+   * Same form twice is never a pair either. The residue of this narrowness is fail-safe: a future
+   * dual format that interleaves anything between its two durable forms costs a duplicate row,
+   * never a lost prompt. */
+  consumeUserDualEmission(record: any): boolean {
+    const pending = this.pendingUserDualEmission;
+    if (pending === undefined) return false;
+    this.pendingUserDualEmission = undefined;
+    if (pending.turnId === undefined || record?.type !== 'event_msg') return false;
+    const payload = record?.payload;
+    if (pending.form === 'item' && payload?.type === 'user_message') {
+      // The legacy record names no turn of its own, so the enclosing turn must be known AND be
+      // the one the completed item declared — otherwise these are prompts of two different turns.
+      return String(payload.message ?? '') === pending.text
+        && pending.turnId === this.activeTurnId;
+    }
+    if (
+      pending.form === 'legacy'
+      && payload?.type === 'item_completed'
+      && payload.item?.type === 'UserMessage'
+    ) {
+      const turnId = payload.turn_id != null ? String(payload.turn_id) : undefined;
+      return turnId !== undefined
+        && userInputText(payload.item.content) === pending.text
+        && pending.turnId === turnId;
+    }
+    return false;
+  }
+
+  expectUserDualEmission(form: 'legacy' | 'item', text: string, turnId: string | undefined): void {
+    this.pendingUserDualEmission = { form, text, turnId };
+  }
+
   /** Records one automatic denial only while a turn is open. */
   recordAutomaticApprovalDenial(
     toolName: string | undefined,
@@ -5886,9 +5935,11 @@ class CodexRuntimeTracker {
     return out;
   }
 
-  recordUser(key: string): void {
+  /** `turnId` defaults to the open turn; a record that declares its own exact turn (0.147
+   *  `item_completed`) books there instead, so its footer ownership never depends on which turn
+   *  this read happened to consider active. */
+  recordUser(key: string, turnId: string | undefined = this.activeTurnId): void {
     this.lastUserMessageKey = key;
-    const turnId = this.activeTurnId;
     if (!turnId) {
       // Some rollouts write the prompt BEFORE the turn opens. It belongs to the turn that opens
       // next, and to no other: holding exactly one unclaimed key is what keeps that attribution
@@ -6146,6 +6197,7 @@ export function mapLine(
   const p = ln?.payload;
   if (!p) return [];
   const duplicateLegacyAssistantPair = runtime.consumeLegacyAssistantPair(ln);
+  const duplicateUserDualEmission = runtime.consumeUserDualEmission(ln);
   const key = `c${lineIndex}`;
   const ts = lineTimestampMs(ln);
   const transition = runtime.noteTurnTransition(rolloutTurnTransition(ln));
@@ -6153,6 +6205,10 @@ export function mapLine(
     switch (p.type) {
       case 'user_message': {
         if (!p.message) return [];
+        // The other durable form of this same prompt already produced its row (see the
+        // `item_completed`/`UserMessage` case): a dual-format rollout writes one prompt twice, and
+        // the second durable record must not become a second bubble.
+        if (duplicateUserDualEmission) return [];
         // The rollout gives this line no native identity at all, but the enclosing turn is already
         // open (`turn_context`/`task_started` precede it and both carry `turn_id`). Rebuilding
         // `codex:<turnId>:u<ordinal>` here is what makes the replayed prompt the SAME row the live
@@ -6164,7 +6220,39 @@ export function mapLine(
         // pick, exactly as for assistant text: re-deciding is how one prompt becomes two rows.
         const userKey = published ? published.adopt(lineIndex, decided) : decided;
         runtime.recordUser(userKey);
+        runtime.expectUserDualEmission('legacy', String(p.message), turnId);
         return [{ type: 'user-message', text: String(p.message), key: userKey, turnId, sentAt: ts }];
+      }
+      case 'item_completed': {
+        // Codex 0.147 stopped writing `event_msg/user_message`: a prompt's only durable event is
+        // now `item_completed` whose `item.type` is `UserMessage` (measured locally: 34 rollouts,
+        // 275 such items, none beside a legacy record). Every other completed item type stays
+        // ignored here exactly as before — assistant text, reasoning and tools keep arriving via
+        // their paired `response_item` records, so mapping them too would double each one.
+        const item = p.item;
+        if (item?.type !== 'UserMessage') return [];
+        const text = userInputText(item.content);
+        if (!text) return [];
+        // The legacy form of this same prompt already produced its row (dual-format rollout).
+        if (duplicateUserDualEmission) return [];
+        // Unlike the legacy event, this record names its own turn — and that exact id outranks
+        // whichever turn this read currently considers open: booking under `turn_id` keeps the
+        // key AND the footer's ownership correct even when this line and the turn's opening
+        // records are read on different sides of an attach boundary.
+        const turnId = p.turn_id != null ? String(p.turn_id) : runtime.currentTurnId;
+        const decided = turnId ? codexUserMessageKey(turnId, runtime.nextUserOrdinal(turnId)) : key;
+        const userKey = published ? published.adopt(lineIndex, decided) : decided;
+        runtime.recordUser(userKey, turnId);
+        runtime.expectUserDualEmission('item', text, turnId);
+        const imageCount = imageInputCount(item.content);
+        return [{
+          type: 'user-message',
+          text,
+          key: userKey,
+          turnId,
+          sentAt: ts ?? timestampToMs(p.started_at_ms),
+          ...(imageCount ? { imageCount } : {}),
+        }];
       }
       case 'agent_message': {
         if (!p.message) return [];
@@ -6790,7 +6878,8 @@ function userInputText(content: unknown): string {
   return content
     .map((c: any) => {
       if (c?.type === 'text') return c.text ?? '';
-      if (c?.type === 'image' || c?.type === 'localImage') return '[image]';
+      // `localImage` on the app-server wire, `local_image` in the 0.147 rollout's completed item.
+      if (c?.type === 'image' || c?.type === 'localImage' || c?.type === 'local_image') return '[image]';
       if (c?.type === 'mention') return c.path ? `@${c.path}` : c.name ? `@${c.name}` : '';
       if (c?.type === 'skill') return c.name ? `/${c.name}` : '';
       return '';
@@ -6802,7 +6891,7 @@ function userInputText(content: unknown): string {
 
 function imageInputCount(content: unknown): number | undefined {
   if (!Array.isArray(content)) return undefined;
-  const n = content.filter((c: any) => c?.type === 'image' || c?.type === 'localImage').length;
+  const n = content.filter((c: any) => c?.type === 'image' || c?.type === 'localImage' || c?.type === 'local_image').length;
   return n || undefined;
 }
 

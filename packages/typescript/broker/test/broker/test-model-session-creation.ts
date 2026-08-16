@@ -283,6 +283,11 @@ try {
     },
     "OpenCode selected model remains available for the first prompt",
   );
+  assert.equal(
+    openCodeCreate.body.attachMode,
+    "live",
+    "a live-only create returns an explicit foreground attach instruction",
+  );
   assert.deepEqual(
     running.opencodeCreates,
     [{ title: "Selected OpenCode model" }],
@@ -515,23 +520,27 @@ try {
   );
 
   // The immediately previous revision must stay writable through the
-  // one-revision overlap window. Revision 13 adds only additive owner,
-  // authority, capability, attach-reason, and refusal fields, so a released
-  // revision-12 client's request body is unchanged.
+  // one-revision overlap window. Revision 14 adds the `http-websocket`
+  // IntegrationKind value plus the client-side `unknown` fallback; nothing a
+  // client SENDS changed, so a released revision-13 client's request body is
+  // unchanged. (The value is breaking on the READ side for a strict decoder,
+  // which is why its only producer — Kimi registration — stays default-off;
+  // a revision-13 client against a default broker sees a byte-identical
+  // roster. test-update-contract.ts carries the full argument.)
   // Both numbers move together on every bump: the query names the revision
   // immediately below the assertion just under it, and a stale query would
   // silently test a client two revisions back, which the overlap window
   // legitimately rejects.
   const previousRevisionQuery =
-    "contractRevision=12&minimumBrokerRevision=2&" +
-    "contractSurfaceHash=fnv1a32%3Af2eb77a8&clientVersion=0.9.9";
+    "contractRevision=13&minimumBrokerRevision=2&" +
+    "contractSurfaceHash=fnv1a32%3A095f3c3c&clientVersion=0.9.9";
   const previousRevision = await request(
     running.base,
     `/api/sessions/claude?${previousRevisionQuery}`,
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 13);
+  assert.equal(BROKER_CONTRACT.revision, 14);
   assert.equal(
     previousRevision.status,
     200,

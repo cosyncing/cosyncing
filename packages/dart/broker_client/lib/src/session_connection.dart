@@ -74,8 +74,9 @@ class SessionConnection {
   final WebSocketAdapter Function(String url) _adapterFactory;
   final int _initialHistory;
 
-  /// Control mode for the attach (`resume` to Drive, null to Observe). Mutated
-  /// by [reattach] and applied on the next (re)connect's `streamEndpoint`.
+  /// Control mode for the attach (`resume` to Drive, `live` to join an
+  /// existing live owner, null to Observe). Mutated by [reattach] and applied
+  /// on the next (re)connect's `streamEndpoint`.
   String? _mode;
 
   /// Drive-attach intent accompanying resume (`create`, `app-restore`,
@@ -459,7 +460,8 @@ class SessionConnection {
   }
 
   /// Re-attaches the stream under a new control [mode] — `resume` to Drive
-  /// (Take over), null to Observe (hand back). [reason] carries the
+  /// (Take over), `live` to join an existing live owner, or null to Observe
+  /// (hand back). [reason] carries the
   /// drive-attach intent for a `resume` attach so the broker can arbitrate
   /// ownership atomically; [ownerRevision] qualifies `join-existing` only.
   /// Null keeps the legacy mode-only attach. Closes the current socket and
@@ -479,9 +481,9 @@ class SessionConnection {
     await connect();
   }
 
-  /// Drops any requested drive mode/reason without touching the socket, so
+  /// Drops any requested control mode/reason without touching the socket, so
   /// the next (re)connect attaches as Observe. Called when an explicit
-  /// authority request (a takeover) fails or times out unconfirmed — a later
+  /// authority request fails, times out, or loses its live owner — a later
   /// automatic reconnect must never silently retry it.
   void disarmDriveAuthority() {
     _mode = null;

@@ -42,8 +42,9 @@ abstract interface class SessionDetailConnection {
   /// Closes the stream.
   Future<void> close({bool reconnect = false});
 
-  /// Re-attaches under a new control mode — `resume` to Drive (Take over), or
-  /// null to Observe (hand back to the terminal). [reason] carries the
+  /// Re-attaches under a new control mode — `resume` to Drive (Take over),
+  /// `live` to join an adapter's existing live owner, or null to Observe.
+  /// [reason] carries the
   /// drive-attach intent for a resume attach (`create`, `app-restore`,
   /// `lease-restore`, `join-existing`, or `takeover`); null keeps the legacy
   /// mode-only attach. [ownerRevision] is required only for `join-existing`.
@@ -53,9 +54,9 @@ abstract interface class SessionDetailConnection {
     SessionOwnerRevision? ownerRevision,
   });
 
-  /// Drops any pending drive mode/reason so the next automatic reconnect
-  /// attaches as Observe. Called when an explicit takeover fails or times out
-  /// unconfirmed; it must never be silently retried by the transport.
+  /// Drops any pending control mode/reason so the next automatic reconnect
+  /// attaches as Observe. Called when an explicit takeover fails, times out,
+  /// or a live owner is demoted; it must never be silently retried.
   void disarmDriveAuthority();
 
   /// Requests terminal handoff from this exact Drive socket.

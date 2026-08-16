@@ -3,6 +3,7 @@ import {
   accessSync,
   constants,
   lstatSync,
+  opendirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -274,6 +275,59 @@ export interface SetupDiagnosisContextOptions {
   homeDir?: string;
 }
 
+/** The most directory entries one listing will ever return, whatever a caller asks for. */
+const DIRECTORY_LISTING_HARD_LIMIT = 256;
+
+function listDirectory(
+  path: string,
+  maxEntries?: number,
+): ReturnType<SetupDiagnosisContext['listDirectory']> {
+  const requested = typeof maxEntries === 'number' && Number.isFinite(maxEntries) && maxEntries > 0
+    ? Math.floor(maxEntries)
+    : DIRECTORY_LISTING_HARD_LIMIT;
+  const ceiling = Math.min(requested, DIRECTORY_LISTING_HARD_LIMIT);
+  // Iterate through the directory handle instead of materializing the whole
+  // listing: a directory with a million entries costs the ceiling, not the
+  // directory. The entry that would exceed the ceiling proves truncation.
+  let dir;
+  try {
+    dir = opendirSync(path);
+  } catch (error) {
+    const code = (error as { code?: string } | undefined)?.code;
+    if (code === 'ENOENT') return { ok: false, reason: 'missing' };
+    if (code === 'ENOTDIR') return { ok: false, reason: 'not-directory' };
+    return { ok: false, reason: 'unreadable' };
+  }
+  const names: string[] = [];
+  let truncated = false;
+  try {
+    for (;;) {
+      const entry = dir.readSync();
+      if (entry === null) break;
+      if (names.length >= ceiling) {
+        truncated = true;
+        break;
+      }
+      names.push(entry.name);
+    }
+  } finally {
+    dir.closeSync();
+  }
+  names.sort();
+  return { ok: true, names, truncated };
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists but belongs to another user — still alive.
+    return (error as { code?: string } | undefined)?.code === 'EPERM';
+  }
+}
+
 export function createSetupDiagnosisContext(options: SetupDiagnosisContextOptions = {}): SetupDiagnosisContext {
   const env = options.env ?? process.env;
   const homeDir = options.homeDir ?? homedir();
@@ -296,6 +350,8 @@ export function createSetupDiagnosisContext(options: SetupDiagnosisContextOption
     runReadOnly: (path, args, timeoutMs) => runReadOnly(path, args, env, timeoutMs),
     fetchJson,
     probeTcp,
+    listDirectory,
+    processAlive,
     displayPath,
   };
 }

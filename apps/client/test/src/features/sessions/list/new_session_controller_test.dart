@@ -260,6 +260,35 @@ void main() {
   );
 
   test(
+    'preserves a live create intent without minting Resume provenance',
+    () async {
+      final fake = _FakeBrokerClient(
+        agents: [_agent('kimi', canCreate: true)],
+        attachMode: 'live',
+      );
+      final driveStore = _RecordingDriveIntentStore();
+      final container = _container(fake, driveStore: driveStore);
+      addTearDown(container.dispose);
+      final controller = container.read(newSessionControllerProvider.notifier);
+      await controller.loadAgents();
+
+      final session = await controller.create(
+        tool: 'kimi',
+        directory: '/workspace',
+        title: '',
+      );
+
+      expect(session?.id, 'created');
+      const key = SessionDetailKey(tool: 'kimi', sessionId: 'created');
+      final intents = container.read(createdSessionAttachIntentsProvider);
+      expect(intents.takeMode(_scope('other-profile'), key), isNull);
+      expect(intents.takeMode(_scope('local'), key), 'live');
+      expect(intents.takeMode(_scope('local'), key), isNull);
+      expect(driveStore.appCreatedKeys, isEmpty);
+    },
+  );
+
+  test(
     'a profile switch during held client resolution cannot mispair or close '
     "the create operation's client",
     () async {
@@ -526,10 +555,12 @@ final class _FakeBrokerClient extends BrokerClient {
   _FakeBrokerClient({
     required this.agents,
     this.models = const [],
+    this.attachMode = 'resume',
   }) : super(baseUrl: 'http://test');
 
   final List<AgentInfo> agents;
   final List<ModelOption> models;
+  final String attachMode;
   String? lastDirectory;
   String? lastTitle;
   int createCalls = 0;
@@ -585,9 +616,9 @@ final class _FakeBrokerClient extends BrokerClient {
         tool: tool,
         title: title ?? '',
         status: SessionStatus.idle,
-        attachMode: AttachMode.resume,
+        attachMode: attachMode == 'live' ? AttachMode.live : AttachMode.resume,
       ),
-      attachMode: 'resume',
+      attachMode: attachMode,
     );
   }
 }

@@ -22,6 +22,16 @@ delivery for Claude Code and Codex is deferred until it can be bound to the
 exact broker and native session; the shared `.cosyncing/outbox` path is not
 supported.
 
+## Experimental source integration
+
+| Agent | Verified upstream version | Activation | Current surface |
+| --- | ---: | --- | --- |
+| [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Foreground source broker with `COSYNCING_ENABLE_DSH=1` | Discovery, history, shared live control, create/rename, prompts, reconnect, and removal |
+
+DeepSeek Harness support is provisional and default-off. It connects to an
+operator-started `dsh web` host; setup does not install or manage that host, and
+the installed systemd/launchd broker does not persist the feature flag yet.
+
 ## Requirements
 
 - Complete the shared [installation prerequisites](../installation/prerequisites.md):

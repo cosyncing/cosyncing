@@ -60,6 +60,13 @@ enum SessionDetailAttachIntent {
   interactive,
 }
 
+final class _InteractiveAttachRequest {
+  const _InteractiveAttachRequest({this.mode, this.reason});
+
+  final String? mode;
+  final String? reason;
+}
+
 SessionInfo _admitSessionOwnerProjection(
   SessionInfo? previous,
   SessionInfo incoming,
@@ -109,6 +116,7 @@ class SessionDetailController
   /// `app-restore`, `lease-restore`, `join-existing`, or `takeover`); null when
   /// no Drive was requested. Settled by the broker's arbitration answer.
   String? _requestedDriveReason;
+  bool _liveAttachArmed = false;
   String? _lastJoinExistingRevision;
   Completer<bool>? _takeoverResult;
   Completer<bool>? _handoffResult;
@@ -477,6 +485,7 @@ class SessionDetailController
     _bootstrapAttempt++;
     _clearHistoryPageTracking();
     _requestedDriveReason = null;
+    _liveAttachArmed = false;
     _establishedAttachIntent = null;
     _lastJoinExistingRevision = null;
 
@@ -542,13 +551,13 @@ class SessionDetailController
     RosterSource source,
     SessionDetailConnection connection,
   ) async {
-    final driveReason = await _interactiveDriveReason(source);
+    final request = await _interactiveAttachRequest(source);
     if (_disposed ||
         _connectionSource != source ||
         !identical(_connection, connection)) {
       return;
     }
-    if (driveReason == null) {
+    if (request.mode == null) {
       // Visibility alone grants interaction with the already-open Observe
       // stream. It does not change broker authority and therefore needs no
       // socket reset, history bootstrap, or replay.
@@ -560,10 +569,13 @@ class SessionDetailController
       return;
     }
 
-    _requestedDriveReason = driveReason;
+    _requestedDriveReason = request.reason;
+    _liveAttachArmed = request.mode == 'live';
     state = state.copyWith(
-      driveRestorePhase: SessionDriveRestorePhase.restoring,
-      clearDriveRestoreConflict: true,
+      driveRestorePhase: request.reason == null
+          ? state.driveRestorePhase
+          : SessionDriveRestorePhase.restoring,
+      clearDriveRestoreConflict: request.reason != null,
       clearError: true,
     );
     try {
@@ -573,7 +585,7 @@ class SessionDetailController
           !identical(_connection, connection)) {
         return;
       }
-      await connection.reattach(mode: 'resume', reason: driveReason);
+      await connection.reattach(mode: request.mode, reason: request.reason);
       if (_disposed ||
           _connectionSource != source ||
           !identical(_connection, connection)) {
@@ -586,6 +598,8 @@ class SessionDetailController
         return;
       }
       _requestedDriveReason = null;
+      _liveAttachArmed = false;
+      connection.disarmDriveAuthority();
       state = state.copyWith(
         connectionStatus: connection.state,
         driveRestorePhase: SessionDriveRestorePhase.idle,
@@ -597,12 +611,37 @@ class SessionDetailController
     }
   }
 
-  Future<String?> _interactiveDriveReason(RosterSource source) async =>
-      ref
-          .read(createdSessionAttachIntentsProvider)
-          .takeResume(source.storageKey, arg)
-      ? kDriveAttachReasonCreate
-      : _driveRestoreReason(source.storageKey);
+  Future<_InteractiveAttachRequest> _interactiveAttachRequest(
+    RosterSource source,
+  ) async {
+    final createdMode = ref
+        .read(createdSessionAttachIntentsProvider)
+        .takeMode(source.storageKey, arg);
+    if (createdMode != null) {
+      return _InteractiveAttachRequest(
+        mode: createdMode,
+        reason: createdMode == 'resume' ? kDriveAttachReasonCreate : null,
+      );
+    }
+
+    final driveReason = await _driveRestoreReason(source.storageKey);
+    if (driveReason != null) {
+      return _InteractiveAttachRequest(mode: 'resume', reason: driveReason);
+    }
+
+    // A fresh roster row is the broker's current per-session attach
+    // instruction. Only the foreground path reads it; resident/background
+    // attaches stay bare Observe. Cached identity rows never enter this
+    // provider, so stale local state cannot mint mutation authority.
+    for (final session in ref.read(rosterSessionsProvider)) {
+      if (session.tool == arg.tool &&
+          session.id == arg.sessionId &&
+          session.attachMode == AttachMode.live) {
+        return const _InteractiveAttachRequest(mode: 'live');
+      }
+    }
+    return const _InteractiveAttachRequest();
+  }
 
   Future<void> _joinExistingDriver(
     SessionJoinExistingAction action,
@@ -682,6 +721,7 @@ class SessionDetailController
     _forgetNegotiatedContract();
     _clearHistoryPageTracking();
     _requestedDriveReason = null;
+    _liveAttachArmed = false;
     if (previousConnection != null) {
       // Fire-and-forget on purpose. This teardown belongs to the RETIRED
       // broker — often a machine that stopped answering — and a dead socket
@@ -782,6 +822,7 @@ class SessionDetailController
   Future<void> disconnect() async {
     _stopBootstrapForManualDisconnect();
     _requestedDriveReason = null;
+    _liveAttachArmed = false;
     _establishedAttachIntent = null;
     _lastJoinExistingRevision = null;
     await _clearDriveIntentBestEffort();
@@ -1638,6 +1679,15 @@ class SessionDetailController
         }
       }
       if (event is SessionWireEvent) {
+        if (_liveAttachArmed && !nextControl.canMutate) {
+          // A live owner can be demoted after the socket opens (for example,
+          // when another Kimi client writes during a stream outage). The
+          // current connection is already read-only, but SessionConnection
+          // preserves its mode across reconnects. Disarm it now so a later
+          // network reconnect cannot keep trying to reclaim a lost owner.
+          _liveAttachArmed = false;
+          connection.disarmDriveAuthority();
+        }
         // Wait for the new attach's authoritative control frame before replay.
         // Replaying on the bare `connected` transition can race ahead of that
         // frame and send into Observe using stale pre-reattach ownership.
@@ -1677,6 +1727,7 @@ class SessionDetailController
         // provenance — only explicit user exits erase it — and surface the
         // machine reason so the manual Take over path stays discoverable.
         _requestedDriveReason = null;
+        _liveAttachArmed = false;
         connection.disarmDriveAuthority();
         _completeTakeover(false);
         _completeHandoff(false);
@@ -1690,6 +1741,7 @@ class SessionDetailController
         );
       } else if (event is EndedWireEvent) {
         _requestedDriveReason = null;
+        _liveAttachArmed = false;
         _completeHandoff(false);
         _establishedAttachIntent = null;
         unawaited(_clearDriveIntentBestEffort());

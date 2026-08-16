@@ -72,6 +72,12 @@ Foreground clients can join the same broker-owned Codex or Pi Drive session with
 second native Resume. Claude Code keeps its Observe/Take-over flow on another client, while OpenCode
 keeps its shared-live behavior. Background Observe connections stay read-only.
 
+**Experimental:** A provisional [DeepSeek Harness](docs/supported_agents/dsh.md) adapter is available
+to source contributors. It connects to an operator-started `dsh web` host and gives active foreground
+clients a shared transcript and control surface. It is default-off and is not yet enabled by the
+installed broker service; background resident subscriptions, model selection, file input, and some
+message presentation remain follow-up work.
+
 ## Prerequisites
 
 Supported cross-device use requires [Tailscale](https://tailscale.com/) on the server and client
