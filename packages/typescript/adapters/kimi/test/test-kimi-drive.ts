@@ -412,6 +412,46 @@ const settle = () => Bun.sleep(30);
 const threw = async (work: () => Promise<unknown>): Promise<Error | undefined> =>
   work().then(() => undefined, (error: Error) => error);
 
+/**
+ * Waits for the REPLACEMENT socket after a reconnect, and returns that exact
+ * object so a frame can be delivered to it rather than to whatever happens to
+ * be last in {@link sockets}.
+ *
+ * Two conditions, because either alone is a lie:
+ *
+ *  - a DISTINCT socket, since the retired one stays in the array; and
+ *  - one whose `open` handler has actually RUN, proven by `client_hello` — the
+ *    first frame `openSocket` sends. A constructed-but-unopened socket has no
+ *    listeners wired to the connection yet, and `observe.ts` silently drops
+ *    frames delivered to a socket that is not `this.socket`.
+ *
+ * A fixed sleep cannot express this. Reopening is deferred to the poll tick,
+ * and `restoreSocket` re-resolves the whole generation over HTTP — a real
+ * request against the fixture server — BEFORE it constructs the socket. How
+ * long that takes is a property of the machine, not of the code under test, so
+ * a sleep that is long enough today silently becomes a race tomorrow. Waiting
+ * on the condition makes a slow re-verification cost time instead of accuracy.
+ */
+async function replacementSocket(
+  retired: FakeSocket | undefined,
+  timeoutMs = 5_000,
+): Promise<FakeSocket> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const candidate = sockets.at(-1);
+    if (candidate
+      && candidate !== retired
+      && candidate.sent.some((sent) => sent.type === 'client_hello')) return candidate;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `no replacement socket opened within ${timeoutMs}ms (sockets=${sockets.length}, `
+        + `newest is ${candidate === retired ? 'still the retired one' : 'constructed but unopened'})`,
+      );
+    }
+    await Bun.sleep(1);
+  }
+}
+
 try {
   // ── 1. createSession ──────────────────────────────────────────────────────
 
@@ -1426,14 +1466,20 @@ try {
     // interval proves it was alive and running something that can produce the
     // row, which is the REST-leads-WS case wearing an outage.
     const { conn } = await drivenSession();
-    sockets.at(-1)!.fire('close', {});
+    const retired = sockets.at(-1)!;
+    retired.fire('close', {});
     await settle();
     messages = [userRow('msg_outage_explained', 'the server ran this'), ...messages];
     await conn.refresh();
+    // The tick reopens the stream, but only AFTER re-resolving the generation
+    // over HTTP, so the replacement socket is not ready the moment a sleep ends.
+    // Deliver to the socket that actually opened: delivering to the retired one
+    // is silently dropped, and the row would then demote with an explanation
+    // sitting unread.
     intervalHandler?.();
-    await settle();
+    const replacement = await replacementSocket(retired);
     await conn.refresh();
-    sockets.at(-1)!.deliver(frame('turn.started', { turnId: 11, origin: { kind: 'user' } }));
+    replacement.deliver(frame('turn.started', { turnId: 11, origin: { kind: 'user' } }));
     await conn.refresh();
     await conn.refresh();
     check('an outage row explained by later server activity does NOT demote',
@@ -1445,6 +1491,45 @@ try {
     check('writes resume once the outage row is accounted for',
       resumed === undefined && writes().length === beforeResumed + 1,
       `${resumed?.message} writes=${writes().length - beforeResumed}`);
+    await conn.close();
+  }
+
+  {
+    // BITE PROOF for the readiness wait above, and the regression guard for the
+    // race it replaced.
+    //
+    // The reopen's re-resolution is parked well past the old fixed budget. A
+    // sleep-based wait would return while the RETIRED socket was still newest,
+    // deliver the explanation into a socket whose listeners are neutralized,
+    // and demote a session that had a perfectly good account of itself — which
+    // is exactly how this suite failed intermittently on loaded machines and on
+    // CI. The first check below asserts the trap is genuinely armed (a sleep
+    // really would have been fooled here); the rest prove the readiness wait
+    // walks past it.
+    const { conn } = await drivenSession();
+    const retired = sockets.at(-1)!;
+    retired.fire('close', {});
+    await settle();
+    messages = [userRow('msg_outage_slow_meta', 'the server ran this too'), ...messages];
+    await conn.refresh();
+    const parkedMeta = gate();
+    holdMeta = parkedMeta.hold;
+    intervalHandler?.();
+    await Bun.sleep(90);
+    check('with re-verification parked, a fixed sleep would still see only the retired socket',
+      sockets.at(-1) === retired, `sockets=${sockets.length}`);
+    parkedMeta.release();
+    // From here the sequence is IDENTICAL to the block above — the park is the
+    // only difference. That is the point: the same script that races on a
+    // loaded machine runs deterministically once the wait is a condition rather
+    // than a duration.
+    const replacement = await replacementSocket(retired);
+    await conn.refresh();
+    replacement.deliver(frame('turn.started', { turnId: 12, origin: { kind: 'user' } }));
+    await conn.refresh();
+    await conn.refresh();
+    check('a slow re-verification does not demote an outage row that was explained',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     await conn.close();
   }
 
