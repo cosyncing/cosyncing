@@ -14,7 +14,13 @@ AgentCapabilities _$AgentCapabilitiesFromJson(Map<String, dynamic> json) =>
         unknownValue: IntegrationKind.unknown,
       ),
       attachModes: (json['attachModes'] as List<dynamic>)
-          .map((e) => $enumDecode(_$AttachModeEnumMap, e))
+          .map(
+            (e) => $enumDecode(
+              _$AttachModeEnumMap,
+              e,
+              unknownValue: AttachMode.unknown,
+            ),
+          )
           .toList(),
       supportsObserve: json['supportsObserve'] as bool,
       supportsResume: json['supportsResume'] as bool,
@@ -62,6 +68,7 @@ const _$AttachModeEnumMap = {
   AttachMode.live: 'live',
   AttachMode.resume: 'resume',
   AttachMode.observe: 'observe',
+  AttachMode.unknown: 'unknown',
 };
 
 const _$PermissionGranularityEnumMap = {

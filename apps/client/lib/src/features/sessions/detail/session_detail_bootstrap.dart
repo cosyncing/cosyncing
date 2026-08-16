@@ -173,9 +173,14 @@ extension _SessionDetailBootstrap on SessionDetailController {
       // provenance may authorize an automatic restore. Both are local facts —
       // the ownership decision itself is the broker's atomic reason-tagged
       // attach, so no roster or transcript is fetched here.
+      // A background attach asks for no authority, which is NOT the same as
+      // being unable to receive any: it still opens a bare socket, and a bare
+      // socket is full-authority on some adapters. So the unreadable-mode check
+      // applies here too — it is a fact about the session, not about what this
+      // attach wanted.
       final attachRequest =
           intent == SessionDetailAttachIntent.backgroundObserve
-          ? const _InteractiveAttachRequest()
+          ? _InteractiveAttachRequest(readOnly: _rosterAttachModeUnreadable)
           : await _interactiveAttachRequest(source);
       if (!_isCurrentBootstrapAttempt(attempt) ||
           RosterSource.of(ref.read(activeBrokerProfileProvider)) != source) {
@@ -207,12 +212,39 @@ extension _SessionDetailBootstrap on SessionDetailController {
         // Restoring Drive is the same ownership boundary as an explicit Take
         // over, and an explicit live attach also changes mutation authority.
         // Never let a retryable prompt from the previous owner replay into the
-        // new owner (Claude would fork on that first send).
+        // new owner (Claude would fork on that first send). Done BEFORE the
+        // recheck below so nothing awaits between that check and the dispatch.
         await _retireRetryableOutboxForControlChange();
-        await connection.reattach(
-          mode: attachRequest.mode,
-          reason: attachRequest.reason,
-        );
+      }
+
+      // Re-read IMMEDIATELY before dispatch, with NO await between this check,
+      // requireReadOnly(), and the attach below.
+      //
+      // The decision above was taken before `_listen`, and on the restore path
+      // before an async provenance lookup. A roster refresh during either
+      // window can turn a readable row unreadable, and acting on the stale
+      // answer would dispatch live/resume declaring nothing — the exact outcome
+      // this path exists to prevent. Fail closed on the LATEST answer. The
+      // latch is raised before connecting, never after, so a session this
+      // client cannot read never has a mutable socket at all.
+      final readOnly = attachRequest.readOnly || _rosterAttachModeUnreadable;
+      final attachMode = readOnly ? null : attachRequest.mode;
+      final attachReason = readOnly ? null : attachRequest.reason;
+      if (readOnly) {
+        connection.requireReadOnly();
+        // Retract what the pre-recheck decision armed, or the controller keeps
+        // waiting for a restore this attach is no longer making.
+        _requestedDriveReason = null;
+        _liveAttachArmed = false;
+        if (state.driveRestorePhase == SessionDriveRestorePhase.restoring) {
+          state = state.copyWith(
+            driveRestorePhase: SessionDriveRestorePhase.idle,
+          );
+        }
+      }
+
+      if (attachMode != null) {
+        await connection.reattach(mode: attachMode, reason: attachReason);
       } else if (existingConnection != null) {
         // Reset a reused connection to the bare Observe/shared-owner attach.
         // SessionConnection deliberately preserves its mode across network

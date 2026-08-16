@@ -399,6 +399,13 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
       drive: {
         state: driveSupported ? 'driving' : 'unavailable',
         supported: driveSupported,
+        // Stated, not inferred. dsh has one client contract and no read-only
+        // credential, so it advertises `live` as its only attach mode and
+        // refuses observe outright: there is no read-only session for terminal
+        // handoff to leave attached, and the broker refuses the call for that
+        // same reason. Declaring it here is what stops the app offering a
+        // control whose only possible outcome is a refusal.
+        handoffAvailable: false,
         ...(driveSupported ? {} : { reason: 'dsh-host-unreachable' }),
       },
       terminalSync: DSH_TERMINAL_SYNC_IMPOSSIBLE,

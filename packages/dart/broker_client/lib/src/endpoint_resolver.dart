@@ -255,6 +255,7 @@ class EndpointResolver {
     String id, {
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
     String? since,
     String? ticket,
@@ -278,6 +279,11 @@ class EndpointResolver {
       params['clientProfileIncarnation'] = clientProfileIncarnation!;
     }
     if (mode != null) params['mode'] = mode;
+    // Asks the broker to enforce a read-only socket. Sent when this client
+    // cannot reason about the session's attach mode, so omitting `mode` is not
+    // a strong enough answer: a bare attach is read-only on one adapter and
+    // full-authority on another, and only the broker can settle it.
+    if (readOnly) params['readOnly'] = '1';
     // Drive-attach intent is additive and resume-only: the broker rejects a
     // reason without mode=resume, so never emit one on an Observe attach.
     if (reason != null && mode == 'resume') params['reason'] = reason;

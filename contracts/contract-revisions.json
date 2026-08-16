@@ -71,6 +71,13 @@
       "minimumClientRevision": 0,
       "clientMinimumBrokerRevision": 2,
       "change": "IntegrationKind gains http-websocket for Kimi Code, plus an unknown fallback member so a client degrades one unrecognized roster row instead of failing the whole roster decode."
+    },
+    {
+      "revision": 15,
+      "surfaceHash": "fnv1a32:095f3c3c",
+      "minimumClientRevision": 0,
+      "clientMinimumBrokerRevision": 2,
+      "change": "SessionDriveControl gains handoffAvailable, takeoverAvailable and takeoverMode so control availability is declared as data instead of inferred, plus an unknown AttachMode fallback so an unrecognized mode degrades to read-only rather than aborting a session decode."
     }
   ]
 }

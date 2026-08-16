@@ -421,9 +421,11 @@ const threw = async (work: () => Promise<unknown>): Promise<Error | undefined> =
  *
  *  - a DISTINCT socket, since the retired one stays in the array; and
  *  - one whose `open` handler has actually RUN, proven by `client_hello` — the
- *    first frame `openSocket` sends. A constructed-but-unopened socket has no
- *    listeners wired to the connection yet, and `observe.ts` silently drops
- *    frames delivered to a socket that is not `this.socket`.
+ *    first frame `openSocket` sends. Listeners are installed synchronously at
+ *    construction, so their presence proves nothing; `client_hello` is what
+ *    proves the open handler ran and this socket became the CURRENT usable
+ *    stream. `observe.ts` silently drops frames delivered to any socket that is
+ *    not `this.socket`.
  *
  * A fixed sleep cannot express this. Reopening is deferred to the poll tick,
  * and `restoreSocket` re-resolves the whole generation over HTTP — a real
@@ -578,6 +580,16 @@ try {
         && !!observeMutation,
       `${JSON.stringify(observing.info.control)} threw=${!!observeMutation}`);
     await observing.close();
+
+    // Kimi is the converse of dsh: it serves a real read-only observe
+    // connection (proven directly above), so handing Drive back to the terminal
+    // leaves the session attached rather than stranded. The declaration and the
+    // capability have to agree — a row claiming handoff on an agent the broker
+    // would refuse is exactly the mismatch this field exists to prevent.
+    check('a driving kimi row declares terminal handoff available, matching its observe capability',
+      live.info.control?.drive.handoffAvailable === true
+        && adapter.capabilities.attachModes?.includes('observe') === true,
+      `${JSON.stringify(live.info.control?.drive)} modes=${JSON.stringify(adapter.capabilities.attachModes)}`);
 
     const conflict = await threw(() => adapter.attach(FOREIGN_ID, 'live'));
     check('a foreign session refuses a live attach with the typed conflict',
@@ -1382,6 +1394,42 @@ try {
     const reattach = await threw(() => adapter.attach(CREATED_ID, 'live'));
     check('a demoted session refuses a fresh live attach',
       isOwnershipConflictError(reattach), `${reattach?.name}`);
+    await conn.close();
+  }
+
+  {
+    // TERMINAL HANDOFF REVOKES THE SAME ELIGIBILITY DEMOTION DOES.
+    //
+    // The hub calls `releaseDriveEligibility` after closing the native owner, so
+    // the observer it then builds cannot advertise Drive. If this path and
+    // demotion ever disagreed, one of them would leave a session that silently
+    // re-acquires Drive on the next attach with no user action — which is the
+    // whole reason handoff needs an adapter hook rather than just a closed
+    // connection. Asserted through the PUBLIC surface, so it holds whatever the
+    // internals are named.
+    const { adapter, conn } = await drivenSession();
+    const beforeRoster = await adapter.discoverSessions();
+    check('the owned session is drivable before handoff',
+      beforeRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === true,
+      JSON.stringify(beforeRoster.find((row) => row.id === CREATED_ID)?.control?.drive));
+
+    adapter.releaseDriveEligibility(CREATED_ID);
+
+    const afterRoster = await adapter.discoverSessions();
+    check('handoff revocation makes the session foreign on the roster',
+      afterRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === false,
+      JSON.stringify(afterRoster.find((row) => row.id === CREATED_ID)?.control?.drive));
+    const afterHandoff = await threw(() => adapter.attach(CREATED_ID, 'live'));
+    check('a handed-off session refuses a fresh live attach, exactly as a demoted one does',
+      isOwnershipConflictError(afterHandoff), `${afterHandoff?.name}`);
+
+    // Idempotent: the hub's contract allows a handoff after a demotion already
+    // revoked the same session, and a second call must be a no-op rather than a
+    // second state change.
+    adapter.releaseDriveEligibility(CREATED_ID);
+    const twiceRoster = await adapter.discoverSessions();
+    check('revoking twice is a no-op',
+      twiceRoster.find((row) => row.id === CREATED_ID)?.control?.drive.supported === false);
     await conn.close();
   }
 

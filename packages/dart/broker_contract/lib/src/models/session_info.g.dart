@@ -12,6 +12,13 @@ SessionDriveControl _$SessionDriveControlFromJson(Map<String, dynamic> json) =>
       supported: json['supported'] as bool,
       reason: json['reason'] as String?,
       willFork: json['willFork'] as bool?,
+      handoffAvailable: json['handoffAvailable'] as bool?,
+      takeoverAvailable: json['takeoverAvailable'] as bool?,
+      takeoverMode: $enumDecodeNullable(
+        _$AttachModeEnumMap,
+        json['takeoverMode'],
+        unknownValue: AttachMode.unknown,
+      ),
     );
 
 Map<String, dynamic> _$SessionDriveControlToJson(
@@ -21,6 +28,9 @@ Map<String, dynamic> _$SessionDriveControlToJson(
   'supported': instance.supported,
   'reason': instance.reason,
   'willFork': instance.willFork,
+  'handoffAvailable': instance.handoffAvailable,
+  'takeoverAvailable': instance.takeoverAvailable,
+  'takeoverMode': _$AttachModeEnumMap[instance.takeoverMode],
 };
 
 const _$DriveStateEnumMap = {
@@ -28,6 +38,13 @@ const _$DriveStateEnumMap = {
   DriveState.driving: 'driving',
   DriveState.unavailable: 'unavailable',
   DriveState.unknown: 'unknown',
+};
+
+const _$AttachModeEnumMap = {
+  AttachMode.live: 'live',
+  AttachMode.resume: 'resume',
+  AttachMode.observe: 'observe',
+  AttachMode.unknown: 'unknown',
 };
 
 SessionTerminalSync _$SessionTerminalSyncFromJson(Map<String, dynamic> json) =>
@@ -214,7 +231,11 @@ SessionInfo _$SessionInfoFromJson(Map<String, dynamic> json) => SessionInfo(
   tool: json['tool'] as String,
   title: json['title'] as String,
   status: $enumDecode(_$SessionStatusEnumMap, json['status']),
-  attachMode: $enumDecode(_$AttachModeEnumMap, json['attachMode']),
+  attachMode: $enumDecode(
+    _$AttachModeEnumMap,
+    json['attachMode'],
+    unknownValue: AttachMode.unknown,
+  ),
   launchSurface: $enumDecodeNullable(
     _$SessionLaunchSurfaceEnumMap,
     json['launchSurface'],
@@ -290,12 +311,6 @@ const _$SessionStatusEnumMap = {
   SessionStatus.working: 'working',
   SessionStatus.needsInput: 'needs-input',
   SessionStatus.idle: 'idle',
-};
-
-const _$AttachModeEnumMap = {
-  AttachMode.live: 'live',
-  AttachMode.resume: 'resume',
-  AttachMode.observe: 'observe',
 };
 
 const _$SessionLaunchSurfaceEnumMap = {

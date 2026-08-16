@@ -1378,6 +1378,7 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   /// hand back). Asserted by drive/take-over tests.
   final List<String?> reattachModes = [];
   final List<String?> reattachReasons = [];
+  final List<bool> reattachReadOnly = [];
   int connectCount = 0;
   int disarmDriveAuthorityCount = 0;
   final StreamController<SessionDetailConnectionStatus> _stateController =
@@ -1459,14 +1460,24 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
     _setState(SessionDetailConnectionStatus.closed);
   }
 
+  bool requiredReadOnly = false;
+
+  @override
+  void requireReadOnly() => requiredReadOnly = true;
+
+  @override
+  bool get readOnly => requiredReadOnly;
+
   @override
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     reattachModes.add(mode);
     reattachReasons.add(reason);
+    reattachReadOnly.add(readOnly);
     _setState(SessionDetailConnectionStatus.connecting);
     _setState(SessionDetailConnectionStatus.connected);
     for (final event in _reattachEvents) {

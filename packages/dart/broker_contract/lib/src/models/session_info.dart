@@ -103,6 +103,9 @@ class SessionDriveControl {
     required this.supported,
     this.reason,
     this.willFork,
+    this.handoffAvailable,
+    this.takeoverAvailable,
+    this.takeoverMode,
   });
 
   /// Creates a [SessionDriveControl] from a JSON map.
@@ -122,6 +125,31 @@ class SessionDriveControl {
   ///
   /// See `docs/protocol/contract-sync.md`.
   final bool? willFork;
+
+  /// Whether Drive can be released to a terminal for this session.
+  ///
+  /// Null keeps the established behavior — a driving session offers handoff —
+  /// so brokers that predate revision 15 are unchanged. False is for an adapter
+  /// with no read-only surface to fall back to, where handing off would close
+  /// the only owner and then fail to replace it.
+  final bool? handoffAvailable;
+
+  /// Whether a user-confirmed takeover may be offered even though [supported]
+  /// is false.
+  ///
+  /// Null falls back to the established rule (`supported && state ==
+  /// observing`). A foreign or demoted session is not drivable now, so
+  /// [supported] stays false and the row stays read-only, while a takeover
+  /// remains a legitimate user action.
+  final bool? takeoverAvailable;
+
+  /// Which attach mode a takeover must use.
+  ///
+  /// Null means [AttachMode.resume], which is what every existing takeover
+  /// adapter uses. [AttachMode.unknown] means this client does not understand
+  /// the broker's declared mode and must not offer takeover at all.
+  @JsonKey(unknownEnumValue: AttachMode.unknown)
+  final AttachMode? takeoverMode;
 
   /// Converts this [SessionDriveControl] to a JSON map.
   Map<String, dynamic> toJson() => _$SessionDriveControlToJson(this);
@@ -482,6 +510,12 @@ class SessionInfo {
   final SessionStatus status;
 
   /// Best attach mode available for this session right now.
+  ///
+  /// Decodes an unrecognized broker value to [AttachMode.unknown] rather than
+  /// throwing: a future mode must cost this one field, not the whole session
+  /// row. An `unknown` mode is treated as read-only and is never echoed back
+  /// into a reconnect request.
+  @JsonKey(unknownEnumValue: AttachMode.unknown)
   final AttachMode attachMode;
 
   /// Current model label (legacy).

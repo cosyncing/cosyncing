@@ -629,6 +629,7 @@ class FakeSessionDetailConnection
   int disposeCount = 0;
   final List<String?> reattachModes = [];
   final List<String?> reattachReasons = [];
+  final List<bool> reattachReadOnly = [];
   final List<SessionOwnerRevision?> reattachOwnerRevisions = [];
   int disarmDriveAuthorityCount = 0;
   int sendPromptCount = 0;
@@ -743,14 +744,24 @@ class FakeSessionDetailConnection
     _setState(SessionDetailConnectionStatus.closed);
   }
 
+  bool requiredReadOnly = false;
+
+  @override
+  void requireReadOnly() => requiredReadOnly = true;
+
+  @override
+  bool get readOnly => requiredReadOnly;
+
   @override
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     reattachModes.add(mode);
     reattachReasons.add(reason);
+    reattachReadOnly.add(readOnly);
     reattachOwnerRevisions.add(ownerRevision);
     if (failNextReattach) {
       failNextReattach = false;
@@ -996,6 +1007,11 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
   int clearCount = 0;
   bool failClear = false;
   bool failRead = false;
+  Completer<void>? _readGate;
+
+  /// Holds the next [read] open until the returned completer fires, so a test
+  /// can change the roster while the drive-restore lookup is in flight.
+  Completer<void> holdNextRead() => _readGate = Completer<void>();
 
   String _key(String tool, String sessionId) => '$tool/$sessionId';
 
@@ -1016,6 +1032,11 @@ class InMemoryControllerDriveIntentStore implements SessionDriveIntentStore {
     required String tool,
     required String sessionId,
   }) async {
+    final gate = _readGate;
+    if (gate != null) {
+      _readGate = null;
+      await gate.future;
+    }
     if (failRead) {
       throw StateError('Drive-intent storage unavailable');
     }
@@ -1134,6 +1155,12 @@ class RecordingSessionTranscriptRepository
 }
 
 class RecordingSessionOutboxRepository implements SessionOutboxRepository {
+  Completer<void>? _retryableGate;
+
+  /// Holds the next retryable load open until the returned completer fires, so
+  /// a test can change the roster while outbox retirement is in flight.
+  Completer<void> holdNextRetryableLoad() => _retryableGate = Completer<void>();
+
   final messages = <SessionOutboxMessage>[];
 
   /// Runs inside the durable insert, so a test can land a broker frame in the
@@ -1186,6 +1213,11 @@ class RecordingSessionOutboxRepository implements SessionOutboxRepository {
     String? brokerProfileId,
     DateTime? now,
   }) async {
+    final gate = _retryableGate;
+    if (gate != null) {
+      _retryableGate = null;
+      await gate.future;
+    }
     final clock = now ?? DateTime.now();
     return messages
         .where(

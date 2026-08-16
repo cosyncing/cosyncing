@@ -408,6 +408,7 @@ final class _GatedCloseConnection extends ScriptedSessionDetailConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     reattachCount++;

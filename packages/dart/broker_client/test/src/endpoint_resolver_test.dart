@@ -3,7 +3,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=14&minimumBrokerRevision=2&'
+    'clientVersion=0.0.0-dev&contractRevision=15&minimumBrokerRevision=2&'
     'contractSurfaceHash=fnv1a32%3A095f3c3c';
 
 void main() {
@@ -341,6 +341,20 @@ void main() {
         expect(
           resolver.streamEndpoint('opencode', 'session-123', mode: 'resume'),
           'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?mode=resume&$_identityQuery',
+        );
+      });
+
+      test('includes readOnly query param when declared', () {
+        expect(
+          resolver.streamEndpoint('opencode', 'session-123', readOnly: true),
+          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?readOnly=1&$_identityQuery',
+        );
+      });
+
+      test('omits readOnly unless declared', () {
+        expect(
+          resolver.streamEndpoint('opencode', 'session-123'),
+          isNot(contains('readOnly')),
         );
       });
 

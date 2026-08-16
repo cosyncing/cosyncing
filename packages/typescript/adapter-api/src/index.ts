@@ -141,6 +141,22 @@ export interface AgentBackend {
    *  `opts.reason` (additive) lets a resume attach carry its authenticated intent so the
    *  adapter can arbitrate restore-vs-takeover atomically; adapters may ignore it. */
   attach(sessionId: string, mode?: AttachMode, opts?: AttachOptions): Promise<SessionConnection>;
+  /** Revoke ADAPTER-OWNED automatic Drive eligibility for one session.
+   *
+   *  Only for adapters that keep their own record of which sessions they may drive — the broker's
+   *  connection registry is not that record. Kimi is the case this exists for: it tracks the sessions
+   *  this process created, and a live attach on one of them is granted automatically. Closing the
+   *  native owner does not touch that record, so terminal handoff would release the connection and
+   *  the very next open would silently take Drive back without the user asking.
+   *
+   *  Called by the hub AFTER the native owner has closed and been unregistered, and BEFORE the
+   *  replacement Observe connection is constructed — the ordering matters, because an adapter asked
+   *  for an observe attach while it still believes it owns the session can publish a drivable row.
+   *
+   *  Adapters with no adapter-owned eligibility omit it entirely; the hub treats its absence as
+   *  "nothing to revoke", never as an error. Must be idempotent: a retry, or a demotion that already
+   *  revoked the same session, has to be a no-op rather than a second state change. */
+  releaseDriveEligibility?(sessionId: string): Promise<void> | void;
   /** Optional dynamic availability for createSession, used when create depends on a live daemon. */
   canCreateSession?(): Promise<boolean> | boolean;
   /** Bounded adapter-owned readiness boundary invoked before model validation and the one create call.

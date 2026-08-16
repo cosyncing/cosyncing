@@ -1692,6 +1692,12 @@ interface WsData {
   uploadIdentity: string;
   /** Negotiated before the Hub attach; hard incompatibility forces this socket to Observe. */
   compatibility: BrokerClientCompatibility;
+  /** The client asked for a read-only socket (`?readOnly=1`) because it cannot
+   *  reason about this session's attach mode. The ENFORCEMENT lives in
+   *  {@link compatibility}, which this folds into during the upgrade; the flag
+   *  records only WHY, so a refusal can say so accurately instead of blaming a
+   *  contract mismatch that did not happen. */
+  readOnlyRequested: boolean;
   /** An actual shared/peer credential was supplied; loopback's credential-less baseline is false. */
   credentialAuthenticated: boolean;
   clientVersion?: string;
@@ -2352,7 +2358,14 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
     ws.send(JSON.stringify({
       kind: 'nack',
       code: 'CLIENT_MESSAGE_FAILED',
-      message: `read-only compatibility mode: ${ws.data.compatibility.reason}`,
+      // A genuine incompatibility OUTRANKS the declaration. Both can be true at
+      // once — an old client can also meet a mode it cannot read — and the
+      // incompatibility is the fact worth telling, since it is the one the user
+      // can act on by updating.
+      message: ws.data.readOnlyRequested
+        && ws.data.compatibility.status !== 'hard-incompatible'
+        ? `read-only session: ${ws.data.compatibility.reason}`
+        : `read-only compatibility mode: ${ws.data.compatibility.reason}`,
       ...(clientMessageId ? { clientMessageId } : {}),
     } satisfies WireEvent));
     return;
@@ -3792,7 +3805,33 @@ server = Bun.serve<WsData>({
       } else if (ownerEpoch !== undefined || ownerSeqRaw !== null) {
         return json({ ok: false, code: 'BAD_PARAM', error: 'owner revision requires reason=join-existing' }, 400);
       }
-      const compatibility = evaluateBrokerClientCompatibility(clientContract.client);
+      const negotiated = evaluateBrokerClientCompatibility(clientContract.client);
+      // A client may DECLARE that it cannot accept mutation authority on this
+      // socket. The case that forces this to exist: a client reads a session
+      // whose `attachMode` its contract revision does not know, so it cannot
+      // reason about what attaching means. Omitting `mode` is not the same
+      // answer — a bare attach is read-only for one adapter, refused by
+      // another, and full-authority for a third (opencode's shared serve, the
+      // codex daemon proxy), so "attach without asking" can still land on a
+      // mutable connection. Only the broker can make it uniform, so the client
+      // says what it needs and the broker enforces it socket-locally.
+      //
+      // Folded into the socket's compatibility rather than tracked beside it,
+      // because "this socket is read-only" is one fact with one set of
+      // consequences — forced observe, refused mutations, no published
+      // authority, no join offer — and a second flag would be a second place
+      // for one of them to be forgotten. The negotiated STATUS is untouched:
+      // the contract is fine, it is this attach that renounces authority. That
+      // also carries the posture to the client in the hello it already reads,
+      // so it stops offering Take over and a live composer.
+      const readOnlyRequested = url.searchParams.get('readOnly') === '1';
+      const compatibility: BrokerClientCompatibility = readOnlyRequested && !negotiated.readOnly
+        ? {
+          ...negotiated,
+          readOnly: true,
+          reason: 'this client attached read-only: it cannot interpret this session\'s attach mode',
+        }
+        : negotiated;
       const mode = compatibility.readOnly ? 'observe' : requestedMode;
       const reason = mode === 'resume' ? (requestedReason as DriveAttachReason | undefined) : undefined;
       const artifactMode = url.searchParams.get('artifactMode') === 'reference' ? 'reference' : 'inline';
@@ -3803,6 +3842,7 @@ server = Bun.serve<WsData>({
           tool: decodeURIComponent(ws[1]!),
           id: decodeURIComponent(ws[2]!),
           mode,
+          readOnlyRequested,
           ...(reason ? { reason } : {}),
           ...(expectedOwnerRevision ? { expectedOwnerRevision } : {}),
           since,
@@ -5352,6 +5392,7 @@ server = Bun.serve<WsData>({
                     ws.data.mc,
                     ws.data.credentialAuthenticated && !compatibility.readOnly,
                     decorateSession(ev.info),
+                    compatibility.readOnly,
                   )
                 : ev;
           const status = ws.send(JSON.stringify(prepared));
@@ -5376,7 +5417,15 @@ server = Bun.serve<WsData>({
         if (compatibility.readOnly) {
           sendRaw({
             kind: 'notice',
-            message: `This client and broker are incompatible; the session is read-only. ${compatibility.reason}`,
+            // A DECLARED read-only attach is not an incompatibility, and saying
+            // so would send the user chasing a version mismatch that does not
+            // exist. The negotiated status is what distinguishes them — and a
+            // socket can be BOTH, in which case the incompatibility wins,
+            // because that is the one the user can act on.
+            message: ws.data.readOnlyRequested
+              && compatibility.status !== 'hard-incompatible'
+              ? `This session is read-only. ${compatibility.reason}`
+              : `This client and broker are incompatible; the session is read-only. ${compatibility.reason}`,
           });
         }
         let mc: ManagedConn;

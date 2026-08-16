@@ -52,6 +52,7 @@ class SessionConnection {
     String artifactMode = 'reference',
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
     int initialHistory = _defaultInitialHistory,
     WebSocketAdapter Function(String url)? adapterFactory,
@@ -61,6 +62,7 @@ class SessionConnection {
        _artifactMode = artifactMode,
        _mode = mode,
        _reason = reason,
+       _readOnly = readOnly,
        _ownerRevision = ownerRevision,
        _initialHistory = initialHistory,
        _adapterFactory = adapterFactory ?? WebSocketAdapter.new;
@@ -86,8 +88,21 @@ class SessionConnection {
   /// Owner revision accompanying a `join-existing` request only.
   SessionOwnerRevision? _ownerRevision;
 
+  /// Whether the broker is asked to enforce a read-only socket.
+  ///
+  /// MONOTONE: it can be raised, never lowered. [_mode] and [_reason] are
+  /// authority REQUESTS, which a refusal must clear so a later reconnect does
+  /// not silently retry them; this is the absence of a request, so clearing it
+  /// would turn the one signal that fails closed into one that quietly stops
+  /// applying. A connection that has once been told it cannot reason about
+  /// this session keeps saying so until it is replaced.
+  bool _readOnly;
+
   /// The current attach control mode (null = Observe).
   String? get mode => _mode;
+
+  /// Whether this socket asks the broker to enforce read-only.
+  bool get readOnly => _readOnly;
 
   /// The current drive-attach reason (null = mode-only attach).
   String? get reason => _reason;
@@ -218,6 +233,7 @@ class SessionConnection {
         _sessionId,
         mode: _mode,
         reason: _reason,
+        readOnly: _readOnly,
         ownerRevision: _ownerRevision,
         ticket: _cursor,
         initialHistory: _initialHistory,
@@ -471,14 +487,24 @@ class SessionConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     if (_disposed) return;
     _mode = mode;
     _reason = reason;
+    _readOnly = _readOnly || readOnly;
     _ownerRevision = reason == 'join-existing' ? ownerRevision : null;
     await close();
     await connect();
+  }
+
+  /// Raises the read-only latch without touching the socket, so the NEXT
+  /// (re)connect declares it. Used before the first connect, which is what
+  /// keeps a session this client cannot reason about from ever having a
+  /// mutable socket — not even for the round trip a re-attach would take.
+  void requireReadOnly() {
+    _readOnly = true;
   }
 
   /// Drops any requested control mode/reason without touching the socket, so
@@ -690,6 +716,7 @@ class SessionConnection {
           _sessionId,
           mode: _mode,
           reason: _reason,
+          readOnly: _readOnly,
           ownerRevision: _ownerRevision,
           ticket: _cursor,
           initialHistory: _initialHistory,

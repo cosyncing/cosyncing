@@ -519,6 +519,7 @@ final class _LifecycleConnection extends FakeSessionDetailConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) async {
     await super.reattach(mode: mode, reason: reason);

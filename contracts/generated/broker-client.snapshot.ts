@@ -1411,16 +1411,40 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * pre-14 clients unfiltered — which is exactly why broker registration of that
  * adapter stays behind an explicit opt-in until every supported client has
  * shipped the tolerant decoding.
+ * Revision 15 adds three additive {@link SessionDriveControl} fields that
+ * describe control availability as DATA rather than leaving the client to infer
+ * it: `handoffAvailable`, `takeoverAvailable`, and `takeoverMode`. Each is
+ * optional and each absent value reproduces today's behavior exactly, so a
+ * pre-15 broker and a post-15 client agree without negotiation.
+ * The reason the first is needed at all: the client offers terminal handoff for
+ * any driving session that declares no terminal action, which is wrong for an
+ * adapter with no read-only surface to fall back to — handoff would close its
+ * only owner and then fail to replace it. The other two exist because a foreign
+ * or demoted session is not drivable NOW (so `supported` must stay false) while
+ * a user-confirmed takeover is still legitimate, and because takeover does not
+ * universally mean `resume`. The same revision gives the first-party client an
+ * `unknown` {@link AttachMode} member: an unrecognized future mode must degrade
+ * to read-only, never abort the decode, and must never be echoed back into a
+ * reconnect the client cannot reason about.
+ * Revision 15 also adds ONE optional stream-query parameter, `readOnly=1`, with
+ * which a client declares that this socket must not be granted mutation
+ * authority. It exists because degrading the decode is not by itself read-only
+ * behavior: a bare attach is read-only for one adapter, refused by another, and
+ * full-authority for a third, so only the broker can make "I cannot interpret
+ * this mode" mean the same thing everywhere. It is compatible in both
+ * directions without negotiation — an older client simply never sends it, and
+ * an older broker never receives it, because a revision-15 client sends it only
+ * on encountering an attach mode that no pre-15 broker can emit.
  * The registry-derived {@link BROKER_CONTRACT_SURFACE_HASH} does not move for
- * the revision-10 or revision-14 additions: none adds a route, frame kind,
- * message type or error code, which is
+ * the revision-10, revision-14 or revision-15 additions: none adds a route,
+ * frame kind, message type or error code, which is
  * exactly why the revision must: a structural DTO change is reviewable only if
- * it is numbered. All revision-5 through revision-14 additions are backward
+ * it is numbered. All revision-5 through revision-15 additions are backward
  * compatible for a tolerant decoder, so the client minimum does not move. Raise
  * the minimum only after every supported store client has crossed the
  * corresponding revision.
  */
-export const BROKER_CONTRACT_REVISION = 14 as const;
+export const BROKER_CONTRACT_REVISION = 15 as const;
 export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 0 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 
@@ -1904,6 +1928,26 @@ export interface SessionDriveControl {
    *  for single-owner safety. The app must warn before the first driven prompt: quitting the terminal
    *  first keeps the SAME session instead. */
   willFork?: boolean;
+  /** Can Drive be RELEASED to a terminal for this session? Absent keeps the established behavior —
+   *  a driving session offers handoff — so every adapter that predates this field is unchanged.
+   *
+   *  `false` is for an adapter that has no read-only surface to fall back to: dsh serves one
+   *  undifferentiated client contract and refuses a non-`live` attach outright, so handing off would
+   *  close its only owner and then fail to build the observer that replaces it. The broker refuses
+   *  such a request on its own capabilities; this field exists so the client never OFFERS it. */
+  handoffAvailable?: boolean;
+  /** Can a user-confirmed takeover be offered even though `supported` is false? Absent falls back to
+   *  the established rule (`supported && state === 'observing'`).
+   *
+   *  Needed because a foreign or demoted session is genuinely not drivable NOW — `supported` must stay
+   *  false and the row must stay read-only — while a takeover is still a legitimate user action. One
+   *  flag cannot carry both meanings without lying about the current posture. */
+  takeoverAvailable?: boolean;
+  /** Which attach mode a takeover must use. Absent means `resume`, which is what every existing
+   *  takeover adapter uses. Declared as DATA so neither the client nor the hub branches on tool name:
+   *  kimi drives through `live` because there is one shared server rather than a broker-owned process
+   *  per session, and an unrecognized value must fail closed rather than be guessed at. */
+  takeoverMode?: AttachMode;
 }
 
 export interface SessionTerminalSync {

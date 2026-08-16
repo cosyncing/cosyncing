@@ -61,10 +61,19 @@ enum SessionDetailAttachIntent {
 }
 
 final class _InteractiveAttachRequest {
-  const _InteractiveAttachRequest({this.mode, this.reason});
+  const _InteractiveAttachRequest({
+    this.mode,
+    this.reason,
+    this.readOnly = false,
+  });
 
   final String? mode;
   final String? reason;
+
+  /// Ask the broker to enforce a read-only socket. Set when the roster row's
+  /// attach mode is one this client's contract revision does not know, so
+  /// omitting [mode] is not a strong enough answer on its own.
+  final bool readOnly;
 }
 
 SessionInfo _admitSessionOwnerProjection(
@@ -557,12 +566,34 @@ class SessionDetailController
         !identical(_connection, connection)) {
       return;
     }
-    if (request.mode == null) {
+    // Re-read here, not only when the request was built: `request` was decided
+    // before an async drive-restore lookup, and a roster refresh during it can
+    // turn a readable row unreadable. Nothing awaits between this and either
+    // dispatch below.
+    final readOnly = request.readOnly || _rosterAttachModeUnreadable;
+    if (readOnly || request.mode == null) {
+      // A read-only declaration is the one exception to the shortcut below: it
+      // has to REACH the broker, and the broker only reads it at attach. This
+      // re-attach requests no authority — it renounces it — so it is safe to
+      // make unconditionally here.
+      if (readOnly) {
+        connection.requireReadOnly();
+        await connection.reattach(readOnly: true);
+        if (_disposed ||
+            _connectionSource != source ||
+            !identical(_connection, connection)) {
+          return;
+        }
+      }
       // Visibility alone grants interaction with the already-open Observe
       // stream. It does not change broker authority and therefore needs no
       // socket reset, history bootstrap, or replay.
       _establishedAttachIntent = SessionDetailAttachIntent.interactive;
-      final joinExisting = state.joinExisting;
+      // A read-only socket never auto-joins an existing driver. The broker no
+      // longer publishes that action to one, but a value observed before the
+      // recheck can still be sitting in state, and joining is an authority
+      // request the monotone latch guarantees cannot succeed.
+      final joinExisting = readOnly ? null : state.joinExisting;
       if (joinExisting != null) {
         await _joinExistingDriver(joinExisting);
       }
@@ -583,6 +614,27 @@ class SessionDetailController
       if (_disposed ||
           _connectionSource != source ||
           !identical(_connection, connection)) {
+        return;
+      }
+      // Retirement is an await too, so the row can turn unreadable INSIDE it —
+      // the earlier recheck is not the last word. This one is: nothing awaits
+      // between here and the dispatch below.
+      if (_rosterAttachModeUnreadable) {
+        _requestedDriveReason = null;
+        _liveAttachArmed = false;
+        connection.requireReadOnly();
+        state = state.copyWith(
+          driveRestorePhase: SessionDriveRestorePhase.idle,
+          connectionStatus: connection.state,
+        );
+        await connection.reattach(readOnly: true);
+        if (_disposed ||
+            _connectionSource != source ||
+            !identical(_connection, connection)) {
+          return;
+        }
+        _establishedAttachIntent = SessionDetailAttachIntent.interactive;
+        state = state.copyWith(connectionStatus: connection.state);
         return;
       }
       await connection.reattach(mode: request.mode, reason: request.reason);
@@ -611,9 +663,35 @@ class SessionDetailController
     }
   }
 
+  /// Whether the broker's current row for this session carries an attach mode
+  /// this contract revision cannot interpret.
+  ///
+  /// Read on EVERY attach path, including background ones, because the answer
+  /// is about the session rather than about what this attach wanted.
+  bool get _rosterAttachModeUnreadable {
+    for (final session in ref.read(rosterSessionsProvider)) {
+      if (session.tool != arg.tool || session.id != arg.sessionId) continue;
+      return session.attachMode == AttachMode.unknown;
+    }
+    return false;
+  }
+
   Future<_InteractiveAttachRequest> _interactiveAttachRequest(
     RosterSource source,
   ) async {
+    // DOMINANT, and therefore first. A create instruction and a drive restore
+    // are both requests for authority; an unreadable attach mode is the
+    // statement that this client cannot judge what authority means here, so it
+    // outranks both — otherwise the two paths that carry the MOST authority
+    // would be the two that skip the check.
+    //
+    // The pending create instruction is deliberately left unconsumed: it is a
+    // one-shot the broker issued, and declining to act on it now is not the
+    // same as spending it. If the row later becomes readable, it still applies.
+    if (_rosterAttachModeUnreadable) {
+      return const _InteractiveAttachRequest(readOnly: true);
+    }
+
     final createdMode = ref
         .read(createdSessionAttachIntentsProvider)
         .takeMode(source.storageKey, arg);
@@ -1912,6 +1990,29 @@ class SessionDetailController
     String brokerProfileId,
     HelloWireEvent hello,
   ) async {
+    // The store is keyed by BROKER PROFILE, so what goes in it must be a fact
+    // about the pairing. On a socket that declared itself read-only, the
+    // hello's `compatibility.readOnly` is this session's doing — the negotiated
+    // status is unchanged and every other socket to the same broker is
+    // writable. Persisting it would mark the whole broker read-only from one
+    // unreadable session, and the same record feeds global client-update
+    // guidance, so it would suppress that too.
+    //
+    // Skipped rather than rewritten: the client knows the flag is its own, but
+    // not what the broker would have negotiated without it, and inventing that
+    // value is worse than keeping the last one this broker actually stated.
+    // Any ordinary session refreshes the record.
+    //
+    // A hard incompatibility OUTRANKS that, and is therefore checked first: the
+    // broker negotiates `readOnly` only in that state, so it is a fact about
+    // the pairing whichever socket observed it, and it is exactly what global
+    // update guidance needs. A socket can be both — an old client can also meet
+    // a mode it cannot read — and dropping the record then would hide the one
+    // problem the user can actually act on.
+    final incompatible =
+        hello.compatibility.status ==
+        BrokerClientCompatibilityStatus.hardIncompatible;
+    if (!incompatible && (_connection?.readOnly ?? false)) return;
     try {
       await ref
           .read(brokerIdentityStoreProvider)

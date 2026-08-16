@@ -51,8 +51,15 @@ abstract interface class SessionDetailConnection {
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   });
+
+  /// Declares this socket read-only from its next (re)connect onward.
+  void requireReadOnly();
+
+  /// Whether this socket has declared itself read-only. Monotone once raised.
+  bool get readOnly;
 
   /// Drops any pending control mode/reason so the next automatic reconnect
   /// attaches as Observe. Called when an explicit takeover fails, times out,
@@ -230,13 +237,21 @@ class BrokerSessionDetailConnection
       _inner.close(reconnect: reconnect);
 
   @override
+  void requireReadOnly() => _inner.requireReadOnly();
+
+  @override
+  bool get readOnly => _inner.readOnly;
+
+  @override
   Future<void> reattach({
     String? mode,
     String? reason,
+    bool readOnly = false,
     SessionOwnerRevision? ownerRevision,
   }) => _inner.reattach(
     mode: mode,
     reason: reason,
+    readOnly: readOnly,
     ownerRevision: ownerRevision,
   );
 

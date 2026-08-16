@@ -63,7 +63,12 @@ export const KIMI_FOREIGN_WRITER_REASON = 'kimi-foreign-writer';
  */
 export function kimiOwnedControlState(): SessionControlState {
   return {
-    drive: { supported: true, state: 'driving' },
+    // Declared rather than left to be inferred from `attachModes`: kimi serves
+    // a genuine read-only observe connection, so handing Drive back leaves the
+    // session attached and watchable instead of stranded — and the adapter
+    // revokes its own Drive eligibility as part of that handoff, so the app
+    // does not get the control offered straight back.
+    drive: { supported: true, state: 'driving', handoffAvailable: true },
     terminalSync: {
       supported: false,
       syncAvailable: false,

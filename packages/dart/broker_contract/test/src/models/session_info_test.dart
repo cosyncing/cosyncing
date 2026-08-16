@@ -256,6 +256,60 @@ void main() {
       expect(SessionInfo.fromJson(observeJson).attachMode, AttachMode.observe);
     });
 
+    test('an unrecognized attach mode degrades the field, not the row', () {
+      // A future broker mode must cost this one field. Throwing here would drop
+      // the whole session, which is the failure revision 14 already paid for on
+      // the roster; testing only ABSENT fields would never catch it.
+      final futureJson = {
+        'id': 'session-future',
+        'tool': 't',
+        'title': 'T',
+        'status': 'idle',
+        'attachMode': 'teleport',
+      };
+      final session = SessionInfo.fromJson(futureJson);
+      expect(session.attachMode, AttachMode.unknown);
+      expect(session.id, 'session-future');
+      expect(session.title, 'T');
+    });
+
+    test('drive control decodes the revision-15 availability fields', () {
+      final control = SessionDriveControl.fromJson({
+        'state': 'observing',
+        'supported': false,
+        'handoffAvailable': false,
+        'takeoverAvailable': true,
+        'takeoverMode': 'live',
+      });
+      expect(control.handoffAvailable, isFalse);
+      expect(control.takeoverAvailable, isTrue);
+      expect(control.takeoverMode, AttachMode.live);
+    });
+
+    test('absent revision-15 control fields decode as null', () {
+      // Null is the compatibility contract: it must mean "behave exactly as
+      // before this revision", which is why these are nullable rather than
+      // defaulted.
+      final control = SessionDriveControl.fromJson({
+        'state': 'driving',
+        'supported': true,
+      });
+      expect(control.handoffAvailable, isNull);
+      expect(control.takeoverAvailable, isNull);
+      expect(control.takeoverMode, isNull);
+    });
+
+    test('an unrecognized takeover mode decodes to unknown, not a throw', () {
+      final control = SessionDriveControl.fromJson({
+        'state': 'observing',
+        'supported': false,
+        'takeoverAvailable': true,
+        'takeoverMode': 'teleport',
+      });
+      expect(control.takeoverMode, AttachMode.unknown);
+      expect(control.takeoverAvailable, isTrue);
+    });
+
     test('roundtrip serialization', () {
       final json = {
         'id': 'session-1',
