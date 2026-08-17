@@ -887,6 +887,23 @@ try {
         && unit.includes('EnvironmentFile=')
         && !`${unit}\n${environment}`.includes('super-secret')
         && !unit.match(/--token|COSYNCING_TOKEN=/));
+    // The unit must never authorize systemd to kill anything but the broker.
+    //
+    // Left to its default (KillMode=control-group) a `stop` SIGTERMs every
+    // descendant, which reaches a host the OPERATOR started from a terminal
+    // that happens to descend from this service — the one thing this product
+    // promises never to touch. It also made the shutdown leg of acceptance
+    // meaningless: hosts died whether or not ownership was ever proven, so a
+    // broken proof looked exactly like a working one.
+    // Read as DIRECTIVES, not as raw text: the unit explains the default it is
+    // overriding, so a substring search finds `KillMode=control-group` in a
+    // comment and calls a correct file wrong.
+    const killModes = unit.split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .filter((line) => line.startsWith('KillMode='));
+    check('the unit stops the broker only, never the whole control group',
+      killModes.length === 1 && killModes[0] === 'KillMode=process',
+      killModes.join(',') || 'no KillMode directive');
     // systemd only unquotes directives it splits into arguments. WorkingDirectory= and EnvironmentFile=
     // take the literal remainder of the line, so a quoted value arrives WITH the quotes: real systemd 255
     // rejected WorkingDirectory as "path is not absolute" (fatal, unit never starts) and silently IGNORED

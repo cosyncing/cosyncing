@@ -29,7 +29,18 @@
  *
  * Captured against dsh 0.1.0-rc.6 (see `test/fixtures/dsh-0.1.0-rc.6.json`).
  */
-import type { AgentMessage, SessionInfo, ToolDisplayClass, ToolSemantic } from '@cosyncing/adapter-api';
+import {
+  boundContextBody,
+  CONTEXT_INJECTION_EVENT,
+  unwrapContextBlock,
+} from '@cosyncing/adapter-api';
+import type {
+  AgentMessage,
+  ContextInjectionPayload,
+  SessionInfo,
+  ToolDisplayClass,
+  ToolSemantic,
+} from '@cosyncing/adapter-api';
 
 // ── Native shapes (structural, deliberately permissive) ─────────────────────
 
@@ -911,9 +922,43 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         }];
       }
       // Injected context is NOT a human bubble. It is agent-visible material the
-      // user never typed, so it renders as a system notice naming its origin.
-      const origin = optionalString(source?.plugin) ?? optionalString(source?.kind) ?? 'unknown';
-      return [{ type: 'notice', message: bounded(`Context added by ${origin}: ${text}`) }];
+      // user never typed, so it goes out as the provider-neutral context event
+      // and the client gives it one compact, collapsible presentation.
+      //
+      // It was a notice until this round, which rendered as a wall of centred
+      // prose quoting a plugin id and a truncated `<system-reminder>` — the
+      // single largest source of noise at session open, and uncollapsible
+      // because a notice has no body to fold. A notice is also the wrong
+      // category: notices are things the USER should read, and this is context
+      // the agent was handed.
+      //
+      // Bounded by the shared CONTEXT body policy, not by `bounded()`: that one
+      // is the 240-char NOTICE bound, sized to keep a one-line banner readable
+      // inline, and it would have silently amputated a real reminder here. A
+      // clipped body reports `truncated` so the client can say so rather than
+      // just stopping mid-sentence.
+      //
+      // The wrapper comes OFF here, the same way Kimi's does. The protocol
+      // states a context body arrives already unwrapped and the client renders
+      // it verbatim, so forwarding the raw block put literal `<system-reminder>`
+      // tags back on screen — the exact noise this event replaced, just folded
+      // behind a disclosure.
+      const injected = unwrapContextBlock(text);
+      // A plugin id is real provenance; a wrapper tag names a KIND. Prefer the
+      // id when the host supplied one, fall back to the tag rather than to
+      // 'unknown', and only then admit we do not know.
+      const origin = optionalString(source?.plugin)
+        ?? optionalString(source?.kind)
+        ?? injected?.source
+        ?? 'unknown';
+      return [{
+        type: 'event',
+        name: CONTEXT_INJECTION_EVENT,
+        payload: {
+          source: origin,
+          ...boundContextBody(injected?.body ?? text),
+        } satisfies ContextInjectionPayload,
+      }];
     }
 
     case 'assistant/message': {

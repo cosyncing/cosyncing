@@ -29,7 +29,7 @@ import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
-  waitForBrokerHealth,
+  startHealthyFixtureBrokerOnPort,
 } from '../helpers/isolated-broker-fixture.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -84,29 +84,41 @@ async function hookRequest(body: any, tries = 6): Promise<any> {
 }
 
 await portLease.release();
-const broker = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
-  cwd: REPO,
-  env: isolatedBrokerFixtureEnvironment(work, {
-    overrides: {
-      PORT: String(PORT),
-      HOST: '127.0.0.1',
-      COSYNCING_MACHINE: 'surface-test',
-      COSYNCING_DEV_MODE: '1',
-      COSYNCING_BRIDGE_GRACE_MS: '300',
-      CLAUDE_CONFIG_DIR: work,
-    },
-  }),
-  stdout: 'pipe',
-  stderr: 'pipe',
-  stdin: 'ignore',
+// Started through the shared helper: a silent startup stall — alive, not
+// listening, nothing written — is retired and respawned once on THIS port
+// instead of costing the suite its whole readiness budget.
+let brokerOutput!: ReturnType<typeof captureProcessOutput>;
+const broker = await startHealthyFixtureBrokerOnPort({
+  port: PORT,
+  healthUrl: `${BASE}/api/health`,
+  spawn: () => {
+    const child = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+      cwd: REPO,
+      env: isolatedBrokerFixtureEnvironment(work, {
+        overrides: {
+          PORT: String(PORT),
+          HOST: '127.0.0.1',
+          COSYNCING_MACHINE: 'surface-test',
+          COSYNCING_DEV_MODE: '1',
+          COSYNCING_BRIDGE_GRACE_MS: '300',
+          CLAUDE_CONFIG_DIR: work,
+        },
+      }),
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    });
+    brokerOutput = captureProcessOutput(child);
+    return child;
+  },
+  capture: () => brokerOutput,
+  stop: async (child) => { child.kill(); await child.exited.catch(() => undefined); },
 });
-const brokerOutput = captureProcessOutput(broker);
 let ws: WebSocket | undefined;
 try {
   // Readiness is not one of this suite's assertions, so it gets no wall-clock
   // budget: a broker booting beside other suites is slow, not broken.
   try {
-    await waitForBrokerHealth(broker, `${BASE}/api/health`);
   } catch (error) {
     throw new Error(`${(error as Error).message}\n${brokerOutput.read().trim().slice(-2000)}`);
   }

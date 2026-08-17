@@ -8,6 +8,7 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -1199,7 +1200,7 @@ void main() {
       expect(find.text('Approve for me'), findsOneWidget);
       expect(
         find.byKey(
-          const Key('session-detail-permission-command-only-copy'),
+          const Key('session-detail-permission-scope-copy'),
         ),
         findsOneWidget,
       );
@@ -1230,6 +1231,226 @@ void main() {
         connection.lastCommandArgs,
         const {'permissionMode': 'accept-edits'},
       );
+    });
+
+    testWidgets('the picked permission mode also scopes an ordinary prompt', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          OptionsWireEvent(
+            models: [],
+            agents: [],
+            modes: [
+              ModeOption(value: 'manual', label: 'Manual approvals'),
+              ModeOption(value: 'auto', label: 'Auto-approve tools'),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('session-detail-permission-selector')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('session-detail-permission-option-auto')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Auto-approve tools'), findsOneWidget);
+
+      await tester.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'do the thing',
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('do the thing'), findsWidgets);
+      await tester.tap(find.byKey(const Key('session-detail-send-button')));
+      await tester.pumpAndSettle();
+
+      // The picker used to move slash commands only, so an ordinary prompt ran
+      // under whatever mode the session held — the selector said one thing and
+      // the prompt did another.
+      expect(connection.lastPrompt, 'do the thing');
+      expect(connection.lastPromptPermissionMode, 'auto');
+    });
+
+    testWidgets('a picker with nothing to pick reads as read-only', (
+      tester,
+    ) async {
+      // A session that must show its model but offers no catalog to choose
+      // from — a terminal-synced session, or an adapter advertising none.
+      final connection = ScriptedSessionDetailConnection(
+        events: [
+          SessionWireEvent(
+            info: SessionInfo.fromJson(const {
+              'id': 'session-1',
+              'tool': 'dsh',
+              'title': 'Locked model',
+              'status': 'idle',
+              'attachMode': 'resume',
+              'currentModel': {
+                'providerID': 'deepseek',
+                'modelID': 'deepseek-chat',
+              },
+              'control': {
+                'drive': {'state': 'driving', 'supported': true},
+                'terminalSync': {
+                  'supported': false,
+                  'syncAvailable': false,
+                  'active': false,
+                },
+              },
+            }),
+          ),
+          const OptionsWireEvent(models: [], agents: [], modes: []),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      final selector = find.byKey(const Key('session-detail-model-selector'));
+      expect(selector, findsOneWidget);
+      // The value stays visible — that part is a product requirement. What
+      // must NOT stay is a dropdown chevron promising a menu no tap opens.
+      expect(
+        find.descendant(
+          of: selector,
+          matching: find.byIcon(Icons.keyboard_arrow_down),
+        ),
+        findsNothing,
+      );
+      final tooltip = tester.widget<Tooltip>(
+        find.descendant(of: selector, matching: find.byType(Tooltip)),
+      );
+      expect(tooltip.message, contains('Read-only'));
+    });
+
+    testWidgets('the compact selection pip is the shared component', (
+      tester,
+    ) async {
+      // A hand-rolled circle here drifts from every other status indicator the
+      // moment one of them changes. The kit is the single definition.
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          OptionsWireEvent(
+            models: [],
+            agents: [],
+            modes: [
+              ModeOption(value: 'manual', label: 'Manual approvals'),
+              ModeOption(value: 'auto', label: 'Auto-approve tools'),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('session-detail-permission-selector')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('session-detail-permission-option-auto')),
+      );
+      await tester.pumpAndSettle();
+
+      // Narrow enough for the composer's compact rendering, where the label is
+      // hidden and the pip is the only signal that a mode is selected.
+      tester.view
+        ..physicalSize = const Size(420, 900)
+        ..devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpAndSettle();
+
+      final selector = find.byKey(
+        const Key('session-detail-permission-selector'),
+      );
+      final dots = find.descendant(
+        of: selector,
+        matching: find.byType(StatusDot),
+      );
+      expect(
+        dots,
+        findsOneWidget,
+        reason: 'the compact pip must be the shared component, not a Container',
+      );
+      expect(tester.widget<StatusDot>(dots.first).size, 8.0);
+    });
+
+    testWidgets('an offered picker keeps its chevron', (tester) async {
+      // The negative control: the affordance must survive where it is real.
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          OptionsWireEvent(
+            models: [
+              ModelOption(
+                providerID: 'anthropic',
+                modelID: 'claude-haiku-4-5',
+                label: 'Haiku',
+              ),
+            ],
+            agents: [],
+            modes: [],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-detail-model-selector')),
+          matching: find.byIcon(Icons.keyboard_arrow_down),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a prompt sent without a pick re-asserts no mode', (
+      tester,
+    ) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: const [
+          OptionsWireEvent(
+            models: [],
+            agents: [],
+            modes: [
+              ModeOption(value: 'manual', label: 'Manual approvals'),
+              ModeOption(value: 'auto', label: 'Auto-approve tools'),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'do the thing',
+      );
+      await tester.tap(find.byKey(const Key('session-detail-send-button')));
+      await tester.pumpAndSettle();
+
+      // Nothing was chosen, so nothing is claimed: re-asserting the session's
+      // own mode on every prompt would silently outrank a change the server
+      // made between two sends.
+      expect(connection.lastPromptPermissionMode, isNull);
     });
 
     testWidgets('later broker mode state replaces a local command override', (

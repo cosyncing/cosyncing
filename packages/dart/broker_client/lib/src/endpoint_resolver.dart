@@ -13,9 +13,7 @@ class EndpointResolver {
     this.clientProfileIncarnation,
   }) {
     if (token != null && peerToken != null) {
-      throw ArgumentError(
-        'Configure either token or peerToken, not both.',
-      );
+      throw ArgumentError('Configure either token or peerToken, not both.');
     }
     if ((clientProfileId == null) != (clientProfileIncarnation == null)) {
       throw ArgumentError(
@@ -67,44 +65,97 @@ class EndpointResolver {
   /// Broker restart-all endpoint.
   String get brokerRestartAllEndpoint => '$baseUrl/api/broker/restart-all';
 
-  /// The agents endpoint.
+  /// The agents endpoint, as a bare path.
+  ///
+  /// Deliberately unqualified: [agentModelsEndpoint] builds on it, and a query
+  /// string here would land in the middle of that path. Roster reads use
+  /// [agentRosterEndpoint] instead.
   String get agentsEndpoint => '$baseUrl/api/agents';
+
+  /// The agent roster, declaring which contract this client can decode.
+  ///
+  /// The roster arrives as ONE list, so an agent carrying a kind this build
+  /// cannot parse would abort the whole decode and leave the app reporting no
+  /// agents at all. Declaring the revision lets the broker withhold exactly
+  /// those rows; omitting it is read as the oldest possible client, which is
+  /// safe but shows less than this build can actually handle.
+  String get agentRosterEndpoint => _appendQuery(agentsEndpoint, {
+    'contractRevision': '$cosyncingClientContractRevision',
+  });
 
   /// Pre-session model catalog endpoint for a specific tool.
   String agentModelsEndpoint(String tool) =>
       '$agentsEndpoint/${Uri.encodeComponent(tool)}/models';
 
   /// The sessions endpoint.
+  ///
+  /// Deliberately unqualified, like [agentsEndpoint]: it is a prefix other
+  /// paths build on, and a query string here would land mid-path. Roster reads
+  /// use [sessionsEndpointFor].
   String get sessionsEndpoint => '$baseUrl/api/sessions';
 
   /// Builds a roster snapshot endpoint, bypassing the cached representation
   /// only for an explicit user refresh.
+  ///
+  /// Declares the contract revision for the same reason [agentRosterEndpoint]
+  /// does, and it has to be the SAME answer. The broker decides which agents a
+  /// client can decode and applies that decision to both lists; asking for
+  /// agents as a revision-15 client and for sessions as an unstated one made
+  /// the broker withhold every Kimi and dsh SESSION while still listing both
+  /// agents — the app would show the tools and none of their work.
   String sessionsEndpointFor({bool refresh = false, String? window}) =>
       _appendQuery(sessionsEndpoint, {
+        'contractRevision': '$cosyncingClientContractRevision',
         if (refresh) 'refresh': '1',
         if (window != null) 'window': window,
       });
 
   /// Lightweight roster metadata/status journal endpoint.
+  ///
+  /// Carries the revision too: deltas update the snapshot, so a delta stream
+  /// with wider visibility than the snapshot it updates would reintroduce
+  /// exactly the rows the snapshot withheld.
   String sessionRosterDeltasEndpointFor({
     required int after,
     required int waitMs,
     String? window,
   }) => _appendQuery('$baseUrl/api/session-roster-deltas', {
+    'contractRevision': '$cosyncingClientContractRevision',
     'after': '$after',
     'waitMs': '$waitMs',
     if (window != null) 'window': window,
   });
 
-  /// Authenticated aggregated machine rosters endpoint.
+  /// The machines endpoint, as a bare path.
+  ///
+  /// Deliberately unqualified, like [agentsEndpoint] and [sessionsEndpoint]:
+  /// [machineResolveEndpoint] builds on it, and a query string here would land
+  /// in the middle of that path. Roster reads use [machineRosterEndpoint].
   String get machinesEndpoint => '$baseUrl/api/machines';
 
+  /// Authenticated aggregated machine rosters, declaring this contract.
+  ///
+  /// The SAME revision as [agentRosterEndpoint] and [sessionsEndpointFor], for
+  /// the same reason: the broker filters every roster read by what the caller
+  /// says it can decode, and an unstated revision reads as the oldest possible
+  /// client. Omitting it here made one app contradict itself — the local roster
+  /// listed a tool while the aggregated view, which is the same rows gathered
+  /// across this broker and its peers, dropped every session belonging to it.
+  String get machineRosterEndpoint => _appendQuery(machinesEndpoint, {
+    'contractRevision': '$cosyncingClientContractRevision',
+  });
+
   /// Resolves an authoritative owning broker for a composite session.
+  ///
+  /// Carries the revision too: resolution searches the same filtered rosters,
+  /// so a session this client can see and open would otherwise fail to resolve
+  /// — a 404 on a row the app is showing.
   String machineResolveEndpoint({
     required String machineId,
     required String tool,
     required String sessionId,
   }) => _appendQuery('$machinesEndpoint/resolve', {
+    'contractRevision': '$cosyncingClientContractRevision',
     'machineId': machineId,
     'tool': tool,
     'sessionId': sessionId,
@@ -284,9 +335,20 @@ class EndpointResolver {
     // a strong enough answer: a bare attach is read-only on one adapter and
     // full-authority on another, and only the broker can settle it.
     if (readOnly) params['readOnly'] = '1';
-    // Drive-attach intent is additive and resume-only: the broker rejects a
-    // reason without mode=resume, so never emit one on an Observe attach.
-    if (reason != null && mode == 'resume') params['reason'] = reason;
+    // Drive-attach intent is additive, and the broker enforces a MATRIX rather
+    // than a mode list. `create`, `app-restore` and `lease-restore` describe
+    // reopening a connection this app previously owned, which is the resume
+    // path; on `live` the broker rejects them. `takeover` is the only reason
+    // valid on `live`, where it seizes the running session — a Kimi demoted
+    // generation is the case that needs it.
+    //
+    // Mirrored here rather than left to the broker because the stale state is
+    // real: a retained `app-restore` intent meeting a session that has since
+    // become live-attach would otherwise build a request that can only 400.
+    if (reason != null &&
+        (mode == 'resume' || (mode == 'live' && reason == 'takeover'))) {
+      params['reason'] = reason;
+    }
     if (reason == 'join-existing' && ownerRevision != null) {
       params['ownerEpoch'] = ownerRevision.epoch;
       params['ownerSeq'] = '${ownerRevision.seq}';

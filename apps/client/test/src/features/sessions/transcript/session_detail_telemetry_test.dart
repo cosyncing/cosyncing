@@ -78,6 +78,25 @@ void main() {
       expect(find.textContaining('Here is the answer.'), findsOneWidget);
     });
 
+    // Both halves of the metadata contract in one pump: the reading reaches the
+    // session, and the frame that carried it leaves no card behind. Asserting
+    // only the absence would pass just as well if the update had been dropped
+    // on the floor, which is the failure this pairing exists to catch.
+    testWidgets('a metadata update changes state, leaving no card', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: eventsWithTelemetry()),
+      );
+      await tester.pumpAndSettle();
+
+      // Applied: the context reading came from the hidden metadata frame.
+      expect(find.text('90k / 100k'), findsOneWidget);
+      // Not rendered: no card, and no raw key or value anywhere on screen.
+      expect(find.textContaining('Metadata update'), findsNothing);
+      expect(find.textContaining('contextUsage'), findsNothing);
+    });
+
     // The composer carries context usage while the roomy strip carries a
     // compact raw-bucket summary and Status keeps the full breakdown.
     testWidgets('the composer shows the latest context reading', (

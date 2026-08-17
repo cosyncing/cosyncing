@@ -81,8 +81,9 @@ class SessionConnection {
   /// on the next (re)connect's `streamEndpoint`.
   String? _mode;
 
-  /// Drive-attach intent accompanying resume (`create`, `app-restore`,
-  /// `lease-restore`, `join-existing`, or `takeover`).
+  /// Drive-attach intent accompanying a drive attach: `create`, `app-restore`,
+  /// `lease-restore` and `join-existing` on resume only, and `takeover` on
+  /// either resume or live.
   String? _reason;
 
   /// Owner revision accompanying a `join-existing` request only.
@@ -268,6 +269,10 @@ class SessionConnection {
   /// acknowledged, so the broker clears only the draft this send actually
   /// contained. Both are omitted against a legacy broker, which keeps its
   /// unconditional clear.
+  ///
+  /// [permissionMode] is the per-prompt approval mode, and must be an exact
+  /// token this session advertised. Omitted leaves the session's own mode
+  /// alone.
   String sendPrompt(
     String content, {
     SessionCurrentModel? model,
@@ -275,6 +280,7 @@ class SessionConnection {
     String? clientMessageId,
     int? draftRevision,
     String? draftUpdateId,
+    String? permissionMode,
   }) {
     final id = _resolveClientMessageId(clientMessageId);
     _sendFrame(
@@ -285,6 +291,7 @@ class SessionConnection {
         clientMessageId: id,
         draftRevision: draftRevision,
         draftUpdateId: draftUpdateId,
+        permissionMode: permissionMode,
       ),
     );
     return id;

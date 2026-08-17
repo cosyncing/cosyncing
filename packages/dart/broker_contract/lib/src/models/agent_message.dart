@@ -1,5 +1,16 @@
 import 'package:broker_contract/src/models/policy_token.dart';
 
+/// Event name for agent-visible material the user never typed.
+///
+/// Adapters map system reminders, runtime snapshots and host context
+/// injections onto this one name so the transcript can give them a single
+/// collapsible presentation instead of one shape per provider. Mirrors
+/// `CONTEXT_INJECTION_EVENT` in the broker's
+/// `packages/typescript/protocol/src/index.ts`; event names are free-form on
+/// the wire, so this is a shared convention rather than a hashed contract
+/// field, and an unrecognized name simply renders as an ordinary event.
+const String kContextInjectionEvent = 'context.injection';
+
 /// Canonical `AgentMessage.type` values emitted by the broker.
 ///
 /// See `docs/protocol/contract-sync.md`.
@@ -1015,6 +1026,42 @@ extension ToolAgentMessage on AgentMessage {
     final value = raw['toolClass'];
     if (value is! String) return null;
     return ToolDisplayClass.fromWire(value);
+  }
+
+  /// Origin and material of a [kContextInjectionEvent] event, when this is one.
+  ///
+  /// Returns `null` for every other message, so a caller cannot accidentally
+  /// render an unrelated event through the context presentation.
+  ///
+  /// `truncated` is true when the adapter clipped the material at the shared
+  /// body ceiling, so the reader can be told the block is a prefix instead of
+  /// being shown a body that merely stops. A missing or non-bool flag reads as
+  /// false — an older broker that never sends one is claiming nothing.
+  ({String source, String body, bool truncated})? get contextInjection {
+    if (eventName != kContextInjectionEvent) return null;
+    final payload = raw['payload'];
+    if (payload is! Map) return null;
+    final source = payload['source'];
+    final body = payload['body'];
+    if (source is! String || body is! String || body.isEmpty) return null;
+    return (
+      source: source,
+      body: body,
+      truncated: payload['truncated'] == true,
+    );
+  }
+
+  /// Canonical event name, for [AgentMessageType.event] frames that carry one.
+  ///
+  /// Read as a typed field rather than dug out of the payload at each call
+  /// site, because the name is the only thing that tells one event from
+  /// another. It is NOT a display string: adapters namespace these
+  /// (`dsh.session-event`), and rendering one verbatim is the raw-identifier
+  /// leakage the transcript exists to keep out.
+  String? get eventName {
+    if (type != AgentMessageType.event) return null;
+    final value = raw['name'];
+    return value is String && value.isNotEmpty ? value : null;
   }
 
   /// Stable call id shared by a tool call and its result, when present.

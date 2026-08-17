@@ -1406,6 +1406,7 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
   String? lastDraftUpdateId;
   int? lastDraftBaseRevision;
   SessionCurrentModel? lastPromptModel;
+  String? lastPromptPermissionMode;
   String? lastPromptClientMessageId;
   List<PromptFileAttachment> lastPromptFiles = const [];
   String? lastCommandName;
@@ -1555,10 +1556,12 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
     int? draftRevision,
     String? draftUpdateId,
     List<PromptFileAttachment> files = const [],
+    String? permissionMode,
   }) async {
     sendPromptCount++;
     lastPrompt = text;
     lastPromptModel = model;
+    lastPromptPermissionMode = permissionMode;
     lastPromptClientMessageId = clientMessageId;
     lastPromptFiles = List.unmodifiable(files);
     await onSendPrompt?.call();

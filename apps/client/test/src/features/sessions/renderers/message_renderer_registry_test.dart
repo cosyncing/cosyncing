@@ -39,6 +39,161 @@ void main() {
       );
     }
 
+    group('injected context', () {
+      AgentMessage contextMessage({
+        String source = 'system-reminder',
+        bool truncated = false,
+      }) => AgentMessage.fromJson({
+        'type': 'event',
+        'name': kContextInjectionEvent,
+        'payload': {
+          'source': source,
+          'body': 'Auto permission mode is active.',
+          if (truncated) 'truncated': true,
+        },
+      });
+
+      const toggle = Key('transcript-context-toggle');
+
+      testWidgets('renders collapsed, with a human label and no wrapper tags', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, contextMessage());
+
+        expect(find.text('Context'), findsOneWidget);
+        // Collapsed: the material is not on screen until asked for.
+        expect(
+          find.textContaining('Auto permission mode'),
+          findsNothing,
+        );
+        // Never the raw wrapper syntax the adapter unwrapped.
+        expect(find.textContaining('<system-reminder>'), findsNothing);
+      });
+
+      testWidgets('the resting row names no provider identifier', (
+        tester,
+      ) async {
+        // The origin is an unedited provider string. At rest the transcript
+        // shows a human word and nothing else; the reader who opens the block
+        // is the one asking where the material came from.
+        await _pumpRenderer(
+          tester,
+          contextMessage(source: '@deepseek-ai/dsh-system-prompt'),
+        );
+
+        expect(find.textContaining('deepseek'), findsNothing);
+        expect(
+          find.byKey(const Key('transcript-context-source')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('expands to the origin and the material, and collapses', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, contextMessage());
+
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Auto permission mode'), findsOneWidget);
+        expect(find.text('system-reminder'), findsOneWidget);
+
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Auto permission mode'), findsNothing);
+        expect(find.text('system-reminder'), findsNothing);
+      });
+
+      testWidgets('a clipped body says so instead of just stopping', (
+        tester,
+      ) async {
+        await _pumpRenderer(tester, contextMessage(truncated: true));
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('transcript-context-truncated')),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a whole body claims no truncation', (tester) async {
+        await _pumpRenderer(tester, contextMessage());
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('transcript-context-truncated')),
+          findsNothing,
+        );
+      });
+
+      testWidgets('the toggle is a reachable, stateful disclosure', (
+        tester,
+      ) async {
+        final semantics = tester.ensureSemantics();
+        await _pumpRenderer(tester, contextMessage());
+
+        // A real touch target, not a hairline between messages: this is
+        // tapped to read the material, so it has to be hittable on a phone.
+        expect(
+          tester.getSize(find.byKey(toggle)).height,
+          greaterThanOrEqualTo(40.0),
+        );
+        expect(
+          tester.getSemantics(find.byKey(toggle)),
+          isSemantics(
+            isButton: true,
+            hasExpandedState: true,
+            isExpanded: false,
+          ),
+        );
+
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getSemantics(find.byKey(toggle)),
+          isSemantics(hasExpandedState: true, isExpanded: true),
+        );
+        semantics.dispose();
+      });
+
+      testWidgets('stays inside a 400px window with a long origin', (
+        tester,
+      ) async {
+        await _pumpRendererAtWidth(
+          tester,
+          contextMessage(source: '@deepseek-ai/dsh-system-prompt-with-a-name'),
+          width: 400,
+        );
+        await tester.tap(find.byKey(toggle));
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.text('Context'), findsOneWidget);
+      });
+
+      testWidgets('an event without the context payload keeps the card', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          AgentMessage.fromJson(const {
+            'type': 'event',
+            'name': 'session.forked',
+            'payload': {'from': 's-1'},
+          }),
+        );
+
+        // The generic event card, not the context row: an unknown event must
+        // never be silently reshaped into something it is not.
+        expect(
+          find.byKey(const Key('transcript-context-toggle')),
+          findsNothing,
+        );
+      });
+    });
+
     testWidgets('falls back for unknown message types', (tester) async {
       await _pumpRenderer(
         tester,

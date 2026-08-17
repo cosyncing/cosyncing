@@ -50,11 +50,17 @@ explicit rather than being inferred from tool names in client code.
 ## Experimental adapters
 
 DeepSeek Harness is not yet part of the generated stable support matrix. Its
-default-off source adapter connects to an external `dsh web` host and currently
-covers discovery, bounded history, shared foreground live control,
-create/rename, prompt resolution, reconnect, and session removal. Background
-resident subscription, model selection, file input, and final UI presentation
-remain follow-up work. See [DeepSeek Harness setup](../supported_agents/dsh.md).
+source adapter is registered by default and served to any client that can decode
+its integration kind. It connects to a `dsh web` host that cosyncing never
+installs, and currently covers discovery, bounded history, shared foreground
+live control, create/rename, prompt resolution, model and permission-preset
+selection, the host's own slash commands, image attachments, reconnect, and
+session removal. Background resident subscription, non-image file input, and
+final UI presentation remain follow-up work.
+
+An installed service may start and restart a locally launchable host, acting
+only on a process it can prove it started. See
+[DeepSeek Harness setup](../supported_agents/dsh.md).
 
 ## Context window reporting
 

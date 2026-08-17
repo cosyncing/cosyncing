@@ -14,6 +14,7 @@
  *   bun run packages/typescript/adapters/kimi/test/test-kimi-mapping.ts   (exit 0 = all pass)
  */
 export {};
+import { CONTEXT_INJECTION_BODY_MAX_UNITS, CONTEXT_INJECTION_EVENT } from '@cosyncing/adapter-api';
 import {
   KIMI_APPROVAL_DETAIL_CAP_BYTES,
   KIMI_UNKEYABLE_QUESTION,
@@ -117,6 +118,140 @@ check('assistant text is still model output',
   mapKimiMessage({ id: 'msg_a', role: 'assistant', content: [{ type: 'text', text: 'hi' }] })
     .map((row) => row.message)[0]?.type === 'model-output');
 
+// ── Injected context vs. a real system message ──────────────────────────────
+//
+// A system row is either something the USER should read or context the AGENT
+// was handed. Only a whole, identifiable wrapper is re-categorized, because
+// folding a real message into a collapsed block hides content nobody then sees.
+
+const reminderRows = mapKimiMessage({
+  id: 'msg_ctx1',
+  role: 'system',
+  content: [{
+    type: 'text',
+    text: '<system-reminder>\nAuto permission mode is active.\n</system-reminder>',
+  }],
+}).map((row) => row.message) as Array<{ type: string; name?: string; payload?: { source?: string; body?: string } }>;
+check('a whole system-reminder block becomes a provider-neutral context event',
+  reminderRows.length === 1
+    && reminderRows[0]!.type === 'event'
+    && reminderRows[0]!.name === CONTEXT_INJECTION_EVENT
+    && reminderRows[0]!.payload?.source === 'system-reminder',
+  JSON.stringify(reminderRows[0]));
+check('...carrying the material with the wrapper syntax removed',
+  reminderRows[0]!.payload?.body === 'Auto permission mode is active.'
+    && !reminderRows[0]!.payload!.body!.includes('<system-reminder>'),
+  JSON.stringify(reminderRows[0]!.payload?.body));
+check('...and claiming no truncation, because nothing was clipped',
+  (reminderRows[0]!.payload as { truncated?: boolean }).truncated === undefined,
+  JSON.stringify(reminderRows[0]!.payload));
+
+// The same shared ceiling as every other adapter, and a clip that announces
+// itself: a body that stops mid-sentence must not read as the whole material.
+const hugeReminder = mapKimiMessage({
+  id: 'msg_ctx_big',
+  role: 'system',
+  content: [{
+    type: 'text',
+    text: `<system-reminder>${'x'.repeat(CONTEXT_INJECTION_BODY_MAX_UNITS + 500)}</system-reminder>`,
+  }],
+}).map((row) => row.message) as Array<{ payload?: { body?: string; truncated?: boolean } }>;
+check('an oversized context body is clipped at the shared ceiling and declares it',
+  hugeReminder.length === 1
+    && hugeReminder[0]!.payload?.body?.length === CONTEXT_INJECTION_BODY_MAX_UNITS
+    && hugeReminder[0]!.payload?.truncated === true,
+  `${hugeReminder[0]?.payload?.body?.length} truncated=${hugeReminder[0]?.payload?.truncated}`);
+
+const plainSystem = mapKimiMessage({
+  id: 'msg_ctx2',
+  role: 'system',
+  content: [{ type: 'text', text: 'The terminal took over this session.' }],
+}).map((row) => row.message) as Array<{ type: string }>;
+check('a real system message is still a notice, not folded away as context',
+  plainSystem.length === 1 && plainSystem[0]!.type === 'notice',
+  JSON.stringify(plainSystem[0]));
+
+const embedded = mapKimiMessage({
+  id: 'msg_ctx3',
+  role: 'system',
+  content: [{
+    type: 'text',
+    text: 'Heads up. <system-reminder>be careful</system-reminder> Act on this.',
+  }],
+}).map((row) => row.message) as Array<{ type: string }>;
+check('a message that merely CONTAINS a reminder is not collapsed — it has content of its own',
+  embedded.length === 1 && embedded[0]!.type === 'notice',
+  JSON.stringify(embedded[0]));
+
+// ── the row shape this actually arrives in ──────────────────────────────────
+//
+// Every case above is `role: 'system'`, which is the role Kimi never uses for
+// injected context. On a live 0.36.1 server every whole `<system-reminder>` is
+// `role: 'user'` carrying `metadata.origin.kind: 'injection'`, and none is
+// `role: 'system'` — so the rule above, written for a row that does not occur,
+// never fired, and the raw wrapper reached the transcript styled as text the
+// operator had typed.
+//
+// The user row takes BOTH the provenance and the whole wrapper. Text alone
+// proves nothing: a person may paste an entire reminder and still be writing.
+const REMINDER_TEXT = '<system-reminder>\nAuto permission mode is active.\n</system-reminder>';
+const injectedOrigin = { origin: { kind: 'injection', variant: 'permission_mode' } };
+
+const userReminder = mapKimiMessage({
+  id: 'msg_ctx_user',
+  role: 'user',
+  metadata: injectedOrigin,
+  content: [{ type: 'text', text: REMINDER_TEXT }],
+}).map((row) => row.message) as Array<{ type: string; name?: string; payload?: { source?: string; body?: string } }>;
+check('a whole system-reminder Kimi calls an injection is context, not something the operator typed',
+  userReminder.length === 1
+    && userReminder[0]!.type === 'event'
+    && userReminder[0]!.name === CONTEXT_INJECTION_EVENT
+    && userReminder[0]!.payload?.source === 'system-reminder'
+    && userReminder[0]!.payload?.body === 'Auto permission mode is active.',
+  JSON.stringify(userReminder[0]));
+
+// Provenance is REQUIRED, not merely consulted. Each of these is a whole,
+// perfectly formed wrapper — the only thing separating them from the case above
+// is Kimi's own account of who produced the row, and that has to be enough to
+// keep the message whole. `cron_job` is a real third kind the live server
+// returns; it is a schedule firing a genuine prompt, not injected context.
+for (const [label, metadata] of [
+  ['a person who pasted one', { origin: { kind: 'user' } }],
+  ['a scheduled prompt', { origin: { kind: 'cron_job' } }],
+  ['metadata that is absent', undefined],
+  ['metadata with no origin', { variant: 'permission_mode' }],
+  ['an origin that is not an object', { origin: 'injection' }],
+  ['an origin kind that is not a string', { origin: { kind: 7 } }],
+] as Array<[string, unknown]>) {
+  const rows = mapKimiMessage({
+    id: `msg_ctx_user_${label.replace(/\W+/g, '_')}`,
+    role: 'user',
+    ...(metadata === undefined ? {} : { metadata }),
+    content: [{ type: 'text', text: REMINDER_TEXT }],
+  }).map((row) => row.message) as Array<{ type: string; text?: string }>;
+  check(`a whole wrapper from ${label} stays a user message, verbatim`,
+    rows.length === 1 && rows[0]!.type === 'user-message' && rows[0]!.text === REMINDER_TEXT,
+    JSON.stringify(rows[0]));
+}
+
+// The other half of the injected case: even WITH the provenance, a row that
+// merely contains a reminder has content of its own and is never collapsed.
+const userEmbedded = mapKimiMessage({
+  id: 'msg_ctx_user2',
+  role: 'user',
+  metadata: injectedOrigin,
+  content: [{
+    type: 'text',
+    text: 'Heads up. <system-reminder>be careful</system-reminder> Act on this.',
+  }],
+}).map((row) => row.message) as Array<{ type: string; text?: string }>;
+check('a message that merely quotes a reminder stays whole even when marked injected',
+  userEmbedded.length === 1
+    && userEmbedded[0]!.type === 'user-message'
+    && userEmbedded[0]!.text === 'Heads up. <system-reminder>be careful</system-reminder> Act on this.',
+  JSON.stringify(userEmbedded[0]));
+
 // ── Identity of equal-content rows ──────────────────────────────────────────
 
 const twinNotices = [
@@ -154,6 +289,24 @@ const usage = overlays.find((m) => m.type === 'metadata-update' && m.key === 'co
 check('session status maps to a context-usage overlay', !!usage,
   JSON.stringify(usage?.type === 'metadata-update' ? usage.value : undefined));
 check('status mapping tolerates junk', mapKimiSessionStatus(null).length === 0);
+
+// The host's reported approval mode has to reach the CONTRACT field the mode
+// picker preselects from. Under any other name the broker still folds it onto
+// the session info, where nothing declares it and nothing reads it — the picker
+// stays blank and the session looks like it has no mode at all.
+const info = overlays.find((m) => m.type === 'metadata-update' && m.key === 'sessionInfo');
+const infoValue = (info?.type === 'metadata-update' ? info.value : {}) as Record<string, unknown>;
+check('the reported permission mode arrives as SessionInfo.currentMode',
+  infoValue.currentMode === 'manual', JSON.stringify(infoValue));
+check('...and not under a name the contract does not declare',
+  !('permissionMode' in infoValue), JSON.stringify(Object.keys(infoValue)));
+// A host that reports no mode must leave the picker with nothing to preselect:
+// an invented default would claim an approval posture nobody granted.
+const modeless = mapKimiSessionStatus({ model: 'k3', busy: false });
+const modelessInfo = modeless.find((m) => m.type === 'metadata-update' && m.key === 'sessionInfo');
+check('a status without a permission mode invents none',
+  !((modelessInfo?.type === 'metadata-update' ? modelessInfo.value : {}) as Record<string, unknown>).currentMode,
+  JSON.stringify(modelessInfo));
 
 // ── Run state: idle is a CLAIM, not a default ───────────────────────────────
 //

@@ -25,6 +25,13 @@
   <integer>5</integer>
   <key>ProcessType</key>
   <string>Background</string>
+  <!-- The macOS half of the systemd unit's KillMode=process. By default launchd
+       signals the job's whole PROCESS GROUP, which reaches a host the user
+       started from a terminal descended from this job and kills it without
+       anything having proved it was ours. The broker stops what it owns through
+       the ownership-checked release pass; nothing else here may be signalled. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>StandardOutPath</key>
   <string>{{STANDARD_OUT_PATH}}</string>
   <key>StandardErrorPath</key>

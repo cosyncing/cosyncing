@@ -190,6 +190,7 @@ const scan: KimiInstanceScan = {
   live: [{
     baseUrl,
     port: listenPort,
+    pid: FIXTURE_RECORD.pid,
     serverId: FIXTURE_RECORD.serverId,
     hostVersion: FIXTURE_RECORD.hostVersion,
     startedAt: FIXTURE_RECORD.startedAt,
@@ -1162,7 +1163,10 @@ try {
       JSON.stringify(attachedInfo?.value) === JSON.stringify({
         model: 'kimi-code/k3-256k',
         thinkingLevel: 'high',
-        permissionMode: 'manual',
+        // `currentMode` is the CONTRACT field the mode picker preselects from.
+        // Under any other name the broker still assigns the value onto the
+        // session info, where nothing declares it and nothing reads it.
+        currentMode: 'manual',
         planMode: false,
         swarmMode: false,
       }),

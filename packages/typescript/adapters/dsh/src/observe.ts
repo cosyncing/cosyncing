@@ -33,8 +33,11 @@
 import type {
   AgentMessage,
   AgentMessageHandler,
+  CommandInput,
   CommandResult,
   HistoryQuery,
+  ModelOption,
+  ModeOption,
   PermissionDecision,
   PromptInput,
   SessionConnection,
@@ -43,7 +46,7 @@ import type {
   Unsubscribe,
 } from '@cosyncing/adapter-api';
 import type { DshDownlinkFrame, DshRpcClient } from './server.ts';
-import { DshDriver } from './drive.ts';
+import { DshDriver, type DshImageLimits } from './drive.ts';
 import {
   createDshMapState,
   dshMessageKey,
@@ -94,8 +97,47 @@ export const DSH_HISTORY_TRUNCATED_NOTICE =
 export const DSH_RECONNECT_NOTICE =
   'Reconnected to the DeepSeek Harness host and reloaded this session.';
 
-/** Command names accepted by {@link DshSessionConnection.runCommand}; all mean `session.cancel`. */
-const DSH_COMMANDS: readonly string[] = Object.freeze(['stop', 'cancel', 'interrupt']);
+/**
+ * Command names {@link DshSessionConnection.runCommand} serves LOCALLY, all
+ * meaning `session.cancel`.
+ *
+ * These are not host registry commands — the host interrupts through
+ * `session.cancel`, not through a `/stop` line — so they are answered here and
+ * never composed into a command line. A host that later registers a command
+ * with one of these names would be shadowed, which is why the roster below
+ * filters them out rather than letting two entries collide.
+ */
+const DSH_LOCAL_COMMANDS: readonly string[] = Object.freeze(['stop', 'cancel', 'interrupt']);
+
+/** The host projection carrying the permission-preset roster and current value. */
+const DSH_PERMISSIONS_PROJECTION = 'permissions';
+
+/** The host projection carrying this deployment's image-intake policy. */
+const DSH_IMAGE_LIMITS_PROJECTION = 'imageLimits';
+
+/** The registry command that switches the permission preset. */
+const DSH_PERMISSION_COMMAND = 'permission';
+
+/**
+ * Map one host preset value onto the contract's universal grouping.
+ *
+ * The GROUPING is for copy and setup docs only; the adapter-owned `value` is
+ * what actually travels, so an unrecognized preset is still perfectly usable —
+ * it just carries no category rather than a guessed one. Deployments configure
+ * this table themselves, so anything not matched is `custom` by definition.
+ */
+function dshModeCategory(value: string): ModeOption['category'] {
+  switch (value) {
+    case 'read-only':
+      return 'ask-permission';
+    case 'workspace-write':
+      return 'approve-for-me';
+    case 'danger-full-access':
+      return 'full-access';
+    default:
+      return 'custom';
+  }
+}
 
 export interface DshConnectionOptions {
   rpc: DshRpcClient;
@@ -623,13 +665,147 @@ export class DshSessionConnection implements SessionConnection {
 
   async sendPrompt(input: PromptInput): Promise<void> {
     this.assertMutable('send a prompt');
+    // Selectors FIRST. dsh has no per-prompt model or permission field, so a
+    // "per-prompt override" is really two durable session changes followed by a
+    // send. Ordering is not cosmetic: a prompt that raced ahead of its own
+    // selectors would run under the previous model or the previous permission
+    // preset — silently, and with the UI showing the new one.
+    await this.applyModelSelection(input.model);
+    await this.applyPermissionMode(input.permissionMode);
     const clientMessageId = input.clientMessageId;
+    // Re-guarded after the selectors, because both of them AWAIT. A guard taken
+    // before a wait proves nothing about the moment after it: the generation
+    // can be lost while a catalog read or a switch command is parked, and this
+    // send would then land on an epoch nothing has re-baselined.
+    this.assertMutable('send a prompt');
     await this.driver.prompt(this.info.id, input, {
       mode: 'queue',
+      imageLimits: this.imageLimits(),
+      ...(this.info.cwd ? { sessionCwd: this.info.cwd } : {}),
       ...(clientMessageId
         ? { onRpcId: (rpcId: string) => this.state.clientKeys.set(rpcId, clientMessageId) }
         : {}),
     });
+  }
+
+  /** This deployment's published image policy, or undefined when none is composed. */
+  private imageLimits(): DshImageLimits | undefined {
+    const value = this.projections.get(DSH_IMAGE_LIMITS_PROJECTION);
+    if (!value || typeof value !== 'object') return undefined;
+    const row = value as Record<string, unknown>;
+    const num = (key: string): number | undefined =>
+      typeof row[key] === 'number' && Number.isFinite(row[key]) ? (row[key] as number) : undefined;
+    const types = Array.isArray(row.mediaTypes)
+      ? row.mediaTypes.filter((entry): entry is string => typeof entry === 'string')
+      : undefined;
+    return {
+      ...(num('maxImageBytes') !== undefined ? { maxImageBytes: num('maxImageBytes') } : {}),
+      ...(num('maxImagesPerMessage') !== undefined ? { maxImagesPerMessage: num('maxImagesPerMessage') } : {}),
+      ...(num('maxMessageImageBytes') !== undefined ? { maxMessageImageBytes: num('maxMessageImageBytes') } : {}),
+      ...(types && types.length > 0 ? { mediaTypes: types } : {}),
+    };
+  }
+
+  /**
+   * Apply a per-prompt model override as a session selection.
+   *
+   * Skipped entirely when the request already matches what the session runs,
+   * so an unchanged picker costs no write at all — which is what keeps an
+   * ordinary send a single RPC.
+   */
+  private async applyModelSelection(model: PromptInput['model']): Promise<void> {
+    if (!model) return;
+    this.assertMutable('select a model');
+    const catalog = await this.driver.models(this.info.id);
+    const wanted = {
+      provider: model.providerID,
+      model: model.modelID,
+      ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}),
+    };
+    const current = catalog.current;
+    if (
+      current
+      && current.provider === wanted.provider
+      && current.model === wanted.model
+      && (current.reasoningEffort ?? undefined) === (wanted.reasoningEffort ?? undefined)
+    ) {
+      return;
+    }
+    // The catalog read above AWAITED. Re-guard before the write it authorized:
+    // the generation may have ended while that request was parked, and a
+    // selection is durable session state, not a retryable read.
+    this.assertMutable('select a model');
+    await this.driver.selectModel(this.info.id, wanted);
+  }
+
+  /**
+   * Apply a per-prompt permission mode by running the host's own switch command.
+   *
+   * Validated against the LIVE roster before anything is sent, for two
+   * different reasons. The value must be one the host advertised — an
+   * unadvertised preset is a caller bug and composing it into a command line
+   * would hand the host free text. And the switch itself must exist: a
+   * deployment that composes no permission service publishes no `permissions`
+   * projection and registers no `permission` command, and silently skipping the
+   * switch there would run the turn under the wrong policy.
+   */
+  private async applyPermissionMode(mode: string | undefined): Promise<void> {
+    if (mode === undefined) return;
+    this.assertMutable('select a permission mode');
+    const select = this.permissionSelect();
+    if (!select) {
+      throw new Error(
+        'this DeepSeek Harness deployment composes no permission service, so it has no permission mode to select',
+      );
+    }
+    if (!select.options.some((option) => option.value === mode)) {
+      throw new Error(`the DeepSeek Harness host does not offer the permission mode "${mode}"`);
+    }
+    if (select.currentValue === mode) return;
+    const roster = await this.driver.listCommands(this.info.id);
+    if (!roster.some((command) => command.name === DSH_PERMISSION_COMMAND)) {
+      throw new Error(
+        'this DeepSeek Harness host advertises permission modes but no command to switch them, so the mode was not changed',
+      );
+    }
+    // The roster read above AWAITED. Re-guard before the switch it authorized —
+    // a permission preset is durable session state, and applying one on a lost
+    // generation would change how the session approves tools while this
+    // connection no longer speaks for it.
+    this.assertMutable('select a permission mode');
+    const execution = await this.driver.executeCommand(this.info.id, `/${DSH_PERMISSION_COMMAND} ${mode}`);
+    if (execution?.result.kind === 'error') {
+      throw new Error(
+        execution.result.text
+          ? `the DeepSeek Harness host refused the permission mode "${mode}": ${execution.result.text}`
+          : `the DeepSeek Harness host refused the permission mode "${mode}"`,
+      );
+    }
+  }
+
+  /** The permission roster the host last published for this session. */
+  private permissionSelect(): { options: ModeOption[]; currentValue: string } | undefined {
+    const value = this.projections.get(DSH_PERMISSIONS_PROJECTION);
+    if (!value || typeof value !== 'object') return undefined;
+    const row = value as { options?: unknown; currentValue?: unknown };
+    if (!Array.isArray(row.options)) return undefined;
+    const options: ModeOption[] = [];
+    for (const entry of row.options) {
+      if (!entry || typeof entry !== 'object') continue;
+      const option = entry as { value?: unknown; name?: unknown; description?: unknown };
+      if (typeof option.value !== 'string' || option.value.length === 0) continue;
+      options.push({
+        value: option.value,
+        label: typeof option.name === 'string' && option.name ? option.name : option.value,
+        ...(typeof option.description === 'string' ? { description: option.description } : {}),
+        category: dshModeCategory(option.value),
+      });
+    }
+    if (options.length === 0) return undefined;
+    return {
+      options,
+      currentValue: typeof row.currentValue === 'string' ? row.currentValue : '',
+    };
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
@@ -677,21 +853,136 @@ export class DshSessionConnection implements SessionConnection {
   }
 
   /**
-   * The one action round 1 can actually perform.
+   * The session's model catalog, flattened from the host's provider groups.
    *
-   * Compact, undo, redo, and share are deliberately absent rather than stubbed:
-   * the host either has no such RPC or it sits outside the round-1 method
-   * allowlist, and an advertised command that cannot run is worse than a missing
-   * one. `stop` follows the shipped naming for the interrupt action.
+   * A READ. The broker collects this at attach with per-surface fault
+   * isolation, so a throw here costs the picker and nothing else.
+   *
+   * A session the host cannot route is advertised as EMPTY rather than as a
+   * catalog: `routable:false` means no adapter serves the current route, so a
+   * turn cannot start, and offering models to pick between would promise a
+   * send that is going to fail. The groups themselves are advisory and stay
+   * exactly as the host ordered them — advertised order is picker order.
    */
-  async listCommands(): Promise<SlashCommand[]> {
-    return [{ name: 'stop', description: 'Stop the running turn', kind: 'action' }];
+  async listModels(): Promise<ModelOption[]> {
+    const catalog = await this.driver.models(this.info.id);
+    if (!catalog.routable) return [];
+    const options: ModelOption[] = [];
+    for (const group of catalog.groups) {
+      for (const model of group.models) {
+        const efforts = model.reasoning?.efforts ?? [];
+        options.push({
+          providerID: group.id,
+          modelID: model.id,
+          // The provider qualifies the label because two providers can serve
+          // the same model id, and a picker showing it twice is unreadable.
+          label: `${model.name} (${group.name})`,
+          ...(model.description ? { description: model.description } : {}),
+          ...(efforts.length > 0
+            ? {
+                reasoningEfforts: efforts.map((effort) => ({
+                  effort: effort.id,
+                  label: effort.name,
+                  ...(effort.description ? { description: effort.description } : {}),
+                })),
+              }
+            : {}),
+          ...(model.reasoning?.defaultEffort
+            ? { defaultReasoningEffort: model.reasoning.defaultEffort }
+            : {}),
+        });
+      }
+    }
+    return options;
   }
 
-  async runCommand(name: string): Promise<CommandResult | void> {
-    if (!DSH_COMMANDS.includes(name)) throw new Error(`dsh has no command "${name}"`);
+  /**
+   * The permission presets this deployment offers.
+   *
+   * Read from the `permissions` projection the connection already holds — no
+   * request at all, so a mode picker costs nothing and stays correct as the
+   * host pushes updates. An absent key means no permission service is composed
+   * and the control is hidden, which is exactly what an empty list does.
+   */
+  async listModes(): Promise<ModeOption[]> {
+    return this.permissionSelect()?.options ?? [];
+  }
+
+  /**
+   * The session's command roster: the host's own registry, plus the local
+   * interrupt.
+   *
+   * A READ. Every host command runs through the command registry and is never
+   * sent to the model, so all of them are `action` kind. A host row whose name
+   * collides with the local interrupt is dropped, because two entries with one
+   * name is a picker that lies about which one runs.
+   *
+   * A host that cannot be reached still yields the interrupt — losing the
+   * ability to stop a running turn because a roster lookup failed would be a
+   * strictly worse outcome than a short list.
+   */
+  async listCommands(): Promise<SlashCommand[]> {
+    const local: SlashCommand[] = [{ name: 'stop', description: 'Stop the running turn', kind: 'action' }];
+    let roster: Awaited<ReturnType<DshDriver['listCommands']>>;
+    try {
+      roster = await this.driver.listCommands(this.info.id);
+    } catch {
+      return local;
+    }
+    for (const command of roster) {
+      if (DSH_LOCAL_COMMANDS.includes(command.name)) continue;
+      local.push({
+        name: command.name,
+        ...(command.description ? { description: command.description } : {}),
+        kind: 'action',
+      });
+    }
+    return local;
+  }
+
+  /**
+   * Run one command.
+   *
+   * EXACTLY ONCE is the property that matters, so this issues a single
+   * `commands/execute` and never retries: the host mints a `commandId` and
+   * appends the lifecycle records the moment it accepts the line, and a
+   * transport failure after that point is indistinguishable from one before it.
+   * A retry could compact a session twice or switch a permission preset the
+   * user did not ask for a second time.
+   *
+   * The line is composed from the ADVERTISED name plus the caller's argument
+   * text; the name is re-checked against the live roster so a stale picker
+   * cannot send an unknown slash line into the host's parser.
+   */
+  async runCommand(name: string, args?: string, _input?: CommandInput): Promise<CommandResult | void> {
+    if (DSH_LOCAL_COMMANDS.includes(name)) {
+      this.assertMutable(`run "${name}"`);
+      await this.driver.cancel(this.info.id);
+      return;
+    }
     this.assertMutable(`run "${name}"`);
-    await this.driver.cancel(this.info.id);
+    const roster = await this.driver.listCommands(this.info.id);
+    if (!roster.some((command) => command.name === name)) {
+      throw new Error(`dsh has no command "${name}"`);
+    }
+    // Re-guarded after the roster read: the lookup awaited, and the generation
+    // it was issued under may have ended while it was in flight.
+    this.assertMutable(`run "${name}"`);
+    const trimmed = args?.trim() ?? '';
+    const execution = await this.driver.executeCommand(
+      this.info.id,
+      trimmed ? `/${name} ${trimmed}` : `/${name}`,
+    );
+    if (!execution) return;
+    if (execution.result.kind === 'error') {
+      throw new Error(
+        execution.result.text ? `/${name} failed: ${execution.result.text}` : `/${name} failed`,
+      );
+    }
+    // A command whose effect streams back as ordinary session events settles
+    // with no text; returning an empty notice would put a blank system line in
+    // the transcript beside the events that ARE the feedback.
+    return execution.result.text ? { notice: execution.result.text } : undefined;
   }
 
   async close(): Promise<void> {

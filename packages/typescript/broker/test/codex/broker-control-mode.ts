@@ -10,11 +10,14 @@
  * process), a throwaway COSYNCING_HOME (never touches a developer's real setup-state), and
  * COSYNCING_OPENCODE_NO_AUTOSERVE=1 (don't spawn a managed opencode serve during the test).
  */
-import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isolatedBrokerFixtureEnvironment, waitForBrokerHealth } from '../helpers/isolated-broker-fixture.ts';
+import {
+  captureProcessOutput,
+  isolatedBrokerFixtureEnvironment,
+  startHealthyFixtureBroker,
+} from '../helpers/isolated-broker-fixture.ts';
 
 const ROOT = join(import.meta.dir, '../../../../..');
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'cosyncing-enabler-fixture-'));
@@ -23,27 +26,32 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-async function freePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
+/** Start a broker and read its health payload once.
+ *
+ *  Readiness runs through the shared starter: a bespoke wall-clock deadline here
+ *  is CI flake by another name now that this suite is required in the aggregate,
+ *  and the starter additionally absorbs a lost port race or a silent startup
+ *  stall by respawning instead of failing the suite. */
+async function startBroker(home: string, env: Record<string, string>): Promise<{
+  broker: ReturnType<typeof Bun.spawn>;
+  base: string;
+  health: any;
+}> {
+  let output!: ReturnType<typeof captureProcessOutput>;
+  const { child, port } = await startHealthyFixtureBroker({
+    spawn: (attemptPort) => {
+      const spawned = spawnBroker(attemptPort, home, env);
+      output = captureProcessOutput(spawned, { maxChars: 4_000 });
+      return spawned;
+    },
+    healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+    capture: () => output,
+    stop: stopBroker,
   });
-  const address = server.address();
-  if (!address || typeof address === 'string') fail('could not allocate a free TCP port');
-  const port = address.port;
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-  return port;
-}
-
-/** Process-aware readiness (loaded-machine ceiling, immediate failure on broker exit, bounded
- *  probes), then one payload read — a bespoke wall-clock deadline here is CI flake by another name
- *  now that this suite is required in the aggregate. */
-async function waitForHealth(broker: ReturnType<typeof Bun.spawn>, base: string): Promise<any> {
-  await waitForBrokerHealth(broker as { exitCode: number | null; exited: Promise<number> }, `${base}/api/health`);
+  const base = `http://127.0.0.1:${port}`;
   const res = await fetch(`${base}/api/health`);
   if (!res.ok) fail(`healthy broker stopped answering /api/health: status ${res.status}`);
-  return await res.json();
+  return { broker: child, base, health: await res.json() };
 }
 
 async function jsonPost(base: string, path: string, body: unknown): Promise<{ status: number; body: any }> {
@@ -80,8 +88,10 @@ function spawnBroker(port: number, home: string, env: Record<string, string>) {
       },
     }),
     stdin: 'ignore',
-    stdout: 'ignore',
-    stderr: 'ignore',
+    // Piped, and drained by the starter's reader: a silent startup stall can
+    // only be told from a slow one by proving nothing was written.
+    stdout: 'pipe',
+    stderr: 'pipe',
   });
 }
 
@@ -106,11 +116,8 @@ try {
 
 // ── Phase 1: the per-agent enabler endpoint, against a broker started WITHOUT Codex sync ──────────────
 {
-  const port = await freePort();
-  const base = `http://127.0.0.1:${port}`;
-  const broker = spawnBroker(port, home, { COSYNCING_CODEX_SYNC_SERVER: '0' });
+  const { broker, base, health } = await startBroker(home, { COSYNCING_CODEX_SYNC_SERVER: '0' });
   try {
-    const health = await waitForHealth(broker, base);
     if (health.codexSyncServer !== false) fail('phase1: expected Codex sync-server disabled at boot');
 
     const before = await getJson(base, '/api/agents/codex/sync');
@@ -155,14 +162,11 @@ try {
   // Seed setup-state to enabled and start a broker WITHOUT COSYNCING_CODEX_SYNC_SERVER in the env.
   mkdirSync(home, { recursive: true });
   writeFileSync(setupStatePath, JSON.stringify({ agents: { codex: true } }, null, 2) + '\n');
-  const port = await freePort();
-  const base = `http://127.0.0.1:${port}`;
   const env: Record<string, string> = {};
   // Deliberately do NOT set COSYNCING_CODEX_SYNC_SERVER — the broker must derive it from setup-state pre-start.
   delete (process.env as any).COSYNCING_CODEX_SYNC_SERVER;
-  const broker = spawnBroker(port, home, env);
+  const { broker, base, health } = await startBroker(home, env);
   try {
-    const health = await waitForHealth(broker, base);
     if (health.codexSyncServer !== true) fail('phase2 (FU-3): a broker launched with persisted codex=true must come up with Codex sync ON, no restart');
 
     const agents = await getJson(base, '/api/agents');

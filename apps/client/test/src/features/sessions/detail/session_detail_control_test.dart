@@ -963,6 +963,105 @@ void main() {
       }
     });
 
+    // Regression: the app told the operator a takeable session was untakeable.
+    //
+    // A Kimi session this broker did not create publishes `supported: false`
+    // with `state: observing` and an explicit `takeoverAvailable`. Every branch
+    // of the precedence cascade fell through to Unavailable, so the header read
+    // "Unavailable" and the status line read "The app can neither take over nor
+    // sync this session" — beside a Take over button that worked.
+    testWidgets('a foreign session that CAN be taken over reads as Observing', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {
+          'state': 'observing',
+          'supported': false,
+          'takeoverAvailable': true,
+          'takeoverMode': 'live',
+        },
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'The app can neither take over nor sync this session. You can '
+          'only observe it.',
+        ),
+        findsNothing,
+      );
+
+      await openStatusSheet(tester);
+      expect(
+        find.byKey(
+          const Key('session-detail-status-sheet-control-pill-observing'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          const Key('session-detail-status-sheet-control-pill-unavailable'),
+        ),
+        findsNothing,
+      );
+    });
+
+    // The demoted half. `unavailable` is TRUE of that drive generation and the
+    // pill goes on saying so — but a takeover opens a fresh generation and is
+    // the only way back, so neither the control nor the copy may deny it.
+    testWidgets('a demoted session offers take over instead of denying it', (
+      tester,
+    ) async {
+      final connection = controlConnection(const {
+        'drive': {
+          'state': 'unavailable',
+          'supported': false,
+          'takeoverAvailable': true,
+          'takeoverMode': 'live',
+        },
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-detail-composer-take-over-button')),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'The app can neither take over nor sync this session. You can '
+          'only observe it.',
+        ),
+        findsNothing,
+      );
+      expect(
+        find.text(
+          'The app is not driving this session. Take over to continue it '
+          'from the app.',
+        ),
+        findsWidgets,
+      );
+    });
+
     testWidgets('Take over pending disables the composer sync copy action', (
       tester,
     ) async {

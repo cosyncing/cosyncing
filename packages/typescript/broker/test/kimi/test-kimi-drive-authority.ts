@@ -135,7 +135,7 @@ const server = Bun.serve({
 
 const baseUrl = `http://127.0.0.1:${server.port ?? 0}`;
 const scan: KimiInstanceScan = {
-  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
+  live: [{ baseUrl, port: server.port ?? 0, pid: process.pid, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
   stale: 0, invalid: 0, truncated: false,
 };
 
@@ -170,15 +170,11 @@ const threw = async (work: () => Promise<unknown>): Promise<Error | undefined> =
 
 let hub: Hub | undefined;
 try {
-  // The narrowed type is the gate stated in the type system: `createSession` is
-  // an optional property that only EXISTS behind `drive`, so a reader who
-  // forgets the flag gets a compile error rather than a runtime one.
+  // The narrowed type records that `createSession` is an optional property on
+  // the interface which this adapter in fact defines, so this suite can create
+  // the owned session its whole question is about.
   const adapter = new KimiAdapter({
     env: {}, homeDir: '/fixture/home',
-    // The DRIVE GATE, asked for explicitly: it is default-off, and with it off
-    // nothing can create a session, so there would be no owned session for this
-    // suite's whole question to be about.
-    drive: true,
     instanceScan: () => scan,
     readToken: () => 'fixture-token',
     // A ceiling, not a wait: the fake socket opens on the next macrotask, so the

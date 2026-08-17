@@ -11,8 +11,11 @@
  *    supported for every discovered session.
  *  - There is no resume: a session is attached by the host, not continued by a
  *    client, so `supportsResume` is false rather than "not implemented yet".
- *  - There is no managed runtime: this build never starts, stops, or configures
- *    the host. It only talks to one the user is already running.
+ *  - This adapter performs no process effects and never configures the host. It
+ *    may DESCRIBE it ({@link DshAdapter.describeManagedHost}), which behind an
+ *    explicit, default-off gate lets the broker start one when none is running
+ *    and this machine has the binary. The broker stops only a process it can
+ *    prove it started; a host the operator runs is never touched.
  *
  * The transport is two-part and lives in `server.ts`: unary RPCs over
  * `POST /api/<method>`, and two push-only WebSocket downlinks. {@link DshHostLink}
@@ -22,10 +25,15 @@
  * unverifiable and the only correct answer is to reopen and re-read.
  */
 import {
+  CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
+  EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
   type AttachMode,
+  type AvailabilityOptions,
+  type ManagedHostDescriptor,
+  type ManagedHostIdentityInputs,
   type SessionConnection,
   type SessionDiscoveryOptions,
   type SessionInfo,
@@ -36,6 +44,7 @@ import { DshDriver } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
 import { DshSessionConnection, type DshConnectionOptions } from './observe.ts';
 import {
+  DSH_DEFAULT_BASE_URL,
   DshDownlinks,
   DshRpcClient,
   resolveDshBaseUrl,
@@ -68,6 +77,17 @@ const SESSION_HOST_FRAMES: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * How long a broker-started `dsh web` has to answer `host.describe`.
+ *
+ * Generous, because this is a server booting rather than a request: being wrong
+ * in the short direction means killing a host that was about to work.
+ */
+export const DSH_MANAGED_HOST_READY_MS = 20_000;
+
+/** How long a stop waits after SIGTERM before escalating. */
+export const DSH_MANAGED_HOST_STOP_MS = 5_000;
+
+/**
  * Frames a generation may accumulate while its `host.describe` probe is still
  * in flight, in COUNT and in BYTES. The probe answers in milliseconds against
  * a healthy host; a burst past either cap means the verifier is wedged — or
@@ -80,45 +100,11 @@ const DSH_VERIFY_MAX_BUFFERED_FRAMES = 1_000;
 const DSH_VERIFY_MAX_BUFFERED_BYTES = 4 * 1_048_576;
 
 /**
- * Opt-in flag for registering the DeepSeek Harness adapter, DEFAULT OFF.
- *
- * Two independent reasons, either of which alone would justify the default:
- *
- *  1. CLIENT COMPATIBILITY. The broker's agent-roster route is not
- *     revision-filtered, so one dsh row makes any client that decodes
- *     `IntegrationKind` strictly throw on `http-websocket` — and because a
- *     single unknown row aborts the WHOLE roster decode, such a client loses
- *     every agent, dsh installed or not.
- *     (The same gate reasoning the Kimi lane established for the same kind.)
- *  2. EXTERNAL HOST DEPENDENCY. This adapter never starts, stops, or configures
- *     anything: it talks to a `dsh web` host the user is already running. A
- *     broker with no such host serves a row whose every action fails, so the
- *     row appears only when an operator has said the host is there.
- *
- * ACTIVATION SCOPE — foreground only, deliberately. The durable service
- * environment is a closed, enumerated, receipt-hashed list
- * (`brokerServiceEnvironmentEntries` in the broker's service-manager) and does
- * NOT carry this flag, so a systemd/launchd-managed broker cannot enable dsh:
- * it is reachable only from a foreground `cosyncing` launch with the variable
- * set. Persisting a feature gate into the service environment is a later
- * lifecycle round that owns those receipts; smuggling one variable past the
- * closed list now would bypass them. The registration-gate suite pins this.
- */
-export const DSH_ENABLE_ENV = 'COSYNCING_ENABLE_DSH';
-
-/**
  * The repo's shared truthy-env reading, so a new flag cannot drift into a new
  * spelling. Same four accepted values as every other `COSYNCING_*` gate.
  */
 function envFlagEnabled(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(value?.trim() ?? '');
-}
-
-/** The ONE predicate broker runtime and doctor both read, so they cannot disagree. */
-export function dshRegistrationEnabled(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  return envFlagEnabled(env[DSH_ENABLE_ENV]);
 }
 
 export interface DshAdapterOptions {
@@ -131,6 +117,13 @@ export interface DshAdapterOptions {
   setTimeout?: (handler: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   reconnectDelayMs?: number;
+  /**
+   * How an executable name becomes an absolute path, injected so a suite can
+   * describe a machine with or without dsh installed without having either.
+   */
+  resolveExecutable?: (command: string) => string | undefined;
+  /** The user's home directory; injected so a suite never depends on the real one. */
+  homeDir?: string;
   /**
    * Test seams for the session connection. The verification guard
    * (`mutationReady`), the rpc/driver wiring, and the close hook are NOT
@@ -331,10 +324,50 @@ export class DshAdapter implements AgentBackend {
   readonly id = DSH_AGENT_ID;
   readonly displayName = DSH_DISPLAY_NAME;
   /**
-   * `live` only. dsh has no client-driven resume (the host attaches sessions),
-   * no native artifact signal, no file input this round (`session.attachment` is
-   * deferred), and no model switch this round (`session.models`/`selectModel` are
-   * deferred). Approvals are per tool call, which is what the host asks for.
+   * Registered for every client, shown only to those that can decode it.
+   *
+   * Replaces the `COSYNCING_ENABLE_DSH` gate. One of that flag's two reasons
+   * was roster tolerance — a dsh row made a pre-tolerance client throw on
+   * `http-websocket` and lose every agent — which the broker now settles per
+   * client. Its other reason, that the row's actions all fail with no host
+   * running, is not a registration question at all: absence is a diagnosis and
+   * an empty session list, which is what an operator needs to SEE rather than
+   * something to hide behind a variable they must already know to set.
+   *
+   * The floor is the INTEGRATION-KIND tolerance, not the later attach-mode one:
+   * `http-websocket` is the only value in this row a released client could fail
+   * to decode, and `live` has existed since the first contract. The registration
+   * suite pins that reasoning against drift.
+   */
+  readonly minimumClientRevision = CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE;
+  /**
+   * Every read here crosses to a host this broker does not own and cannot
+   * restart, and a leg is three RPCs at 30 seconds each. Unbudgeted, one
+   * unresponsive host would hold the roster for every OTHER agent too.
+   */
+  readonly discoveryBudgetMs = EXTERNAL_HOST_DISCOVERY_BUDGET_MS;
+  /**
+   * The host is EXTERNAL: `dsh web` runs with or without this broker, so its
+   * lifecycle is governed by proven ownership rather than by assumption. See
+   * {@link DshAdapter.describeManagedHost}.
+   */
+  readonly integration = { externalHost: { managed: true as const } };
+  /**
+   * `live` only. dsh has no client-driven resume (the host attaches sessions)
+   * and no native artifact signal. Approvals are per tool call, which is what
+   * the host asks for.
+   *
+   * `supportsModelSwitch` is true: `session.models` and `session.selectModel`
+   * are wired, and a per-prompt override is applied as the durable session
+   * selection the host actually models.
+   *
+   * `supportsNativeFileInput` is true with a real limit behind it. The host
+   * takes inline image bytes on the prompt and has no route for anything else,
+   * so the adapter delivers images and refuses other types outright. This flag
+   * governs whether the client offers an attach control at all, and it is a
+   * per-agent fact rather than a per-file one — leaving it false would remove
+   * the only affordance that reaches the host's image intake, so an honest
+   * immediate refusal for a non-image is the better trade.
    *
    * `observe` is NOT offered: dsh serves one undifferentiated client contract, so
    * an "observe" attach would hold the same full Drive authority as `live` and
@@ -349,8 +382,8 @@ export class DshAdapter implements AgentBackend {
     supportsLiveAttach: true,
     supportsCrossClientDriveSharing: true,
     supportsNativeArtifact: false,
-    supportsNativeFileInput: false,
-    supportsModelSwitch: false,
+    supportsNativeFileInput: true,
+    supportsModelSwitch: true,
     permissionGranularity: 'per-tool',
   };
 
@@ -366,6 +399,11 @@ export class DshAdapter implements AgentBackend {
 
   private baseUrl(): string {
     return resolveDshBaseUrl(this.env, this.options.baseUrl);
+  }
+
+  /** Where a managed host would run from. Injected first, then the environment. */
+  private homeDir(): string {
+    return this.options.homeDir ?? this.env.HOME ?? this.env.USERPROFILE ?? '.';
   }
 
   private rpc(): DshRpcClient {
@@ -398,14 +436,125 @@ export class DshAdapter implements AgentBackend {
    * product does not maintain — so this proves the contract, not the process.
    * See {@link verifyDshHostDescribe} for the residual and the upstream ask.
    */
-  async isAvailable(): Promise<boolean> {
+  /**
+   * dsh's host is `dsh web` — a program the operator runs, and one the broker
+   * may start for them on this machine only.
+   *
+   * Two refusals are deliberate and are the whole safety content of this method:
+   *
+   * NOT LOOPBACK. A configured base URL pointing anywhere but this machine
+   * describes somebody else's process on somebody else's host. It is described
+   * with no locator and no launch, so the broker can neither start it nor form
+   * an opinion about who owns it — the only correct posture toward a remote
+   * address.
+   *
+   * NPX-ONLY INSTALLS. dsh is commonly run as `npx @deepseek-ai/dsh web`, which
+   * leaves no binary on PATH. That is reported as "cannot be launched" rather
+   * than papered over by invoking `npx`, because doing so would let a broker
+   * fetch and execute code from the network as a side effect of starting up.
+   * An operator who wants that runs it themselves, and the broker then finds a
+   * host already serving.
+   *
+   * A NON-DEFAULT PORT IS NOT LAUNCHABLE, and this is the third refusal. The
+   * locator watches whatever port the operator configured, so a launch that does
+   * not BIND that port would describe one address and start a host at another —
+   * the broker would then watch an empty port, conclude its child never became
+   * ready, and stop it, while the host it actually started keeps running
+   * somewhere else. Making the two agree needs a source-verified bind/port flag
+   * for `dsh web`, and this adapter does not have one: the DSH roadmap requires
+   * the exact invocation, profile/home, bind behavior, working directory and
+   * environment to be source-verified before implementation, and only the bare
+   * default invocation has been physically exercised. So exactly that one
+   * configuration is launchable and every other is described, watched, and left
+   * for the operator to start.
+   */
+  /**
+   * The resolved base URL, which is what `identityKey` below is, for an
+   * environment this adapter is not necessarily running in.
+   *
+   * `null` for an address that cannot be resolved at all — the same refusal
+   * `describeManagedHost` makes, and for the same reason: an unusable address
+   * names no host, so it must not match one either.
+   *
+   * Resolved from the passed environment ALONE, deliberately ignoring this
+   * instance's injected `options.baseUrl`: the answer must be a property of the
+   * environment being asked about, and a diagnosis comparing against it resolves
+   * from an environment too. An instance override leaking in here would make the
+   * two sides disagree about the same machine.
+   */
+  managedHostIdentity(inputs: ManagedHostIdentityInputs): string | null {
+    try {
+      return resolveDshBaseUrl(inputs.env);
+    } catch {
+      return null;
+    }
+  }
+
+  async describeManagedHost(): Promise<ManagedHostDescriptor | null> {
+    let baseUrl: string;
+    try {
+      baseUrl = this.baseUrl();
+    } catch {
+      return null; // an unusable configured address describes nothing
+    }
+    let url: URL;
+    try {
+      url = new URL(baseUrl);
+    } catch {
+      return null;
+    }
+    const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost'
+      || url.hostname === '::1' || url.hostname === '[::1]';
+    const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+    // The launch is `dsh web` with no flags, which is the invocation whose
+    // behavior is known — and `dsh web` with no flags serves the default base
+    // URL. So it may only be used when that is exactly where the adapter is
+    // pointed; the comparison is on the resolved address rather than on "did
+    // the operator configure anything", so an operator who explicitly sets the
+    // default still gets a startable host.
+    const launchable = loopback && baseUrl === DSH_DEFAULT_BASE_URL;
+    const resolve = this.options.resolveExecutable ?? ((command: string) => Bun.which(command) ?? undefined);
+    const executable = launchable ? resolve('dsh') : undefined;
+    return {
+      identityKey: baseUrl,
+      locator: loopback && Number.isInteger(port) && port > 0
+        ? { kind: 'tcp-port', port }
+        : { kind: 'unknown' },
+      launch: executable
+        ? {
+          command: executable,
+          args: ['web'],
+          // Watching files by polling instead of inotify. The physical DSH
+          // qualification on this platform found the host needs it — inotify
+          // instances were exhausted host-wide (121/128 in use), and a `dsh web`
+          // that cannot watch its own workspace reports no changes rather than
+          // failing loudly, which is the worst way for this to go wrong.
+          env: { CHOKIDAR_USEPOLLING: '1' },
+          // Pinned, not inherited: a broker running as a service starts from `/`,
+          // and a host that resolves anything against its cwd would then behave
+          // differently depending on how the broker was launched. dsh keeps its
+          // profiles under `~/.dsh`, so a home-rooted cwd cannot change which
+          // profile the default `web` template resolves to.
+          cwd: this.homeDir(),
+        }
+        : null,
+      // No `version`: dsh's `host.describe.version` is a documented placeholder,
+      // and recording a placeholder as evidence would be worse than recording
+      // nothing — it reads like a fact.
+      ...(loopback && Number.isInteger(port) && port > 0 ? { serving: { port } } : {}),
+      readyTimeoutMs: DSH_MANAGED_HOST_READY_MS,
+      stopGraceMs: DSH_MANAGED_HOST_STOP_MS,
+    };
+  }
+
+  async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
     let rpc: DshRpcClient;
     try {
       rpc = this.rpc();
     } catch {
       return false; // an unusable configured base URL is "not available", not a crash
     }
-    const outcome = await rpc.call<unknown>('host.describe', {});
+    const outcome = await rpc.call<unknown>('host.describe', {}, options?.signal ? { signal: options.signal } : {});
     if (!outcome.ok) return false;
     return verifyDshHostDescribe(outcome.value).ok;
   }
@@ -423,9 +572,10 @@ export class DshAdapter implements AgentBackend {
    * user sees after creating a session in the host's own UI and not yet typing.
    */
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
-    const list = await this.rpc().call<{ items?: unknown }>('session.list', {});
+    const cancel = options?.signal ? { signal: options.signal } : {};
+    const list = await this.rpc().call<{ items?: unknown }>('session.list', {}, cancel);
     if (!list.ok) return [];
-    const workspaces = await this.workspaceTitles();
+    const workspaces = await this.workspaceTitles(options?.signal);
     const items = Array.isArray(list.value?.items) ? list.value.items : [];
     const sessions: SessionInfo[] = [];
     for (const raw of items) {
@@ -448,9 +598,13 @@ export class DshAdapter implements AgentBackend {
   }
 
   /** sessionId → its workspace's display title, for sessions with no title projection yet. */
-  private async workspaceTitles(): Promise<Map<string, string>> {
+  private async workspaceTitles(cancel?: AbortSignal): Promise<Map<string, string>> {
     const titles = new Map<string, string>();
-    const outcome = await this.rpc().call<{ items?: unknown }>('workspace.list', {});
+    const outcome = await this.rpc().call<{ items?: unknown }>(
+      'workspace.list',
+      {},
+      cancel ? { signal: cancel } : {},
+    );
     if (!outcome.ok) return titles;
     const items = Array.isArray(outcome.value?.items) ? outcome.value.items : [];
     for (const raw of items) {

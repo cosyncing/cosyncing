@@ -30,7 +30,7 @@ import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
-  waitForBrokerHealth,
+  startHealthyFixtureBrokerOnPort,
 } from '../helpers/isolated-broker-fixture.ts';
 
 const BRIDGE_MODULE_PATH = resolve(
@@ -464,28 +464,31 @@ const BROKER = `http://127.0.0.1:${PORT}`;
 const WSBASE = BROKER.replace(/^http/, 'ws');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 await portLease.release();
-const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-  env: isolatedBrokerFixtureEnvironment(brokerFixtureRoot, {
-    overrides: { PORT: String(PORT), HOST: '127.0.0.1' },
-  }),
-  stdout: 'pipe',
-  stderr: 'pipe',
+// Started through the shared helper: a silent startup stall — alive, not
+// listening, nothing written — is retired and respawned once on THIS port
+// instead of costing the suite its whole readiness budget.
+let brokerOutput!: ReturnType<typeof captureProcessOutput>;
+const broker = await startHealthyFixtureBrokerOnPort({
+  port: PORT,
+  healthUrl: `${BROKER}/api/health`,
+  spawn: () => {
+    const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
+      env: isolatedBrokerFixtureEnvironment(brokerFixtureRoot, {
+        overrides: { PORT: String(PORT), HOST: '127.0.0.1' },
+      }),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    brokerOutput = captureProcessOutput(child);
+    return child;
+  },
+  capture: () => brokerOutput,
+  stop: async (child) => { child.kill(); await child.exited.catch(() => undefined); },
 });
-const brokerOutput = captureProcessOutput(broker);
-// Readiness is not one of this suite's assertions, so it gets no wall-clock
-// budget: a broker booting beside other suites is slow, not broken.
-const waitHealth = async (): Promise<void> => {
-  try {
-    await waitForBrokerHealth(broker, `${BROKER}/api/health`);
-  } catch (error) {
-    throw new Error(`${(error as Error).message}\n${brokerOutput.read().trim().slice(-2000)}`);
-  }
-};
 const post = (path: string, body: unknown) =>
   fetch(`${BROKER}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 try {
-  await waitHealth();
   const sf = `/tmp/cabridge-enrich-${Math.random().toString(36).slice(2, 8)}.jsonl`;
   const id = String((await (await post('/pi/bridge/hello', {
     sessionFile: sf,

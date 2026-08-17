@@ -24,7 +24,7 @@
 import { Hub } from '../../src/sessions/hub.ts';
 import { ClientHandoffSequencer } from '../../src/sessions/client-handoff-sequencer.ts';
 import { activeOwnerState, JoinExistingError } from '../../src/sessions/session-owner.ts';
-import { AgentRegistry, type AgentMessage, type SessionConnection, type SessionInfo } from '../../../adapter-api/src/index.ts';
+import { AgentRegistry, isOwnershipConflictError, type AgentMessage, type SessionConnection, type SessionInfo } from '../../../adapter-api/src/index.ts';
 import { opencodeControlState } from '../../../adapters/opencode/src/index.ts';
 
 let failures = 0;
@@ -1321,6 +1321,513 @@ await parkedMutableCase('C22', 'resume', 'live');
   check('J5 a disappeared owner fails as not-found without native attach',
     missingCode === 'JOIN_OWNER_NOT_FOUND' && attachCalls === 2,
     `code=${missingCode}, attachCalls=${attachCalls}`);
+}
+
+// ── C24: a takeover through the Hub runs a FRESH promotion ──────────────────
+//
+// The path that matters, because it is the one the app uses. `ensure` returns a
+// registered mode-scoped wrapper WITHOUT calling the adapter, which is right
+// for every other reason and wrong for takeover: a demoted generation stays
+// registered under `#live` and can never mutate again, so returning it hands
+// the user a successful attach on a connection that refuses every write — and
+// the adapter's promotion transaction never runs at all.
+//
+// A direct `adapter.attach()` test cannot see this. It has no Hub, so it never
+// meets the wrapper that shadows the adapter.
+const demotedInfo = (id: string): SessionInfo => ({
+  ...info(id, 'observe'),
+  tool: 'kimi',
+  control: {
+    // Exactly the demoted posture: not drivable now, re-takeover declared.
+    drive: {
+      supported: false, state: 'unavailable',
+      takeoverAvailable: true, takeoverMode: 'live',
+    },
+    terminalSync: { supported: false, syncAvailable: false, active: false },
+  },
+} as SessionInfo);
+
+{
+  const registry = new AgentRegistry();
+  const asked: Array<{ mode?: string; reason?: string }> = [];
+  const demoted = fakeConn(demotedInfo('s13'));
+  const promoted = fakeConn(controlledInfo('kimi', 's13', 'live', 'driving'));
+  let handOut: SessionConnection = demoted;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, mode?: string, opts?: { reason?: string }) => {
+      asked.push({ mode, reason: opts?.reason });
+      const conn = handOut;
+      handOut = promoted;
+      return conn;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const stale = await hub.ensure('kimi', 's13', 'live');
+  const frames: any[] = [];
+  stale.addClient((ev: any) => frames.push(ev));
+
+  const fresh = await hub.ensure('kimi', 's13', 'live', 'takeover');
+  check('C24 a takeover does not hand back the registered non-driving wrapper',
+    fresh !== stale, `same=${fresh === stale}`);
+  check('C24b ...it asks the adapter for a fresh promotion, carrying the reason',
+    asked.length === 2 && asked[1]?.reason === 'takeover' && asked[1]?.mode === 'live',
+    JSON.stringify(asked));
+  check('C24c ...and the replacement is the driving owner',
+    fresh.conn.info.control?.drive?.state === 'driving',
+    JSON.stringify(fresh.conn.info.control?.drive));
+  check('C24d the demoted generation is closed, not left running',
+    (demoted as any).closed === true);
+  // MIGRATED, not ended: the session did not end, its owner was replaced. A
+  // client told `ended` would tear down its view of a session that is fine.
+  check('C24e the existing client migrated instead of being told the session ended',
+    frames.every((frame) => frame.kind !== 'ended'),
+    JSON.stringify(frames.map((f) => f.kind)));
+  const beforeFresh = frames.length;
+  (promoted as any).emit({ type: 'notice', message: 'from the new owner' } as AgentMessage);
+  check('C24f ...and now receives from the replacement',
+    frames.length > beforeFresh, `${frames.length - beforeFresh} frames`);
+  const later = await hub.ensure('kimi', 's13', 'live');
+  check('C24g a later ordinary live attach joins the replacement, not the retired wrapper',
+    later === fresh && asked.length === 2, `attaches=${asked.length}`);
+}
+
+// ── C25: a FAILED promotion preserves the incumbent ─────────────────────────
+//
+// The rollback that makes the replacement safe to attempt at all. Everything
+// the client already has must survive a refusal, or a takeover the adapter
+// correctly refuses would cost the user the read-only session they were
+// watching.
+{
+  const registry = new AgentRegistry();
+  const observer = fakeConn(demotedInfo('s14'));
+  let attaches = 0;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, _mode?: string, opts?: { reason?: string }) => {
+      attaches += 1;
+      if (opts?.reason === 'takeover') throw new Error('promotion refused: another writer was proven');
+      return observer;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const incumbent = await hub.ensure('kimi', 's14', 'live');
+  const frames: any[] = [];
+  incumbent.addClient((ev: any) => frames.push(ev));
+
+  let refusal = '';
+  try {
+    await hub.ensure('kimi', 's14', 'live', 'takeover');
+  } catch (error) {
+    refusal = error instanceof Error ? error.message : String(error);
+  }
+  check('C25 a refused promotion propagates the adapter refusal',
+    /another writer was proven/.test(refusal), refusal);
+  check('C25b ...the incumbent is still registered and still open',
+    (await hub.ensure('kimi', 's14', 'live')) === incumbent
+      && (observer as any).closed === false,
+    `closed=${(observer as any).closed}`);
+  check('C25c ...its clients were never detached or told the session ended',
+    frames.every((frame) => frame.kind !== 'ended'),
+    JSON.stringify(frames.map((f) => f.kind)));
+  const beforeRefusal = frames.length;
+  (observer as any).emit({ type: 'notice', message: 'still watching' } as AgentMessage);
+  check('C25d ...and still receive from it',
+    frames.length > beforeRefusal, `${frames.length - beforeRefusal} frames`);
+  check('C25e the refused promotion left no extra attach in flight',
+    attaches === 2, `attaches=${attaches}`);
+}
+
+// ── C26/C27: a PARKED promotion admits under a compare-and-swap ─────────────
+//
+// The adapter's barrier proves the candidate CAN drive. It cannot prove the
+// broker still wants it: the attach is asynchronous, and the key it means to
+// take can change underneath. Admission therefore re-checks the exact premise
+// the promotion started from, and a failed check must close the candidate AND
+// leave no Drive eligibility behind — a rejected promotion whose ownership
+// stuck would make the session drivable by the next ORDINARY live attach, which
+// carries no confirmation anywhere in its path.
+function parkedPromotionFixture(id: string) {
+  const registry = new AgentRegistry();
+  const incumbent = fakeConn(demotedInfo(id));
+  const candidate = fakeConn(controlledInfo('kimi', id, 'live', 'driving'));
+  let committed = 0;
+  // The adapter's provisional-ownership seam. Counting calls is how "no Drive
+  // eligibility remains" becomes observable from here.
+  (candidate as any).commitPromotion = () => { committed += 1; return true; };
+  let release: (() => void) | undefined;
+  let parked = false;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, _mode?: string, opts?: { reason?: string }) => {
+      if (opts?.reason !== 'takeover') return incumbent;
+      parked = true;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return candidate;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+  return {
+    hub, incumbent, candidate,
+    committed: () => committed,
+    // Waits for the promotion to actually be parked inside the adapter before
+    // releasing it, so the test manipulates hub state in the real window rather
+    // than racing a fixed sleep.
+    releaseWhenParked: async () => {
+      for (let i = 0; i < 500 && !(parked && release); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      if (!release) throw new Error('the promotion never reached the adapter');
+      release();
+    },
+  };
+}
+
+{
+  // The incumbent BECOMES DRIVING while the promotion is opening. Admitting now
+  // would depose an owner that acquired the session legitimately.
+  const fixture = parkedPromotionFixture('s15');
+  const stale = await fixture.hub.ensure('kimi', 's15', 'live');
+  const promotion = fixture.hub.ensure('kimi', 's15', 'live', 'takeover');
+  promotion.catch(() => { /* asserted below */ });
+  (fixture.incumbent.info as any).control.drive = { supported: true, state: 'driving' };
+  await fixture.releaseWhenParked();
+  let refusal = '';
+  try { await promotion; } catch (error) { refusal = error instanceof Error ? error.name : String(error); }
+
+  check('C26 a promotion whose incumbent became driving is refused at admission',
+    refusal === 'SupersededAttachError', refusal || '(resolved)');
+  check('C26b ...the candidate is closed rather than registered',
+    (fixture.candidate as any).closed === true);
+  check('C26c ...and its provisional ownership was never committed',
+    fixture.committed() === 0, `commits=${fixture.committed()}`);
+  check('C26d ...while the incumbent survives untouched',
+    (await fixture.hub.ensure('kimi', 's15', 'live')) === stale
+      && (fixture.incumbent as any).closed === false,
+    `closed=${(fixture.incumbent as any).closed}`);
+}
+
+{
+  // The HUB SHUTS DOWN while the promotion is opening. `dispose` clears the
+  // registry, so the wrapper this promotion set out to replace is gone as well.
+  const fixture = parkedPromotionFixture('s16');
+  await fixture.hub.ensure('kimi', 's16', 'live');
+  const promotion = fixture.hub.ensure('kimi', 's16', 'live', 'takeover');
+  promotion.catch(() => { /* asserted below */ });
+  const shutdown = fixture.hub.dispose();
+  await fixture.releaseWhenParked();
+  let refusal = '';
+  try { await promotion; } catch (error) { refusal = error instanceof Error ? error.name : String(error); }
+  await shutdown;
+
+  check('C27 a promotion that lands after shutdown is refused at admission',
+    refusal === 'SupersededAttachError', refusal || '(resolved)');
+  check('C27b ...the candidate is closed rather than registered',
+    (fixture.candidate as any).closed === true);
+  check('C27c ...and its provisional ownership was never committed',
+    fixture.committed() === 0, `commits=${fixture.committed()}`);
+  // Shutdown awaits the promotion, so it cannot report itself finished while an
+  // adapter connection it caused is still open.
+  check('C27d ...and shutdown did not return leaving that connection open',
+    (fixture.candidate as any).closed === true && (fixture.incumbent as any).closed === true);
+}
+
+// ── C28: the adapter REFUSING the commit is an answer, not a formality ──────
+//
+// `commitPromotion()` may return false: a demotion can cross admission, after
+// the broker decided to admit and before ownership is recorded. Ignoring that
+// answer is worse than never asking. On the replacement path the incumbent
+// would already be gone, so the session would be served by a wrapper that owns
+// nothing — every mutation failing — while the working read-only connection its
+// clients had was thrown away for it.
+{
+  const registry = new AgentRegistry();
+  const incumbent = fakeConn(demotedInfo('s17'));
+  const candidate = fakeConn(controlledInfo('kimi', 's17', 'live', 'driving'));
+  // The demotion lands SYNCHRONOUSLY inside `createManaged`, which subscribes
+  // to the connection — the narrowest real window there is, after the broker
+  // has decided to admit and before ownership is recorded. The adapter answers
+  // the commit with false because of it.
+  let demotedDuringAdmission = false;
+  const realSubscribe = (candidate as any).subscribe;
+  (candidate as any).subscribe = (handler: (m: AgentMessage) => void) => {
+    demotedDuringAdmission = true;
+    return realSubscribe(handler);
+  };
+  (candidate as any).commitPromotion = () => !demotedDuringAdmission;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, _mode?: string, opts?: { reason?: string }) =>
+      (opts?.reason === 'takeover' ? candidate : incumbent),
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const stale = await hub.ensure('kimi', 's17', 'live');
+  const frames: any[] = [];
+  stale.addClient((ev: any) => frames.push(ev));
+
+  let conflict = '';
+  try {
+    await hub.ensure('kimi', 's17', 'live', 'takeover');
+  } catch (error) {
+    conflict = isOwnershipConflictError(error) ? error.conflict : `${(error as Error).name}`;
+  }
+  check('C28 a refused commit answers with a structured ownership conflict',
+    conflict === 'driver-changed', conflict || '(resolved)');
+  check('C28b ...the candidate is closed, never registered',
+    (candidate as any).closed === true);
+  check('C28c ...the incumbent is preserved and still serving its clients',
+    (await hub.ensure('kimi', 's17', 'live')) === stale
+      && (incumbent as any).closed === false
+      && frames.every((frame) => frame.kind !== 'ended'),
+    `closed=${(incumbent as any).closed} frames=${JSON.stringify(frames.map((f) => f.kind))}`);
+  const before = frames.length;
+  (incumbent as any).emit({ type: 'notice', message: 'still the owner' } as AgentMessage);
+  check('C28d ...and still delivering to them',
+    frames.length > before, `${frames.length - before} frames`);
+}
+
+// ── C29: an INITIAL takeover admits under the same compare-and-swap ─────────
+//
+// It has no incumbent to replace, which is exactly why its key can be taken by
+// something else while the adapter is opening — an adoption, a replacement, a
+// plain attach — none of which move the generation.
+{
+  const registry = new AgentRegistry();
+  const candidate = fakeConn(controlledInfo('kimi', 's18', 'live', 'driving'));
+  const interloper = fakeConn(controlledInfo('kimi', 's18', 'live', 'driving'));
+  let committed = 0;
+  (candidate as any).commitPromotion = () => { committed += 1; return true; };
+  let release: (() => void) | undefined;
+  let parked = false;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, _mode?: string, opts?: { reason?: string }) => {
+      if (opts?.reason !== 'takeover') return interloper;
+      parked = true;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return candidate;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  // No incumbent: the takeover goes through ordinary `ensure`, not replacement.
+  const promotion = hub.ensure('kimi', 's18', 'live', 'takeover');
+  promotion.catch(() => { /* asserted below */ });
+  for (let i = 0; i < 500 && !parked; i += 1) await new Promise((r) => setTimeout(r, 1));
+  // Another operation claims the previously empty key, without touching the
+  // generation.
+  const owner = await hub.ensure('kimi', 's18', 'live#other');
+  (hub as any).conns.set((hub as any).key('kimi', 's18', 'live'), owner);
+  release!();
+  let refusal = '';
+  try { await promotion; } catch (error) { refusal = error instanceof Error ? error.name : String(error); }
+
+  check('C29 an initial takeover whose key was claimed meanwhile is refused',
+    refusal === 'SupersededAttachError', refusal || '(resolved)');
+  check('C29b ...the candidate is closed rather than registered',
+    (candidate as any).closed === true);
+  check('C29c ...and its provisional ownership was never committed',
+    committed === 0, `commits=${committed}`);
+  check('C29d ...while the owner that claimed the key is untouched',
+    (interloper as any).closed === false);
+}
+
+{
+  // The same path crossed by SHUTDOWN.
+  const registry = new AgentRegistry();
+  const candidate = fakeConn(controlledInfo('kimi', 's19', 'live', 'driving'));
+  let committed = 0;
+  (candidate as any).commitPromotion = () => { committed += 1; return true; };
+  let release: (() => void) | undefined;
+  let parked = false;
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async () => {
+      parked = true;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return candidate;
+    },
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  const promotion = hub.ensure('kimi', 's19', 'live', 'takeover');
+  promotion.catch(() => { /* asserted below */ });
+  for (let i = 0; i < 500 && !parked; i += 1) await new Promise((r) => setTimeout(r, 1));
+  const shutdown = hub.dispose();
+  release!();
+  let refusal = '';
+  try { await promotion; } catch (error) { refusal = error instanceof Error ? error.name : String(error); }
+  await shutdown;
+
+  check('C29e an initial takeover landing after shutdown is refused',
+    refusal === 'SupersededAttachError', refusal || '(resolved)');
+  check('C29f ...closed, and never committed',
+    (candidate as any).closed === true && committed === 0, `commits=${committed}`);
+}
+
+// ── C31: a refused commit on the INITIAL takeover path ─────────────────────
+//
+// The same answer, on the path that has no incumbent. There is nothing to
+// preserve here, but there is something to avoid publishing: a wrapper the
+// adapter refused to back must not become the session's registered owner, or
+// every mutation on it fails while the roster says the session is driven.
+{
+  const registry = new AgentRegistry();
+  const candidate = fakeConn(controlledInfo('kimi', 's21', 'live', 'driving'));
+  let demotedDuringAdmission = false;
+  const realSubscribe = (candidate as any).subscribe;
+  (candidate as any).subscribe = (handler: (m: AgentMessage) => void) => {
+    demotedDuringAdmission = true;
+    return realSubscribe(handler);
+  };
+  (candidate as any).commitPromotion = () => !demotedDuringAdmission;
+  const observer = fakeConn(info('s21', 'observe'));
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async (_id: string, _mode?: string, opts?: { reason?: string }) =>
+      (opts?.reason === 'takeover' ? candidate : observer),
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  let conflict = '';
+  try {
+    await hub.ensure('kimi', 's21', 'live', 'takeover');
+  } catch (error) {
+    conflict = isOwnershipConflictError(error) ? error.conflict : `${(error as Error).name}`;
+  }
+  check('C31 an initial takeover whose commit is refused answers with a conflict',
+    conflict === 'driver-changed', conflict || '(resolved)');
+  check('C31b ...the candidate is closed, never registered',
+    (candidate as any).closed === true);
+  // The key must be left CLEAR: a later attach builds a fresh connection rather
+  // than joining the wrapper the adapter refused to own.
+  const next = await hub.ensure('kimi', 's21', 'live');
+  check('C31c ...and the key is left free for a fresh attach',
+    next.conn === observer, `conn=${next.conn === candidate ? 'refused candidate' : 'fresh'}`);
+}
+
+// ── C30: a wrapper that fails to build must not strand the promotion ────────
+//
+// `createManaged` subscribes to the connection, which runs adapter code. If
+// that throws, the connection is live, its ownership is unsettled and its
+// promotion latch is still held — so without closing it, the adapter would
+// refuse EVERY future promotion of that session on the strength of one that
+// never completed.
+{
+  const registry = new AgentRegistry();
+  const candidate = fakeConn(controlledInfo('kimi', 's20', 'live', 'driving'));
+  let committed = 0;
+  (candidate as any).commitPromotion = () => { committed += 1; return true; };
+  (candidate as any).subscribe = () => { throw new Error('adapter blew up while subscribing'); };
+  registry.register({
+    id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+    isAvailable: async () => true, discoverSessions: async () => [],
+    attach: async () => candidate,
+  } as any);
+  const hub = new Hub(registry, 15000);
+
+  let thrown = '';
+  try {
+    await hub.ensure('kimi', 's20', 'live', 'takeover');
+  } catch (error) {
+    thrown = error instanceof Error ? error.message : String(error);
+  }
+  check('C30 a wrapper that fails to build propagates the failure',
+    /blew up while subscribing/.test(thrown), thrown);
+  check('C30b ...and closes the provisional connection rather than stranding it',
+    (candidate as any).closed === true);
+  check('C30c ...without committing ownership', committed === 0, `commits=${committed}`);
+}
+
+// ── C32: the failed-admission close is AWAITED, not fired and forgotten ─────
+//
+// That close is not cleanup — it is what SETTLES the provisional ownership and
+// releases the adapter's promotion latch. Started but not awaited, a slower
+// adapter close outlives the rejection it belongs to: the caller learns the
+// takeover failed and is free to start the next one while the adapter still
+// believes the previous promotion is in flight, so the retry is refused for an
+// attempt nobody is making any more. The rejection has to be the LAST thing to
+// happen, not the first.
+//
+// The discriminator is the release timing. `release` is scheduled on a
+// macrotask, so a rejection that did not wait for the close can only arrive
+// before it runs — leaving `closeFinished` false at the catch.
+{
+  const slowClosing = (conn: any) => {
+    let finished = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    conn.close = async () => { await gate; finished = true; };
+    conn.commitPromotion = () => true;
+    conn.subscribe = () => { throw new Error('adapter blew up while subscribing'); };
+    return { finished: () => finished, release: () => release() };
+  };
+
+  {
+    const registry = new AgentRegistry();
+    const candidate = fakeConn(controlledInfo('kimi', 's21', 'live', 'driving'));
+    const slow = slowClosing(candidate);
+    registry.register({
+      id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+      isAvailable: async () => true, discoverSessions: async () => [],
+      attach: async () => candidate,
+    } as any);
+    const hub = new Hub(registry, 15000);
+
+    const attempt = hub.ensure('kimi', 's21', 'live', 'takeover');
+    setTimeout(slow.release, 0);
+    let thrown = '';
+    try {
+      await attempt;
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : String(error);
+    }
+    check('C32 an initial takeover whose wrapper fails still rejects',
+      /blew up while subscribing/.test(thrown), thrown);
+    check('C32b ...only once the adapter close has actually FINISHED',
+      slow.finished() === true, `closeFinished=${slow.finished()}`);
+  }
+
+  {
+    const registry = new AgentRegistry();
+    const incumbent = fakeConn(demotedInfo('s22'));
+    const candidate = fakeConn(controlledInfo('kimi', 's22', 'live', 'driving'));
+    const slow = slowClosing(candidate);
+    registry.register({
+      id: 'kimi', displayName: 'Kimi', capabilities: {} as any,
+      isAvailable: async () => true, discoverSessions: async () => [],
+      attach: async (_id: string, _mode?: string, opts?: { reason?: string }) =>
+        (opts?.reason === 'takeover' ? candidate : incumbent),
+    } as any);
+    const hub = new Hub(registry, 15000);
+
+    const stale = await hub.ensure('kimi', 's22', 'live');
+    const attempt = hub.ensure('kimi', 's22', 'live', 'takeover');
+    setTimeout(slow.release, 0);
+    let thrown = '';
+    try {
+      await attempt;
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : String(error);
+    }
+    check('C32c a replacement takeover whose wrapper fails still rejects',
+      /blew up while subscribing/.test(thrown), thrown);
+    check('C32d ...only once the adapter close has actually FINISHED',
+      slow.finished() === true, `closeFinished=${slow.finished()}`);
+    check('C32e ...and the incumbent it never got to replace still serves',
+      (await hub.ensure('kimi', 's22', 'live')) === stale
+        && (incumbent as any).closed === false);
+  }
 }
 
 console.log(failures ? `\nFAIL: ${failures} check(s) failed.` : '\nAll hub mode-fold checks passed.');

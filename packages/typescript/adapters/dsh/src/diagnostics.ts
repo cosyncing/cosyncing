@@ -26,6 +26,7 @@ import {
 } from '@cosyncing/adapter-api';
 import {
   DSH_BASE_URL_ENV,
+  DSH_DEFAULT_BASE_URL,
   DSH_FIXTURE_VERSION,
   DSH_MUX_ROUTE,
   dshApiPath,
@@ -37,6 +38,66 @@ export const DSH_DISPLAY_NAME = 'DeepSeek Harness';
 
 /** Status a real host answers to a plain GET on an upgrade-only stream route. */
 export const DSH_UPGRADE_REQUIRED_STATUS = 426;
+
+/**
+ * Says CONFIGURED TO MANAGE rather than "owns this host": the posture is a fact
+ * about this machine's cosyncing, not about whichever process answers, which may
+ * be the operator's own and which cosyncing preserves untouched.
+ */
+const DSH_MANAGED_HOST_REMEDIATION = 'cosyncing is configured to manage the DeepSeek Harness host and '
+  + 'will start or restart it. Wait for it to come back and rerun doctor; if it does not, check the '
+  + 'cosyncing service and run `cosyncing repair`.';
+
+/**
+ * Is the address THIS diagnosis resolved a host cosyncing manages here?
+ *
+ * The comparison is the whole point. The broker manages the address its own
+ * environment resolves — the default one, since the service environment carries
+ * no `COSYNCING_DSH_BASE_URL` — while doctor runs in an operator's shell that
+ * may name any address at all, including one on another machine.
+ */
+function managedHere(context: SetupDiagnosisContext, baseUrl: string): boolean {
+  return context.managedExternalHostIdentities?.includes(baseUrl) === true;
+}
+
+/**
+ * What to tell an operator whose dsh host is not listening. THREE postures, and
+ * the middle one is the reason this is not a boolean.
+ *
+ * MANAGED HERE — no command. A `dsh web` would race the broker's own start and
+ * recovery and end with two hosts on one address, the same hazard the Kimi
+ * diagnosis answers the same way.
+ *
+ * NOT THIS MACHINE'S ADDRESS — no command either, and this is the case a
+ * managed/unmanaged flag gets wrong. `dsh web` takes no address: it serves the
+ * default one. Handing it to an operator pointed somewhere else starts a host
+ * that is not the one they are diagnosing, and if cosyncing manages the default
+ * address that started host collides with the managed one. The honest answer
+ * names the address and leaves the action with the only person who can take it.
+ *
+ * OTHERWISE — the local default, unmanaged, where the direct command is both
+ * correct and the entire value of the remediation.
+ */
+function hostRemediation(
+  context: SetupDiagnosisContext,
+  baseUrl: string,
+): SetupCheck['remediation'] {
+  if (managedHere(context, baseUrl)) {
+    // No command, deliberately: this is the message whose whole purpose is to
+    // NOT hand the operator a way to start a competing host.
+    return { kind: 'manual', message: DSH_MANAGED_HOST_REMEDIATION };
+  }
+  if (baseUrl !== DSH_DEFAULT_BASE_URL) {
+    // The address is safe to print: `resolveDshBaseUrl` has already stripped any
+    // credentials, which is the same guarantee the evidence fields rely on.
+    return {
+      kind: 'manual',
+      message: `Start the DeepSeek Harness host at ${baseUrl}, then rerun doctor. `
+        + 'cosyncing starts a host only at its own default address.',
+    };
+  }
+  return { kind: 'command', message: 'Start the DeepSeek Harness host, then rerun doctor.', command: 'dsh web' };
+}
 
 export const DSH_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.1.0-rc.6',
@@ -206,7 +267,7 @@ export async function diagnoseDshSetup(
       detailCode: reachable === 'closed' ? 'server-not-running' : 'server-unknown',
       summary: 'No DeepSeek Harness host is listening on the configured address.',
       evidence: { baseUrl },
-      remediation: { kind: 'command', message: 'Start the DeepSeek Harness host, then rerun doctor.', command: 'dsh web' },
+      remediation: hostRemediation(context, baseUrl),
     });
     return { agent: DSH_AGENT_ID, displayName: DSH_DISPLAY_NAME, minimumVersion: DSH_MINIMUM_VERSION, checks };
   }

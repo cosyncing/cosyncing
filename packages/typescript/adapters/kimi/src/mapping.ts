@@ -11,8 +11,14 @@
  *
  * Captured against Kimi Code 0.35.0 (see `test/fixtures/kimi-0.35.0.json`).
  */
+import {
+  boundContextBody,
+  CONTEXT_INJECTION_EVENT,
+  unwrapContextBlock,
+} from '@cosyncing/adapter-api';
 import type {
   AgentMessage,
+  ContextInjectionPayload,
   ModelOption,
   SessionControlState,
   SessionInfo,
@@ -81,7 +87,29 @@ export function kimiOwnedControlState(): SessionControlState {
 /** The control state of a session this process did not create. Fail-closed: observe only. */
 export function kimiForeignControlState(): SessionControlState {
   return {
-    drive: { state: 'observing', supported: false, reason: KIMI_FOREIGN_DRIVE_REASON },
+    // `supported: false` is unchanged and still means what it says: cosyncing
+    // will not drive this session on its own, because it cannot prove no
+    // terminal is writing it. `takeoverAvailable` is the other half of that
+    // sentence — the user CAN authorize it explicitly, and that authorization
+    // is exactly what turns the unprovable into a decision they made. Without
+    // it the takeover control would be unreachable on the only sessions that
+    // need it, since `supported && observing` is false here by design.
+    //
+    // `live` because a Kimi takeover attaches to the running server session;
+    // there is no cosyncing-owned process to `resume` into.
+    //
+    // Advertised unconditionally. It used to ride a rollout flag, which meant
+    // the row's honesty depended on a caller remembering to thread it; the
+    // adapter's own ownership and safety checks are what decide whether a
+    // takeover actually proceeds, and they answer the same way for every
+    // caller.
+    drive: {
+      state: 'observing',
+      supported: false,
+      reason: KIMI_FOREIGN_DRIVE_REASON,
+      takeoverAvailable: true,
+      takeoverMode: 'live' as const,
+    },
     terminalSync: {
       supported: false,
       syncAvailable: false,
@@ -116,7 +144,20 @@ export function kimiOwnedObserveControlState(): SessionControlState {
  */
 export function kimiDemotedControlState(terminalSync: SessionControlState['terminalSync']): SessionControlState {
   return {
-    drive: { supported: false, state: 'unavailable', reason: KIMI_FOREIGN_WRITER_REASON },
+    // `unavailable` stays, and so does `supported: false`: this generation is
+    // finished and nothing reattaching to it can drive. Re-takeover is still
+    // legitimate, but only as a FRESH user confirmation opening a fresh
+    // generation — which is why it has to be declared explicitly here. The
+    // `takeoverAvailable ?? (supported && observing)` fallback can never fire
+    // on `unavailable`, so without these two fields a demoted session would be
+    // permanently unrecoverable through the UI.
+    drive: {
+      supported: false,
+      state: 'unavailable',
+      reason: KIMI_FOREIGN_WRITER_REASON,
+      takeoverAvailable: true,
+      takeoverMode: 'live',
+    },
     // Unchanged: demotion is a statement about the DRIVE half only.
     terminalSync,
   };
@@ -183,6 +224,27 @@ export interface KimiMessagePage {
   has_more?: unknown;
 }
 
+/**
+ * Kimi's own statement of where a row came from — `metadata.origin.kind`.
+ *
+ * Observed on a live 0.36.1 server: `injection` for harness-handed context,
+ * `user` for a person typing, `cron_job` for a schedule firing a real prompt.
+ * Only the first is context, and only Kimi can say which — the TEXT cannot,
+ * because a person may legitimately paste or quote a whole wrapper block and
+ * that is still them writing.
+ *
+ * Absent, malformed, or any other kind reads as not-injected, which keeps the
+ * message whole. That is the safe direction: showing a reminder verbatim is
+ * untidy, folding someone's own words into a collapsed disclosure loses them.
+ */
+function kimiOriginKind(metadata: unknown): string | undefined {
+  if (typeof metadata !== 'object' || metadata === null) return undefined;
+  const origin = (metadata as { origin?: unknown }).origin;
+  if (typeof origin !== 'object' || origin === null) return undefined;
+  const kind = (origin as { kind?: unknown }).kind;
+  return typeof kind === 'string' ? kind : undefined;
+}
+
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 /**
@@ -227,7 +289,10 @@ function optionalEpochMs(value: unknown): number | undefined {
  * is FOREIGN — listing plus reviewed read-only observe, never Drive. That is
  * the coexistence rule, fail-closed: no predicate means nothing is owned.
  */
-export function mapKimiSession(raw: KimiV2Session, isOwned?: KimiOwnershipPredicate): SessionInfo | undefined {
+export function mapKimiSession(
+  raw: KimiV2Session,
+  isOwned?: KimiOwnershipPredicate,
+): SessionInfo | undefined {
   const id = optionalString(raw?.id);
   if (!id) return undefined;
   const meta = raw.meta ?? {};
@@ -250,7 +315,10 @@ export function mapKimiSession(raw: KimiV2Session, isOwned?: KimiOwnershipPredic
   };
 }
 
-export function mapKimiSessionPage(page: KimiV2SessionPage | undefined, isOwned?: KimiOwnershipPredicate): {
+export function mapKimiSessionPage(
+  page: KimiV2SessionPage | undefined,
+  isOwned?: KimiOwnershipPredicate,
+): {
   sessions: SessionInfo[];
   nextPageToken?: string;
   hasMore: boolean;
@@ -467,6 +535,7 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
   const role = raw.role;
   const parts = contentParts(raw.content);
   const sentAt = optionalEpochMs(raw.created_at);
+  const originKind = kimiOriginKind(raw.metadata);
   const nativeRole = typeof role === 'string' ? role : undefined;
   const rows: KimiMappedRow[] = [];
   const out = {
@@ -488,7 +557,39 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
     if (kind === 'text') {
       const text = textOf(part, 'text');
       if (!text) continue;
-      if (role === 'user') {
+      // Injected context is recognized on the USER row as well as the system
+      // one, because the user row is where Kimi actually delivers it: every
+      // `<system-reminder>` block a live server returns arrives as
+      // `role: 'user'` and none as `role: 'system'`. Recognizing it only under
+      // `system` — as this did — meant the rule never fired on real data, and
+      // the raw wrapper reached the transcript rendered as something the
+      // operator had typed.
+      //
+      // On the user row it takes BOTH Kimi's provenance and a whole wrapper.
+      // The text alone is not evidence of anything: a person may paste or quote
+      // an entire reminder, and that is still them writing. `metadata.origin`
+      // is the only party that knows, so a row it does not call `injection` —
+      // including `user`, `cron_job`, and anything missing or malformed — stays
+      // a user message even when the whole message is a wrapper.
+      //
+      // The system row keeps its own rule, unchanged: there the wrapper alone
+      // decides, because a system row is never someone typing.
+      const injected = role === 'system'
+        || (role === 'user' && originKind === 'injection')
+        ? unwrapContextBlock(text)
+        : undefined;
+      if (injected) {
+        out.push({
+          type: 'event',
+          name: CONTEXT_INJECTION_EVENT,
+          payload: {
+            source: injected.source,
+            // Same ceiling every adapter uses, and a clip is declared rather
+            // than left looking like the end of the material.
+            ...boundContextBody(injected.body),
+          } satisfies ContextInjectionPayload,
+        }, key);
+      } else if (role === 'user') {
         out.push({
           type: 'user-message',
           text,
@@ -496,6 +597,10 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
           ...(sentAt !== undefined ? { sentAt } : {}),
         }, key);
       } else if (role === 'system') {
+        // A system row that is NOT an identifiable wrapper is something the USER
+        // should read, so it stays a notice: folding every system row into
+        // collapsed context would hide real messages behind a disclosure nobody
+        // opens.
         out.push({ type: 'notice', message: text }, key);
       } else if (role === 'assistant') {
         out.push({ type: 'model-output', text, final: true, key }, key);
@@ -639,13 +744,20 @@ export function mapKimiSessionStatus(raw: unknown): AgentMessage[] {
   }
   const model = optionalString(status.model);
   const thinkingLevel = optionalString(status.thinking_level);
-  const permissionMode = optionalString(status.permission);
+  // `currentMode` is the CONTRACT field the mode picker preselects from (see
+  // `SessionInfo.currentMode`), and the broker folds this value straight onto
+  // the session's info object. Emitted as `permissionMode` it landed on that
+  // object under a name nothing declares and nothing reads, so the picker sat
+  // blank while the session was demonstrably in a mode the host had reported —
+  // and the obvious repair, defaulting the picker to a mode, would have been
+  // the client inventing an approval posture the host never claimed.
+  const currentMode = optionalString(status.permission);
   const planMode = optionalBoolean(status.plan_mode);
   const swarmMode = optionalBoolean(status.swarm_mode);
   const sessionInfo = {
     ...(model ? { model } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
-    ...(permissionMode ? { permissionMode } : {}),
+    ...(currentMode ? { currentMode } : {}),
     ...(planMode !== undefined ? { planMode } : {}),
     ...(swarmMode !== undefined ? { swarmMode } : {}),
   };

@@ -142,6 +142,16 @@ export interface KimiDiscoveredInstance {
   baseUrl: string;
   port: number;
   /**
+   * The server process id the registry recorded, already proven live by the
+   * scan's own liveness probe.
+   *
+   * Carried through because the registry is AUTHORITATIVE about which process
+   * serves this instance, and a broker asking the question any other way — by
+   * looking up whoever holds the port — would be guessing where the host itself
+   * has already answered.
+   */
+  pid: number;
+  /**
    * The REGISTRY generation id (`server_id` in the record file). It is NOT the
    * id `/api/v1/meta` echoes — see {@link bindKimiServerIdentity}.
    */
@@ -310,6 +320,7 @@ export function scanKimiInstances(home: string, io: KimiInstanceScanIo): KimiIns
     scan.live.push({
       baseUrl,
       port: record.port,
+      pid: record.pid,
       serverId: record.serverId,
       ...(record.hostVersion ? { hostVersion: record.hostVersion } : {}),
       ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
@@ -414,6 +425,17 @@ export interface KimiReadOnlyHttpOptions {
   /** Body ceiling in BYTES, enforced at the read; a larger body is reported as `too-large`, never parsed. */
   maxBytes?: number;
   fetchImpl?: KimiFetch;
+  /**
+   * Caller-owned cancellation for every read this client makes, reported as
+   * `unreachable`.
+   *
+   * It belongs to the CLIENT rather than to one `getJson` because a client is
+   * built per operation while an operation is several reads — identity, then
+   * health, then pages — and what a caller abandons is the operation, not a
+   * request. `timeoutMs` still applies independently: that one bounds a single
+   * request, this one bounds the caller's interest in all of them.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -488,6 +510,7 @@ export class KimiReadOnlyHttp {
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
   private readonly fetchImpl: KimiFetch;
+  private readonly cancel?: AbortSignal;
 
   constructor(options: KimiReadOnlyHttpOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -495,6 +518,7 @@ export class KimiReadOnlyHttp {
     this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : KIMI_HTTP_TIMEOUT_MS;
     this.maxBytes = options.maxBytes && options.maxBytes > 0 ? options.maxBytes : KIMI_HTTP_MAX_BODY_BYTES;
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init) as unknown as ReturnType<KimiFetch>);
+    if (options.signal) this.cancel = options.signal;
   }
 
   /** The origin this client reads from. Safe to log; carries no credential. */
@@ -519,8 +543,13 @@ export class KimiReadOnlyHttp {
       return { ok: false, reason: 'invalid-response', message: 'unresolvable request url' };
     }
 
+    // Checked before the socket is opened, not only linked to it: a caller that
+    // has already stopped waiting must not spend a connection on this host.
+    if (this.cancel?.aborted) return { ok: false, reason: 'unreachable' };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const onCancel = () => controller.abort();
+    this.cancel?.addEventListener('abort', onCancel, { once: true });
     let status: number;
     let body: string;
     try {
@@ -550,6 +579,7 @@ export class KimiReadOnlyHttp {
       return { ok: false, reason: 'unreachable' };
     } finally {
       clearTimeout(timer);
+      this.cancel?.removeEventListener('abort', onCancel);
     }
 
     const envelope = decodeKimiEnvelope(body);

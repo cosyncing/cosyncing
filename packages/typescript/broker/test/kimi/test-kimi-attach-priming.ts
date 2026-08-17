@@ -83,6 +83,7 @@ const scan: KimiInstanceScan = {
   live: [{
     baseUrl,
     port: listenPort,
+    pid: FIXTURE_RECORD.pid,
     serverId: FIXTURE_RECORD.serverId,
     hostVersion: FIXTURE_RECORD.hostVersion,
     startedAt: FIXTURE_RECORD.startedAt,

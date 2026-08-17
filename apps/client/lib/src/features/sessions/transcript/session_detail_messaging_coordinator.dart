@@ -72,8 +72,18 @@ extension _SessionDetailMessaging on SessionDetailController {
   Future<bool> _sendPromptCoordinated(
     String text, {
     SessionCurrentModel? model,
+    String? permissionMode,
   }) async {
     final trimmedPrompt = text.trim();
+    // Normalized ONCE, here, so the durable row and the wire frame carry a
+    // byte-identical value. The broker fingerprints every field of a mutating
+    // frame except the client message id, so a replay that re-derived this —
+    // or dropped it — would hash differently and come back as a conflicting
+    // reuse of the id rather than the original acknowledgement.
+    final trimmedMode = permissionMode?.trim();
+    final promptPermissionMode = trimmedMode == null || trimmedMode.isEmpty
+        ? null
+        : trimmedMode;
     final attachmentSnapshot = state.stagedAttachments;
     if (trimmedPrompt.isEmpty && attachmentSnapshot.isEmpty) {
       return false;
@@ -148,6 +158,12 @@ extension _SessionDetailMessaging on SessionDetailController {
         payload: {
           'text': trimmedPrompt,
           if (model != null) 'model': model.toJson(),
+          // Durable, so a retry after a reconnect asks for the SAME approval
+          // mode the user chose. Recomputing it at replay would read whatever
+          // the composer holds by then — a mode the user has since changed, or
+          // none at all — and send a request they never made.
+          if (promptPermissionMode != null)
+            'permissionMode': promptPermissionMode,
           if (stagedAttachments.isNotEmpty)
             'files': stagedAttachments
                 .map((attachment) => attachment.toOutboxJson())
@@ -185,6 +201,7 @@ extension _SessionDetailMessaging on SessionDetailController {
           clientMessageId: clientMessageId,
           draftRevision: draftRevision,
           draftUpdateId: draftUpdateId,
+          permissionMode: promptPermissionMode,
         ),
         onPersisted: (clientMessageId) {
           optimisticId = clientMessageId;

@@ -2870,7 +2870,12 @@ export class ClaudeResumeConnection implements SessionConnection {
         .filter((n: any) => typeof n === 'string' && n)
         .map((n: string): SlashCommand => ({ name: n, kind: builtin.has(n) ? 'action' : 'prompt' })),
     ];
-    this.emit({ type: 'event', name: 'init', payload: { model: o.model, permissionMode: o.permissionMode, effort: o.effort } });
+    // Namespaced like every other adapter-specific event (`dsh.session-event`,
+    // `kimi.unmapped-content`): the bare `init` was this adapter's private
+    // launch record wearing a name generic enough for any provider to collide
+    // with. Sessions already recorded under the old name stay recognized by the
+    // client's legacy entry; nothing else reads it.
+    this.emit({ type: 'event', name: 'claude.init', payload: { model: o.model, permissionMode: o.permissionMode, effort: o.effort } });
     // Seed the authoritative runtime model/mode/effort so omitted-field turns reassert them (doc-12
     // currentModel/Mode). `init` is the source of truth for the effort claude launched with when it reports
     // one; otherwise preserve the effort already chosen so a model re-seed doesn't drop it.

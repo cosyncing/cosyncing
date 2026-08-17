@@ -201,7 +201,9 @@ const en: SetupMessages = {
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
-  })[id],
+    kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
+    dsh: 'Managed `dsh web` host; one you started yourself, or on another machine, is never touched.',
+  }[id] ?? 'Managed external host; one you started yourself is never touched.'),
   unsupportedVersionUnreadable: 'the installed version could not be read',
   unsupportedDetected: (version) => `detected ${version}`,
   unsupportedUpgrade: (command) => ` Run \`${command}\`.`,
@@ -223,7 +225,7 @@ const en: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
   managedRuntimeTitle: 'Required managed-runtime acknowledgement',
   managedRuntimeBody: (product) =>
-    `${product} will manage supported shared Codex/OpenCode runtimes and the packaged Pi bridge. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
+    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi bridge, and the \`kimi web\` and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
   legacyPiBridgeConfirm: (path) =>
@@ -420,7 +422,9 @@ const zhHans: SetupMessages = {
     opencode: '由 cosyncing 托管共享 serve；你自己启动的 server 不受影响。',
     pi: '装有 Pi 时，随包提供会话内 bridge。',
     claude: '只有「观察 + 接管」两种模式；安装过程不会改动 Claude 的配置。',
-  })[id],
+    kimi: '由 cosyncing 托管 `kimi web` host；你自己启动的 server 不受影响。',
+    dsh: '由 cosyncing 托管 `dsh web` host；你自己启动的、或在其他机器上的 host 都不受影响。',
+  }[id] ?? '由 cosyncing 托管的外部 host；你自己启动的不受影响。'),
   unsupportedVersionUnreadable: '无法读取已安装的版本',
   unsupportedDetected: (version) => `检测到 ${version}`,
   unsupportedUpgrade: (command) => `请执行 \`${command}\` 升级。`,
@@ -440,7 +444,7 @@ const zhHans: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
   managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
   managedRuntimeBody: (product) =>
-    `${product} 会接管支持的 Codex/OpenCode 共享运行时，以及随包提供的 Pi bridge。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
+    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi bridge，以及 \`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
   legacyPiBridgeConfirm: (path) =>
     `用当前随包版本替换 ${path} 中内容完全匹配的已知旧版 Pi bridge？如果回滚，会逐字节恢复旧文件。`,

@@ -59,8 +59,8 @@ import {
   stopCodexDaemonEnsureProcess,
 } from '@cosyncing/adapter-codex';
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
-import { KimiAdapter, kimiRegistrationEnabled } from '@cosyncing/adapter-kimi';
-import { DshAdapter, dshRegistrationEnabled } from '@cosyncing/adapter-dsh';
+import { KimiAdapter } from '@cosyncing/adapter-kimi';
+import { DshAdapter } from '@cosyncing/adapter-dsh';
 import { Hub, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
 import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../roster/roster-overlay.ts';
 import {
@@ -207,6 +207,22 @@ import {
   clearManagedRuntimeFailure,
   recordManagedRuntimeFailure,
 } from './managed-runtime-state.ts';
+import {
+  rosterRepresentationKey,
+  rosterVisibility,
+  visibleSessions,
+  type RosterVisibility,
+} from './roster-visibility.ts';
+import {
+  defaultManagedHostEffects,
+  ensureManagedHost,
+  managedHostRestartLedger,
+  managedHostStartupReport,
+  managedHostStore,
+  ManagedHostSupervisor,
+  MANAGED_HOST_SUPERVISION_INTERVAL_MS,
+  releaseManagedHost,
+} from './managed-host.ts';
 import {
   mutationFingerprint,
   ProtocolJournal,
@@ -586,37 +602,44 @@ registry.register(new CodexAdapter({
 })); // Codex — observe (rollout-JSONL tail); resume is a later increment
 registry.register(new ClaudeAdapter()); // Claude Code — observe (transcript-JSONL tail); resume/live are later increments
 // Kimi Code — observe for every session (kimi web HTTP + WS), plus Drive for
-// the ones cosyncing itself created BEHIND ITS OWN default-off gate
-// (COSYNCING_KIMI_DRIVE). Foreground clients explicitly request `mode=live`;
-// background resident tabs stay on the authority-free bare owner. A session
-// this broker process did not create stays
-// observe-only and fail-closed even with Drive on: a terminal `kimi -S` may own
-// it, and two writers silently fork one Kimi journal. A ROLLOUT GATE, NOT A
-// CAPABILITY DECISION: the adapter is finished and safe, but `/api/agents` is
-// not revision-filtered, so one kimi row makes a strict `$enumDecode` client
-// throw on the unknown integration kind — and because that aborts the WHOLE
-// roster decode, such a client loses every agent, Kimi installed or not. Stay
-// default-off until every supported client ships the tolerant decoding added
-// alongside this slice. Activation is foreground-only for now: the durable
-// service environment is a closed enumerated list that does not carry this
-// flag (see KIMI_ENABLE_ENV's contract), so a managed service cannot enable
-// Kimi until a later lifecycle round adds a persisted feature-gate path.
-if (kimiRegistrationEnabled()) registry.register(new KimiAdapter());
-// DeepSeek Harness — live-only Drive against an EXTERNAL `dsh web` host this
-// broker never starts, stops, or configures. dsh is server-first: one host
+// the ones cosyncing itself created. Foreground clients explicitly request
+// `mode=live`; background resident tabs stay on the authority-free bare owner.
+// A session this broker process did not create stays observe-only and
+// fail-closed: a terminal `kimi -S` may own it, and two writers silently fork
+// one Kimi journal. That rule, not configuration, is what makes Drive safe —
+// the `COSYNCING_KIMI_DRIVE` rollout gate it used to sit behind is gone, having
+// only ever meant that the surface most users would meet was the one that never
+// shipped. Registered
+// UNCONDITIONALLY: the old `COSYNCING_ENABLE_KIMI` gate was never a capability
+// decision — the adapter was finished — but `/api/agents` was not
+// revision-filtered, so one kimi row made a pre-tolerance client throw on the
+// unknown integration kind and lose its WHOLE roster. A flag answered that by
+// denying Kimi to everyone, including the clients that could read it and a
+// managed service that could never set it. The route now filters per client
+// against each adapter's declared minimum revision, which settles the same
+// question without asking an operator to know a variable name.
+registry.register(new KimiAdapter());
+// DeepSeek Harness — live-only Drive against an EXTERNAL `dsh web` host: a
+// process that exists with or without this broker and is never configured by
+// it. Whether this broker may START one depends on how it was launched: the
+// INSTALLED SERVICE carries `COSYNCING_DSH_MANAGED_HOST=1` in its durable
+// environment, so a packaged cosyncing starts, supervises, and stops the host
+// its agent needs; a FOREGROUND broker has no such environment unless the
+// operator sets it, so a source checkout observes and touches nothing by
+// default. Neither posture can reach a host it did not start: authorization
+// only permits acting on a process this broker can prove is its own. dsh is
+// server-first: one host
 // process owns the append-only session log and every client (its own browser UI
 // included) is a peer of it, so there is no ownership arbitration, no resume to
 // offer, and no observe mode — the host serves one undifferentiated client
 // contract, and calling a full-authority connection "observe" would be a lie.
-// Default-off for TWO reasons, either sufficient on its own: `/api/agents` is
-// not revision-filtered, so one dsh row makes a strict `$enumDecode` client
-// throw on `http-websocket` and lose its WHOLE roster; and with no host running
-// the row's every action fails, so it appears only where an operator has said
-// the host is there. Activation is foreground-only: the durable service
-// environment is a closed enumerated list that does not carry this flag (see
-// DSH_ENABLE_ENV's contract), so a managed service cannot enable dsh until a
-// later lifecycle round adds a persisted feature-gate path.
-if (dshRegistrationEnabled()) registry.register(new DshAdapter());
+// Registered UNCONDITIONALLY, for the reason given above Kimi. The old
+// `COSYNCING_ENABLE_DSH` gate carried a second reason as well — with no host
+// running, every action on the row fails — but that is a diagnosis to SHOW,
+// not a registration question. An operator who has not started `dsh web` is
+// better served by an agent that says so than by one that stays invisible
+// unless they already knew to set a variable.
+registry.register(new DshAdapter());
 
 let latestBrokerHealth: BrokerHealthSnapshot;
 let attentionService: AttentionService;
@@ -1590,10 +1613,25 @@ async function discoverLocalSessions(
   return decorated;
 }
 
-async function discoverMachineRosters(localBaseUrl: string): Promise<AggregatedMachines> {
+async function discoverMachineRosters(
+  localBaseUrl: string,
+  visibility: RosterVisibility,
+): Promise<AggregatedMachines> {
   const generatedAt = Date.now();
-  const local = localMachineRoster(MACHINE, await discoverLocalSessions(), localBaseUrl, generatedAt);
-  const peers = await Promise.all(MACHINE_PEER_CONFIG.peers.map((peer) => fetchPeerMachineRoster(peer)));
+  // Filtered here rather than at the route, because the aggregate contains this
+  // machine's sessions AND every peer's: a client that cannot decode an agent
+  // must not receive its sessions from any of them. Peers are asked as a
+  // current client (see `fetchPeerMachineRoster`), so what arrives is everything
+  // this broker can decode, and this narrows it to what the CALLER can.
+  const local = localMachineRoster(
+    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), localBaseUrl, generatedAt,
+  );
+  const peers = (await Promise.all(MACHINE_PEER_CONFIG.peers.map((peer) => fetchPeerMachineRoster(peer))))
+    .map((peer) => ({
+      ...peer,
+      sessions: visibleSessions(peer.sessions, visibility),
+      sessionCount: visibleSessions(peer.sessions, visibility).length,
+    }));
   const machines = [local, ...peers];
   if (MACHINE_PEER_CONFIG.error) {
     machines.push({
@@ -1656,6 +1694,34 @@ function parseWsClientContract(searchParams: URLSearchParams): {
   };
 }
 
+/**
+ * The contract revision a `/api/agents` caller claims, for roster filtering.
+ *
+ * Deliberately NOT the strict `parseWsClientContract`. That one rejects partial
+ * metadata because a socket carrying half a contract identity is a client bug
+ * worth failing loudly. Here the question is only "how much can you decode",
+ * and every unclear answer has the same safe reading: assume the least. A
+ * missing parameter is a client built before it existed, and a malformed one
+ * tells us nothing — both get the legacy-safe view, which shows FEWER agents
+ * and never more.
+ *
+ * Refusing the request instead would be worse than useless: a roster that 400s
+ * over a query parameter costs the caller every agent, which is the exact
+ * failure this filtering exists to prevent.
+ */
+function parseAgentRosterClientRevision(searchParams: URLSearchParams): number {
+  const raw = searchParams.get('contractRevision');
+  // A canonical non-negative decimal integer and nothing else. `Number` alone
+  // would be a far wider grammar than "malformed means oldest" implies — it
+  // reads `0xF`, `1e2`, `+14`, and whitespace-padded digits as numbers — and
+  // every one of those is a client whose encoding we do not recognize claiming
+  // a decode ability we would then act on. The only revisions this broker
+  // honors are the ones a client can state plainly.
+  if (raw == null || !/^(?:0|[1-9][0-9]*)$/.test(raw)) return 0;
+  const revision = Number(raw);
+  return Number.isSafeInteger(revision) ? revision : 0;
+}
+
 function parseInitialHistoryLimit(searchParams: URLSearchParams): number {
   const raw = searchParams.get('initialHistory');
   if (raw == null) {
@@ -1674,7 +1740,9 @@ interface WsData {
   /** Attach mode from `?mode=` (default observe). `resume` opens a DRIVABLE connection (own Hub owner)
    *  — entered only on explicit user action ("Drive"), so opening a session never auto-drives it. */
   mode?: string;
-  /** Authenticated drive-attach intent from `?reason=` (resume only). */
+  /** Authenticated drive-attach intent from `?reason=`. Drive modes only, and
+   *  per the reason/mode matrix: every reason with `resume`, and `takeover`
+   *  alone with `live` (see `DRIVE_ATTACH_REASONS`). */
   reason?: DriveAttachReason;
   /** Exact owner projection an authenticated `join-existing` request is conditional on. */
   expectedOwnerRevision?: SessionOwnerRevision;
@@ -3786,8 +3854,35 @@ server = Bun.serve<WsData>({
         && !(DRIVE_ATTACH_REASONS as readonly string[]).includes(requestedReason)) {
         return json({ ok: false, code: 'BAD_PARAM', error: `unknown attach reason: ${requestedReason}` }, 400);
       }
-      if (requestedReason !== undefined && requestedMode !== 'resume') {
-        return json({ ok: false, code: 'BAD_PARAM', error: 'attach reason requires mode=resume' }, 400);
+      if (requestedReason !== undefined && requestedMode !== 'resume' && requestedMode !== 'live') {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'attach reason requires mode=resume or mode=live' }, 400);
+      }
+      // The reason/mode matrix, not merely "a reason is allowed on live".
+      // `create`, `app-restore` and `lease-restore` all describe reopening a
+      // Drive connection this app previously owned, which is the resume path;
+      // on `live` they would name a provenance the live path cannot have.
+      // `takeover` is the only intent that means "seize the running session",
+      // which is what a live attach does.
+      if (requestedMode === 'live' && requestedReason !== undefined && requestedReason !== 'takeover') {
+        return json({ ok: false, code: 'BAD_PARAM', error: `attach reason ${requestedReason} requires mode=resume` }, 400);
+      }
+      // A reason-tagged LIVE takeover crosses the same explicit Drive
+      // credential boundary as resume. The outer `authed` gate already covers
+      // every session stream, so this is not a general remote-auth bypass —
+      // but in the tokenless loopback baseline `authed` proves nothing about
+      // credentials, and `credentialAuthenticated` is what proves an actual
+      // shared or peer credential was supplied. Without this, takeover — the
+      // one attach that seizes Drive from a live owner — would be the only
+      // drive attach that never crossed the boundary.
+      //
+      // Reusing RESUME_AUTH_REQUIRED is deliberate. The code names the
+      // boundary, not the mode, and BROKER_ERROR_CODES feeds
+      // BROKER_CONTRACT_SURFACE_HASH: a new code moves the hash, and every
+      // client on this same revision would then evaluate as hard-incompatible
+      // and be forced read-only. Renaming a 401 is not worth that.
+      if (requestedReason !== undefined && requestedMode === 'live'
+        && !credentialAuthenticated(req, url)) {
+        return json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive takeover' }, 401);
       }
       const ownerEpoch = url.searchParams.get('ownerEpoch')?.trim() || undefined;
       const ownerSeqRaw = url.searchParams.get('ownerSeq');
@@ -3833,7 +3928,12 @@ server = Bun.serve<WsData>({
         }
         : negotiated;
       const mode = compatibility.readOnly ? 'observe' : requestedMode;
-      const reason = mode === 'resume' ? (requestedReason as DriveAttachReason | undefined) : undefined;
+      // Carried for both drive modes. A read-only fold has already rewritten
+      // `mode` to observe, which drops the reason with it — an attach that
+      // renounced authority cannot be tagged with an intent to take it.
+      const reason = mode === 'resume' || mode === 'live'
+        ? (requestedReason as DriveAttachReason | undefined)
+        : undefined;
       const artifactMode = url.searchParams.get('artifactMode') === 'reference' ? 'reference' : 'inline';
       const since = url.searchParams.get('ticket') || url.searchParams.get('since') || undefined;
       const historyLimit = parseInitialHistoryLimit(url.searchParams);
@@ -5194,8 +5294,16 @@ server = Bun.serve<WsData>({
       // `syncEnabled` is the persisted per-agent enablement (AgentSyncEnablement) the Settings toggle
       // reflects — only Codex has an explicit enable today (OpenCode auto-serves, Pi probes its extension).
       const codexSyncEnabled = process.env.COSYNCING_CODEX_SYNC_SERVER === '1';
+      // The roster decodes as ONE list on the client, so an agent carrying a
+      // kind an older client cannot parse costs it EVERY agent rather than
+      // just that row. Each client is therefore sent only the agents it can
+      // decode, judged against the revision it declared. A client that
+      // declares nothing is treated as the oldest possible one — see
+      // `parseAgentRosterClientRevision`.
+      const agentVisibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
+      const visible = registry.list().filter((b) => agentVisibility.tools.has(b.id));
       const agents = await Promise.all(
-        registry.list().map(async (b) => ({
+        visible.map(async (b) => ({
           id: b.id,
           displayName: b.displayName,
           capabilities: b.capabilities,
@@ -5222,7 +5330,13 @@ server = Bun.serve<WsData>({
       if (!machineId || !tool || !sessionId || [machineId, tool, sessionId].some((value) => value.length > 1000)) {
         return json({ ok: false, code: 'BAD_PARAM', error: 'machineId, tool, and sessionId are required' }, 400);
       }
-      const resolution = resolveMachineSession(await discoverMachineRosters(publicBrokerUrl(req, url)), { machineId, tool, sessionId });
+      const resolution = resolveMachineSession(
+        await discoverMachineRosters(
+          publicBrokerUrl(req, url),
+          rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
+        ),
+        { machineId, tool, sessionId },
+      );
       const status = resolution.ok
         ? 200
         : resolution.status === 'not-found'
@@ -5234,7 +5348,13 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/machines' && req.method === 'GET') {
-      return json({ ok: true, ...(await discoverMachineRosters(publicBrokerUrl(req, url))) });
+      return json({
+        ok: true,
+        ...(await discoverMachineRosters(
+          publicBrokerUrl(req, url),
+          rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
+        )),
+      });
     }
 
     if (path === '/api/session-roster-deltas' && req.method === 'GET') {
@@ -5247,6 +5367,11 @@ server = Bun.serve<WsData>({
         if (!Number.isSafeInteger(after) || after < 0) throw new Error('after must be a non-negative integer');
         if (!Number.isSafeInteger(requestedWaitMs) || requestedWaitMs < 0) throw new Error('waitMs must be a non-negative integer');
         const windowMs = parseSessionWindowMs(rawWindow);
+        // Deltas carry the same visibility as the snapshot they update, or they
+        // undo it: a client correctly served no Kimi sessions in its snapshot
+        // would be handed one by the next delta that mentioned a Kimi session,
+        // and from then on hold a row for an agent it was told does not exist.
+        const deltaVisibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
         const now = Date.now();
         const revisionStore = rosterRevisionForWindow(windowMs);
         // A slow safety scan is itself this request's wait. Return immediately
@@ -5269,7 +5394,22 @@ server = Bun.serve<WsData>({
         ) {
           batch = revisionStore.eventsAfter(after);
         }
-        return json(batch);
+        // The batch REVISION is deliberately not rewritten when deltas are
+        // dropped. It is the roster's own counter, shared by every client, and
+        // advancing the cursor past an event this client must never see is
+        // exactly right — there is nothing for it to come back for.
+        //
+        // What keeps a client consistent across a change in what it can see is
+        // the SNAPSHOT, which is where its cursor comes from: `/api/sessions`
+        // answers with the roster revision it was built at, filtered by the same
+        // visibility, and the client polls from there. A build that declares a
+        // different revision takes its own snapshot before its first poll, so
+        // its cursor is established under the projection it will be served. The
+        // journal itself makes no promise here — a complete one answers `after=0`
+        // with deltas from revision 1 rather than demanding a reset — which is
+        // exactly why the snapshot, not the cursor value, is what establishes
+        // the baseline.
+        return json({ ...batch, deltas: visibleSessions(batch.deltas, deltaVisibility) });
       } catch (error) {
         return json({ ok: false, code: 'BAD_PARAM', error: error instanceof Error ? error.message : String(error) }, 400);
       }
@@ -5281,7 +5421,11 @@ server = Bun.serve<WsData>({
       // kept — see filterSessionsByWindow). ETag → 304 skips the whole body when the roster is unchanged
       // between polls; gzip otherwise takes the ~2 MB payload to ~200 KB. Both matter at the ~6s poll.
       const rawWindow = url.searchParams.get('window');
-      const windowKey = rosterWindowKey(rawWindow);
+      // Sessions are filtered by the SAME decision as `/api/agents`, and the
+      // representation cache is keyed by it — see `roster-visibility.ts` for why
+      // all three have to agree.
+      const visibility = rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams));
+      const windowKey = rosterRepresentationKey(rosterWindowKey(rawWindow), visibility);
       const windowMs = parseSessionWindowMs(rawWindow);
       const requestNow = Date.now();
       const force = url.searchParams.get('refresh') === '1';
@@ -5305,7 +5449,7 @@ server = Bun.serve<WsData>({
         });
       }
       const sessions = filterSessionsByWindow(
-        await discoverLocalSessions(force || cutoffExpired, windowMs, requestNow),
+        visibleSessions(await discoverLocalSessions(force || cutoffExpired, windowMs, requestNow), visibility),
         windowMs,
         requestNow,
       );
@@ -5437,7 +5581,24 @@ server = Bun.serve<WsData>({
             ? hub.joinExisting(tool, id, expectedOwnerRevision!)
             : await hub.ensure(tool, id, mode, reason);
         } catch (err) {
-          if (mode === 'live' && isOwnershipConflictError(err)) {
+          // A DENIED reason-tagged drive attach answers with a structured conflict frame and
+          // continues as an Observe-class attach on the SAME socket, so the client keeps its
+          // provenance and shows honest ownership instead of a reconnect loop.
+          //
+          // This must stay AHEAD of the generic live fallback below. That fallback exists for
+          // eligibility that changed under an unattended live attach, and it absorbs the refusal
+          // silently — correct when nobody asked for anything, wrong when a user pressed Take
+          // over. Ordered the other way, a refused takeover is downgraded to Observe and the user
+          // is told nothing about why the thing they explicitly asked for did not happen.
+          if ((mode === 'resume' || mode === 'live') && reason) {
+            const message = err instanceof Error ? err.message : String(err);
+            // The ACTUAL requested mode: a takeover is refused as the live attach it was, and a
+            // client that reads this frame to decide what to retry must not be told 'resume'.
+            sendRaw({ kind: 'attach-conflict', requestedMode: mode, reason, code: driveAttachRefusalCode(err), message });
+            mode = undefined;
+            ws.data.mode = undefined; // close() must release the fallback owner's bare key
+            mc = await hub.ensure(tool, id);
+          } else if (mode === 'live' && isOwnershipConflictError(err)) {
             // Live eligibility can change between the roster/create response
             // and socket open. Fall back to the bare Observe owner on the SAME
             // socket; the authoritative session frame disarms the client's
@@ -5447,16 +5608,8 @@ server = Bun.serve<WsData>({
             ws.data.mode = undefined;
             mc = await hub.ensure(tool, id);
           } else {
-            // A DENIED reason-tagged resume answers with a structured conflict frame and continues
-            // as an Observe-class attach on the SAME socket, so the client keeps its provenance and
-            // shows honest ownership instead of a reconnect loop. A mode-only resume preserves the
-            // legacy error+close contract for older clients.
-            if (mode !== 'resume' || !reason) throw err;
-            const message = err instanceof Error ? err.message : String(err);
-            sendRaw({ kind: 'attach-conflict', requestedMode: 'resume', reason, code: driveAttachRefusalCode(err), message });
-            mode = undefined;
-            ws.data.mode = undefined; // close() must release the fallback owner's bare key
-            mc = await hub.ensure(tool, id);
+            // A mode-only resume preserves the legacy error+close contract for older clients.
+            throw err;
           }
         }
         // If the socket closed during the (up to ~4s) attach, close() already ran with no
@@ -5878,6 +6031,108 @@ brokerUpdateTimer.unref?.();
 const runtimeUpdatePollMs = Math.max(10_000, Number(process.env.COSYNCING_RUNTIME_UPDATE_POLL_MS ?? 60_000) || 60_000);
 let runtimeUpdateTimer: ReturnType<typeof setInterval> | undefined;
 const managedOpencodeStartup = ensureManagedOpencodeServe(() => !shuttingDown);
+// External agent hosts (`kimi web`, `dsh web`): processes that exist with or
+// without this broker. Every adapter is asked the same way — no tool-name branch
+// — and an adapter that declares no external host answers 'not-applicable'.
+//
+// Default OFF per agent, so this is inert until an operator authorizes it. Even
+// authorized, it only ever CREATES a host: anything already serving is
+// classified and left exactly as it was found, because the one thing this must
+// never do is disturb a host the user is running themselves.
+const managedHostEffects = defaultManagedHostEffects();
+const managedHostOwners = managedHostStore();
+const managedHostStartup = Promise.allSettled(registry.list().map(async (backend) => {
+  if (shuttingDown) return;
+  const outcome = await ensureManagedHost(backend, managedHostEffects, managedHostOwners);
+  if (outcome.action === 'not-applicable' || outcome.action === 'not-authorized') {
+    // Nothing was attempted, so there is no failure to record and none to clear.
+  } else if (outcome.action === 'start-failed') {
+    // Persisted through the sanitizing journal rather than logged raw: this is
+    // native output from another program, and it reaches an operator's disk.
+    recordManagedRuntimeFailure({
+      agent: backend.id, detailCode: outcome.detailCode, capturedOutput: outcome.capturedOutput,
+    });
+  } else {
+    clearManagedRuntimeFailure(backend.id);
+  }
+  // What to SAY is decided next to the outcome type rather than here, so a
+  // variant added to that union cannot reach an operator as silence — which is
+  // exactly how `preserved-predecessor` went unreported.
+  for (const line of managedHostStartupReport(backend.id, outcome)) {
+    if (line.level === 'warn') console.warn(`${LOG_PREFIX} ${line.message}`);
+    else console.log(`${LOG_PREFIX} ${line.message}`);
+  }
+})).catch(() => undefined);
+/**
+ * Supervision, which is the difference between "the broker can start a host" and
+ * "the host is running".
+ *
+ * A managed host that dies at 3am is otherwise gone until someone restarts the
+ * broker. Each tick asks the adapter's own readiness probe first, so a healthy
+ * host costs one probe and nothing else, and only two PROVEN states lead to a
+ * restart — see `recoverManagedHost`. Ticks never overlap: a slow probe delays
+ * the next tick instead of stacking a second one on top of it.
+ */
+const managedHostSupervisor = new ManagedHostSupervisor({
+  backends: () => registry.list(),
+  effects: managedHostEffects,
+  store: managedHostOwners,
+  ledger: managedHostRestartLedger(),
+  stopping: () => shuttingDown,
+  onOutcome: (agent, outcome) => {
+    if (outcome.action === 'recovered') {
+      // Said only when a host is SERVING again — see `restart`. The journal is
+      // cleared for the same reason the startup path clears it: a runtime that
+      // came back must not leave doctor reporting a failure that is over.
+      console.log(`${LOG_PREFIX} restarted the managed ${agent} host after it stopped serving`);
+      clearManagedRuntimeFailure(agent);
+    } else if (outcome.action === 'recovery-failed') {
+      // The case that used to print the success line above. It is a warning AND
+      // a durable record: nobody is reading the journal at 3am, so the only
+      // thing still true in the morning is what doctor can read off disk.
+      // `already-serving` reaching HERE means the address answered but what is
+      // on it is not provably ours, so the verdict — not the action — is the
+      // fact worth journalling: "another process holds this address" and "the
+      // restart spawned nothing" need different answers from an operator.
+      // The discriminant is read inline rather than through the boolean below,
+      // because narrowing does not survive the indirection.
+      const detailCode = outcome.outcome.action === 'start-failed'
+        ? outcome.outcome.detailCode
+        : outcome.outcome.action === 'already-serving'
+          ? `host-recovery-address-${outcome.outcome.verdict}`
+          : `host-recovery-${outcome.outcome.action}`;
+      const addressHeldByStranger = outcome.outcome.action === 'already-serving';
+      // The wording splits because the two failures are not the same fact. A
+      // stranger holding the address IS serving — saying it is not would send
+      // the operator looking for a process that is running fine — it simply is
+      // not one this broker may manage. Everything else genuinely ended with no
+      // host on the address.
+      console.warn(addressHeldByStranger
+        ? `${LOG_PREFIX} the configured ${agent} address is serving, but its process is not proven to be managed by ${PRODUCT_IDENTITY.productName} (${detailCode}) — run \`${PRODUCT_IDENTITY.primaryBinary} doctor\``
+        : `${LOG_PREFIX} the managed ${agent} host is not serving and the restart did not bring it back (${detailCode}) — run \`${PRODUCT_IDENTITY.primaryBinary} doctor\``);
+      recordManagedRuntimeFailure({
+        agent,
+        detailCode,
+        ...(outcome.outcome.action === 'start-failed'
+          ? { capturedOutput: outcome.outcome.capturedOutput }
+          : {}),
+      });
+    } else if (outcome.action === 'declined' && outcome.reason === 'budget-exhausted') {
+      console.warn(`${LOG_PREFIX} the managed ${agent} host keeps failing to stay up; not restarting it again — run \`cosyncing doctor\``);
+    }
+  },
+  onError: (agent, error) => {
+    console.error(`${LOG_PREFIX} managed ${agent} host supervision failed: ${String(error)}`);
+  },
+});
+const managedHostSupervision = setInterval(() => {
+  // Startup has to finish first, or the supervisor races the very start it is
+  // supposed to be supervising. `tick()` is synchronous and self-guarding, so
+  // this cannot queue ticks behind a slow one.
+  void managedHostStartup.then(() => managedHostSupervisor.tick());
+}, MANAGED_HOST_SUPERVISION_INTERVAL_MS);
+managedHostSupervision.unref?.();
+
 const runtimeStartup = (async () => {
   await managedOpencodeStartup;
   if (shuttingDown) return;
@@ -5929,6 +6184,7 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
     relaunchTimer = undefined;
     if (runtimeUpdateTimer) clearInterval(runtimeUpdateTimer);
     clearInterval(brokerUpdateTimer);
+    clearInterval(managedHostSupervision);
     clearInterval(brokerHealthCapacityTimer);
     clearInterval(brokerHealthCanaryTimer);
     clearInterval(brokerHealthDiagnosticsTimer);
@@ -5962,6 +6218,22 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
       hub.dispose(),
       stopManagedOpencodeServe(),
       stopCodexDaemonEnsureProcess(),
+      // Reap only what this broker started. `releaseManagedHost` refuses to
+      // signal anything it cannot prove ownership of, so calling it for every
+      // agent is safe even on a machine full of hosts the operator runs.
+      // Awaited via the startup promise AND the in-flight supervision tick, so
+      // neither a host mid-launch nor one mid-RECOVERY is left behind by a
+      // shutdown that raced it. Both are settle-only (`allSettled` inside,
+      // `.catch` on the startup promise), so a failure in either cannot skip the
+      // release pass that follows.
+      managedHostStartup
+        .then(() => managedHostSupervisor.settled())
+        .then(() => Promise.allSettled(registry.list().map(async (backend) => {
+        const outcome = await releaseManagedHost(backend, managedHostEffects, managedHostOwners);
+        if (outcome.action === 'stopped') {
+          console.log(`${LOG_PREFIX} stopped the managed ${backend.id} host (pid ${outcome.pid})`);
+        }
+      }))),
     ]);
 
     try {

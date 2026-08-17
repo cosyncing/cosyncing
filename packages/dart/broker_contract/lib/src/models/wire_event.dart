@@ -683,8 +683,12 @@ class NackWireEvent extends WireEvent {
 }
 
 /// `{ kind: 'attach-conflict', requestedMode, reason, code, message }` — the
-/// broker's structured answer to a reason-tagged `mode=resume` attach it
-/// denied.
+/// broker's structured answer to a reason-tagged DRIVE attach it denied.
+///
+/// [requestedMode] names the mode that was actually asked for: `resume`, or
+/// `live` for a takeover of a session whose Drive lives on the live key. A
+/// client reading this frame to decide what to retry must use that value
+/// rather than assume resume.
 ///
 /// The socket stays open and continues as an Observe-class attach; this frame
 /// tells the client the machine reason so it can keep its local Drive

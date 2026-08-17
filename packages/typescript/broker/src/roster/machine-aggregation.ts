@@ -8,7 +8,7 @@ import type {
   MachineSessionResolution,
   SessionInfo,
 } from '@cosyncing/protocol';
-import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import { BROKER_CONTRACT_REVISION, PRODUCT_IDENTITY } from '@cosyncing/protocol';
 
 export type { AggregatedMachines, MachinePeerErrorCode, MachineRoster } from '@cosyncing/protocol';
 
@@ -158,7 +158,12 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await fetch(`${peer.url}/api/sessions`, {
+    // Declares the revision this BROKER can decode, which is the current one:
+    // a peer filters its roster to what its caller can parse, and a caller that
+    // says nothing is read as the oldest possible client. Asking bare made every
+    // peer withhold exactly the agents with a declared floor — Kimi and dsh —
+    // so remote sessions for them could never appear in a machine roster.
+    const res = await fetch(`${peer.url}/api/sessions?contractRevision=${BROKER_CONTRACT_REVISION}`, {
       signal: ac.signal,
       headers: peer.token ? { [PRODUCT_IDENTITY.tokenHeader]: peer.token } : undefined,
     });

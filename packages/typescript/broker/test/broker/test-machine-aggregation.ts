@@ -6,6 +6,7 @@
  */
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:net';
+import { BROKER_CONTRACT_REVISION } from '@cosyncing/protocol';
 import {
   aggregatedMachines,
   localMachineRoster,
@@ -94,6 +95,10 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
   const legacyPeerPort = await freePort();
 
   let sawPeerToken = false;
+  // What revision this broker declared when it asked its peer. A peer filters
+  // its roster to what the CALLER can decode, so a broker that asks bare is read
+  // as the oldest possible client and is served no Kimi or dsh sessions at all.
+  let sawPeerRevision: string | null = null;
   const healthyPeer = Bun.serve({
     hostname: '127.0.0.1',
     port: peerPort,
@@ -101,6 +106,7 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
       const url = new URL(req.url);
       if (url.pathname !== '/api/sessions') return Response.json({ error: 'not found' }, { status: 404 });
       sawPeerToken = req.headers.get('x-cosyncing-token') === peerToken;
+      sawPeerRevision = url.searchParams.get('contractRevision');
       if (!sawPeerToken) return Response.json({ error: 'unauthorized' }, { status: 401 });
       return Response.json({
         machine: 'peer-a',
@@ -110,6 +116,15 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
             id: 'peer-session',
             tool: 'opencode',
             title: 'Peer session',
+            status: 'idle',
+            attachMode: 'observe',
+          },
+          // An agent with a declared minimum client revision. It must reach a
+          // current client and must NOT reach one that cannot decode its row.
+          {
+            id: 'peer-kimi-session',
+            tool: 'kimi',
+            title: 'Peer kimi session',
             status: 'idle',
             attachMode: 'observe',
           },
@@ -185,6 +200,33 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
     assert.equal(body.machine, 'local-machine');
     assert.equal(Array.isArray(body.machines), true);
     assert.equal(sawPeerToken, true);
+    // The broker asks its peer as the client it actually is.
+    assert.equal(sawPeerRevision, String(BROKER_CONTRACT_REVISION));
+
+    // ── the aggregate is projected for the client that asked for it ─────────
+    //
+    // A machine roster carries this machine's sessions AND every peer's, so a
+    // client that cannot decode an agent must not receive its sessions through
+    // this route either. Asked as a current client, the peer's Kimi session
+    // arrives; asked as an older one — or as one that declares nothing — it does
+    // not, while every other session still does.
+    const machinesAt = async (query: string): Promise<string[]> => {
+      const response = await fetch(`${base}/api/machines${query}`, {
+        headers: { 'x-cosyncing-token': token },
+      });
+      assert.equal(response.status, 200);
+      const parsed = JSON.parse(await response.text()) as any;
+      return parsed.machines.flatMap((entry: any) => (entry.sessions ?? []).map((session: any) => session.id));
+    };
+    const currentClient = await machinesAt(`?contractRevision=${BROKER_CONTRACT_REVISION}`);
+    const legacyClient = await machinesAt('?contractRevision=13');
+    const undeclaredClient = await machinesAt('');
+    assert.equal(currentClient.includes('peer-kimi-session'), true);
+    assert.equal(legacyClient.includes('peer-kimi-session'), false);
+    assert.equal(undeclaredClient.includes('peer-kimi-session'), false);
+    // ...and hiding one agent never costs a client the others.
+    assert.equal(legacyClient.includes('peer-session'), true);
+    assert.equal(undeclaredClient.includes('peer-session'), true);
 
     const local = body.machines.find((m: any) => m.machine === 'local-machine');
     assert.equal(local.role, 'local');

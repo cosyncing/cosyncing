@@ -7,6 +7,21 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
+# Stop signals the broker ONLY, never the whole control group.
+#
+# systemd's default, KillMode=control-group, SIGTERMs every descendant of this
+# unit. That silently breaks the promise the whole ownership engine exists to
+# keep — "a host you started yourself is never touched" — because a host the
+# user launched from a terminal that happens to descend from this service is a
+# descendant too, and the kill reaches it without anything having proved it was
+# ours. It also made shutdown untestable: managed hosts died whether or not the
+# broker could prove it owned them, so a bug in that proof looked like success.
+#
+# The broker stops what it owns, through the ownership-checked release pass, and
+# leaves everything else running. Children it does own but somehow fails to
+# reap survive with their records intact, which is what makes them reapable on
+# the next start rather than orphaned forever.
+KillMode=process
 ExecStart={{EXEC_START}}
 WorkingDirectory={{WORKING_DIRECTORY}}
 Environment=COSYNCING_SERVICE_PROVIDER=systemd

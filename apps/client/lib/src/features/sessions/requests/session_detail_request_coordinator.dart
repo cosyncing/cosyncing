@@ -450,7 +450,10 @@ extension _SessionDetailRequestActions on SessionDetailController {
       // moved since) would be rejected as a conflicting reuse of the id instead
       // of returning the original acknowledgement. Rows written before these
       // keys existed carry neither, and stay byte-identical to their first
-      // send.
+      // send. The approval mode is replayed for both reasons at once: it is
+      // part of that fingerprint, and it is the mode the user chose for THIS
+      // prompt — reading the composer's current mode at replay time would send
+      // a request they never made.
       SessionOutboxMessageKind.prompt => connection.sendPrompt(
         payload['text'] as String? ?? '',
         model: _decodeModel(payload['model']),
@@ -458,6 +461,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
         clientMessageId: clientMessageId,
         draftRevision: (payload['draftRevision'] as num?)?.toInt(),
         draftUpdateId: payload['draftUpdateId'] as String?,
+        permissionMode: payload['permissionMode'] as String?,
       ),
       SessionOutboxMessageKind.command => connection.sendCommand(
         payload['name'] as String? ?? '',

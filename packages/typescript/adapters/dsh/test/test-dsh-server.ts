@@ -29,6 +29,7 @@ import {
   DSH_FRAME_MAX_BYTES,
   DSH_HOST_ROUTE,
   DSH_MUX_ROUTE,
+  DSH_REMOTE_METHODS,
   DSH_RESPOND_ROUTE,
   DSH_RPC_METHODS,
   dshApiPath,
@@ -60,17 +61,50 @@ function check(name: string, ok: boolean, detail = ''): void {
 // ── 1. Round-1 method allowlist (structural) ────────────────────────────────
 
 {
+  // Written out rather than derived from the constant, so widening the
+  // allowlist is a deliberate edit HERE and not a side effect of an edit there.
   const expectedMethods = [
     'host.describe', 'workspace.list', 'session.list', 'session.history',
     'session.create', 'session.prompt', 'session.cancel', 'session.rename',
+    // The model surface, verified against the installed 0.1.0-rc.6 host.
+    'session.models', 'session.selectModel',
   ];
   check(
-    'the unary method allowlist is exactly the round-1 set',
+    'the unary method allowlist is exactly the verified set',
     JSON.stringify([...DSH_RPC_METHODS].sort()) === JSON.stringify([...expectedMethods].sort()),
     DSH_RPC_METHODS.join(','),
   );
 
-  const expectedRoutes = [...expectedMethods, DSH_RESPOND_ROUTE, DSH_MUX_ROUTE, DSH_HOST_ROUTE];
+  // The Typert Remote family is a SEPARATE constant because it is a separate
+  // wire dialect (`payload:{args:{…}}`, named fields). Only the two commands
+  // endpoints are reachable; `goals/*`, `messageFeedback/*` and the rest of
+  // that family stay unbuildable.
+  check(
+    'the Typert Remote allowlist is exactly the two commands endpoints',
+    JSON.stringify([...DSH_REMOTE_METHODS].sort()) === JSON.stringify(['commands/execute', 'commands/list']),
+    DSH_REMOTE_METHODS.join(','),
+  );
+
+  check(
+    'an unverified Typert Remote endpoint cannot be produced',
+    ['goals/create', 'messageFeedback/put', 'pluginInventory/list', 'commands/', 'commands'].every((route) => {
+      try {
+        dshApiPath(route);
+        return false;
+      } catch {
+        return true;
+      }
+    }),
+  );
+
+  const expectedRoutes = [
+    ...expectedMethods,
+    'commands/list',
+    'commands/execute',
+    DSH_RESPOND_ROUTE,
+    DSH_MUX_ROUTE,
+    DSH_HOST_ROUTE,
+  ];
   check(
     'no /api route outside the allowlist can be produced',
     JSON.stringify([...DSH_API_ROUTES].sort()) === JSON.stringify([...expectedRoutes].sort()),
@@ -105,6 +139,56 @@ function check(name: string, ok: boolean, detail = ''): void {
   );
 
   check('an allowlisted route produces its exact path', dshApiPath('session.prompt') === '/api/session.prompt');
+
+  // The two dialects must not be crossable. A Remote endpoint reached through
+  // `call` would post a bare payload the host rejects as `internal` one round
+  // trip later, and an RPC method reached through `callRemote` would arrive
+  // double-wrapped in `args`. Both are routing mistakes, so both are refused
+  // here rather than by the host.
+  {
+    let posted = 0;
+    const fetchImpl: DshFetch = async () => {
+      posted += 1;
+      return { status: 200, text: async () => '{}' };
+    };
+    const rpc = new DshRpcClient({ baseUrl: 'http://h', fetchImpl });
+    const asRpc = await rpc.call('commands/list' as never, {});
+    const asRemote = await rpc.callRemote('session.prompt' as never, {});
+    check(
+      'neither wire dialect can be used to reach the other’s methods',
+      asRpc.ok === false
+        && asRpc.failure.kind === 'transport'
+        && asRpc.failure.reason === 'route-not-allowed'
+        && asRemote.ok === false
+        && asRemote.failure.kind === 'transport'
+        && asRemote.failure.reason === 'route-not-allowed'
+        && posted === 0,
+      `${JSON.stringify(asRpc)} / ${JSON.stringify(asRemote)} / ${posted} posts`,
+    );
+  }
+
+  {
+    // The gateway matches FIELD NAMES against its descriptor, so the wrapper is
+    // load-bearing: the installed host answers a bare payload with "Remote
+    // payload must contain exactly one plain-object args field".
+    let body: Record<string, unknown> = {};
+    const fetchImpl: DshFetch = async (_url, init) => {
+      body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        status: 200,
+        text: async () => JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [] } }),
+      };
+    };
+    const rpc = new DshRpcClient({ baseUrl: 'http://h', fetchImpl });
+    await rpc.callRemote('commands/list', { agentId: 'session-1' });
+    check(
+      'a Typert Remote call wraps its named arguments in the args field the gateway requires',
+      body.type === 'client-request'
+        && body.method === 'commands/list'
+        && JSON.stringify(body.payload) === JSON.stringify({ args: { agentId: 'session-1' } }),
+      JSON.stringify(body),
+    );
+  }
 
   // One builder, proven over the source text: outside server.ts no adapter
   // source may embed an /api/ path literal (a quote or backtick immediately
@@ -601,14 +685,16 @@ class FakeSocket implements DshSocketLike {
   });
 
   check(
-    'the capability posture is live-only drive: no observe, resume, artifacts, file input, or model switch',
+    'the capability posture is live-only drive with model switching and image input',
     adapter.capabilities.integrationKind === 'http-websocket'
       && JSON.stringify(adapter.capabilities.attachModes) === JSON.stringify(['live'])
       && adapter.capabilities.supportsLiveAttach && !adapter.capabilities.supportsObserve
       && !adapter.capabilities.supportsResume
       && !adapter.capabilities.supportsNativeArtifact
-      && !adapter.capabilities.supportsNativeFileInput
-      && !adapter.capabilities.supportsModelSwitch
+      // The host takes inline image bytes on the prompt; this flag is what
+      // makes the client offer the attach control that reaches them.
+      && adapter.capabilities.supportsNativeFileInput
+      && adapter.capabilities.supportsModelSwitch
       && adapter.capabilities.permissionGranularity === 'per-tool',
     JSON.stringify(adapter.capabilities),
   );

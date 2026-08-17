@@ -1398,7 +1398,15 @@ String _controlStatusDescription(
     SessionControlPill.syncAvailable =>
       l10n.sessionControlSyncAvailableDescription,
     SessionControlPill.observing => l10n.sessionControlObservingDescription,
-    SessionControlPill.unavailable => l10n.sessionControlUnavailableDescription,
+    // The pill describes the SESSION; this line describes what the operator can
+    // do about it, and on a demoted session the two part company. "Unavailable"
+    // is true of that drive generation and stays, but telling someone the app
+    // "can neither take over nor sync" beside a working Take over button is
+    // false — and this is the one state where taking over is the only way back.
+    SessionControlPill.unavailable =>
+      control.canTakeOver
+          ? l10n.sessionControlTakeoverAvailableDescription
+          : l10n.sessionControlUnavailableDescription,
     SessionControlPill.unknown => l10n.sessionControlUnknownDescription,
   };
 }

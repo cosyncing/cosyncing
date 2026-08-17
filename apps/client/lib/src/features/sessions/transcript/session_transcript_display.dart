@@ -94,6 +94,14 @@ List<SessionTranscriptDisplayEntry> buildSessionTranscriptDisplayEntries({
       index += 1;
       continue;
     }
+    // Internal bookkeeping the session needs and the reader does not. Same
+    // contract as the resolutions above: the canonical list is untouched, so
+    // telemetry, ownership, caches, Debug and persistence still see every
+    // frame — only the transcript row is withheld.
+    if (isInternalBookkeepingMessage(message)) {
+      index += 1;
+      continue;
+    }
     if (!_isToolMessage(message)) {
       entries.add(
         MessageTranscriptDisplayEntry(
@@ -177,6 +185,46 @@ List<SessionTranscriptDisplayEntry> _buildFinalOnlyEntries(
 bool _isRequestResolutionMessage(AgentMessage message) =>
     message.type == AgentMessageType.permissionResolved ||
     message.type == AgentMessageType.questionResolved;
+
+/// Canonical event names that record an internal step, not session content.
+///
+/// Matched by exact name rather than by prefix or payload shape. An adapter is
+/// free to invent event names, and a broad rule — "hide events with small
+/// payloads", "hide anything namespaced" — would eventually swallow a real
+/// lifecycle transition that nobody remembered to exempt. Adding a name here is
+/// a deliberate act; forgetting to is merely noisy.
+const _internalEventNames = <String>{
+  // The host's own per-event bookkeeping. It carries a native event type and a
+  // sequence number and nothing a reader can act on, and it arrives once per
+  // event, so a session opens behind a wall of identical rows.
+  'dsh.session-event',
+  // Claude's launch record: model, permission mode and effort, all of which the
+  // session surfaces already show.
+  'claude.init',
+  // The same record under the unnamespaced name it carried before, kept only
+  // because transcripts recorded then still replay it. No adapter emits it now,
+  // and nothing new should claim a bare name this generic.
+  'init',
+};
+
+/// Whether [message] is internal bookkeeping that must not become a row.
+///
+/// Deliberately narrow. `metadata-update` is bookkeeping by construction — it
+/// exists so the client can update runtime totals, status, ownership and
+/// caches, and it was rendering its own key and value as a card, which is both
+/// noise and raw-identifier leakage. Events are matched by exact canonical
+/// name, so errors, notices, permission and question requests, tool activity
+/// and real lifecycle transitions are all untouched.
+///
+/// Hiding is a DISPLAY decision only. The state these frames carry is applied
+/// from the canonical list (see `SessionTelemetry.applyMessage`), which this
+/// function never sees.
+bool isInternalBookkeepingMessage(AgentMessage message) {
+  if (message.type == AgentMessageType.metadataUpdate) return true;
+  if (message.type != AgentMessageType.event) return false;
+  final name = message.eventName;
+  return name != null && _internalEventNames.contains(name);
+}
 
 bool _isFinalOnlyAlwaysVisible(AgentMessage message) => switch (message.type) {
   AgentMessageType.userMessage ||

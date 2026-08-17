@@ -232,6 +232,18 @@ export const KIMI_INTERACTION_REGISTRY_LIMIT = 64;
  * subscribes to that stream (see {@link KIMI_TRANSCRIPT_GRADE}): a server that
  * sends one anyway is still telling us something changed.
  */
+/**
+ * WHY a walk is running, because one consumer counts them.
+ *
+ * `poll` is the periodic tick and nothing else. Everything else — a frame that
+ * says the transcript moved, a reconnect finishing, a lifecycle call — is an
+ * `event` walk: a fine moment to READ, and no evidence at all about time
+ * passing. The divergence detector in `drive.ts` confirms a foreign write by
+ * counting polls the server stayed silent through, and two walks in the same
+ * millisecond are not two silences.
+ */
+export type KimiWalkKind = 'poll' | 'event';
+
 const REFRESH_TRIGGER_EVENTS: ReadonlySet<string> = new Set([
   'transcript.reset',
   'transcript.ops',
@@ -721,6 +733,7 @@ export class KimiObserveConnection implements SessionConnection {
     return this.liveActivityValue;
   }
 
+
   /** One discontinuity. Bumping the mark is what makes a later "nothing happened" trustworthy. */
   protected noteStreamBreak(): void {
     this.streamMarkValue += 1;
@@ -742,7 +755,7 @@ export class KimiObserveConnection implements SessionConnection {
    * detector, which must see rows the emission dedupe would swallow — a foreign
    * user prompt that arrived once already is still evidence.
    */
-  protected onWalkedRows(_rows: KimiMappedRow[]): void {}
+  protected onWalkedRows(_rows: KimiMappedRow[], _kind: KimiWalkKind): void {}
 
   /** Rows the authoritative history read delivered. Base does nothing; drive baselines from them. */
   protected onHistoryRows(_rows: KimiMappedRow[]): void {}
@@ -1243,7 +1256,8 @@ export class KimiObserveConnection implements SessionConnection {
       // stream if it dropped. Without the reopen, one lost socket would demote a
       // server-live session to poll-only for the rest of the connection.
       void this.restoreSocket();
-      void this.refresh();
+      // The ONE poll in this class. Everything else that refreshes is an event.
+      void this.refresh('poll');
       // The overlay read and the journal read are NOT part of the transcript
       // walk and must not take its single slot: the walk is the expensive,
       // session-force-loading job, and a coalesced tick would otherwise silently
@@ -1349,7 +1363,7 @@ export class KimiObserveConnection implements SessionConnection {
    * later re-subscribe needs no catch-up path — the next tick simply refreshes,
    * and the overlap walk above covers whatever accumulated in between.
    */
-  async refresh(): Promise<void> {
+  async refresh(kind: KimiWalkKind = 'event'): Promise<void> {
     if (this.closed || this.refreshing) return;
     if (!this.hasSubscribers) return;
     // A refused generation must not be spent on another read: re-resolve first,
@@ -1361,7 +1375,7 @@ export class KimiObserveConnection implements SessionConnection {
       if (!(await this.ensureTransport())) return;
       if (this.closed || this.refreshing || !this.hasSubscribers) return;
     }
-    await this.runExclusiveWalk(KIMI_REFRESH_MAX_PAGES, KIMI_REFRESH_PAGE_SIZE);
+    await this.runExclusiveWalk(KIMI_REFRESH_MAX_PAGES, KIMI_REFRESH_PAGE_SIZE, kind);
   }
 
   /**
@@ -1374,9 +1388,10 @@ export class KimiObserveConnection implements SessionConnection {
   private runExclusiveWalk(
     maxPages: number,
     pageSize: number,
+    kind: KimiWalkKind = 'event',
   ): Promise<'overlapped' | 'exhausted' | 'error' | 'ceiling'> {
     this.refreshing = true;
-    const run = this.walk(maxPages, pageSize).finally(() => {
+    const run = this.walk(maxPages, pageSize, kind).finally(() => {
       this.refreshing = false;
       this.activeWalk = undefined;
     });
@@ -1395,6 +1410,7 @@ export class KimiObserveConnection implements SessionConnection {
   private async walk(
     maxPages: number,
     pageSize: number,
+    kind: KimiWalkKind = 'event',
   ): Promise<'overlapped' | 'exhausted' | 'error' | 'ceiling'> {
     const pages: KimiMappedRow[][] = [];
     let beforeId: string | undefined;
@@ -1435,7 +1451,7 @@ export class KimiObserveConnection implements SessionConnection {
     // BEFORE emission, deliberately: the detector must see every row this walk
     // gathered, including the ones the seen-set is about to swallow. A foreign
     // prompt that already emitted once is still a foreign prompt.
-    this.onWalkedRows(walked);
+    this.onWalkedRows(walked, kind);
     for (const row of walked) {
       // `emit` owns the seen-check and the remember for BOTH the primed and
       // the buffered paths, so there is exactly one place a row can be

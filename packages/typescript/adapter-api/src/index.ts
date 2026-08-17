@@ -8,9 +8,10 @@ import type { AgentSetupDiagnosis, SetupDiagnosisContext } from './diagnosis.ts'
 
 // ── Backend (one per tool) ───────────────────────────────────────────────────
 
-/** Additive attach context. `reason` only accompanies an authenticated
- *  `mode=resume` attach (see `DriveAttachReason`); adapters that ignore it keep
- *  their existing behavior, which is exactly the mode-only compatibility path. */
+/** Additive attach context. `reason` only accompanies an authenticated DRIVE
+ *  attach — `mode=resume`, or `mode=live` where the reason is `takeover` (see
+ *  `DriveAttachReason` for the full matrix); adapters that ignore it keep their
+ *  existing behavior, which is exactly the mode-only compatibility path. */
 export interface AttachOptions {
   reason?: DriveAttachReason;
 }
@@ -126,8 +127,81 @@ export interface AgentBackend {
   readonly capabilities: AgentCapabilities;
   /** Optional native-host integration described as data for broker orchestration. */
   readonly integration?: import('./integration.ts').AgentIntegration;
+  /**
+   * Oldest client contract revision that may be SHOWN this agent at all.
+   *
+   * Declared by the adapter, applied by the broker when it projects
+   * `/api/agents`, and never sent to anyone: a client below this revision is
+   * simply not told the agent exists. It exists because the roster decodes as
+   * ONE list, so an agent carrying an `integrationKind` or `attachMode` an
+   * older client cannot parse costs that client EVERY agent, not just this one.
+   *
+   * Absent means every client may see it — the right default, because an agent
+   * built from values that have always existed excludes nobody. Set it only for
+   * an agent that introduces a value older clients cannot decode, and set it to
+   * the revision that introduced the tolerance THAT AGENT NEEDS — the highest of
+   * {@link CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE} and
+   * {@link CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE} its own declared
+   * values require — rather than the current revision, or the newest tolerance
+   * that exists. Either shortcut silently hides the agent from a whole released
+   * client generation that could have decoded it.
+   */
+  readonly minimumClientRevision?: number;
+  /**
+   * Ceiling on how long the registry will WAIT for this backend's discovery leg
+   * — `isAvailable()` and `discoverSessions()` together — before abandoning it
+   * for this sweep and aborting its in-flight work.
+   *
+   * Absent means no ceiling, which is right for a backend that reads local
+   * files: it is bounded by the filesystem and cannot hang on a peer. Set it on
+   * any backend whose discovery crosses a network to a host this broker does
+   * not own, because {@link AgentRegistry.discoverAll} answers only when every
+   * backend has, so one unresponsive host otherwise stalls the WHOLE roster —
+   * including agents that answered in milliseconds.
+   *
+   * A per-request transport timeout is not a substitute. A leg is several
+   * requests, and a host that accepts connections and answers slowly (or never)
+   * pays that timeout once per request; the ceiling that matters to the roster
+   * is over the leg.
+   */
+  readonly discoveryBudgetMs?: number;
+  /**
+   * Describe the external host this adapter talks to, so the broker can own its
+   * lifecycle without knowing which agent this is.
+   *
+   * `null` means there is nothing to describe right now — no host is configured,
+   * or the adapter cannot say where one would be. Absent entirely means the
+   * agent has no external host, which is every adapter whose runtime the broker
+   * already owns as its own child.
+   *
+   * This must be a READ: resolve configuration, consult a registry the host
+   * maintains, report what it finds. It must not start, stop, signal, or connect
+   * to anything. The broker performs every effect implied by what this returns,
+   * and only after deciding it is allowed to.
+   */
+  describeManagedHost?(): Promise<import('./integration.ts').ManagedHostDescriptor | null>;
+  /**
+   * WHICH host a given environment points this adapter at, as an opaque identity
+   * key — the same key {@link import('./integration.ts').ManagedHostDescriptor}
+   * records ownership under.
+   *
+   * Pure and parameterized, which is the whole point: `describeManagedHost`
+   * answers for the environment this adapter instance was constructed with, and
+   * the broker needs the answer for an environment it is NOT running in — the
+   * installed service's. That is what makes the managed posture specific to a
+   * configuration instead of to an agent, so an operator pointed at some other
+   * home or address is not told that host is supervised.
+   *
+   * `null` where the environment names no host this adapter could talk to (an
+   * unusable address), which is an identity nothing can match.
+   *
+   * Adapters that declare `integration.externalHost` must implement this; the
+   * broker cannot scope a posture it cannot name, and a managed host with no
+   * identity would have to be treated as agent-wide again.
+   */
+  managedHostIdentity?(inputs: import('./integration.ts').ManagedHostIdentityInputs): string | null;
   /** Is the tool installed / its server reachable right now? */
-  isAvailable(): Promise<boolean>;
+  isAvailable(options?: AvailabilityOptions): Promise<boolean>;
   /** Read-only setup/doctor checks. This path must not call discovery or start/install any runtime. */
   diagnoseSetup?(context: SetupDiagnosisContext): Promise<AgentSetupDiagnosis>;
   /** Enumerate sessions for the roster.
@@ -197,12 +271,45 @@ export interface AgentBackend {
   watchSessionInfo?(onChange: (info: SessionInfo) => void): Unsubscribe;
 }
 
+/** Per-call context for an availability probe. */
+export interface AvailabilityOptions {
+  /**
+   * Aborted when the caller stops waiting — the discovery budget expiring is
+   * the case this exists for. A backend that reaches a network MUST thread it
+   * into the request it is waiting on; abandoning the promise bounds the
+   * caller but leaves the socket open to a host that already proved it will
+   * not answer.
+   */
+  signal?: AbortSignal;
+}
+
 export interface SessionDiscoveryOptions {
   /** Inclusive UTC epoch-millisecond cutoff for idle historical sessions. */
   updatedAfter?: number;
   /** Optional deterministic evidence hook for bounded-discovery fixtures. */
   onWork?: (work: SessionDiscoveryWork) => void;
+  /** See {@link AvailabilityOptions.signal}; the same signal spans the whole leg. */
+  signal?: AbortSignal;
 }
+
+/**
+ * {@link AgentBackend.discoveryBudgetMs} for a backend whose sessions live in an
+ * external host process.
+ *
+ * ONE number for all of them, deliberately. A per-adapter budget would be a
+ * second policy for a question that is not about any adapter: how long the
+ * roster may be held hostage by a host nobody here owns. The adapters differ in
+ * their per-request timeouts (5s and 30s today) precisely because those answer
+ * a different question — how long ONE request may take — and neither of them
+ * bounds a leg.
+ *
+ * Five seconds is above any healthy leg by orders of magnitude: these hosts are
+ * on loopback, where a JSON read is milliseconds, and it is at or above each
+ * adapter's own single-request ceiling, so a request that would have succeeded
+ * is not cut short. It is far below the wait a user would read as "cosyncing is
+ * broken", which is the failure this exists to prevent.
+ */
+export const EXTERNAL_HOST_DISCOVERY_BUDGET_MS = 5_000;
 
 /** One native read/query performed by session discovery. */
 export type SessionDiscoveryWork =
@@ -212,6 +319,25 @@ export type SessionDiscoveryWork =
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 /** Holds the registered adapters. Adding a tool touches only registration. */
+/**
+ * What a declared discovery budget actually means, including when it is nonsense.
+ *
+ * `undefined` is "no budget" and stays that way: that is every local adapter,
+ * which reads the filesystem and has nothing to hang on, and putting a deadline
+ * on that could only lose sessions.
+ *
+ * A DECLARED but unusable value — 0, negative, NaN, Infinity — is a different
+ * thing entirely, and the one meaning it must never take is "therefore wait
+ * forever". A backend declares this field only because its discovery can cross
+ * to a host the broker does not own, so a broken number is exactly the case
+ * where the bound matters most. It falls back to the standard budget.
+ */
+export function effectiveDiscoveryBudgetMs(declared: number | undefined): number | undefined {
+  if (declared === undefined) return undefined;
+  return Number.isFinite(declared) && declared > 0 ? declared : EXTERNAL_HOST_DISCOVERY_BUDGET_MS;
+}
+
+
 export class AgentRegistry {
   private readonly backends = new Map<string, AgentBackend>();
 
@@ -227,19 +353,65 @@ export class AgentRegistry {
     return [...this.backends.values()];
   }
 
-  /** Discover sessions across all available backends; failures are isolated. */
+  /**
+   * Discover sessions across all available backends; failures are isolated, and
+   * so is SLOWNESS.
+   *
+   * The isolation that used to exist here was only for throwing: one backend's
+   * exception could not lose another's sessions. But the answer still waits for
+   * every backend, so a backend that neither throws nor returns held the entire
+   * roster — and the backends that can do that are exactly the ones talking to
+   * a host the broker does not own. A host that accepts the connection and then
+   * says nothing is the shape that matters: it is indistinguishable from a slow
+   * one, so nothing below fails, and every established local agent waits behind
+   * it.
+   *
+   * {@link AgentBackend.discoveryBudgetMs} bounds that wait per backend. On
+   * expiry the leg is abandoned for this sweep — the backend contributes no
+   * rows, exactly as an unavailable one does — and its signal is aborted so a
+   * cooperating adapter tears the request down rather than leaving a socket
+   * open to a host that has already proved it will not answer.
+   *
+   * The race is what makes the bound hold: a backend that ignores its signal
+   * delays nothing, because the registry has already stopped waiting on it.
+   */
   async discoverAll(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
-    const perBackend = await Promise.all(
-      this.list().map(async (b) => {
-        try {
-          if (!(await b.isAvailable())) return [];
-          return await b.discoverSessions(options);
-        } catch {
-          return [];
-        }
-      }),
-    );
+    const perBackend = await Promise.all(this.list().map((b) => this.discoverFromBackend(b, options)));
     return perBackend.flat();
+  }
+
+  private async discoverFromBackend(
+    backend: AgentBackend,
+    options?: SessionDiscoveryOptions,
+  ): Promise<SessionInfo[]> {
+    const budgetMs = effectiveDiscoveryBudgetMs(backend.discoveryBudgetMs);
+    if (budgetMs === undefined) return await discoveryLeg(backend, options);
+    // `AbortSignal.timeout` rather than a tracked timer: it does not hold the
+    // event loop open, so a budget that outlives the leg cannot keep a broker
+    // that is otherwise finished from exiting.
+    const expiry = AbortSignal.timeout(budgetMs);
+    const signal = options?.signal ? AbortSignal.any([expiry, options.signal]) : expiry;
+    const abandoned = new Promise<SessionInfo[]>((resolve) => {
+      if (signal.aborted) resolve([]);
+      else signal.addEventListener('abort', () => resolve([]), { once: true });
+    });
+    return await Promise.race([discoveryLeg(backend, { ...options, signal }), abandoned]);
+  }
+}
+
+/** One backend's whole discovery leg, isolated: it resolves, and never throws. */
+async function discoveryLeg(
+  backend: AgentBackend,
+  options?: SessionDiscoveryOptions,
+): Promise<SessionInfo[]> {
+  try {
+    const available = await backend.isAvailable(
+      options?.signal ? { signal: options.signal } : undefined,
+    );
+    if (!available) return [];
+    return await backend.discoverSessions(options);
+  } catch {
+    return [];
   }
 }
 

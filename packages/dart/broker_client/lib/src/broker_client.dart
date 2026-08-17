@@ -169,7 +169,7 @@ class BrokerClient {
   /// `GET /api/agents`
   Future<List<AgentInfo>> listAgents() async {
     final response = await _get<List<dynamic>>(
-      _resolver.agentsEndpoint,
+      _resolver.agentRosterEndpoint,
     );
     return response
         .map((e) => AgentInfo.fromJson(e as Map<String, dynamic>))
@@ -181,7 +181,11 @@ class BrokerClient {
   /// `GET /api/sessions`
   Future<ListSessionsResponse> listSessions() async {
     final response = await _get<Map<String, dynamic>>(
-      _resolver.sessionsEndpoint,
+      // `sessionsEndpointFor`, not the bare prefix: this read has to declare
+      // the same contract revision as every other roster read, or the broker
+      // reads it as the oldest possible client and withholds every agent with
+      // a declared floor.
+      _resolver.sessionsEndpointFor(),
     );
     return ListSessionsResponse.fromJson(response);
   }
@@ -286,7 +290,7 @@ class BrokerClient {
   /// `GET /api/machines` is authenticated and read-only.
   Future<AggregatedMachinesResponse> listMachines() async {
     final response = await _get<Map<String, dynamic>>(
-      _resolver.machinesEndpoint,
+      _resolver.machineRosterEndpoint,
     );
     return AggregatedMachinesResponse.fromJson(response);
   }

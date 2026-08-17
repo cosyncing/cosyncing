@@ -32,6 +32,15 @@ import {
   renderLifecycleStatus,
   type LifecycleStatusReport,
 } from '../../src/installation/broker-lifecycle.ts';
+import {
+  defaultManagedHostEffects,
+  managedHostStore,
+  readManagedHostOwnership,
+  type LiveProcess,
+  type ManagedHostLocation,
+  type ManagedHostOwnership,
+} from '../../src/runtime/managed-host.ts';
+const BOOT = 'boot-aaaa';
 import { cliMessages } from '../../src/cli/cli-i18n.ts';
 import { PRODUCT_IDENTITY } from '../../../adapter-api/src/index.ts';
 import { BUILD_INFO, buildFingerprint } from '../../src/runtime/build-info.ts';
@@ -1414,6 +1423,116 @@ try {
         && disconnect[0]!.summary.includes("'codex resume'")
         && uninstalled.exitCode === 0 && stopCalls.length === 1
         && readCodexDaemonOwnership(m.home)?.startedByBroker === false);
+  }
+
+
+  // ── external agent hosts (`kimi web`, `dsh web`) ───────────────────────────
+  //
+  // Uninstall runs outside the broker, so the ownership records are the only
+  // list of hosts there is. The rule is the Codex daemon's: stop what cosyncing
+  // can prove it started, leave everything else running.
+  {
+    const hostMachine = (record: Partial<ManagedHostOwnership> = {}) => {
+      const m = machine({ binaryHash: true }); cleanup.push(m.root);
+      managedHostStore(m.home).write({
+        schemaVersion: 3, pid: 8801, start: '5150', boot: BOOT, comm: 'kimi',
+        agent: 'kimi', identityKey: '/fixture/agent-root/.kimi-code',
+        recordedAtMs: 1_752_700_000_000,
+        evidence: { executable: '/usr/bin/kimi', args: ['web', '--no-open'], port: 58627 },
+        ...record,
+      } as ManagedHostOwnership);
+      return m;
+    };
+    const effectsFor = (
+      listener: ManagedHostLocation,
+      live: LiveProcess,
+      signals: Array<{ pid: number; signal: string }>,
+    ) => ({
+      ...defaultManagedHostEffects(),
+      listener: () => listener,
+      liveProcess: () => live,
+      signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => { signals.push({ pid, signal }); },
+    });
+    const OWNED_LIVE: LiveProcess = { state: 'running', identity: { pid: 8801, start: '5150', boot: BOOT, comm: 'kimi' } };
+
+    {
+      // Proven ours: planned, advised, and actually stopped.
+      const m = hostMachine();
+      const signals: Array<{ pid: number; signal: string }> = [];
+      let live: LiveProcess = OWNED_LIVE;
+      const hostOptions = {
+        managedHostEffects: {
+          ...defaultManagedHostEffects(),
+          listener: () => ({ state: 'identified', pid: 8801 }) as ManagedHostLocation,
+          liveProcess: () => live,
+          signal: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => {
+            signals.push({ pid, signal });
+            live = { state: 'absent' }; // it dies on the first signal
+          },
+        },
+      };
+      const plan = await inspectUninstall({ ...baseOptions(m), ...hostOptions, purgeData: false });
+      const uninstalled = await runUninstall({
+        ...baseOptions(m), ...hostOptions, confirmed: true, allowLegacyIntegrations: false,
+        purgeData: false, purgeConfirmed: false, expectedPlan: plan,
+      });
+      check('an external host cosyncing started is planned for a stop, advised, and actually stopped',
+        plan.actions.filter((action) => action.id === 'managed-host.stop').length === 1
+          && plan.advisories.some((item) => item.detailCode === 'managed-host-sessions-disconnect')
+          && uninstalled.exitCode === 0
+          && signals.length >= 1 && signals[0]!.pid === 8801
+          && readManagedHostOwnership('kimi', m.home) === null,
+        JSON.stringify({ actions: plan.actions.map((a) => a.id), signals }));
+    }
+    {
+      // A host the operator started: never planned, never signalled.
+      const m = hostMachine();
+      const signals: Array<{ pid: number; signal: string }> = [];
+      const hostOptions = {
+        managedHostEffects: effectsFor(
+          { state: 'identified', pid: 8801 },
+          { state: 'running', identity: { pid: 8801, start: '9999', boot: BOOT, comm: 'kimi' } }, // recycled pid
+          signals,
+        ),
+      };
+      const plan = await inspectUninstall({ ...baseOptions(m), ...hostOptions, purgeData: false });
+      const uninstalled = await runUninstall({
+        ...baseOptions(m), ...hostOptions, confirmed: true, allowLegacyIntegrations: false,
+        purgeData: false, purgeConfirmed: false, expectedPlan: plan,
+      });
+      check('an external host that cannot be proven ours is advised as preserved and never signalled',
+        plan.actions.filter((action) => action.id === 'managed-host.stop').length === 0
+          && plan.advisories.filter((item) => item.detailCode === 'managed-host-preserved').length === 1
+          && uninstalled.exitCode === 0 && signals.length === 0
+          // The record is durable state: it survives a non-purge uninstall so a
+          // reinstall can still prove ownership of a host this run left alone.
+          && readManagedHostOwnership('kimi', m.home) !== null,
+        JSON.stringify({ actions: plan.actions.map((a) => a.id), signals }));
+    }
+    {
+      // An address this machine will not describe: no conclusion, no action.
+      const m = hostMachine();
+      const signals: Array<{ pid: number; signal: string }> = [];
+      const hostOptions = { managedHostEffects: effectsFor({ state: 'unknown' }, { state: 'unknown' }, signals) };
+      const plan = await inspectUninstall({ ...baseOptions(m), ...hostOptions, purgeData: false });
+      check('an unlocatable external host is preserved rather than assumed gone',
+        plan.actions.filter((action) => action.id === 'managed-host.stop').length === 0
+          && plan.advisories.filter((item) => item.detailCode === 'managed-host-preserved').length === 1
+          && signals.length === 0,
+        JSON.stringify(plan.advisories.map((a) => a.detailCode)));
+    }
+    {
+      // Already gone: nothing to stop, and it says so rather than warning.
+      const m = hostMachine();
+      const signals: Array<{ pid: number; signal: string }> = [];
+      const hostOptions = { managedHostEffects: effectsFor({ state: 'absent' }, { state: 'absent' }, signals) };
+      const plan = await inspectUninstall({ ...baseOptions(m), ...hostOptions, purgeData: false });
+      check('an external host that already exited needs no stop and is reported as such',
+        plan.actions.filter((action) => action.id === 'managed-host.stop').length === 0
+          && plan.advisories.filter((item) => item.detailCode === 'managed-host-not-running').length === 1
+          && signals.length === 0,
+        JSON.stringify(plan.advisories.map((a) => a.detailCode)));
+    }
   }
 
   // A replacement daemon (the broker's daemon died, the user started a new one) recreates the control

@@ -25,7 +25,7 @@
  *   bun run packages/typescript/adapters/kimi/test/test-kimi-server.ts   (exit 0 = all pass)
  */
 export {};
-import { KIMI_DRIVE_ENV, KimiAdapter, kimiDriveEnabled } from '../src/index.ts';
+import { KimiAdapter } from '../src/index.ts';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -96,7 +96,7 @@ function check(name: string, ok: boolean, detail = ''): void {
  */
 const BOUND_STARTED_AT = 1_786_657_461_604;
 function boundInstance(serverId: string, baseUrl: string, port: number) {
-  return { baseUrl, port, serverId, hostVersion: FIXTURE.kimiVersion, startedAt: BOUND_STARTED_AT };
+  return { baseUrl, port, pid: 4242, serverId, hostVersion: FIXTURE.kimiVersion, startedAt: BOUND_STARTED_AT };
 }
 function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -404,6 +404,7 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
   const instance = {
     baseUrl: `http://127.0.0.1:${record.port}`,
     port: record.port,
+    pid: record.pid,
     serverId: record.serverId,
     hostVersion: record.hostVersion,
     startedAt: registryStartedAt,
@@ -1399,6 +1400,7 @@ const FIXTURE_RECORD = decodeKimiInstanceRecord(FIXTURE.instanceRecord)!;
 const fixtureInstance = {
   baseUrl,
   port: listenPort,
+  pid: FIXTURE_RECORD.pid,
   serverId: FIXTURE_RECORD.serverId,
   hostVersion: FIXTURE_RECORD.hostVersion,
   startedAt: FIXTURE_RECORD.startedAt,
@@ -1414,10 +1416,6 @@ try {
   const adapter = new KimiAdapter({
     env: {},
     homeDir: '/fixture/home',
-    // The DRIVE GATE, asked for explicitly. It is default-off — see the
-    // registration-gate suite for the off surface and why — so a suite about
-    // the K2 posture has to name the posture it is testing.
-    drive: true,
     instanceScan: () => scan,
     readToken: () => 'fixture-token',
   });
@@ -1454,58 +1452,53 @@ try {
   // — for any adapter — so advertising Drive would put affordances in front of
   // the user that end in a refused attach. With the gate off this adapter is
   // the K1 observe surface exactly.
-  const gateNames = ['createSession', 'canCreateSession', 'prepareCreateSession', 'listModels'] as const;
-  const gatedOff = new KimiAdapter({
-    env: {},
-    homeDir: '/fixture/home',
-    instanceScan: () => scan,
-    readToken: () => 'fixture-token',
-  });
-  check('with the drive gate off the adapter advertises the observe-only surface',
-    gatedOff.capabilities.attachModes.join(',') === 'observe'
-      && gatedOff.capabilities.supportsObserve === true
-      && gatedOff.capabilities.supportsLiveAttach === false
-      && gatedOff.capabilities.supportsModelSwitch === false
-      && gatedOff.capabilities.supportsResume === false
-      && gatedOff.capabilities.integrationKind === 'http-websocket',
-    JSON.stringify(gatedOff.capabilities));
-  // ABSENT, not throwing. The broker decides what a tool can do by asking
-  // whether the method EXISTS — `typeof b.createSession === 'function'` builds
-  // the roster row (`runtime.ts:5136-5139`) and `!backend?.createSession`
-  // answers the create route (`runtime.ts:4496`) — so a method that exists and
-  // throws still puts a create button in front of the user.
-  check('with the drive gate off the create surface is ABSENT, not a throwing stub',
-    gateNames.every((name) => (gatedOff as unknown as Record<string, unknown>)[name] === undefined),
-    gateNames.map((name) => `${name}=${typeof (gatedOff as unknown as Record<string, unknown>)[name]}`).join(','));
-  const gatedByEnv = new KimiAdapter({
-    env: { [KIMI_DRIVE_ENV]: 'true' },
-    homeDir: '/fixture/home',
-    instanceScan: () => scan,
-    readToken: () => 'fixture-token',
-  });
-  check('the drive gate reads the shared truthy-env spellings, and the injected option wins over them',
-    kimiDriveEnabled({ [KIMI_DRIVE_ENV]: '1' })
-      && kimiDriveEnabled({ [KIMI_DRIVE_ENV]: 'on' })
-      && !kimiDriveEnabled({})
-      && !kimiDriveEnabled({ [KIMI_DRIVE_ENV]: '0' })
-      && typeof gatedByEnv.createSession === 'function'
-      && new KimiAdapter({ env: { [KIMI_DRIVE_ENV]: '1' }, drive: false }).createSession === undefined,
-    `env=${typeof gatedByEnv.createSession}`);
-  // NEGATIVE CONTROL on the off state: with nothing able to create, the owned
-  // set stays empty, every roster row maps foreign, and a `mode='live'` attach
-  // refuses through the ownership conflict that already exists — so the off
-  // state needs no second refusal path and no mapping change.
-  const gatedLive = await gatedOff.attach(FIXTURE.sessionId, 'live')
+  // THE WRITE SURFACE IS PRESENT, and presence is what the broker reads.
+  //
+  // These four used to appear only when `COSYNCING_KIMI_DRIVE` was set, and
+  // their ABSENCE was the mechanism of the off state — deliberately absent
+  // rather than throwing, because the broker decides what a tool can do by
+  // asking whether the method EXISTS: `typeof b.createSession === 'function'`
+  // builds the roster row (`runtime.ts:5136-5139`) and `!backend?.createSession`
+  // answers the create route (`runtime.ts:4496`). The gate is gone, so the same
+  // probe must now find all four.
+  const writeSurface = ['createSession', 'canCreateSession', 'prepareCreateSession', 'listModels'] as const;
+  check('the create surface is present, so the broker advertises a creatable tool',
+    writeSurface.every((name) => typeof (adapter as unknown as Record<string, unknown>)[name] === 'function'),
+    writeSurface.map((name) => `${name}=${typeof (adapter as unknown as Record<string, unknown>)[name]}`).join(','));
+  check('the adapter advertises observe-first with live attach and model switching',
+    adapter.capabilities.attachModes.join(',') === 'observe,live'
+      && adapter.capabilities.supportsObserve === true
+      && adapter.capabilities.supportsLiveAttach === true
+      && adapter.capabilities.supportsModelSwitch === true
+      && adapter.capabilities.supportsResume === false
+      && adapter.capabilities.integrationKind === 'http-websocket',
+    JSON.stringify(adapter.capabilities));
+  // OWNERSHIP, not configuration, is what refuses a write now. This fixture
+  // created nothing, so every session on it is foreign and a plain `live`
+  // attach still refuses through the ownership conflict — the same refusal the
+  // rollout gate used to produce as a side effect, arrived at by the rule that
+  // was always doing the real work.
+  const foreignLive = await adapter.attach(FIXTURE.sessionId, 'live')
     .then(() => undefined, (error: Error) => error);
-  check('with the drive gate off a live attach refuses through the ownership conflict',
-    isOwnershipConflictError(gatedLive), `${gatedLive?.name ?? '(did not throw)'}`);
+  check('a live attach on a session this process does not own still refuses',
+    isOwnershipConflictError(foreignLive), `${foreignLive?.name ?? '(did not throw)'}`);
   // Every OTHER write-class native action stays absent: each needs its own
   // transcript semantics, and an unimplemented one must not be advertised.
   check('adapter advertises no other native write action',
     ['renameSession', 'forkSession', 'cloneSession', 'exportTranscript', 'setAgent']
       .every((name) => typeof (adapter as unknown as Record<string, unknown>)[name] !== 'function'));
-  check('adapter exposes no broker-managed runtime this round',
-    (adapter as { integration?: unknown }).integration === undefined);
+  // The distinction between the two integration kinds, asserted rather than
+  // assumed. `managedRuntime` means a runtime the broker OWNS as its own child
+  // and may restart at will — Codex's daemon, OpenCode's serve. `kimi web` is
+  // not that: it is a program the user may already be running, so it declares
+  // `externalHost`, whose entire contract is that nothing is stopped without
+  // proof this broker started it. Claiming the wrong one here would hand a
+  // user's own server to code that restarts runtimes freely.
+  const integration = (adapter as { integration?: Record<string, unknown> }).integration;
+  check('adapter declares an EXTERNAL host, never a broker-owned managed runtime',
+    integration?.managedRuntime === undefined
+      && (integration?.externalHost as { managed?: unknown } | undefined)?.managed === true,
+    JSON.stringify(integration));
 
   check('isAvailable follows the health contract', await adapter.isAvailable());
 
@@ -1516,18 +1509,18 @@ try {
   check('discovered rows are all observe-only',
     discovered.every((row) => row.attachMode === 'observe' && row.tool === 'kimi'));
 
-  // The same roster read through the GATE-OFF adapter. Its own discovery is
-  // kept here, after the page-counting check above, because every sweep bumps
-  // the fixture's page counter. With nothing able to create, the owned set is
-  // empty by construction, so every row maps foreign — which is what makes the
-  // `mode='live'` refusal above the only refusal path the off state needs.
-  const gatedRoster = await gatedOff.discoverSessions();
-  check('with the drive gate off every listed session maps foreign-shaped',
-    gatedRoster.length > 0
-      && gatedRoster.every((row) => row.attachMode === 'observe'
+  // A second roster read, kept here after the page-counting check above because
+  // every sweep bumps the fixture's page counter. Nothing was created, so the
+  // owned set is empty and every row maps foreign — unsupported for Drive, and
+  // now carrying the takeover the user can authorize explicitly.
+  const foreignRoster = await adapter.discoverSessions();
+  check('every listed session maps foreign-shaped, with takeover advertised',
+    foreignRoster.length > 0
+      && foreignRoster.every((row) => row.attachMode === 'observe'
         && row.control?.drive.supported === false
-        && row.control.drive.reason === 'kimi-terminal-owned'),
-    gatedRoster.map((row) => `${row.attachMode}:${row.control?.drive.supported}`).join(','));
+        && row.control.drive.reason === 'kimi-terminal-owned'
+        && row.control.drive.takeoverAvailable === true),
+    foreignRoster.map((row) => `${row.attachMode}:${row.control?.drive.supported}`).join(','));
 
   // Several live servers on one home are NOT interchangeable (each owns
   // whichever sessions it loaded), so the adapter refuses instead of guessing.

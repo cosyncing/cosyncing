@@ -310,8 +310,11 @@ void main() {
 
     group('listAgents', () {
       test('returns list of AgentInfo on success', () async {
+        // The URL is part of the assertion: the roster read must DECLARE this
+        // client's contract revision, or the broker treats it as the oldest
+        // possible client and withholds every agent it might not decode.
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/agents',
+          'http://127.0.0.1:7734/api/agents?contractRevision=15',
           (server) => server.reply(200, [
             {
               'id': 'opencode',
@@ -345,7 +348,8 @@ void main() {
     group('listSessions', () {
       test('returns ListSessionsResponse on success', () async {
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/sessions',
+          'http://127.0.0.1:7734/api/sessions'
+          '?contractRevision=$cosyncingClientContractRevision',
           (server) => server.reply(200, {
             'machine': 'test-machine',
             'sessions': [
@@ -370,7 +374,8 @@ void main() {
         'conditional list sends ETag and accepts 304 without a body',
         () async {
           dioAdapter.onGet(
-            'http://127.0.0.1:7734/api/sessions',
+            'http://127.0.0.1:7734/api/sessions'
+            '?contractRevision=$cosyncingClientContractRevision',
             headers: const {'If-None-Match': 'W/"roster-v1"'},
             (server) => server.reply(
               304,
@@ -396,7 +401,8 @@ void main() {
         'conditional list puts the time bound in the broker query',
         () async {
           dioAdapter.onGet(
-            'http://127.0.0.1:7734/api/sessions?window=7d',
+            'http://127.0.0.1:7734/api/sessions'
+            '?contractRevision=$cosyncingClientContractRevision&window=7d',
             (server) => server.reply(
               200,
               {
@@ -415,7 +421,8 @@ void main() {
 
       test('explicit refresh bypasses the ETag and decodes revision', () async {
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/sessions?refresh=1',
+          'http://127.0.0.1:7734/api/sessions'
+          '?contractRevision=$cosyncingClientContractRevision&refresh=1',
           (server) => server.reply(
             200,
             {'machine': 'test-machine', 'revision': 7, 'sessions': <Object>[]},
@@ -438,7 +445,9 @@ void main() {
 
       test('waits for and decodes transcript-free roster deltas', () async {
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/session-roster-deltas?after=7&waitMs=2000',
+          'http://127.0.0.1:7734/api/session-roster-deltas'
+          '?contractRevision=$cosyncingClientContractRevision'
+          '&after=7&waitMs=2000',
           (server) => server.reply(200, {
             'revision': 8,
             'deltas': [
@@ -474,7 +483,8 @@ void main() {
       test('puts the roster window on delta waits', () async {
         dioAdapter.onGet(
           'http://127.0.0.1:7734/api/session-roster-deltas'
-          '?after=8&waitMs=2000&window=7d',
+          '?contractRevision=$cosyncingClientContractRevision'
+          '&after=8&waitMs=2000&window=7d',
           (server) => server.reply(200, {
             'revision': 9,
             'deltas': [
@@ -1217,7 +1227,8 @@ void main() {
     group('listMachines', () {
       test('returns typed local and degraded peer rosters', () async {
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/machines',
+          'http://127.0.0.1:7734/api/machines'
+          '?contractRevision=$cosyncingClientContractRevision',
           (server) => server.reply(200, {
             'ok': true,
             'machine': 'local-machine',
@@ -1252,7 +1263,8 @@ void main() {
       test('resolves the authoritative owner by composite identity', () async {
         dioAdapter.onGet(
           'http://127.0.0.1:7734/api/machines/resolve'
-          '?machineId=peer-a&tool=codex&sessionId=session-1',
+          '?contractRevision=$cosyncingClientContractRevision'
+          '&machineId=peer-a&tool=codex&sessionId=session-1',
           (server) => server.reply(200, {
             'ok': true,
             'status': 'resolved',

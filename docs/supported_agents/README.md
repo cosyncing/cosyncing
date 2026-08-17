@@ -26,11 +26,24 @@ supported.
 
 | Agent | Verified upstream version | Activation | Current surface |
 | --- | ---: | --- | --- |
-| [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Foreground source broker with `COSYNCING_ENABLE_DSH=1` | Discovery, history, shared live control, create/rename, prompts, reconnect, and removal |
+| [Kimi Code](kimi.md) | 0.35.0 | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, model selection |
+| [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Registered by default; uses a `dsh web` host cosyncing can start | Discovery, history, shared live control, create/rename, prompts, models, permission presets, native commands, image input, reconnect, and removal |
 
-DeepSeek Harness support is provisional and default-off. It connects to an
-operator-started `dsh web` host; setup does not install or manage that host, and
-the installed systemd/launchd broker does not persist the feature flag yet.
+Both are provisional and both talk to a local server rather than a CLI. Setup
+does not install those servers, but an installed cosyncing service starts,
+supervises, and stops one it owns, so the agents work without keeping a terminal
+open — setup lists both and names their hosts in the consent it asks you for.
+cosyncing never stops or reconfigures a host you started yourself; see
+[managed hosts](kimi.md#managed-hosts) for what ownership means.
+
+Install both hosts globally, with npm for DeepSeek Harness
+(`npm install -g @deepseek-ai/dsh`). cosyncing locates a host binary on your
+PATH, so an `npx`-only DeepSeek Harness install can be talked to but never
+started, restarted, or version-checked — see
+[installing the host](dsh.md#install-the-host). Clients older
+than the contract revision that added tolerant agent decoding are not shown
+either agent, because one row they cannot decode would cost them their whole
+agent list.
 
 ## Requirements
 

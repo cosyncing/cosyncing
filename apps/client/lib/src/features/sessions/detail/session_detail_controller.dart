@@ -121,7 +121,7 @@ class SessionDetailController
   String? _attachmentPromptClientMessageId;
   Completer<bool>? _attachmentPromptResult;
 
-  /// The drive-attach reason of the in-flight/last resume request (`create`,
+  /// The drive-attach reason of the in-flight/last drive request (`create`,
   /// `app-restore`, `lease-restore`, `join-existing`, or `takeover`); null when
   /// no Drive was requested. Settled by the broker's arbitration answer.
   String? _requestedDriveReason;
@@ -957,8 +957,12 @@ class SessionDetailController
       _requestedDriveReason = kDriveAttachReasonTakeover;
       final result = Completer<bool>();
       _takeoverResult = result;
+      // The broker declares which mode a takeover must use; Kimi's demoted
+      // generation needs `live`, where `resume` would attach to nothing it
+      // owns. `canTakeOver` above has already refused every mode that cannot
+      // acquire authority, so this is the mode that decision was made under.
       await connection.reattach(
-        mode: 'resume',
+        mode: control.takeoverAttachMode,
         reason: kDriveAttachReasonTakeover,
       );
       if (connection.state != SessionDetailConnectionStatus.connected) {
@@ -2143,8 +2147,18 @@ class SessionDetailController
   ///
   /// The trimmed prompt must be non-empty and the session must be connected.
   /// Returns `true` only when the prompt was accepted by the transport.
-  Future<bool> sendPrompt(String text, {SessionCurrentModel? model}) =>
-      _sendPromptCoordinated(text, model: model);
+  ///
+  /// [permissionMode] is the composer's selected approval mode; omitting it
+  /// leaves the session in whatever mode it already holds.
+  Future<bool> sendPrompt(
+    String text, {
+    SessionCurrentModel? model,
+    String? permissionMode,
+  }) => _sendPromptCoordinated(
+    text,
+    model: model,
+    permissionMode: permissionMode,
+  );
 
   Future<bool> sendDraft(String text) => _sendDraftCoordinated(text);
 

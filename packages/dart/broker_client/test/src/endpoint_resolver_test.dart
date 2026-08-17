@@ -98,22 +98,55 @@ void main() {
       expect(resolver.sessionsEndpoint, 'http://127.0.0.1:7734/api/sessions');
     });
 
-    test('sessionsEndpointFor encodes only explicit refresh', () {
+    test('sessionsEndpointFor declares the revision and explicit refresh', () {
       expect(
         resolver.sessionsEndpointFor(),
-        'http://127.0.0.1:7734/api/sessions',
+        'http://127.0.0.1:7734/api/sessions'
+        '?contractRevision=$cosyncingClientContractRevision',
       );
       expect(
         resolver.sessionsEndpointFor(refresh: true),
-        'http://127.0.0.1:7734/api/sessions?refresh=1',
+        'http://127.0.0.1:7734/api/sessions'
+        '?contractRevision=$cosyncingClientContractRevision&refresh=1',
       );
     });
 
     test('sessionRosterDeltasEndpointFor encodes revision and wait', () {
       expect(
         resolver.sessionRosterDeltasEndpointFor(after: 42, waitMs: 25000),
-        'http://127.0.0.1:7734/api/session-roster-deltas?after=42&waitMs=25000',
+        'http://127.0.0.1:7734/api/session-roster-deltas'
+        '?contractRevision=$cosyncingClientContractRevision'
+        '&after=42&waitMs=25000',
       );
+    });
+
+    // EVERY roster read has to declare the SAME revision. Agents filtered at
+    // one revision and sessions at another is not a smaller bug than no
+    // filtering at all: it showed the agents and withheld all their work.
+    //
+    // The machine reads belong in this list for the same reason, and were the
+    // ones missed. Aggregation returns those same rows gathered across this
+    // broker and its peers, and resolution searches them, so an unstated
+    // revision there contradicts the local roster the app is already showing.
+    test('every roster read declares one and the same contract revision', () {
+      final reads = [
+        resolver.agentRosterEndpoint,
+        resolver.sessionsEndpointFor(),
+        resolver.sessionRosterDeltasEndpointFor(after: 0, waitMs: 0),
+        resolver.machineRosterEndpoint,
+        resolver.machineResolveEndpoint(
+          machineId: 'peer-a',
+          tool: 'kimi',
+          sessionId: 'session-1',
+        ),
+      ];
+      for (final read in reads) {
+        expect(
+          Uri.parse(read).queryParameters['contractRevision'],
+          '$cosyncingClientContractRevision',
+          reason: read,
+        );
+      }
     });
 
     test('schedule endpoints return and encode the broker paths', () {
@@ -188,12 +221,36 @@ void main() {
       );
     });
 
-    test('machinesEndpoint returns authenticated roster path', () {
+    test('machinesEndpoint stays a bare prefix for the resolve path', () {
       expect(
         resolver.machinesEndpoint,
         'http://127.0.0.1:7734/api/machines',
       );
     });
+
+    test('machineRosterEndpoint declares the revision', () {
+      expect(
+        resolver.machineRosterEndpoint,
+        'http://127.0.0.1:7734/api/machines'
+        '?contractRevision=$cosyncingClientContractRevision',
+      );
+    });
+
+    test(
+      'machineResolveEndpoint declares the revision before its identity',
+      () {
+        expect(
+          resolver.machineResolveEndpoint(
+            machineId: 'peer a',
+            tool: 'kimi',
+            sessionId: 'session/1',
+          ),
+          'http://127.0.0.1:7734/api/machines/resolve'
+          '?contractRevision=$cosyncingClientContractRevision'
+          '&machineId=peer%20a&tool=kimi&sessionId=session%2F1',
+        );
+      },
+    );
 
     test('renameSessionEndpoint encodes tool and id', () {
       expect(
@@ -378,6 +435,42 @@ void main() {
           ),
           'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?$_identityQuery',
         );
+      });
+
+      test('sends only takeover as a reason on mode=live', () {
+        // Takeover is the one intent a live attach can carry: it means seize
+        // the running session, which is what attaching live does. A Kimi
+        // demoted generation needs exactly this.
+        expect(
+          resolver.streamEndpoint(
+            'kimi',
+            'session-123',
+            mode: 'live',
+            reason: 'takeover',
+          ),
+          'ws://127.0.0.1:7734/api/sessions/kimi/session-123/stream?mode=live&reason=takeover&$_identityQuery',
+        );
+        // The others describe reopening a connection this app previously owned
+        // — the resume path. The broker rejects them on live, so a retained
+        // restore intent meeting a live session must not build a request whose
+        // only possible answer is 400.
+        for (final stale in [
+          'app-restore',
+          'lease-restore',
+          'create',
+          'join-existing',
+        ]) {
+          expect(
+            resolver.streamEndpoint(
+              'kimi',
+              'session-123',
+              mode: 'live',
+              reason: stale,
+            ),
+            'ws://127.0.0.1:7734/api/sessions/kimi/session-123/stream?mode=live&$_identityQuery',
+            reason: '$stale must not ride a live attach',
+          );
+        }
       });
 
       test('includes owner revision only for join-existing', () {

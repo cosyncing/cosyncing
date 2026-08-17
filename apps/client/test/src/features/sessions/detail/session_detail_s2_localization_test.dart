@@ -12,20 +12,20 @@ void main() {
       (
         locale: Locale('en'),
         fallback: 'Permission',
-        title: 'Command permission mode',
+        title: 'Permission mode',
         body:
-            'Applies to slash commands sent from this composer. Regular '
-            'prompts keep the permission mode published by the Server.',
+            'Applies to prompts and slash commands sent from this composer. '
+            'If the Server publishes a different mode, that one takes over.',
         ask: 'Ask permission',
         approve: 'Approve for me',
       ),
       (
         locale: Locale('zh'),
         fallback: '权限',
-        title: '命令权限模式',
+        title: '权限模式',
         body:
-            '适用于从此输入框发送的斜杠命令。普通提示词仍沿用服务器'
-            '发布的权限模式。',
+            '适用于从此输入框发送的提示词和斜杠命令。'
+            '若服务器发布了其他权限模式，则以服务器为准。',
         ask: '每次询问',
         approve: '自动批准',
       ),

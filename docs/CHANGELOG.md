@@ -13,9 +13,28 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
-- A provisional, default-off DeepSeek Harness source adapter can connect to an
-  operator-started `dsh web` host for session discovery, history, and shared
-  foreground control.
+- Kimi Code is supported as a provisional source integration: discovery and
+  read-only observe for every session on the local `kimi web` server, plus
+  Drive — prompts, approvals, model selection — for the sessions cosyncing
+  created, and explicit takeover for the ones it did not.
+- A provisional DeepSeek Harness source adapter connects to a `dsh web` host for
+  session discovery, history, and shared foreground control, with model and
+  reasoning-effort selection, permission presets, the host's own commands, and
+  image attachments. General file attachments are not supported, because the
+  host accepts image content only. Control is foreground and live: cosyncing
+  holds no background subscription to a dsh session.
+- Both are registered by default and served to any client able to decode them —
+  neither needs a rollout flag. cosyncing does not install either host, but an
+  installed service starts, supervises, and stops one it owns, so neither agent
+  needs a terminal left open. A host you started yourself is never stopped,
+  replaced, or reconfigured, and setup names every host it will manage before
+  you agree to it.
+
+### Changed
+
+- Stopping the broker service now signals only the broker. Processes that merely
+  shared its service group are left running, and the agent hosts cosyncing owns
+  stop through an ownership-checked release instead.
 
 ### Fixed
 
@@ -23,7 +42,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   duplicating legacy user-message records.
 - Kimi Drive no longer demotes a session when the server's own activity frame
   crosses the first healthy walk after a stream reconnect; activity observed
-  since an unattributed row was held now accounts for it.
+  since an unattributed row was held now accounts for it, and repeated reads
+  inside one interval no longer count as repeated intervals of silence.
 
 ## 0.3.0 — 2026-08-14
 

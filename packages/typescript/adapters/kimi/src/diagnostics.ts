@@ -2,15 +2,17 @@
  * Setup/doctor diagnosis for Kimi Code, itself EFFECT-FREE.
  *
  * Read-only describes this file, not the adapter: diagnosis probes paths and
- * answers questions, while the adapter can also drive sessions it created when
- * the default-off Drive gate is on (see the write boundary in
- * `implementation.ts`). What is stated here is only what the diagnosis needs the
- * installed Kimi to offer.
+ * answers questions, while the adapter can also drive the sessions it created
+ * (see the write boundary in `implementation.ts`). What is stated here is only
+ * what the diagnosis needs the installed Kimi to offer.
  *
- * Diagnosis never starts a server. When none is running the honest answer is
- * "not running", with `kimi web --no-open` as the user-facing remediation: the
- * broker-managed lifecycle is a later stage, and starting a server here would
- * force-load sessions a terminal may already own.
+ * Diagnosis never starts or stops a server, and never tells an operator to when
+ * cosyncing is the one managing it. Starting one here would force-load sessions
+ * a terminal may already own; instructing a manual start or restart where the
+ * broker supervises the host races that supervision and leaves two servers on
+ * one home. So every remediation that would start or restart the server follows
+ * the posture the broker supplies — see {@link hostRemediation} — and only an
+ * unmanaged install is handed a `kimi web` command.
  */
 import { join } from 'node:path';
 import {
@@ -31,9 +33,82 @@ import {
   type KimiInstanceScan,
 } from './server.ts';
 
+/**
+ * What to tell an operator whose Kimi host is not running.
+ *
+ * The two answers are not stylistic variants; one of them is unsafe in the other
+ * posture. Where cosyncing manages this host it starts one when none is running
+ * and restarts a crashed one, so a manual `kimi web` races that recovery and
+ * leaves two servers on one home — which cosyncing then refuses to guess
+ * between (see the `ambiguous` refusal in `implementation.ts`). Where cosyncing
+ * does NOT manage it, nothing else will start it and the command is the whole
+ * answer.
+ *
+ * The posture comes from the broker through the context, because only the broker
+ * can see the durable service configuration and the ownership record it is
+ * derived from.
+ */
+/**
+ * Says CONFIGURED TO MANAGE rather than "owns this server", deliberately.
+ *
+ * The posture is a fact about this machine's cosyncing, not about whichever
+ * process happens to be answering right now — that one may well be the
+ * operator's own, which cosyncing will preserve and never touch. A message
+ * claiming ownership of it would be false exactly when a user is trying to work
+ * out whose server they are looking at.
+ */
+const KIMI_MANAGED_HOST_REMEDIATION = 'cosyncing is configured to manage the Kimi host and will start or '
+  + 'restart it. Wait for it to come back and rerun doctor; if it does not, check the cosyncing service '
+  + 'and run `cosyncing repair`.';
+
+/**
+ * Is the home THIS diagnosis resolved one cosyncing manages here?
+ *
+ * The comparison is the whole point. The broker manages the home its own
+ * environment resolves; doctor runs in an operator's shell, which may name a
+ * different one through `KIMI_CODE_HOME`. Answering agent-wide would tell that
+ * operator their private home is supervised when nothing is watching it — and
+ * "nothing is watching it" is precisely when they need the manual instruction.
+ */
+function managedHere(context: SetupDiagnosisContext, home: string): boolean {
+  return context.managedExternalHostIdentities?.includes(home) === true;
+}
+
+function hostRemediation(context: SetupDiagnosisContext, home: string): SetupCheck['remediation'] {
+  // No command in the managed branch, and deliberately none: this is the message
+  // whose whole purpose is to NOT hand the operator a way to start a competing
+  // host.
+  if (managedHere(context, home)) return { kind: 'manual', message: KIMI_MANAGED_HOST_REMEDIATION };
+  return {
+    kind: 'command',
+    message: 'Start the Kimi local server, then rerun doctor.',
+    command: 'kimi web --no-open',
+  };
+}
+
+/**
+ * The same choice for every check whose fix is "restart the server yourself".
+ *
+ * A manual restart is not the safer half of a manual start. Stopping the server
+ * is what opens the window: the supervisor sees its host gone and starts a
+ * replacement, and the operator — following the instruction to completion —
+ * starts another. Two servers on one home, arrived at by doing exactly what
+ * doctor said.
+ *
+ * The unmanaged wording is kept per check, because where nothing else will act
+ * the specific instruction is the whole value of the remediation.
+ */
+function restartRemediation(
+  context: SetupDiagnosisContext,
+  home: string,
+  unmanaged: string,
+): SetupCheck['remediation'] {
+  return { kind: 'manual', message: managedHere(context, home) ? KIMI_MANAGED_HOST_REMEDIATION : unmanaged };
+}
+
 export const KIMI_MINIMUM_VERSION: AgentMinimumVersion = Object.freeze({
   version: '0.35.0',
-  requiredFeature: 'the `kimi web` local server REST `/api/v2/sessions` list and the `{seq, epoch}` WebSocket cursor protocol used for observe, plus — where the default-off Drive gate is enabled — the `/api/v1` session-create, prompt, approval, and question endpoints Drive writes through for sessions cosyncing created',
+  requiredFeature: 'the `kimi web` local server REST `/api/v2/sessions` list and the `{seq, epoch}` WebSocket cursor protocol used for observe, plus the `/api/v1` session-create, prompt, approval, and question endpoints Drive writes through for sessions cosyncing created',
   evidenceUrl: 'https://moonshotai.github.io/kimi-code/en/guides/server.html',
   evidenceNote: 'Conservative floor: this repository captured its Kimi fixtures from a real 0.35.0 server (meta, session list, paged messages, snapshot, WS handshake). The server API is marked experimental upstream, so the floor is the exact tested version rather than an inferred earlier one.',
 });
@@ -98,7 +173,7 @@ function tokenCheck(context: SetupDiagnosisContext, home: string, serverPresent:
       : 'The Kimi server token file is unreadable.',
     evidence: { path: inspected.displayPath },
     ...(serverPresent
-      ? { remediation: { kind: 'manual' as const, message: 'Restart `kimi web --no-open` so it writes a server token.' } }
+      ? { remediation: restartRemediation(context, home, 'Restart `kimi web --no-open` so it writes a server token.') }
       : {}),
   };
 }
@@ -186,9 +261,17 @@ export async function diagnoseKimiSetup(
       detailCode: 'server-ambiguous',
       summary: 'Several Kimi servers are running on this home, so cosyncing cannot tell which one owns a session.',
       evidence: { liveInstances: scan.live.length },
+      // Not a start or a restart, so it does not go through `restartRemediation`
+      // — but it still cannot be posture-blind. Under management, "stop all but
+      // one" could have an operator stop cosyncing's own server, which the
+      // supervisor then restarts, leaving the ambiguity exactly where it was.
+      // The one they can act on is the one they started.
       remediation: {
         kind: 'manual',
-        message: 'Stop all but one `kimi web` server for this Kimi home, then rerun doctor.',
+        message: managedHere(context, home)
+          ? 'cosyncing is configured to manage the Kimi host and keeps one of its own. '
+            + 'Stop the Kimi servers you started yourself, then rerun doctor.'
+          : 'Stop all but one `kimi web` server for this Kimi home, then rerun doctor.',
       },
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
@@ -203,11 +286,7 @@ export async function diagnoseKimiSetup(
         ? 'Only stale Kimi server records remain; no server is running.'
         : 'No local Kimi server is running.',
       evidence: { staleRecords: scan.stale, invalidRecords: scan.invalid, defaultPort: KIMI_DEFAULT_PORT },
-      remediation: {
-        kind: 'command',
-        message: 'Start the Kimi local server, then rerun doctor.',
-        command: 'kimi web --no-open',
-      },
+      remediation: hostRemediation(context, home),
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
@@ -222,7 +301,7 @@ export async function diagnoseKimiSetup(
       detailCode: health.status === 'unreachable' ? 'server-unreachable' : 'server-health-unexpected',
       summary: 'A Kimi server is registered but does not answer its health contract.',
       evidence: { url: instance.baseUrl },
-      remediation: { kind: 'manual', message: 'Restart `kimi web --no-open` and rerun doctor.' },
+      remediation: restartRemediation(context, home, 'Restart `kimi web --no-open` and rerun doctor.'),
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
@@ -239,10 +318,11 @@ export async function diagnoseKimiSetup(
       detailCode: 'server-unauthorized',
       summary: 'The Kimi server rejected the authenticated capability probe.',
       evidence: { url: instance.baseUrl },
-      remediation: {
-        kind: 'manual',
-        message: 'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
-      },
+      remediation: restartRemediation(
+        context,
+        home,
+        'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
+      ),
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
@@ -253,7 +333,15 @@ export async function diagnoseKimiSetup(
   // this point, and the binding is not atomic with any later use.)
   const bound = bindKimiServerIdentity(instance, payload);
   if (!bound.ok) {
-    checks.push({ id: 'kimi.server', status: 'fail', ...IDENTITY_FAILURE[bound.reason], evidence: { url: instance.baseUrl } });
+    checks.push({
+      id: 'kimi.server',
+      status: 'fail',
+      ...IDENTITY_FAILURE[bound.reason],
+      // The table holds the UNMANAGED wording; the posture decides whether the
+      // operator is the one who should be restarting anything.
+      remediation: restartRemediation(context, home, IDENTITY_FAILURE[bound.reason].remediation!.message),
+      evidence: { url: instance.baseUrl },
+    });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }
   const decoded = decodeKimiServerMeta(payload);
@@ -264,10 +352,11 @@ export async function diagnoseKimiSetup(
       detailCode: 'server-capabilities-missing',
       summary: 'The Kimi server did not advertise the capabilities this integration requires.',
       evidence: { url: instance.baseUrl },
-      remediation: {
-        kind: 'manual',
-        message: 'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
-      },
+      remediation: restartRemediation(
+        context,
+        home,
+        'Restart `kimi web --no-open` so a current server token is written, then rerun doctor.',
+      ),
     });
     return { agent: 'kimi', displayName: 'Kimi Code', minimumVersion: KIMI_MINIMUM_VERSION, checks };
   }

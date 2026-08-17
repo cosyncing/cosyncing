@@ -54,9 +54,8 @@ import {
 } from '../../src/installation/service-manager.ts';
 import {
   captureProcessOutput,
-  reserveLoopbackFixturePort,
   settledProcessOutput,
-  waitForBrokerHealth,
+  startHealthyFixtureBroker,
 } from '../helpers/isolated-broker-fixture.ts';
 import { verificationEnvironment } from '../../../../../scripts/verification/verification-graph.ts';
 
@@ -184,30 +183,40 @@ async function withPackagedBroker(
   /** Extra entries the durable service would carry; the default fixture deliberately runs with none. */
   serviceEnvironment: Record<string, string> = {},
 ): Promise<void> {
-  const portLease = await reserveLoopbackFixturePort();
-  const port = portLease.port;
-  const base = `http://127.0.0.1:${port}`;
-  configurePackagedFixture(fixture, port);
-  await portLease.release();
-  const child = Bun.spawn([binary, 'broker'], {
-    cwd,
-    env: { ...packagedEnvironment(fixture, port), ...serviceEnvironment },
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
   // Drained from the start, and unbounded: the checks below read the whole
   // log, and reading the streams only after the exit left nothing draining
   // them while the broker was starting.
-  const brokerOutput = captureProcessOutput(child, { maxChars: Infinity });
-  let exerciseError: unknown;
+  let brokerOutput!: ReturnType<typeof captureProcessOutput>;
+  let child!: ReturnType<typeof Bun.spawn>;
+  let port!: number;
   try {
     // Readiness is not one of this suite's assertions, so it gets no
     // wall-clock budget: a packaged broker booting beside other work is slow,
-    // not broken.
-    await waitForBrokerHealth(child, `${base}/api/health`).catch((error: Error) => {
-      throw new Error(`${error.message}\n${brokerOutput.read().trim().slice(-2000)}`);
-    });
+    // not broken. A port lost to a sibling fixture costs a respawn.
+    ({ child, port } = await startHealthyFixtureBroker({
+      spawn: (attemptPort) => {
+        configurePackagedFixture(fixture, attemptPort);
+        const spawned = Bun.spawn([binary, 'broker'], {
+          cwd,
+          env: { ...packagedEnvironment(fixture, attemptPort), ...serviceEnvironment },
+          stdin: 'ignore',
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        brokerOutput = captureProcessOutput(spawned, { maxChars: Infinity });
+        return spawned;
+      },
+      healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+      // Settled, not snapshotted: the exit does not mean the pipes drained.
+      capture: () => brokerOutput,
+      stop: async (spawned) => { spawned.kill('SIGTERM'); await spawned.exited.catch(() => undefined); },
+    }));
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n${brokerOutput?.read().trim().slice(-2000) ?? ''}`);
+  }
+  const base = `http://127.0.0.1:${port}`;
+  let exerciseError: unknown;
+  try {
     await exercise(base);
   } catch (error) {
     exerciseError = error;
@@ -233,24 +242,34 @@ async function withSourceBroker(
   fixture: PackageFixture,
   exercise: (base: string) => Promise<void>,
 ): Promise<void> {
-  const portLease = await reserveLoopbackFixturePort();
-  const port = portLease.port;
+  let brokerOutput!: ReturnType<typeof captureProcessOutput>;
+  let child!: ReturnType<typeof Bun.spawn>;
+  let port!: number;
+  try {
+    ({ child, port } = await startHealthyFixtureBroker({
+      spawn: (attemptPort) => {
+        configurePackagedFixture(fixture, attemptPort);
+        const spawned = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
+          cwd: ROOT,
+          env: packagedEnvironment(fixture, attemptPort),
+          stdin: 'ignore',
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        brokerOutput = captureProcessOutput(spawned, { maxChars: Infinity });
+        return spawned;
+      },
+      healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+      // Settled, not snapshotted: the exit does not mean the pipes drained.
+      capture: () => brokerOutput,
+      stop: async (spawned) => { spawned.kill('SIGTERM'); await spawned.exited.catch(() => undefined); },
+    }));
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n${brokerOutput?.read().trim().slice(-2000) ?? ''}`);
+  }
   const base = `http://127.0.0.1:${port}`;
-  configurePackagedFixture(fixture, port);
-  await portLease.release();
-  const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-    cwd: ROOT,
-    env: packagedEnvironment(fixture, port),
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const brokerOutput = captureProcessOutput(child, { maxChars: Infinity });
   let exerciseError: unknown;
   try {
-    await waitForBrokerHealth(child, `${base}/api/health`).catch((error: Error) => {
-      throw new Error(`${error.message}\n${brokerOutput.read().trim().slice(-2000)}`);
-    });
     await exercise(base);
   } catch (error) {
     exerciseError = error;
@@ -312,6 +331,28 @@ async function withSourceBroker(
       launchd.includes('{{ENVIRONMENT_VARIABLES}}') &&
       launchd.includes('<string>{{STANDARD_OUT_PATH}}</string>') &&
       launchd.includes('<key>RunAtLoad</key>') && !launchd.includes('COSYNCING_TOKEN='));
+
+  // Neither service manager may be left holding a licence to kill our children.
+  //
+  // Both default to signalling the whole group — systemd's KillMode is
+  // control-group, and launchd signals the job's process group unless the job
+  // abandons it. Either default reaches a host the OPERATOR started from a
+  // terminal descended from the service and kills it with nothing having proved
+  // it was ours, which is the single promise this product's ownership engine
+  // exists to keep. The broker stops what it owns through the ownership-checked
+  // release pass; the service manager stops the broker and nothing else.
+  // Read as DIRECTIVES, not as raw text: the unit explains the default it is
+  // overriding, so a substring search finds `KillMode=control-group` in a
+  // comment and calls a correct file wrong.
+  const systemdKillModes = systemd.split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .filter((line) => line.startsWith('KillMode='));
+  check('the systemd template stops the broker only, never its control group',
+    systemdKillModes.length === 1 && systemdKillModes[0] === 'KillMode=process',
+    systemdKillModes.join(',') || 'no KillMode directive');
+  check('the launchd template abandons its process group instead of signalling it',
+    /<key>AbandonProcessGroup<\/key>\s*<true\/>/.test(launchd),
+    launchd.includes('AbandonProcessGroup') ? 'present but not true' : 'absent');
 
   // One argv definition, two renderers. If a provider ever built its own command instead of reading this,
   // a Linux and a macOS install of the same package could launch different things.

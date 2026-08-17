@@ -7,6 +7,8 @@ SessionControlState _control({
   bool driveSupported = true,
   bool? willFork,
   bool? handoffAvailable,
+  bool? takeoverAvailable,
+  AttachMode? takeoverMode,
   String? driveReason,
   bool syncSupported = false,
   bool syncAvailable = false,
@@ -25,6 +27,8 @@ SessionControlState _control({
       reason: driveReason,
       willFork: willFork,
       handoffAvailable: handoffAvailable,
+      takeoverAvailable: takeoverAvailable,
+      takeoverMode: takeoverMode,
     ),
     terminalSync: SessionTerminalSync(
       supported: syncSupported,
@@ -205,6 +209,134 @@ void main() {
       );
       expect(view.action, SessionControlAction.takeOver);
       expect(view.canTakeOver, isTrue);
+    });
+
+    group('declared takeover availability', () {
+      // A demoted Kimi generation: not drivable now — re-driving it as-is would
+      // fork the journal — but re-takeover is legitimate as a fresh
+      // confirmation. `unavailable` can never satisfy the historical
+      // `supported && observing` rule, so without the declaration this session
+      // would be permanently unrecoverable through the UI.
+      test(
+        'an unavailable session is still takeable when the broker says so',
+        () {
+          final view = SessionControlView.fromControl(
+            _control(
+              driveState: DriveState.unavailable,
+              driveSupported: false,
+              takeoverAvailable: true,
+              takeoverMode: AttachMode.live,
+            ),
+          );
+          expect(view.canTakeOver, isTrue);
+          expect(view.takeoverAttachMode, 'live');
+          // The declaration governs takeover only. The pill and the primary
+          // action still describe the session honestly.
+          expect(view.pill, SessionControlPill.unavailable);
+          expect(view.action, SessionControlAction.disabled);
+        },
+      );
+
+      test(
+        'an explicit false withdraws takeover from a session that would '
+        'otherwise offer it',
+        () {
+          final view = SessionControlView.fromControl(
+            _control(
+              driveState: DriveState.observing,
+              takeoverAvailable: false,
+            ),
+          );
+          expect(view.canTakeOver, isFalse);
+        },
+      );
+
+      // An older broker sends neither field; the historical rule must survive
+      // verbatim or every pre-revision-15 session loses its recovery path.
+      test('absent fields reproduce the historical rule exactly', () {
+        expect(
+          SessionControlView.fromControl(
+            _control(driveState: DriveState.observing),
+          ).canTakeOver,
+          isTrue,
+        );
+        expect(
+          SessionControlView.fromControl(
+            _control(driveState: DriveState.observing, driveSupported: false),
+          ).canTakeOver,
+          isFalse,
+        );
+        expect(
+          SessionControlView.fromControl(
+            _control(driveState: DriveState.unavailable, driveSupported: false),
+          ).canTakeOver,
+          isFalse,
+        );
+      });
+
+      // Taking over means attaching in a specific mode. A client that cannot
+      // name the mode would have to guess, and guessing `resume` on a session
+      // that requires `live` seizes Drive the wrong way rather than not at all.
+      test('an unrecognized takeover mode fails closed', () {
+        final view = SessionControlView.fromControl(
+          _control(
+            driveState: DriveState.observing,
+            takeoverAvailable: true,
+            takeoverMode: AttachMode.unknown,
+          ),
+        );
+        expect(view.canTakeOver, isFalse);
+      });
+
+      // The other side of the same argument: `observe` is a mode this client
+      // understands perfectly, and it grants no authority, so a takeover
+      // performed in it could only ever fail.
+      test('a takeover mode that grants no authority fails closed too', () {
+        final view = SessionControlView.fromControl(
+          _control(
+            driveState: DriveState.observing,
+            takeoverAvailable: true,
+            takeoverMode: AttachMode.observe,
+          ),
+        );
+        expect(view.canTakeOver, isFalse);
+      });
+
+      test(
+        'a declared resume mode, and an absent one, both attach as resume',
+        () {
+          expect(
+            SessionControlView.fromControl(
+              _control(
+                driveState: DriveState.observing,
+                takeoverMode: AttachMode.resume,
+              ),
+            ).takeoverAttachMode,
+            'resume',
+          );
+          expect(
+            SessionControlView.fromControl(
+              _control(driveState: DriveState.observing),
+            ).takeoverAttachMode,
+            'resume',
+          );
+        },
+      );
+
+      // A read-only socket renounced authority monotonically, so the re-attach
+      // a takeover would issue is still read-only and cannot succeed.
+      test('a read-only socket is not offered takeover even when declared', () {
+        final view = SessionControlView.fromControl(
+          _control(
+            driveState: DriveState.unavailable,
+            driveSupported: false,
+            takeoverAvailable: true,
+            takeoverMode: AttachMode.live,
+          ),
+          socketReadOnly: true,
+        );
+        expect(view.canTakeOver, isFalse);
+      });
     });
 
     test('sync available (not active): explicit join action, not mutable', () {

@@ -350,6 +350,13 @@ abstract final class OutboundFrame {
   /// the time the prompt is read — yet the shared draft it advanced to is this
   /// prompt's own text. The token lets the broker recognize that and still
   /// clear, instead of leaving the sent prompt behind as an unsent draft.
+  ///
+  /// [permissionMode] is a per-prompt approval mode and must be one of the
+  /// exact tokens this session advertised through `listModes`; the broker
+  /// rejects anything else rather than guessing at it. Omitting it means "use
+  /// whatever mode the session is already in", which is NOT the same as
+  /// re-asserting the current one — a re-assertion would override a mode the
+  /// server changed underneath, which this prompt never asked to do.
   static Map<String, dynamic> prompt(
     String text, {
     SessionCurrentModel? model,
@@ -357,6 +364,7 @@ abstract final class OutboundFrame {
     String? clientMessageId,
     int? draftRevision,
     String? draftUpdateId,
+    String? permissionMode,
   }) {
     if (files.length > promptAttachmentMaxFiles) {
       throw RangeError.range(
@@ -377,6 +385,8 @@ abstract final class OutboundFrame {
       if (files.isNotEmpty)
         'files': files.map((file) => file.toJson()).toList(),
       if (model != null) 'model': _modelOverride(model),
+      if (permissionMode != null && permissionMode.isNotEmpty)
+        'permissionMode': permissionMode,
       if (clientMessageId != null) 'clientMessageId': clientMessageId,
       if (draftRevision != null) 'draftRevision': draftRevision,
       if (draftUpdateId != null) 'draftUpdateId': draftUpdateId,

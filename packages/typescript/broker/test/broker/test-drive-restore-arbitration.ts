@@ -466,6 +466,54 @@ for await (const chunk of Bun.stdin.stream()) {
     );
     check('G3d join-existing retains the authenticated Resume credential boundary', unauthenticatedJoin.status === 401);
 
+    // A reason is now valid on `live` as well as `resume`, which opens exactly
+    // one new way to reach Drive. These four pin the boundary around it.
+    // The credential boundary itself is NOT provable on this fixture: it runs
+    // tokened, so the outer `authed` gate answers 401 for every stream and a
+    // refusal here would be attributable to either gate. It is proved in the
+    // tokenless baseline at the end of this file, which is the only place the
+    // two gates disagree.
+    //
+    // `join-existing` resolves an exact app-owned Drive connection by owner
+    // revision, which only the resume path can do.
+    const joinOnLive = await fetch(
+      `${base}${streamPath}?token=${token}&mode=live&reason=join-existing&ownerEpoch=epoch&ownerSeq=1`,
+    );
+    check('G3i join-existing is still refused on a live attach', joinOnLive.status === 400,
+      `status=${joinOnLive.status}`);
+    const revisionOnTakeover = await fetch(
+      `${base}${streamPath}?token=${token}&mode=live&reason=takeover&ownerEpoch=epoch&ownerSeq=1`,
+    );
+    check('G3j an owner revision still requires join-existing, on live too',
+      revisionOnTakeover.status === 400, `status=${revisionOnTakeover.status}`);
+
+    // The reason/mode MATRIX, not merely "a reason is allowed on live".
+    // `create`, `app-restore` and `lease-restore` each describe reopening a
+    // Drive connection this app previously owned — the resume path. On live
+    // they would name a provenance the live path cannot have, so accepting them
+    // would let a client claim app-created ownership of a session it never
+    // created. Only `takeover` means "seize the running session".
+    const nonTakeoverOnLive: string[] = [];
+    for (const badReason of ['create', 'app-restore', 'lease-restore']) {
+      const answer = await fetch(`${base}${streamPath}?token=${token}&mode=live&reason=${badReason}`);
+      if (answer.status !== 400) nonTakeoverOnLive.push(`${badReason}=${answer.status}`);
+    }
+    check('G3k only takeover is a valid reason on a live attach',
+      nonTakeoverOnLive.length === 0, nonTakeoverOnLive.join(' ') || '(all refused 400)');
+    // ...and the positive control, so the matrix is not simply refusing live.
+    const takeoverOnLive = await fetch(`${base}${streamPath}?token=${token}&mode=live&reason=takeover`);
+    check('G3k2 ...while takeover itself is accepted past parameter validation',
+      takeoverOnLive.status !== 400, `status=${takeoverOnLive.status}`);
+    // Every one of them stays valid on resume, which is the half that would
+    // break silently if the matrix were written as a blanket live refusal.
+    const stillValidOnResume: string[] = [];
+    for (const goodReason of ['create', 'app-restore', 'lease-restore', 'takeover']) {
+      const answer = await fetch(`${base}${streamPath}?token=${token}&mode=resume&reason=${goodReason}`);
+      if (answer.status === 400) stillValidOnResume.push(goodReason);
+    }
+    check('G3k3 ...and every reason remains valid on resume',
+      stillValidOnResume.length === 0, stillValidOnResume.join(' ') || '(all accepted)');
+
     // Temporarily remove the simulated terminal owner so this fixture can
     // establish one real Drive socket and exercise the handoff message. The
     // competing owner is restored before the denial checks below.
@@ -634,6 +682,31 @@ for await (const chunk of Bun.stdin.stream()) {
     check('G7 the denied restore spawned no additional Resume owner process',
       resumeOwnerSpawnCount() === resumeSpawnsAfterHandoff);
 
+    // ── G13: a refused reason-tagged LIVE takeover is REPORTED, not absorbed ──
+    //
+    // The generic live fallback silently downgrades an ownership conflict to
+    // Observe, which is right for an unattended live attach whose eligibility
+    // changed under it and wrong for a takeover: the user pressed a button and
+    // has to be told the answer. Ordered the other way round, this socket would
+    // arrive at Observe with no conflict frame at all — G13b is what fails then.
+    const liveTakeoverFrames = await wsFrames(
+      `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=live&reason=takeover`,
+      (seen) => seen.some((f) => f.kind === 'session'),
+    );
+    const liveConflict = liveTakeoverFrames.find((f) => f.kind === 'attach-conflict');
+    check('G13 a refused live takeover reports the conflict rather than silently observing',
+      Boolean(liveConflict), JSON.stringify(liveTakeoverFrames.map((f) => f.kind)));
+    // The frame must name the mode that was actually requested. A client that
+    // reads it to decide what to retry must not be told `resume` for an attach
+    // it made on `live`.
+    check('G13b ...and the frame carries the ACTUAL requested mode',
+      liveConflict?.requestedMode === 'live' && liveConflict?.reason === 'takeover',
+      JSON.stringify(liveConflict));
+    check('G13c ...and the same socket still continues as the Observe fallback',
+      liveTakeoverFrames.some((f) => f.kind === 'session'
+        && f.info?.attachMode === 'observe'),
+      JSON.stringify(liveTakeoverFrames.find((f) => f.kind === 'session')?.info?.attachMode));
+
     const bareFrames = await wsFrames(
       `ws://127.0.0.1:${port}${streamPath}?token=${token}`,
       (seen) => seen.some((f) => f.kind === 'session'),
@@ -703,6 +776,74 @@ for await (const chunk of Bun.stdin.stream()) {
     await broker.exited.catch(() => undefined);
     await settledProcessOutput(brokerOutput);
     await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+// ── G12: the Drive credential boundary, in the baseline where it is the only
+// gate ──────────────────────────────────────────────────────────────────────
+//
+// A TOKENLESS loopback broker. This is the configuration the boundary exists
+// for and the only one that can prove it: with no token configured the outer
+// `authed` gate is open for every route, so `credentialAuthenticated` is the
+// sole thing between an unattended caller and Drive. On the tokened fixture
+// above, `authed` refuses first and a 401 proves nothing about which gate ran.
+//
+// The pairing matters as much as either check alone: takeover refused, bare
+// live admitted, same broker, same request otherwise.
+{
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-arb-open-'));
+  const portLease = await reserveLoopbackFixturePort();
+  const port = portLease.port;
+  const env = isolatedBrokerFixtureEnvironment(home, {
+    overrides: {
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      COSYNCING_HOME: home,
+      COSYNCING_MACHINE: 'arb-open-fixture',
+      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+      COSYNCING_CODEX_SYNC_SERVER: '0',
+      COSYNCING_CODEX_APP_SERVER_SOCK: '',
+    },
+  });
+  await portLease.release();
+  const openBroker = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+    cwd: process.cwd(), env, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore',
+  });
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 100 && !ready; attempt += 1) {
+      try { ready = (await fetch(`${base}/api/health`)).ok; } catch { /* not up yet */ }
+      if (!ready) await Bun.sleep(100);
+    }
+    check('G12 the tokenless baseline broker starts', ready, base);
+
+    const path = '/api/sessions/codex/missing/stream';
+    const bareLive = await fetch(`${base}${path}?mode=live`);
+    check('G12a an unattended live attach is open in the tokenless baseline',
+      bareLive.status === 426, `status=${bareLive.status}`);
+
+    const takeover = await fetch(`${base}${path}?mode=live&reason=takeover`);
+    const takeoverBody = await takeover.json().catch(() => ({})) as { code?: string };
+    check('G12b ...but a reason-tagged live takeover still requires a Drive credential',
+      takeover.status === 401 && takeoverBody.code === 'RESUME_AUTH_REQUIRED',
+      `status=${takeover.status} code=${String(takeoverBody.code)}`);
+    // 401 rather than 426 is also what proves the adapter is never reached: the
+    // refusal lands at the route, before the upgrade, so no socket exists for an
+    // attach to run on.
+    check('G12c ...refused at the route, never reaching the websocket upgrade',
+      takeover.status !== 426, `status=${takeover.status}`);
+
+    const resume = await fetch(`${base}${path}?mode=resume`);
+    check('G12d the resume boundary this extends is unchanged',
+      resume.status === 401, `status=${resume.status}`);
+  } finally {
+    openBroker.kill();
+    await openBroker.exited.catch(() => undefined);
     rmSync(home, { recursive: true, force: true });
   }
 }

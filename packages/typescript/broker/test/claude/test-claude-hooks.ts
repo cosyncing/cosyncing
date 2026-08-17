@@ -14,9 +14,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeSessionId, CLAUDE_HOOK_SCRIPT } from '../../../adapters/claude/src/index.ts';
 import {
+  captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
-  waitForBrokerHealth,
+  startHealthyFixtureBrokerOnPort,
 } from '../helpers/isolated-broker-fixture.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -64,18 +65,31 @@ async function hookRequest(body: any, tries = 6): Promise<any> {
 }
 
 await portLease.release();
-const broker = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
-  cwd: REPO,
-  env: fixtureEnvironment,
-  stdout: 'pipe', stderr: 'pipe', stdin: 'ignore',
+// Started through the shared helper so a silent startup stall — alive, not
+// listening, nothing written — is retired and respawned once on THIS port
+// rather than costing the suite its whole readiness budget. Draining the pipes
+// is what makes that provable; they were piped here and never read.
+let brokerOutput!: ReturnType<typeof captureProcessOutput>;
+const broker = await startHealthyFixtureBrokerOnPort({
+  port: PORT,
+  healthUrl: `${BASE}/api/health`,
+  // Readiness is not one of this suite's assertions, so it gets no wall-clock
+  // budget: a broker booting beside other suites is slow, not broken.
+  spawn: () => {
+    const child = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+      cwd: REPO,
+      env: fixtureEnvironment,
+      stdout: 'pipe', stderr: 'pipe', stdin: 'ignore',
+    });
+    brokerOutput = captureProcessOutput(child);
+    return child;
+  },
+  capture: () => brokerOutput,
+  stop: async (child) => { child.kill(); await child.exited.catch(() => undefined); },
 });
 
 let ws: WebSocket | undefined;
 try {
-  // 1) wait for the broker to listen.
-  // Readiness is not one of this suite's assertions, so it gets no wall-clock
-  // budget: a broker booting beside other suites is slow, not broken.
-  await waitForBrokerHealth(broker, `${BASE}/api/health`);
   check('broker up', true, `:${PORT}`);
 
   // 2) hook hello → session adopted as a pinned, synced live connection
