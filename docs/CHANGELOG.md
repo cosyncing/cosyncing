@@ -11,12 +11,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-18
+
 ### Added
 
 - Kimi Code is supported as a provisional source integration: discovery and
   read-only observe for every session on the local `kimi web` server, plus
   Drive — prompts, approvals, model selection — for the sessions cosyncing
-  created, and explicit takeover for the ones it did not.
+  created, explicit takeover for the ones it did not, and handing Drive back to
+  the terminal when you are done with it.
 - A provisional DeepSeek Harness source adapter connects to a `dsh web` host for
   session discovery, history, and shared foreground control, with model and
   reasoning-effort selection, permission presets, the host's own commands, and
@@ -35,6 +38,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Stopping the broker service now signals only the broker. Processes that merely
   shared its service group are left running, and the agent hosts cosyncing owns
   stop through an ownership-checked release instead.
+- The broker declares which controls a session can grant instead of leaving the
+  client to infer them (contract revision 15). A client offers terminal handoff
+  only where the session actually supports it, a session whose attach mode the
+  client cannot decode attaches read-only rather than arming Drive on a guess,
+  and the broker enforces that read-only posture on the connection instead of
+  trusting the client to honor it.
 
 ### Fixed
 
