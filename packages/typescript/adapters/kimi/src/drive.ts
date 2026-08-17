@@ -310,7 +310,8 @@ export class KimiDriveConnection extends KimiObserveConnection {
   private readonly knownUserMessageIds = new Set<string>();
   private readonly suspects = new Map<string, KimiDivergenceSuspect>();
   /**
-   * User rows this connection cannot attribute BECAUSE the stream was down.
+   * User rows this connection cannot attribute BECAUSE the stream was down,
+   * each with the earliest {@link liveActivity} baseline it was held with.
    *
    * Held apart from {@link suspects} because they are a different claim. A
    * suspect is a row observed under a healthy, silent stream and is on its way
@@ -319,11 +320,19 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * as accounted for is precisely the bug this set exists to undo — and they
    * leave here only for a verdict or for evidence, never for a timeout.
    *
+   * The activity reading is the row's share of the explanation window. The
+   * first healthy walk after a break ARMS these rows with the counter as it
+   * stands at walk's end, and a frame that crossed that walk is already
+   * counted in it — arming would make the suspect carry its own answer as its
+   * baseline and confirm against it. Against the hold-time reading instead,
+   * any server activity since the row was held is the server answering for
+   * the row, whenever in the recovery it landed.
+   *
    * Bounded at {@link KIMI_DIVERGENCE_SUSPECT_LIMIT}, and the overflow rule is
    * DEMOTE rather than evict: 64 prompts nobody can account for is not a race,
    * and a bounded memory must never forgive what it cannot hold.
    */
-  private readonly unresolvedSuspects = new Set<string>();
+  private readonly unresolvedSuspects = new Map<string, number>();
 
   /** One repair at a time; a burst of discontinuities is one incoherent state, not N. */
   private repairing = false;
@@ -1120,7 +1129,11 @@ export class KimiDriveConnection extends KimiObserveConnection {
     // dropping it is what let an unexplained user row be quietly recorded as
     // known and then never be suspectable again, which is a foreign writer this
     // connection has agreed in advance never to notice.
-    for (const id of this.suspects.keys()) this.addUnresolved(id);
+    // The move carries each suspect's ORIGINAL activity baseline with it: a
+    // frame observed after the row was first questioned is evidence the break
+    // must not re-baseline away, or the reconnect would arm the row with its
+    // own answer as the starting point and confirm against it.
+    for (const [id, suspect] of this.suspects) this.addUnresolved(id, suspect.activity);
     this.suspects.clear();
     super.noteStreamBreak();
     // A break that happened IN PLACE — the socket is still open, so no `open`
@@ -1155,14 +1168,23 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * it can resolve them, which is the thing being watched for. Evicting the
    * oldest instead would silently forgive exactly the evidence the bound was
    * supposed to preserve.
+   *
+   * The {@link liveActivity} reading is taken NOW so the walk that later arms
+   * the row can tell "the server has said nothing since the row was held"
+   * from "the answer arrived before the watch could be armed". A row moved in
+   * from {@link suspects} brings the baseline it was armed with instead — the
+   * break that moved it is not a reason to forget activity already observed —
+   * and a row that already HAS a baseline keeps it: the earliest reading is
+   * the one that separates "nothing since the row was first questioned" from
+   * later evidence.
    */
-  private addUnresolved(id: string): void {
+  private addUnresolved(id: string, activity = this.liveActivity): void {
     if (this.unresolvedSuspects.has(id) || this.sentUserMessageIds.has(id)) return;
     if (this.unresolvedSuspects.size >= KIMI_DIVERGENCE_SUSPECT_LIMIT) {
       this.demoteToObserve(KIMI_FOREIGN_WRITER_REASON);
       return;
     }
-    this.unresolvedSuspects.add(id);
+    this.unresolvedSuspects.set(id, activity);
   }
 
   /** Evidence arrived for one row: it was ours after all. Clears it from both sets. */
@@ -1226,7 +1248,10 @@ export class KimiDriveConnection extends KimiObserveConnection {
         // re-proving an item id it was already told it had.
         if (suspect.mark !== mark) {
           this.suspects.delete(id);
-          if (suspect.unresolved) this.addUnresolved(id);
+          // Same rule as the move in `noteStreamBreak`: the hole does not
+          // re-baseline the row, so the activity reading it was armed with
+          // goes back into the hold with it.
+          if (suspect.unresolved) this.addUnresolved(id, suspect.activity);
           continue;
         }
         suspect.polls += 1;
@@ -1240,9 +1265,22 @@ export class KimiDriveConnection extends KimiObserveConnection {
       // outage denied them: a real watch, under a stream that is demonstrably
       // up, starting from this interval. They carry their provenance with them
       // so a SECOND outage re-arms them rather than clearing them.
-      for (const id of [...this.unresolvedSuspects]) {
+      for (const [id, heldActivity] of [...this.unresolvedSuspects]) {
         this.unresolvedSuspects.delete(id);
         if (this.sentUserMessageIds.has(id)) continue;
+        // The explanation may already BE here: a frame that crossed THIS walk
+        // is counted in `activity`, and a suspect armed with that reading as
+        // its baseline would count the answer as part of the silence — it
+        // would then confirm against the very frame that accounted for the
+        // row. The row's open question is whether the server answered for
+        // this session at any point since the row was held, and a moved
+        // counter is that answer — the same REST-leads-WS exoneration the
+        // suspects above get, measured from the hold instead of from the
+        // arming. The row is accounted for, not armed.
+        if (activity !== heldActivity) {
+          boundedAdd(this.knownUserMessageIds, id, KIMI_DIVERGENCE_ID_LIMIT);
+          continue;
+        }
         this.suspects.set(id, { mark, activity, polls: 1, unresolved: true });
       }
 
