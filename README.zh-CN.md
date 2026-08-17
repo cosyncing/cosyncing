@@ -56,9 +56,11 @@ Broker 运行在智能体工作的那台机器上，负责观察它们的会话�
   <a href="https://openai.com/codex/" title="Codex"><img src="docs/assets/agents/pills/codex.png" alt="Codex" height="34"></a>
   <a href="https://opencode.ai/" title="OpenCode"><img src="docs/assets/agents/pills/opencode.png" alt="OpenCode" height="34"></a>
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
+  <a href="https://www.kimi.com/code" title="Kimi Code"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi Code" height="34"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
 </p>
 
-四者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
+六者共用同一套协议；各家智能体开放的能力并不一致，应用会如实显示某个会话实际支持什么。
 Claude Code 的会话在接管之前保持只读。版本与安装方法见
 [支持的智能体](docs/supported_agents/README.md)，逐项能力见
 [适配器支持](docs/protocol/adapter-support.md)（均为英文）。
