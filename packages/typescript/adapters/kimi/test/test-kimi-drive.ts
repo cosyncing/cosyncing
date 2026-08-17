@@ -471,6 +471,26 @@ const walkedAfterReconnect = (conn: KimiDriveConnection): Promise<void> =>
   (conn as unknown as { settleContent: () => Promise<void> }).settleContent();
 
 /**
+ * Fail a bounded wait with its own diagnostic instead of riding the suite
+ * timeout. A barrier that awaits production work without one turns a stuck
+ * walk into a 90-second hang that blames the whole suite — exactly the kind
+ * of timing-dependent gate failure this change exists to remove.
+ */
+const withinDeadline = async <T>(work: Promise<T>, ms: number, what: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
  * Wait out the walk currently holding the slot — and NOTHING more.
  *
  * This is the barrier the explained-outage blocks actually need, and the
@@ -487,9 +507,18 @@ const walkedAfterReconnect = (conn: KimiDriveConnection): Promise<void> =>
  * detector state reflects exactly one post-reconnect evaluation, and the
  * frame delivered next genuinely precedes the second walk.
  */
-const waitOutWalk = async (conn: KimiDriveConnection): Promise<void> => {
+const waitOutWalk = async (conn: KimiDriveConnection, timeoutMs = 5_000): Promise<void> => {
   const walk = conn as unknown as { refreshing: boolean; activeWalk?: Promise<void> };
-  while (walk.refreshing) await walk.activeWalk;
+  const deadline = Date.now() + timeoutMs;
+  while (walk.refreshing) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('the in-flight transcript walk never settled — the slot stayed busy past the deadline');
+    }
+    // `refreshing` and `activeWalk` are set in one synchronous frame, so a
+    // busy slot always has its promise.
+    await withinDeadline(walk.activeWalk!, remaining, 'the in-flight transcript walk');
+  }
 };
 
 /** Transcript reads the fixture has SERVED so far — the observable half of a walk. */
@@ -527,10 +556,13 @@ async function heldRow(conn: KimiDriveConnection, timeoutMs = 5_000): Promise<vo
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (provenanceOpen(conn)) return;
-    if (Date.now() >= deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
       throw new Error('the outage row was never held — no walk observed it while the stream was down');
     }
-    await conn.refresh();
+    // The refresh itself is bounded by the same deadline: an unbounded await
+    // here would keep the deadline from ever firing on a stuck walk.
+    await withinDeadline(conn.refresh(), remaining, 'a refresh while waiting for the outage hold');
     await Bun.sleep(1);
   }
 }
