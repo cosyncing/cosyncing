@@ -454,6 +454,119 @@ async function replacementSocket(
   }
 }
 
+/**
+ * A walk-COMPLETION barrier for the post-reconnect sequences below.
+ *
+ * Socket-open readiness is not this barrier: the poll tick starts its own
+ * walk the moment the generation re-resolves, and `refresh()` COALESCES on
+ * that busy slot (`observe.ts`, `runExclusiveWalk`), so an awaited `refresh()`
+ * can return having run no walk at all. `settleContent` is the production
+ * primitive written for exactly this ordering (`drive.ts` uses it to land a
+ * send after the rows that belong before it): it waits the in-flight walk
+ * out, then runs one more to completion. The cast reaches a protected member
+ * the way the interaction-record checks elsewhere in this suite already do,
+ * without growing the public surface for a test.
+ */
+const walkedAfterReconnect = (conn: KimiDriveConnection): Promise<void> =>
+  (conn as unknown as { settleContent: () => Promise<void> }).settleContent();
+
+/**
+ * Fail a bounded wait with its own diagnostic instead of riding the suite
+ * timeout. A barrier that awaits production work without one turns a stuck
+ * walk into a 90-second hang that blames the whole suite — exactly the kind
+ * of timing-dependent gate failure this change exists to remove.
+ */
+const withinDeadline = async <T>(work: Promise<T>, ms: number, what: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Wait out the walk currently holding the slot — and NOTHING more.
+ *
+ * This is the barrier the explained-outage blocks actually need, and the
+ * stronger {@link walkedAfterReconnect} is actively WRONG there: the tick's
+ * own post-reconnect walk is what ARMS the held row (polls=1), so a barrier
+ * that then runs one more walk runs the CONFIRMING walk — the suspect reaches
+ * {@link KIMI_DIVERGENCE_CONFIRM_POLLS} and demotes before the test has even
+ * delivered the explanation. Whether that happened depended on whether the
+ * tick walk's evaluation or the barrier's second walk came first, which is
+ * machine timing: the intermittent demotion this suite kept showing on CI.
+ *
+ * After the reconnect the only walk that can exist is the tick's — the timer
+ * is test-driven and nothing else triggers one — so once the slot is idle the
+ * detector state reflects exactly one post-reconnect evaluation, and the
+ * frame delivered next genuinely precedes the second walk.
+ */
+const waitOutWalk = async (conn: KimiDriveConnection, timeoutMs = 5_000): Promise<void> => {
+  const walk = conn as unknown as { refreshing: boolean; activeWalk?: Promise<void> };
+  const deadline = Date.now() + timeoutMs;
+  while (walk.refreshing) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('the in-flight transcript walk never settled — the slot stayed busy past the deadline');
+    }
+    // `refreshing` and `activeWalk` are set in one synchronous frame, so a
+    // busy slot always has its promise.
+    await withinDeadline(walk.activeWalk!, remaining, 'the in-flight transcript walk');
+  }
+};
+
+/** Transcript reads the fixture has SERVED so far — the observable half of a walk. */
+const transcriptReads = (): number =>
+  requests.filter((entry) => entry.method === 'GET' && entry.path.endsWith('/messages')).length;
+
+/**
+ * Is the detector holding any row whose provenance is still open? Read through
+ * the same cast pattern as the other private-state checks in this suite —
+ * `provenancePending` stays private production state.
+ */
+const provenanceOpen = (conn: KimiDriveConnection): boolean =>
+  (conn as unknown as { provenancePending: boolean }).provenancePending;
+
+/**
+ * An outage-HOLD barrier: resolves once the row the block just added is
+ * genuinely held as unresolved — observed under a DOWN stream, which is the
+ * whole premise of the explained-outage blocks below.
+ *
+ * `await conn.refresh()` cannot promise this. The socket's own close listener
+ * fires a refresh that re-resolves the generation over HTTP before it walks
+ * (`observe.ts`), and on a slow machine that walk is still in flight when a
+ * fixed settle ends: the test's refresh then COALESCES on the busy slot, the
+ * row is never seen while the stream is down, and when a walk finally reads
+ * it after the replacement socket has opened, the detector quite correctly
+ * treats it as a row that appeared under a healthy, silent stream — suspects
+ * it, and confirms it to a demotion before the explanatory frame is even
+ * delivered. Polling the detector's own provenance state — and nudging a
+ * refresh each round, so the walk that makes it true is never missing — turns
+ * "the outage saw the row" into the condition it always needed to be. While
+ * the stream is down no healthy evaluation can run, so a pending provenance
+ * here can only BE the unresolved hold.
+ */
+async function heldRow(conn: KimiDriveConnection, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (provenanceOpen(conn)) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('the outage row was never held — no walk observed it while the stream was down');
+    }
+    // The refresh itself is bounded by the same deadline: an unbounded await
+    // here would keep the deadline from ever firing on a stuck walk.
+    await withinDeadline(conn.refresh(), remaining, 'a refresh while waiting for the outage hold');
+    await Bun.sleep(1);
+  }
+}
+
 try {
   // ── 1. createSession ──────────────────────────────────────────────────────
 
@@ -1466,8 +1579,10 @@ try {
     socket.fire('close', {});
     await settle();
     messages = [userRow('msg_during_outage', 'arrived while the stream was down'), ...messages];
-    await conn.refresh();
-    await conn.refresh();
+    // The refusal checks below stand on the row being HELD, which only a walk
+    // under the down stream can do — so that observation is barriered, not
+    // slept (see heldRow).
+    await heldRow(conn);
     check('rows seen while the socket was down never demote',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     // ...and the connection SAYS it cannot account for the row, by refusing to
@@ -1518,7 +1633,12 @@ try {
     retired.fire('close', {});
     await settle();
     messages = [userRow('msg_outage_explained', 'the server ran this'), ...messages];
-    await conn.refresh();
+    // The row must be SEEN while the stream is down — that is the premise every
+    // later claim in this block stands on. A plain refresh cannot promise it
+    // (see heldRow): the close listener's own re-resolution walk can still hold
+    // the slot when a fixed settle ends, and a row first read after the stream
+    // is back is, correctly, a fresh suspect under a healthy silent stream.
+    await heldRow(conn);
     // The tick reopens the stream, but only AFTER re-resolving the generation
     // over HTTP, so the replacement socket is not ready the moment a sleep ends.
     // Deliver to the socket that actually opened: delivering to the retired one
@@ -1526,7 +1646,13 @@ try {
     // sitting unread.
     intervalHandler?.();
     const replacement = await replacementSocket(retired);
-    await conn.refresh();
+    // The frame must land in the interval BETWEEN the arming walk and the
+    // confirming one: socket-open readiness is not a walk barrier (the tick
+    // starts its own walk the moment the generation re-resolves), and waiting
+    // out that walk by running ANOTHER one would run the confirmation itself
+    // — the suspect would demote before its explanation was delivered. Wait
+    // the tick's walk out, deliver, then let the next walk evaluate.
+    await waitOutWalk(conn);
     replacement.deliver(frame('turn.started', { turnId: 11, origin: { kind: 'user' } }));
     await conn.refresh();
     await conn.refresh();
@@ -1559,7 +1685,7 @@ try {
     retired.fire('close', {});
     await settle();
     messages = [userRow('msg_outage_slow_meta', 'the server ran this too'), ...messages];
-    await conn.refresh();
+    await heldRow(conn);
     const parkedMeta = gate();
     holdMeta = parkedMeta.hold;
     intervalHandler?.();
@@ -1572,12 +1698,114 @@ try {
     // loaded machine runs deterministically once the wait is a condition rather
     // than a duration.
     const replacement = await replacementSocket(retired);
-    await conn.refresh();
+    await waitOutWalk(conn);
     replacement.deliver(frame('turn.started', { turnId: 12, origin: { kind: 'user' } }));
     await conn.refresh();
     await conn.refresh();
     check('a slow re-verification does not demote an outage row that was explained',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    await conn.close();
+  }
+
+  {
+    // THE EXPLANATION CROSSING THE ARMING WALK — the schedule socket-readiness
+    // alone cannot rule out. The reconnect's first healthy walk is held open
+    // INSIDE the fixture server, the explanatory frame is delivered while that
+    // walk is in flight, and only then is the walk allowed to finish.
+    //
+    // The detector contract says this row is EXPLAINED, not merely lucky. The
+    // outage row's open question is "did the server answer for this session at
+    // any point since the row appeared unattributed", and a frame that arrives
+    // while the arming walk is still gathering is exactly such an answer: the
+    // same REST-leads-WS case as the blocks above, measured from the hold
+    // rather than from the arming. Counting the frame into the suspect's
+    // arming baseline instead would call the explanation part of the silence,
+    // and the suspect would confirm against the very frame that accounted for
+    // it — demoting a session whose server demonstrably answered for it, the
+    // false positive this detector exists to avoid.
+    const { conn } = await drivenSession();
+    const retired = sockets.at(-1)!;
+    retired.fire('close', {});
+    await settle();
+    messages = [userRow('msg_outage_crossed', 'the server ran this during recovery'), ...messages];
+    await heldRow(conn);
+    // Park the transcript read BEFORE the tick, so the first healthy walk the
+    // reconnect runs is the one held open here — and record how many transcript
+    // reads the fixture has served, so the walk's arrival is PROVEN rather than
+    // assumed.
+    const readsBefore = transcriptReads();
+    const crossing = gate();
+    holdMessages = crossing.hold;
+    intervalHandler?.();
+    const replacement = await replacementSocket(retired);
+    const parkedDeadline = Date.now() + 5_000;
+    while (transcriptReads() === readsBefore) {
+      if (Date.now() >= parkedDeadline) {
+        throw new Error('the reconnect walk never reached the parked transcript read');
+      }
+      await Bun.sleep(1);
+    }
+    // The walk is parked mid-flight with its GET served and unanswered: the
+    // frame below genuinely crosses it. This is the delivery the readiness
+    // wait cannot order.
+    replacement.deliver(frame('turn.started', { turnId: 13, origin: { kind: 'user' } }));
+    crossing.release();
+    // The barrier waits the parked walk out and runs one more; the refresh
+    // after it widens the window past the confirmation rule, so a suspect
+    // armed WITH the explanation in its baseline — the regression pinned here
+    // — would have confirmed by the time the check runs.
+    await walkedAfterReconnect(conn);
+    await conn.refresh();
+    check('a turn.started crossing the first healthy walk still exonerates the outage row',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    // ...and "accounted for" has teeth: provenance is closed, so a write goes
+    // out. NEGATIVE CONTROL on the count, as everywhere else.
+    const beforeCrossed = writes().length;
+    promptAnswer = ok({ prompt_id: 'prompt_crossed', user_message_id: 'msg_crossed', status: 'running', content: [], created_at: 'x' });
+    const resumed = await threw(() => conn.sendPrompt({ text: 'writing again' }));
+    check('writes resume once the crossing frame has accounted for the row',
+      resumed === undefined && writes().length === beforeCrossed + 1,
+      `${resumed?.message} writes=${writes().length - beforeCrossed}`);
+    await conn.close();
+  }
+
+  {
+    // THE EXPLANATION ARRIVES, THEN THE STREAM BREAKS BEFORE ANY WALK CAN
+    // EVALUATE IT. The suspect was armed in a healthy interval, the server's
+    // frame landed, and the socket died in between — so the evidence exists
+    // only inside the suspect being MOVED to the unresolved set. Re-baselining
+    // on the move would record the counter AFTER the frame, and the reconnect
+    // would then arm the row with its own answer as the starting point and
+    // confirm against it: the same false demotion as the crossing case, one
+    // transition later. The contract is unchanged — activity at any point
+    // since the row was first questioned exonerates it — so the break must
+    // carry the baseline, not the current reading.
+    const { conn } = await drivenSession();
+    const retired = sockets.at(-1)!;
+    messages = [userRow('msg_explained_before_break', 'explained, then the stream died'), ...messages];
+    await conn.refresh();
+    // Armed now: one healthy poll of an unexplained row, per the blocks above.
+    // The frame and the close are SYNCHRONOUS and adjacent, so no walk can
+    // evaluate the suspect in between — the move to the unresolved set is the
+    // only place the evidence can survive.
+    retired.deliver(frame('turn.started', { turnId: 14, origin: { kind: 'user' } }));
+    retired.fire('close', {});
+    await settle();
+    // The stream returns with NOTHING further to say: if the baseline survived
+    // the move, the frame already delivered accounts for the row.
+    intervalHandler?.();
+    await replacementSocket(retired);
+    await walkedAfterReconnect(conn);
+    await conn.refresh();
+    await conn.refresh();
+    check('a suspect whose explanation arrived before the break does NOT demote',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    const beforeExplained = writes().length;
+    promptAnswer = ok({ prompt_id: 'prompt_explained', user_message_id: 'msg_explained', status: 'running', content: [], created_at: 'x' });
+    const explainedResume = await threw(() => conn.sendPrompt({ text: 'writing again' }));
+    check('writes resume once the pre-break frame has accounted for the row',
+      explainedResume === undefined && writes().length === beforeExplained + 1,
+      `${explainedResume?.message} writes=${writes().length - beforeExplained}`);
     await conn.close();
   }
 

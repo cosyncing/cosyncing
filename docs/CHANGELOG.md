@@ -21,6 +21,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - Codex 0.147 completed user-message records now appear in transcripts without
   duplicating legacy user-message records.
+- Kimi Drive no longer demotes a session when the server's own activity frame
+  crosses the first healthy walk after a stream reconnect; activity observed
+  since an unattributed row was held now accounts for it.
 
 ## 0.3.0 — 2026-08-14
 
