@@ -899,6 +899,7 @@ class _HeldSessionDetailConnection implements SessionDetailConnection {
     int? draftRevision,
     String? draftUpdateId,
     List<PromptFileAttachment> files = const [],
+    String? permissionMode,
   }) async {}
 
   @override

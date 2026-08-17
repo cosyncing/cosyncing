@@ -874,7 +874,7 @@ enum SessionDriveRestorePhase {
   /// No restoration is in flight.
   idle,
 
-  /// A reason-tagged resume attach was sent; waiting for the broker's
+  /// A reason-tagged drive attach was sent; waiting for the broker's
   /// arbitration answer.
   restoring,
 

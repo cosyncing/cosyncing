@@ -75,6 +75,9 @@ abstract interface class SessionDetailConnection {
   /// [draftUpdateId] the token of a draft write not yet acknowledged, so the
   /// broker's post-send clear covers this device's own draft and can never
   /// erase a newer one another device typed. Omitted against a legacy broker.
+  ///
+  /// [permissionMode] is the per-prompt approval mode the composer selected;
+  /// omitted leaves the session's own mode alone.
   Future<void> sendPrompt(
     String text, {
     SessionCurrentModel? model,
@@ -82,6 +85,7 @@ abstract interface class SessionDetailConnection {
     String? clientMessageId,
     int? draftRevision,
     String? draftUpdateId,
+    String? permissionMode,
   });
 
   /// Replaces the shared composer draft for this session.
@@ -271,6 +275,7 @@ class BrokerSessionDetailConnection
     String? clientMessageId,
     int? draftRevision,
     String? draftUpdateId,
+    String? permissionMode,
   }) async {
     _inner.sendPrompt(
       text,
@@ -279,6 +284,7 @@ class BrokerSessionDetailConnection
       clientMessageId: clientMessageId,
       draftRevision: draftRevision,
       draftUpdateId: draftUpdateId,
+      permissionMode: permissionMode,
     );
   }
 

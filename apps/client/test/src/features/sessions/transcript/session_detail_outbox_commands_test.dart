@@ -135,6 +135,52 @@ void main() {
         expect(outbox?.status, SessionOutboxMessageStatus.sending);
       });
 
+      test('the selected permission mode is sent and made durable', () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        final sent = await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .sendPrompt('scoped prompt', permissionMode: 'auto');
+
+        expect(sent, isTrue);
+        // The exact token reaches the wire...
+        expect(fakeConnection.lastPromptPermissionMode, 'auto');
+        // ...and the durable row records it, so a retry reproduces this frame
+        // rather than re-reading a composer that may have moved on. The broker
+        // fingerprints every field but the client message id, so a drifted
+        // replay comes back as a conflicting reuse of that id.
+        final outbox = fakeOutboxRepository.messageById(
+          fakeConnection.lastPromptClientMessageId!,
+        );
+        expect(outbox?.payload, const {
+          'text': 'scoped prompt',
+          'permissionMode': 'auto',
+          'draftRevision': 0,
+        });
+      });
+
+      test('a prompt with no override claims no mode at all', () async {
+        keepSessionDetailAlive(container, key);
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .attach();
+
+        await container
+            .read(sessionDetailControllerProvider(key).notifier)
+            .sendPrompt('unscoped prompt');
+
+        // Absent, not blank and not echoed back: an ordinary prompt must not
+        // re-assert a mode, which would outrank one the server changed.
+        expect(fakeConnection.lastPromptPermissionMode, isNull);
+        final outbox = fakeOutboxRepository.messageById(
+          fakeConnection.lastPromptClientMessageId!,
+        );
+        expect(outbox?.payload.containsKey('permissionMode'), isFalse);
+      });
+
       test('client-message ack marks outbox row delivered', () async {
         keepSessionDetailAlive(container, key);
         await container
@@ -696,6 +742,89 @@ void main() {
             fakeConnection.lastPromptClientMessageId,
             'ca.retry.same-id',
           );
+        },
+      );
+
+      test(
+        'a replayed prompt asks for the mode it was sent with',
+        () async {
+          keepSessionDetailAlive(container, key);
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .attach();
+          await fakeOutboxRepository.upsert(
+            SessionOutboxMessage.create(
+              sessionKey: key,
+              brokerProfileId: fakeControllerBrokerScope(),
+              clientMessageId: 'ca.retry.mode',
+              kind: SessionOutboxMessageKind.prompt,
+              payload: const {
+                'text': 'please retry',
+                'permissionMode': 'manual',
+              },
+            ).copyWith(status: SessionOutboxMessageStatus.retryable),
+          );
+
+          fakeConnection
+            ..emitState(SessionDetailConnectionStatus.reconnecting)
+            ..emitState(SessionDetailConnectionStatus.connected);
+          await Future<void>.delayed(Duration.zero);
+          fakeConnection.emitSessionControl(const {
+            'drive': {'state': 'driving', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          });
+          await Future<void>.delayed(Duration.zero);
+          await Future<void>.delayed(Duration.zero);
+
+          // Read from the durable row, not from live UI state — nothing in
+          // this test ever selected a mode, so a recomputed replay would send
+          // none and change a request the user already made.
+          expect(fakeConnection.sendPromptCount, 1);
+          expect(fakeConnection.lastPromptPermissionMode, 'manual');
+        },
+      );
+
+      test(
+        'a row written before the mode existed replays unchanged',
+        () async {
+          keepSessionDetailAlive(container, key);
+          await container
+              .read(sessionDetailControllerProvider(key).notifier)
+              .attach();
+          await fakeOutboxRepository.upsert(
+            SessionOutboxMessage.create(
+              sessionKey: key,
+              brokerProfileId: fakeControllerBrokerScope(),
+              clientMessageId: 'ca.retry.legacy-mode',
+              kind: SessionOutboxMessageKind.prompt,
+              payload: const {'text': 'please retry'},
+            ).copyWith(status: SessionOutboxMessageStatus.retryable),
+          );
+
+          fakeConnection
+            ..emitState(SessionDetailConnectionStatus.reconnecting)
+            ..emitState(SessionDetailConnectionStatus.connected);
+          await Future<void>.delayed(Duration.zero);
+          fakeConnection.emitSessionControl(const {
+            'drive': {'state': 'driving', 'supported': true},
+            'terminalSync': {
+              'supported': false,
+              'syncAvailable': false,
+              'active': false,
+            },
+          });
+          await Future<void>.delayed(Duration.zero);
+          await Future<void>.delayed(Duration.zero);
+
+          // Byte-identical to its first send. Adding a mode on replay would
+          // change the fingerprint and turn an already-executed prompt into a
+          // terminal id conflict.
+          expect(fakeConnection.sendPromptCount, 1);
+          expect(fakeConnection.lastPromptPermissionMode, isNull);
         },
       );
 

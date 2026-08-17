@@ -240,3 +240,130 @@ class _ReadOnlyHint extends StatelessWidget {
     );
   }
 }
+
+/// Collapsed row for agent-visible context the user never typed.
+///
+/// Quiet by default and expandable on demand: this material is background the
+/// agent was handed, not something the reader has to act on, and at session
+/// open there can be several of them in a row. Rendered literally they were
+/// the loudest thing on screen — centred walls of prose quoting plugin ids and
+/// raw `<system-reminder>` tags — while carrying nothing a reader needs at a
+/// glance.
+///
+/// Collapsed, the row is a plain human word and nothing else. The origin is an
+/// unedited provider identifier — `@deepseek-ai/dsh-system-prompt` — and putting
+/// it in the always-visible header made the resting transcript read as internal
+/// plumbing, which is the raw-identifier leakage this presentation exists to
+/// keep out. It belongs to the reader who opened the block and asked where the
+/// material came from, so it appears above the body once expanded.
+///
+/// The material itself is kept whole, and when the adapter had to clip it the
+/// block says so in words instead of just stopping.
+class _ContextInjectionRow extends StatefulWidget {
+  const _ContextInjectionRow({required this.message});
+
+  final AgentMessage message;
+
+  @override
+  State<_ContextInjectionRow> createState() => _ContextInjectionRowState();
+}
+
+class _ContextInjectionRowState extends State<_ContextInjectionRow> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
+    final injected = widget.message.contextInjection;
+    if (injected == null) return const SizedBox.shrink();
+    final quiet = theme.colorScheme.onSurfaceVariant;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // One merged semantics node: the label comes from the Text, the tap
+          // from the InkWell, and the disclosure state is declared explicitly
+          // so a screen reader knows the row opens and whether it is open.
+          MergeSemantics(
+            child: Semantics(
+              button: true,
+              expanded: _expanded,
+              child: InkWell(
+                key: const Key('transcript-context-toggle'),
+                borderRadius: BorderRadius.circular(context.tokens.radiusMd),
+                onTap: () => setState(() => _expanded = !_expanded),
+                child: ConstrainedBox(
+                  // 40 is the floor for a real touch target, not the 36 some
+                  // quiet transcript affordances use: this one is tapped to
+                  // read the material, so it has to be reliably hittable on a
+                  // phone. Still under the 48 of primary controls, so it does
+                  // not push the messages around it apart.
+                  constraints: const BoxConstraints(minHeight: 40),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.article_outlined, size: 16, color: quiet),
+                        const SizedBox(width: 8),
+                        Text(
+                          l10n.transcriptContextLabel,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: quiet,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          _expanded ? Icons.expand_less : Icons.expand_more,
+                          size: 18,
+                          color: quiet,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, top: 4, bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    injected.source,
+                    key: const Key('transcript-context-source'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(color: quiet),
+                  ),
+                  const SizedBox(height: 4),
+                  DefaultTextStyle.merge(
+                    style: TextStyle(color: quiet),
+                    child: _MarkdownBody(source: injected.body),
+                  ),
+                  if (injected.truncated) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      l10n.transcriptContextTruncated,
+                      key: const Key('transcript-context-truncated'),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: quiet,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}

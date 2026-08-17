@@ -204,6 +204,67 @@ void main() {
       );
     });
 
+    test('takeOver attaches in the mode the broker declared', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      // A demoted Kimi generation. It is not drivable now — `supported: false`,
+      // `unavailable` — and a re-takeover has to attach `live`, because there
+      // is no cosyncing-owned process to resume into. Sending the historical
+      // `resume` here would attach to nothing and fail.
+      fakeConnection.emitSessionControl(const {
+        'drive': {
+          'state': 'unavailable',
+          'supported': false,
+          'takeoverAvailable': true,
+          'takeoverMode': 'live',
+        },
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      unawaited(controller.takeOver());
+      await Future<void>.delayed(Duration.zero);
+      expect(fakeConnection.reattachModes, ['live']);
+      expect(fakeConnection.reattachReasons, ['takeover']);
+    });
+
+    test('takeOver refuses a mode it cannot reason about', () async {
+      keepSessionDetailAlive(container, key);
+      final controller = container.read(
+        sessionDetailControllerProvider(key).notifier,
+      );
+      await controller.attach();
+      // A future attach mode. Taking over means attaching in a specific mode,
+      // and guessing `resume` on a session that needs something else seizes
+      // Drive the wrong way rather than not at all.
+      fakeConnection.emitSessionControl(const {
+        'drive': {
+          'state': 'observing',
+          'supported': true,
+          'takeoverAvailable': true,
+          'takeoverMode': 'teleport',
+        },
+        'terminalSync': {
+          'supported': false,
+          'syncAvailable': false,
+          'active': false,
+        },
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final succeeded = await controller.takeOver();
+      await Future<void>.delayed(Duration.zero);
+      expect(succeeded, isFalse);
+      expect(fakeConnection.reattachModes, isEmpty);
+    });
+
     test('new-session resume instruction is consumed exactly once', () async {
       container
           .read(createdSessionAttachIntentsProvider)

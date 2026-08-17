@@ -43,6 +43,7 @@ import {
   KimiObserveConnection,
   type KimiObserveOptions,
   type KimiPendingSnapshot,
+  type KimiWalkKind,
 } from './observe.ts';
 import { KimiReadOnlyHttp } from './server.ts';
 import {
@@ -156,6 +157,21 @@ export const KIMI_DEMOTED_REFUSAL =
   'this Kimi session is being written by another program, so cosyncing is observing it only';
 
 /**
+ * Refusal for every write attempted while a takeover is still PROVISIONAL —
+ * after the adapter's barrier proved this connection may drive, and before the
+ * broker admitted it as the session's owner.
+ *
+ * The two-phase promotion exists so that a refused admission leaves no trace,
+ * and a write sent in this window is exactly the trace it was meant to prevent:
+ * the connection would have prompted, answered a card or stopped a turn in a
+ * session it then turns out it never owned, and no rollback can unsend that.
+ * Ownership is not yet a fact here, so neither is authority.
+ */
+export const KIMI_UNCOMMITTED_PROMOTION_REFUSAL =
+  'cosyncing has not finished taking over this Kimi session yet, so it will not write to it. '
+  + 'Try again in a moment.';
+
+/**
  * Refusal for a content write attempted with the safety stream down.
  *
  * Names the DEPENDENCY rather than the mechanism: the live stream is how an
@@ -256,6 +272,18 @@ export interface KimiDriveOptions extends KimiObserveOptions {
    */
   onDemoted?: (sessionId: string, reason: string) => void;
   /**
+   * Settles ownership a PROMOTING attach minted provisionally: `true` commits
+   * it, `false` discards it.
+   *
+   * Present only for a takeover of a session the adapter did not already own.
+   * The adapter proves this connection may drive before returning it, but the
+   * broker can still refuse to admit it, and closing a connection cannot undo
+   * eligibility already recorded — so the record waits for admission. Injected
+   * as a callback for the same reason {@link onDemoted} is: the connection must
+   * never hold the adapter.
+   */
+  settlePromotion?: (commit: boolean) => boolean;
+  /**
    * Told when the create-time model request has actually been SPENT — on the
    * first successful prompt — so the adapter can forget it.
    *
@@ -296,6 +324,15 @@ interface KimiDivergenceSuspect {
 export class KimiDriveConnection extends KimiObserveConnection {
   private demoted = false;
   private readonly onDemoted?: (sessionId: string, reason: string) => void;
+
+  /**
+   * Settles provisional ownership from a promoting takeover, once.
+   *
+   * Cleared as soon as it runs, so commit and abandon are each idempotent and
+   * cannot race each other: whichever of admission or close happens first is
+   * the one that decides, and the second is a no-op.
+   */
+  private settlePromotion?: (commit: boolean) => boolean;
 
   /** `prompt_id`s submitted here that have not seen their terminal event. */
   private readonly pendingPrompts = new Set<string>();
@@ -374,12 +411,24 @@ export class KimiDriveConnection extends KimiObserveConnection {
     super(info, http, wsUrl, token, options);
     if (options.pendingModel) this.pendingModel = options.pendingModel;
     if (options.onDemoted) this.onDemoted = options.onDemoted;
+    if (options.settlePromotion) this.settlePromotion = options.settlePromotion;
     if (options.onModelConsumed) this.onModelConsumed = options.onModelConsumed;
     this.writeStreamWaitMs = options.writeStreamWaitMs && options.writeStreamWaitMs > 0
       ? options.writeStreamWaitMs
       : KIMI_WRITE_STREAM_WAIT_MS;
   }
 
+  /**
+   * Posture, not authority — and TRUE across an uncommitted promotion.
+   *
+   * A promoting connection has to behave like a driver during admission even
+   * though it may not write: the foreign-writer detector must stay armed (a
+   * competing writer appearing in this window is what makes the commit refuse),
+   * and an approval card arriving in it must be captured answerable, because the
+   * promotion it belongs to usually succeeds. Authority is gated at the write
+   * door instead — see {@link assertWritable}, which refuses every mutation
+   * until the broker commits.
+   */
   protected override get driving(): boolean {
     return !this.demoted && !this.closed;
   }
@@ -704,7 +753,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * tail and cannot deliver an uncorrelated echo twice) and the run-state repair
    * (a session-row read, no rows in it).
    */
-  override async refresh(): Promise<void> {
+  override async refresh(kind: KimiWalkKind = 'event'): Promise<void> {
     // THE RECONCILE RETRY RIDES HERE, and deliberately ahead of the fence: a
     // reconciliation is two cheap card reads that have nothing to do with the
     // transcript walk the fence holds, and a fenced refresh returning early
@@ -724,7 +773,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
       this.heldRefresh = true;
       return;
     }
-    await super.refresh();
+    await super.refresh(kind);
   }
 
   /** Close one submission, and release the held walk when the last one closes. */
@@ -1207,7 +1256,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * DISARMED until history has primed the connection: before the baseline
    * exists, every pre-existing user message in the transcript looks new.
    */
-  protected override onWalkedRows(rows: KimiMappedRow[]): void {
+  protected override onWalkedRows(rows: KimiMappedRow[], kind: KimiWalkKind): void {
     if (!this.driving || !this.primed) {
       // Still record what was seen, so arming the detector later does not
       // suspect rows that were already on screen.
@@ -1254,6 +1303,23 @@ export class KimiDriveConnection extends KimiObserveConnection {
           if (suspect.unresolved) this.addUnresolved(id, suspect.activity);
           continue;
         }
+        // WHAT COUNTS AS EVIDENCE, and the whole of the fix for a demotion that
+        // could be reached without any time passing at all.
+        //
+        // The counter is named `polls` because the evidence it wants is SILENCE
+        // ACROSS POLLS, and only a POLL is one. A reconnect fires several
+        // unawaited refreshes in close succession — the tick, the
+        // re-verification finishing, a restored stream adopting its cursor, a
+        // frame saying the transcript moved — and when each of them spent a
+        // confirmation, two landing back to back exhausted the budget inside a
+        // single interval. A row the server was about to account for was judged
+        // foreign in the same millisecond it was first suspected, and the
+        // session dropped to observe with its explanation already on the wire.
+        //
+        // Event walks still exonerate above, and still record what they saw.
+        // They simply do not accumulate suspicion: being seen twice in no time
+        // at all is one silence counted twice, not two silences.
+        if (kind !== 'poll') continue;
         suspect.polls += 1;
         if (suspect.polls >= KIMI_DIVERGENCE_CONFIRM_POLLS) {
           this.demoteToObserve(KIMI_FOREIGN_WRITER_REASON);
@@ -1388,8 +1454,29 @@ export class KimiDriveConnection extends KimiObserveConnection {
 
   // ── Plumbing ──────────────────────────────────────────────────────────────
 
-  /** Every mutating entry point starts here. A demoted or closed connection writes nothing. */
+  /**
+   * Every mutating entry point starts here. A demoted, closed, or NOT-YET-
+   * ADMITTED connection writes nothing.
+   *
+   * The third condition is what makes the two-phase promotion a real boundary
+   * rather than a bookkeeping convention. Between the adapter's barrier and the
+   * broker's admission this connection is live, streaming, and holds only
+   * PROVISIONAL ownership — the broker can still refuse it, and the rollback
+   * that follows can un-record eligibility but cannot un-send a prompt. So the
+   * window has to be write-free by construction: refuse here, and a refused
+   * promotion is guaranteed to have written nothing at all.
+   *
+   * Deliberately NOT enforced through {@link driving}, which stays true across
+   * this window. `driving` arms the foreign-writer detector and decides whether
+   * an arriving permission card is answerable; false there would disarm the
+   * detector for the whole window — recording any competing writer's rows as
+   * already-known, so it could never be suspected afterwards — and that
+   * detection is precisely what lets the commit refuse. It would also capture
+   * cards as read-only for a promotion that then succeeds, against a posture
+   * the code elsewhere relies on being monotone.
+   */
   private assertWritable(): void {
+    if (this.settlePromotion) throw new Error(KIMI_UNCOMMITTED_PROMOTION_REFUSAL);
     if (this.demoted) throw new Error(KIMI_DEMOTED_REFUSAL);
     if (this.closed) throw new Error('this Kimi connection is closed');
   }
@@ -1589,7 +1676,33 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * waiting on one would otherwise sit out its whole ceiling to learn what this
    * call already knows.
    */
+  /**
+   * See {@link SessionConnection.commitPromotion}. Called by the broker once it
+   * has decided to ADMIT this connection as the session's owner, before the
+   * connection is registered or exposed.
+   *
+   * May still refuse: the adapter re-checks, at this exact moment, that nothing
+   * disqualified the session while the broker was admitting it. Until it
+   * returns true, {@link assertWritable} refuses every mutation.
+   */
+  commitPromotion(): boolean {
+    const settle = this.settlePromotion;
+    if (!settle) return true; // not a promotion; ownership was never provisional
+    this.settlePromotion = undefined;
+    return settle(true);
+  }
+
   override async close(): Promise<void> {
+    // ROLLBACK. A promoting attach that is closed without ever being admitted
+    // never earned durable eligibility — the broker refused it, or nothing ever
+    // served from it. Discarding here rather than leaving it recorded is what
+    // stops a rejected promotion from making the session drivable by a later
+    // ORDINARY live attach that carries no user confirmation.
+    const settle = this.settlePromotion;
+    if (settle) {
+      this.settlePromotion = undefined;
+      settle(false);
+    }
     await super.close();
     this.settleStreamWaiters(false);
   }

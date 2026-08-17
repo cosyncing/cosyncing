@@ -1,26 +1,30 @@
 #!/usr/bin/env bun
 /**
- * The dsh gate: ONE flag, OPT-IN, DEFAULT OFF, and FOREGROUND ONLY.
+ * dsh registration: unconditional, and filtered per client.
  *
- * `COSYNCING_ENABLE_DSH` carries two independent reasons, either sufficient on
- * its own:
+ * `COSYNCING_ENABLE_DSH` carried two independent reasons, and the route now
+ * answers both better than a flag could:
  *
  *  1. CLIENT COMPATIBILITY, the same one the Kimi lane established for the same
- *     integration kind. `/api/agents` is not revision-filtered, so one dsh row
- *     makes any client that decodes `IntegrationKind` strictly throw on
- *     `http-websocket` — and because a single unknown row aborts the WHOLE
- *     roster decode, such a client loses every agent, dsh installed or not.
+ *     integration kind. One dsh row makes any client that decodes
+ *     `IntegrationKind` strictly throw on `http-websocket` — and because a
+ *     single unknown row aborts the WHOLE roster decode, such a client loses
+ *     every agent, dsh installed or not. The flag answered that by denying dsh
+ *     to EVERYONE, including the clients that read it perfectly well and a
+ *     managed service that could never set it. `/api/agents` now withholds the
+ *     row from exactly the clients that cannot decode it.
  *  2. EXTERNAL HOST DEPENDENCY. This adapter never starts, stops, or configures
  *     anything: it talks to a `dsh web` host the operator is already running.
- *     On a machine with no host, every action on the row fails, so the row
- *     appears only where somebody said the host is there.
+ *     But "no host is running" is a DIAGNOSIS and an empty session list, which
+ *     is what an operator needs to see — not a reason to hide the agent behind
+ *     a variable they must already know to set. It is still the reason setup
+ *     does not offer dsh as an installable agent.
  *
- * Unlike Kimi there is no second Drive gate, because there is nothing to stage:
- * dsh serves ONE undifferentiated client contract. There is no read-only
- * credential, so an "observe" attach would hold the same full write authority
- * as `live` and the word would be a lie — the adapter refuses it outright and
- * the row advertises `live` only. Registration therefore admits the whole
- * surface at once, which is why the flag itself is the entire boundary.
+ * There is no second Drive gate as there is for Kimi, because there is nothing
+ * to stage: dsh serves ONE undifferentiated client contract. There is no
+ * read-only credential, so an "observe" attach would hold the same full write
+ * authority as `live` and the word would be a lie — the adapter refuses it
+ * outright and the row advertises `live` only.
  *
  * Proved against a REAL broker over its real `/api/agents` and create routes
  * rather than by reading the registration source: "is the row served" and "what
@@ -31,8 +35,8 @@
  * with a temp home and a scrubbed environment, and its dsh base URL is pinned
  * to an unroutable origin by `isolatedBrokerFixtureEnvironment` — the default
  * is `127.0.0.1:3080`, which is exactly where a maintainer's own `dsh web` host
- * listens, so an unset variable had to fail closed rather than open. The
- * fixture's own pin is asserted below.
+ * listens, and now that registration is unconditional an unpinned fixture would
+ * reach it on every run. The fixture's own pin is asserted below.
  *
  *   bun run packages/typescript/broker/test/dsh/test-dsh-registration-gate.ts
  */
@@ -42,13 +46,33 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
-  waitForBrokerHealth,
+  startHealthyFixtureBroker,
 } from '../helpers/isolated-broker-fixture.ts';
-import { DshAdapter, dshRegistrationEnabled, DSH_ENABLE_ENV } from '../../../adapters/dsh/src/index.ts';
+import { DshAdapter } from '../../../adapters/dsh/src/index.ts';
+import {
+  ATTACH_MODES_KNOWN_BEFORE_TOLERANT_DECODE,
+  CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE,
+  CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
+} from '@cosyncing/protocol';
+
+/**
+ * The revision this adapter's floor is, and the one it is deliberately NOT.
+ *
+ * dsh needs the INTEGRATION-KIND tolerance and nothing later: `http-websocket`
+ * is the only value in its row a released client could fail to decode, and
+ * `live` has existed since the first contract. Pinning the floor at the newer
+ * attach-mode tolerance instead would hide the agent from a whole released
+ * client generation that decodes the row perfectly.
+ */
+const FLOOR = String(CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE);
+const LATER_TOLERANCE = String(CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE);
 import { DSH_BASE_URL_ENV, DSH_DEFAULT_BASE_URL } from '../../../adapters/dsh/src/server.ts';
 import { agentSummaries } from '../../src/installation/setup.ts';
+import { setupMessages } from '../../src/installation/setup-i18n.ts';
 import { defaultDoctorAdapters } from '../../src/installation/doctor.ts';
+import { managedHostGateEnv } from '../../src/runtime/managed-host.ts';
 import { brokerServiceEnvironmentEntries } from '../../src/installation/service-manager.ts';
 
 const ROOT = join(import.meta.dir, '../../../../..');
@@ -102,8 +126,11 @@ function spawnBroker(port: number, overrides: Record<string, string>) {
     cwd: ROOT,
     env: fixtureEnvironment(port, overrides),
     stdin: 'ignore',
-    stdout: 'ignore',
-    stderr: 'ignore',
+    // PIPED, not ignored, and drained by the caller. Silence is evidence: the
+    // shared starter only retires and respawns a stalled start once it can
+    // prove the process wrote nothing, and a discarded stream proves nothing.
+    stdout: 'pipe',
+    stderr: 'pipe',
   });
 }
 
@@ -120,22 +147,36 @@ async function stopBroker(broker: ReturnType<typeof Bun.spawn>): Promise<void> {
 
 /** One real broker, asked everything it can answer: each spawn is expensive. */
 async function withBroker<T>(env: Record<string, string>, ask: (base: string) => Promise<T>): Promise<T> {
-  const port = await freePort();
-  const base = `http://127.0.0.1:${port}`;
-  const broker = spawnBroker(port, env);
+  // Through the shared starter: this suite spawns a real broker per question,
+  // so it is exposed to both a lost port race and a silent startup stall.
+  let output!: ReturnType<typeof captureProcessOutput>;
+  const { child: broker, port } = await startHealthyFixtureBroker({
+    reservePort: freePort,
+    spawn: (attemptPort) => {
+      const spawned = spawnBroker(attemptPort, env);
+      output = captureProcessOutput(spawned, { maxChars: 4_000 });
+      return spawned as unknown as { exitCode: number | null; exited: Promise<number> };
+    },
+    healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+    capture: () => output,
+    stop: (child) => stopBroker(child as unknown as ReturnType<typeof Bun.spawn>),
+  });
   try {
-    await waitForBrokerHealth(
-      broker as { exitCode: number | null; exited: Promise<number> },
-      `${base}/api/health`,
-    );
-    return await ask(base);
+    return await ask(`http://127.0.0.1:${port}`);
   } finally {
-    await stopBroker(broker);
+    await stopBroker(broker as unknown as ReturnType<typeof Bun.spawn>);
   }
 }
 
-async function agentRows(base: string): Promise<Array<Record<string, unknown>>> {
-  const response = await fetch(`${base}/api/agents`);
+/**
+ * The roster as a client of a given contract revision receives it.
+ *
+ * `revision` omitted models a client built before the parameter existed, which
+ * is the case the filtering exists to protect.
+ */
+async function agentRows(base: string, revision?: string): Promise<Array<Record<string, unknown>>> {
+  const query = revision === undefined ? '' : `?contractRevision=${encodeURIComponent(revision)}`;
+  const response = await fetch(`${base}/api/agents${query}`);
   if (!response.ok) throw new Error(`/api/agents answered ${response.status}`);
   return await response.json() as Array<Record<string, unknown>>;
 }
@@ -170,65 +211,66 @@ try {
     pinnedBaseUrl !== DSH_DEFAULT_BASE_URL && pinnedBaseUrl === UNROUTABLE_FIXTURE_ORIGIN,
     `${pinnedBaseUrl} (production default ${DSH_DEFAULT_BASE_URL})`);
   check('the fixture environment carries no dsh gate of its own and no inherited host state',
-    probeEnvironment[DSH_ENABLE_ENV] === undefined
+    probeEnvironment.COSYNCING_ENABLE_DSH === undefined
       && probeEnvironment.DSH_HOME === undefined
       && probeEnvironment.HOME === join(fixtureRoot, 'home'),
-    `${String(probeEnvironment[DSH_ENABLE_ENV])} / ${String(probeEnvironment.HOME)}`);
+    `${String(probeEnvironment.COSYNCING_ENABLE_DSH)} / ${String(probeEnvironment.HOME)}`);
+  // A fixture may read a wrong host and be merely wrong; a fixture that STARTS
+  // one leaves a real `dsh web` running on the machine that ran the suite.
+  check('no fixture broker is authorized to start a managed dsh host',
+    probeEnvironment.COSYNCING_DSH_MANAGED_HOST === '0',
+    String(probeEnvironment.COSYNCING_DSH_MANAGED_HOST));
 
-  // ── The predicate ─────────────────────────────────────────────────────────
-  check('the gate predicate defaults to off for absent and false-like values',
-    !dshRegistrationEnabled({})
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: '' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: '   ' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: '0' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: 'false' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: 'off' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: 'no' })
-      && !dshRegistrationEnabled({ [DSH_ENABLE_ENV]: 'enabled' }));
-  check('the gate predicate accepts exactly the repo truthy spellings, case- and space-insensitive',
-    TRUTHY_SPELLINGS.every((value) => dshRegistrationEnabled({ [DSH_ENABLE_ENV]: value }))
-      && dshRegistrationEnabled({ [DSH_ENABLE_ENV]: ' True ' })
-      && dshRegistrationEnabled({ [DSH_ENABLE_ENV]: 'ON' }),
-    TRUTHY_SPELLINGS.join(','));
-
-  // ── The stock broker behaves as if dsh does not exist ─────────────────────
-  const withoutFlag = await rosterAgents({});
-  const withoutIds = withoutFlag.map((row) => String(row.id));
-  check('a default broker serves no dsh row', !withoutIds.includes('dsh'), withoutIds.join(','));
-  check('a default broker still serves the established agents',
-    ['opencode', 'pi', 'codex', 'claude'].every((id) => withoutIds.includes(id)),
-    withoutIds.join(','));
-
-  // ── Every accepted spelling registers, through a real broker each time ────
+  // ── One broker, two views ─────────────────────────────────────────────────
   //
-  // The predicate above proves the parser; these prove the WIRING reads that
-  // parser. A spelling accepted by the predicate but dropped somewhere between
-  // `process.env` and `registry.register` would pass the first check and fail
-  // here, which is the whole reason each spelling gets its own broker.
-  let canonicalRow: Record<string, unknown> | undefined;
-  let canonicalCreate: { status: number; body: Record<string, unknown> } | undefined;
-  for (const spelling of TRUTHY_SPELLINGS) {
-    const isCanonical = spelling === '1';
-    const answered = await withBroker(
-      { [DSH_ENABLE_ENV]: spelling },
-      async (base) => ({
-        rows: await agentRows(base),
-        // The create route costs one more request on one broker, not four.
-        create: isCanonical ? await createDshSession(base) : undefined,
-      }),
-    );
-    const ids = answered.rows.map((row) => String(row.id));
-    const dshRows = answered.rows.filter((row) => String(row.id) === 'dsh');
-    check(`the opt-in spelling "${spelling}" registers EXACTLY ONE dsh row`,
-      dshRows.length === 1, ids.join(','));
-    check(`the opt-in spelling "${spelling}" adds ONLY dsh`,
-      ids.length === withoutIds.length + 1 && withoutIds.every((id) => ids.includes(id)),
-      ids.join(','));
-    if (isCanonical) {
-      canonicalRow = dshRows[0];
-      canonicalCreate = answered.create;
-    }
-  }
+  // Registration no longer varies with the environment; only the view does. The
+  // old `COSYNCING_ENABLE_DSH` gate hid dsh from everyone to protect the
+  // clients that could not decode `http-websocket`, and denied it to a managed
+  // service that could never set the flag. The route now withholds the row from
+  // exactly those clients and serves it to the rest.
+  const { legacy, current, older, later, noncanonical, canonicalCreate } = await withBroker({}, async (base) => ({
+    legacy: await agentRows(base),
+    current: await agentRows(base, FLOOR),
+    older: await agentRows(base, String(CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE - 1)),
+    later: await agentRows(base, LATER_TOLERANCE),
+    // Every spelling `Number()` would have read as a revision at or above the
+    // floor. Each is a client whose encoding this broker does not recognize,
+    // claiming a decode ability the roster would then act on.
+    noncanonical: await Promise.all(
+      ['not-a-number', '', '0xF', '1e2', ` ${FLOOR} `, `+${FLOOR}`, `0${FLOOR}`, 'Infinity']
+        .map(async (raw) => [raw, await agentRows(base, raw)] as const),
+    ),
+    canonicalCreate: await createDshSession(base),
+  }));
+  const idsOf = (rows: Array<Record<string, unknown>>) => rows.map((row) => String(row.id));
+  const withoutIds = idsOf(legacy);
+  const withIds = idsOf(current);
+
+  check('a client that declares nothing is served no dsh row',
+    !withoutIds.includes('dsh'), withoutIds.join(','));
+  check('a client one revision too old is served no dsh row',
+    !idsOf(older).includes('dsh'), idsOf(older).join(','));
+  // Fail closed on nonsense rather than 400: refusing would cost the caller
+  // every agent, which is the failure this filtering exists to prevent. The
+  // grammar must be exactly as narrow as the policy claims — `0xF` and `1e2` are
+  // both ≥ the floor to `Number`, and neither is a revision.
+  const leaked = noncanonical.filter(([, rows]) => idsOf(rows).includes('dsh')).map(([raw]) => raw);
+  check('every non-canonical revision spelling is read as the oldest client, not rejected',
+    leaked.length === 0, leaked.map((raw) => JSON.stringify(raw)).join(','));
+  check('a client at the tolerant revision IS served EXACTLY ONE dsh row',
+    current.filter((row) => String(row.id) === 'dsh').length === 1, withIds.join(','));
+  // The floor is a MINIMUM, not an equality: a newer client is served too.
+  check('a client past the floor is still served the dsh row',
+    idsOf(later).includes('dsh'), idsOf(later).join(','));
+  check('the established agents are served to both views',
+    ['opencode', 'pi', 'codex', 'claude'].every((id) =>
+      withoutIds.includes(id) && withIds.includes(id)),
+    `${withoutIds.join(',')} | ${withIds.join(',')}`);
+  check('the filter withholds only what the client cannot decode',
+    withoutIds.every((id) => withIds.includes(id)),
+    `${withoutIds.join(',')} -> ${withIds.join(',')}`);
+
+  const canonicalRow = current.find((row) => String(row.id) === 'dsh');
 
   // ── What the served row actually claims ───────────────────────────────────
   //
@@ -249,26 +291,40 @@ try {
   check('the served dsh row advertises NEITHER observe NOR resume',
     capabilities?.supportsObserve === false && capabilities?.supportsResume === false,
     JSON.stringify(capabilities));
+  // The declared minimum is a claim about decodability; this is its evidence.
+  // Every attach mode in the row predates both tolerance fallbacks, so the
+  // integration kind is the only thing forcing a floor at all. Adding a newer
+  // mode without raising the minimum would hand a revision-14 client a row it
+  // cannot decode, and it fails HERE rather than in the field.
+  const publishedModes = (capabilities?.attachModes as unknown[] ?? []).map(String);
+  const needingTolerance = publishedModes.filter(
+    (mode) => !ATTACH_MODES_KNOWN_BEFORE_TOLERANT_DECODE.includes(mode as never));
+  check('every attach mode dsh publishes predates the attach-mode tolerance',
+    publishedModes.length > 0 && needingTolerance.length === 0,
+    `published=${publishedModes.join(',')} needing-tolerance=${needingTolerance.join(',')}`);
   check('the adapter REFUSES an observe attach rather than serving a full-authority connection under that name',
     await refuses('observe'));
   check('the adapter REFUSES a resume attach', await refuses('resume'));
   // The reviewed Drive posture: every discovered session is drivable because
   // writes are RPCs into the one owner, so cross-client sharing is the normal
   // state rather than a conflict; approvals are per tool call, which is what
-  // the host asks for; and this round advertises no model switch, no native
-  // file input, and no artifact signal because those upstream methods are off
-  // the round-1 allowlist.
+  // the host asks for; model switching and native file input are served
+  // (`session.models`/`session.selectModel`, and inline image bytes on the
+  // prompt); and there is still no artifact signal, because the host has none.
   check('the served dsh row carries the reviewed Drive posture',
     capabilities?.supportsCrossClientDriveSharing === true
       && capabilities?.permissionGranularity === 'per-tool'
-      && capabilities?.supportsModelSwitch === false
-      && capabilities?.supportsNativeFileInput === false
+      && capabilities?.supportsModelSwitch === true
+      && capabilities?.supportsNativeFileInput === true
       && capabilities?.supportsNativeArtifact === false,
     JSON.stringify(capabilities));
   // Write-class actions are derived from HOOK PRESENCE (`runtime.ts`), so this
   // asserts which hooks the adapter actually defines. Rename exists; fork,
-  // clone, transcript export and create-time model selection do not, because
-  // their upstream methods are on the deferred list the path builder refuses.
+  // clone and transcript export do not, because their upstream methods are on
+  // the deferred list the path builder refuses. Create-time model selection
+  // stays absent for a different reason: `session.models` is per-session and
+  // `session.create` takes no model, so there is no pre-session catalog to
+  // offer — the picker appears once the session exists.
   check('the served dsh row offers native rename and NO other write-class action',
     canonicalRow?.canRenameNative === true
       && canonicalRow?.canSelectModelAtCreation === false
@@ -291,13 +347,15 @@ try {
       && canonicalCreate.body.retryable === true,
     `${canonicalCreate?.status} ${JSON.stringify(canonicalCreate?.body)}`);
 
-  // ── Activation scope: foreground only ─────────────────────────────────────
+  // ── Activation scope: what IS durable, and what deliberately is not ───────
   //
-  // The durable service environment is a closed enumerated list and must not
-  // carry the flag, so a managed systemd/launchd broker cannot enable dsh.
-  // Pinned here as a tripwire — the later lifecycle round that adds a persisted
-  // feature-gate path flips this check deliberately, with the receipts that
-  // surface owns.
+  // The durable service environment is a closed enumerated list, and the two
+  // dsh-shaped things it could carry are not the same question. Managed-host
+  // ACTIVATION belongs there — an installed service that can see a host but
+  // never start, recover, or stop one is the same as the agent not working. The
+  // host ADDRESS does not: pointing the adapter somewhere else is a foreground
+  // decision, and a managed broker must never silently inherit a host an
+  // operator configured once in a shell.
   const serviceEnvironment = brokerServiceEnvironmentEntries({
     homeDir: '/fixture/home',
     stateHome: '/fixture/state',
@@ -305,41 +363,43 @@ try {
     executablePath: '/fixture/bin/cosyncing',
     webDir: '/fixture/web',
   }).map(([name]) => name);
-  check('the durable service environment carries neither the dsh gate nor a dsh host address',
-    !serviceEnvironment.includes(DSH_ENABLE_ENV) && !serviceEnvironment.includes(DSH_BASE_URL_ENV),
+  check('the durable service environment activates a managed dsh host',
+    serviceEnvironment.includes(managedHostGateEnv('dsh')),
+    serviceEnvironment.join(','));
+  check('the durable service environment carries no retired dsh gate and no dsh host address',
+    !serviceEnvironment.some((name) => name.includes('ENABLE_DSH'))
+      && !serviceEnvironment.includes(DSH_BASE_URL_ENV),
     serviceEnvironment.join(','));
 
-  // ── Doctor rides the SAME gate ────────────────────────────────────────────
+  // ── Doctor diagnoses dsh unconditionally ──────────────────────────────────
   //
-  // Doctor describes the CURRENT environment, so with the flag on it may
-  // legitimately diagnose dsh — the running (foreground) broker serves it. What
-  // must never happen is the two disagreeing, so the check is agreement across
-  // every spelling rather than two independent assertions.
+  // It reports what is installed and reachable, and "the host is not running"
+  // is exactly what an operator opened doctor to be told. An adapter that
+  // disappears unless a variable is set cannot report that, which is why the
+  // environment no longer changes this list at all.
   const doctorDefault = defaultDoctorAdapters({}).map((adapter) => adapter.id);
-  check('default doctor diagnoses no dsh adapter', !doctorDefault.includes('dsh'), doctorDefault.join(','));
-  const disagreements: string[] = [];
+  check('doctor diagnoses dsh with no flag set',
+    doctorDefault.includes('dsh'), doctorDefault.join(','));
+  const varied: string[] = [];
   for (const value of [...TRUTHY_SPELLINGS, '', '0', 'false', 'off', 'no', 'enabled']) {
-    const environment = { [DSH_ENABLE_ENV]: value };
-    const diagnosed = defaultDoctorAdapters(environment).some((adapter) => adapter.id === 'dsh');
-    if (diagnosed !== dshRegistrationEnabled(environment)) disagreements.push(JSON.stringify(value));
+    const ids = defaultDoctorAdapters({ COSYNCING_ENABLE_DSH: value }).map((adapter) => adapter.id);
+    if (JSON.stringify(ids) !== JSON.stringify(doctorDefault)) varied.push(JSON.stringify(value));
   }
-  check('doctor and the registration predicate agree for every spelling, truthy and false-like',
-    disagreements.length === 0, disagreements.join(','));
-  const doctorEnabled = defaultDoctorAdapters({ [DSH_ENABLE_ENV]: '1' }).map((adapter) => adapter.id);
-  check('the opt-in flag adds dsh to doctor, and only dsh',
-    doctorEnabled.includes('dsh')
-      && doctorEnabled.length === doctorDefault.length + 1
-      && doctorDefault.every((id) => doctorEnabled.includes(id)),
-    doctorEnabled.join(','));
+  check('no spelling of the removed flag changes what doctor diagnoses',
+    varied.length === 0, varied.join(','));
 
   // ── Setup stays closed ────────────────────────────────────────────────────
   //
-  // Setup advertises what the SERVICE IT INSTALLS will serve, and that
-  // service's environment is the closed list pinned above — it cannot carry the
-  // flag. So even when the (gated) doctor report carries a dsh section, setup
-  // omits the row: advertising it would promise an agent the installed service
-  // then refuses to serve. This flips deliberately in the lifecycle round that
-  // persists the gate into the service environment.
+  // Setup advertises what the service it installs can actually DELIVER, and it
+  // now delivers this one. dsh was off the preflight while setup neither started
+  // nor managed `dsh web` — listing it then would have promised a working agent
+  // where the honest answer was "run the host yourself". The service this setup
+  // installs now starts that host when none is running, restarts it, and stops
+  // the one it started, which is the condition the omission was waiting on.
+  //
+  // It matters beyond the panel: the same install asks the operator to consent
+  // to the runtimes cosyncing will manage, and a host missing from that list is
+  // a host managed without being disclosed.
   const summaryFor = (agents: string[]) => agentSummaries({
     minimumVersions: agents.map((agent) => ({
       agent, displayName: agent, version: '0.0.0',
@@ -347,12 +407,19 @@ try {
     })),
     sections: [{ id: 'agents', title: 'Agents', checks: [] }],
   } as never).map((row) => row.id as string);
-  check('setup omits dsh when the doctor did not diagnose it',
-    !summaryFor(['codex', 'opencode', 'pi', 'claude']).includes('dsh'),
+  check('setup lists dsh, whose host the installed service now manages',
+    summaryFor(['codex', 'opencode', 'pi', 'claude']).includes('dsh'),
     summaryFor(['codex', 'opencode', 'pi', 'claude']).join(','));
-  check('setup omits dsh even when the doctor report carries it (the service cannot serve it)',
-    !summaryFor(['codex', 'opencode', 'pi', 'claude', 'dsh']).includes('dsh'),
+  check('...whether or not the doctor report happened to carry a row for it',
+    summaryFor(['codex', 'opencode', 'pi', 'claude', 'dsh']).includes('dsh'),
     summaryFor(['codex', 'opencode', 'pi', 'claude', 'dsh']).join(','));
+  // The consent shown immediately before setup writes managed-host activation
+  // into the service environment must name this host too.
+  for (const language of ['en', 'zh-Hans'] as const) {
+    const body = setupMessages(language).managedRuntimeBody('cosyncing');
+    check(`the managed-runtime consent names the dsh host (${language})`,
+      body.includes('dsh web'), body.slice(0, 160));
+  }
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));
 } finally {

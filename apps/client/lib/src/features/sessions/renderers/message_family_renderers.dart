@@ -391,6 +391,12 @@ Widget _userMessageRenderer(BuildContext context, AgentMessage message) {
 }
 
 Widget _eventMessageRenderer(BuildContext context, AgentMessage message) {
+  // Context material gets a presentation of its own: quiet, collapsed, and
+  // labelled for a human. Every other event keeps the generic card below, so an
+  // unknown or future event still renders honestly rather than disappearing.
+  if (message.contextInjection != null) {
+    return _ContextInjectionRow(message: message);
+  }
   final l10n = AppLocalizations.of(context);
   return _TranscriptBubble(
     icon: Icons.event_note_outlined,

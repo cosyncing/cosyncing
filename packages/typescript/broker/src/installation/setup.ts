@@ -19,6 +19,7 @@ import {
 } from '../security/credentials.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
 import { collectDoctorReport, DURABLE_SERVICE_CHECK_ID, type DoctorReport } from './doctor.ts';
+import { shippedAdapters } from './shipped-adapters.ts';
 import {
   assessDurableStateForSetup,
   durableStateLayout,
@@ -178,7 +179,7 @@ export interface OpencodeShimInspection {
 }
 
 export interface SetupAgentSummary {
-  id: 'codex' | 'opencode' | 'pi' | 'claude';
+  id: 'codex' | 'opencode' | 'pi' | 'claude' | 'kimi' | 'dsh';
   displayName: string;
   state: 'missing' | 'supported' | 'unsupported' | 'runtime-unavailable';
   installedVersion?: string;
@@ -417,24 +418,42 @@ function installedVersion(report: DoctorReport, id: string): string | undefined 
   return typeof value === 'string' ? value : undefined;
 }
 
+/** Agents the installed service delivers itself, with no external host involved. */
+const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'claude'] as const;
+
+/**
+ * Setup advertises what the SERVICE IT INSTALLS can actually deliver.
+ *
+ * That used to exclude Kimi and dsh, and the reason was true at the time: both
+ * depend on an external host that setup neither started nor managed, so listing
+ * them would have promised a working agent where the honest answer was "run the
+ * host yourself". The managed-host lifecycle is what changed it. The service
+ * this setup installs now starts `kimi web` and `dsh web` when none is running,
+ * restarts them, and stops the ones it started — so they belong on the list by
+ * exactly the rule that kept them off it.
+ *
+ * Membership comes from what each adapter DECLARES, not from a second list of
+ * names: an adapter that gains a managed host appears here without this file
+ * changing, and one that loses it disappears. That also keeps this in step with
+ * the service environment, which activates the same set from the same source.
+ */
+function setupPreflightAgents(): readonly SetupAgentSummary['id'][] {
+  const managedHosts = shippedAdapters()
+    .filter((adapter) => adapter.integration?.externalHost?.managed === true)
+    .map((adapter) => adapter.id as SetupAgentSummary['id']);
+  return [...SETUP_DELIVERED_AGENTS, ...managedHosts];
+}
+
 export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
-  const behavior: Record<SetupAgentSummary['id'], string> = {
+  const behavior: Record<string, string> = {
     codex: 'Managed shared app-server; remote terminals may join it.',
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
+    kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
+    dsh: 'Managed `dsh web` host; one you started yourself, or one on another machine, is never touched.',
   };
-  // Setup advertises what the SERVICE IT INSTALLS will serve, and the durable
-  // service environment is a closed enumerated list that cannot carry
-  // COSYNCING_ENABLE_KIMI or COSYNCING_ENABLE_DSH (see
-  // brokerServiceEnvironmentEntries) — so a doctor report carrying a Kimi or
-  // dsh section (doctor describes the CURRENT, possibly foreground-enabled
-  // environment) must NOT surface here: setup would be advertising an agent the
-  // service it is about to install will not serve. This list stays closed —
-  // it is an allowlist, not a filter over the report — so a gated agent joins
-  // it only in the lifecycle round that persists its gate into the service
-  // environment. The registration-gate suites pin both omissions.
-  return (['codex', 'opencode', 'pi', 'claude'] as const).map((id) => {
+  return setupPreflightAgents().map((id) => {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
     const binary = check(report, `${id}.binary`);
     const version = check(report, `${id}.version`);
@@ -480,7 +499,10 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
       ...(state === 'unsupported' && upgradeCommand ? { upgradeCommand } : {}),
       ...(standaloneWarning ? { managedRuntimeWarning: standaloneWarning } : {}),
       ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
-      managedBehavior: behavior[id],
+      // A declared managed host with no copy of its own still says something
+      // true rather than `undefined`, so adding an adapter can never print a
+      // hole into the preflight.
+      managedBehavior: behavior[id] ?? 'Managed external host; one you started yourself is never touched.',
     };
   });
 }

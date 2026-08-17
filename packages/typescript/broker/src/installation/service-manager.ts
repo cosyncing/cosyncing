@@ -33,6 +33,7 @@ import type {
   SetupTransactionAction,
 } from './setup-transaction.ts';
 import type { InstalledResourceRecord } from './install-state.ts';
+import { managedHostServiceEnvironmentEntries } from './shipped-adapters.ts';
 
 export const SYSTEMD_SERVICE_NAME = `${PRODUCT_IDENTITY.serviceName}.service`;
 /** launchd job label; also the plist filename stem and the `gui/<uid>/<label>` service target. */
@@ -540,6 +541,14 @@ export function brokerServiceEnvironmentEntries(options: {
     // exactly where setup measured it. Without this entry a packaged service install serves "no web app" on
     // a host where setup told the operator the app was there.
     ['COSYNCING_WEB_DIR', cleanAbsolutePath(options.webDir, 'web')],
+    // Managed external hosts, on by default for the service the installer owns.
+    //
+    // The alternative was an installed broker that can see a `kimi web` or
+    // `dsh web` host and use it, but cannot start one, recover a crashed one, or
+    // stop the one it started — which is the same as those agents not working
+    // unless the operator keeps a terminal open. Derived from what the adapters
+    // declare, so this list does not need editing when one is added.
+    ...managedHostServiceEnvironmentEntries(),
   ];
 }
 

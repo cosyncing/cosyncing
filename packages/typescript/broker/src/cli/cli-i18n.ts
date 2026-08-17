@@ -182,6 +182,7 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Reconcile managed runtime versions when sessions are safe to restart.': '请在会话可安全重启时修复托管运行时版本。',
   'Managed runtime update status is unavailable.': '托管运行时更新状态不可用。',
   'Retry managed runtime diagnosis.': '请重试托管运行时诊断。',
+  'Stop that host yourself if you no longer want it running; cosyncing will not stop a process it cannot prove it started.': '如果不再需要该主机，请自行停止它；cosyncing 不会停止无法证明是由它自己启动的进程。',
   'No private advertised endpoint is configured; the broker remains loopback-only.': '未配置私有公开端点；broker 仍仅限本机访问。',
   'Configure Tailscale Serve only if private remote access is wanted.': '仅在需要私有远程访问时配置 Tailscale Serve。',
   'The advertised private endpoint is reachable.': '私有公开端点可访问。',

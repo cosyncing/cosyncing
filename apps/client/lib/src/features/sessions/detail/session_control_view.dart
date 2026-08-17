@@ -70,6 +70,7 @@ class SessionControlView {
     required this.willFork,
     required this.answerOnly,
     this.canTakeOver = false,
+    this.takeoverMode,
     this.reason,
     this.command,
     this.launchSurface,
@@ -169,6 +170,40 @@ class SessionControlView {
         joinExisting != null &&
         sessionOwner?.state == SessionOwnerState.drive;
 
+    // Whether THIS socket can take the session over, resolved before the
+    // precedence cascade because the pill and the action have to agree with it.
+    //
+    // They used to be computed independently, and Kimi is where they disagreed:
+    // a session this broker did not create publishes `supported: false` with
+    // `state: observing`, so every branch below fell through to `unavailable` —
+    // the header read "Unavailable" and the composer said the app could neither
+    // take over nor sync, beside a Take over button that worked. The rule now
+    // is simply that a takeable session is never described as untakeable.
+    //
+    // `takeoverAvailable` exists because a session can be legitimately takeable
+    // while not drivable NOW: a demoted Kimi connection publishes
+    // `supported: false, state: unavailable` deliberately — re-driving that
+    // generation would fork the journal — so the historical
+    // `supported && observing` rule can never fire there and re-takeover would
+    // be unreachable without it. An ABSENT field is an older broker and keeps
+    // exactly today's rule.
+    //
+    // An unknown `takeoverMode` fails closed. Taking over means attaching in a
+    // specific mode, and a client that cannot name the mode would have to
+    // guess; guessing `resume` on a session that requires `live` seizes Drive
+    // the wrong way rather than not at all. `observe` fails closed for the same
+    // reason from the other side: it is a mode this client understands
+    // perfectly and it grants no authority, so a takeover performed in it could
+    // only ever fail.
+    final takeoverPossible =
+        !socketReadOnly &&
+        drive.takeoverMode != AttachMode.unknown &&
+        drive.takeoverMode != AttachMode.observe &&
+        !syncActiveHere &&
+        !shareableDriverActive &&
+        (drive.takeoverAvailable ??
+            (drive.supported && drive.state == DriveState.observing));
+
     // Precedence (oracle): sync-active > driving > sync-available > observing
     // > neither. Sync and Drive are mutually exclusive display states.
     final SessionControlPill pill;
@@ -200,17 +235,33 @@ class SessionControlView {
     } else if (sync.supported && sync.syncAvailable) {
       pill = SessionControlPill.syncAvailable;
       action = terminalAction ?? SessionControlAction.join;
-    } else if (drive.supported && drive.state == DriveState.observing) {
+    } else if (drive.state == DriveState.observing &&
+        (drive.supported || takeoverPossible)) {
+      // Observing covers two shapes: a session cosyncing could drive itself,
+      // and one it will not drive on its own but the operator may authorize.
+      // `supported` alone missed the second — the row is observing, and saying
+      // "Unavailable" about a session with a live Take over button is false.
       pill = SessionControlPill.observing;
       // The session is drivable, but not BY THIS SOCKET: a read-only attach
       // renounced authority, and the read-only latch is monotone, so the
       // re-attach a takeover would issue is still read-only and cannot
       // succeed. The pill stays truthful about the session; the action does
       // not offer a control that can only fail.
-      action = socketReadOnly
-          ? SessionControlAction.disabled
-          : SessionControlAction.takeOver;
+      action = takeoverPossible
+          ? SessionControlAction.takeOver
+          : SessionControlAction.disabled;
     } else {
+      // Includes the takeable-but-not-drivable shape: a demoted Kimi
+      // generation publishes `state: unavailable` and means it — that
+      // generation is finished and nothing reattaching to it can drive — so
+      // both the pill and the auto-routed action go on describing it honestly.
+      //
+      // Takeover is NOT lost here. `canTakeOver` below is a separate
+      // affordance with its own control (session_detail_composer, and the
+      // header in session_detail_chrome), so a takeover that opens a fresh
+      // generation stays one tap away without the primary slot having to
+      // claim this session is drivable as it stands. Promoting the action
+      // here would claim exactly that, and it is false.
       pill = SessionControlPill.unavailable;
       action = SessionControlAction.disabled;
     }
@@ -226,13 +277,10 @@ class SessionControlView {
       // session — including when terminal sync is merely available (the pill
       // then reads "Sync available" and the primary action is Join). Sync
       // availability is a capability, not ownership; it must never leave
-      // Join as the only path (CR1).
-      canTakeOver:
-          !socketReadOnly &&
-          !syncActiveHere &&
-          !shareableDriverActive &&
-          drive.supported &&
-          drive.state == DriveState.observing,
+      // Join as the only path (CR1). Resolved above the cascade, which now has
+      // to agree with it.
+      canTakeOver: takeoverPossible,
+      takeoverMode: drive.takeoverMode,
       reason: drive.reason ?? sync.reason,
       command: sync.command,
       launchSurface: launchSurface,
@@ -279,6 +327,24 @@ class SessionControlView {
   /// actively synced — independent of the pill, so `syncAvailable` (whose
   /// primary [action] is Join) still exposes Drive as a secondary action.
   final bool canTakeOver;
+
+  /// Which attach mode a takeover must use, when the broker declares one.
+  ///
+  /// Carried beside [canTakeOver] rather than re-read at the call site so the
+  /// decision and the mode it was made under cannot drift apart. Null means the
+  /// broker declared nothing and the historical `resume` applies; while
+  /// [canTakeOver] is true it is only ever [AttachMode.live] or
+  /// [AttachMode.resume], because the two modes that cannot acquire authority
+  /// — [AttachMode.unknown] and [AttachMode.observe] — fail that decision
+  /// closed.
+  final AttachMode? takeoverMode;
+
+  /// The wire mode a takeover attach must request.
+  ///
+  /// Total over the values reachable when [canTakeOver] holds, so no call site
+  /// has to guess at a mode it was not given.
+  String get takeoverAttachMode =>
+      takeoverMode == AttachMode.live ? 'live' : 'resume';
 
   /// Optional reason for a non-mutable state, surfaced to the user.
   final String? reason;

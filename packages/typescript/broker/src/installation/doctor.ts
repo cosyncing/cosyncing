@@ -8,13 +8,7 @@ import type {
   SetupDiagnosisContext,
   SetupCheckStatus,
 } from '@cosyncing/adapter-api';
-import { PRODUCT_IDENTITY } from '@cosyncing/adapter-api';
-import { CodexAdapter } from '@cosyncing/adapter-codex';
-import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
-import { PiAdapter } from '@cosyncing/adapter-pi';
-import { ClaudeAdapter } from '@cosyncing/adapter-claude';
-import { KimiAdapter, kimiRegistrationEnabled } from '@cosyncing/adapter-kimi';
-import { DshAdapter, dshRegistrationEnabled } from '@cosyncing/adapter-dsh';
+import { INTERNAL_AGENT_ROSTER_PATH, PRODUCT_IDENTITY } from '@cosyncing/adapter-api';
 import type { BuildInfo } from '../runtime/build-info.ts';
 import {
   BUN_RUNTIME_OVERRIDE_VARIABLE,
@@ -43,6 +37,8 @@ import {
 import type { RuntimeAssetReport } from '../runtime/runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
 import { isSupportedBrokerHost, supportedBrokerHostList } from './supported-hosts.ts';
+import { shippedAdapters } from './shipped-adapters.ts';
+import { brokerManagedHostIdentities } from './managed-host-posture.ts';
 import { inspectOwnerOnlyFile } from '../security/secure-files.ts';
 import {
   inspectAgentSkills,
@@ -80,6 +76,12 @@ import {
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
+import {
+  classifyManagedHost,
+  defaultManagedHostEffects,
+  listManagedHostOwnerships,
+  locateRecordedManagedHost,
+} from '../runtime/managed-host.ts';
 import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
 
 export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
@@ -848,6 +850,77 @@ function setupFailureChecks(home: string, context: SetupDiagnosisContext): Setup
   }];
 }
 
+/**
+ * Report every external agent host this installation has an ownership record
+ * for, and say plainly whether it is still ours.
+ *
+ * Read straight off disk, so it works with the broker stopped — which is when an
+ * operator most needs it. Nothing here performs an effect: it locates, it
+ * classifies, and it reports. The three answers are genuinely different things
+ * to tell someone:
+ *
+ *   owned          the host is running and cosyncing can stop it
+ *   absent         the record describes a process that is gone; harmless
+ *   foreign/unknown something is there that cosyncing must not touch, which is
+ *                  also why `uninstall` will leave it running
+ *
+ * A record that cannot be proven is a `warn`, never a `fail`: nothing is broken,
+ * but a host may outlive the product, and that is exactly the surprise this
+ * check exists to prevent.
+ */
+function managedHostChecks(home: string, effects = defaultManagedHostEffects()): SetupCheck[] {
+  return listManagedHostOwnerships(home).map((record) => {
+    const location = locateRecordedManagedHost(record, effects);
+    const verdict = location.state === 'unknown'
+      ? 'indeterminate'
+      : classifyManagedHost(
+        record,
+        effects.liveProcess(location.state === 'identified' ? location.pid : record.pid),
+        record.identityKey,
+      );
+    const evidence = {
+      agent: record.agent,
+      pid: record.pid,
+      executable: record.evidence.executable,
+      ...(record.evidence.port === undefined ? {} : { port: record.evidence.port }),
+      ...(record.evidence.version === undefined ? {} : { version: record.evidence.version }),
+      ...(record.evidence.profile === undefined ? {} : { profile: record.evidence.profile }),
+      verdict,
+    };
+    if (verdict === 'owned') {
+      return {
+        id: `state.managed-host-${record.agent}`,
+        status: 'pass' as const,
+        detailCode: 'managed-host-owned',
+        summary: `The ${record.agent} host cosyncing started is running and can be stopped by cosyncing.`,
+        evidence,
+      };
+    }
+    if (verdict === 'absent') {
+      return {
+        id: `state.managed-host-${record.agent}`,
+        status: 'pass' as const,
+        detailCode: 'managed-host-not-running',
+        summary: `The ${record.agent} host cosyncing started is no longer running.`,
+        evidence,
+      };
+    }
+    return {
+      id: `state.managed-host-${record.agent}`,
+      status: 'warn' as const,
+      detailCode: verdict === 'foreign' ? 'managed-host-foreign' : 'managed-host-unprovable',
+      summary: verdict === 'foreign'
+        ? `A ${record.agent} host is running that cosyncing cannot prove it started; cosyncing will leave it running.`
+        : `Whether the ${record.agent} host is still the one cosyncing started cannot be determined on this machine; cosyncing will leave it running.`,
+      evidence,
+      remediation: remediation(
+        `${PRODUCT_IDENTITY.primaryBinary} doctor`,
+        'Stop that host yourself if you no longer want it running; cosyncing will not stop a process it cannot prove it started.',
+      ),
+    };
+  });
+}
+
 function firstOutputWord(stdout: string, stderr: string): string {
   return `${stdout}\n${stderr}`.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
 }
@@ -1171,7 +1244,7 @@ async function endpointAndRuntimeChecks(options: {
       });
     }
 
-    const readiness = await options.context.fetchJson(new URL('/api/agents', internal).toString(), headers);
+    const readiness = await options.context.fetchJson(new URL(INTERNAL_AGENT_ROSTER_PATH, internal).toString(), headers);
     if (readiness.status === 'ok' && Array.isArray(readiness.json)) {
       const installed = new Set(resolveServiceAgentExecutables(options.context).map((agent) => agent.id));
       for (const candidate of readiness.json) {
@@ -1293,9 +1366,20 @@ async function endpointAndRuntimeChecks(options: {
   return { network, runtime, agents };
 }
 
-async function diagnoseAgents(
+export async function diagnoseAgents(
   context: SetupDiagnosisContext,
   adapters: readonly AgentBackend[],
+  /**
+   * The external hosts THIS machine's cosyncing starts and supervises, as the
+   * identity keys each adapter names them by.
+   *
+   * Threaded per adapter rather than left on the shared context, so a diagnosis
+   * never has to ask about itself by name: each adapter is simply handed the
+   * identities of its own managed hosts, and decides by comparing them against
+   * the one it resolved. An agent with no entry is told nothing, which is the
+   * unmanaged posture.
+   */
+  brokerManaged: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
 ): Promise<AgentSetupDiagnosis[]> {
   return Promise.all(adapters.map(async (adapter) => {
     if (!adapter.diagnoseSetup) {
@@ -1318,8 +1402,22 @@ async function diagnoseAgents(
       };
     }
     try {
-      const diagnosis = await adapter.diagnoseSetup(context);
-      return adapter.integration?.managedRuntime?.failureJournal
+      const managedIdentities = brokerManaged.get(adapter.id);
+      const diagnosis = await adapter.diagnoseSetup(
+        managedIdentities ? { ...context, managedExternalHostIdentities: [...managedIdentities] } : context,
+      );
+      // A managed EXTERNAL HOST earns the same diagnosis as a managed runtime,
+      // and for the same reason: the broker starts it, supervises it, and
+      // restarts it, so its failures to do any of that are the broker's to
+      // report. Without this a Kimi or dsh host that crashed and could not be
+      // restarted left nothing in doctor at all — the supervisor's warning
+      // scrolled past in the journal and that was the end of it.
+      //
+      // Derived from what the adapter declares, not from a list of ids, so the
+      // next managed-host adapter cannot ship with its recovery failures silent.
+      const diagnosesManagedFailures = adapter.integration?.managedRuntime?.failureJournal === true
+        || adapter.integration?.externalHost?.managed === true;
+      return diagnosesManagedFailures
         ? {
             ...diagnosis,
             checks: [
@@ -1411,25 +1509,23 @@ function summarize(sections: readonly DoctorSection[]): Record<SetupCheckStatus,
 }
 
 /**
- * The adapters production doctor diagnoses. Kimi and dsh each ride the SAME
- * rollout gate as their broker registration (see `runtime.ts`): doctor and
- * setup must never advertise or diagnose an agent the running broker will not
- * serve, and each gate reads the env the doctor was handed so the pairing is
- * testable. Doctor describes the CURRENT (possibly foreground-enabled)
- * environment, which is why it may legitimately diagnose a gated agent that
- * setup still omits — see `agentSummaries`.
+ * The adapters production doctor diagnoses: every one this build ships, with no
+ * dependence on the environment it was handed.
+ *
+ * It is the SAME list the installed service derives managed-host activation
+ * from, so an agent cannot be diagnosed here and left unmanaged there. Doctor
+ * reporting a host that is not running is the answer an operator opened it for;
+ * an adapter that disappears unless a variable is set cannot give it.
+ *
+ * `env` is accepted and deliberately unused — the parameter survives so callers
+ * that once passed a rollout environment keep compiling, and so the signature
+ * says out loud that the answer no longer depends on it.
  */
 export function defaultDoctorAdapters(
   env: Readonly<Record<string, string | undefined>>,
 ): readonly AgentBackend[] {
-  return [
-    new OpenCodeAdapter(),
-    new PiAdapter(),
-    new CodexAdapter(),
-    new ClaudeAdapter(),
-    ...(kimiRegistrationEnabled(env) ? [new KimiAdapter()] : []),
-    ...(dshRegistrationEnabled(env) ? [new DshAdapter()] : []),
-  ];
+  void env;
+  return shippedAdapters();
 }
 
 export async function collectDoctorReport(dependencies: DoctorDependencies): Promise<DoctorReport> {
@@ -1446,7 +1542,16 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   const identity = dependencies.applicationIdentity
     ?? currentApplicationIdentity(dependencies.buildInfo.distribution, `${import.meta.dir}/cli.ts`);
   const [adapterDiagnoses, service, installedService, tailscale] = await Promise.all([
-    diagnoseAgents(dependencies.context, adapters),
+    diagnoseAgents(dependencies.context, adapters, brokerManagedHostIdentities(
+      // `home` is the STATE home — receipts and ownership records. The identity
+      // an adapter resolves belongs to the USER home, which is the same one the
+      // diagnosis below resolves against; handing it the state home would name
+      // `~/.cosyncing/.kimi-code`, match nothing, and quietly restore the manual
+      // start command the posture exists to withhold.
+      home,
+      dependencies.context.homeDir,
+      adapters,
+    )),
     serviceChecks(dependencies.context, host.wsl),
     installedBrokerServiceChecks(dependencies.context, home, identity.runtimePath),
     networkChecks(
@@ -1501,6 +1606,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context: dependencies.context }),
         ...agentSkillChecks(home, dependencies.context),
         ...setupFailureChecks(home, dependencies.context),
+        ...managedHostChecks(home),
         ...durableChecks(home, dependencies.context),
       ],
     },

@@ -50,6 +50,7 @@ import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-co
 import {
   codexTuiReadinessCheck,
   collectDoctorReport,
+  diagnoseAgents,
   doctorColorEnabled,
   renderDoctorReport,
   type DoctorReport,
@@ -420,6 +421,55 @@ try {
       !JSON.stringify(codexFailureCheck).includes(sentinel) &&
       !codexFailure.checks.some((item) => item.id === 'codex.managed-start-failure'));
 
+  // A managed EXTERNAL HOST earns the same diagnosis as a managed runtime.
+  //
+  // Kimi and dsh declare `externalHost.managed` and no `managedRuntime`, and the
+  // gate used to require the latter — so a Kimi host that crashed and could not
+  // be restarted produced a supervisor warning in the journal and NOTHING in
+  // doctor. Driven through `diagnoseAgents` rather than by asserting the
+  // predicate, so it is the real wiring under test.
+  {
+    const hostFailure = JSON.stringify({
+      schemaVersion: 1,
+      failures: {
+        kimi: {
+          detailCode: 'host-spawn-failed',
+          recordedAt: '2026-08-17T10:00:00.000Z',
+          capturedOutput: `COSYNCING_TOKEN=${sentinel}`,
+        },
+      },
+    });
+    const hostContext = fakeContext({
+      readText: (path) => path.endsWith('managed-runtime-failures.json')
+        ? { ok: true, text: hostFailure }
+        : { ok: false, reason: 'missing' },
+    });
+    const stub = (id: string, integration: unknown) => ({
+      id,
+      displayName: id,
+      integration,
+      diagnoseSetup: async () => ({
+        agent: id,
+        displayName: id,
+        minimumVersion: { version: '0.0.0', requiredFeature: '', evidenceUrl: '' },
+        checks: [],
+      }),
+    });
+    const diagnoses = await diagnoseAgents(hostContext, [
+      stub('kimi', { externalHost: { managed: true } }),
+      stub('plain', {}),
+    ] as never);
+    const kimiChecks = diagnoses.find((entry) => entry.agent === 'kimi')?.checks ?? [];
+    const plainChecks = diagnoses.find((entry) => entry.agent === 'plain')?.checks ?? [];
+    const kimiFailure = kimiChecks.find((item) => item.id === 'kimi.managed-start-failure');
+    check('a managed external host whose restart failed produces a blocking, actionable doctor finding',
+      kimiChecks.length === 1 && kimiFailure?.status === 'fail' && !!kimiFailure.remediation
+        && !JSON.stringify(kimiFailure).includes(sentinel),
+      JSON.stringify(kimiFailure));
+    check('...and an adapter with no managed host is still not asked about a journal it never writes',
+      plainChecks.length === 0, JSON.stringify(plainChecks));
+  }
+
   const opencodeConflict = await diagnoseOpenCodeSetup(fakeContext({
     executables: { opencode: '/fixture/bin/opencode' },
     runReadOnly: async () => ({ status: 'ok', stdout: '1.17.19', stderr: '' }),
@@ -486,6 +536,53 @@ try {
         && ownedStale.detailCode === 'bridge-owned-stale'
         && ownedStale.remediation?.message.includes('setup or repair') === true,
       `${ownedStale?.status}:${ownedStale?.detailCode}`);
+  }
+
+  {
+    // THE TWO HOMES, AT THE CALL SITE.
+    //
+    // The posture function takes the state home and the user home separately;
+    // this is the check that DOCTOR hands the right one to each role, which is
+    // where the mistake actually happened. Nothing errors when it does not:
+    // identities resolved under `~/.cosyncing` name a host no agent has ever
+    // used, so they match nothing the diagnosis resolved, a managed host reads
+    // as unmanaged, and doctor offers the manual start command the whole posture
+    // exists to withhold. Silent by construction, so it needs a test.
+    const userHome = join(testRoot, 'managed-host-homes');
+    const stateHome = join(userHome, '.cosyncing');
+    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    const install = committedInstallState('2026-08-17T00:00:00.000Z');
+    install.resources.push({
+      id: 'service-environment',
+      kind: 'environment-file',
+      target: join(stateHome, 'broker.env'),
+      ownership: { proof: 'receipt' },
+    } as never);
+    writeInstallState(install, stateHome);
+    let handed: readonly string[] | undefined;
+    const hostAdapter = {
+      id: 'fixture-host',
+      displayName: 'Fixture Host',
+      integration: { externalHost: { managed: true } },
+      // Resolves under whatever home it is GIVEN, exactly as a real adapter
+      // does — which is what makes the wrong home observable here.
+      managedHostIdentity: ({ homeDir }: { homeDir: string }) => `${homeDir}/.fixture-host`,
+      diagnoseSetup: async (context: { managedExternalHostIdentities?: readonly string[] }) => {
+        handed = context.managedExternalHostIdentities;
+        return { agent: 'fixture-host', displayName: 'Fixture Host', checks: [] };
+      },
+    } as unknown as AgentBackend;
+    await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: fakeContext({ homeDir: userHome }),
+      assetReport: inspectRuntimeAssets(),
+      adapters: [hostAdapter],
+      stateHome,
+    });
+    check('doctor resolves a managed identity under the USER home, never the state home',
+      handed?.includes(`${userHome}/.fixture-host`) === true
+        && handed?.some((identity) => identity.startsWith(`${stateHome}/`)) === false,
+      JSON.stringify(handed));
   }
 
   const claudeLegacy = await diagnoseClaudeSetup(fakeContext({

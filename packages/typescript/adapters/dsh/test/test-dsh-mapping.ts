@@ -20,8 +20,10 @@
  *   bun run packages/typescript/adapters/dsh/test/test-dsh-mapping.ts   (exit 0 = all pass)
  */
 export {};
+import { CONTEXT_INJECTION_BODY_MAX_UNITS, CONTEXT_INJECTION_EVENT } from '@cosyncing/adapter-api';
 import {
   createDshMapState,
+  DSH_NOTICE_MAX_CHARS,
   dshMessageKey,
   dshProjectionMessages,
   DshProjectionStore,
@@ -63,7 +65,7 @@ function typesOf(messages: Array<{ type: string }>): string {
   check(
     'the captured 21-event turn folds to its canonical rows',
     typesOf(rows as Array<{ type: string }>)
-      === 'metadata-update,run-summary,user-message,notice,notice,metadata-update,model-output,token-count,run-summary',
+      === 'metadata-update,run-summary,user-message,event,event,metadata-update,model-output,token-count,run-summary',
     typesOf(rows as Array<{ type: string }>),
   );
 
@@ -76,14 +78,45 @@ function typesOf(messages: Array<{ type: string }>): string {
     JSON.stringify(human),
   );
 
-  const notices = rows.filter((row) => row.type === 'notice') as Array<{ message: string }>;
+  // Injected context is agent-visible material the user never typed. It carries
+  // the provider-neutral context name so ONE client presentation can fold it,
+  // and it names its origin without the reader ever seeing the wire syntax.
+  const injected = rows.filter((row) =>
+    row.type === 'event' && row.name === CONTEXT_INJECTION_EVENT
+  ) as Array<{ payload: { source: string; body: string; truncated?: boolean } }>;
   check(
-    'injected context renders as bounded notices naming their origin, never as human bubbles',
-    notices.length === 2
-      && notices[0]!.message.startsWith('Context added by @deepseek-ai/dsh-system-prompt')
-      && notices[1]!.message.startsWith('Context added by skill-catalog')
-      && notices.every((notice) => notice.message.length <= 240),
-    notices.map((notice) => `${notice.message.slice(0, 40)}…`).join(' | '),
+    'injected context becomes context events naming their origin, never human bubbles',
+    injected.length === 2
+      && injected[0]!.payload.source === '@deepseek-ai/dsh-system-prompt'
+      && injected[1]!.payload.source === 'skill-catalog'
+      && injected.every((row) =>
+        row.payload.body.length > 0 && row.payload.body.length <= CONTEXT_INJECTION_BODY_MAX_UNITS
+      ),
+    injected.map((row) => `${row.payload.source}: ${row.payload.body.length} units`).join(' | '),
+  );
+  // These two blocks are short enough that the old notice bound never bit, so
+  // the capture alone proves nothing about clipping — the oversized case below
+  // is what covers it. What this does prove: an unclipped body claims nothing,
+  // and carries no ellipsis the adapter added.
+  check(
+    'a whole context body claims no truncation and gains no ellipsis',
+    injected.every((row) =>
+      row.payload.truncated === undefined && !row.payload.body.endsWith('…')
+    ),
+    injected.map((row) => `${row.payload.body.length}/${row.payload.truncated}`).join(' | '),
+  );
+  // The context ceiling is a DIFFERENT policy from the notice bound, not a
+  // rename of it: a notice is a one-line banner, a context body is folded away
+  // and read on demand. Pinned so a later tidy-up cannot quietly re-merge them.
+  check(
+    'the context ceiling is far larger than the notice bound',
+    CONTEXT_INJECTION_BODY_MAX_UNITS > DSH_NOTICE_MAX_CHARS * 4,
+    `${CONTEXT_INJECTION_BODY_MAX_UNITS} vs ${DSH_NOTICE_MAX_CHARS}`,
+  );
+  check(
+    'no injected context is left as an unfoldable notice',
+    !rows.some((row) => row.type === 'notice'
+      && String((row as { message?: string }).message ?? '').startsWith('Context added by')),
   );
 
   const output = rows.find((row) => row.type === 'model-output') as { text?: string; final?: boolean; key?: string };
@@ -135,9 +168,13 @@ function typesOf(messages: Array<{ type: string }>): string {
       && rows.filter((row) => row.type === 'model-output').length === 1,
   );
 
+  // The generic activity floor still must not appear for a turn this adapter
+  // fully understands. The canonical context event is exempt because it is the
+  // opposite of a fallback: a deliberate, named mapping the client renders. An
+  // unrecognized `dsh.*` event would still fail this.
   check(
     'a fully recognized turn produces no opaque activity records',
-    !rows.some((row) => row.type === 'event'),
+    !rows.some((row) => row.type === 'event' && row.name !== CONTEXT_INJECTION_EVENT),
     typesOf(rows as Array<{ type: string }>),
   );
 }
@@ -167,6 +204,90 @@ function typesOf(messages: Array<{ type: string }>): string {
     state,
   );
   check('an ignorable event is omitted entirely', ignorable.length === 0);
+
+  // A pathological injection is still bounded — but it says it was clipped, so
+  // the client can tell the reader the block is a prefix rather than showing a
+  // body that simply stops.
+  const huge = 'x'.repeat(CONTEXT_INJECTION_BODY_MAX_UNITS + 500);
+  const clipped = mapDshEvent(
+    {
+      event: {
+        type: 'user/message',
+        seq: 105,
+        time: 1,
+        data: { source: { kind: 'plugin', plugin: 'huge-plugin' }, content: [{ type: 'text', text: huge }] },
+      },
+    },
+    state,
+  ) as Array<{ payload?: { body?: string; truncated?: boolean } }>;
+  check(
+    'an oversized context body is clipped at the shared ceiling and declares it',
+    clipped.length === 1
+      && clipped[0]!.payload?.body?.length === CONTEXT_INJECTION_BODY_MAX_UNITS
+      && clipped[0]!.payload?.truncated === true,
+    `${clipped[0]?.payload?.body?.length} truncated=${clipped[0]?.payload?.truncated}`,
+  );
+  check(
+    'a clipped body carries no adapter-invented ellipsis that could pass for provider text',
+    !clipped[0]!.payload!.body!.endsWith('…'),
+  );
+
+  // The ceiling is measured in UTF-16 code units, so a cut can land between the
+  // halves of an emoji. Half a surrogate pair is not a character — it renders as
+  // a replacement glyph and is ill-formed wherever the payload is re-encoded.
+  const emojiEdge = `${'x'.repeat(CONTEXT_INJECTION_BODY_MAX_UNITS - 1)}😀tail`;
+  const emojiClipped = mapDshEvent(
+    {
+      event: {
+        type: 'user/message',
+        seq: 106,
+        time: 1,
+        data: { source: { kind: 'plugin', plugin: 'emoji-plugin' }, content: [{ type: 'text', text: emojiEdge }] },
+      },
+    },
+    state,
+  ) as Array<{ payload?: { body?: string; truncated?: boolean } }>;
+  const emojiBody = emojiClipped[0]!.payload!.body!;
+  check(
+    'a cut that would split an emoji backs off instead of leaving half of one',
+    !/[\uD800-\uDBFF]$/.test(emojiBody)
+      && emojiBody.length === CONTEXT_INJECTION_BODY_MAX_UNITS - 1
+      && emojiClipped[0]!.payload!.truncated === true,
+    `len=${emojiBody.length} lastCode=${emojiBody.charCodeAt(emojiBody.length - 1)}`,
+  );
+  check(
+    'the well-formed body survives a JSON round trip unchanged',
+    JSON.parse(JSON.stringify({ body: emojiBody })).body === emojiBody,
+  );
+
+  // The host wraps injected material the same way Kimi does. The protocol says
+  // a context body arrives already unwrapped, and the client renders it
+  // verbatim, so a forwarded wrapper puts raw tags back on screen.
+  const wrapped = mapDshEvent(
+    {
+      event: {
+        type: 'user/message',
+        seq: 107,
+        time: 1,
+        data: {
+          source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+          content: [{ type: 'text', text: '<system-reminder>\nStay on task.\n</system-reminder>' }],
+        },
+      },
+    },
+    state,
+  ) as Array<{ payload?: { source?: string; body?: string } }>;
+  check(
+    'a wrapped host block is unwrapped, keeping the plugin id as its origin',
+    wrapped[0]!.payload?.body === 'Stay on task.'
+      && wrapped[0]!.payload?.source === '@deepseek-ai/dsh-system-prompt',
+    JSON.stringify(wrapped[0]!.payload),
+  );
+  check(
+    'no context body reaches the client still carrying wrapper syntax',
+    !wrapped[0]!.payload!.body!.includes('<system-reminder>'),
+    JSON.stringify(wrapped[0]!.payload?.body),
+  );
 
   const structurallyBroken = [
     { type: 'tool/call', seq: 101, time: 1, data: {} },

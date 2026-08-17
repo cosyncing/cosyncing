@@ -66,10 +66,18 @@ Claude Code 的会话在接管之前保持只读。版本与安装方法见
 前台客户端可以加入同一个由 Broker 托管的 Codex 或 Pi Drive 会话，而不会再次启动原生 Resume。
 Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode 继续使用共享实时会话；后台观察连接始终只读。
 
-**实验性支持：** 源码贡献者可以试用暂定的
-[DeepSeek Harness](docs/supported_agents/dsh.md) 适配器。它连接到由操作者启动的 `dsh web`
-宿主，多个前台客户端可以共享对话记录和控制。该适配器默认关闭，安装后的 Broker 服务目前不会启用它；
-后台常驻订阅、模型选择、文件输入和部分消息显示仍待完善。
+**实验性支持：** 源码贡献者可以试用两个暂定适配器，它们连接的都是本地服务器而非 CLI。
+[Kimi Code](docs/supported_agents/kimi.md) 对 `kimi web` 服务器上的每个会话提供只读观察，对 cosyncing
+自己创建的会话提供 Drive（提示词、审批、模型选择），对其余会话提供显式接管。
+[DeepSeek Harness](docs/supported_agents/dsh.md) 连接 `dsh web` 宿主，多个前台客户端可以共享对话记录
+和控制，并支持模型与推理强度选择、权限预设、宿主自带的斜杠命令以及图片附件。通用文件附件不受支持
+（该宿主只接受图片内容）；后台常驻订阅和部分消息显示仍待完善。
+
+两者都不需要开关标志，也不需要一直开着终端：安装后的 cosyncing 服务会在宿主未运行时启动它、在它崩溃后
+重启它，并且只停止自己启动的那一个。你自己启动的宿主不会被停止、替换或重新配置，安装流程也会在征求同意
+前列出它将托管的两个宿主。DeepSeek Harness 请全局安装：`npm install -g @deepseek-ai/dsh` —— cosyncing
+只在 PATH 上查找 `dsh`，因此仅用 `npx` 的安装可以通信，但无法被启动或校验版本。两个宿主的安装说明见
+[支持的智能体](docs/supported_agents/README.md)（英文）。
 
 ## 前置要求
 

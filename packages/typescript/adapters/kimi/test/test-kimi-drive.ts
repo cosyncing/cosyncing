@@ -49,10 +49,22 @@ import {
   KIMI_OPEN_PROVENANCE_REFUSAL,
   KIMI_STOP_ALREADY_DONE_NOTICE,
   KIMI_STOP_NOTICE,
+  KIMI_UNCOMMITTED_PROMOTION_REFUSAL,
   KimiDriveConnection,
 } from '../src/drive.ts';
-import { KIMI_AMBIGUOUS_SINGLE_ANSWER, KIMI_APPROVAL_DETAIL_CAP_BYTES } from '../src/mapping.ts';
-import { KIMI_LIVE_ATTACH_NO_STREAM } from '../src/implementation.ts';
+import {
+  KIMI_AMBIGUOUS_SINGLE_ANSWER,
+  KIMI_APPROVAL_DETAIL_CAP_BYTES,
+  kimiDemotedControlState,
+  kimiForeignControlState,
+} from '../src/mapping.ts';
+import {
+  KIMI_FOREIGN_ATTACH_REFUSAL,
+  KIMI_LIVE_ATTACH_NO_STREAM,
+  KIMI_TAKEOVER_DEMOTED_REFUSAL,
+  KIMI_TAKEOVER_IN_FLIGHT_REFUSAL,
+  KIMI_TAKEOVER_UNKNOWN_SESSION_REFUSAL,
+} from '../src/implementation.ts';
 import { KIMI_WS_FRAME_MAX_BYTES } from '../src/observe.ts';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -304,7 +316,7 @@ const server = Bun.serve({
 
 const baseUrl = `http://127.0.0.1:${server.port ?? 0}`;
 const liveScan: KimiInstanceScan = {
-  live: [{ baseUrl, port: server.port ?? 0, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
+  live: [{ baseUrl, port: server.port ?? 0, pid: process.pid, serverId: SERVER_ID, hostVersion: '0.35.0', startedAt: SERVER_STARTED_AT }],
   stale: 0, invalid: 0, truncated: false,
 };
 
@@ -363,15 +375,13 @@ const frame = (type: string, payload: Record<string, unknown> = {}, sessionId = 
 let intervalHandler: (() => void) | undefined;
 
 /**
- * A Kimi adapter with the DRIVE GATE ON, which is what makes the create surface
- * exist at all.
+ * A Kimi adapter, whose create surface is simply present.
  *
- * The gate (`COSYNCING_KIMI_DRIVE`) is default-off as a controlled rollout of
- * the write surface — foreground clients DO request `mode='live'` — and with it
- * off `createSession` and friends are ABSENT rather than throwing, so a suite
- * about Drive has to ask for the posture it is testing. The return type says the
- * same thing in the type system: these four are present here, and a reader who
- * forgets the gate gets a compile error rather than a runtime one.
+ * The four write entry points used to appear only with `COSYNCING_KIMI_DRIVE`
+ * set, so this suite had to ask for the posture it was testing. The gate is
+ * gone — Drive is an ordinary capability, permitted per session by ownership
+ * and the requested attach mode — and the `Required<...>` here now records a
+ * fact about the adapter rather than about a flag.
  */
 type DrivingKimiAdapter = KimiAdapter
   & Required<Pick<KimiAdapter, 'createSession' | 'canCreateSession' | 'prepareCreateSession' | 'listModels'>>;
@@ -387,7 +397,6 @@ interface AdapterOverrides {
 function makeAdapter(scan: KimiInstanceScan = liveScan, overrides: AdapterOverrides = {}): DrivingKimiAdapter {
   return new KimiAdapter({
     env: {}, homeDir: '/fixture/home',
-    drive: true,
     instanceScan: () => scan,
     readToken: overrides.readToken ?? (() => 'fixture-token'),
     ...(overrides.writeFetchImpl ? { writeFetchImpl: overrides.writeFetchImpl } : {}),
@@ -408,7 +417,29 @@ function silentSocketFactory(): KimiSocketLike {
   return new FakeSocket();
 }
 
+
 const settle = () => Bun.sleep(30);
+
+/**
+ * Waits for a promotion to REACH its commit barrier — the socket exists and
+ * `waitForStream` is pending on it — rather than sleeping at it.
+ *
+ * Bounded, and it THROWS on expiry. An unbounded `while` here would turn a
+ * promotion that never opens a socket into a suite that hangs until the outer
+ * 90s sub-suite timeout kills it, reported as a readiness flake rather than as
+ * the real defect. The condition is the honest signal; the ceiling is what
+ * makes a broken condition say so.
+ */
+async function socketConstructed(before: number, timeoutMs = 5_000): Promise<FakeSocket> {
+  const deadline = Date.now() + timeoutMs;
+  while (sockets.length === before) {
+    if (Date.now() > deadline) {
+      throw new Error(`no socket was constructed within ${timeoutMs}ms (still ${sockets.length})`);
+    }
+    await Bun.sleep(1);
+  }
+  return sockets.at(-1)!;
+}
 const threw = async (work: () => Promise<unknown>): Promise<Error | undefined> =>
   work().then(() => undefined, (error: Error) => error);
 
@@ -494,18 +525,18 @@ const withinDeadline = async <T>(work: Promise<T>, ms: number, what: string): Pr
  * Wait out the walk currently holding the slot — and NOTHING more.
  *
  * This is the barrier the explained-outage blocks actually need, and the
- * stronger {@link walkedAfterReconnect} is actively WRONG there: the tick's
- * own post-reconnect walk is what ARMS the held row (polls=1), so a barrier
- * that then runs one more walk runs the CONFIRMING walk — the suspect reaches
- * {@link KIMI_DIVERGENCE_CONFIRM_POLLS} and demotes before the test has even
- * delivered the explanation. Whether that happened depended on whether the
- * tick walk's evaluation or the barrier's second walk came first, which is
- * machine timing: the intermittent demotion this suite kept showing on CI.
+ * stronger {@link walkedAfterReconnect} is wrong there: it would run a further
+ * walk of its own, and a block that is counting reads cannot start by adding
+ * an uncounted one.
  *
- * After the reconnect the only walk that can exist is the tick's — the timer
- * is test-driven and nothing else triggers one — so once the slot is idle the
- * detector state reflects exactly one post-reconnect evaluation, and the
- * frame delivered next genuinely precedes the second walk.
+ * Suspicion now accumulates on POLLS only, so a stray walk no longer costs a
+ * suspect its budget the way it did when this barrier was written — the
+ * demotion that made the suite intermittent is fixed in the detector, not
+ * here. What the barrier still buys is determinism: after the reconnect the
+ * only walk that can exist is the tick's — the timer is test-driven and
+ * nothing else triggers one — so once the slot is idle the detector state
+ * reflects exactly one post-reconnect evaluation instead of whatever the
+ * scheduler happened to interleave.
  */
 const waitOutWalk = async (conn: KimiDriveConnection, timeoutMs = 5_000): Promise<void> => {
   const walk = conn as unknown as { refreshing: boolean; activeWalk?: Promise<void> };
@@ -634,7 +665,11 @@ try {
     check('a down server fails the readiness boundary with the typed 503 error',
       isSessionCreateTemporarilyUnavailableError(error)
         && error.detailCode === 'kimi-server-unavailable'
-        && /kimi web/.test(error.message),
+        // Names the SITUATION, never the command that would create a second
+        // host: the broker starts and supervises this one wherever it is
+        // authorized to, so remediation that starts a competing server races it.
+        && !/kimi web/.test(error.message)
+        && /cosyncing doctor/.test(error.message),
       `${error?.name} ${error?.message}`);
     // The boundary must CREATE NOTHING — that is its whole contract.
     check('the readiness boundary issued no create',
@@ -795,7 +830,7 @@ try {
     promptAnswer = ok({ prompt_id: 'prompt_5', user_message_id: 'msg_user_5', status: 'running', content: [], created_at: 'x' });
     await conn.sendPrompt({ text: 'correlate me', clientMessageId: 'client-abc' });
     messages = [userRow('msg_user_5', 'correlate me'), userRow('msg_user_other', 'typed in the terminal')];
-    await conn.refresh();
+    await conn.refresh('poll');
     const echoes = rows.filter((row): row is Extract<AgentMessage, { type: 'user-message' }> => row.type === 'user-message');
     const mine = echoes.find((row) => row.text === 'correlate me');
     const theirs = echoes.find((row) => row.text === 'typed in the terminal');
@@ -1460,13 +1495,13 @@ try {
     // A terminal `kimi -S` turn: the row appears through the REST re-fold and
     // the socket says nothing, because the CLI runs its own in-process bus.
     messages = [userRow('msg_terminal', 'typed in a terminal'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check('one poll of an unexplained user row suspects but does NOT demote',
       conn.demotedToObserve === false && conn.info.attachMode === 'live',
       `demoted=${conn.demotedToObserve}`);
 
     const beforeWrites = writes().length;
-    await conn.refresh();
+    await conn.refresh('poll');
     check(`a suspect surviving ${KIMI_DIVERGENCE_CONFIRM_POLLS} healthy polls demotes exactly once`,
       conn.demotedToObserve === true
         && rows.filter((row) => row.type === 'error' && row.message === KIMI_DIVERGENCE_MESSAGE).length === 1,
@@ -1553,10 +1588,10 @@ try {
     const { conn } = await drivenSession();
     const socket = sockets.at(-1)!;
     messages = [userRow('msg_server_side', 'submitted through another API client'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     socket.deliver(frame('turn.started', { turnId: 7, origin: { kind: 'user' } }));
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('a suspect explained by WS activity in the interval does NOT demote',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -1612,12 +1647,30 @@ try {
       heldWithStream?.message === KIMI_OPEN_PROVENANCE_REFUSAL
         && writes().length === beforeStreamUpHold,
       `${heldWithStream?.message} writes=${writes().length - beforeStreamUpHold}`);
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('an outage row that nothing ever accounts for demotes once the stream is healthy again',
       conn.demotedToObserve === true
         && rows.filter((row) => row.type === 'error' && row.message === KIMI_DIVERGENCE_MESSAGE).length === 1,
       `demoted=${conn.demotedToObserve}`);
+    await conn.close();
+  }
+
+  {
+    // ...AND THE DETECTOR STILL CONFIRMS, which is the half that proves the rule
+    // above is a rule and not an off switch. A poll IS an interval of silence,
+    // so the suspicion survives any number of reads and dies on the next poll.
+    const { conn } = await drivenSession();
+    messages = [userRow('msg_event_walks_only', 'a foreign prompt'), ...messages];
+    await conn.refresh('poll');
+    check('a foreign row is suspected on the poll that first sees it',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    for (let walk = 0; walk < 5; walk += 1) await conn.refresh();
+    check('...and five more reads with the server silent still decide nothing',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    await conn.refresh('poll');
+    check('...while the very next POLL confirms it, unchanged from before the fix',
+      conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
     await conn.close();
   }
 
@@ -1646,16 +1699,29 @@ try {
     // sitting unread.
     intervalHandler?.();
     const replacement = await replacementSocket(retired);
-    // The frame must land in the interval BETWEEN the arming walk and the
-    // confirming one: socket-open readiness is not a walk barrier (the tick
-    // starts its own walk the moment the generation re-resolves), and waiting
-    // out that walk by running ANOTHER one would run the confirmation itself
-    // — the suspect would demote before its explanation was delivered. Wait
-    // the tick's walk out, deliver, then let the next walk evaluate.
+    // Settle the tick's own walk before doing anything else: socket-open
+    // readiness is not a walk barrier — the tick starts its walk the moment the
+    // generation re-resolves — so without this the reads below would interleave
+    // with it and the block would be measuring the scheduler.
     await waitOutWalk(conn);
+    // REGRESSION, task #39. These three walks are what a reconnect really does:
+    // the re-verification finishing, a restored stream adopting its cursor, and
+    // a frame that says the transcript moved each fire an unawaited refresh, and
+    // they land in whatever order the scheduler chooses. They are READS, not
+    // intervals. When each of them spent a confirmation, this exact scenario
+    // failed a gate run — the row was judged foreign in the same millisecond it
+    // was first suspected, with its explanation already on the wire — and it
+    // passed every time it was run alone, which is what made it look like a
+    // flake. One extra walk was enough; the suspect needed only to be seen
+    // twice, and being seen twice in no time at all is not evidence.
+    await conn.refresh();
+    await conn.refresh();
+    await conn.refresh();
+    check('extra walks inside one poll interval cannot confirm a suspect',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     replacement.deliver(frame('turn.started', { turnId: 11, origin: { kind: 'user' } }));
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('an outage row explained by later server activity does NOT demote',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     // ...and with provenance resolved, writing is allowed again.
@@ -1700,8 +1766,8 @@ try {
     const replacement = await replacementSocket(retired);
     await waitOutWalk(conn);
     replacement.deliver(frame('turn.started', { turnId: 12, origin: { kind: 'user' } }));
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('a slow re-verification does not demote an outage row that was explained',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -1823,7 +1889,7 @@ try {
     const submit = gate();
 
     holdMessages = read.hold;
-    const walking = conn.refresh();
+    const walking = conn.refresh('poll');
     await settle();
 
     // The submit passes the write gate — the stream is up and nothing is
@@ -1852,9 +1918,9 @@ try {
     promptAnswer = ok({ prompt_id: 'prompt_after_late', user_message_id: 'msg_after_late', status: 'running', content: [], created_at: 'x' });
     const resumed = await threw(() => conn.sendPrompt({ text: 'writing again' }));
     messages = [userRow('msg_after_late', 'writing again'), ...messages];
-    await conn.refresh();
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('our own late-resolving POST exonerates the row: no demotion, and writes resume',
       resumed === undefined
         && writes().length === beforeAfterEvidence + 1
@@ -1872,7 +1938,7 @@ try {
     sockets.at(-1)!.fire('close', {});
     await settle();
     messages = [userRow('msg_flappy', 'typed in a terminal'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     // The stream returns and the row starts its confirmation...
     intervalHandler?.();
     await settle();
@@ -1883,15 +1949,15 @@ try {
     // evidence gathered while nobody was listening.
     sockets.at(-1)!.fire('close', {});
     await settle();
-    await conn.refresh();
+    await conn.refresh('poll');
     check('the second break does not clear the row, and nothing demotes while the stream is down',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     intervalHandler?.();
     await settle();
     check('the re-armed row starts its confirmation over rather than resuming mid-count',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('the row demotes after the NEXT healthy interval — the break re-armed it, it did not forgive it',
       conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -1912,11 +1978,11 @@ try {
     const flood = (from: number, count: number) => Array.from({ length: count }, (_, index) =>
       userRow(`msg_flood_${from + index}`, 'typed in a terminal'));
     messages = [...flood(0, 40), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check('a flood inside the bound is held, not yet a verdict',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     messages = [...flood(40, 40), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check(`more than ${KIMI_DIVERGENCE_SUSPECT_LIMIT} unattributable prompts demotes rather than forgetting one`,
       conn.demotedToObserve === true && conn.info.attachMode === 'observe',
       `demoted=${conn.demotedToObserve}`);
@@ -1933,9 +1999,9 @@ try {
       assistantRow('msg_assistant_b', 'another fragment'),
       ...messages,
     ];
-    await conn.refresh();
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('assistant-only poll rows never demote',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -1958,7 +2024,7 @@ try {
     const { conn, rows } = await drivenSession();
     const socket = sockets.at(-1)!;
     messages = [userRow('msg_terminal_break', 'typed in a terminal'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check('the unexplained row is suspected and has not demoted yet',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     socket.fire('message', {
@@ -1973,11 +2039,11 @@ try {
     });
     // The break happened IN PLACE — the socket is still open, so there is no
     // reconnect to wait for. The very next walk re-arms the row.
-    await conn.refresh();
+    await conn.refresh('poll');
     check('the interrupted suspect is preserved, and one interval after the break is not yet proof',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('with nothing accounting for it after the break, the preserved suspect demotes',
       conn.demotedToObserve === true
         && conn.info.attachMode === 'observe'
@@ -1993,9 +2059,9 @@ try {
     promptAnswer = ok({ prompt_id: 'prompt_own', user_message_id: 'msg_own_echo', status: 'running', content: [], created_at: 'x' });
     await conn.sendPrompt({ text: 'mine' });
     messages = [userRow('msg_own_echo', 'mine'), ...messages];
-    await conn.refresh();
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('our own prompt echo never becomes a suspect',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -2026,7 +2092,7 @@ try {
     }));
 
     messages = [userRow('msg_healthy_provenance', 'typed in a terminal'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check('one healthy poll of an unexplained row suspects it without demoting',
       conn.demotedToObserve === false && conn.info.attachMode === 'live',
       `demoted=${conn.demotedToObserve}`);
@@ -2062,7 +2128,7 @@ try {
     // The server itself answers for the row: an owned-session frame in the
     // interval proves it ran something that can account for it.
     socket.deliver(frame('turn.started', { turnId: 21, origin: { kind: 'user' } }));
-    await conn.refresh();
+    await conn.refresh('poll');
     check('server activity exonerates the row rather than demoting it',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
 
@@ -2116,7 +2182,7 @@ try {
     check(`exactly ${KIMI_DIVERGENCE_SUSPECT_LIMIT} unexplained rows in one healthy walk do not demote, and all are tracked`,
       conn.demotedToObserve === false && tracked === KIMI_DIVERGENCE_SUSPECT_LIMIT,
       `demoted=${conn.demotedToObserve} tracked=${tracked}`);
-    await conn.refresh();
+    await conn.refresh('poll');
     check('...and they confirm on the next healthy poll, by the ordinary rule',
       conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
     await conn.close();
@@ -2250,7 +2316,7 @@ try {
     // it — a session that silently stops showing new rows after one refused
     // prompt.
     messages = [assistantRow('msg_after_refusal', 'delivered after a refused prompt'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a refused prompt leaves no submission fence standing: the next refresh walks',
       rows.some((row) => row.type === 'model-output' && row.text === 'delivered after a refused prompt'),
@@ -2316,17 +2382,17 @@ try {
     intervalHandler?.();
     await settle();
     messages = [userRow('msg_unopened_window', 'typed in a terminal'), ...messages];
-    await conn.refresh();
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('polls taken while a socket is assigned but unopened create no suspects and never demote',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     // ...and the row is HELD, not forgiven: once a real stream exists it is
     // confirmed. Both halves matter — the first is F1, the second is F2.
     sockets.at(-1)!.fire('open', {});
     await settle();
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('the row held through the unopened window demotes once a real stream exists',
       conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
     socketsOpenAutomatically = true;
@@ -2660,7 +2726,7 @@ try {
     // reconcile it, which is a card the user never sees.
     pendingApprovals = [approvalRow('ap_after_ceiling')];
     const beforeRetry = approvalReads();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('the ceiling leaves the pending work for the next poll tick, which runs exactly ONE fresh reconciliation',
       approvalReads() === beforeRetry + 1 && cards('ap_after_ceiling').length === 1,
@@ -2670,7 +2736,7 @@ try {
     // pending, a refresh reconciles nothing at all — a tick must not become a
     // standing pair of card reads on every session.
     const beforeIdle = approvalReads();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a refresh with nothing pending starts no reconciliation',
       approvalReads() === beforeIdle, `passes=${approvalReads() - beforeIdle}`);
@@ -2696,7 +2762,7 @@ try {
     pendingApprovals = [approvalRow('ap_after_close')];
     await conn.close();
     const beforeClosed = approvalReads();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a connection closed with reconcile work pending runs no retry at all',
       approvalReads() === beforeClosed, `passes=${approvalReads() - beforeClosed}`);
@@ -2904,7 +2970,7 @@ try {
     await settle();
     intervalHandler?.();
     await settle();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a reconnect with no subscriber issues ZERO pending-interaction reads',
       approvalReads() === beforeIdle && questionReads() === beforeIdleQuestions,
@@ -2915,7 +2981,7 @@ try {
     // returns runs the work rather than waiting for another break.
     const returning = conn.subscribe((message) => rows.push(message));
     const beforeReturn = approvalReads();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('the held reconciliation runs on the first refresh after a subscriber returns',
       approvalReads() === beforeReturn + 1 && cardsOf(rows, 'ap_no_watcher').length === 1,
@@ -3159,7 +3225,7 @@ try {
    */
   const demoteByForeignRow = async (conn: KimiDriveConnection, id: string): Promise<void> => {
     messages = [userRow(id, 'typed in a terminal'), ...messages];
-    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS; poll += 1) await conn.refresh();
+    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS; poll += 1) await conn.refresh('poll');
   };
 
   {
@@ -3279,7 +3345,7 @@ try {
       rerunPending(conn) === true && conn.demotedToObserve === true,
       `requested=${rerunPending(conn)} demoted=${conn.demotedToObserve}`);
     const beforeIdle = approvalReads();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('...so a later poll tick starts nothing either',
       approvalReads() === beforeIdle, `passes=${approvalReads() - beforeIdle}`);
@@ -3350,7 +3416,7 @@ try {
     // The blocked turn's completion arrives while the POST is still out, and a
     // second trigger for good measure.
     socket.deliver(frame('prompt.completed', { promptId: 'prompt_fenced', finishedAt: 'x', reason: 'blocked' }));
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('no user row is emitted while the submit POST is unresolved',
       echoes().length === 0, `${echoes().length} early rows`);
@@ -3362,8 +3428,8 @@ try {
       echoes().length === 1 && echoes()[0]?.clientKey === 'client-fenced',
       `${echoes().length} rows, clientKey=${echoes()[0]?.clientKey}`);
     // ...and the row never looked foreign to the detector on the way through.
-    await conn.refresh();
-    await conn.refresh();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
     check('the fenced echo never becomes a suspect',
       conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
     // ...and it SUSPENDED nothing on the way through either. Now that ANY open
@@ -3380,7 +3446,7 @@ try {
 
     // MECHANISM CONTROL: with no submit in flight, a refresh is not held at all.
     messages = [assistantRow('msg_unfenced', 'delivered normally'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     check('a refresh with no in-flight submit is unaffected by the fence',
       rows.some((row) => row.type === 'model-output' && row.text === 'delivered normally'));
     await conn.close();
@@ -3546,7 +3612,7 @@ try {
     const parkedWrite = threw(() => conn.sendPrompt({ text: 'parked at the door' }));
     await settle();
     messages = [assistantRow('msg_during_door', 'delivered while the door waits'), ...messages];
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a write still AT the door holds no walk: the fence rises with the POST, not before it',
       rows.some((row) => row.type === 'model-output' && row.text === 'delivered while the door waits'),
@@ -3572,7 +3638,7 @@ try {
       row.type === 'user-message' && row.text === 'fenced after a refusal');
     const sending = conn.sendPrompt({ text: 'fenced after a refusal', clientMessageId: 'client-after-door' });
     await settle();
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     check('a door refusal leaves the fence at zero: the NEXT submit still holds its own walk',
       echoes().length === 0, `${echoes().length} early rows`);
@@ -3608,7 +3674,7 @@ try {
     // to re-resolve — and that is what the park holds.
     acceptedToken = 'fixture-token-claim';
     currentToken = 'fixture-token-claim';
-    await conn.refresh();
+    await conn.refresh('poll');
     await settle();
     const parkedMeta = gate();
     holdMeta = parkedMeta.hold;
@@ -3969,6 +4035,303 @@ try {
       unrecoverable.some((run) => run.dispatches.length === 0
         && /could not be re-verified/.test(run.outcome)),
       unrecoverable.map((run) => run.dispatches.length).join(','));
+  }
+  // ── Round 3: transactional takeover promotion ─────────────────────────────
+  //
+  // Promotion is the moment a FOREIGN session becomes one this process may
+  // drive. It has to be all-or-nothing. A half-committed promotion either
+  // strands eligibility on a session cosyncing cannot actually drive, or grants
+  // Drive to a writer a demotion has already disqualified — and eligibility,
+  // once minted, survives every later attach.
+
+  {
+    // ── THE ADVERTISEMENT AND THE ACTION MUST AGREE ─────────────────────────
+    //
+    // Takeover is the one path to Drive that needs no prior ownership, so it is
+    // the one where a row saying one thing and the adapter doing another is
+    // reachable. It used to ride `COSYNCING_KIMI_DRIVE`, threaded by the caller
+    // — which meant a caller who forgot produced a row that hid a capability
+    // the adapter would in fact perform. Now neither side can be configured
+    // away, and both are asserted here against the same adapter.
+    const foreignRoster = await makeAdapter().discoverSessions();
+    const foreignRow = foreignRoster.find((row) => row.id === FOREIGN_ID);
+    check('a discovered foreign session advertises takeover, unsupported but available',
+      foreignRow !== undefined
+        && foreignRow.control?.drive.supported === false
+        && foreignRow.control.drive.state === 'observing'
+        && foreignRow.control.drive.takeoverAvailable === true
+        && foreignRow.control.drive.takeoverMode === 'live',
+      JSON.stringify(foreignRow?.control?.drive));
+
+    // The mapping asserted directly as well: a posture that is only correct
+    // once it has been through a connection is one the roster can still get
+    // wrong, and there is no longer any argument by which it could be absent.
+    const foreignDrive = kimiForeignControlState().drive;
+    check('the foreign declaration cannot be produced without its takeover fields',
+      foreignDrive.supported === false
+        && foreignDrive.state === 'observing'
+        && foreignDrive.takeoverAvailable === true
+        && foreignDrive.takeoverMode === 'live',
+      JSON.stringify(foreignDrive));
+
+    const demotedDrive = kimiDemotedControlState({
+      supported: false, syncAvailable: false, active: false,
+    }).drive;
+    // `unavailable` can never satisfy the client's `supported && observing`
+    // fallback, so WITHOUT the explicit pair a demoted session would be
+    // permanently unrecoverable through the UI. That is the whole reason these
+    // two fields exist rather than being inferred.
+    check('a demoted row declares re-takeover explicitly, since its state can never imply it',
+      demotedDrive.supported === false
+        && demotedDrive.state === 'unavailable'
+        && demotedDrive.takeoverAvailable === true
+        && demotedDrive.takeoverMode === 'live',
+      JSON.stringify(demotedDrive));
+  }
+
+  {
+    const adapter = makeAdapter();
+    const withoutReason = await threw(() => adapter.attach(FOREIGN_ID, 'live'));
+    check('a live attach on a foreign session with NO takeover intent still refuses',
+      isOwnershipConflictError(withoutReason) && withoutReason.conflict === 'kimi-foreign-session',
+      `${withoutReason?.message}`);
+
+    const unlisted = await threw(() =>
+      adapter.attach('session_not_on_this_server', 'live', { reason: 'takeover' }));
+    check('a takeover of a session this server does not list is refused, not synthesized',
+      isOwnershipConflictError(unlisted) && unlisted.message === KIMI_TAKEOVER_UNKNOWN_SESSION_REFUSAL,
+      `${unlisted?.message}`);
+
+    const beforeWrites = writes().length;
+    const driven = await adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' }) as KimiDriveConnection;
+    check('an authorized takeover drives the foreign session',
+      driven instanceof KimiDriveConnection
+        && driven.info.attachMode === 'live'
+        && driven.info.control?.drive.supported === true
+        && driven.info.control.drive.state === 'driving',
+      JSON.stringify(driven.info.control));
+    check('...and promoting issued no write of its own',
+      writes().length === beforeWrites, `${writes().length - beforeWrites} POSTs`);
+
+    // PROVISIONAL until the broker admits it. Passing the adapter's own barrier
+    // proves the connection can drive; it does not prove the broker accepted it
+    // as the session's owner, and closing a connection cannot undo eligibility
+    // already recorded. So nothing is owned yet.
+    const beforeAdmission = await adapter.attach(FOREIGN_ID);
+    check('a promotion past the barrier has NOT yet recorded ownership',
+      beforeAdmission.info.control?.drive.supported === false,
+      JSON.stringify(beforeAdmission.info.control?.drive));
+    await beforeAdmission.close();
+
+    check('the broker admitting the connection commits ownership',
+      driven.commitPromotion() === true);
+    // Now observable through the public surface: a later BARE attach reports
+    // the owned posture where it used to report the foreign one.
+    const bare = await adapter.attach(FOREIGN_ID);
+    check('the commit is durable: a later bare attach sees an owned session',
+      bare.info.control?.drive.supported === true, JSON.stringify(bare.info.control));
+    await bare.close();
+    await driven.close();
+  }
+
+  {
+    // NO WRITE AUTHORITY BEFORE ADMISSION — the property that makes the
+    // two-phase promotion a transaction rather than bookkeeping. A rollback can
+    // un-record eligibility; nothing unsends a prompt, un-answers a card or
+    // un-stops a turn. So the window between the adapter's barrier and the
+    // broker's commit has to be write-free BY CONSTRUCTION, and the proof is a
+    // negative control: zero POSTs, not merely a rejected promise.
+    //
+    // `stop` is checked explicitly because it is the door most likely to slip
+    // through: it is deliberately exempt from the content-write gate, so the
+    // only thing standing between an uncommitted promotion and a stopped turn
+    // is the authority check itself.
+    const adapter = makeAdapter();
+    const provisional = await adapter.attach(
+      FOREIGN_ID, 'live', { reason: 'takeover' }) as KimiDriveConnection;
+    const beforeWindow = writes().length;
+
+    const earlyPrompt = await threw(() => provisional.sendPrompt({ text: 'before the commit' }));
+    check('an uncommitted promotion refuses sendPrompt',
+      earlyPrompt?.message === KIMI_UNCOMMITTED_PROMOTION_REFUSAL, `${earlyPrompt?.message}`);
+    const earlyStop = await threw(() => provisional.runCommand('stop'));
+    check('...refuses stop, the one write exempt from the content gate',
+      earlyStop?.message === KIMI_UNCOMMITTED_PROMOTION_REFUSAL, `${earlyStop?.message}`);
+    const earlyApproval = await threw(() => provisional.respondPermission('req-provisional', 'approve'));
+    check('...and refuses an approval',
+      earlyApproval?.message === KIMI_UNCOMMITTED_PROMOTION_REFUSAL, `${earlyApproval?.message}`);
+    check('...having issued ZERO writes across the whole uncommitted window',
+      writes().length === beforeWindow, `${writes().length - beforeWindow} POSTs`);
+
+    // ...and the refusal is scoped to the window, not a connection that is
+    // permanently mute: the same object writes as soon as it owns the session.
+    check('the broker admitting it commits ownership', provisional.commitPromotion() === true);
+    await provisional.sendPrompt({ text: 'after the commit' });
+    check('...and the committed connection writes normally',
+      writes().length > beforeWindow, `${writes().length - beforeWindow} POSTs`);
+    await provisional.close();
+  }
+
+  {
+    // ROLLBACK ON REJECTED ADMISSION. The broker can refuse a connection that
+    // passed the adapter's barrier — a superseded generation, an incumbent that
+    // changed underneath, a hub shutting down — and it refuses by closing
+    // without committing. If ownership had already been recorded, the session
+    // would stay drivable and the very next ORDINARY live attach would drive it
+    // with no user confirmation anywhere in that path.
+    const adapter = makeAdapter();
+    const candidate = await adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' }) as KimiDriveConnection;
+    await candidate.close(); // the broker rejected it
+
+    const after = await adapter.attach(FOREIGN_ID);
+    check('a promotion the broker never admitted leaves no Drive eligibility',
+      after.info.control?.drive.supported === false,
+      JSON.stringify(after.info.control?.drive));
+    await after.close();
+    const stillRefused = await threw(() => adapter.attach(FOREIGN_ID, 'live'));
+    check('...so an ordinary live attach still refuses, with no confirmation banked',
+      isOwnershipConflictError(stillRefused) && stillRefused.conflict === 'kimi-foreign-session',
+      `${stillRefused?.name}`);
+    // Committing after the rollback must not resurrect it: the latch it would
+    // have settled is gone.
+    check('...and a late commit on the discarded candidate changes nothing',
+      candidate.commitPromotion() === true, 'idempotent no-op');
+    const late = await adapter.attach(FOREIGN_ID);
+    check('...leaving the session foreign',
+      late.info.control?.drive.supported === false,
+      JSON.stringify(late.info.control?.drive));
+    await late.close();
+  }
+
+  {
+    // CLOSING A COMMITTED PROMOTION IS A NO-OP, not a rollback. The settlement
+    // runs once: after it commits, the latch is gone, so the close that follows
+    // — on this connection or on any later one for the same session — finds
+    // nothing to settle and cannot revoke the eligibility a subsequent attach
+    // is relying on. This is the property that makes it safe for the rollback
+    // to be reached from `close()` at all.
+    const adapter = makeAdapter();
+    const promoted = await adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' }) as KimiDriveConnection;
+    check('the promotion commits on admission', promoted.commitPromotion() === true);
+    const later = await adapter.attach(FOREIGN_ID, 'live') as KimiDriveConnection;
+    await promoted.close(); // the committed generation is torn down
+
+    const owned = await adapter.attach(FOREIGN_ID);
+    check('closing a COMMITTED promotion does not revoke what a later attach relies on',
+      owned.info.control?.drive.supported === true,
+      JSON.stringify(owned.info.control?.drive));
+    await owned.close();
+    await later.close();
+  }
+
+  {
+    // ROLLBACK. `waitForStream` is the commit barrier precisely because it is
+    // the point at which the connection is proven able to carry approval
+    // requests back and to notice a foreign writer.
+    const adapter = makeAdapter(liveScan, { socketFactory: silentSocketFactory });
+    const beforeWrites = writes().length;
+    const failed = await threw(() => adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' }));
+    check('a takeover whose safety stream never opens refuses rather than degrading',
+      failed?.message === KIMI_LIVE_ATTACH_NO_STREAM, `${failed?.message}`);
+    check('...and wrote nothing on the way out',
+      writes().length === beforeWrites, `${writes().length - beforeWrites} POSTs`);
+
+    const after = await adapter.attach(FOREIGN_ID);
+    check('...and rolled back: no drive eligibility was minted for the foreign session',
+      after.info.control?.drive.supported === false, JSON.stringify(after.info.control));
+    await after.close();
+  }
+
+  {
+    // A DEMOTION CROSSING THE ATTEMPT. The window is real: the promotion has
+    // not added the session to the owned set yet, so the demotion's delete has
+    // nothing to remove and would be lost without the in-flight flag — and the
+    // barrier would then commit eligibility that a proven foreign writer had
+    // already taken away.
+    socketsOpenAutomatically = false;
+    try {
+      const adapter = makeAdapter();
+      const before = sockets.length;
+      const attaching = adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' });
+      const socket = await socketConstructed(before);
+      adapter.releaseDriveEligibility(FOREIGN_ID);
+      socket.fire('open', {});
+      const raced = await threw(() => attaching);
+      check('a demotion crossing the promotion refuses the takeover instead of committing',
+        isOwnershipConflictError(raced) && raced.message === KIMI_TAKEOVER_DEMOTED_REFUSAL,
+        `${raced?.message}`);
+
+      const after = await adapter.attach(FOREIGN_ID);
+      check('...and the session is still foreign, with nothing committed',
+        after.info.control?.drive.supported === false, JSON.stringify(after.info.control));
+      await after.close();
+    } finally {
+      socketsOpenAutomatically = true;
+    }
+  }
+
+  {
+    // CONCURRENT EXCLUSION. Defense in depth — the hub already dedupes
+    // same-key attaches — so this covers the callers it does not mediate.
+    socketsOpenAutomatically = false;
+    try {
+      const adapter = makeAdapter();
+      const before = sockets.length;
+      const first = adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' });
+      const held = await socketConstructed(before);
+      const second = await threw(() =>
+        adapter.attach(FOREIGN_ID, 'live', { reason: 'takeover' }));
+      check('a second concurrent promotion of one session is refused',
+        isOwnershipConflictError(second) && second.message === KIMI_TAKEOVER_IN_FLIGHT_REFUSAL,
+        `${second?.message}`);
+      check('...and the refusal opened no second socket',
+        sockets.length === before + 1, `${sockets.length - before} sockets`);
+
+      held.fire('open', {});
+      const won = await first as KimiDriveConnection;
+      check('...while the first promotion still commits',
+        won instanceof KimiDriveConnection && won.info.control?.drive.state === 'driving',
+        JSON.stringify(won.info.control));
+      await won.close();
+    } finally {
+      socketsOpenAutomatically = true;
+    }
+  }
+
+  {
+    // RE-TAKEOVER AFTER DEMOTION: allowed, but only as a fresh confirmation
+    // opening a fresh generation. The demoted generation stays permanently
+    // non-mutable — a re-takeover must not resurrect the connection that lost
+    // the session, only replace it.
+    const { adapter, conn } = await drivenSession();
+    messages = [userRow('msg_terminal_retake', 'typed in a terminal'), ...messages];
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    check('the diverged generation is demoted before the re-takeover',
+      conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
+
+    const beforeWrites = writes().length;
+    const withoutConfirmation = await threw(() => adapter.attach(CREATED_ID, 'live'));
+    check('a demoted session still refuses a live attach with no fresh confirmation',
+      isOwnershipConflictError(withoutConfirmation), `${withoutConfirmation?.name}`);
+
+    const retaken = await adapter.attach(CREATED_ID, 'live', { reason: 'takeover' }) as KimiDriveConnection;
+    check('a re-takeover after demotion opens a NEW driving generation',
+      retaken instanceof KimiDriveConnection
+        && retaken !== conn
+        && retaken.info.attachMode === 'live'
+        && retaken.info.control?.drive.state === 'driving',
+      JSON.stringify(retaken.info.control));
+
+    const stalePrompt = await threw(() => conn.sendPrompt({ text: 'from the demoted generation' }));
+    const staleStop = await threw(() => conn.runCommand('stop'));
+    check('...while every mutation on the demoted generation still refuses, writing nothing',
+      !!stalePrompt && stalePrompt.message === KIMI_DEMOTED_REFUSAL
+        && !!staleStop && staleStop.message === KIMI_DEMOTED_REFUSAL
+        && writes().length === beforeWrites,
+      `writes=${writes().length - beforeWrites} ${stalePrompt?.message} | ${staleStop?.message}`);
+    await retaken.close();
+    await conn.close();
   }
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));

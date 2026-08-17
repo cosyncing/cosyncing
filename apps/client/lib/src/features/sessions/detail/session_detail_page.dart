@@ -908,6 +908,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     final success = await controller.sendPrompt(
       trimmedPrompt,
       model: _selectedModelOverride,
+      // The same selection slash commands already carry. It is null whenever
+      // the pick equals the session's authoritative mode, so an ordinary
+      // prompt never re-asserts a mode — which would quietly outrank one the
+      // server changed underneath it.
+      permissionMode: _selectedPermissionModeOverride,
     );
     if (!mounted) {
       return;

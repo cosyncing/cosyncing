@@ -20,6 +20,7 @@ import type {
   SetupHttpProbe,
   SetupPathInspection,
 } from '@cosyncing/adapter-api';
+import { DSH_DEFAULT_BASE_URL } from '../src/server.ts';
 import {
   diagnoseDshSetup,
   npxCacheRoot,
@@ -81,7 +82,12 @@ function context(world: FakeWorld): { context: SetupDiagnosisContext; urls: stri
 }
 
 function checkOf(
-  diagnosis: { checks: Array<{ id: string; status: string; detailCode: string; remediation?: { command?: string } }> },
+  diagnosis: {
+    checks: Array<{
+      id: string; status: string; detailCode: string;
+      remediation?: { command?: string; message?: string };
+    }>;
+  },
   id: string,
 ) {
   return diagnosis.checks.find((entry) => entry.id === id);
@@ -251,11 +257,103 @@ function checkOf(
   }).context);
   const closedServer = checkOf(closed, 'dsh.server');
   check(
-    'no host listening is a warn carrying the command that starts one',
+    'no host listening is a warn carrying the command that starts one, where nothing manages it',
     closedServer?.status === 'warn'
       && closedServer.detailCode === 'server-not-running'
       && closedServer.remediation?.command === 'dsh web',
     JSON.stringify(closedServer),
+  );
+
+  // THE MANAGED POSTURE. Same closed port, opposite instruction.
+  //
+  // The installed service starts and supervises this host by default, so a
+  // `dsh web` command races its recovery and leaves two hosts on one address.
+  const managedClosed = await diagnoseDshSetup({
+    ...context({ executable: '/usr/local/bin/dsh', version: '0.1.0-rc.6', tcp: 'closed' }).context,
+    managedExternalHostIdentities: [DSH_DEFAULT_BASE_URL],
+  });
+  const managedClosedServer = checkOf(managedClosed, 'dsh.server');
+  check(
+    'the managed posture reports the same absent host, with no command at all',
+    managedClosedServer?.status === closedServer?.status
+      && managedClosedServer?.detailCode === closedServer?.detailCode
+      && managedClosedServer?.remediation?.command === undefined,
+    JSON.stringify(managedClosedServer),
+  );
+  check(
+    '...and never names dsh web, claiming only that cosyncing is CONFIGURED to manage the host',
+    !/dsh web/.test(managedClosedServer?.remediation?.message ?? '')
+      && /configured to manage/.test(managedClosedServer?.remediation?.message ?? ''),
+    managedClosedServer?.remediation?.message,
+  );
+  // AN ADDRESS THIS MACHINE DOES NOT SERVE, on a machine where the service IS
+  // installed and manages the default one.
+  //
+  // Two things must both be true here, and a managed/unmanaged flag can only
+  // deliver one of them. The remote host is NOT claimed as managed — cosyncing
+  // will never start it. And it still gets no `dsh web`, because that command
+  // takes no address: it would start a host at the DEFAULT address, which is
+  // neither the host being diagnosed nor a free address — it is the one the
+  // service manages, so the suggestion collides with the managed host while
+  // doing nothing for the operator's actual problem.
+  //
+  // A reserved `.example` name, not an RFC1918 literal: this tree ships publicly,
+  // where a private address reads as leaked topology whether or not it is one.
+  const REMOTE_HOST = 'http://dsh-host.example:3080';
+  const managedRemote = await diagnoseDshSetup({
+    ...context({
+      executable: '/usr/local/bin/dsh',
+      version: '0.1.0-rc.6',
+      tcp: 'closed',
+      env: { COSYNCING_DSH_BASE_URL: REMOTE_HOST },
+    }).context,
+    managedExternalHostIdentities: [DSH_DEFAULT_BASE_URL],
+  });
+  const managedRemoteServer = checkOf(managedRemote, 'dsh.server');
+  check(
+    'a host at another address is never claimed as managed, whatever the service manages',
+    !/configured to manage/.test(managedRemoteServer?.remediation?.message ?? ''),
+    JSON.stringify(managedRemoteServer?.remediation),
+  );
+  check(
+    '...and is never handed a local dsh web, which would start a DIFFERENT host',
+    managedRemoteServer?.remediation?.command === undefined
+      && !/dsh web/.test(managedRemoteServer?.remediation?.message ?? ''),
+    JSON.stringify(managedRemoteServer?.remediation),
+  );
+  check(
+    '...but still says what to do, naming the address the operator must start',
+    managedRemoteServer?.remediation?.message?.includes(REMOTE_HOST) === true,
+    managedRemoteServer?.remediation?.message,
+  );
+  // The same address with NOTHING installed: still no local command, for the
+  // same reason. This is not a managed-posture rule, it is an address rule.
+  const unmanagedRemote = await diagnoseDshSetup(context({
+    executable: '/usr/local/bin/dsh',
+    version: '0.1.0-rc.6',
+    tcp: 'closed',
+    env: { COSYNCING_DSH_BASE_URL: REMOTE_HOST },
+  }).context);
+  check(
+    'an unmanaged remote host is refused the local command too',
+    checkOf(unmanagedRemote, 'dsh.server')?.remediation?.command === undefined,
+    JSON.stringify(checkOf(unmanagedRemote, 'dsh.server')?.remediation),
+  );
+  // ...while the local default with nothing managing it keeps it, which is what
+  // makes the three postures distinct rather than one blanket refusal.
+  check(
+    'the local default address with nothing managing it still gets dsh web',
+    closedServer?.remediation?.command === 'dsh web',
+    JSON.stringify(closedServer?.remediation),
+  );
+  // A sweep over the whole managed diagnosis: nothing anywhere in it may offer
+  // the host command, not just the check this test happens to look at.
+  const managedMessages = [...managedClosed.checks, ...managedRemote.checks, ...unmanagedRemote.checks]
+    .map((entry) => `${entry.remediation?.message ?? ''} ${entry.remediation?.command ?? ''}`);
+  check(
+    'no remediation in a managed or non-default diagnosis mentions dsh web at all',
+    managedMessages.every((message) => !/dsh web/.test(message)),
+    managedMessages.filter((message) => /dsh web/.test(message)).join(' | ') || 'none',
   );
   check(
     'a closed port never produces a contract verdict',

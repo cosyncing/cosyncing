@@ -120,6 +120,33 @@ export interface SetupDiagnosisContext {
   ): Promise<SetupHttpProbe>;
   probeTcp(host: string, port: number, timeoutMs?: number): Promise<'open' | 'closed' | 'unknown'>;
   displayPath(path: string): string;
+  /**
+   * WHICH of this agent's external hosts cosyncing is responsible for starting
+   * on this machine — as identity keys, in the adapter's own identity space
+   * ({@link AgentBackend.managedHostIdentity}: a home for one agent, an address
+   * for another).
+   *
+   * Supplied per agent by the broker, which is the only side that can answer it:
+   * the decision comes from durable installation state — a service configured to
+   * manage this host, or an ownership record proving one was started — and an
+   * adapter can see neither.
+   *
+   * IDENTITIES RATHER THAN A FLAG, because management is per configuration and
+   * not per agent, and a boolean is wrong in both directions at once. The
+   * installed service manages the host its OWN environment resolves; an operator
+   * whose shell points the same adapter somewhere else — a different home, a
+   * host on another machine — is diagnosing a host that nothing here manages. A
+   * flag would tell that operator their host is supervised when it is not, and
+   * the inverse case is worse: it would let a diagnosis offer a local start
+   * command whose host collides with the managed one.
+   *
+   * So a diagnosis applies the managed posture only when the identity it
+   * actually resolved appears here. Absent or empty means nothing on this
+   * machine is managed, which is the posture where manual instructions are safe
+   * — a context that was never told stays useful rather than silently
+   * withholding guidance.
+   */
+  readonly managedExternalHostIdentities?: readonly string[];
 }
 
 /** Extract a SemVer-shaped version from tool output while ignoring product prefixes and build suffixes. */

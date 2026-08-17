@@ -3,8 +3,15 @@
  * cosyncing itself created.
  *
  * Talks to the official local server started by `kimi web --no-open` over its
- * REST `/api/v1` + `/api/v2` surface and the `/api/v1/ws` cursor stream. It
- * never starts, stops, or configures that server.
+ * REST `/api/v1` + `/api/v2` surface and the `/api/v1/ws` cursor stream.
+ *
+ * It never CONFIGURES that server, and it performs no process effects itself.
+ * It DESCRIBES the server to the broker — see
+ * {@link KimiAdapter.describeManagedHost} — and the broker starts one when none
+ * is running, supervises it, and stops it on exit. The installed service does
+ * that by default; a foreground broker opts in. Either way the broker stops only
+ * a process it can prove it started, so a server the user runs is never
+ * touched.
  *
  * THE WRITE BOUNDARY, precisely. The only write door is the six enumerated
  * methods of {@link KimiDriveHttp}, and it is reachable only from a
@@ -33,8 +40,8 @@
  * lands on the distinct `tool:id#live` key instead, which makes that authority
  * socket-local by construction.
  *
- * CONSEQUENCE, and the gate that answers it. `mode='live'` IS reachable from
- * the app, on the foreground path only: `createdSessionAttachMode`
+ * CONSEQUENCE. `mode='live'` IS reachable from the app, on the foreground path
+ * only: `createdSessionAttachMode`
  * (`runtime.ts`) returns `'live'` when the session's own attach instruction is
  * live, the client's interactive attach asks for it when the FRESH roster row
  * says live (`session_detail_controller.dart`), and the create flow records a
@@ -43,30 +50,35 @@
  * bare Observe, which is exactly the keying argument above: authority is
  * socket-local because only the `#live` key carries it.
  *
- * So the Drive gate is NOT "the app cannot ask for this". It is a
- * controlled-rollout boundary for the WRITE SURFACE itself, and it stays
- * default-off until physical Kimi Drive qualification is done. With it off this
- * adapter presents exactly the K1 surface — observe-only capabilities, and no
- * create/model hooks at all, so the broker's presence probes report a tool that
- * cannot create sessions; with nothing able to create, the owned set stays empty
- * and `mode='live'` refuses through the same ownership conflict that refuses
- * foreign sessions. With it on, the K2 surface is present and reachable end to
- * end. Two gates rather than one because they answer different questions:
- * `COSYNCING_ENABLE_KIMI` is about clients that cannot decode the row at all,
- * this one is about qualifying a write surface independently of the read-only
- * integration.
+ * Drive is an ordinary capability of this adapter, permitted per session by
+ * OWNERSHIP and the requested attach mode. It spent one round behind
+ * `COSYNCING_KIMI_DRIVE`, a default-off rollout boundary for the write surface;
+ * that gate is gone, because a flag nobody was expected to set meant the surface
+ * most users would meet was the one that never shipped, and because the rule
+ * that actually keeps a write safe — only a session this process created may be
+ * driven — is enforced per attach and cannot be configured away. The
+ * registration flag that used to sit beside it answered a different question
+ * — which clients can decode this row —
+ * and the broker now settles that per client from
+ * {@link KimiAdapter.minimumClientRevision}, so nothing about qualifying the
+ * write surface depends on hiding the agent from everyone.
  *
- * Not in this round, deliberately: takeover of terminal-created sessions,
- * native file/image input, agent/mode switching, and any lifecycle management
- * of the Kimi server itself.
+ * Not in this round, deliberately: native file/image input, and agent/mode
+ * switching.
  */
 import {
+  CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
+  EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
   OwnershipConflictError,
   SessionCreateTemporarilyUnavailableError,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
   type AttachMode,
+  type AttachOptions,
+  type AvailabilityOptions,
+  type ManagedHostDescriptor,
+  type ManagedHostIdentityInputs,
   type ModelOption,
   type PromptInput,
   type SessionConnection,
@@ -74,6 +86,7 @@ import {
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
+import { join } from 'node:path';
 import { diagnoseKimiSetup } from './diagnostics.ts';
 import {
   KIMI_INSTANCE_SCAN_MAX_FILES,
@@ -112,6 +125,17 @@ const DISCOVERY_PAGE_SIZE = 50;
 
 /** Discovery pages per sweep, so an enormous store cannot become unbounded roster work. */
 const DISCOVERY_MAX_PAGES = 4;
+
+/**
+ * How long a broker-started `kimi web` has to answer its own health probe.
+ *
+ * Generous, because this is a server booting rather than a request: the cost of
+ * being wrong in the short direction is killing a host that was about to work.
+ */
+export const KIMI_MANAGED_HOST_READY_MS = 20_000;
+
+/** How long a stop waits after SIGTERM before escalating. */
+export const KIMI_MANAGED_HOST_STOP_MS = 5_000;
 
 /** One instance record is a handful of scalars; anything larger is not one. */
 const INSTANCE_RECORD_MAX_BYTES = 8 * 1024;
@@ -172,7 +196,52 @@ export const KIMI_FOREIGN_ATTACH_REFUSAL =
 /** Machine conflict category for the refusal above; the broker relays it as an `attach-conflict`. */
 export const KIMI_FOREIGN_ATTACH_CONFLICT = 'kimi-foreign-session';
 
+/**
+ * Why a takeover of a session this server does not list is refused.
+ *
+ * A takeover is authorized against a session the user can SEE. If discovery
+ * does not return it, the synthesized fallback row would be the only evidence
+ * it exists — and promoting on that would let a typo or a stale client id mint
+ * Drive eligibility for an arbitrary string.
+ */
+export const KIMI_TAKEOVER_UNKNOWN_SESSION_REFUSAL =
+  'cosyncing cannot take over this Kimi session because the Kimi server does not list it. It may have '
+  + 'been deleted, or belong to a different Kimi home. Reload the session list and try again.';
+
+/**
+ * Why a takeover that raced a demotion is refused.
+ *
+ * The promotion had not committed when a foreign writer was proven on the same
+ * session. Committing anyway would hand Drive to the loser of that race.
+ */
+export const KIMI_TAKEOVER_DEMOTED_REFUSAL =
+  'cosyncing stopped taking over this Kimi session because another program was proven to be writing it '
+  + 'while the takeover was still opening. The session is available read-only.';
+
+/**
+ * Why a second concurrent takeover of one session is refused.
+ *
+ * Defense in depth only — see the latch's own comment for why the hub already
+ * prevents this for socket-driven attaches.
+ */
+export const KIMI_TAKEOVER_IN_FLIGHT_REFUSAL =
+  'cosyncing is already taking over this Kimi session. Wait for that attempt to finish.';
+
 /** Why an attach was refused, in the caller's language. */
+/**
+ * What to tell a caller whose create failed because no Kimi host was reachable.
+ *
+ * Deliberately does NOT name `kimi web`. The broker starts and supervises that
+ * host itself wherever it is authorized to — by default under the installed
+ * service — so telling a user to start one races the managed startup and invites
+ * a SECOND server on the same home. That is the exact ambiguity ownership proof
+ * exists to prevent, and it is already one of the refusal reasons below
+ * (`ambiguous`), so the remediation for a missing host must not be able to
+ * create it. Doctor is the honest pointer: it reports what is actually running
+ * and whose it is, without starting anything.
+ */
+const KIMI_HOST_UNAVAILABLE_REMEDIATION = 'retry shortly, or run `cosyncing doctor`';
+
 const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
   none: 'no local Kimi server is running',
   ambiguous: 'several Kimi servers are running on this home; cosyncing will not guess which one owns the session',
@@ -186,34 +255,6 @@ const ATTACH_REFUSAL: Record<KimiInstanceRefusal, string> = {
 };
 
 /**
- * Opt-in flag for registering the Kimi adapter, DEFAULT OFF.
- *
- * Not a feature preference — a client-compatibility gate. `/api/agents` is not
- * revision-filtered, so a single Kimi row makes any client that decodes
- * `IntegrationKind` strictly throw, and because one unknown row aborts the whole
- * roster decode that client loses its ENTIRE roster, Kimi installed or not. The
- * first-party client decodes tolerantly from the contract revision that added
- * the `unknown` fallback onward; until every supported client has shipped that,
- * serving a Kimi row by default would break working installations for a feature
- * they are not using.
- *
- * Flip the default only once supported clients ship tolerant decoding. Spelling
- * follows the repo's existing `COSYNCING_*` truthy-env convention
- * (`COSYNCING_CODEX_SYNC_SERVER`).
- *
- * ACTIVATION SCOPE — foreground only, deliberately. The durable service
- * environment is a closed, enumerated, receipt-hashed list
- * (`brokerServiceEnvironmentEntries` in the broker's service-manager) and does
- * NOT carry this flag, so a systemd/launchd-managed broker cannot enable Kimi:
- * K1 is reachable only from a foreground `cosyncing` launch with the variable
- * set. That is intentional for a review-stage adapter — a persisted
- * feature-gate that setup writes into the service environment is a later
- * lifecycle round, and smuggling one variable past that closed list now would
- * bypass its receipts. The registration-gate suite pins this restriction.
- */
-export const KIMI_ENABLE_ENV = 'COSYNCING_ENABLE_KIMI';
-
-/**
  * The observe socket URL of a resolved instance.
  *
  * ONE derivation, used by the attach and by the reverifier it installs: two
@@ -225,66 +266,31 @@ function wsUrlFor(instance: KimiDiscoveredInstance): string {
 }
 
 /**
- * Opt-in flag for the DRIVE surface, DEFAULT OFF — the second gate.
- *
- * Registration and Drive are two different bets. {@link KIMI_ENABLE_ENV} is
- * about clients that cannot decode a Kimi roster row; this one is about
- * qualifying the WRITE SURFACE itself. Foreground clients do request
- * `mode='live'` (see the header), so what this gate withholds is not an
- * unreachable capability — it is a writer that has not yet been proven against
- * a real Kimi host. Until that physical pass, advertising Drive would put a
- * `live` attach mode, `supportsLiveAttach`, a model switcher and a create hook
- * in front of users on the strength of deterministic evidence alone.
- *
- * With this off the adapter is the K1 observe surface exactly: no live attach
- * mode, no model switch, and no create/prepare/list-models methods AT ALL. Their
- * absence is the point rather than a throwing stub — the broker probes for the
- * method (`runtime.ts:5136-5139`, `runtime.ts:1369`), so a defined method that
- * throws still advertises a creatable tool and a create button that fails.
- *
- * With no way to create, {@link KimiAdapter.ownedSessions} stays empty, every
- * roster row maps foreign, and a `mode='live'` attach refuses through the
- * ownership conflict that already exists. So the off state needs no mapping
- * change and no second refusal path.
- *
- * Flip the default once Kimi Drive has a physical pass against a real host.
- * Same truthy-env convention as every other `COSYNCING_*` flag.
- */
-export const KIMI_DRIVE_ENV = 'COSYNCING_KIMI_DRIVE';
-
-/** The repo's shared truthy-env reading, so two flags cannot drift into two spellings. */
-function envFlagEnabled(value: string | undefined): boolean {
-  return /^(1|true|yes|on)$/i.test(value?.trim() ?? '');
-}
-
-export function kimiRegistrationEnabled(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  return envFlagEnabled(env[KIMI_ENABLE_ENV]);
-}
-
-export function kimiDriveEnabled(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  return envFlagEnabled(env[KIMI_DRIVE_ENV]);
-}
-
-/**
- * The K1 surface: observe, and nothing that implies a writer.
+ * The adapter's surface: observe every session, drive the ones cosyncing owns.
  *
  * A fresh object per adapter, never a shared frozen singleton: `attachModes` is
  * a mutable array in the protocol type, and one adapter instance handing the
  * broker an array another instance could reach is a coupling nothing here needs.
+ *
+ * Drive used to sit behind `COSYNCING_KIMI_DRIVE`, a default-off rollout gate
+ * for a write surface that had not yet met a real Kimi host. It has now, so the
+ * gate is gone rather than defaulted on: a flag nobody is expected to set is a
+ * second configuration of the adapter that ships untested, and the checks that
+ * actually keep a write safe are ownership and the attach mode, which are
+ * enforced per session and cannot be turned off by an environment.
  */
-function kimiObserveCapabilities(): AgentCapabilities {
+function kimiCapabilities(): AgentCapabilities {
   return {
     integrationKind: 'http-websocket',
-    attachModes: ['observe'],
+    // `observe` stays FIRST: it is the mode every session supports, and only the
+    // ones this process created can be driven. Live attach joins the running
+    // server; it never resumes one.
+    attachModes: ['observe', 'live'],
     supportsObserve: true,
     // No `mode=resume`: this adapter never owns a Kimi process, so there is no
     // session for it to resume INTO.
     supportsResume: false,
-    supportsLiveAttach: false,
+    supportsLiveAttach: true,
     // The server has no "send this file to the user" signal; artifacts are
     // detected from content like every filesystem-only adapter.
     supportsNativeArtifact: false,
@@ -293,26 +299,12 @@ function kimiObserveCapabilities(): AgentCapabilities {
     // would advertise an input the adapter then refuses.
     supportsNativeFileInput: false,
     // Model selection is a WRITE — it rides the prompt body, and only a drive
-    // connection sends one — so the observe surface cannot offer it.
-    supportsModelSwitch: false,
-    // Unchanged by the gate: this describes the approval scope the SERVER
-    // offers — `'session'`, approve once and the rule applies to this session's
-    // later calls — which is a fact about Kimi, not about what this adapter may
-    // do with it.
-    permissionGranularity: 'per-session',
-  };
-}
-
-/** The K2 surface: observe for every session, plus Drive for the ones cosyncing created. */
-function kimiDriveCapabilities(): AgentCapabilities {
-  return {
-    ...kimiObserveCapabilities(),
-    // `observe` stays FIRST: it is the mode every session supports, and only the
-    // ones this process created can be driven. Live attach joins the running
-    // server; it never resumes one.
-    attachModes: ['observe', 'live'],
-    supportsLiveAttach: true,
+    // connection sends one, which the ones this process owns are.
     supportsModelSwitch: true,
+    // The approval scope the SERVER offers — `'session'`, approve once and the
+    // rule applies to this session's later calls — which is a fact about Kimi,
+    // not about what this adapter may do with it.
+    permissionGranularity: 'per-session',
   };
 }
 
@@ -339,16 +331,47 @@ export interface KimiAdapterOptions {
   /** Injected only by tests: the content-write stream ceiling. See `KIMI_WRITE_STREAM_WAIT_MS`. */
   writeStreamWaitMs?: number;
   /**
-   * The Drive gate, injected. Wins over {@link KIMI_DRIVE_ENV} so a suite can
-   * name the posture it is testing instead of arranging an environment for it.
+   * How an executable name becomes an absolute path, injected so a suite can
+   * describe a machine with or without Kimi installed without having either.
    */
-  drive?: boolean;
+  resolveExecutable?: (command: string) => string | undefined;
 }
 
 export class KimiAdapter implements AgentBackend {
   readonly id = 'kimi';
   readonly displayName = 'Kimi Code';
   readonly capabilities: AgentCapabilities;
+  /**
+   * Registered for every client, shown only to those that can decode it.
+   *
+   * This replaces the `COSYNCING_ENABLE_KIMI` gate, which was never a
+   * capability decision: the adapter was finished, but one kimi row made a
+   * pre-tolerance client throw on the unknown integration kind and lose its
+   * WHOLE roster. An environment flag answered that with "then nobody gets
+   * Kimi", including the clients that could read it perfectly well. The broker
+   * now answers per client instead.
+   *
+   * The floor is the INTEGRATION-KIND tolerance, not the later attach-mode one:
+   * `http-websocket` is the only value here that a released client could fail to
+   * decode, and both attach modes this adapter offers (`observe` and `live`)
+   * have existed since long before either fallback. The registration suite pins
+   * that reasoning against drift.
+   */
+  readonly minimumClientRevision = CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE;
+  /**
+   * A leg here is the identity read, the health read, and up to
+   * {@link DISCOVERY_MAX_PAGES} session pages — every one of them against a
+   * server this adapter never starts or stops. Unbudgeted, a server that
+   * accepts connections and answers nothing would hold the roster for every
+   * OTHER agent as well.
+   */
+  readonly discoveryBudgetMs = EXTERNAL_HOST_DISCOVERY_BUDGET_MS;
+  /**
+   * The host is EXTERNAL: `kimi web` runs with or without this broker, so its
+   * lifecycle is governed by proven ownership rather than by assumption. See
+   * {@link KimiAdapter.describeManagedHost}.
+   */
+  readonly integration = { externalHost: { managed: true as const } };
 
   /**
    * The create surface, PRESENT ONLY BEHIND THE DRIVE GATE.
@@ -372,8 +395,6 @@ export class KimiAdapter implements AgentBackend {
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly homeDir: string;
   private readonly options: KimiAdapterOptions;
-  /** See {@link KIMI_DRIVE_ENV}. Decided once, at construction. */
-  private readonly driveEnabled: boolean;
 
   /**
    * Sessions created through {@link createSession} in THIS process, and the
@@ -393,6 +414,28 @@ export class KimiAdapter implements AgentBackend {
   private readonly pendingModels = new Map<string, PromptInput['model']>();
 
   /**
+   * Takeover promotions that have started and not yet committed or failed.
+   *
+   * DEFENSE IN DEPTH, and deliberately not the thing that stops two sockets
+   * racing: `Hub.pending` installs its in-flight entry synchronously and
+   * dedupes concurrent attaches on the same key, so two clients driving one
+   * broker never reach a second promotion. This covers the callers the hub does
+   * not mediate — a direct adapter consumer, and two Hub instances over one
+   * adapter — where nothing else would.
+   */
+  private readonly promotionsInFlight = new Set<string>();
+
+  /**
+   * Sessions demoted while their takeover promotion was still in flight.
+   *
+   * A demotion arriving mid-promotion has nothing to remove: the promotion has
+   * not added the session to {@link ownedSessions} yet. Recording it here is
+   * what lets the commit barrier refuse, instead of adding eligibility a proven
+   * foreign writer had just taken away.
+   */
+  private readonly demotedDuringPromotion = new Set<string>();
+
+  /**
    * Drop a session's automatic Drive eligibility, and the create-time model
    * request that only makes sense while we hold it.
    *
@@ -409,6 +452,13 @@ export class KimiAdapter implements AgentBackend {
    * state change.
    */
   private revokeDriveEligibility(sessionId: string): void {
+    // A demotion that lands mid-promotion must survive to the commit barrier.
+    // `ownedSessions` does not contain the session yet — that is precisely what
+    // committing would do — so this delete would be a silent no-op and the
+    // barrier would then grant Drive to the writer that just lost the race.
+    if (this.promotionsInFlight.has(sessionId)) {
+      this.demotedDuringPromotion.add(sessionId);
+    }
     this.ownedSessions.delete(sessionId);
     this.pendingModels.delete(sessionId);
   }
@@ -423,9 +473,7 @@ export class KimiAdapter implements AgentBackend {
     this.options = options;
     this.env = options.env ?? process.env;
     this.homeDir = options.homeDir ?? (process.env.HOME ?? '');
-    this.driveEnabled = options.drive ?? kimiDriveEnabled(this.env);
-    this.capabilities = this.driveEnabled ? kimiDriveCapabilities() : kimiObserveCapabilities();
-    if (!this.driveEnabled) return;
+    this.capabilities = kimiCapabilities();
     this.canCreateSession = () => this.probeCreateSession();
     this.prepareCreateSession = () => this.readyToCreateSession();
     this.listModels = () => this.readModelCatalog();
@@ -489,11 +537,16 @@ export class KimiAdapter implements AgentBackend {
     }
   }
 
-  private client(instance: KimiDiscoveredInstance, token: string | undefined): KimiReadOnlyHttp {
+  private client(
+    instance: KimiDiscoveredInstance,
+    token: string | undefined,
+    cancel?: AbortSignal,
+  ): KimiReadOnlyHttp {
     return new KimiReadOnlyHttp({
       baseUrl: instance.baseUrl,
       ...(token ? { token } : {}),
       ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      ...(cancel ? { signal: cancel } : {}),
     });
   }
 
@@ -530,14 +583,107 @@ export class KimiAdapter implements AgentBackend {
    * identity, so a rotation between two reads cannot split one connection
    * across two credentials.
    */
-  private async verifiedInstance(): Promise<{ resolved: KimiVerifiedInstance; token: string | undefined }> {
+  private async verifiedInstance(cancel?: AbortSignal): Promise<{ resolved: KimiVerifiedInstance; token: string | undefined }> {
     const token = this.token();
-    const resolved = await resolveVerifiedInstance(this.scan(), (instance) => this.client(instance, token));
+    const resolved = await resolveVerifiedInstance(this.scan(), (instance) => this.client(instance, token, cancel));
     return { resolved, token };
   }
 
-  async isAvailable(): Promise<boolean> {
-    const { resolved } = await this.verifiedInstance();
+  /**
+   * Kimi's host is `kimi web` — a program the user may already be running, and
+   * one the broker may start for them.
+   *
+   * Everything here is a READ: the registry the host itself maintains, and
+   * whether an executable exists. The broker decides what, if anything, to do
+   * with the answer.
+   *
+   * `null` — describing nothing at all — is returned for the two states where
+   * no honest answer exists, and both are refusals this adapter already makes
+   * elsewhere for the same reason ({@link resolveVerifiedInstance}):
+   *
+   *  - a TRUNCATED registry scan, which can prove neither "one server" nor
+   *    "none", so any locator derived from it would be a guess;
+   *  - MORE THAN ONE live instance, where naming one would be picking a server
+   *    arbitrarily and the broker would then own the wrong process.
+   */
+  /**
+   * The HOME, which is what `identityKey` below is, resolved for an environment
+   * this adapter is not necessarily running in.
+   *
+   * Total and effect-free: a home is a path, and naming one asserts nothing about
+   * whether a server is registered there. That is why the broker can ask it about
+   * the installed service's environment while the adapter itself was constructed
+   * with an operator's.
+   */
+  managedHostIdentity(inputs: ManagedHostIdentityInputs): string {
+    return resolveKimiHome(inputs.env, inputs.homeDir);
+  }
+
+  async describeManagedHost(): Promise<ManagedHostDescriptor | null> {
+    const scan = this.scan();
+    if (scan.truncated || scan.live.length > 1) return null;
+    const instance = scan.live[0];
+    const executable = this.hostExecutable();
+    return {
+      // The HOME, not a base URL: `kimi web` chooses its own port, so the home
+      // is what decides which registry — and therefore which server — this
+      // record is about. A record written for one home proves nothing about a
+      // server registered in another.
+      identityKey: this.home(),
+      // The registry already recorded the pid and the scan already proved it
+      // live, so the broker never has to guess from a port.
+      //
+      // With no live instance this asserts ABSENT rather than unknown, and that
+      // assertion is the only thing that can authorize starting a host at all.
+      // It rests on two facts: the registry is kimi's own published index of its
+      // running servers — the same index discovery already trusts to enumerate
+      // them — and this scan COMPLETED, since a truncated one was refused above.
+      // So "no live entry" here is a successful lookup that found nothing, not a
+      // lookup that gave up. A server whose registry file was deleted underneath
+      // it would be missed, and the cost of that is bounded and visible: the
+      // second `kimi web` loses the port and exits, reported as a start failure.
+      // No stranger is signalled on this path either way.
+      locator: instance ? { kind: 'pid', pid: instance.pid } : { kind: 'absent' },
+      launch: executable
+        // `--no-open` because a broker starting a host must not also open a
+        // browser on somebody's desktop.
+        //
+        // No `--port`: this adapter has not source-verified that `kimi web`
+        // accepts one, and the whole design already assumes it picks its own
+        // port and publishes it in the registry. Inventing a flag here would
+        // produce a launch that silently does something other than what the
+        // descriptor claims — the DSH mismatch, imported.
+        ? { command: executable, args: ['web', '--no-open'], cwd: this.homeDir }
+        : null,
+      // The registry's own numbers, which is the only place kimi's chosen port
+      // is ever written down. `profile` is the home, because that is what
+      // decides which registry — and so which server — this record is about.
+      serving: instance
+        ? { port: instance.port, profile: this.home() }
+        : { profile: this.home() },
+      readyTimeoutMs: KIMI_MANAGED_HOST_READY_MS,
+      stopGraceMs: KIMI_MANAGED_HOST_STOP_MS,
+    };
+  }
+
+  /**
+   * The `kimi` executable, PATH first and then the official installer's
+   * location.
+   *
+   * The fallback exists because that install directory is not on a service
+   * PATH by default, which the diagnostics module already had to account for:
+   * an install that is present but off PATH is INSTALLED, and reporting it as
+   * absent here would refuse to start a host that works perfectly well.
+   */
+  private hostExecutable(): string | undefined {
+    const resolve = this.options.resolveExecutable ?? ((command: string) => Bun.which(command) ?? undefined);
+    const onPath = resolve('kimi');
+    if (onPath) return onPath;
+    return resolve(join(this.homeDir, '.kimi-code', 'bin', 'kimi'));
+  }
+
+  async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
+    const { resolved } = await this.verifiedInstance(options?.signal);
     if (!resolved.ok) return false;
     const health = await resolved.http.getJson<{ ok?: unknown }>('/api/v1/healthz');
     return health.ok && health.data?.ok === true;
@@ -583,7 +729,7 @@ export class KimiAdapter implements AgentBackend {
    * see {@link KimiObserveConnection.getHistory}.
    */
   async discoverSessions(options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
-    const { resolved } = await this.verifiedInstance();
+    const { resolved } = await this.verifiedInstance(options?.signal);
     if (!resolved.ok) return [];
     return this.discoverFrom(resolved.http, options);
   }
@@ -631,15 +777,86 @@ export class KimiAdapter implements AgentBackend {
    *                  authority is not socket-local.
    *  - `resume`    → refused. Nothing here owns a Kimi process to resume into.
    */
-  async attach(sessionId: string, mode?: AttachMode): Promise<SessionConnection> {
+  async attach(sessionId: string, mode?: AttachMode, opts?: AttachOptions): Promise<SessionConnection> {
+    const takeover = mode === 'live' && opts?.reason === 'takeover';
+    // Only an UNOWNED takeover is a promotion. A takeover of a session already
+    // owned is an ordinary live attach that happens to carry the reason, and
+    // must not take the latch or run the transaction.
+    if (!takeover || this.ownedSessions.has(sessionId)) {
+      return this.openAttach(sessionId, mode, takeover);
+    }
+    if (this.promotionsInFlight.has(sessionId)) {
+      throw new OwnershipConflictError(KIMI_TAKEOVER_IN_FLIGHT_REFUSAL, KIMI_FOREIGN_ATTACH_CONFLICT);
+    }
+    this.promotionsInFlight.add(sessionId);
+    this.demotedDuringPromotion.delete(sessionId);
+    let settled = false;
+    try {
+      const connection = await this.openAttach(sessionId, mode, takeover);
+      // The latch is HELD past this return, deliberately. Ownership is still
+      // provisional until the broker admits the connection, so the window a
+      // demotion has to be noticed extends to that moment too; releasing here
+      // would let a demotion between the barrier and admission go unrecorded
+      // and be committed anyway. `settlePromotion` releases it.
+      settled = true;
+      return connection;
+    } finally {
+      // Only the FAILURE path releases here. A promotion that never produced a
+      // connection has nothing left to settle.
+      if (!settled) {
+        this.promotionsInFlight.delete(sessionId);
+        this.demotedDuringPromotion.delete(sessionId);
+      }
+    }
+  }
+
+  /**
+   * Settle ownership a promotion minted provisionally: the broker admitted the
+   * connection (`commit`), or it did not and the connection is being closed.
+   *
+   * EXACT-GENERATION, which is the property that makes it safe to run late. It
+   * settles only the promotion whose latch it still holds; a rollback arriving
+   * after a NEWER promotion has already committed finds the latch gone and
+   * touches nothing, so a rejected attempt can never revoke its successor's
+   * eligibility. A blunt `ownedSessions.delete(sessionId)` here would do exactly
+   * that.
+   */
+  private settlePromotion(sessionId: string, commit: boolean): boolean {
+    // Not ours to settle: a later promotion already took the latch and
+    // committed, or this one was settled once already.
+    if (!this.promotionsInFlight.has(sessionId)) return false;
+    const demoted = this.demotedDuringPromotion.has(sessionId);
+    this.promotionsInFlight.delete(sessionId);
+    this.demotedDuringPromotion.delete(sessionId);
+    // No `await` between the check and the add.
+    if (!commit || demoted) return false;
+    this.ownedSessions.add(sessionId);
+    return true;
+  }
+
+  /**
+   * The attach itself, with the promotion latch already held when one is owed.
+   *
+   * Split from {@link attach} so the latch has exactly one acquisition and one
+   * release around every exit path, including the throws.
+   */
+  private async openAttach(
+    sessionId: string,
+    mode: AttachMode | undefined,
+    takeover: boolean,
+  ): Promise<SessionConnection> {
     if (mode === 'resume') {
       throw new Error('kimi cannot resume a session: cosyncing never owns the Kimi process that runs it');
     }
     const owned = this.ownedSessions.has(sessionId);
-    if (mode === 'live' && !owned) {
+    // A live attach on a foreign session is still refused; what a takeover
+    // changes is that the user has explicitly authorized this one. The refusal
+    // for a live attach carrying NO takeover intent is unchanged.
+    if (mode === 'live' && !owned && !takeover) {
       throw new OwnershipConflictError(KIMI_FOREIGN_ATTACH_REFUSAL, KIMI_FOREIGN_ATTACH_CONFLICT);
     }
-    const drive = mode === 'live' && owned;
+    const promoting = takeover && !owned;
+    const drive = mode === 'live' && (owned || takeover);
     // One verified snapshot for the whole attach: discovery and the connection
     // it produces must talk to the SAME server, or the returned SessionInfo
     // would describe a session the connection never reads.
@@ -649,6 +866,13 @@ export class KimiAdapter implements AgentBackend {
     }
     const { instance, http } = resolved;
     const known = (await this.discoverFrom(http)).find((session) => session.id === sessionId);
+    // A promotion is authorized against a session the user could see. The
+    // synthesized fallback below is deliberately foreign-shaped and exists for
+    // a create the listing has not caught up with; accepting it here would let
+    // any unlisted id mint Drive eligibility for itself.
+    if (promoting && !known) {
+      throw new OwnershipConflictError(KIMI_TAKEOVER_UNKNOWN_SESSION_REFUSAL, KIMI_FOREIGN_ATTACH_CONFLICT);
+    }
     const info: SessionInfo = known ?? {
       id: sessionId,
       tool: this.id,
@@ -675,7 +899,11 @@ export class KimiAdapter implements AgentBackend {
     // An OWNED session that is not driving is a real posture, not a fallback:
     // drive is supported, this connection just is not doing it — because it was
     // opened in observe, or because nothing asked for `live`.
-    if (owned) {
+    // A promoting takeover is owned-in-waiting: the commit barrier below is the
+    // only thing left between here and eligibility, and it either commits or
+    // throws, so no connection is ever returned describing a posture it did not
+    // get.
+    if (owned || promoting) {
       info.attachMode = drive ? 'live' : 'observe';
       info.control = drive ? kimiOwnedControlState() : kimiOwnedObserveControlState();
     }
@@ -729,6 +957,11 @@ export class KimiAdapter implements AgentBackend {
       // implementation with terminal handoff — the two must never disagree about
       // what losing eligibility means.
       onDemoted: (id) => this.revokeDriveEligibility(id),
+      // Present only for a promotion: an attach that already owned the session
+      // has nothing provisional to settle.
+      ...(promoting
+        ? { settlePromotion: (commit: boolean) => this.settlePromotion(sessionId, commit) }
+        : {}),
       // The first successful prompt is the moment the request is spent; from
       // then on the session runs under whatever it settled on, and re-pinning
       // the create-time choice on a later attach would be the bug this replaces.
@@ -746,6 +979,33 @@ export class KimiAdapter implements AgentBackend {
     if (!(await connection.waitForStream(this.options.liveAttachSocketMs ?? KIMI_LIVE_ATTACH_SOCKET_MS))) {
       await connection.close();
       throw new Error(KIMI_LIVE_ATTACH_NO_STREAM);
+    }
+    // ── Promotion barrier ───────────────────────────────────────────────────
+    //
+    // `waitForStream` is the barrier because it is the point at which this
+    // connection is proven able to carry approval requests back to the user and
+    // to notice a foreign writer. Nothing above it may record ownership: a
+    // promotion that committed earlier could hand out Drive eligibility on a
+    // connection that then failed to open, leaving a foreign session
+    // permanently marked ours.
+    //
+    // Passing the barrier still does not COMMIT. Ownership stays provisional
+    // until the broker admits this connection as the session's owner, because
+    // the broker can refuse — a superseded generation, an incumbent that
+    // changed underneath, a hub shutting down — and closing a connection cannot
+    // undo eligibility already recorded. A rejected promotion that had already
+    // committed would leave the session drivable by the next ORDINARY live
+    // attach, with no user confirmation anywhere in that path.
+    //
+    // Everything here is therefore rollback-safe: no write has been issued and
+    // `ownedSessions` is untouched, so every failure path — including one the
+    // broker causes after this returns — leaves the session a foreign Observe
+    // exactly as it found it.
+    if (promoting) {
+      if (this.demotedDuringPromotion.has(sessionId)) {
+        await connection.close();
+        throw new OwnershipConflictError(KIMI_TAKEOVER_DEMOTED_REFUSAL, KIMI_FOREIGN_ATTACH_CONFLICT);
+      }
     }
     return connection;
   }
@@ -772,7 +1032,7 @@ export class KimiAdapter implements AgentBackend {
     const { resolved } = await this.verifiedInstance();
     if (resolved.ok) return;
     throw new SessionCreateTemporarilyUnavailableError(
-      `${ATTACH_REFUSAL[resolved.reason]} — start it with \`kimi web --no-open\` and try again`,
+      `${ATTACH_REFUSAL[resolved.reason]} — ${KIMI_HOST_UNAVAILABLE_REMEDIATION}`,
       'kimi-server-unavailable',
     );
   }
@@ -818,7 +1078,7 @@ export class KimiAdapter implements AgentBackend {
     const { resolved, token } = await this.verifiedInstance();
     if (!resolved.ok) {
       throw new SessionCreateTemporarilyUnavailableError(
-        `${ATTACH_REFUSAL[resolved.reason]} — start it with \`kimi web --no-open\` and try again`,
+        `${ATTACH_REFUSAL[resolved.reason]} — ${KIMI_HOST_UNAVAILABLE_REMEDIATION}`,
         'kimi-server-unavailable',
       );
     }

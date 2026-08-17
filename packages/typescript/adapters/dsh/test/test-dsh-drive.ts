@@ -14,9 +14,18 @@
  *   bun run packages/typescript/adapters/dsh/test/test-dsh-drive.ts   (exit 0 = all pass)
  */
 export {};
-import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { PRODUCT_IDENTITY, type AgentMessage, type SessionInfo } from '@cosyncing/adapter-api';
 import { DshRpcClient, type DshFetch } from '../src/server.ts';
-import { DshDriver, DshDriveError, DSH_ATTACHMENT_UNSUPPORTED } from '../src/drive.ts';
+import {
+  DshDriver,
+  DshDriveError,
+  DSH_FILE_UNSTAGED,
+  DSH_FILE_UNSUPPORTED,
+  DSH_FILE_UNTRUSTED,
+} from '../src/drive.ts';
 import { DshSessionConnection } from '../src/observe.ts';
 import { mapDshApproval, mapDshQuestion } from '../src/mapping.ts';
 
@@ -34,8 +43,15 @@ function check(name: string, ok: boolean, detail = ''): void {
 
 interface Sent { path: string; body: Record<string, unknown> }
 
-/** A client whose answers are scripted per route, recording every request. */
-function client(answers: Record<string, unknown> = {}, options: { newRpcId?: () => string } = {}): {
+/** A client whose answers are scripted per route, recording every request.
+ *
+ *  `onRequest` fires while the call is still in flight, which is what makes a
+ *  PARKED-REQUEST test possible: it is the only moment that behaves like a
+ *  generation ending under an await. */
+function client(
+  answers: Record<string, unknown> = {},
+  options: { newRpcId?: () => string; onRequest?: (path: string) => void } = {},
+): {
   rpc: DshRpcClient;
   sent: Sent[];
 } {
@@ -44,6 +60,7 @@ function client(answers: Record<string, unknown> = {}, options: { newRpcId?: () 
     const body = JSON.parse(init.body) as Record<string, unknown>;
     const path = new URL(url).pathname.replace('/api/', '');
     sent.push({ path, body });
+    options.onRequest?.(path);
     if (path === 'respond') {
       return { status: 200, text: async () => JSON.stringify(answers.respond ?? { accepted: true }) };
     }
@@ -102,11 +119,11 @@ function client(answers: Record<string, unknown> = {}, options: { newRpcId?: () 
   const driver = new DshDriver(rpc);
   let refused: unknown;
   await driver
-    .prompt(SESSION_ID, { text: 'see this', files: [{ name: 'a.png', mimeType: 'image/png' }] })
+    .prompt(SESSION_ID, { text: 'see this', files: [{ name: 'notes.pdf', mimeType: 'application/pdf' }] })
     .catch((error: unknown) => { refused = error; });
   check(
-    'an attachment is refused outright rather than sent as text that references a file the agent never got',
-    refused instanceof DshDriveError && refused.message.includes(DSH_ATTACHMENT_UNSUPPORTED) && sent.length === 0,
+    'a non-image file is refused outright rather than sent as text that references a file the agent never got',
+    refused instanceof DshDriveError && refused.message.includes(DSH_FILE_UNSUPPORTED) && sent.length === 0,
     refused instanceof Error ? refused.message : String(refused),
   );
 }
@@ -442,26 +459,731 @@ function client(answers: Record<string, unknown> = {}, options: { newRpcId?: () 
   const connection = new DshSessionConnection(info, { rpc });
   const surface = connection as unknown as Record<string, unknown>;
   check(
-    'unimplemented seams are absent rather than throwing stubs, so the broker never offers them',
+    'seams the host genuinely lacks stay absent rather than becoming throwing stubs',
     surface.rejectQuestion === undefined
       && surface.sendFile === undefined
-      && surface.listModels === undefined
       && surface.setAgent === undefined
       && surface.respondPlan === undefined,
   );
 
   const { rpc: cancelRpc, sent } = client();
   const cancelling = new DshSessionConnection(info, { rpc: cancelRpc });
-  const commands = await cancelling.listCommands();
   await cancelling.runCommand('stop');
-  let unknownCommand = false;
-  await cancelling.runCommand('compact').catch(() => { unknownCommand = true; });
   check(
-    'the only advertised command is the interrupt the host actually implements',
-    JSON.stringify(commands) === JSON.stringify([{ name: 'stop', description: 'Stop the running turn', kind: 'action' }])
-      && sent[0]!.path === 'session.cancel'
-      && unknownCommand,
+    'the interrupt is served locally through session.cancel, never as a slash line',
+    sent.length === 1 && sent[0]!.path === 'session.cancel',
+    JSON.stringify(sent.map((entry) => entry.path)),
+  );
+}
+
+// ── 6. Models, modes, commands, images ──────────────────────────────────────
+//
+// The four capabilities wired against the installed host (0.1.0-rc.6), and the
+// properties that make them safe rather than merely present: a selector is a
+// DURABLE session change on this host, so it must be validated before it is
+// sent and must never fire from a socket without live authority.
+
+/** Script a business value whose own shape contains `result`, which the bare
+ *  form of {@link client} would otherwise read as the envelope's result slot. */
+function ok(value: unknown): { result: { ok: true; value: unknown } } {
+  return { result: { ok: true, value } };
+}
+
+const INFO: SessionInfo = { id: SESSION_ID, tool: 'dsh', title: 't', status: 'idle', attachMode: 'live' };
+
+const CATALOG = {
+  current: { provider: 'minimax-cn', model: 'MiniMax-M3' },
+  routable: true,
+  groups: [
+    {
+      id: 'deepseek-official',
+      name: 'DeepSeek',
+      models: [
+        {
+          id: 'deepseek-v4-flash',
+          name: 'DeepSeek-V4-Flash',
+          reasoning: {
+            efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'high',
+          },
+        },
+      ],
+    },
+    { id: 'minimax-cn', name: 'MiniMax CN', models: [{ id: 'MiniMax-M3', name: 'MiniMax-M3' }] },
+  ],
+  failures: [],
+};
+
+const PERMISSIONS = {
+  options: [
+    { value: 'read-only', name: 'read-only' },
+    { value: 'workspace-write', name: 'workspace-write' },
+    { value: 'danger-full-access', name: 'danger-full-access' },
+  ],
+  currentValue: 'workspace-write',
+};
+
+const IMAGE_LIMITS = {
+  maxImageBytes: 5_242_880,
+  maxImagesPerMessage: 2,
+  maxMessageImageBytes: 8_000_000,
+  mediaTypes: ['image/png', 'image/jpeg'],
+};
+
+/** An attached connection whose projections carry the host's published blocks. */
+async function attached(
+  answers: Record<string, unknown> = {},
+  values: Record<string, unknown> = { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+  options: { mutationReady?: () => boolean; onRequest?: (path: string) => void } = {},
+): Promise<{ connection: DshSessionConnection; sent: Sent[] }> {
+  const { rpc, sent } = client(
+    {
+      'session.history': { events: [], hasMore: false, projections: { asOfSeq: 1, values } },
+      ...answers,
+    },
+    options.onRequest ? { onRequest: options.onRequest } : {},
+  );
+  const connection = new DshSessionConnection(INFO, {
+    rpc,
+    ...(options.mutationReady ? { mutationReady: options.mutationReady } : {}),
+  });
+  await connection.getHistory();
+  sent.length = 0; // the seed itself is not the subject of these checks
+  return { connection, sent };
+}
+
+{
+  const { connection } = await attached({ 'session.models': CATALOG });
+  const models = await connection.listModels();
+  check(
+    'the model catalog flattens the host provider groups, qualifying each label with its provider',
+    models.length === 2
+      && models[0]!.providerID === 'deepseek-official'
+      && models[0]!.modelID === 'deepseek-v4-flash'
+      && models[0]!.label === 'DeepSeek-V4-Flash (DeepSeek)'
+      && JSON.stringify(models[0]!.reasoningEfforts) === JSON.stringify([
+        { effort: 'off', label: 'Off' },
+        { effort: 'high', label: 'High' },
+      ])
+      && models[0]!.defaultReasoningEffort === 'high'
+      && models[1]!.providerID === 'minimax-cn'
+      && models[1]!.reasoningEfforts === undefined,
+    JSON.stringify(models),
+  );
+}
+
+{
+  // `routable:false` says no adapter serves the current route, so no turn can
+  // start. A picker there would promise a send that is going to fail.
+  const { connection } = await attached({ 'session.models': { ...CATALOG, routable: false } });
+  check('a session the host cannot route advertises no models at all', (await connection.listModels()).length === 0);
+}
+
+{
+  const { connection } = await attached({
+    'session.models': {
+      current: { provider: 'p', model: 'm' },
+      routable: true,
+      groups: [
+        null,
+        { name: 'no id' },
+        { id: 'ok', name: 'OK', models: [null, { name: 'no id' }, { id: 'good', name: 'Good' }] },
+      ],
+    },
+  });
+  const models = await connection.listModels();
+  check(
+    'one malformed catalog row does not cost the user every other model on the host',
+    models.length === 1 && models[0]!.providerID === 'ok' && models[0]!.modelID === 'good',
+    JSON.stringify(models),
+  );
+}
+
+{
+  // A non-boolean `routable` fails closed: it gates whether a turn can start,
+  // and guessing `true` offers a composer the host will refuse.
+  const { connection } = await attached({ 'session.models': { ...CATALOG, routable: 'yes' } });
+  check('a non-boolean routable is not read as routable', (await connection.listModels()).length === 0);
+}
+
+{
+  const { connection, sent } = await attached({ 'session.models': CATALOG });
+  await connection.sendPrompt({ text: 'go', model: { providerID: 'minimax-cn', modelID: 'MiniMax-M3' } });
+  check(
+    'a model override matching what the session already runs costs no selection write',
+    !sent.some((entry) => entry.path === 'session.selectModel')
+      && sent[sent.length - 1]!.path === 'session.prompt',
+    JSON.stringify(sent.map((entry) => entry.path)),
+  );
+}
+
+{
+  const { connection, sent } = await attached({ 'session.models': CATALOG, 'session.selectModel': { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } } });
+  await connection.sendPrompt({
+    text: 'go',
+    model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' },
+  });
+  const select = sent.find((entry) => entry.path === 'session.selectModel');
+  const order = sent.map((entry) => entry.path);
+  check(
+    'a changed model is selected BEFORE the prompt, in the host vocabulary',
+    JSON.stringify(select?.body.payload) === JSON.stringify({
+      sessionId: SESSION_ID,
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'high',
+    })
+      && order.indexOf('session.selectModel') < order.indexOf('session.prompt'),
+    JSON.stringify(order),
+  );
+}
+
+{
+  // The live host answers an unknown route `model-unavailable`. The prompt must
+  // NOT go out afterwards: it would run under the old model while the UI shows
+  // the new one.
+  const { connection, sent } = await attached({
+    'session.models': CATALOG,
+    'session.selectModel': { result: { ok: false, error: { code: 'model-unavailable', message: 'no adapter registered' } } },
+  });
+  let failure: unknown;
+  await connection
+    .sendPrompt({ text: 'go', model: { providerID: 'gone', modelID: 'gone' } })
+    .catch((error: unknown) => { failure = error; });
+  check(
+    'a refused model selection surfaces its native code and suppresses the prompt',
+    failure instanceof DshDriveError
+      && failure.code === 'model-unavailable'
+      && !sent.some((entry) => entry.path === 'session.prompt'),
+    `${failure instanceof DshDriveError ? failure.code : String(failure)} / ${JSON.stringify(sent.map((e) => e.path))}`,
+  );
+}
+
+{
+  const { connection } = await attached();
+  const modes = await connection.listModes();
+  check(
+    'permission modes come from the projection the connection already holds, with universal categories',
+    JSON.stringify(modes) === JSON.stringify([
+      { value: 'read-only', label: 'read-only', category: 'ask-permission' },
+      { value: 'workspace-write', label: 'workspace-write', category: 'approve-for-me' },
+      { value: 'danger-full-access', label: 'danger-full-access', category: 'full-access' },
+    ]),
+    JSON.stringify(modes),
+  );
+}
+
+{
+  const { connection, sent } = await attached({}, { imageLimits: IMAGE_LIMITS });
+  const modes = await connection.listModes();
+  check(
+    'a deployment composing no permission service offers no modes and asks the host nothing',
+    modes.length === 0 && sent.length === 0,
+  );
+}
+
+{
+  // An unadvertised preset is a caller bug. Composing it into a slash line
+  // would hand the host free text under the guise of a picker value.
+  const { connection, sent } = await attached({ 'commands/list': [{ name: 'permission', description: 'switch' }] });
+  let refused: unknown;
+  await connection
+    .sendPrompt({ text: 'go', permissionMode: 'root-everything' })
+    .catch((error: unknown) => { refused = error; });
+  check(
+    'a permission mode the host never advertised is refused, and nothing is sent',
+    refused instanceof Error && refused.message.includes('root-everything') && sent.length === 0,
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(sent.map((e) => e.path))}`,
+  );
+}
+
+{
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'permission', description: 'Switch the permission preset' }],
+    'commands/execute': ok({ commandId: 'cmd-p', result: { kind: 'success' } }),
+  });
+  await connection.sendPrompt({ text: 'go', permissionMode: 'read-only' });
+  const execute = sent.find((entry) => entry.path === 'commands/execute');
+  const order = sent.map((entry) => entry.path);
+  check(
+    'a changed permission mode runs the host switch command before the prompt',
+    JSON.stringify(execute?.body.payload) === JSON.stringify({
+      args: { agentId: SESSION_ID, line: '/permission read-only' },
+    })
+      && order.indexOf('commands/execute') < order.indexOf('session.prompt'),
+    JSON.stringify(order),
+  );
+}
+
+{
+  const { connection, sent } = await attached();
+  await connection.sendPrompt({ text: 'go', permissionMode: 'workspace-write' });
+  check(
+    'a permission mode equal to the current one costs no command',
+    !sent.some((entry) => entry.path === 'commands/execute')
+      && sent.some((entry) => entry.path === 'session.prompt'),
+    JSON.stringify(sent.map((entry) => entry.path)),
+  );
+}
+
+{
+  // Modes advertised with no switch registered is a real deployment shape.
+  // Skipping the switch silently would run the turn under the wrong policy.
+  const { connection, sent } = await attached({ 'commands/list': [{ name: 'compact', description: 'c' }] });
+  let refused: unknown;
+  await connection
+    .sendPrompt({ text: 'go', permissionMode: 'read-only' })
+    .catch((error: unknown) => { refused = error; });
+  check(
+    'advertised modes with no switch command refuse the send rather than running under the old policy',
+    refused instanceof Error && !sent.some((entry) => entry.path === 'session.prompt'),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(sent.map((e) => e.path))}`,
+  );
+}
+
+{
+  const { connection } = await attached({
+    'commands/list': [
+      { name: 'compact', description: 'Compact older conversation history' },
+      { name: 'stop', description: 'a host command shadowing the local interrupt' },
+      { name: '', description: 'nameless' },
+      null,
+    ],
+  });
+  const commands = await connection.listCommands();
+  check(
+    'the roster is the host registry plus the local interrupt, with collisions and junk dropped',
+    JSON.stringify(commands) === JSON.stringify([
+      { name: 'stop', description: 'Stop the running turn', kind: 'action' },
+      { name: 'compact', description: 'Compact older conversation history', kind: 'action' },
+    ]),
     JSON.stringify(commands),
+  );
+}
+
+{
+  // Losing the ability to stop a running turn because a roster lookup failed
+  // would be strictly worse than a short list.
+  const { connection } = await attached({ 'commands/list': { not: 'an array' } });
+  const commands = await connection.listCommands();
+  check(
+    'a malformed roster still leaves the interrupt reachable',
+    commands.length === 1 && commands[0]!.name === 'stop',
+    JSON.stringify(commands),
+  );
+}
+
+{
+  const { connection, sent } = await attached({ 'commands/list': [{ name: 'compact', description: 'c' }] });
+  let refused: unknown;
+  await connection.runCommand('rm-rf').catch((error: unknown) => { refused = error; });
+  check(
+    'a name the live roster does not carry never becomes a slash line',
+    refused instanceof Error && !sent.some((entry) => entry.path === 'commands/execute'),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(sent.map((e) => e.path))}`,
+  );
+}
+
+{
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'goal', description: 'set or view the goal' }],
+    'commands/execute': ok({ commandId: 'cmd-1', result: { kind: 'success', text: 'Goal set' } }),
+  });
+  const result = await connection.runCommand('goal', '  ship it  ');
+  const executes = sent.filter((entry) => entry.path === 'commands/execute');
+  check(
+    'a command executes exactly once, with the argument text on the advertised name',
+    executes.length === 1
+      && JSON.stringify(executes[0]!.body.payload) === JSON.stringify({
+        args: { agentId: SESSION_ID, line: '/goal ship it' },
+      })
+      && JSON.stringify(result) === JSON.stringify({ notice: 'Goal set' }),
+    `${executes.length} / ${JSON.stringify(result)}`,
+  );
+}
+
+{
+  // The host mints a commandId and appends lifecycle records the moment it
+  // accepts the line, so a failure after that point is indistinguishable from
+  // one before it. Retrying could compact a session twice.
+  const { connection, sent } = await attached({
+    'commands/list': [{ name: 'compact', description: 'c' }],
+    'commands/execute': { result: { ok: false, error: { code: 'internal', message: 'boom' } } },
+  });
+  await connection.runCommand('compact').catch(() => {});
+  check(
+    'a failed execution is never retried',
+    sent.filter((entry) => entry.path === 'commands/execute').length === 1,
+    JSON.stringify(sent.map((entry) => entry.path)),
+  );
+}
+
+{
+  const { connection } = await attached({
+    'commands/list': [{ name: 'export', description: 'e' }],
+    'commands/execute': ok({ commandId: 'cmd-2', result: { kind: 'error', text: 'nothing to export' } }),
+  });
+  let failure: unknown;
+  await connection.runCommand('export').catch((error: unknown) => { failure = error; });
+  check(
+    'a command the host rejects surfaces as a failure, not as a success notice',
+    failure instanceof Error && failure.message.includes('nothing to export'),
+    failure instanceof Error ? failure.message : String(failure),
+  );
+}
+
+{
+  const { rpc, sent } = client();
+  const driver = new DshDriver(rpc);
+  await driver.prompt(
+    SESSION_ID,
+    { text: 'look', images: [{ data: 'aGVsbG8=', mimeType: 'image/PNG', name: 'shot.png' }] },
+    { imageLimits: IMAGE_LIMITS },
+  );
+  const content = (sent[0]!.body.payload as { content: unknown[] }).content;
+  check(
+    'an image rides the prompt as a host content part, after the text, with a normalized media type',
+    JSON.stringify(content) === JSON.stringify([
+      { type: 'text', text: 'look' },
+      { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },
+    ]),
+    JSON.stringify(content),
+  );
+}
+
+for (const [name, images, needle] of [
+  ['count', [1, 2, 3].map(() => ({ data: 'aGk=', mimeType: 'image/png' })), 'at most 2 images'],
+  ['type', [{ data: 'aGk=', mimeType: 'image/tiff' }], 'does not accept image/tiff'],
+  ['size', [{ data: 'a'.repeat(8_000_000), mimeType: 'image/png', name: 'big.png' }], 'larger than'],
+] as const) {
+  const { rpc, sent } = client();
+  let refused: unknown;
+  await new DshDriver(rpc)
+    .prompt(SESSION_ID, { text: 'x', images: [...images] }, { imageLimits: IMAGE_LIMITS })
+    .catch((error: unknown) => { refused = error; });
+  check(
+    `an image breaching the host ${name} limit fails the prompt before any upload, quoting the host's own bound`,
+    refused instanceof DshDriveError && refused.message.includes(needle) && sent.length === 0,
+    refused instanceof Error ? refused.message : String(refused),
+  );
+}
+
+{
+  // No attachment service composed: the host documents that case as "skip the
+  // pre-check and let the host answer", so an absent policy must not invent one.
+  const { rpc, sent } = client();
+  await new DshDriver(rpc).prompt(SESSION_ID, {
+    text: 'x',
+    images: [{ data: 'aGk=', mimeType: 'image/tiff' }],
+  });
+  check('an absent intake policy admits the prompt instead of inventing a bound', sent.length === 1);
+}
+
+// The app has ONE attachment affordance and it stages everything as a file, so
+// these are the checks that decide whether the host's image intake is reachable
+// from the product at all — and whether reaching it can be abused into reading
+// a file the user never attached.
+
+{
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-attach-'));
+  const inbox = join(workspace, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox');
+  mkdirSync(inbox, { recursive: true });
+  const staged = join(inbox, 'shot.png');
+  writeFileSync(staged, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+  const { rpc, sent } = client();
+  await new DshDriver(rpc).prompt(
+    SESSION_ID,
+    { text: 'look', files: [{ name: 'shot.png', mimeType: 'image/png', brokerPath: staged }] },
+    { imageLimits: IMAGE_LIMITS, sessionCwd: workspace },
+  );
+  const content = (sent[0]!.body.payload as { content: unknown[] }).content;
+  check(
+    'a staged image is read from the inbox and inlined, so the app’s one attach control reaches the host',
+    JSON.stringify(content) === JSON.stringify([
+      { type: 'text', text: 'look' },
+      { type: 'image', mediaType: 'image/png', data: 'iVBORw==', name: 'shot.png' },
+    ]),
+    JSON.stringify(content),
+  );
+
+  // The containment check is the reason a client-supplied path can never be
+  // opened. `dirname` must equal the inbox exactly, so a resolved `..` — which
+  // lands anywhere else on the disk — is refused before any read.
+  const outside = join(workspace, 'secret.png');
+  writeFileSync(outside, Buffer.from([1, 2, 3]));
+  for (const [name, brokerPath] of [
+    ['a traversal out of the inbox', join(inbox, '..', 'secret.png')],
+    ['an absolute path elsewhere', outside],
+    ['a nested path under the inbox', join(inbox, 'nested', 'x.png')],
+  ] as const) {
+    const { rpc: r, sent: s } = client();
+    let refused: unknown;
+    await new DshDriver(r)
+      .prompt(
+        SESSION_ID,
+        { text: 'x', files: [{ name: 'x.png', mimeType: 'image/png', brokerPath }] },
+        { imageLimits: IMAGE_LIMITS, sessionCwd: workspace },
+      )
+      .catch((error: unknown) => { refused = error; });
+    check(
+      `${name} is refused before any byte is read`,
+      refused instanceof DshDriveError && refused.message.includes(DSH_FILE_UNTRUSTED) && s.length === 0,
+      refused instanceof Error ? refused.message : String(refused),
+    );
+  }
+
+  {
+    const { rpc: r, sent: s } = client();
+    let refused: unknown;
+    await new DshDriver(r)
+      .prompt(
+        SESSION_ID,
+        { text: 'x', files: [{ name: 'x.png', mimeType: 'image/png' }] },
+        { imageLimits: IMAGE_LIMITS, sessionCwd: workspace },
+      )
+      .catch((error: unknown) => { refused = error; });
+    check(
+      'an attachment that never went through staging is refused',
+      refused instanceof DshDriveError && refused.message.includes(DSH_FILE_UNSTAGED) && s.length === 0,
+      refused instanceof Error ? refused.message : String(refused),
+    );
+  }
+
+  // A symlink is refused by the OPEN, not by a check that precedes it: the
+  // leaf is opened with O_NOFOLLOW, so a link swapped in after any check would
+  // still fail. Both directions are refused — the broker writes real files into
+  // the inbox and never a link, so there is no legitimate case to preserve, and
+  // "points somewhere allowed" is not a judgement worth making at all.
+  for (const [name, target] of [
+    ['out of the inbox', outside],
+    ['at another file inside the inbox', staged],
+  ] as const) {
+    const link = join(inbox, `link-${name.replace(/\W+/g, '-')}.png`);
+    symlinkSync(target, link);
+    const { rpc: r, sent: s } = client();
+    let refused: unknown;
+    await new DshDriver(r)
+      .prompt(
+        SESSION_ID,
+        { text: 'x', files: [{ name: 'x.png', mimeType: 'image/png', brokerPath: link }] },
+        { imageLimits: IMAGE_LIMITS, sessionCwd: workspace },
+      )
+      .catch((error: unknown) => { refused = error; });
+    check(
+      `a symlink in the inbox pointing ${name} is refused, and nothing is read through it`,
+      refused instanceof DshDriveError && refused.message.includes(DSH_FILE_UNTRUSTED) && s.length === 0,
+      refused instanceof Error ? refused.message : String(refused),
+    );
+  }
+
+  {
+    // A type the host will not take is refused on the TYPE, before the path is
+    // even considered — so the message names the real problem.
+    const { rpc: r, sent: s } = client();
+    let refused: unknown;
+    await new DshDriver(r)
+      .prompt(
+        SESSION_ID,
+        { text: 'x', files: [{ name: 'notes.pdf', mimeType: 'application/pdf', brokerPath: staged }] },
+        { imageLimits: IMAGE_LIMITS, sessionCwd: workspace },
+      )
+      .catch((error: unknown) => { refused = error; });
+    check(
+      'a non-image staged file is refused on its type, not on its path',
+      refused instanceof DshDriveError && refused.message.includes(DSH_FILE_UNSUPPORTED) && s.length === 0,
+      refused instanceof Error ? refused.message : String(refused),
+    );
+  }
+
+  rmSync(workspace, { recursive: true, force: true });
+}
+
+{
+  const { rpc, sent } = client();
+  const driver = new DshDriver(rpc);
+  await driver.prompt(
+    SESSION_ID,
+    { text: 'x', images: [{ data: 'aGk=', mimeType: 'image/png', name: '../../escape.png' }] },
+    { imageLimits: IMAGE_LIMITS },
+  );
+  const part = ((sent[0]!.body.payload as { content: Record<string, unknown>[] }).content)[1]!;
+  check(
+    'an image part carries only bytes, a media type, and a display name — never a path field',
+    JSON.stringify(Object.keys(part).sort()) === JSON.stringify(['data', 'mediaType', 'name', 'type']),
+    JSON.stringify(Object.keys(part)),
+  );
+}
+
+// ── 7. Live authority ───────────────────────────────────────────────────────
+//
+// Every new selector is a WRITE on this host. A socket without live authority,
+// a generation that has been replaced, and a session the host removed must all
+// perform zero HTTP writes — proven by counting requests, not by reading code.
+
+{
+  const { connection, sent } = await attached(
+    { 'session.models': CATALOG, 'commands/list': [{ name: 'permission', description: 'p' }] },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => false },
+  );
+  const refusals: string[] = [];
+  const record = (error: unknown) => { refusals.push(error instanceof Error ? error.message : String(error)); };
+  await connection.sendPrompt({ text: 'x' }).catch(record);
+  await connection.sendPrompt({ text: 'x', model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash' } }).catch(record);
+  await connection.sendPrompt({ text: 'x', permissionMode: 'read-only' }).catch(record);
+  await connection.runCommand('stop').catch(record);
+  await connection.runCommand('permission', 'read-only').catch(record);
+  check(
+    'a stale generation performs zero HTTP writes across every mutating surface',
+    refusals.length === 5
+      && refusals.every((message) => message.includes('re-verifying'))
+      && sent.length === 0,
+    `${refusals.length} refusals / ${JSON.stringify(sent.map((entry) => entry.path))}`,
+  );
+}
+
+{
+  const { connection, sent } = await attached({ 'session.models': CATALOG });
+  (connection as unknown as { removed: boolean }).removed = true;
+  const refusals: string[] = [];
+  const record = (error: unknown) => { refusals.push(error instanceof Error ? error.message : String(error)); };
+  await connection.sendPrompt({ text: 'x', model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash' } }).catch(record);
+  await connection.sendPrompt({ text: 'x', permissionMode: 'read-only' }).catch(record);
+  await connection.runCommand('permission', 'read-only').catch(record);
+  check(
+    'a session the host removed performs zero HTTP writes, selectors included',
+    refusals.length === 3
+      && refusals.every((message) => message.includes('removed from the DeepSeek Harness host'))
+      && sent.length === 0,
+    `${refusals.length} refusals / ${JSON.stringify(sent.map((entry) => entry.path))}`,
+  );
+}
+
+{
+  // Reads stay reachable while mutation is gated: a picker that blanks itself
+  // during a re-verify would look like a host with no models.
+  const { connection, sent } = await attached(
+    { 'session.models': CATALOG },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => false },
+  );
+  const models = await connection.listModels();
+  const modes = await connection.listModes();
+  check(
+    'discovery still answers while mutation is gated, and writes nothing',
+    models.length === 2
+      && modes.length === 3
+      && sent.every((entry) => entry.path === 'session.models'),
+    JSON.stringify(sent.map((entry) => entry.path)),
+  );
+}
+
+// ── 8. Authority lost under an await ────────────────────────────────────────
+//
+// A guard taken BEFORE a wait proves nothing about the moment after it. Every
+// selector on this adapter reads first and writes second, so each one parks a
+// request in between — and a generation can end while it is parked. These flip
+// `mutationReady` DURING the read and assert the write that would have followed
+// never goes out.
+//
+// The reads themselves are allowed to complete; it is only the write that must
+// notice. Each case therefore asserts on the route that comes AFTER the flip.
+
+for (const [name, parkOn, forbidden] of [
+  ['the model catalog', 'session.models', 'session.selectModel'],
+  ['the model selection itself', 'session.selectModel', 'session.prompt'],
+] as const) {
+  let ready = true;
+  const { connection, sent } = await attached(
+    {
+      'session.models': CATALOG,
+      'session.selectModel': { selected: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } },
+    },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => ready, onRequest: (path) => { if (path === parkOn) ready = false; } },
+  );
+  let refused: unknown;
+  await connection
+    .sendPrompt({ text: 'go', model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash' } })
+    .catch((error: unknown) => { refused = error; });
+  const paths = sent.map((entry) => entry.path);
+  check(
+    `a generation lost during ${name} stops the send before ${forbidden}`,
+    refused instanceof Error
+      && refused.message.includes('re-verifying')
+      && !paths.includes(forbidden),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(paths)}`,
+  );
+}
+
+for (const [name, parkOn, forbidden] of [
+  ['command discovery', 'commands/list', 'commands/execute'],
+  ['the permission switch itself', 'commands/execute', 'session.prompt'],
+] as const) {
+  let ready = true;
+  const { connection, sent } = await attached(
+    {
+      'commands/list': [{ name: 'permission', description: 'Switch the permission preset' }],
+      'commands/execute': ok({ commandId: 'cmd-x', result: { kind: 'success' } }),
+    },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => ready, onRequest: (path) => { if (path === parkOn) ready = false; } },
+  );
+  let refused: unknown;
+  await connection
+    .sendPrompt({ text: 'go', permissionMode: 'read-only' })
+    .catch((error: unknown) => { refused = error; });
+  const paths = sent.map((entry) => entry.path);
+  check(
+    `a generation lost during ${name} stops the send before ${forbidden}`,
+    refused instanceof Error
+      && refused.message.includes('re-verifying')
+      && !paths.includes(forbidden),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(paths)}`,
+  );
+}
+
+{
+  // The same hazard on the command path: the roster read is awaited, so the
+  // execution it authorizes needs its own guard.
+  let ready = true;
+  const { connection, sent } = await attached(
+    {
+      'commands/list': [{ name: 'compact', description: 'c' }],
+      'commands/execute': ok({ commandId: 'cmd-y', result: { kind: 'success' } }),
+    },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => ready, onRequest: (path) => { if (path === 'commands/list') ready = false; } },
+  );
+  let refused: unknown;
+  await connection.runCommand('compact').catch((error: unknown) => { refused = error; });
+  check(
+    'a generation lost during a runCommand roster read stops the execution',
+    refused instanceof Error
+      && refused.message.includes('re-verifying')
+      && !sent.some((entry) => entry.path === 'commands/execute'),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(sent.map((e) => e.path))}`,
+  );
+}
+
+{
+  // The unchanged-selector path must ALSO re-guard: it skips the write but
+  // still awaited the catalog, and the prompt after it is a write.
+  let ready = true;
+  const { connection, sent } = await attached(
+    { 'session.models': CATALOG },
+    { permissions: PERMISSIONS, imageLimits: IMAGE_LIMITS },
+    { mutationReady: () => ready, onRequest: (path) => { if (path === 'session.models') ready = false; } },
+  );
+  let refused: unknown;
+  await connection
+    .sendPrompt({ text: 'go', model: { providerID: 'minimax-cn', modelID: 'MiniMax-M3' } })
+    .catch((error: unknown) => { refused = error; });
+  check(
+    'a generation lost during a NO-OP model check still stops the prompt',
+    refused instanceof Error && !sent.some((entry) => entry.path === 'session.prompt'),
+    `${refused instanceof Error ? refused.message : String(refused)} / ${JSON.stringify(sent.map((e) => e.path))}`,
   );
 }
 

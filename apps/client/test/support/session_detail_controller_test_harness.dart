@@ -679,6 +679,7 @@ class FakeSessionDetailConnection
   String? lastHistoryPageClientMessageId;
   int historyPageRequestCount = 0;
   SessionCurrentModel? lastPromptModel;
+  String? lastPromptPermissionMode;
   List<PromptFileAttachment> lastPromptFiles = const [];
   String? lastPromptClientMessageId;
   int? lastPromptDraftRevision;
@@ -814,10 +815,12 @@ class FakeSessionDetailConnection
     int? draftRevision,
     String? draftUpdateId,
     List<PromptFileAttachment> files = const [],
+    String? permissionMode,
   }) async {
     sendPromptCount++;
     lastPrompt = text;
     lastPromptModel = model;
+    lastPromptPermissionMode = permissionMode;
     lastPromptFiles = files;
     lastPromptClientMessageId = clientMessageId;
     lastPromptDraftRevision = draftRevision;

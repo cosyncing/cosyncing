@@ -8,12 +8,13 @@
  *
  *  1. ONE PATH BUILDER. {@link dshApiPath} is the only function in the package
  *     that produces an `/api/...` string, and it refuses any route outside
- *     {@link DSH_API_ROUTES}. Round 1 deliberately talks to eight unary methods
- *     plus `respond` and the two streams; every other method the host serves
- *     (settings, credentials, agent presets, directory access, fork, queue
- *     mutation, model selection, subagents, commands, skills, goals, export) is
- *     listed in {@link DSH_DEFERRED_RPC_METHODS} and is unreachable from here.
- *     A later round widens the allowlist on purpose, not by a stray fetch.
+ *     {@link DSH_API_ROUTES}. That surface is ten unary methods
+ *     ({@link DSH_RPC_METHODS}), the two `commands/*` Typert Remote endpoints
+ *     ({@link DSH_REMOTE_METHODS}), `respond`, and the two streams; every other
+ *     method the host serves (settings, credentials, agent presets, directory
+ *     access, fork, queue mutation, subagents, skills, goals, export) is listed
+ *     in {@link DSH_DEFERRED_RPC_METHODS} and is unreachable from here. A later
+ *     round widens the allowlist on purpose, not by a stray fetch.
  *
  *  2. PUSH-ONLY SOCKETS. {@link DshSocketLike} has no `send`, so the downlink
  *     manager physically cannot write to the mux or host stream. The dsh
@@ -108,9 +109,34 @@ export const DSH_RPC_METHODS = Object.freeze([
   'session.prompt',
   'session.cancel',
   'session.rename',
+  'session.models',
+  'session.selectModel',
 ] as const);
 
 export type DshRpcMethod = (typeof DSH_RPC_METHODS)[number];
+
+/**
+ * Typert Remote endpoints. A SECOND wire dialect on the same transport, kept in
+ * its own constant because it is not interchangeable with an RPC method: these
+ * are not in the host's `RpcMethodMap`, and their payload is
+ * `{args:{…}}` with NAMED fields rather than a bare business payload.
+ *
+ * The generated contract
+ * (`@deepseek-ai/dsh-commands/lib/typert.remote-client.d.ts`) declares them
+ * positionally — `(agentId, line, signal?)` — but the gateway matches an object
+ * against a field descriptor, so the names are load-bearing and are pinned by
+ * `test-dsh-server.ts`. The installed 0.1.0-rc.6 host refuses anything else:
+ * a bare payload answers "Remote payload must contain exactly one plain-object
+ * args field", and a wrong field name answers "args fields do not match the
+ * descriptor".
+ */
+export const DSH_REMOTE_METHODS = Object.freeze(['commands/list', 'commands/execute'] as const);
+
+export type DshRemoteMethod = (typeof DSH_REMOTE_METHODS)[number];
+
+export function isDshRemoteMethod(value: string): value is DshRemoteMethod {
+  return (DSH_REMOTE_METHODS as readonly string[]).includes(value);
+}
 
 /**
  * The host's queue discipline for one prompt. `queue` hands the message to the
@@ -128,6 +154,7 @@ export const DSH_HOST_ROUTE = 'events.host';
 /** Every `/api` route this package may produce, unary and streaming alike. */
 export const DSH_API_ROUTES: readonly string[] = Object.freeze([
   ...DSH_RPC_METHODS,
+  ...DSH_REMOTE_METHODS,
   DSH_RESPOND_ROUTE,
   DSH_MUX_ROUTE,
   DSH_HOST_ROUTE,
@@ -140,16 +167,22 @@ export const DSH_API_ROUTES: readonly string[] = Object.freeze([
  * line rather than by discovering the gap in production.
  */
 // The names below are the host's REAL method names (apiproxy `rpc-map.ts` at
-// 0.1.0-rc.6), so the wiring round widens the allowlist by moving lines, not by
-// re-deriving the surface. Not listed: `session.export` (a GET download route,
-// not an RPC) and the Typert Remote namespaces (`commands/execute`,
-// `goals/create`, `messageFeedback/put`, `pluginInventory/list`, …), which ride
-// `POST /api/<namespace>/<method>` outside `RpcMethodMap`.
+// 0.1.0-rc.6), so a wiring round widens the allowlist by moving lines, not by
+// re-deriving the surface — which is exactly how `session.models` and
+// `session.selectModel` left this list. Not listed: `session.export` (a GET
+// download route, not an RPC) and the Typert Remote namespaces
+// (`goals/create`, `messageFeedback/put`, `pluginInventory/list`, …), which ride
+// `POST /api/<namespace>/<method>` outside `RpcMethodMap`; the two `commands/*`
+// endpoints of that family are now allowlisted in {@link DSH_REMOTE_METHODS}.
+//
+// `session.attachment` stays here on purpose. It is a READ-back of one durable
+// image the session log already references — not an upload route — so it buys
+// no capability the prompt path does not already carry, and the host has no
+// general file intake at all: `session.prompt` accepts exactly a text part and
+// an image part.
 export const DSH_DEFERRED_RPC_METHODS: readonly string[] = Object.freeze([
   'session.fork',
   'session.updateQueue',
-  'session.models',
-  'session.selectModel',
   'session.search',
   'session.attachment',
   'subagent.list',
@@ -374,11 +407,16 @@ export class DshRpcClient {
    * `options.onRpcId` hands the caller the id this call was minted with. dsh
    * stamps that exact id onto the `user/message` a prompt produces, so it is the
    * only handle an adapter has for correlating a send with its own echo.
+   *
+   * `options.signal` lets a caller that has stopped waiting take the request
+   * down with it — the discovery budget is the case it exists for. It reports
+   * as a RETRYABLE `timeout`, which is what it is: the caller's deadline rather
+   * than the transport's, expiring on a host that had not answered either way.
    */
   async call<T>(
     method: DshRpcMethod,
     payload: unknown,
-    options?: { onRpcId?: (rpcId: string) => void },
+    options?: { onRpcId?: (rpcId: string) => void; signal?: AbortSignal },
   ): Promise<DshOutcome<T>> {
     if (!isDshRpcMethod(method)) {
       return {
@@ -386,10 +424,46 @@ export class DshRpcClient {
         failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: String(method) },
       };
     }
+    return this.dispatch<T>(method, payload, options);
+  }
+
+  /**
+   * Call one Typert Remote endpoint.
+   *
+   * Deliberately a SEPARATE entry point rather than a wider `call`. The two
+   * dialects share an outer envelope and nothing else: a Remote endpoint is
+   * absent from the host's `RpcMethodMap`, and its business arguments must be
+   * wrapped in `args`. Folding them together would make a Remote name usable
+   * with a bare payload — which the host rejects at runtime, one round trip
+   * later, as an `internal` error rather than as the routing mistake it is.
+   *
+   * `args` is typed as a record because the gateway matches FIELD NAMES against
+   * its descriptor; a positional array is refused.
+   */
+  async callRemote<T>(
+    method: DshRemoteMethod,
+    args: Readonly<Record<string, unknown>>,
+    options?: { signal?: AbortSignal },
+  ): Promise<DshOutcome<T>> {
+    if (!isDshRemoteMethod(method)) {
+      return {
+        ok: false,
+        failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: String(method) },
+      };
+    }
+    return this.dispatch<T>(method, { args }, options);
+  }
+
+  /** The shared envelope: mint an id, post, and decode `server-response`. */
+  private async dispatch<T>(
+    method: string,
+    payload: unknown,
+    options?: { onRpcId?: (rpcId: string) => void; signal?: AbortSignal },
+  ): Promise<DshOutcome<T>> {
     const rpcId = this.newRpcId();
     options?.onRpcId?.(rpcId);
     const body = JSON.stringify({ type: 'client-request', rpcId, method, payload });
-    const raw = await this.post(method, body);
+    const raw = await this.post(method, body, options?.signal);
     if (!raw.ok) return raw;
 
     let parsed: unknown;
@@ -472,7 +546,7 @@ export class DshRpcClient {
    * The single network operation. `POST` and the JSON media type are literals:
    * the host answers 415 to anything else, and no caller may choose a verb.
    */
-  private async post(route: string, body: string): Promise<DshOutcome<string>> {
+  private async post(route: string, body: string, cancel?: AbortSignal): Promise<DshOutcome<string>> {
     let url: string;
     try {
       url = `${this.baseUrl}${dshApiPath(route)}`;
@@ -482,8 +556,18 @@ export class DshRpcClient {
         failure: { kind: 'transport', reason: 'route-not-allowed', retryable: false, detail: route },
       };
     }
+    // Checked before the socket is opened, not only linked to it: a caller whose
+    // deadline has already passed must not spend a connection on this host.
+    if (cancel?.aborted) {
+      return { ok: false, failure: { kind: 'transport', reason: 'timeout', retryable: true } };
+    }
     const entry: InFlight = { controller: new AbortController() };
     this.inFlight.add(entry);
+    const onCancel = () => {
+      entry.cause ??= 'timeout';
+      entry.controller.abort();
+    };
+    cancel?.addEventListener('abort', onCancel, { once: true });
     const timer = this.setTimeoutImpl(() => {
       entry.cause ??= 'timeout';
       entry.controller.abort();
@@ -513,6 +597,7 @@ export class DshRpcClient {
       return { ok: false, failure: { kind: 'transport', reason, retryable: true } };
     } finally {
       this.clearTimeoutImpl(timer);
+      cancel?.removeEventListener('abort', onCancel);
       this.inFlight.delete(entry);
     }
     // The host puts BUSINESS outcomes in the envelope and keeps HTTP for carrier

@@ -18,7 +18,7 @@ import {
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
   settledProcessOutput,
-  waitForBrokerHealth,
+  startHealthyFixtureBroker,
 } from '../helpers/isolated-broker-fixture.ts';
 import { OpenCodeAdapter } from '../../../adapters/opencode/src/index.ts';
 
@@ -61,33 +61,44 @@ async function spawnBroker(options: {
   base: string;
 }> {
   const fixtureRoot = join(root, options.fixture);
-  const lease = await reserveLoopbackFixturePort();
-  const port = lease.port;
-  const env = isolatedBrokerFixtureEnvironment(fixtureRoot, {
-    overrides: {
-      PORT: String(port),
-      HOST: '127.0.0.1',
-      COSYNCING_TOKEN: token,
-      OPENCODE_URL: options.opencodeUrl,
-      COSYNCING_OPENCODE_NO_AUTOSERVE: options.noAutoserve ? '1' : '0',
-      COSYNCING_OPENCODE_STARTUP_TIMEOUT_MS: String(options.startupTimeoutMs ?? 2_000),
-      COSYNCING_PI_BIN: options.pi.pi,
-      PATH: `${options.pi.nodeBin}:${options.opencodeBin ? dirname(options.opencodeBin) + ':' : ''}${process.env.PATH ?? ''}`,
-      COSYNCING_CODEX_SYNC_SERVER: '0',
+  // Built per attempt: the reservation releases the port before the child binds
+  // it, so a sibling fixture can take it in between, and a retry needs the fresh
+  // port carried all the way into the child's environment.
+  let output!: ReturnType<typeof captureProcessOutput>;
+  const { child, port } = await startHealthyFixtureBroker({
+    spawn: (attemptPort) => {
+      const env = isolatedBrokerFixtureEnvironment(fixtureRoot, {
+        overrides: {
+          PORT: String(attemptPort),
+          HOST: '127.0.0.1',
+          COSYNCING_TOKEN: token,
+          OPENCODE_URL: options.opencodeUrl,
+          COSYNCING_OPENCODE_NO_AUTOSERVE: options.noAutoserve ? '1' : '0',
+          COSYNCING_OPENCODE_STARTUP_TIMEOUT_MS: String(options.startupTimeoutMs ?? 2_000),
+          COSYNCING_PI_BIN: options.pi.pi,
+          PATH: `${options.pi.nodeBin}:${options.opencodeBin ? dirname(options.opencodeBin) + ':' : ''}${process.env.PATH ?? ''}`,
+          COSYNCING_CODEX_SYNC_SERVER: '0',
+        },
+      });
+      const spawned = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
+        cwd: process.cwd(),
+        env,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      output = captureProcessOutput(spawned, { maxChars: 12_000 });
+      return spawned;
     },
+    healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+    // This suite pipes the child's output, so a collision can be read from the
+    // broker's own error code. Settled rather than snapshotted: the exit does
+    // not mean the pipes drained, and the last chunk is the one that carries
+    // the reason.
+    capture: () => output,
+    stop: async (spawned) => { spawned.kill(); await spawned.exited.catch(() => undefined); },
   });
-  await lease.release();
-  const child = Bun.spawn(['bun', 'packages/typescript/broker/src/main.ts'], {
-    cwd: process.cwd(),
-    env,
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const output = captureProcessOutput(child, { maxChars: 12_000 });
-  const base = `http://127.0.0.1:${port}`;
-  await waitForBrokerHealth(child, `${base}/api/health`);
-  return { child, output, base };
+  return { child, output, base: `http://127.0.0.1:${port}` };
 }
 
 async function stopBroker(broker: Awaited<ReturnType<typeof spawnBroker>>): Promise<string> {

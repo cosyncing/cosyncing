@@ -214,8 +214,8 @@ class _ComposerBottomBar extends StatelessWidget {
             _ComposerPickerButton(
               key: const Key('session-detail-permission-selector'),
               icon: Icons.shield_outlined,
-              // The "· commands" qualifier moves to the tooltip; the bar shows
-              // the bare mode label (icon + status dot when collapsed).
+              // The bar shows the bare mode label (icon + status dot when
+              // collapsed); the tooltip carries what the mode applies to.
               label: modeOption?.label ?? l10n.sessionPermissionModeFallback,
               tooltip: l10n.sessionPermissionModeTooltip,
               compact: collapsed,
@@ -338,35 +338,45 @@ class _ComposerPickerButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context);
     final scheme = theme.colorScheme;
+    // A picker with nothing to pick is READ-ONLY, not merely inert. Some
+    // sessions are required to show their model and permission mode while
+    // offering no way to change them (a terminal-synced session, or an adapter
+    // that advertises no options), and until now those looked exactly like a
+    // working picker — same colour, same dropdown chevron — so tapping one did
+    // nothing and said nothing. The value stays visible; the affordance goes.
+    final interactive = onPressed != null;
+    final quiet = interactive
+        ? scheme.onSurfaceVariant
+        : scheme.onSurfaceVariant.withValues(alpha: 0.6);
     final labelStyle = theme.textTheme.labelMedium?.copyWith(
       fontWeight: FontWeight.w500,
-      color: scheme.onSurfaceVariant,
+      color: quiet,
     );
     final Widget child = compact
         ? Stack(
             clipBehavior: Clip.none,
             children: [
-              Icon(icon, size: 16, color: scheme.onSurfaceVariant),
-              Positioned(
-                right: -2,
-                top: -1,
-                child: Container(
-                  width: 6,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: scheme.primary,
-                    shape: BoxShape.circle,
-                  ),
+              Icon(icon, size: 16, color: quiet),
+              // The component kit's dot, at a grid size and grid offset. This
+              // was a hand-rolled 6dp Container nudged by -2/-1 — a private
+              // reimplementation of a shared component, off the grid in both
+              // its size and its position, which is exactly how a kit stops
+              // being the single place this shape is defined.
+              if (interactive)
+                Positioned(
+                  right: -4,
+                  top: -4,
+                  child: StatusDot(color: scheme.primary, size: 8),
                 ),
-              ),
             ],
           )
         : Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 14, color: scheme.onSurfaceVariant),
-              const SizedBox(width: 5),
+              Icon(icon, size: 14, color: quiet),
+              const SizedBox(width: 4),
               Flexible(
                 child: Text(
                   label,
@@ -374,16 +384,22 @@ class _ComposerPickerButton extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 1),
-              Icon(
-                Icons.keyboard_arrow_down,
-                size: 14,
-                color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
-              ),
+              // No chevron without a menu behind it. The arrow is the whole
+              // promise this control was failing to keep.
+              if (interactive) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  Icons.keyboard_arrow_down,
+                  size: 14,
+                  color: quiet.withValues(alpha: 0.7),
+                ),
+              ],
             ],
           );
     return Tooltip(
-      message: tooltip,
+      message: interactive
+          ? tooltip
+          : '$tooltip\n${l10n.sessionComposerPickerReadOnly}',
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 220),
         child: TextButton(
@@ -391,12 +407,13 @@ class _ComposerPickerButton extends StatelessWidget {
           style: TextButton.styleFrom(
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.symmetric(
-              horizontal: compact ? 6 : 8,
+              horizontal: compact ? 4 : 8,
               vertical: 4,
             ),
             minimumSize: Size.zero,
             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            foregroundColor: scheme.onSurfaceVariant,
+            foregroundColor: quiet,
+            disabledForegroundColor: quiet,
             textStyle: labelStyle,
           ),
           child: child,
@@ -609,7 +626,7 @@ class _PermissionModePickerSheet extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               l10n.sessionPermissionModeSheetBody,
-              key: const Key('session-detail-permission-command-only-copy'),
+              key: const Key('session-detail-permission-scope-copy'),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

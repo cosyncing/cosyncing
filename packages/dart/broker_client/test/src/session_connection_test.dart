@@ -653,6 +653,34 @@ void main() {
         expect(frame['model'], containsPair('reasoningEffort', 'high'));
       });
 
+      test('sendPrompt forwards the exact selected permission mode', () async {
+        await connection.connect();
+        await flush();
+        connection.sendPrompt('hello', permissionMode: 'auto');
+
+        final frame =
+            jsonDecode(adapter.sentFrames.first) as Map<String, dynamic>;
+        // The exact advertised token, unrewritten: the broker validates it
+        // against what the adapter published and rejects anything else.
+        expect(frame['permissionMode'], 'auto');
+      });
+
+      test('sendPrompt omits the mode when none was selected', () async {
+        await connection.connect();
+        await flush();
+        connection
+          ..sendPrompt('hello')
+          ..sendPrompt('hello again', permissionMode: '');
+
+        for (final sent in adapter.sentFrames) {
+          final frame = jsonDecode(sent) as Map<String, dynamic>;
+          // Absent, not empty. Omitting it leaves the session in the mode it
+          // already holds; an empty token would be rejected as unadvertised
+          // and cost the user the whole prompt.
+          expect(frame.containsKey('permissionMode'), isFalse);
+        }
+      });
+
       test('sendPrompt forwards ordered inline and staged files', () async {
         await connection.connect();
         await flush();

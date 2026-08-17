@@ -46,13 +46,20 @@ export type AttachMode =
   | 'resume' // continue a saved session as a broker-owned process
   | 'observe'; // read-only transcript tail; always available, zero-config
 
-/** Why an authenticated client is asking for a `mode=resume` attach. */
+/** Why an authenticated client is asking for a drive attach.
+ *
+ * The reason/mode matrix is not "any reason on any drive mode". The first four
+ * all describe reopening a Drive connection this app previously owned, which is
+ * the `mode=resume` path; on `mode=live` they would name a provenance the live
+ * path cannot have. `takeover` means "seize the running session", which is what
+ * a live attach does, so it is the ONLY reason valid on `mode=live` — and it is
+ * valid on `resume` too, where it takes over a terminal-created session. */
 export const DRIVE_ATTACH_REASONS = [
-  'create', // first attach of a session the app just created (broker-issued one-shot intent)
-  'app-restore', // reopen from the durable app-created control preference (no TTL)
-  'lease-restore', // reopen a terminal-created session inside the 30-minute takeover lease
-  'join-existing', // join the exact app-owned Drive connection named by an owner revision
-  'takeover', // an explicit, user-confirmed Take over
+  'create', // resume only: first attach of a session the app just created (broker-issued one-shot intent)
+  'app-restore', // resume only: reopen from the durable app-created control preference (no TTL)
+  'lease-restore', // resume only: reopen a terminal-created session inside the 30-minute takeover lease
+  'join-existing', // resume only: join the exact app-owned Drive connection named by an owner revision
+  'takeover', // resume OR live: an explicit, user-confirmed Take over
 ] as const;
 
 export type DriveAttachReason = (typeof DRIVE_ATTACH_REASONS)[number];
@@ -999,6 +1006,11 @@ export type AgentMessage =
       /** Back-compat alias only if a native source calls it createdAt. Prefer sentAt in new code. */
       createdAt?: number;
     }
+  /**
+   * A named thing that happened. `name` is adapter-chosen and is NOT a display
+   * string — see {@link CONTEXT_INJECTION_EVENT} for the one name the client
+   * gives a presentation of its own.
+   */
   | { type: 'event'; name: string; payload?: unknown }
   | {
       /**
@@ -1099,6 +1111,117 @@ export type AgentMessage =
    */
   | { type: 'history-reset'; notice?: string; semantic?: HistoryResetSemantic }
   | { type: 'error'; message: string };
+
+/**
+ * Agent-visible material the user never typed: a system reminder, a runtime
+ * snapshot, a skill catalogue, a host's context injection.
+ *
+ * PROVIDER-NEUTRAL BY CONSTRUCTION. Every tool grows some version of this, and
+ * each arrived shaped like its own host — DeepSeek Harness as a notice reading
+ * "Context added by @deepseek-ai/dsh-system-prompt: …", Kimi as a bare
+ * `system`-role row whose text was a raw `<system-reminder>` block. Rendered
+ * literally, both spill wire syntax and internal plugin ids into the
+ * transcript, and neither can be collapsed because a notice is not collapsible.
+ *
+ * Adapters map that material to `{ type: 'event', name: CONTEXT_INJECTION_EVENT,
+ * payload: { source, body } }` so the client can give it ONE presentation — a
+ * compact, collapsible block labelled for a human — without the generic event
+ * widget growing a branch per provider. `source` names the origin for the quiet
+ * secondary label; `body` is the material itself, kept intact for the expanded
+ * view.
+ *
+ * A plain string constant rather than a new canonical message type: event names
+ * are already free-form, so this changes no registry, no wire shape and no
+ * contract revision, and an older client simply renders it as the ordinary
+ * event it is.
+ */
+export const CONTEXT_INJECTION_EVENT = 'context.injection';
+
+/** Payload carried by a {@link CONTEXT_INJECTION_EVENT} event. */
+export interface ContextInjectionPayload {
+  /** Where the material came from, named for the reader (shown once expanded). */
+  source: string;
+  /** The material itself, wrapper syntax already unwrapped by the adapter. */
+  body: string;
+  /**
+   * Set when `body` is only a PREFIX of the material, clipped at
+   * {@link CONTEXT_INJECTION_BODY_MAX_UNITS}. Absent means the body is whole.
+   *
+   * Silent truncation is the failure this flag exists to prevent: a reader who
+   * opens a context block is asking to see what the agent was handed, and a
+   * body that simply stops looks identical to one that ended. The client says
+   * so in words instead.
+   */
+  truncated?: boolean;
+}
+
+/**
+ * Ceiling on a context body, in UTF-16 CODE UNITS — the unit JavaScript string
+ * indices are actually in, which is not the same as characters.
+ *
+ * Named for the real unit rather than for "characters", because the difference
+ * is observable: an emoji is two units, so a body of 8000 emoji is 4000 of
+ * them, and a bound documented in characters would be quietly wrong by up to a
+ * factor of two for non-Latin text. Code units are also the unit that matches
+ * what this bound is FOR — keeping a pathological injection from inflating
+ * every turn's payload — since they track serialized size directly.
+ *
+ * Far larger than a notice bound, because the two are different objects: a
+ * notice is a one-line banner that has to stay readable inline, while a context
+ * body is collapsed by default and read only on demand. Sized to keep real
+ * injected material — reminders, project instructions, a file the agent was
+ * handed — intact, and to bound only the pathological case.
+ */
+export const CONTEXT_INJECTION_BODY_MAX_UNITS = 8_000;
+
+/**
+ * Apply {@link CONTEXT_INJECTION_BODY_MAX_UNITS}, reporting whether it bit.
+ *
+ * Shared so both adapters bound identically. No ellipsis is appended: the body
+ * stays literal material, and the `truncated` flag is what the client renders a
+ * localized note from. An adapter-invented "…" would be indistinguishable from
+ * one the provider actually sent.
+ *
+ * The result is always well-formed UTF-16 — see the surrogate backoff below —
+ * so a bound measured in code units never produces a broken character.
+ */
+export function boundContextBody(text: string): { body: string; truncated?: boolean } {
+  if (text.length <= CONTEXT_INJECTION_BODY_MAX_UNITS) return { body: text };
+  let end = CONTEXT_INJECTION_BODY_MAX_UNITS;
+  // Never cut BETWEEN the halves of a surrogate pair. JavaScript string indices
+  // are UTF-16 code units, so an emoji occupies two of them, and a slice that
+  // lands in the middle keeps a lone high surrogate — not a character at all,
+  // but a broken code unit that renders as a replacement glyph and is ill-formed
+  // anywhere the payload is re-encoded. Backing off one unit costs at most one
+  // character and always ends on a whole one.
+  const lastUnit = text.charCodeAt(end - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+  return { body: text.slice(0, end), truncated: true };
+}
+
+/**
+ * Recognize a whole message that is nothing but ONE wrapped context block.
+ *
+ * Shared so every adapter agrees on what counts, and deliberately strict: the
+ * text must open with a tag and close with its match, with nothing outside.
+ * A message that merely CONTAINS a reminder somewhere in the middle is a real
+ * message with an aside in it — folding that away would hide content the user
+ * was meant to read, which is a far worse failure than leaving one block
+ * uncollapsed.
+ *
+ * The tag name becomes the block's source label, so the reader sees
+ * "system-reminder" rather than a line of angle brackets.
+ */
+export function unwrapContextBlock(
+  text: string,
+): { source: string; body: string } | undefined {
+  const trimmed = text.trim();
+  const match = /^<([a-z][a-z0-9-]*)>\s*([\s\S]*?)\s*<\/\1>$/i.exec(trimmed);
+  if (!match) return undefined;
+  const [, tag, body] = match;
+  if (!tag || !body) return undefined;
+  return { source: tag, body };
+}
 
 /**
  * The exhaustive list of canonical message `type` values — the single source of truth the
@@ -1407,10 +1530,10 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * DTO field is a BREAKING read for any client that decodes it strictly, so the
  * same revision gives the first-party client an `unknown` fallback member: an
  * unrecognized future kind must degrade one roster row, never abort the whole
- * roster decode. `/api/agents` is not revision-filtered, so a Kimi row reaches
- * pre-14 clients unfiltered — which is exactly why broker registration of that
- * adapter stays behind an explicit opt-in until every supported client has
- * shipped the tolerant decoding.
+ * roster decode. That tolerance is what makes the kind safe to publish at all,
+ * so it is also the revision from which a client may be SHOWN an agent that
+ * carries it — see {@link CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE}
+ * and the per-client `/api/agents` filter that applies it.
  * Revision 15 adds three additive {@link SessionDriveControl} fields that
  * describe control availability as DATA rather than leaving the client to infer
  * it: `handoffAvailable`, `takeoverAvailable`, and `takeoverMode`. Each is
@@ -1426,6 +1549,21 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * `unknown` {@link AttachMode} member: an unrecognized future mode must degrade
  * to read-only, never abort the decode, and must never be echoed back into a
  * reconnect the client cannot reason about.
+ * Because `takeoverMode` can name `live`, revision 15 also widens where a
+ * {@link DriveAttachReason} is accepted — by exactly one entry, not by mode.
+ * The matrix is: `create`, `app-restore`, `lease-restore` and `join-existing`
+ * remain valid ONLY with `mode=resume`, because each describes reopening a
+ * Drive connection this app previously owned and `join-existing` further
+ * resolves an exact owner revision, which only the resume path can do;
+ * `takeover` is valid with `resume` or `live`, because it means seize the
+ * running session, which is what a live attach does. Any other pairing is
+ * rejected at the route before the upgrade. The reason carries through to the
+ * adapter for both drive modes.
+ *
+ * This is additive — an omitted reason behaves exactly as before on either
+ * mode — and it does NOT widen the credential boundary: a reason-tagged live
+ * attach must cross the same authenticated-credential check as a resume, so
+ * takeover is not the one drive attach that reaches an adapter uncredentialed.
  * Revision 15 also adds ONE optional stream-query parameter, `readOnly=1`, with
  * which a client declares that this socket must not be granted mutation
  * authority. It exists because degrading the decode is not by itself read-only
@@ -1457,6 +1595,53 @@ export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
  * overlap window above.
  */
 export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 2 as const;
+
+/**
+ * The client revisions that survive an agent value they have never heard of.
+ *
+ * `/api/agents` decodes as ONE list, so a client whose enum decode throws on an
+ * unrecognized value does not merely lose that row — it loses the WHOLE roster
+ * and reports having no agents at all, whether or not the unfamiliar agent was
+ * one it wanted. These constants say from which revision each tolerance exists,
+ * and an adapter's {@link AgentBackend.minimumClientRevision} is the highest one
+ * its OWN declared values actually need.
+ *
+ * They are deliberately two numbers rather than one "tolerant enough" floor.
+ * The two fallbacks shipped one revision apart, so collapsing them to the later
+ * number hides every agent built from long-existing attach modes from an entire
+ * released client generation that could have decoded it perfectly.
+ *
+ * BROKER-SIDE filtering inputs, never wire fields. Which agents a given client
+ * can decode is the broker's question to settle, and publishing each agent's
+ * minimum would ask every client to re-derive an answer it has already been
+ * given. Neither adds a route, frame kind, message type or error code, so the
+ * contract revision does not move with them.
+ */
+export const CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE = 14 as const;
+/** @see CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE */
+export const CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE = 15 as const;
+
+/**
+ * The {@link AttachMode} members every supported client has always decoded.
+ *
+ * An agent built only from these needs no attach-mode tolerance, so its floor is
+ * whatever its {@link IntegrationKind} requires and nothing more. Adding a mode
+ * to this set is a claim about shipped clients, not about this codebase.
+ */
+export const ATTACH_MODES_KNOWN_BEFORE_TOLERANT_DECODE: readonly AttachMode[] =
+  Object.freeze(['live', 'resume', 'observe']);
+
+/**
+ * `/api/agents` as the broker's OWN processes must request it.
+ *
+ * Doctor and the lifecycle summary read this route to report what is
+ * registered, and an unqualified request is treated as the oldest possible
+ * client — so they would be handed the legacy-safe view and report a newer
+ * agent as missing, which is the opposite of their job. They are by definition
+ * current with the broker, so they say so.
+ */
+export const INTERNAL_AGENT_ROSTER_PATH =
+  `/api/agents?contractRevision=${BROKER_CONTRACT_REVISION}` as const;
 
 function fnv1a32(value: string): string {
   let hash = 0x811c9dc5;
@@ -2183,6 +2368,42 @@ export interface SessionConnection {
   /** Semantic plan lifecycle action from the app. Adapters may map this to a native plan-control
    *  channel; the broker has an explicit prompt fallback for adapters that only support text steering. */
   respondPlan?(input: PlanActionInput): Promise<void>;
+  /**
+   * Commit ownership a PROMOTING attach minted provisionally.
+   *
+   * Present only on a connection produced by a user-confirmed takeover of a
+   * session the adapter did not already own. Such an attach proves it may drive
+   * (the adapter's own barrier) but must not record durable Drive eligibility
+   * until the broker has actually ADMITTED the connection as the session's
+   * owner: the broker can still reject it — a superseded generation, an
+   * incumbent that changed underneath, a hub shutting down — and closing a
+   * connection does not undo eligibility the adapter already recorded. Were the
+   * record made EAGERLY at attach, a rejected admission would therefore leave
+   * the session marked drivable, and a later ORDINARY live attach would drive it
+   * with no second confirmation anywhere in its path — precisely the state the
+   * confirmation exists to prevent. So the record waits for admission.
+   *
+   * The broker calls this exactly once, after it has decided to admit the
+   * connection and BEFORE it registers or exposes it, with no await between that
+   * decision and this call. The order is load-bearing in both directions:
+   * committing earlier would record ownership the broker may still refuse, and
+   * committing after exposure would mean reading the answer too late — on the
+   * replacement path the incumbent would already be retired, leaving the wrapper
+   * now serving the session owning nothing.
+   *
+   * Returning false REFUSES the promotion; the adapter may do so if it learned
+   * between the barrier and admission that it must not own the session after
+   * all. The broker then closes the connection, leaves the incumbent (if any) in
+   * place, and reports a conflict. Not calling it at all — because admission
+   * failed — and closing the connection instead is the same rollback: the
+   * adapter discards the provisional ownership. Idempotent.
+   *
+   * Until this returns true the connection is live but has NO write authority:
+   * an adapter implementing this hook must refuse every mutation while ownership
+   * is provisional, so that a refused promotion is guaranteed to have written
+   * nothing. A rollback can un-record eligibility; it cannot unsend a prompt.
+   */
+  commitPromotion?(): boolean;
   close(): Promise<void>;
 }
 

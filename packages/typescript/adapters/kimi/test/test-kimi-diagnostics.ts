@@ -21,7 +21,7 @@
 export {};
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { diagnoseKimiSetup } from '../src/diagnostics.ts';
-import { KIMI_DEFAULT_PORT, decodeKimiInstanceRecord } from '../src/server.ts';
+import { KIMI_DEFAULT_PORT, decodeKimiInstanceRecord, resolveKimiHome } from '../src/server.ts';
 
 const FIXTURE = await Bun.file(new URL('./fixtures/kimi-0.35.0.json', import.meta.url)).json() as {
   kimiVersion: string;
@@ -44,6 +44,12 @@ const baseUrl = `http://127.0.0.1:${listenPort}`;
 // reads to the public-tree scan as a personal path leaking into the tree. The
 // fixture root is fictional, so build the paths from this constant instead.
 const FIXTURE_HOME = '/fixture/home';
+/**
+ * The identity an installed service manages on this fixture machine, resolved
+ * through the same function the adapter reports to the broker — never a literal
+ * path, so a test cannot agree with a rule the product no longer follows.
+ */
+const MANAGED_HOME = resolveKimiHome({}, FIXTURE_HOME);
 // The registry record AS CAPTURED. Its `server_id` is upstream's own and is a
 // DIFFERENT ULID from the one the captured `/api/v1/meta` echoes: upstream
 // mints the two independently, so a fixture that derives either from the other
@@ -87,6 +93,7 @@ const liveOne = {
   live: [{
     baseUrl,
     port: listenPort,
+    pid: FIXTURE_RECORD.pid,
     serverId: FIXTURE_RECORD.serverId,
     hostVersion: FIXTURE_RECORD.hostVersion,
     startedAt: FIXTURE_RECORD.startedAt,
@@ -127,16 +134,160 @@ check('a truncated registry fails the server check as registry-overflow',
 const down = byId(serverDown, 'kimi.server');
 check('a stale registry reports server-registry-stale, never a fake server',
   down?.status === 'warn' && down.detailCode === 'server-registry-stale');
-check('the not-running remediation names the user-facing command',
+check('the not-running remediation names the user-facing command when nothing manages the host',
   down?.remediation?.command === 'kimi web --no-open');
+
+// THE MANAGED POSTURE. Same absent server, opposite instruction.
+//
+// Where cosyncing starts and supervises this host, telling the operator to run
+// `kimi web` races the broker's own recovery and leaves two servers on one home
+// — which cosyncing then refuses to guess between. The check still reports the
+// host is down; only what to DO about it changes.
+const managedDown = await diagnoseKimiSetup(
+  context({ managedExternalHostIdentities: [MANAGED_HOME] }),
+  { instances: { live: [], stale: 2, invalid: 0, truncated: false } },
+);
+const managedServer = byId(managedDown, 'kimi.server');
+check('the managed posture reports the same down server, never a fake one',
+  managedServer?.status === 'warn' && managedServer.detailCode === 'server-registry-stale',
+  `${managedServer?.status}/${managedServer?.detailCode}`);
+check('the managed remediation carries NO command at all',
+  managedServer?.remediation !== undefined && managedServer.remediation.command === undefined,
+  JSON.stringify(managedServer?.remediation));
+check('...and never names a way to start a competing host',
+  !/kimi web/.test(managedServer?.remediation?.message ?? '')
+    && /cosyncing/.test(managedServer?.remediation?.message ?? ''),
+  managedServer?.remediation?.message);
+// The posture is the ONLY difference between the two answers, which is what
+// makes it a posture rather than a second diagnosis.
+// EVERY start/restart instruction follows the posture, not just the one for an
+// absent server. Stopping a running server is what opens the window: the
+// supervisor sees its host gone and starts a replacement while the operator,
+// following the instruction to completion, starts another.
+{
+  const managedContext = context({ managedExternalHostIdentities: [MANAGED_HOME] });
+  const managedDiagnoses = [
+    // No server at all: the START instruction.
+    await diagnoseKimiSetup(managedContext, { instances: { live: [], stale: 1, invalid: 0, truncated: false } }),
+    // Several servers: the "stop all but one" instruction, which under
+    // management could otherwise have them stop cosyncing's own.
+    await diagnoseKimiSetup(managedContext, {
+      instances: {
+        live: [
+          { baseUrl, port: listenPort, pid: 4001, serverId: 'a' },
+          { baseUrl, port: listenPort + 1, pid: 4002, serverId: 'b' },
+        ],
+        stale: 0, invalid: 0, truncated: false,
+      },
+    }),
+    // A live server with no token file: the RESTART instruction, and the one
+    // that proves stopping is as unsafe as starting — the supervisor fills the
+    // window the operator opens.
+    await diagnoseKimiSetup(
+      context({
+        managedExternalHostIdentities: [MANAGED_HOME],
+        inspectPath: (path) => ({
+          status: path.endsWith('server.token') ? 'missing' as const : 'directory' as const,
+          readable: true,
+          displayPath: path,
+        }),
+      }),
+      { instances: liveOne, token: 'fixture-token' },
+    ),
+    // A live server that fails its health contract: another RESTART path.
+    await diagnoseKimiSetup(
+      context({
+        managedExternalHostIdentities: [MANAGED_HOME],
+        fetchJson: async () => ({ status: 'unreachable' as const }),
+      }),
+      { instances: liveOne, token: 'fixture-token' },
+    ),
+    // A live server whose identity cannot be bound: the IDENTITY_FAILURE table,
+    // whose unmanaged wording lives in a const the posture must still override.
+    await diagnoseKimiSetup(
+      context({
+        managedExternalHostIdentities: [MANAGED_HOME],
+        fetchJson: async (url) => url.endsWith('/healthz')
+          ? { status: 'ok' as const, json: FIXTURE.rest.healthz }
+          : { status: 'ok' as const, json: { data: { server: {} } } },
+      }),
+      { instances: liveOne, token: 'fixture-token' },
+    ),
+  ];
+  const managedChecks = managedDiagnoses.flatMap((diagnosis) => diagnosis.checks);
+  const managedMessages = managedChecks
+    .map((entry) => entry.remediation?.message)
+    .filter((message): message is string => message !== undefined);
+  check('no managed-posture remediation names kimi web at all',
+    managedMessages.length > 0 && managedMessages.every((message) => !/kimi web/.test(message)),
+    managedMessages.filter((message) => /kimi web/.test(message)).join(' | ') || 'none');
+  check('no managed-posture remediation carries a runnable command',
+    managedChecks.every((entry) => entry.remediation?.command === undefined),
+    managedChecks.map((entry) => entry.remediation?.command).filter(Boolean).join(','));
+  // Says CONFIGURED TO MANAGE, never "owns this server": the process answering
+  // right now may be the operator's own, which cosyncing preserves and never
+  // touches, and a claim of ownership would be false exactly then.
+  check('the managed wording claims configuration, not ownership of whatever is running',
+    managedMessages.some((message) => /configured to manage/.test(message))
+      && managedMessages.every((message) => !/owns this server/.test(message)),
+    managedMessages.join(' | ').slice(0, 200));
+}
+
+// A CONFIGURATION THE SERVICE DOES NOT MANAGE, on a machine where the service
+// IS installed. The operator's shell names another Kimi home; the service
+// manages the default one and knows nothing about this one.
+//
+// The inverse honesty failure to the one above, and the reason the posture
+// carries identities instead of a flag: an agent-wide "kimi is managed" would
+// tell this operator their private home is supervised, when in fact nobody is
+// watching it and the manual instruction is the only thing that will start it.
+{
+  const customHome = '/fixture/elsewhere/.kimi-code';
+  const custom = await diagnoseKimiSetup(
+    context({
+      // The broker still reports what IT manages — the default home — while the
+      // diagnosis resolves the operator's.
+      managedExternalHostIdentities: [MANAGED_HOME],
+      env: { KIMI_CODE_HOME: customHome },
+    }),
+    { instances: { live: [], stale: 1, invalid: 0, truncated: false } },
+  );
+  const customServer = byId(custom, 'kimi.server');
+  check('a home the service does not manage keeps the manual start command',
+    customServer?.remediation?.command === 'kimi web --no-open',
+    JSON.stringify(customServer?.remediation));
+  check('...and is never described as managed by cosyncing',
+    !/configured to manage/.test(customServer?.remediation?.message ?? ''),
+    customServer?.remediation?.message);
+  // The identity actually decided it: the same shell, with the broker managing
+  // THIS home, flips to the managed posture and drops the command.
+  const alsoManaged = await diagnoseKimiSetup(
+    context({
+      managedExternalHostIdentities: [MANAGED_HOME, customHome],
+      env: { KIMI_CODE_HOME: customHome },
+    }),
+    { instances: { live: [], stale: 1, invalid: 0, truncated: false } },
+  );
+  const alsoManagedServer = byId(alsoManaged, 'kimi.server');
+  check('a custom home the broker DOES manage takes the managed posture',
+    alsoManagedServer?.remediation?.command === undefined
+      && /configured to manage/.test(alsoManagedServer?.remediation?.message ?? ''),
+    JSON.stringify(alsoManagedServer?.remediation));
+}
+
+check('the two postures differ in remediation and in nothing else',
+  managedServer?.status === down?.status
+    && managedServer?.detailCode === down?.detailCode
+    && managedServer?.remediation?.message !== down?.remediation?.message,
+  `${managedServer?.detailCode} | ${down?.detailCode}`);
 
 // Fail closed on several live servers: they are not interchangeable, so naming
 // one would be a guess presented as a fact. The adapter refuses the same way.
 const ambiguousDiagnosis = await diagnoseKimiSetup(context(), {
   instances: {
     live: [
-      { baseUrl, port: listenPort, serverId: 'a' },
-      { baseUrl, port: listenPort + 1, serverId: 'b' },
+      { baseUrl, port: listenPort, pid: 4001, serverId: 'a' },
+      { baseUrl, port: listenPort + 1, pid: 4002, serverId: 'b' },
     ],
     stale: 0, invalid: 0, truncated: false,
   },
@@ -199,7 +350,7 @@ for (const [label, patch, detailCode] of [
     `${serverCheck?.status}/${serverCheck?.detailCode}`);
 }
 const unbindable = await diagnoseKimiSetup(context(), {
-  instances: { ...liveOne, live: [{ baseUrl, port: listenPort, serverId: FIXTURE_RECORD.serverId }] },
+  instances: { ...liveOne, live: [{ baseUrl, port: listenPort, pid: FIXTURE_RECORD.pid, serverId: FIXTURE_RECORD.serverId }] },
   token: 't',
 });
 const unbindableCheck = byId(unbindable, 'kimi.server');

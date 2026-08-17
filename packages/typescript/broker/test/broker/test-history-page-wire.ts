@@ -13,8 +13,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, rmSync } from 'node:fs';
 import {
   isolatedBrokerFixtureEnvironment,
-  reserveLoopbackFixturePort,
-  waitForBrokerHealth,
+  startHealthyFixtureBroker,
 } from '../helpers/isolated-broker-fixture.ts';
 
 const FIXTURE_MESSAGES = 2_500;
@@ -43,51 +42,70 @@ type RunningBroker = {
 };
 
 async function startBroker(home: string): Promise<RunningBroker> {
-  const portLease = await reserveLoopbackFixturePort();
-  const port = portLease.port;
   let stderr = '';
-  await portLease.release();
-  const child = Bun.spawn(
-    ['bun', 'run', 'packages/typescript/broker/src/main.ts'],
-    {
-      env: isolatedBrokerFixtureEnvironment(home, {
-        overrides: {
-          PORT: String(port),
-          HOST: '127.0.0.1',
-          COSYNCING_HOME: home,
-          COSYNCING_TOKEN: '',
-          COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
-          COSYNCING_HISTORY_MAX_MESSAGES: '5000',
-          COSYNCING_TEST_HISTORY_READ_METRICS: '1',
-        },
-      }),
-      stdout: 'ignore',
-      stderr: 'pipe',
-    },
-  );
-  void (async () => {
-    const reader = child.stderr.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      stderr += new TextDecoder().decode(value);
-    }
-  })();
-  const base = `http://127.0.0.1:${port}`;
+  let drained: Promise<void> = Promise.resolve();
   // Readiness is not one of this suite's assertions, so it does not get this
   // suite's 15s budget: a broker booting beside other suites is slow, not
   // broken. Every wait after this keeps WAIT_MS, because those are the
   // behaviour under test.
+  //
+  // Through the shared starter, so a lost port race or a silent startup stall
+  // costs a respawn rather than the suite. This suite drains the stream itself,
+  // so its own accumulator is handed back as the silence evidence rather than a
+  // second reader competing for the same pipe; it resets per attempt.
+  let child!: ReturnType<typeof Bun.spawn>;
+  let port!: number;
   try {
-    await waitForBrokerHealth(child, `${base}/api/health`);
+    ({ child, port } = await startHealthyFixtureBroker({
+      spawn: (attemptPort) => {
+        stderr = '';
+        const spawned = Bun.spawn(
+          ['bun', 'run', 'packages/typescript/broker/src/main.ts'],
+          {
+            env: isolatedBrokerFixtureEnvironment(home, {
+              overrides: {
+                PORT: String(attemptPort),
+                HOST: '127.0.0.1',
+                COSYNCING_HOME: home,
+                COSYNCING_TOKEN: '',
+                COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+                COSYNCING_HISTORY_MAX_MESSAGES: '5000',
+                COSYNCING_TEST_HISTORY_READ_METRICS: '1',
+              },
+            }),
+            stdout: 'ignore',
+            stderr: 'pipe',
+          },
+        );
+        drained = (async () => {
+          const reader = spawned.stderr.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            stderr += new TextDecoder().decode(value);
+          }
+        })();
+        return spawned;
+      },
+      healthUrl: (attemptPort) => `http://127.0.0.1:${attemptPort}/api/health`,
+      // This suite accumulates stderr itself (it asserts over the whole log
+      // later), so it supplies the two readers directly rather than a capture:
+      // an immediate snapshot for silence, and the same text once the drain
+      // has reached EOF for collision classification.
+      peekOutput: () => stderr,
+      readSettledOutput: async () => {
+        await Promise.race([drained, Bun.sleep(2_000)]);
+        return stderr;
+      },
+      // A rejected child never reaches the caller, so it cannot clean it up. A
+      // broker that is merely slow, not dead, would otherwise outlive the suite
+      // and be reaped by the lane as a stray.
+      stop: async (spawned) => { spawned.kill(); await spawned.exited.catch(() => undefined); },
+    }));
   } catch (error) {
-    // The caller never receives this child, so it cannot clean it up. A broker
-    // that is merely slow, not dead, would otherwise outlive the suite and be
-    // reaped by the lane as a stray.
-    child.kill();
-    await child.exited;
     throw new Error(`${(error as Error).message}\n${stderr.slice(-2_000)}`);
   }
+  const base = `http://127.0.0.1:${port}`;
   return {
     child,
     base,

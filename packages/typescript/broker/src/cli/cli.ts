@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import type { OpencodeShimSignal } from '../installation/setup-presenter.ts';
 import { BUILD_INFO, type BuildInfo } from '../runtime/build-info.ts';
+import { exitAfterDiagnostics } from '../runtime/fatal-start.ts';
 import { currentApplicationIdentity, type ApplicationIdentity } from '../runtime/application-identity.ts';
 import { inspectInstallState, type InstallStateInspection } from '../installation/install-state.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
@@ -997,6 +998,33 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   }
 }
 
+/**
+ * Should a finished command END the process, rather than return and drain?
+ *
+ * Only a FAILED `broker` invocation. Starting a server is the one command that
+ * can leave the event loop non-empty after it fails — it registers timers,
+ * watchers and sockets before it can throw — so returning would leave this
+ * process alive forever having printed that it failed. Every other command
+ * (doctor, setup, uninstall, a rejected argument, a cancelled prompt) returns
+ * from work that holds nothing open, drains, and exits on its own; forcing
+ * those would buy nothing and could cut short whatever they are still flushing.
+ *
+ * Exported so the policy can be tested directly. For commands that hold nothing
+ * open the two behaviors are indistinguishable from outside the process today,
+ * which is precisely why the rule is pinned here rather than inferred from
+ * observed exits — the cost of getting it wrong is latent, not immediate.
+ */
+export function forcesFatalExit(argv: readonly string[], exitCode: number): boolean {
+  return exitCode !== 0 && argv[0] === 'broker';
+}
+
 if (import.meta.main) {
-  process.exitCode = await runCli(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const exitCode = await runCli(argv);
+  // `runCli` stays a plain function returning a number, which is what makes it
+  // testable, so ending the process belongs here at the entry point. The
+  // diagnostic is already in the stream by now, so it is flushed rather than
+  // rewritten. See {@link forcesFatalExit} for why this is scoped so narrowly.
+  if (forcesFatalExit(argv, exitCode)) await exitAfterDiagnostics(exitCode);
+  process.exitCode = exitCode;
 }

@@ -42,6 +42,14 @@ import {
 } from '../security/credentials.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
 import {
+  classifyManagedHost,
+  defaultManagedHostEffects,
+  listManagedHostOwnerships,
+  locateRecordedManagedHost,
+  managedHostStore,
+  stopRecordedManagedHost,
+} from '../runtime/managed-host.ts';
+import {
   applyDurableStateMigrationsWithLockHeld,
   durableStateLayout,
   planDurableStateMigrations,
@@ -57,7 +65,7 @@ import {
   type InstalledResourceRecord,
 } from './install-state.ts';
 import { acquireInstallationLock, type InstallationLockHandle } from './installation-lock.ts';
-import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import { INTERNAL_AGENT_ROSTER_PATH, PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { inspectRuntimeAssets, serviceFlutterWebRoot } from '../runtime/runtime-assets.ts';
 import {
   inspectAgentSkill,
@@ -160,6 +168,11 @@ export interface LifecycleBaseOptions {
   codexDaemonProbe?: () => Promise<CodexDaemonStatus>;
   /** Injected Codex daemon stopper (uninstall execution); default runs `codex app-server daemon stop`. */
   codexDaemonStop?: (timeoutMs: number) => Promise<void>;
+  /**
+   * Injected process/table effects for external agent hosts, so a suite can
+   * describe a machine with a running host without one existing.
+   */
+  managedHostEffects?: ReturnType<typeof defaultManagedHostEffects>;
 }
 
 /** Best-effort, read-only view of the managed Codex app-server daemon used by uninstall planning. */
@@ -563,7 +576,7 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
       env.config?.broker.advertisedUrl ? await resolveTailscaleFallbackAddresses(env.context) : [],
       options.advertisedDirectProbe,
     ))(),
-    authenticatedJson(env, '/api/agents'),
+    authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH),
     // The only endpoint here whose response size follows the operator's data rather than the
     // protocol, and so the only one that gets the larger allowance.
     authenticatedJson(env, '/api/sessions', {
@@ -1642,6 +1655,41 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
     });
   }
 
+  // External agent hosts (`kimi web`, `dsh web`). Same rule as the Codex daemon
+  // and for the same reason: a host cosyncing STARTED is cosyncing's to stop, and
+  // one the operator started is not. Uninstall runs outside the broker, so the
+  // ownership records are the only list of hosts there is — see
+  // `listManagedHostOwnerships`. The record files themselves are durable state
+  // and survive a non-purge uninstall, which is deliberate: a re-install can
+  // still prove ownership of a host this run could not stop.
+  const managedHostEffects = options.managedHostEffects ?? defaultManagedHostEffects();
+  for (const record of listManagedHostOwnerships(env.home)) {
+    const location = locateRecordedManagedHost(record, managedHostEffects);
+    const live = location.state === 'identified'
+      ? managedHostEffects.liveProcess(location.pid)
+      : managedHostEffects.liveProcess(record.pid);
+    const verdict = location.state === 'unknown'
+      ? 'indeterminate'
+      : classifyManagedHost(record, live, record.identityKey);
+    if (verdict === 'owned') {
+      actions.push({ id: 'managed-host.stop', target: `${record.agent}-external-host`, legacy: false });
+      advisories.push({
+        detailCode: 'managed-host-sessions-disconnect',
+        summary: `The ${record.agent} host cosyncing started will be stopped; its sessions remain on disk and reopen when the host is started again.`,
+      });
+    } else if (verdict === 'absent') {
+      advisories.push({
+        detailCode: 'managed-host-not-running',
+        summary: `The ${record.agent} host cosyncing started is no longer running; nothing needs to be stopped.`,
+      });
+    } else {
+      advisories.push({
+        detailCode: 'managed-host-preserved',
+        summary: `The running ${record.agent} host cannot be proven to be the one cosyncing started; it will be left running.`,
+      });
+    }
+  }
+
   // Tokdash: reverse a setup-provisioned instance and NOTHING else. The record only exists when setup ran
   // `pipx install tokdash` and/or `tokdash setup`; an instance that was already running when setup asked is
   // reused and leaves no record, so it is never removed here. Reversal is Tokdash's own `uninstall`, which
@@ -1852,6 +1900,31 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
             ...(options.tokdashRunner ? { run: options.tokdashRunner } : {}),
           });
           if (!reversal.removed) { remaining.push('tokdash-preserved'); continue; }
+        } else if (action.id === 'managed-host.stop') {
+          // Re-proved under the lock, exactly like the Codex daemon above: the
+          // plan proved ownership at inspection time, and a process can exit —
+          // or have its pid recycled — between then and now. `stopRecordedManagedHost`
+          // re-classifies and re-proves identity before every signal, so a host
+          // that stopped being ours in that window is preserved untouched.
+          const agent = action.target.replace(/-external-host$/, '');
+          const record = listManagedHostOwnerships(env.home).find((entry) => entry.agent === agent);
+          if (!record) {
+            remaining.push('managed-host-preserved');
+            continue;
+          }
+          const effects = options.managedHostEffects ?? defaultManagedHostEffects();
+          let outcome;
+          try {
+            outcome = await stopRecordedManagedHost(record, effects, managedHostStore(env.home));
+          } catch {
+            remaining.push('managed-host-preserved');
+            continue;
+          }
+          // A host left running is a warning, never a failed uninstall: the rest
+          // of the removal is correct and complete, and the operator can stop it.
+          if (outcome.action === 'preserved') remaining.push('managed-host-preserved');
+          completed.push(action.id);
+          continue;
         } else if (action.id === 'codex-daemon.stop') {
           // Re-verify ownership under the lock — never stop a daemon we cannot prove cosyncing started, even
           // though the action only exists in the plan when ownership was proven. The live control-socket

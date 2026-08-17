@@ -1,5 +1,15 @@
 #!/usr/bin/env bun
-/** Direct, deterministic proof that adapter roster cutoffs avoid native decode/query work. */
+/**
+ * Direct, deterministic proof of the two bounds roster discovery must hold.
+ *
+ * WORK: each adapter applies the cutoff before expensive native decoding, so a
+ * long history costs the window rather than the store.
+ *
+ * TIME: no single backend can hold the roster. Both bounds exist for the same
+ * reason — the roster is one answer assembled from every adapter — but they
+ * fail differently, and the second only became reachable once adapters that
+ * talk to a host this broker does not own were registered by default.
+ */
 export {};
 
 import {
@@ -13,7 +23,17 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { Database } from 'bun:sqlite';
-import type { SessionDiscoveryWork } from '../../../adapter-api/src/index.ts';
+import {
+  AgentRegistry,
+  effectiveDiscoveryBudgetMs,
+  EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
+  type AgentBackend,
+  type AgentCapabilities,
+  type AvailabilityOptions,
+  type SessionDiscoveryOptions,
+  type SessionDiscoveryWork,
+  type SessionInfo,
+} from '../../../adapter-api/src/index.ts';
 
 const results: { name: string; ok: boolean; detail?: string }[] = [];
 function check(name: string, ok: boolean, detail?: string): void {
@@ -215,6 +235,186 @@ exit 0
       opencodeRows.some((row) => row.id === 'recent') &&
       !opencodeRows.some((row) => row.id === 'old'),
     JSON.stringify({ sql, rows: opencodeRows.map((row) => row.id) }),
+  );
+
+  // ── TIME: one wedged host must not hold the whole roster ───────────────────
+  //
+  // The shape that matters is a host that ACCEPTS the connection and then never
+  // answers. Nothing fails, so no error path runs; the leg simply never
+  // completes, and `discoverAll` answers only when every backend has. Before the
+  // budget this made the roster hostage to a host the broker does not own — and
+  // the established agents, which had already answered in microseconds, waited
+  // with it.
+  //
+  // These fakes stand in for that host deliberately. A real one would need a
+  // socket that accepts and stalls, which proves the same thing less directly
+  // and less reliably; what is under test is the registry's bound, not TCP.
+  const externalCapabilities: AgentCapabilities = {
+    integrationKind: 'http-websocket',
+    attachModes: ['live'],
+    supportsObserve: false,
+    supportsResume: false,
+    supportsLiveAttach: true,
+    supportsNativeArtifact: false,
+    supportsNativeFileInput: false,
+    supportsModelSwitch: false,
+    permissionGranularity: 'none',
+  };
+
+  /** An established local adapter: answers at once, declares no budget. */
+  class SettledBackend implements AgentBackend {
+    constructor(readonly id: string) {}
+    readonly displayName = 'settled';
+    readonly capabilities: AgentCapabilities = {
+      ...externalCapabilities,
+      integrationKind: 'jsonrpc-stdio',
+    };
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+    async discoverSessions(): Promise<SessionInfo[]> {
+      return [{
+        id: `${this.id}-session`,
+        tool: this.id,
+        title: 'settled',
+        status: 'idle',
+        attachMode: 'live',
+      }];
+    }
+    async attach(): Promise<never> {
+      throw new Error('not reachable in this fixture');
+    }
+  }
+
+  /**
+   * A host that accepts and never answers. `cooperative` decides whether it
+   * honours the abort — the uncooperative variant is the one that proves the
+   * bound is the registry's own, not the adapter's good behaviour.
+   */
+  class WedgedHostBackend implements AgentBackend {
+    aborted = false;
+    sawSignal = false;
+    constructor(readonly id: string, readonly budgetMs: number, private readonly cooperative: boolean) {}
+    readonly displayName = 'wedged';
+    readonly capabilities = externalCapabilities;
+    get discoveryBudgetMs(): number {
+      return this.budgetMs;
+    }
+    async isAvailable(options?: AvailabilityOptions): Promise<boolean> {
+      this.sawSignal = options?.signal !== undefined;
+      return await new Promise<boolean>((resolve) => {
+        if (!this.cooperative) return; // never settles, by construction
+        options?.signal?.addEventListener('abort', () => {
+          this.aborted = true;
+          resolve(false);
+        }, { once: true });
+      });
+    }
+    async discoverSessions(_options?: SessionDiscoveryOptions): Promise<SessionInfo[]> {
+      return [];
+    }
+    async attach(): Promise<never> {
+      throw new Error('not reachable in this fixture');
+    }
+  }
+
+  const cooperative = new WedgedHostBackend('wedged-cooperative', 25, true);
+  const cooperativeRegistry = new AgentRegistry();
+  cooperativeRegistry.register(new SettledBackend('established'));
+  cooperativeRegistry.register(cooperative);
+  // No timing assertion, deliberately: the wedged leg has NO other way to
+  // settle, so `discoverAll` resolving at all is the proof. Under the old
+  // unbounded `Promise.all` this line never returns and the suite times out.
+  const cooperativeRows = await cooperativeRegistry.discoverAll();
+  check(
+    'a wedged external host is abandoned at its budget and cannot withhold an established agent',
+    cooperativeRows.map((row) => row.id).join(',') === 'established-session',
+    JSON.stringify(cooperativeRows.map((row) => row.id)),
+  );
+  check(
+    'the abandoned leg is CANCELLED, not merely ignored',
+    cooperative.sawSignal && cooperative.aborted,
+    `sawSignal=${cooperative.sawSignal} aborted=${cooperative.aborted}`,
+  );
+
+  const uncooperative = new WedgedHostBackend('wedged-uncooperative', 25, false);
+  const uncooperativeRegistry = new AgentRegistry();
+  uncooperativeRegistry.register(new SettledBackend('established'));
+  uncooperativeRegistry.register(uncooperative);
+  const uncooperativeRows = await uncooperativeRegistry.discoverAll();
+  check(
+    'a backend that IGNORES its abort still delays nothing',
+    uncooperativeRows.map((row) => row.id).join(',') === 'established-session',
+    JSON.stringify(uncooperativeRows.map((row) => row.id)),
+  );
+
+  // The budget is a ceiling on the WAIT, never a cutoff applied to work that
+  // finished inside it: a healthy host's rows must survive it untouched.
+  class PromptHostBackend extends SettledBackend {
+    readonly discoveryBudgetMs = EXTERNAL_HOST_DISCOVERY_BUDGET_MS;
+  }
+  const healthyRegistry = new AgentRegistry();
+  healthyRegistry.register(new PromptHostBackend('prompt-host'));
+  const healthyRows = await healthyRegistry.discoverAll();
+  check(
+    'a budgeted backend that answers inside its budget keeps every row',
+    healthyRows.map((row) => row.id).join(',') === 'prompt-host-session',
+    JSON.stringify(healthyRows.map((row) => row.id)),
+  );
+
+
+  // A DECLARED budget that is not a usable number must not read as "no budget".
+  // That is the fail-open direction on the one code path whose whole reason to
+  // exist is that the work behind it can hang, so every unusable value falls
+  // back to the standard budget instead.
+  check(
+    'a declared-but-unusable discovery budget falls back to the standard one, never to unbounded',
+    [0, -1, Number.NaN, Number.POSITIVE_INFINITY, -0]
+      .every((value) => effectiveDiscoveryBudgetMs(value) === EXTERNAL_HOST_DISCOVERY_BUDGET_MS),
+    JSON.stringify([0, -1, 'NaN', 'Infinity'].map((value) => effectiveDiscoveryBudgetMs(Number(value)))),
+  );
+  check(
+    'a usable declared budget is honoured exactly, and an absent one still means no budget',
+    effectiveDiscoveryBudgetMs(25) === 25 && effectiveDiscoveryBudgetMs(undefined) === undefined,
+    `${effectiveDiscoveryBudgetMs(25)}/${effectiveDiscoveryBudgetMs(undefined)}`,
+  );
+  {
+    // ...and end to end: a wedged host declaring a broken budget still cannot
+    // hold the roster. Under a fail-open reading this line never returns.
+    const broken = new WedgedHostBackend('wedged-broken-budget', 0, true);
+    const brokenRegistry = new AgentRegistry();
+    brokenRegistry.register(new SettledBackend('established'));
+    brokenRegistry.register(broken);
+    const rows = await brokenRegistry.discoverAll();
+    check(
+      'a wedged host that declares a broken budget is still abandoned, not waited on forever',
+      rows.map((row) => row.id).join(',') === 'established-session' && broken.aborted,
+      JSON.stringify({ rows: rows.map((row) => row.id), aborted: broken.aborted }),
+    );
+  }
+
+  // Which adapters carry the budget, asserted against the shipped ones rather
+  // than restated. External-host adapters need it; the local ones must NOT have
+  // acquired it, because a budget on a filesystem read would be a deadline on
+  // work that cannot hang and can only lose sessions.
+  const { KimiAdapter } = await import('../../../adapters/kimi/src/index.ts');
+  const { DshAdapter } = await import('../../../adapters/dsh/src/index.ts');
+  // Read through the SPI, which is how the registry reads it — and, for the
+  // local four, the only way it typechecks at all: the property is genuinely
+  // absent from those classes rather than present and undefined.
+  const external: AgentBackend[] = [new KimiAdapter(), new DshAdapter()];
+  check(
+    'both external-host adapters declare the shared discovery budget',
+    external.every((adapter) => adapter.discoveryBudgetMs === EXTERNAL_HOST_DISCOVERY_BUDGET_MS),
+    JSON.stringify(external.map((adapter) => [adapter.id, adapter.discoveryBudgetMs])),
+  );
+  const local: AgentBackend[] = [
+    new CodexAdapter(), new ClaudeAdapter(), new PiAdapter(), new OpenCodeAdapter(),
+  ];
+  check(
+    'the local adapters declare no budget, so their discovery is never cut short',
+    local.every((adapter) => adapter.discoveryBudgetMs === undefined),
+    JSON.stringify(local.map((adapter) => [adapter.id, adapter.discoveryBudgetMs])),
   );
 } finally {
   rmSync(root, { recursive: true, force: true });

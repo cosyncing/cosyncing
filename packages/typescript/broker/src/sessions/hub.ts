@@ -125,7 +125,7 @@ export type WireEvent =
   | { kind: 'ack'; ack: 'ack' | 'nack' | 'client-message'; attachTicket?: string; clientMessageId?: string; duplicate?: boolean; pending?: boolean; draftCleared?: boolean; draftRevision?: number }
   | { kind: 'nack'; code: string; message: string; attachTicket?: string; clientMessageId?: string; duplicate?: boolean }
   | { kind: 'error'; message: string }
-  /** Structured ownership arbitration result for a reason-tagged `mode=resume` attach the broker
+  /** Structured ownership arbitration result for a reason-tagged drive attach the broker
    *  DENIED: the socket stays open and continues as an Observe-class attach, and this frame tells
    *  the client the machine reason so it can keep (or surface) its local provenance honestly.
    *  Never sent for a mode-only attach — those keep the legacy error+close behavior. */
@@ -982,6 +982,12 @@ export class Hub {
   private readonly conns = new Map<string, ManagedConn>();
   private readonly pending = new Map<string, PendingAttach>();
 
+  /** In-flight takeover REPLACEMENTS, keyed like `conns`. Separate from
+   *  {@link pending} because those coalesce onto an attach that has no wrapper
+   *  yet, while these run against a key that is already registered — the whole
+   *  point is that the incumbent stays serving until the replacement exists. */
+  private readonly takeovers = new Map<string, Promise<ManagedConn>>();
+
   /** Monotone per-key attach generation, bumped whenever this session's
    *  ownership changes under attaches that are already in flight — terminal
    *  handoff retiring the mutable keys, or an adapter's Drive eligibility being
@@ -1112,6 +1118,128 @@ export class Hub {
     managed.notifyEnded('terminal-handoff-failed');
     managed.detachLocal();
     void managed.conn.close().catch(() => { /* settling a failed handoff */ });
+  }
+
+  /**
+   * Replace a non-driving registered wrapper with a freshly promoted one, for a
+   * user-confirmed takeover.
+   *
+   * TRANSACTIONAL, and in this order for one reason: the incumbent is the
+   * clients' current connection, so it may not be retired until a replacement
+   * actually exists. The adapter attach runs FIRST and may throw — a refused
+   * promotion, a safety stream that never opened, a demotion that crossed the
+   * attempt — and every one of those paths leaves the registry, the clients and
+   * the incumbent exactly as they were. The caller then sees the refusal it
+   * would have seen anyway, on a session that still works read-only.
+   *
+   * Provider-neutral: no adapter is named, and an adapter with no promotion
+   * concept simply returns a connection here like any other attach.
+   */
+  private async replaceForTakeover(
+    tool: string,
+    id: string,
+    key: string,
+    mode: string | undefined,
+    reason: DriveAttachReason,
+    stale: ManagedConn,
+  ): Promise<ManagedConn> {
+    // Concurrent takeovers of one key coalesce onto the first. Without this the
+    // second would see the still-registered incumbent and start a second
+    // promotion against the same session.
+    const inflight = this.takeovers.get(key);
+    if (inflight) return await inflight;
+
+    const startedGeneration = this.generationOf(key);
+    const attempt = (async (): Promise<ManagedConn> => {
+      const backend = this.registry.get(tool);
+      if (!backend) throw new Error(`unknown tool: ${tool}`);
+      const conn = await backend.attach(id, mode as AttachMode | undefined, { reason });
+      // ADMISSION, as a real compare-and-swap. The generation alone is not
+      // enough: it moves only when ownership is deliberately RETIRED, while an
+      // eviction, a fold, another replacement, or an incumbent that BECAME
+      // driving all change what is registered under this key without touching
+      // it. Swapping on a stale premise would overwrite a newer wrapper, or
+      // depose an owner that started driving while this promotion was opening.
+      //
+      // All four must hold: the hub is alive, the incumbent is still the exact
+      // wrapper this promotion set out to replace, it is still not driving, and
+      // ownership has not been retired underneath.
+      const admissible = !this.disposed
+        && this.conns.get(key) === stale
+        && stale.conn.info.control?.drive?.state !== 'driving'
+        && this.generationOf(key) === startedGeneration;
+      if (!admissible) {
+        // Closed WITHOUT committing, which is the rollback: the adapter
+        // discards the ownership this promotion minted provisionally. Were it
+        // committed, a refused admission would leave the session drivable by
+        // the next ORDINARY live attach — one that carries no confirmation
+        // anywhere in its path.
+        await conn.close().catch(() => { /* nothing was ever served from it */ });
+        throw new SupersededAttachError(
+          'This attach began before session ownership changed; attach again for current state.',
+        );
+      }
+      // Built BEFORE the incumbent is touched, and guarded: `createManaged`
+      // subscribes to the connection, and an adapter that throws there would
+      // otherwise strand a live connection whose promotion latch is still held,
+      // leaving that session permanently un-promotable.
+      //
+      // Inline rather than a shared helper, because the helper would have to be
+      // async to await the close — and awaiting it on the SUCCESS path would
+      // open an event-loop turn between the admission check above and the commit
+      // below, which is the exact gap both were written to close. The only await
+      // here is on the failing path, where there is no longer anything to race.
+      let replacement: ManagedConn;
+      try {
+        replacement = this.createManaged(conn);
+      } catch (error) {
+        // AWAITED, not fired and forgotten. The close is what settles the
+        // provisional ownership and releases the promotion latch, so a caller
+        // that sees this attach reject must not be able to start the next one
+        // while the adapter still believes this promotion is in flight.
+        await conn.close().catch(() => { /* already failing; do not mask it */ });
+        throw error;
+      }
+      // COMMIT BEFORE REPLACING. The adapter may still refuse — a demotion can
+      // cross admission — and it answers by returning false. Committing after
+      // the swap would mean acting on that answer too late: the incumbent would
+      // already be gone, and the wrapper now serving the session would own
+      // nothing, so every mutation on it would fail while the read-only
+      // connection the clients had was already discarded.
+      const committed = conn.commitPromotion?.() ?? true;
+      if (!committed) {
+        await replacement.dispose().catch(() => { /* never served */ });
+        throw new OwnershipConflictError(
+          'This session gained another writer while the takeover was opening, so control was not transferred.',
+          'driver-changed',
+        );
+      }
+      // No await from here to the end: the swap, the client migration and the
+      // retirement are one step, so no caller can observe a key with the stale
+      // wrapper gone and the replacement not yet in place.
+      this.unregisterWrapper(key, stale);
+      this.conns.set(key, replacement);
+      const moved = stale.moveClientsTo(replacement);
+      // `detachLocal`, NOT `notifyEnded`: the session did not end, its owner was
+      // replaced. Clients that just migrated must not be told otherwise.
+      stale.detachLocal();
+      void stale.conn.close().catch(() => { /* the replaced generation */ });
+      const resolution = this.reconcileSessionOwner(tool, id, replacement.conn.info);
+      if (moved > 0) {
+        replacement.broadcastSessionProjection(
+          this.withOwnerProjection(replacement.conn.info, resolution.projection),
+        );
+        replacement.refreshAttachedClients();
+      }
+      this.reportEnsureBranch('create', replacement);
+      return replacement;
+    })();
+    this.takeovers.set(key, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (this.takeovers.get(key) === attempt) this.takeovers.delete(key);
+    }
   }
 
   private keyForManaged(target: ManagedConn): string | undefined {
@@ -1950,6 +2078,23 @@ export class Hub {
     this.cancelEvict(key); // a fresh attach cancels any pending disposal
     const existing = this.conns.get(key);
     if (existing) {
+      // A TAKEOVER IS NOT A JOIN. Every other reason asks to reach the owner of
+      // this session; takeover asks for a NEW one, because the user said the
+      // current arrangement is wrong. Returning the registered wrapper here
+      // would hand back the exact connection that lost the session — a demoted
+      // Kimi generation stays registered under `#live` and can never mutate
+      // again — and, worse, would skip the adapter entirely, so the promotion
+      // transaction that makes takeover safe would never run. The client would
+      // see a successful attach and a connection that refuses every write.
+      //
+      // Scoped to a NON-DRIVING wrapper: a driving owner is a real owner, and
+      // taking that over is ownership arbitration, which belongs to the adapter
+      // and the conflict frame, not to a silent replacement here.
+      if (reason === 'takeover'
+        && (mode === 'live' || mode === 'resume')
+        && existing.conn.info.control?.drive?.state !== 'driving') {
+        return await this.replaceForTakeover(tool, id, key, mode, reason, existing);
+      }
       this.attentionLeases.delete(existing);
       this.attentionLeaseDenied.delete(existing);
       this.reportEnsureBranch('reuse', existing);
@@ -1977,14 +2122,51 @@ export class Hub {
       // snapshot and this line is the race. A connection from a retired
       // generation is closed rather than registered — publishing it would
       // reinstate authority the session has since given up.
-      if (this.generationOf(key) !== startedGeneration) {
+      // An INITIAL takeover admits here rather than through the replacement
+      // path, because there was no incumbent to replace — and it needs the same
+      // compare-and-swap. The generation alone does not cover it: the hub can
+      // shut down, or another operation can populate this previously empty key,
+      // without ever moving the generation. Overwriting that owner would depose
+      // it AND commit provisional ownership on top.
+      //
+      // Scoped to a promotion. Widening this to every attach would change
+      // unrelated admission behavior in a round that has no finding about it;
+      // what is new here is the ownership commit, so what is guarded is that.
+      const promoting = reason === 'takeover';
+      const admissible = this.generationOf(key) === startedGeneration
+        && (!promoting || (!this.disposed && !this.conns.has(key)));
+      if (!admissible) {
         this.clearPending(key, entry);
         await conn.close().catch(() => { /* nothing was ever served from it */ });
         throw new SupersededAttachError(
           'This attach began before session ownership changed; attach again for current state.',
         );
       }
-      const mc = this.createManaged(conn);
+      // Guarded, and inline, for the reasons given at the replacement path: a
+      // throwing `subscribe` must not strand a live connection holding an
+      // unsettled promotion latch, and the close that settles it is awaited
+      // before the rejection propagates.
+      let mc: ManagedConn;
+      try {
+        mc = this.createManaged(conn);
+      } catch (error) {
+        this.clearPending(key, entry);
+        await conn.close().catch(() => { /* already failing; do not mask it */ });
+        throw error;
+      }
+      // COMMIT BEFORE EXPOSING. The adapter may refuse — a demotion can cross
+      // admission — and it says so by returning false. Registering first and
+      // reading the answer afterwards would publish a wrapper that owns
+      // nothing, whose every mutation then fails.
+      const committed = conn.commitPromotion?.() ?? true;
+      if (!committed) {
+        this.clearPending(key, entry);
+        await mc.dispose().catch(() => { /* never served */ });
+        throw new OwnershipConflictError(
+          'This session gained another writer while the takeover was opening, so control was not transferred.',
+          'driver-changed',
+        );
+      }
       this.conns.set(key, mc);
       this.clearPending(key, entry);
       this.reconcileSessionOwner(tool, id, mc.conn.info);
@@ -2041,8 +2223,17 @@ export class Hub {
 
     // An attach that started before shutdown may still create and register a ManagedConn. Wait for
     // those constructors to settle before taking the final connection snapshot.
-    await Promise.allSettled([...this.pending.values()].map((entry) => entry.promise));
+    // Takeover replacements are awaited for the same reason and one more: a
+    // parked promotion holds a live adapter connection, and its admission check
+    // refuses once `disposed` is set — so waiting here is what lets it close
+    // that connection (and discard its provisional ownership) before shutdown
+    // reports itself finished.
+    await Promise.allSettled([
+      ...[...this.pending.values()].map((entry) => entry.promise),
+      ...this.takeovers.values(),
+    ]);
     this.pending.clear();
+    this.takeovers.clear();
 
     const managed = [...new Set(this.conns.values())];
     this.conns.clear();

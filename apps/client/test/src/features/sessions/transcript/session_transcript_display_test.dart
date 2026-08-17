@@ -282,6 +282,111 @@ void main() {
       expectNoResolutionRows(ToolDisplayMode.finalMessagesOnly);
     });
   });
+  group('internal bookkeeping', () {
+    test('metadata updates never become transcript rows', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('user-message', {'key': 'u1', 'text': 'hi'}),
+          _message('metadata-update', {
+            'key': 'sessionUsage',
+            'value': 'inputTokens: 11191; outputTokens: 107',
+          }),
+          _message('metadata-update', {
+            'key': 'activeTime',
+            'value': 'activeMs: 292224',
+          }),
+          _message('model-output', {'text': 'hello', 'final': true}),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      // The user prompt and the answer; neither bookkeeping frame.
+      expect(entries, hasLength(2));
+      expect(
+        entries.whereType<MessageTranscriptDisplayEntry>().map(
+          (entry) => entry.message.type,
+        ),
+        isNot(contains(AgentMessageType.metadataUpdate)),
+      );
+    });
+
+    test('internal launch and host session-event records are withheld', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('event', {
+            'name': 'claude.init',
+            'payload': {'model': 'claude-haiku-4-5'},
+          }),
+          _message('event', {
+            'name': 'dsh.session-event',
+            'payload': {'eventType': 'run/started', 'seq': 3},
+          }),
+          _message('user-message', {'key': 'u1', 'text': 'hi'}),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(entries, hasLength(1));
+    });
+
+    test('a transcript recorded under the legacy init name stays quiet', () {
+      // Sessions captured before the name was namespaced still replay the bare
+      // form. Dropping the legacy entry would leave old transcripts noisier
+      // than new ones for the very same frame.
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('event', {
+            'name': 'init',
+            'payload': {'model': 'claude-haiku-4-5'},
+          }),
+          _message('user-message', {'key': 'u1', 'text': 'hi'}),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(entries, hasLength(1));
+    });
+
+    test('a meaningful event still renders — suppression is by exact name', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('event', {
+            'name': 'session.forked',
+            'payload': {'from': 's-1'},
+          }),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(entries, hasLength(1));
+    });
+
+    test('errors and notices are never suppressed', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('notice', {'message': 'the terminal took over'}),
+          _message('error', {'message': 'the session failed'}),
+          _message('metadata-update', {'key': 'sessionUsage', 'value': 'x'}),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(entries, hasLength(2));
+    });
+
+    test('an unnamed event is kept, so an unknown frame cannot vanish', () {
+      final entries = buildSessionTranscriptDisplayEntries(
+        messages: [
+          _message('event', {
+            'payload': {'anything': 1},
+          }),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(entries, hasLength(1));
+    });
+  });
 }
 
 AgentMessage _toolCall(String callId, ToolDisplayClass displayClass) =>

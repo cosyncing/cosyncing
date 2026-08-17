@@ -2104,12 +2104,14 @@ class _BlockingHistoryPageConnection
     int? draftRevision,
     String? draftUpdateId,
     List<PromptFileAttachment> files = const [],
+    String? permissionMode,
   }) => connection.sendPrompt(
     text,
     model: model,
     clientMessageId: clientMessageId,
     draftRevision: draftRevision,
     draftUpdateId: draftUpdateId,
+    permissionMode: permissionMode,
     files: files,
   );
 
