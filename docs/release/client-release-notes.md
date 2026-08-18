@@ -3,18 +3,31 @@
 These are broker-independent Flutter clients. Install and run the broker first,
 then use `cosy pair` to authorize the client.
 
-## What's new in 0.3.0
+## What's new in 0.4.0
 
-- Secondary Codex and Pi clients can join the broker's current Drive owner
-  without starting another native Resume.
-- Session ownership is kept separate from each client's mutation authority;
-  stale ownership revisions and concurrent handoffs fail closed.
-- Background Observe connections remain read-only. Claude Code's secondary-client
-  behavior and OpenCode's shared-live behavior are unchanged.
-- Setup, repair, doctor, and uninstall share one receipt-based Pi bridge ownership
-  decision. A stale bridge updates automatically only when its receipt and current
-  contents prove that cosyncing owns it; user edits and unsafe targets remain
-  protected.
+- Two more agents appear alongside Claude Code, Codex, OpenCode, and Pi. Both
+  are provisional, and both need a broker running 0.4.0.
+- **Kimi Code**: every session on the local `kimi web` server is discoverable and
+  observable, whoever started it. Sessions cosyncing created are drivable —
+  prompts, approvals, question replies, interruption, model selection — a
+  session it did not create can be taken over explicitly, and Drive can be handed
+  back to the terminal. File and image input are not implemented yet.
+- **DeepSeek Harness**: session discovery, history, and shared foreground
+  control against a `dsh web` host, with model and reasoning-effort selection,
+  permission presets, the host's own commands, and image attachments. General
+  file attachments are unavailable because the host accepts image content only.
+- Neither host needs a terminal left open. An installed broker service starts,
+  supervises, and stops a host it owns; one you started yourself is never
+  stopped, replaced, or reconfigured.
+- The client no longer offers a control the session cannot grant, and a session
+  whose attach mode it cannot decode stays read-only instead of arming Drive on
+  a guess. The broker enforces that rather than trusting the client.
+
+## Known issue
+
+Codex transcript events can still appear slightly out of order in some
+multi-client sessions. This release does not claim to resolve that separate
+ordering and compare-and-swap investigation.
 
 ## Downloads
 
