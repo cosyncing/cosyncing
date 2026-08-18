@@ -1,6 +1,9 @@
 # Adapter support and evidence
 
-The broker presents one protocol across Claude Code, Codex, OpenCode, and Pi.
+The broker presents one protocol across Claude Code, Codex, OpenCode, Pi, Kimi
+Code, and DeepSeek Harness. The generated matrix below covers the four whose
+claims carry the required evidence; Kimi Code and DeepSeek Harness are
+provisional and are described under [experimental adapters](#experimental-adapters).
 Support claims are generated from `support-matrix-claims.ts` and must have the
 evidence level required by `trace-manifest.ts`.
 
@@ -48,6 +51,17 @@ upstream agent exposes every feature. A partial or unavailable cell must remain
 explicit rather than being inferred from tool names in client code.
 
 ## Experimental adapters
+
+Kimi Code is not yet part of the generated stable support matrix. Its source
+adapter is registered by default and served to any client that can decode its
+integration kind. It connects to the local server `kimi web` starts, which
+cosyncing never installs, and currently covers discovery and read-only observe
+for every session on that server, plus Drive — prompts, approvals, question
+replies, interruption, and model selection — for the sessions cosyncing created,
+explicit takeover for the ones it did not, and returning Drive to the terminal.
+Native file and image input, agent and mode switching, and the physical
+acceptance its claims will rest on remain follow-up work. See
+[Kimi Code setup](../supported_agents/kimi.md).
 
 DeepSeek Harness is not yet part of the generated stable support matrix. Its
 source adapter is registered by default and served to any client that can decode
