@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "cd56bd2a9d7078fd555ff2e2f14ace6dad1e33e0",
+  "acceptedBase": "25d51a2b9d67be8eab3dffe14bbf756aa33d0738",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -31,6 +31,7 @@
     "broker.drive-restore",
     "broker.dsh-attach-priming",
     "broker.dsh-attachments",
+    "broker.dsh-create-generation-race",
     "broker.dsh-diagnosis",
     "broker.dsh-drive",
     "broker.dsh-mapping",
@@ -117,7 +118,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:01c3e14440867c348aac79fc627c58b5ff9981749c4d6c704aecc233a0cc5560"
+      "fingerprint": "sha256:655ba76157a10d715815b3c84f8d0d6aa5a0b5dc0bef32fcd4c872f8cbd5da55"
     },
     {
       "id": "capabilities",
@@ -360,6 +361,10 @@
     {
       "id": "dsh-attachments",
       "fingerprint": "sha256:757c3d2f8f9690724e0dd7acb05f2067a05182956e054e85877583cdb9ceab76"
+    },
+    {
+      "id": "dsh-create-generation-race",
+      "fingerprint": "sha256:8e22c9258086ab68840e758aff7211064839fa5405d489e919bf9f2f8174c6c4"
     },
     {
       "id": "dsh-diagnostics",

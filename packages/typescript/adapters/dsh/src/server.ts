@@ -349,9 +349,39 @@ export interface DshRpcClientOptions {
   clearTimeout?: (handle: unknown) => void;
 }
 
+/**
+ * Why a call does or does not die when a downlink generation ends.
+ *
+ * An enum rather than a boolean because the two survival reasons are NOT the
+ * same claim, and collapsing them would let a future caller inherit an argument
+ * that does not apply to it:
+ *
+ * - `epoch-bound` — the answer describes session state read under this
+ *   generation. Mixing it with a re-baselined picture is the hazard
+ *   {@link DshRpcClient.abortInFlight} exists to prevent, so it dies. The
+ *   DEFAULT, because a call whose category nobody has thought about is safest
+ *   re-issued.
+ * - `host-scoped` — the answer describes the HOST (is it alive, what does it
+ *   serve, which workspaces exist). A generation rotating underneath it does
+ *   not make it wrong, and aborting it turns an unrelated rotation into a
+ *   failure of whatever asked.
+ * - `non-idempotent-write` — the outcome is already being decided upstream and
+ *   aborting locally cannot undo it. Abandoning the answer does not cancel the
+ *   write; it only loses the receipt, and a caller that retries on the
+ *   resulting "retryable" failure duplicates the effect.
+ *
+ * Note the asymmetry: `host-scoped` survives because abandoning it is
+ * needlessly destructive, `non-idempotent-write` because abandoning it is
+ * UNSAFE. "Abort by default" is the right default for reads and is not a
+ * general safety argument for writes.
+ */
+export type DshGenerationLossPolicy = 'epoch-bound' | 'host-scoped' | 'non-idempotent-write';
+
 interface InFlight {
   controller: AbortController;
   cause?: 'timeout' | 'generation-lost';
+  /** Absent means {@link DshGenerationLossPolicy} `epoch-bound`. */
+  generationLoss?: DshGenerationLossPolicy;
 }
 
 /**
@@ -389,15 +419,26 @@ export class DshRpcClient {
   }
 
   /**
-   * Fail every in-flight call with a RETRYABLE `generation-lost`.
+   * Fail every EPOCH-BOUND in-flight call with a RETRYABLE `generation-lost`.
    *
    * A downlink generation ending means the client's picture of the host is
    * stale, and a unary answer that arrives after that point describes a session
    * state nothing has re-baselined yet. Callers get a typed retryable failure
    * and re-issue after the re-baseline instead of mixing epochs.
+   *
+   * That reasoning holds only for `epoch-bound` answers. A liveness probe or a
+   * workspace listing describes the host, not the epoch, and aborting one turns
+   * an unrelated generation rotation into a failure of whatever issued it —
+   * which is how a session create landing next to a live attach became
+   * "DeepSeek Harness is temporarily unavailable", intermittently and with no
+   * recorded cause. A non-idempotent write survives for a different and stronger
+   * reason: the abort cannot reach the host, so dropping the answer loses the
+   * receipt for an effect that already happened. See
+   * {@link DshGenerationLossPolicy}.
    */
   abortInFlight(): void {
     for (const entry of this.inFlight) {
+      if (entry.generationLoss && entry.generationLoss !== 'epoch-bound') continue;
       entry.cause = 'generation-lost';
       entry.controller.abort();
     }
@@ -412,11 +453,19 @@ export class DshRpcClient {
    * down with it — the discovery budget is the case it exists for. It reports
    * as a RETRYABLE `timeout`, which is what it is: the caller's deadline rather
    * than the transport's, expiring on a host that had not answered either way.
+   *
+   * `options.generationLoss` declares what a downlink generation ending means
+   * for THIS call; see {@link DshGenerationLossPolicy}. Omitted means
+   * `epoch-bound`, deliberately: an unclassified call is safest re-issued.
    */
   async call<T>(
     method: DshRpcMethod,
     payload: unknown,
-    options?: { onRpcId?: (rpcId: string) => void; signal?: AbortSignal },
+    options?: {
+      onRpcId?: (rpcId: string) => void;
+      signal?: AbortSignal;
+      generationLoss?: DshGenerationLossPolicy;
+    },
   ): Promise<DshOutcome<T>> {
     if (!isDshRpcMethod(method)) {
       return {
@@ -458,12 +507,16 @@ export class DshRpcClient {
   private async dispatch<T>(
     method: string,
     payload: unknown,
-    options?: { onRpcId?: (rpcId: string) => void; signal?: AbortSignal },
+    options?: {
+      onRpcId?: (rpcId: string) => void;
+      signal?: AbortSignal;
+      generationLoss?: DshGenerationLossPolicy;
+    },
   ): Promise<DshOutcome<T>> {
     const rpcId = this.newRpcId();
     options?.onRpcId?.(rpcId);
     const body = JSON.stringify({ type: 'client-request', rpcId, method, payload });
-    const raw = await this.post(method, body, options?.signal);
+    const raw = await this.post(method, body, options?.signal, options?.generationLoss);
     if (!raw.ok) return raw;
 
     let parsed: unknown;
@@ -546,7 +599,12 @@ export class DshRpcClient {
    * The single network operation. `POST` and the JSON media type are literals:
    * the host answers 415 to anything else, and no caller may choose a verb.
    */
-  private async post(route: string, body: string, cancel?: AbortSignal): Promise<DshOutcome<string>> {
+  private async post(
+    route: string,
+    body: string,
+    cancel?: AbortSignal,
+    generationLoss?: DshGenerationLossPolicy,
+  ): Promise<DshOutcome<string>> {
     let url: string;
     try {
       url = `${this.baseUrl}${dshApiPath(route)}`;
@@ -561,7 +619,10 @@ export class DshRpcClient {
     if (cancel?.aborted) {
       return { ok: false, failure: { kind: 'transport', reason: 'timeout', retryable: true } };
     }
-    const entry: InFlight = { controller: new AbortController() };
+    const entry: InFlight = {
+      controller: new AbortController(),
+      ...(generationLoss ? { generationLoss } : {}),
+    };
     this.inFlight.add(entry);
     const onCancel = () => {
       entry.cause ??= 'timeout';

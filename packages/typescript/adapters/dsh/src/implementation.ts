@@ -27,6 +27,7 @@
 import {
   CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE,
   EXTERNAL_HOST_DISCOVERY_BUDGET_MS,
+  PRODUCT_IDENTITY,
   type AgentBackend,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
@@ -55,6 +56,8 @@ import {
   type DshHostDescribe,
   type DshSocketFactory,
 } from './server.ts';
+
+const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 
 /** Mux frame types that address one session and must reach its connection. */
 const SESSION_MUX_FRAMES: readonly string[] = Object.freeze([
@@ -190,7 +193,7 @@ export class DshHostLink {
         onOpen: (generation) => {
           void this.verify(generation);
         },
-        onLost: () => this.onGenerationLost(),
+        onLost: (generation, reason) => this.onGenerationLost(generation, reason),
         onDiagnostic: (diagnostic) => {
           // Contained: an undecodable frame or a socket hiccup is recorded and
           // the stream continues. Only a lost socket or `stream/error` ends the
@@ -279,12 +282,22 @@ export class DshHostLink {
     for (const frame of buffered) this.route(frame);
   }
 
-  private onGenerationLost(): void {
+  private onGenerationLost(generation: number, reason: string): void {
     this.ready = false;
     this.preVerificationFrames = [];
     this.preVerificationBytes = 0;
+    // Said out loud because it is otherwise invisible. The diagnostics buffer
+    // below is in-memory and surfaced nowhere, so a rotation that took an
+    // unrelated call down with it left no trace to correlate against — which is
+    // what made the intermittent create failure a code read rather than a log
+    // read. The reason is our own literal and the origin carries no credential.
+    console.warn(
+      `${LOG_PREFIX} dsh downlink generation ${generation} ended (${reason}); `
+      + `re-baselining against ${this.rpc.origin}`,
+    );
     // A unary answer arriving after the generation ended describes a state
-    // nothing has re-baselined, so in-flight calls fail retryable instead.
+    // nothing has re-baselined, so epoch-bound in-flight calls fail retryable
+    // instead. Host-scoped calls opt out; see DshRpcClient.abortInFlight.
     this.rpc.abortInFlight();
     for (const connection of this.connections.values()) connection.onGenerationLost();
   }
@@ -554,7 +567,12 @@ export class DshAdapter implements AgentBackend {
     } catch {
       return false; // an unusable configured base URL is "not available", not a crash
     }
-    const outcome = await rpc.call<unknown>('host.describe', {}, options?.signal ? { signal: options.signal } : {});
+    // Host-scoped, so a downlink generation rotating mid-probe must not answer
+    // "unavailable" for a host that is answering fine.
+    const outcome = await rpc.call<unknown>('host.describe', {}, {
+      generationLoss: 'host-scoped',
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
     if (!outcome.ok) return false;
     return verifyDshHostDescribe(outcome.value).ok;
   }
@@ -704,7 +722,7 @@ export class DshAdapter implements AgentBackend {
    * itself rather than trusting an earlier sweep.
    */
   private async requireVerifiedHost(): Promise<void> {
-    const outcome = await this.rpc().call<unknown>('host.describe', {});
+    const outcome = await this.rpc().call<unknown>('host.describe', {}, { generationLoss: 'host-scoped' });
     if (!outcome.ok || !verifyDshHostDescribe(outcome.value).ok) {
       throw new Error('the DeepSeek Harness host did not pass verification; the write was not issued');
     }
@@ -776,7 +794,11 @@ export class DshAdapter implements AgentBackend {
   }
 
   private async workspaces(): Promise<Array<{ workspaceId: string; path: string; title: string }>> {
-    const outcome = await this.rpc().call<{ items?: unknown }>('workspace.list', {});
+    // A workspace registry is host state, not session state, so it outlives an
+    // epoch the same way the liveness probe does.
+    const outcome = await this.rpc().call<{ items?: unknown }>('workspace.list', {}, {
+      generationLoss: 'host-scoped',
+    });
     if (!outcome.ok) return [];
     const items = Array.isArray(outcome.value?.items) ? outcome.value.items : [];
     const workspaces: Array<{ workspaceId: string; path: string; title: string }> = [];
