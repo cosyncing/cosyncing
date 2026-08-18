@@ -40,11 +40,11 @@ here fails open, and the thing it would fail open into is opening arbitrary
 model-authored paths on the user's machine.
 
 Local file references are therefore deliberately inert for now. Making them
-useful is what [R-01](../project/roadmap.md) exists to do properly — resolved
-against the broker-owned workspace through its jailed read-only file API, with
-traversal and symlink escape rejected there rather than re-litigated in the
-client. R-01 likewise rejects host-local `file:` URLs. Until it lands, such
-references stay selectable, copyable text.
+useful is what [open workspace file references](../project/roadmap.md) exists to
+do properly — resolved against the broker-owned workspace through its jailed
+read-only file API, with traversal and symlink escape rejected there rather than
+re-litigated in the client. That work likewise rejects host-local `file:` URLs.
+Until it lands, such references stay selectable, copyable text.
 
 ## Session telemetry
 

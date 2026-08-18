@@ -1,151 +1,101 @@
 # Roadmap
 
-Last updated: 2026-08-14.
+This page describes where cosyncing is going. It lists open product work, not a
+release schedule. Priorities may change as real-world testing exposes more
+important problems. Shipped work belongs in the [changelog](../CHANGELOG.md).
 
-This roadmap contains open work only. Completed predecessor milestones are not
-repeated as future work. Each item must name an owner, an activation condition,
-and acceptance evidence before implementation starts. The maintainers' internal
-roadmap source audit records how predecessor plans and code TODO markers were
-dispositioned; it is kept outside the public tree.
+## Now
 
-## Now: public readiness and first release proof
+### Make releases and upgrades dependable
 
-- Resolve and record the compiled Bun runtime distribution obligations; keep the
-  binary-release legal gate closed until approval.
-- Provision protected release environments and signing material only after that
-  approval. Keep all private key material out of the repository and PR jobs.
-- Run broker prerelease, the real app-triggered upgrade/unhealthy-rollback
-  exercise, and stable promotion from hosted infrastructure.
-- Run packaged platform acceptance for every client and broker host included in
-  release claims. An unavailable capability must remain unclaimed.
+- Keep installation and package-manager updates predictable.
+- Reduce CI flakes without weakening contract, security, or release checks.
+- Test changes that affect installation or platform behavior on packaged
+  clients and supported broker hosts.
 
-## Next: first post-consolidation product wave
+### Finish Kimi Code and DeepSeek Harness support
 
-### R-01: clickable workspace file references in the Flutter client
+Both shipped as provisional integrations. What remains before either becomes a
+full support claim:
 
-Make references such as `lib/example.dart:42:7` useful from session transcripts
-without turning arbitrary model text into authority.
+- Add Kimi file and image input.
+- Add the DeepSeek Harness background subscription and its remaining
+  presentation work. Non-image file input stays unavailable while the host
+  accepts image content only.
+- Complete the physical acceptance each one needs on the platforms its claims
+  depend on.
+- Keep unsupported functions visibly unavailable instead of approximating them,
+  and leave the behavior and compatibility of existing adapters unchanged.
 
-Scope:
+## Next
 
-- Render explicit paths from typed filesystem-edit and file-artifact messages as
-  links. Add conservative recognition of workspace-relative `path:line:column`
-  references in model and tool text.
-- Activate explicit Markdown file references that pair a `friendly label` with
-  a `workspace/path` target without hiding the target location.
-  Pre-release transcript rendering keeps these targets visible and copyable but
-  deliberately non-actionable; R-01 owns the later click/open behavior.
-- Resolve every link against the selected session's broker-owned workspace and
-  existing read-only file API. Opening a link selects the Files surface and the
-  referenced file or preview; line and column are hints, not separate authority.
-- Keep the behavior agent-neutral. Renderers and controllers must not branch on
-  Claude, Codex, Kimi, OpenCode, Pi, or a tool command name.
-- Reject traversal, symlink escape, unsupported schemes, arbitrary external
-  URLs, and host-local `file:` URLs. An unresolved reference remains selectable
-  and copyable text.
-- Support keyboard, pointer, touch, and screen-reader activation across Flutter
-  web and native clients. The retained PoC UI is not a parity gate.
+### Open workspace file references
 
-Acceptance:
+- Recognize safe workspace-relative references such as
+  `lib/example.dart:42:7` in session transcripts.
+- Open them in the current session's read-only Files surface.
+- Reject traversal, symlink escape, unsupported URLs, and host-local file URLs.
+- Support keyboard, pointer, touch, and screen-reader use on web and native
+  clients.
 
-- Parser tests cover relative paths, spaces, punctuation, line/column suffixes,
-  Windows-looking text, URLs, Markdown label/target pairs, traversal attempts,
-  code fences, and false positives.
-- Widget/controller tests prove typed and recognized links open only the current
-  session's jailed read-only file surface and preserve ordinary text selection.
-- Broker filesystem tests remain the authority for path containment and symlink
-  rejection; the client does not duplicate or weaken that policy.
-- A real-session audit covers at least two registered adapters and one missing,
-  renamed, or denied file.
+### Improve the everyday session experience
 
-Owner: client and protocol maintainers. This can start after the public-release
-baseline is stable; it does not require Kimi support.
+- Make session health, control ownership, pending questions, and permissions
+  easier to understand.
+- Improve usage, runtime, and context reporting where an agent exposes reliable
+  evidence.
+- Continue real-session testing across agents, clients, and desktop form
+  factors.
+- Keep shared behavior agent-neutral; provider-specific code stays inside its
+  adapter.
 
-### R-02: Kimi Code adapter support
+## Later
 
-Add Kimi as a fifth adapter through the same protocol and evidence system used
-by the four registered adapters. Historical research is a starting point, not
-an API guarantee: re-audit the current Kimi CLI, persisted session format, and
-supported structured control interface before selecting a transport.
+### Easier connections and broader platform support
 
-Scope:
+- Support more than one broker in a client with clear identity and credential
+  separation.
+- Explore automatic discovery and relay/NAT traversal without weakening pairing
+  security.
+- Add native Windows broker hosting when packaging and service integration can
+  be supported together.
+- Evaluate tray operation, background tasks, notifications, and remote wake per
+  platform before advertising them.
 
-- Implement read-only discovery, bounded history, stable identity, and live
-  observation from canonical Kimi evidence first.
-- Add create/resume/Drive only through a currently supported structured
-  interface. Do not claim true live terminal coexistence without multi-client
-  evidence from the current upstream runtime.
-- Map messages, thinking, tool calls/results, edits, usage, status, permissions,
-  questions, and files into existing canonical protocol families. Unsupported
-  capabilities remain explicit.
-- Keep Kimi credentials and session stores broker-local. Setup, doctor, repair,
-  upgrade, and uninstall must never expose or rewrite upstream credentials
-  without an approved, receipt-owned operation.
-- Add an adapter capability manifest, support-matrix column, conformance tests,
-  deterministic fixtures, and opt-in real-runtime trajectories. No Kimi-specific
-  branch may enter the Flutter client.
+### Richer interaction
 
-Acceptance:
+- Add interactive artifacts and agent-generated UI only with a defined sandbox
+  and authority model.
+- Consider PTY/SSH access and remote workspace mutation only after authorization,
+  containment, audit, and recovery are designed.
+- Improve long-running transfers, retention, cleanup, and interruption recovery.
 
-- Discovery/history/reattach and stable replay pass deterministic and real-store
-  evidence lanes.
-- Every advertised capability has the required evidence level; unavailable
-  functions render honest read-only or unsupported states.
-- File-edit references feed the same typed filesystem surfaces used by R-01,
-  while image or file input is enabled only when current runtime evidence proves
-  it.
-- Existing four-adapter conformance, broker aggregate, contract drift, and
-  Flutter suites remain green.
+### More agents and native capabilities
 
-Owner: adapter and protocol maintainers. R-02 can start after the public-release
-baseline is stable and a maintainer supplies a clean current-runtime evidence
-scope. It is the promoted Kimi slice of the former generic additional-adapter
-item; other adapters remain D-06.
+- Add more adapters when their current runtime offers stable interfaces and the
+  required conformance evidence can be maintained.
+- Expand existing adapters only when upstream evidence supports the claim—for
+  example, richer Claude synchronization, native planning channels, or native
+  usage limits.
 
-## Later and decision-gated work
+### Compiled native broker distribution
 
-| Item | Owner | Activation condition |
-|---|---|---|
-| D-01: updater expansion beyond explicit signed stable/pinned-candidate actions | product and security/release maintainers | Silent automation, extra channels, fleet rollout, or remote policy is proposed and receives a separate threat review |
-| D-02: automatic discovery, relay/NAT traversal, and credential provisioning | product and transport/security maintainers | Zero-configuration remote connection enters supported scope |
-| D-03: interactive artifact execution | client and security maintainers | Interaction beyond display-only trusted content is required and sandbox policy is approved |
-| D-04: production remote wake | client/platform and privacy maintainers | Remote wake becomes an advertised capability and deployment ownership exists |
-| D-05: PTY/SSH and remote workspace mutation | broker/security and client maintainers | Authorization, containment, audit, and recovery models are approved |
-| D-06: additional adapters other than Kimi | adapter maintainer | A launch requirement or community proposal includes conformance and trajectory evidence budget |
-| D-08: health fallback and detail UI enhancements | broker and client maintainers | The core compatibility/health contract is stable |
-| D-09: task-list canonicalization, universal session surfaces, and timestamp/runtime semantics, including the OpenCode context-meter, Pi context-stat, and Pi live-output telemetry follow-ups | protocol, adapter, and client maintainers | A verified cross-adapter inconsistency affects a supported claim |
-| D-10: quota interruption continuation | broker and client maintainers | Product semantics and adapter support are approved |
-| D-11: tray/background desktop operation | client/platform maintainer | A supported platform requires always-on behavior |
-| D-12: private hardware/evidence automation, including the deferred real-Pi immediate-typing and OpenCode no-window user-timing trace lanes | release/evidence maintainer | Repeat cost justifies it; it never becomes required public CI |
-| D-13: real-session dogfood and rich Session Detail residuals, including final terminal, permission/question, request/transfer, dense desktop, goal-confirmation, and optional composer-prediction UX; the natural-language pending-input promotion decision is taken together with composer prediction | client and product/design maintainers | Before claiming a polished interactive terminal/session experience or when dogfood finds a release blocker |
-| D-14: packaged platform evidence for voice, notifications, camera, secure storage, file pickers, WebViews, lifecycle, and background tasks | client/platform maintainer | Before claiming the corresponding capability on a shipped platform |
-| D-15: transcript, checkpoint, protocol-journal, migration, crash, and large-session operational evidence | client, broker, and storage maintainers | Before expanding durability claims beyond deterministic bounded tests |
-| D-16: transfer completion ambiguity, background uploads, token-at-rest hardening, retention, expiry, orphan cleanup, and quota policy | broker, client, and security maintainers | Before promising automatic restart/background transfer or deletion behavior |
-| D-17: paired-peer least privilege, roster/revoke/rotate UI, envelope replay defense, and recovery/migration | protocol and security maintainers | Before expanding peer access or encrypted-session claims |
-| D-18: broker host expansion to native Windows | broker/release maintainer | Packaging, service integration, and clean-host evidence are funded and pass together; Linux and Apple Silicon macOS are already supported |
-| D-19: Claude answer-only/true-sync expansion | Claude adapter and security maintainers | A packaged, authenticated command boundary and current-runtime trajectory evidence exist |
-| D-20: macOS/Windows terminal-presence detection and other adapter-host parity | adapter/platform maintainers | The relevant broker host becomes supported |
-| D-21: agent-generated UI beyond display-only artifacts | protocol, client, and security maintainers | A stable structured UI contract and sandboxed interaction authority are approved |
-| D-23: candidate-manifest app UI | release maintainer | Protected prerelease acceptance workflow needs it |
-| D-24: published-candidate app-triggered upgrade/unhealthy-rollback evidence | release maintainer | Credential-free hosted topology is available; required before every compiled broker release |
-| D-25: native agent usage-window parity beyond the packaged, consented Tokdash integration, including Claude/Codex five-hour and weekly limits | broker and client maintainers | A supported adapter exposes stable native quota evidence that can be represented without weakening the existing Tokdash path |
-| D-26: native plan-channel adoption beyond the shipped semantic fallback, starting with Codex `plan\|default` collaboration mode and any real Pi plan channel | adapter and protocol maintainers | Current-runtime evidence proves a native plan approve/revise/exit channel for that agent |
-| D-27: sealed-client follow-ups: terminal fresh-state parity for swipe and tap, goal/command lookup consolidation, shared route constants, unread-badge helper deduplication, real-broker fork-boundary confirmation, and live roster timing | client maintainers | The owning module is next changed; a correctness or advertised-capability gap escalates into the matching release blocker |
-| D-28: multiple concurrent brokers in one client, reframing pairing from a first-run gate into an ongoing broker-add surface: a client served by broker A pairs to broker B and switches between them, with per-broker identity, credential isolation, session-roster attribution, and a defined story for name collisions and offline brokers | client, protocol, and security maintainers | More than one broker must be reachable from a single client, or the pairing surface is redesigned; do not weaken the one-QR-one-device peer model to satisfy it |
+The npm package remains the supported broker distribution. Compiled native
+broker releases stay blocked until legal review, signing, protected release
+infrastructure, rollback testing, and clean-host platform acceptance are all in
+place.
 
-## Audited branch and plan dispositions
+## How roadmap work is accepted
 
-| Historical slice | Public disposition |
-|---|---|
-| Design-system and localization experiments | Not imported. The consolidated design system and localization files are canonical; remaining product ideas enter D-13 through a new proposal. |
-| Session-workspace routing experiments | Not imported. Current typed routing and workspace behavior are canonical; future changes are D-13 work. |
-| Flutter version-file repair | Closed: the consolidated version file is valid and CI pins the same Flutter version explicitly. |
-| Personal form-factor captures and historical status branches | Private evidence/history only; no source or captures imported. |
+Roadmap items ship only when:
 
-The broker root redirect, remote transcript-export default-deny policy,
-multi-machine roster identity, durable transcript/checkpoint foundation,
-scheduled-send client adoption, and BPC13 client compatibility/update adoption
-are implemented decisions rather than open roadmap items. The retained PoC UI
-stays non-production under `apps/poc-ui`. Older phased plans, agent breakdowns,
-review sweeps, private implementation logs, and raw roadmap worktrees were not
-bulk-imported; their still-open outcomes are mapped in the roadmap source audit.
+- advertised capabilities match tested behavior;
+- unavailable or unsafe behavior fails closed;
+- credentials and local agent data remain broker-local;
+- protocol, adapter, client, and upgrade compatibility checks pass; and
+- public claims are backed by deterministic tests and the necessary physical
+  platform evidence.
+
+Detailed implementation plans and machine-specific evidence are maintained
+privately. Public support claims are tracked in the
+[adapter support documentation](../protocol/adapter-support.md).
