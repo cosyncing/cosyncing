@@ -603,9 +603,20 @@ export class DshDriver {
 
   /** Create a session inside an existing workspace. Returns the host-issued id. */
   async create(workspaceId: string): Promise<{ sessionId: string; agentPreset?: string }> {
+    // Aborting a create mid-flight does not un-create it upstream: the caller
+    // would see a retryable failure for a session that exists and retry into a
+    // duplicate. A generation rotation is not a reason to abandon a write whose
+    // outcome is already decided on the host.
+    //
+    // This removes generation loss as an ARTIFICIAL cause of an unknown outcome.
+    // It does not remove every one: the unary deadline still applies, so a host
+    // that creates the session and answers after it leaves the same ambiguity by
+    // a different route. Resolving that needs an outcome-unknown result the
+    // caller can reconcile against session.list, not a longer timeout.
     const outcome = await this.rpc.call<{ sessionId?: unknown; agentPreset?: unknown }>(
       'session.create',
       { workspaceId },
+      { generationLoss: 'non-idempotent-write' },
     );
     if (!outcome.ok) throw new DshDriveError('session create', outcome.failure);
     const sessionId = typeof outcome.value?.sessionId === 'string' ? outcome.value.sessionId : '';
