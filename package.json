@@ -99,6 +99,7 @@
     "test:broker-draft-sync-wire": "bun run packages/typescript/broker/test/broker/test-draft-sync.ts",
     "test:broker-draft-two-client-wire": "bun run packages/typescript/broker/test/broker/test-draft-two-client-wire.ts",
     "test:broker-kimi-cross-client-join": "bun run packages/typescript/broker/test/broker/test-kimi-cross-client-join.ts",
+    "test:broker-claude-cross-client-join": "bun run packages/typescript/broker/test/broker/test-claude-cross-client-join.ts",
     "test:broker-protocol-journal": "bun run packages/typescript/broker/test/broker/test-protocol-journal.ts",
     "test:broker-history-page-cache": "bun run packages/typescript/broker/test/broker/test-history-page-cache.ts",
     "test:broker-history-paging": "bun run packages/typescript/broker/test/broker/test-history-page-wire.ts",

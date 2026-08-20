@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "4f8bc1640f36123057363b6c4fb42de75df6e91e",
+  "acceptedBase": "7405b98a7bef843f1592eba7a5a10259c09790fe",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -8,6 +8,7 @@
     "broker.artifact-session-isolation",
     "broker.attach-identity",
     "broker.capabilities",
+    "broker.claude-cross-client-join",
     "broker.claude-driven-queue",
     "broker.claude-hooks",
     "broker.claude-hooks-surface",
@@ -120,7 +121,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:eeec72d3beb3c30e4937e265457628a2570d31e90f421b0eecdc80f29c2bf0b2"
+      "fingerprint": "sha256:8e7f8eaee287ab915dfc97ca43cf0ecad28aaf684ff6edd0815213c872c8def0"
     },
     {
       "id": "capabilities",
@@ -275,6 +276,10 @@
     {
       "id": "broker-update-contract",
       "fingerprint": "sha256:6b23aeef25478db8c4a45c104174bdfa43d05b8e45c6633cc610a405b4b4eef1"
+    },
+    {
+      "id": "claude-cross-client-join",
+      "fingerprint": "sha256:0586336ff9c5d04c37c0920f17cdc680537e21bd7782164ec765a4be929a31f4"
     },
     {
       "id": "claude-driven-queue",

@@ -89,6 +89,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   a page reload: the adapter publishes the pending row itself and clears its
   "queued" badge in place once the transcript delivers it. If Claude cannot be
   launched, the send fails instead of leaving the session stuck on Running.
+- A reloaded page that can no longer prove it was driving a Claude session
+  (cleared browser storage, an expired take-over lease, a different device)
+  used to land on the read-only view — an "Observing" header and a vanished
+  queued prompt — while the broker's own Claude drive kept running. The broker
+  now offers that page its existing Claude drive to join, as it already does
+  for Kimi and dsh, and the queued prompt comes back with it.
 - Claude session rows show the model for every family the adapter knows,
   including Fable. Kimi rows show the server's own model names (for example
   `K2.7 Coding`, `K3-256k`) instead of a raw alias or a guessed version, and

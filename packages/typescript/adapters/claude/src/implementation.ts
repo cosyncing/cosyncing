@@ -114,6 +114,20 @@ const CAPS: AgentCapabilities = {
   supportsNativeFileInput: true, // resume sendPrompt: native image blocks + files staged to .cosyncing/inbox; live sendFile too
   supportsModelSwitch: true, // resume relaunches with `--model`; observe ignores it
   permissionGranularity: 'per-session', // resume launches with a chosen `--permission-mode`
+  // Two sockets may share ONE Drive connection through the broker's join action (physical pass, P1:
+  // "steering badge lost on refresh" / "queued message gone after refresh"). The Drive owner is this
+  // broker's own `claude -p --resume` child; a reloaded page that cannot prove its Drive provenance
+  // locally (storage reset, lease lapsed, another device) attaches bare and used to be handed the
+  // read-only observe connection — whose history is the transcript alone — while the driving
+  // connection, its child, and its still-undelivered prompts sat alive under `#resume` with nothing
+  // telling the page about them. With the flag, Hub.sessionDetailFrame offers that socket the join,
+  // the client reattaches onto the EXISTING owner (Hub.joinExisting never attaches), and the owner's
+  // getHistory() — pending driven rows included — is what it replays.
+  // What makes the share safe here: the join hands out the existing child, so the session still has
+  // exactly one writer; both sockets' prompts reach one stdin in order, the driven-row FIFO and the
+  // foreign-write exoneration are per CONNECTION (a peer socket's prompt is never a foreign writer),
+  // and a demotion publishes the new control state to every subscriber at once.
+  supportsCrossClientDriveSharing: true,
 };
 
 // The default store honors CLAUDE_CONFIG_DIR exactly as the real `claude` binary does (so a user — or a
