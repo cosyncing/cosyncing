@@ -2198,19 +2198,18 @@ export class Hub {
 
   /** Release the connection an attach actually joined.
    *
-   * A `mode=resume` ensure may fold onto an already-mutable bare/live owner.
-   * In that case releasing the requested `#resume` key is a no-op and leaks the
-   * clientless canonical owner. Resolve the real key by identity before
-   * delegating to the normal zero-client grace path. */
+   * A `mode=resume` ensure may fold onto an already-mutable bare/live owner, and
+   * a {@link joinExisting} socket carries `mode=resume` while the Kimi/dsh owner
+   * it joined lives under `#live`. In both cases releasing the requested
+   * `#resume` key is a no-op and leaks the clientless owner until dispose.
+   * Resolve the real key by identity across every mode this session can be
+   * registered under before delegating to the normal zero-client grace path. */
   releaseAttached(tool: string, id: string, requestedMode: string | undefined, mc: ManagedConn): void {
-    const requestedKey = this.key(tool, id, requestedMode);
-    if (this.conns.get(requestedKey) === mc) {
-      this.release(tool, id, requestedMode);
-      return;
-    }
-    const baseKey = this.key(tool, id);
-    if (this.conns.get(baseKey) === mc) {
-      this.release(tool, id);
+    for (const mode of [requestedMode, undefined, 'live', 'resume']) {
+      if (this.conns.get(this.key(tool, id, mode)) === mc) {
+        this.release(tool, id, mode);
+        return;
+      }
     }
   }
 

@@ -192,6 +192,30 @@ function parseModelGroups(raw: unknown): DshModelProviderGroup[] {
 }
 
 /**
+ * The host's DISPLAY NAME for one model in a catalog answer, when it published
+ * one distinct from the id.
+ *
+ * Seeds `SessionInfo.currentModel.label`, which the roster and composer read
+ * verbatim — the client authors no model names of its own. Two deliberate
+ * differences from {@link dshModelOptions}'s picker label:
+ *
+ *  - NOT provider-qualified. `currentModel` already carries `providerID`, and
+ *    the client strips the model id out of the label before showing it, so a
+ *    `"Name (Provider)"` label would render as the leftover `"(Provider)"`.
+ *  - Absent when the name EQUALS the id. `parseModelGroups` defaults a missing
+ *    `name` to the id, and forwarding that would publish a raw id as if it were
+ *    an authored name. No name is reported as no name.
+ */
+export function dshModelDisplayName(
+  groups: readonly DshModelProviderGroup[],
+  providerId: string,
+  modelId: string,
+): string | undefined {
+  const model = groups.find((group) => group.id === providerId)?.models.find((entry) => entry.id === modelId);
+  return model && model.name !== model.id ? model.name : undefined;
+}
+
+/**
  * Flatten provider groups into picker options.
  *
  * Shared by the session-scoped catalog (`DshSessionConnection.listModels`) and

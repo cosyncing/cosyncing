@@ -277,12 +277,22 @@ class _ChatPanel extends ConsumerWidget {
                   ],
                 );
               }
+              // The expanded panel is the reading surface for a plan or task
+              // list, so its cap follows the viewport instead of a fixed 160:
+              // at that height an opened list showed two rows. The transcript
+              // still keeps the majority of the work surface.
+              final liveStateMaxHeight = (constraints.maxHeight * 0.45).clamp(
+                160.0,
+                420.0,
+              );
               return Column(
                 children: [
                   if (bootstrapStatus != null) bootstrapStatus,
                   if (!state.liveState.isEmpty || state.commandProgress != null)
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 160),
+                      constraints: BoxConstraints(
+                        maxHeight: liveStateMaxHeight,
+                      ),
                       child: SingleChildScrollView(
                         child: _ReadableColumn(child: liveStateSurface),
                       ),
@@ -462,7 +472,6 @@ class _LiveStateItem {
   const _LiveStateItem({
     required this.id,
     required this.archiveIdentity,
-    required this.fingerprint,
     required this.kind,
     required this.value,
     required this.label,
@@ -476,7 +485,6 @@ class _LiveStateItem {
 
   final String id;
   final String archiveIdentity;
-  final String fingerprint;
   final _LiveStateItemKind kind;
   final Object value;
   final String label;
@@ -498,7 +506,6 @@ List<_LiveStateItem> _liveStateItemsFromParts(
       _LiveStateItem(
         id: 'command:${progress.name}',
         archiveIdentity: '${progress.name}:${progress.startedAt}',
-        fingerprint: '${progress.name}:${progress.startedAt}',
         kind: _LiveStateItemKind.command,
         value: progress,
         label: l10n.command,
@@ -515,17 +522,6 @@ List<_LiveStateItem> _liveStateItemsFromParts(
           activity.startedAtMs,
           activity.title,
         ].join('|'),
-        fingerprint: [
-          activity.status.wireValue,
-          activity.title,
-          activity.subtitle,
-          activity.agentsDone,
-          activity.agentsTotal,
-          activity.toolCalls,
-          activity.children
-              .map((child) => '${child.key}:${child.status}')
-              .join(),
-        ].join('|'),
         kind: _LiveStateItemKind.activity,
         value: activity,
         label: l10n.activity,
@@ -540,12 +536,6 @@ List<_LiveStateItem> _liveStateItemsFromParts(
       _LiveStateItem(
         id: 'goal:${goal.key}',
         archiveIdentity: [goal.key, goal.startedAt, goal.title].join('|'),
-        fingerprint: [
-          goal.status.wireValue,
-          goal.title,
-          goal.detail,
-          goal.startedAt,
-        ].join('|'),
         kind: _LiveStateItemKind.goal,
         value: goal,
         label: l10n.goal,
@@ -562,17 +552,6 @@ List<_LiveStateItem> _liveStateItemsFromParts(
       _LiveStateItem(
         id: 'task-list:${taskList.key}',
         archiveIdentity: taskList.key,
-        fingerprint: [
-          taskList.status.wireValue,
-          taskList.title,
-          taskList.updatedAt,
-          taskList.semantic?.revision,
-          taskList.items
-              .map(
-                (item) => '${item.id}:${item.status.wireValue}:${item.title}',
-              )
-              .join(),
-        ].join('|'),
         kind: _LiveStateItemKind.taskList,
         value: taskList,
         label: taskList.semantic == null ? l10n.tasks : l10n.plan,

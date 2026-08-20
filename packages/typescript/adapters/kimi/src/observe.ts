@@ -44,6 +44,7 @@ import type {
   AgentMessage,
   AgentMessageHandler,
   HistoryQuery,
+  ModelOption,
   PermissionDecision,
   PromptInput,
   SessionConnection,
@@ -54,10 +55,13 @@ import { KimiReadOnlyHttp, isKimiReadOnlyWsFrame, type KimiReadOnlyWsFrame } fro
 import type { KimiDriveHttp } from './drive-http.ts';
 import {
   KIMI_MAIN_AGENT_ID,
+  KimiModelCatalogCache,
   createKimiMappingState,
+  kimiStatusModel,
   mapKimiApprovalRequest,
   mapKimiApprovalResolved,
   mapKimiMessagePage,
+  mapKimiModelCatalog,
   mapKimiQuestionRequest,
   mapKimiSessionStatus,
   mapKimiTurnFailure,
@@ -369,6 +373,16 @@ export interface KimiObserveOptions {
   wireRoot?: string;
   /** Injected filesystem for the journal reader; production uses the real one. */
   wireIo?: KimiWireIo;
+  /**
+   * The model catalog this connection joins `/status.model` against.
+   *
+   * Passed in so the ATTACH's own status read and this connection's polls share
+   * one cache: the attach reads the catalog through the adapter's verified
+   * client moments before the connection exists, and re-reading it here would
+   * spend a second request to learn the same rows. Absent means a private
+   * cache, which is what a direct construction wants.
+   */
+  modelCatalog?: KimiModelCatalogCache;
 }
 
 interface KimiCursor {
@@ -494,6 +508,8 @@ export class KimiObserveConnection implements SessionConnection {
   private primingIdentities = new Set<string>();
   private primingStartedAt?: number;
   private readonly nowImpl: () => number;
+  /** `/api/v1/models` as this connection last read it; see {@link KimiModelCatalogCache}. */
+  private readonly modelCatalog: KimiModelCatalogCache;
   /**
    * Undefined means "no position this connection can defend". Subscribing then
    * carries NO cursor entry, which asks the server for no replay at all and
@@ -729,6 +745,7 @@ export class KimiObserveConnection implements SessionConnection {
     this.nowImpl = options.now ?? (() => Date.now());
     if (options.wireRoot) this.wireRoot = options.wireRoot;
     this.wireIo = options.wireIo ?? defaultKimiWireIo;
+    this.modelCatalog = options.modelCatalog ?? new KimiModelCatalogCache();
   }
 
   // ── Transport generations ─────────────────────────────────────────────────
@@ -1307,6 +1324,22 @@ export class KimiObserveConnection implements SessionConnection {
     this.emit(overlay, kimiOverlayIdentity(overlay.key, revision));
   }
 
+  /**
+   * `GET /api/v1/models` → picker options, and the rows a status reading is
+   * labelled from. ONE definition: the drive connection's `listModels` is this,
+   * so the label the roster shows and the option the picker offers can never
+   * decode the same catalog differently.
+   */
+  protected async readModelCatalogRows(): Promise<ModelOption[]> {
+    if (this.transportInvalid && !(await this.ensureTransport())) return [];
+    const result = await this.transport.http.getJson<unknown>('/api/v1/models');
+    if (!result.ok) {
+      this.noteUnauthorized(result.reason);
+      return [];
+    }
+    return mapKimiModelCatalog(result.data);
+  }
+
   private async readOverlays(): Promise<AgentMessage[]> {
     const result = await this.transport.http.getJson<unknown>(
       `/api/v1/sessions/${encodeURIComponent(this.info.id)}/status`,
@@ -1315,7 +1348,14 @@ export class KimiObserveConnection implements SessionConnection {
       this.noteUnauthorized(result.reason);
       return [];
     }
-    return mapKimiSessionStatus(result.data);
+    // The alias is primed against the catalog BEFORE the mapping, so a model
+    // the host added mid-session gets its label on the poll that first reports
+    // it rather than on the next attach.
+    const catalog = await this.modelCatalog.optionsFor(
+      kimiStatusModel(result.data),
+      () => this.readModelCatalogRows(),
+    );
+    return mapKimiSessionStatus(result.data, catalog);
   }
 
   /**

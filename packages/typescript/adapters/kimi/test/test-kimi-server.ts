@@ -1482,6 +1482,13 @@ try {
   check('adapter advertises native file input and still no artifact signal',
     adapter.capabilities.supportsNativeFileInput === true
       && adapter.capabilities.supportsNativeArtifact === false);
+  // Cross-client Drive sharing is a claim about the CONNECTION, not the wire:
+  // a joining socket is handed the existing drive connection, so the session
+  // keeps exactly one writer. Without the flag the broker offers a second
+  // client no join at all and it observes forever. The wire behaviour itself is
+  // proved in `broker/test/broker/test-kimi-cross-client-join.ts`.
+  check('adapter declares that two clients may share one drive connection',
+    adapter.capabilities.supportsCrossClientDriveSharing === true);
   check('adapter advertises session creation and its readiness boundary',
     typeof (adapter as { createSession?: unknown }).createSession === 'function'
       && typeof (adapter as { canCreateSession?: unknown }).canCreateSession === 'function'

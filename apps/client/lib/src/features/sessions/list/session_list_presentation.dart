@@ -83,6 +83,11 @@ String? _humanModelLabel(String? value, String? raw) {
 
 bool _looksLikeRawModelId(String value) {
   if (value.contains(' ')) return false;
+  // A provider-qualified value is a raw id whatever else it looks like: no
+  // human label carries `/` or `:`. Without this, a digit-free id such as
+  // `kimi-code/kimi-for-coding` failed the segments+letter+digit test and was
+  // passed through verbatim as if it were a name.
+  if (value.contains('/') || value.contains(':')) return true;
   final parts = value
       .split(RegExp('[-_/.:]+'))
       .where((part) => part.isNotEmpty);
@@ -94,6 +99,11 @@ bool _looksLikeRawModelId(String value) {
 String? _derivedModelLabel(String? modelId) {
   final raw = modelId?.trim().toLowerCase() ?? '';
   if (raw.isEmpty) return null;
+  // Never guess from a provider-qualified id. Pairing digits out of
+  // `kimi-code/k3-256k` produced `Kimi 3.256`, and the digit-free sibling
+  // produced a bare `Kimi`; both are invented names. The adapter authors
+  // `currentModel.label`, and with no label the roster shows nothing.
+  if (raw.contains('/') || raw.contains(':')) return null;
   for (final entry in _modelFamilies.entries) {
     final familyStart = raw.indexOf(entry.key);
     if (familyStart < 0) continue;

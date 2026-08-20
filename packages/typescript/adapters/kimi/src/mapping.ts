@@ -570,11 +570,80 @@ export function mapKimiModelCatalog(raw: unknown): ModelOption[] {
   return options;
 }
 
+/**
+ * The catalog rows a `/status` reading is joined against, read ONCE per
+ * connection and re-read once per alias the cache does not know.
+ *
+ * A cache rather than a per-status read because `/status` is polled every 10 s
+ * and the catalog is a per-HOST constant; a cache that never re-reads because a
+ * host can add a model mid-life, which would otherwise leave that session
+ * label-less until the next attach. The re-read is spent PER ALIAS, so a host
+ * reporting an alias its own catalog omits costs one extra request, not one per
+ * poll.
+ *
+ * Holds no transport: the read is supplied by the caller, because the attach
+ * path reads through the adapter's verified client and the connection reads
+ * through its own generation (which reverification can replace under it).
+ */
+export class KimiModelCatalogCache {
+  private options: readonly ModelOption[] = [];
+  private read = false;
+  private readonly reReadAliases = new Set<string>();
+  /** Bound on the re-read memory; a host reporting endless novel aliases costs a set, not a leak. */
+  private static readonly RE_READ_LIMIT = 64;
+
+  /**
+   * Catalog rows to join `modelID` against. Never throws and never fails an
+   * attach: a refused or odd read yields the rows already held (possibly none),
+   * which the join then simply does not match.
+   */
+  async optionsFor(
+    modelID: string | undefined,
+    read: () => Promise<ModelOption[]>,
+  ): Promise<readonly ModelOption[]> {
+    if (modelID === undefined) return this.options;
+    if (!this.read) {
+      this.read = true;
+      this.options = await read();
+    }
+    if (this.options.some((option) => option.modelID === modelID)) return this.options;
+    if (this.reReadAliases.has(modelID)) return this.options;
+    this.reReadAliases.add(modelID);
+    if (this.reReadAliases.size > KimiModelCatalogCache.RE_READ_LIMIT) {
+      for (const oldest of this.reReadAliases) {
+        this.reReadAliases.delete(oldest);
+        if (this.reReadAliases.size <= KimiModelCatalogCache.RE_READ_LIMIT) break;
+      }
+    }
+    const fresh = await read();
+    // A failed re-read answers `[]`; keeping what we had is strictly better
+    // than forgetting a catalog because one request was refused.
+    if (fresh.length > 0) this.options = fresh;
+    return this.options;
+  }
+}
+
+/** The alias a `/status` body reports, so a caller can prime the catalog before mapping it. */
+export function kimiStatusModel(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  return optionalString((raw as Record<string, unknown>).model);
+}
+
 // ── Messages ────────────────────────────────────────────────────────────────
 
 /** Stable dedupe/merge key for one native message part. */
 function partKey(messageId: string, index: number): string {
   return `kimi:${messageId}:${index}`;
+}
+
+/**
+ * Key of the user row an ATTACHMENT-ONLY prompt gets, which no content part
+ * produced. `u` where {@link partKey} puts an index, so it can never collide
+ * with a part's key, and it is derived from the message id alone so a history
+ * fold and a live walk mint the same one.
+ */
+function attachmentOnlyUserKey(messageId: string): string {
+  return `kimi:${messageId}:u`;
 }
 
 /**
@@ -1016,6 +1085,8 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
       });
     },
   };
+  /** Positions in {@link rows} of the artifacts made from this message's IMAGE parts. */
+  const imageRowIndexes: number[] = [];
 
   if (parts.length === 0) return rows;
 
@@ -1309,6 +1380,7 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
           // in every history replay.
           ...(url.length <= KIMI_INLINE_IMAGE_DATA_URL_CAP ? { url } : {}),
         }, key);
+        imageRowIndexes.push(rows.length - 1);
         continue;
       }
       out.push({ type: 'event', name: `kimi.${kind}`, payload: { key } }, key);
@@ -1332,6 +1404,59 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
       continue;
     }
     out.push(degradedPart(key, typeof kind === 'string' ? kind : 'unknown'), key);
+  }
+
+  // ── The sent image belongs to a user row ──────────────────────────────────
+  //
+  // An echoed image is a top-level `file-artifact`, so the client rendered it as
+  // an agent deliverable — a download card detached from the bubble the person
+  // actually sent it on. `userMessageKey` is the ownership link the protocol
+  // defines for exactly this; identity stays `artifactKey`.
+  //
+  // THE OWNER IS THE FIRST user-message row of this native message, in part
+  // order. A message with several text parts folds to several rows and one of
+  // them has to hold the attachments; first is the only choice that is stable
+  // across a history fold and a live walk (both read the same part array in the
+  // same order) and it is the row the reader meets first. Existing keys are NOT
+  // touched — the drive echo adoption and the divergence detector match on them.
+  //
+  // An image-only prompt has no text part and therefore had no user row at all,
+  // which is the second half of the same defect: nothing to attach to, and no
+  // bubble for the person's own send. It gets one with empty text, keyed off the
+  // message id rather than any part index (no part produced it, and no
+  // part-indexed key can collide with it).
+  if (role === 'user' && imageRowIndexes.length > 0) {
+    let ownerIndex = rows.findIndex((row) => row.message.type === 'user-message');
+    if (ownerIndex < 0) {
+      const attachmentKey = attachmentOnlyUserKey(id);
+      rows.unshift({
+        message: {
+          type: 'user-message',
+          text: '',
+          key: attachmentKey,
+          ...(sentAt !== undefined ? { sentAt } : {}),
+        },
+        identity: `user-message:${attachmentKey}`,
+        nativeMessageId: id,
+        ...(nativeRole !== undefined ? { nativeRole } : {}),
+        ...(originKind !== undefined ? { originKind } : {}),
+      });
+      for (let i = 0; i < imageRowIndexes.length; i += 1) imageRowIndexes[i]! += 1;
+      ownerIndex = 0;
+    }
+    const owner = rows[ownerIndex]!;
+    const ownerMessage = owner.message as Extract<AgentMessage, { type: 'user-message' }>;
+    const ownerKey = ownerMessage.key;
+    owner.message = { ...ownerMessage, imageCount: imageRowIndexes.length };
+    if (ownerKey) {
+      for (const index of imageRowIndexes) {
+        const artifact = rows[index]!;
+        artifact.message = {
+          ...(artifact.message as Extract<AgentMessage, { type: 'file-artifact' }>),
+          userMessageKey: ownerKey,
+        };
+      }
+    }
   }
   return rows;
 }
@@ -1385,8 +1510,15 @@ export function mapKimiMessagePage(page: KimiMessagePage | undefined, state?: Ki
  * `busy` is deliberately NOT mapped. `SessionInfo.status` already carries
  * working/idle from the v2 activity enum, and a second liveness bit read at a
  * different moment could only contradict it.
+ *
+ * `catalog` is `GET /api/v1/models` as this connection last read it
+ * ({@link KimiModelCatalogCache}). `/status` reports the catalog's `model`
+ * VERBATIM — probed on 0.37.2, `"model":"kimi-code/k3-256k"` against a catalog
+ * row `{provider:'managed:kimi-code', model:'kimi-code/k3-256k',
+ * display_name:'K3-256k'}` — so the two join on that string exactly, and the
+ * join is the only authored label this adapter has.
  */
-export function mapKimiSessionStatus(raw: unknown): AgentMessage[] {
+export function mapKimiSessionStatus(raw: unknown, catalog?: readonly ModelOption[]): AgentMessage[] {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
   const status = raw as Record<string, unknown>;
   const out: AgentMessage[] = [];
@@ -1408,8 +1540,31 @@ export function mapKimiSessionStatus(raw: unknown): AgentMessage[] {
   const currentMode = optionalString(status.permission);
   const planMode = optionalBoolean(status.plan_mode);
   const swarmMode = optionalBoolean(status.swarm_mode);
+  // THE ROSTER LABEL, and the decision behind it: the HOST CATALOG's
+  // `display_name` is authoritative — `K2.7 Coding`, `K3-256k` — and this
+  // adapter builds no product mapping to `kimi-k3`-style names. A label the
+  // host does not use is a second naming system to keep in sync with a server
+  // that ships new models without asking, and the picker already shows these
+  // exact strings.
+  //
+  // Emitted as `currentModel` because that is the CONTRACT field (the same trap
+  // `currentMode` above documents): the bare `model` string reaches the client
+  // with no label, and the client's own heuristics then print the raw alias
+  // (`kimi-code/kimi-for-coding`), the bare family word (`Kimi`), or a
+  // digit-scavenged invention (`Kimi 3.256`). The raw string STAYS in `model`
+  // for the tooltip. No join, no label: an unknown alias keeps today's
+  // behaviour rather than being given a name nothing reported.
+  const entry = model ? catalog?.find((option) => option.modelID === model) : undefined;
+  // A model the LOADED catalog does not know publishes an EXPLICIT
+  // `currentModel: undefined`: the broker folds this value with Object.assign,
+  // so an omitted key would leave the previous model's label on the roster
+  // after a switch. No catalog at all (none read yet) says nothing either way.
+  const clearLabel = model !== undefined && entry === undefined && catalog !== undefined && catalog.length > 0;
   const sessionInfo = {
     ...(model ? { model } : {}),
+    ...(entry && model
+      ? { currentModel: { providerID: entry.providerID, modelID: model, label: entry.label } }
+      : clearLabel ? { currentModel: undefined } : {}),
     ...(thinkingLevel ? { thinkingLevel } : {}),
     ...(currentMode ? { currentMode } : {}),
     ...(planMode !== undefined ? { planMode } : {}),

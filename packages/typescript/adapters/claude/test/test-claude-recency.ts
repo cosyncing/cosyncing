@@ -42,6 +42,8 @@ const forkB = join(projectDir, `${forkBUuid}.jsonl`);
 const firstUserUuid = 'shared-first-user-uuid';
 const wrapperUuid = 'eeeeeeee-1111-4222-8333-aaaaaaaaaaaa';
 const wrapperTranscript = join(wrapperProjectDir, `${wrapperUuid}.jsonl`);
+const fableUuid = 'ffffffff-1111-4222-8333-aaaaaaaaaaaa';
+const fableTranscript = join(projectDir, `${fableUuid}.jsonl`);
 const oldTs = Date.parse('2026-07-01T10:59:00.000Z');
 // REAL wall clock, not a literal: the background-pending window (30 min) and the freshness gate are
 // measured against Date.now() inside the adapter — a hard-coded "now" made these checks rot within
@@ -86,6 +88,17 @@ writeFileSync(
     JSON.stringify({ type: 'user', uuid: 'wrapper-user', timestamp: '2026-07-04T12:00:00.000Z', cwd, message: { content: 'Wrapper prompt' } }),
     JSON.stringify({ type: 'assistant', uuid: 'wrapper-a1', timestamp: '2026-07-04T12:01:00.000Z', message: { model: 'wrapper-base-model', content: [{ type: 'text', text: 'base' }] } }),
     JSON.stringify({ type: 'assistant', uuid: 'wrapper-a2', timestamp: '2026-07-04T12:02:00.000Z', message: { model: 'wrapper-tail-model', content: [{ type: 'text', text: 'tail' }] } }),
+  ].join('\n') + '\n',
+);
+
+// P2: the client's family table has no `fable` entry, so the roster showed no model at all for a Fable
+// session while Opus/Sonnet/Haiku rendered from the same client-side derivation. The label has to be
+// authored by the adapter, which is the only party that knows Claude's tiers.
+writeFileSync(
+  fableTranscript,
+  [
+    JSON.stringify({ type: 'user', uuid: 'fable-user', timestamp: '2026-07-05T09:00:00.000Z', cwd, message: { content: 'Fable prompt' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'fable-a1', timestamp: '2026-07-05T09:01:00.000Z', message: { model: 'claude-fable-5', content: [{ type: 'text', text: 'ok' }] } }),
   ].join('\n') + '\n',
 );
 
@@ -141,7 +154,13 @@ check('recent unnotified background task keeps roster row working even without a
 check('fork fixtures carry the same first-user lineageId', forkARow?.lineageId === firstUserUuid && forkBRow?.lineageId === firstUserUuid, JSON.stringify([forkARow?.lineageId, forkBRow?.lineageId]));
 const wrapperConn = await adapter.attach(wrapperId, 'observe') as any;
 check('wrapper attach currentModel uses transcript tail model over wrapper default', wrapperConn.info.currentModel?.modelID === 'wrapper-tail-model', JSON.stringify(wrapperConn.info.currentModel));
+check('unknown (wrapper) model carries NO authored label — an invented one would be worse than none', wrapperConn.info.currentModel?.label === undefined, JSON.stringify(wrapperConn.info.currentModel));
 await wrapperConn.close();
+const fableId = Buffer.from(fableTranscript).toString('base64url');
+check('fable fixture row discovered', rows.some((s: any) => s.id === fableId), `rows=${rows.length}`);
+const fableConn = await adapter.attach(fableId, 'observe') as any;
+check('P2: a fable session carries the adapter-authored currentModel.label the roster reads', fableConn.info.currentModel?.label === 'Fable 5' && fableConn.info.currentModel?.modelID === 'claude-fable-5', JSON.stringify(fableConn.info.currentModel));
+await fableConn.close();
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);

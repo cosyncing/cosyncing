@@ -148,6 +148,21 @@ const imageEchoRow = (id: string) => ({
   created_at: '2026-08-14T09:00:00.000Z',
 });
 
+/**
+ * The model catalog, mutable so a REFUSED read can be staged: the label join
+ * has to degrade to the bare alias rather than cost the attach.
+ */
+let modelsAnswer: unknown = ok({
+  items: [
+    { provider: 'kimi-code', model: 'k3-256k', display_name: 'K3 256k', max_context_size: 262_144, support_efforts: ['low', 'high'], default_effort: 'high' },
+    { provider: 'kimi-code', model: 'k2', max_context_size: 131_072 },
+    // Structurally broken: no `model`, so no selection token exists behind
+    // it. Must be SKIPPED, never surfaced as an option the broker would
+    // then validate a create against.
+    { provider: 'kimi-code', display_name: 'nameless' },
+  ],
+});
+
 /** Mutable route answers, so one fake server can stand in for many server states. */
 let createAnswer: unknown = ok({
   id: CREATED_ID, workspace_id: 'wd_0001', title: 'from cosyncing',
@@ -282,16 +297,7 @@ const server = Bun.serve({
       return Response.json(ok(SERVER_META));
     }
     if (path === '/api/v1/models') {
-      return Response.json(ok({
-        items: [
-          { provider: 'kimi-code', model: 'k3-256k', display_name: 'K3 256k', max_context_size: 262_144, support_efforts: ['low', 'high'], default_effort: 'high' },
-          { provider: 'kimi-code', model: 'k2', max_context_size: 131_072 },
-          // Structurally broken: no `model`, so no selection token exists behind
-          // it. Must be SKIPPED, never surfaced as an option the broker would
-          // then validate a create against.
-          { provider: 'kimi-code', display_name: 'nameless' },
-        ],
-      }));
+      return Response.json(modelsAnswer);
     }
     if (path === '/api/v2/sessions') {
       return Response.json(ok({
@@ -985,6 +991,11 @@ try {
         && bare.info.currentModel.providerID === 'kimi-code'
         && bare.info.currentModel.reasoningEffort === 'high',
       JSON.stringify(bare.info.currentModel));
+    // The picker sends provider and id and no label, so a create-time choice
+    // would otherwise reach the roster unnamed and be printed by the client's
+    // own guess. It gets the SAME catalog label a host-reported model gets.
+    check('...and the create-time choice carries the host catalog label too',
+      bare.info.currentModel?.label === 'K3 256k', JSON.stringify(bare.info.currentModel));
     check('attach seeds the permission chip from the host-reported mode, pass-through',
       bare.info.currentMode === 'a-mode-from-the-future', JSON.stringify(bare.info.currentMode));
     await bare.close();
@@ -1036,6 +1047,25 @@ try {
       degraded.info.currentMode === undefined && degraded.info.attachMode === 'observe',
       JSON.stringify({ mode: degraded.info.currentMode, attach: degraded.info.attachMode }));
     await degraded.close();
+
+    // ...and so must a failed CATALOG read: the label has one source, and
+    // losing it costs the name, never the attach or the selection itself.
+    const savedModels = modelsAnswer;
+    modelsAnswer = fail(50_001, null, 'models unavailable');
+    statusAnswer = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'k3-256k' });
+    const catalogAdapter = makeAdapter();
+    await catalogAdapter.createSession({
+      directory: WORKSPACE,
+      model: { providerID: 'kimi-code', modelID: 'k3-256k' },
+    });
+    const unlabelled = await catalogAdapter.attach(CREATED_ID);
+    check('a failed catalog read leaves the attach working, with the bare model and no label',
+      unlabelled.info.model === 'k3-256k'
+        && unlabelled.info.currentModel?.modelID === 'k3-256k'
+        && unlabelled.info.currentModel.label === undefined,
+      JSON.stringify(unlabelled.info.currentModel));
+    await unlabelled.close();
+    modelsAnswer = savedModels;
 
     statusAnswer = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'kimi-code/k3-256k' });
   }
@@ -2752,7 +2782,7 @@ try {
     // prefix up to the materialization path is reconstructible from the
     // upload answer's own meta. The row is staged from the fixture's recorded
     // upload exactly as the server builds it from its store.
-    const { conn } = await drivenSession();
+    const { conn, rows } = await drivenSession();
     const savedPromptAnswer = promptAnswer;
     promptAnswer = ok({ prompt_id: 'prompt_noid_file', status: 'running', content: [], created_at: 'x' });
     await conn.sendPrompt({
@@ -2767,8 +2797,12 @@ try {
       `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_noid_file_echo')}`);
 
     // The IMAGE-ONLY case is the app's attachment path (no `images` wire
-    // field): the file went INLINE, so the echo's row is named from the
-    // rehydrated data URL's mime — `image.png` — not from the file's name.
+    // field): the file went INLINE, so the echo is the artifact row named from
+    // the rehydrated data URL's mime — `image.png` — plus the EMPTY user row
+    // that artifact is linked to. The empty row walks in FIRST, so it is the
+    // row the detector meets and the one that spends this submission's
+    // attachment evidence; the artifact behind it is covered by the shared
+    // native message id.
     promptAnswer = ok({ prompt_id: 'prompt_noid_img', status: 'running', content: [], created_at: 'x' });
     await conn.sendPrompt({
       text: '',
@@ -2776,9 +2810,20 @@ try {
     });
     messages = [imageEchoRow('msg_noid_img_echo'), ...messages];
     for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS + 1; poll += 1) await conn.refresh('poll');
-    check('an image-only echo without a user_message_id is adopted by its derived echo name and never demotes',
+    check('an image-only echo without a user_message_id is adopted by its own attachment evidence and never demotes',
       conn.demotedToObserve === false && conn.accountedUserMessageIds.has('msg_noid_img_echo'),
       `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_noid_img_echo')}`);
+    const echoedArtifact = rows.find((row) =>
+      row.type === 'file-artifact' && row.artifactKey === 'kimi:msg_noid_img_echo:0');
+    const echoedUserRow = rows.find((row) =>
+      row.type === 'user-message' && row.key === 'kimi:msg_noid_img_echo:u');
+    check('...and the live echo delivers the image linked to its own user row',
+      echoedArtifact !== undefined && echoedUserRow !== undefined
+        && (echoedArtifact as { userMessageKey?: string }).userMessageKey
+          === (echoedUserRow as { key?: string }).key
+        && (echoedUserRow as { text?: string }).text === ''
+        && (echoedUserRow as { imageCount?: number }).imageCount === 1,
+      JSON.stringify([echoedUserRow, echoedArtifact]));
     promptAnswer = savedPromptAnswer;
     await conn.close();
   }

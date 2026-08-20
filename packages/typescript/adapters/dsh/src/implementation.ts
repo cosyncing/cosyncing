@@ -43,7 +43,7 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME } from './diagnostics.ts';
-import { DshDriver, dshModelOptions } from './drive.ts';
+import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
 import { DshSessionConnection, type DshConnectionOptions } from './observe.ts';
 import {
@@ -686,11 +686,39 @@ export class DshAdapter implements AgentBackend {
     const info: SessionInfo = known ?? {
       id: sessionId,
       tool: this.id,
+      // Same parent half of the roster link the mapped rows carry. The
+      // synthesized fallback is still a real session that can own children.
+      nativeId: sessionId,
       title: sessionId,
       status: 'idle',
       attachMode: 'live',
       launchSurface: 'unknown',
     };
+    // The composer's model picker preselects from `info.currentModel`, and the
+    // roster read this info came from maps no model at all — so without this
+    // seed the picker sits blank until the FIRST PROMPT's `request/header`
+    // publishes one. `session.models` is the authoritative per-session read and
+    // is already allowlisted, so ask it here.
+    //
+    // Best effort by design: a host that cannot answer leaves both fields
+    // absent and the `request/header` path stays the fallback. An attach must
+    // not fail over a picker seed.
+    try {
+      const catalog = await new DshDriver(this.rpc()).models(sessionId);
+      const current = catalog.current;
+      if (current) {
+        const label = dshModelDisplayName(catalog.groups, current.provider, current.model);
+        info.model = current.model;
+        info.currentModel = {
+          providerID: current.provider,
+          modelID: current.model,
+          ...(label ? { label } : {}),
+          ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}),
+        };
+      }
+    } catch {
+      /* no authoritative model right now; request/header still publishes one */
+    }
     const link = this.hostLink();
     let connection: DshSessionConnection;
     connection = new DshSessionConnection(info, {
@@ -832,6 +860,10 @@ export class DshAdapter implements AgentBackend {
     return {
       id: created.sessionId,
       tool: this.id,
+      // The parent half of the roster link — see mapDshSession. A session
+      // created here can spawn children immediately, so the row it returns has
+      // to carry it too or those children render flat until the next discovery.
+      nativeId: created.sessionId,
       title: title || chosen.title,
       cwd: chosen.path,
       status: 'idle',

@@ -4,10 +4,22 @@ part of 'message_renderer_registry.dart';
 ///
 /// Authorship is carried by alignment and surface colour alone — no person icon
 /// and no `User message` header. A queued prompt is dimmed and tagged.
+///
+/// [attachments] are the file artifacts the user SENT WITH this prompt. They
+/// render inside the bubble, under the text, because they are the user's own
+/// material — rendering them as standalone artifact cards read as agent
+/// deliverables. A prompt that was only an attachment carries no text and then
+/// renders no body at all.
 class _ConversationUserBubble extends StatelessWidget {
-  const _ConversationUserBubble({required this.message});
+  const _ConversationUserBubble({
+    required this.message,
+    this.attachments = const [],
+    this.attachmentActionBuilder,
+  });
 
   final AgentMessage message;
+  final List<AgentMessage> attachments;
+  final Widget? Function(AgentMessage attachment)? attachmentActionBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -20,6 +32,7 @@ class _ConversationUserBubble extends StatelessWidget {
           preferredKeys: const ['content', 'text', 'message'],
         ) ??
         '';
+    final hasBody = text.trim().isNotEmpty || attachments.isEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
         final maxWidth = constraints.maxWidth.isFinite
@@ -52,10 +65,23 @@ class _ConversationUserBubble extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                     ],
-                    _MarkdownBody(source: text),
+                    if (hasBody) _MarkdownBody(source: text),
                     if (message.bodyTruncated)
                       const _BodyTruncatedNote(
                         key: Key('user-message-body-truncated'),
+                      ),
+                    for (var index = 0; index < attachments.length; index++)
+                      Padding(
+                        padding: EdgeInsets.only(
+                          top: hasBody || index > 0 ? 8 : 0,
+                        ),
+                        child: _UserAttachmentView(
+                          key: Key('user-attachment-$index'),
+                          message: attachments[index],
+                          action: attachmentActionBuilder?.call(
+                            attachments[index],
+                          ),
+                        ),
                       ),
                   ],
                 ),
@@ -66,6 +92,144 @@ class _ConversationUserBubble extends StatelessWidget {
       },
     );
   }
+}
+
+/// One artifact the user sent with a prompt, drawn inside the user bubble.
+///
+/// An image with a resolvable source gets an inline, height-bounded preview;
+/// everything else — and any image whose bytes will not decode — gets a compact
+/// chip. The per-artifact action stays reachable in both.
+class _UserAttachmentView extends StatelessWidget {
+  const _UserAttachmentView({required this.message, this.action, super.key});
+
+  final AgentMessage message;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    final descriptor = SessionArtifactDescriptor.fromMessage(message);
+    final descriptorName = descriptor?.name?.trim();
+    final descriptorPath = descriptor?.path?.trim();
+    final name = (descriptorName?.isNotEmpty ?? false)
+        ? descriptorName!
+        : (descriptorPath?.isNotEmpty ?? false)
+        ? descriptorPath!
+        : l10n.sessionArtifactUntitled;
+    final size = descriptor?.size;
+    final image = _userAttachmentImage(descriptor);
+    final chip = _UserAttachmentChip(name: name, size: size);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (image == null)
+          chip
+        else
+          ClipRRect(
+            borderRadius: BorderRadius.circular(tokens.radiusMd),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: Image(
+                key: const Key('user-attachment-image'),
+                image: image,
+                fit: BoxFit.contain,
+                semanticLabel: name,
+                errorBuilder: (context, error, stack) => chip,
+              ),
+            ),
+          ),
+        if (action case final action?) ...[
+          const SizedBox(height: 4),
+          action,
+        ],
+      ],
+    );
+  }
+}
+
+/// Compact name/size chip for a non-image (or undecodable) user attachment.
+class _UserAttachmentChip extends StatelessWidget {
+  const _UserAttachmentChip({required this.name, this.size});
+
+  final String name;
+  final int? size;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(tokens.radiusSm),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.insert_drive_file_outlined,
+              size: 16,
+              color: tokens.textSecondary,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: tokens.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (size case final size?) ...[
+              const SizedBox(width: 8),
+              Text(
+                l10n.bytesCount(size),
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: tokens.textTertiary,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Resolves an inline preview source for a user attachment, or `null`.
+///
+/// Only an image mime with a usable source previews. A `data:` URI is decoded
+/// locally; a broker URL is fetched. Anything else falls through to the chip
+/// rather than rendering a broken box.
+ImageProvider<Object>? _userAttachmentImage(
+  SessionArtifactDescriptor? descriptor,
+) {
+  if (descriptor == null) return null;
+  final mime = descriptor.mimeType?.trim().toLowerCase() ?? '';
+  if (!mime.startsWith('image/')) return null;
+  final source = descriptor.downloadSourceUrl;
+  if (source == null || source.isEmpty) return null;
+  if (descriptor.isInlineDataUrl) {
+    try {
+      return MemoryImage(UriData.parse(source).contentAsBytes());
+    } on Object {
+      return null;
+    }
+  }
+  final uri = Uri.tryParse(source);
+  if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+    return null;
+  }
+  return NetworkImage(source);
 }
 
 /// Continuous left-aligned model-output surface for a conversation turn.

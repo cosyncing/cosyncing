@@ -47,7 +47,85 @@ MessageWireEvent _runSummary(
   ),
 );
 
+MessageWireEvent _sentArtifact(
+  int seq, {
+  required String name,
+  required String mimeType,
+  required String url,
+  String? userMessageKey,
+}) => MessageWireEvent(
+  seq: seq,
+  message: AgentMessage(
+    type: AgentMessageType.fileArtifact,
+    raw: {
+      'type': 'file-artifact',
+      'artifactKey': 'artifact-$name',
+      'name': name,
+      'mimeType': mimeType,
+      'url': url,
+      if (userMessageKey != null) 'userMessageKey': userMessageKey,
+    },
+  ),
+);
+
 void main() {
+  // P6. End-to-end wiring: the projection nests the artifact and the transcript
+  // hands it to the bubble instead of building a standalone artifact row.
+  group('user attachments in the live transcript', () {
+    testWidgets('renders a sent image inside its own user bubble', (
+      tester,
+    ) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            _user(1, 'u1', 'What is in this?'),
+            _sentArtifact(
+              2,
+              name: 'screenshot.png',
+              mimeType: 'image/png',
+              url:
+                  'data:image/png;base64,'
+                  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42'
+                  'mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+              userMessageKey: 'u1',
+            ),
+            _model(3, 'a1', 'A single pixel'),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('user-attachment-0')), findsOneWidget);
+      // The artifact no longer has its own agent-side card.
+      expect(find.byType(Card), findsNothing);
+    });
+
+    testWidgets('leaves an agent-produced artifact as its own row', (
+      tester,
+    ) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            _user(1, 'u1', 'Write the report'),
+            _model(2, 'a1', 'Done'),
+            _sentArtifact(
+              3,
+              name: 'report.pdf',
+              mimeType: 'application/pdf',
+              url: 'https://broker.example/artifacts/report.pdf',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('user-attachment-0')), findsNothing);
+      expect(find.text('report.pdf'), findsOneWidget);
+    });
+  });
+
   group('conversation turn footer', () {
     testWidgets('shows one footer with runtime, copy, and telemetry actions', (
       tester,

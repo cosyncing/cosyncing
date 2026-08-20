@@ -199,6 +199,7 @@ final class ConversationTurn {
     required this.distinctToolCallCount,
     required this.isPartial,
     this.runSummary,
+    this.userAttachments = const [],
   });
 
   /// Ordinal position of this turn in the transcript, from 0.
@@ -243,6 +244,14 @@ final class ConversationTurn {
   /// Whether this turn's opening prompt is missing because history was
   /// truncated. Such a turn is labelled partial in telemetry.
   final bool isPartial;
+
+  /// File artifacts the user SENT WITH [userMessage], in canonical order.
+  ///
+  /// A `file-artifact` carrying this turn opener's `userMessageKey` is removed
+  /// from [content] and listed here so it renders inside the right-aligned
+  /// user surface instead of as an agent deliverable. An artifact whose owner
+  /// row is not in this projection stays in [content].
+  final List<AgentMessage> userAttachments;
 
   /// Completed run summary associated with this turn, or `null`.
   ///
@@ -312,6 +321,22 @@ List<ConversationTurn> buildConversationTurns({
     }
   }
 
+  // A user attachment travels as its own top-level `file-artifact` stamped
+  // with the key of the user-message it was sent with. Move it under that row
+  // before the display entries are built; an artifact whose owner row is not
+  // in this projection is left where it is and renders user-side on its own.
+  final attachmentsByTurn = <int, List<AgentMessage>>{};
+  for (final segment in segments) {
+    segment.content.removeWhere((message) {
+      final ownerKey = message.fileArtifactUserMessageKey;
+      if (ownerKey == null) return false;
+      final turnIndex = turnByUserKey[ownerKey];
+      if (turnIndex == null) return false;
+      (attachmentsByTurn[turnIndex] ??= <AgentMessage>[]).add(message);
+      return true;
+    });
+  }
+
   final summaryByTurn = <int, ConversationTurnRunSummary>{};
   for (final message in runSummaryMessages) {
     final summary = ConversationTurnRunSummary.fromMessage(message);
@@ -344,6 +369,9 @@ List<ConversationTurn> buildConversationTurns({
             segments[index].opener == null &&
             segments[index].content.isNotEmpty,
         runSummary: summaryByTurn[index],
+        userAttachments: List<AgentMessage>.unmodifiable(
+          attachmentsByTurn[index] ?? const <AgentMessage>[],
+        ),
       ),
   ];
   return List<ConversationTurn>.unmodifiable(turns);

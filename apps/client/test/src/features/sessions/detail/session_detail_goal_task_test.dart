@@ -212,7 +212,7 @@ void main() {
       },
     );
 
-    testWidgets('expanded task rows render at the enlarged presentation', (
+    testWidgets('expanded task rows render at the transcript body scale', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -251,21 +251,81 @@ void main() {
       final tile = tester.widget<ListTile>(row);
       expect(tile.dense, isNot(true));
 
+      // P3a. The 2026-08-19 change answered a request for a taller panel with
+      // headline text and a 40px icon; the rows now match their transcript
+      // siblings and the height comes from the panel's own cap.
       final icon = tester.widget<Icon>(
         find.descendant(of: row, matching: find.byIcon(Icons.pending_outlined)),
       );
-      expect(icon.size, 40);
+      expect(icon.size, 20);
 
       final textTheme = Theme.of(tester.element(row)).textTheme;
       final title = tester.widget<Text>(
         find.descendant(of: row, matching: find.text('Current task')),
       );
-      expect(title.style?.fontSize, textTheme.headlineMedium?.fontSize);
+      expect(title.style?.fontSize, textTheme.bodyLarge?.fontSize);
       final detail = tester.widget<Text>(
         find.descendant(of: row, matching: find.text('Halfway there')),
       );
-      expect(detail.style?.fontSize, textTheme.headlineSmall?.fontSize);
+      expect(detail.style?.fontSize, textTheme.bodyMedium?.fontSize);
     });
+
+    // P3b. A finished list used to arm a 3-second auto-archive at initState,
+    // re-armed on every update and never cancelled by expansion, so opening it
+    // to read one row deleted it mid-read. The predicate also compared the
+    // LOCALIZED status label, so it fired in English and never in Chinese.
+    for (final locale in const [Locale('en'), Locale('zh')]) {
+      testWidgets(
+        'keeps a finished task list pinned in ${locale.languageCode}',
+        (tester) async {
+          await tester.pumpWidget(
+            buildSessionDetailTestPage(
+              locale: locale,
+              events: [
+                mutableSession(),
+                MessageWireEvent(
+                  seq: 1,
+                  message: AgentMessage.fromJson({
+                    'type': 'task-list-state',
+                    'key': 'plan',
+                    'status': 'done',
+                    'title': 'Launch checklist',
+                    'items': [
+                      {'title': 'Ship it', 'status': 'done'},
+                    ],
+                  }),
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final strip = find.byKey(
+            const ValueKey('session-live-strip-task-list:plan'),
+          );
+          expect(strip, findsOneWidget);
+
+          await tester.pump(const Duration(seconds: 4));
+          await tester.pumpAndSettle();
+          expect(strip, findsOneWidget);
+
+          await tester.tap(strip);
+          await tester.pumpAndSettle();
+          // A done list opens collapsed inside the card, so the reader has to
+          // open it too — which is exactly when the timer used to fire.
+          await tester.tap(
+            find.byKey(const Key('session-task-list-expansion')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Ship it'), findsOneWidget);
+
+          await tester.pump(const Duration(seconds: 4));
+          await tester.pumpAndSettle();
+          expect(strip, findsOneWidget);
+          expect(find.text('Ship it'), findsOneWidget);
+        },
+      );
+    }
 
     testWidgets(
       'dispatches advertised goal actions and waits for broker state',
@@ -426,5 +486,61 @@ void main() {
         );
       },
     );
+  });
+
+  // P3c. The projection chain used to open with the idle sweep as the FIRST
+  // branch of an if/else, so any frame carrying an idle status skipped the
+  // whole type dispatch behind it.
+  group('SessionLiveState idle sweep', () {
+    AgentMessage message(Map<String, Object?> json) =>
+        AgentMessage.fromJson(json);
+
+    test('an idle status frame clears activities and keeps task lists', () {
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'agent:one',
+          'title': 'Explore',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'task-list-state',
+          'key': 'plan',
+          'status': 'running',
+          'items': [
+            {'title': 'Ship it', 'status': 'open'},
+          ],
+        }),
+        message(const {'type': 'status', 'status': 'idle'}),
+      ]);
+
+      expect(state.activities, isEmpty);
+      expect(state.taskLists.single.key, 'plan');
+    });
+
+    test('a task-list frame is dispatched and never sweeps activities', () {
+      // `task-list-state` carries its own `status` field. The sweep is gated on
+      // the frame TYPE so that field can never be read as a turn boundary, and
+      // it no longer stands in front of the type dispatch.
+      final state = SessionLiveState.fromMessages([
+        message(const {
+          'type': 'agent-activity',
+          'key': 'agent:one',
+          'title': 'Explore',
+          'status': 'running',
+        }),
+        message(const {
+          'type': 'task-list-state',
+          'key': 'plan',
+          'status': 'running',
+          'items': [
+            {'title': 'Ship it', 'status': 'open'},
+          ],
+        }),
+      ]);
+
+      expect(state.taskLists.single.key, 'plan');
+      expect(state.activities.single.key, 'agent:one');
+    });
   });
 }

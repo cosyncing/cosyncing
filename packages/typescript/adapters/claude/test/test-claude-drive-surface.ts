@@ -196,10 +196,18 @@ async function main(): Promise<void> {
     await conn.sendPrompt({ text: 'the queued message, delivered' }); // installs the fake proc (running)
     append({ type: 'user', uuid: 'echo-1', timestamp: '2026-07-14T10:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'the queued message, delivered' }] } });
     drain();
-    check('echo tail: our own send echo emits a user-message frame', um().length === 1 && um()[0].text === 'the queued message, delivered', JSON.stringify(um()));
+    // P1a/P1b: the send itself emits the canonical row (app-minted key, no queued flag on an idle
+    // session) and the tail echo RE-emits it under the SAME key, so the client upserts in place.
+    check('echo tail: our own send echo re-emits the send row under its key',
+      um().length === 2
+        && um()[1].text === 'the queued message, delivered'
+        && um()[1].key === um()[0].key
+        && String(um()[0].key).startsWith('queued:app:')
+        && !um()[0].queued && !um()[1].queued,
+      JSON.stringify(um()));
     check('echo tail: our own echo is NOT flagged foreign', errors().length === 0 && conn.info.attachMode === 'resume');
     drain();
-    check('echo tail: re-drain emits nothing (offset advanced)', um().length === 1);
+    check('echo tail: re-drain emits nothing (offset advanced)', um().length === 2);
 
     const before = msgs.length;
     append({ type: 'assistant', uuid: 'echo-a', message: { id: 'em1', role: 'assistant', content: [{ type: 'text', text: 'reply' }] } });

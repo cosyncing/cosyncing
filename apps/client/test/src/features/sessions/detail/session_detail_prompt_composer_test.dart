@@ -143,6 +143,76 @@ void main() {
       );
     });
 
+    // P1d. The capture used to OR in `liveState.activities.isNotEmpty`, so any
+    // live agent-activity bar marked an idle session's send queued — and the
+    // flag is immutable after capture, so the badge never cleared.
+    testWidgets('does not queue-label a send on an idle session with a live '
+        'activity', (tester) async {
+      final connection = ScriptedSessionDetailConnection(
+        events: [
+          SessionWireEvent(
+            info: SessionInfo.fromJson({
+              'id': 'session-1',
+              'tool': 'claude',
+              'title': 'Idle session',
+              'status': 'idle',
+              'attachMode': 'resume',
+              'control': const {
+                'drive': {'state': 'driving', 'supported': true},
+                'terminalSync': {
+                  'supported': false,
+                  'syncAvailable': false,
+                  'active': false,
+                },
+                'input': 'full',
+              },
+            }),
+          ),
+          MessageWireEvent(
+            seq: 1,
+            message: AgentMessage.fromJson(const {
+              'type': 'agent-activity',
+              'key': 'activity-1',
+              'status': 'running',
+              'title': 'Background agent',
+            }),
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('session-detail-prompt-input')),
+        'Follow up',
+      );
+      await tester.pump();
+      final send = tester.widget<IconButton>(
+        find.byKey(const Key('session-detail-send-button')),
+      );
+      expect(send.onPressed, isNotNull);
+      send.onPressed!();
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionDetailPage)),
+      );
+      final state = container.read(
+        sessionDetailControllerProvider(
+          const SessionDetailKey(tool: 'claude', sessionId: 'session-1'),
+        ),
+      );
+      expect(state.sessionInfo?.status, SessionStatus.idle);
+      expect(state.liveState.activities, isNotEmpty);
+      expect(state.optimisticPrompts.single.queued, isFalse);
+      expect(
+        find.byKey(const Key('queued-user-message-badge')),
+        findsNothing,
+      );
+    });
+
     testWidgets('debounces session-scoped draft relay and swallows its echo', (
       tester,
     ) async {

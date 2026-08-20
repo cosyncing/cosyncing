@@ -72,6 +72,8 @@ function check(name: string, ok: boolean, detail = ''): void {
 // ── Fake server ─────────────────────────────────────────────────────────────
 
 let messageCalls = 0;
+/** `/api/v1/models` reads the fake server served, so the per-connection cache is observable. */
+let modelReads = 0;
 let failNextMessages = false;
 const messagePageRequests: Array<{ beforeId: string | null; returned: number }> = [];
 /**
@@ -105,6 +107,12 @@ let holdNextMessages: Promise<void> | undefined;
 let onMessagesRequest: ((beforeId: string | null) => void) | undefined;
 /** The current `/status` answer, so a reading can CHANGE between poll ticks. */
 let statusPayload: { code: number; msg: string; data: unknown } = FIXTURE.rest.status!;
+/**
+ * The current `/api/v1/models` answer, or `undefined` for a host that does not
+ * serve one — the 0.35.0 capture has no catalog, which is also the shape of a
+ * refused read, and the label join must degrade to the bare alias there.
+ */
+let modelsPayload: { code: number; msg: string; data: unknown } | undefined;
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
@@ -119,6 +127,10 @@ const server = Bun.serve({
     if (url.pathname === '/api/v2/sessions') return Response.json(FIXTURE.rest.v2Sessions);
     if (url.pathname === `/api/v1/sessions/${FIXTURE.sessionId}/status`) {
       return Response.json(statusPayload);
+    }
+    if (url.pathname === '/api/v1/models') {
+      modelReads += 1;
+      if (modelsPayload) return Response.json(modelsPayload);
     }
     if (url.pathname === `/api/v1/sessions/${FIXTURE.sessionId}/messages`) {
       messageCalls += 1;
@@ -1593,6 +1605,91 @@ try {
       `context=${overlayRows('contextUsage').length} info=${overlayRows('sessionInfo').length}`);
     await statusConn.close();
     statusPayload = FIXTURE.rest.status!;
+  }
+
+  // ── P8: the roster label is joined from the host catalog ──────────────────
+  //
+  // `/status.model` is the catalog's `model` VERBATIM (probed on a live 0.37.2
+  // host), so the two join exactly and `display_name` is the authoritative
+  // label. Without it the client is handed a bare alias and prints the raw id,
+  // or the bare family word, or a digit-scavenged invention.
+
+  {
+    // A host that serves no catalog is the same shape as a refused read: the
+    // attach must still work and still seed the alias, with no invented label.
+    const beforeBare = modelReads;
+    const bare = await observing.attach(FIXTURE.sessionId) as KimiObserveConnection;
+    check('with no catalog the attach still seeds the bare model and invents no label',
+      bare.info.model === 'kimi-code/k3-256k' && bare.info.currentModel === undefined
+        && modelReads > beforeBare,
+      JSON.stringify({ model: bare.info.model, current: bare.info.currentModel }));
+    await bare.close();
+
+    // The host's own names, as the 0.37.2 probe recorded them. `k3` is
+    // deliberately absent: it is added below, mid-life, to prove the cache
+    // re-reads for an alias it does not know rather than labelling nothing.
+    modelsPayload = {
+      code: 0, msg: 'success',
+      data: { items: [
+        { provider: 'managed:kimi-code', model: 'kimi-code/k3-256k', display_name: 'K3-256k' },
+      ] },
+    };
+    const labelled = await observing.attach(FIXTURE.sessionId) as KimiObserveConnection;
+    check('attach labels the host-reported model from the catalog, before any prompt',
+      labelled.info.currentModel?.label === 'K3-256k'
+        && labelled.info.currentModel.modelID === 'kimi-code/k3-256k'
+        && labelled.info.currentModel.providerID === 'managed:kimi-code'
+        && labelled.info.model === 'kimi-code/k3-256k',
+      JSON.stringify(labelled.info.currentModel));
+
+    const labelRows: AgentMessage[] = [];
+    labelled.subscribe((message) => labelRows.push(message));
+    const labelTick = intervalHandler;
+    await labelled.getHistory();
+    await labelled.getHistoryOverlays();
+    const labelInfo = () => labelRows.filter(
+      (message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
+        message.type === 'metadata-update' && message.key === 'sessionInfo');
+
+    // The session switched model, to one the host added after this connection
+    // attached. Both halves are the point: the poll re-reads for an alias its
+    // cache lacks, and the changed reading reaches the client labelled.
+    modelsPayload = {
+      code: 0, msg: 'success',
+      data: { items: [
+        { provider: 'managed:kimi-code', model: 'kimi-code/k3-256k', display_name: 'K3-256k' },
+        { provider: 'managed:kimi-code', model: 'kimi-code/kimi-for-coding', display_name: 'K2.7 Coding' },
+      ] },
+    };
+    const base = FIXTURE.rest.status!.data as Record<string, unknown>;
+    statusPayload = { ...FIXTURE.rest.status!, data: { ...base, model: 'kimi-code/kimi-for-coding' } };
+    labelTick?.();
+    await Bun.sleep(60);
+    check('a status change to another catalog model emits the updated label',
+      labelInfo().length === 1
+        && (labelInfo()[0]?.value as { currentModel?: { label?: string; modelID?: string } })
+          .currentModel?.label === 'K2.7 Coding'
+        && (labelInfo()[0]?.value as { model?: string }).model === 'kimi-code/kimi-for-coding',
+      JSON.stringify(labelInfo().map((row) => row.value)));
+
+    // An alias no catalog knows keeps the bare string. The re-read is spent on
+    // it once, not once per poll.
+    const beforeUnknown = modelReads;
+    statusPayload = { ...FIXTURE.rest.status!, data: { ...base, model: 'kimi-code/k9-unreleased' } };
+    labelTick?.();
+    await Bun.sleep(60);
+    labelTick?.();
+    await Bun.sleep(60);
+    const unknownInfo = labelInfo().at(-1)?.value as { model?: string; currentModel?: unknown };
+    check('an alias the catalog does not know keeps the bare model and CLEARS the label explicitly, at one extra read',
+      unknownInfo?.model === 'kimi-code/k9-unreleased' && unknownInfo.currentModel === undefined
+        && 'currentModel' in unknownInfo // the broker folds with Object.assign: an omitted key would keep K2.7 Coding
+        && modelReads === beforeUnknown + 1,
+      JSON.stringify({ info: unknownInfo, reads: modelReads - beforeUnknown }));
+
+    await labelled.close();
+    statusPayload = FIXTURE.rest.status!;
+    modelsPayload = undefined;
   }
 
   // A reading that RETURNS to an earlier value is still news. contextUsage going

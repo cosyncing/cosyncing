@@ -654,6 +654,12 @@ function typesOf(messages: Array<{ type: string }>): string {
   const summary = FIXTURE.sessionList.body.result.value.items[0]!;
   const session = mapDshSession(summary)!;
   check(
+    "the summary's permissions projection seeds currentMode on the row — the chip is set before the first session frame",
+    session.currentMode === 'workspace-write'
+      && mapDshSession({ ...summary, projections: undefined })!.currentMode === undefined,
+    String(session.currentMode),
+  );
+  check(
     'a captured session row maps with its projected title and drive-owner control state',
     session.id === SESSION_ID
       && session.title === 'cosyncing spike (safe to delete)'
@@ -1330,6 +1336,180 @@ function typesOf(messages: Array<{ type: string }>): string {
     'an unparsable spawn argument string emits no bar',
     brokenCall.length === 1 && brokenCall[0]!.type === 'tool-call',
     JSON.stringify(brokenCall),
+  );
+}
+
+// ── 9. Roster lineage: the client's parent/child join ───────────────────────
+
+{
+  // The client's nesting is agent-neutral and needs BOTH halves of the link.
+  // Its lookup table is built ONLY from rows carrying `nativeId`
+  // (session_roster_projection.dart, identity `(machine, tool, nativeId)`), so
+  // a child publishing `parentThreadId` alone resolves to nothing and renders
+  // as an unrelated top-level row. This is that exact join, asserted here.
+  const summary = FIXTURE.sessionList.body.result.value.items[0]!;
+  const parent = mapDshSession(summary)!;
+  const child = mapDshSession({
+    ...summary,
+    sessionId: 'session-child-1f2e',
+    origin: 'subagent',
+    parentSessionId: SESSION_ID,
+  })!;
+  check(
+    "the child's parentThreadId resolves to the parent's nativeId — the client's roster join",
+    child.parentThreadId === parent.nativeId
+      && parent.nativeId === SESSION_ID
+      && child.origin === 'subagent',
+    JSON.stringify({ parent: parent.nativeId, child: child.parentThreadId }),
+  );
+  check(
+    'every dsh row carries nativeId, not just the ones that happen to be parents',
+    child.nativeId === 'session-child-1f2e'
+      && mapDshSession({ ...summary, sessionId: 'plain' })!.nativeId === 'plain',
+  );
+}
+
+// ── 10. Background-subagent settlements are tool blocks, not messages ───────
+
+{
+  // The literals come from `@deepseek-ai/dsh-subagent`'s `settlementSummary()`
+  // and `deliverReport()`. Kept verbatim: the settled source carries NO
+  // structural outcome (kind/form/summary/senderSessionId only), so the
+  // package's own English line is the only evidence of how the child ended.
+  const CHILD = 'session-child-9a3b';
+  const settlement = (text: string, seq = 200): DshHistoryEntry => ({
+    event: {
+      type: 'user/message', seq, time: 7000,
+      data: {
+        content: [{ type: 'text', text }],
+        source: { kind: 'subagent-settled', form: 'notice', summary: text, senderSessionId: CHILD },
+        id: 'settle-1',
+      },
+    } as never,
+  });
+
+  const failureText = `Background subagent ${CHILD} failed before it finished.It left no closing message.`;
+  const failure = mapDshEvent(settlement(failureText), createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+  check(
+    'a settled notice becomes exactly one tool-call + tool-result, never a user bubble or context event',
+    failure.length === 2
+      && failure[0]!.type === 'tool-call'
+      && failure[1]!.type === 'tool-result'
+      && failure.every((row) => row.toolName === 'subagent')
+      && failure[0]!.title === 'Background subagent settled'
+      && JSON.stringify(failure[0]!.args) === JSON.stringify({ subagent: CHILD })
+      && failure[1]!.result === failureText
+      && !failure.some((row) => row.type === 'user-message')
+      && !failure.some((row) => row.type === 'event' && row.name === CONTEXT_INJECTION_EVENT),
+    JSON.stringify(failure),
+  );
+  check(
+    'a failed settlement is an error card',
+    failure[1]!.isError === true,
+    JSON.stringify(failure[1]),
+  );
+
+  // The ONE success arm upstream has. Every other stopReason — aborted,
+  // max-tokens, refusal, error, and a variant the package cannot name — says
+  // "before it finished", and upstream reports those as unfinished rather than
+  // silently as success. This adapter draws the line in the same place.
+  const okText = `Background subagent ${CHILD} finished and will do no further work unless you send it more.It left no closing message.`;
+  const settled = mapDshEvent(settlement(okText), createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+  check(
+    'a completed settlement carries no error state',
+    settled.length === 2 && settled[1]!.isError === undefined,
+    JSON.stringify(settled[1]),
+  );
+
+  for (const [name, text] of [
+    ['aborted', `Background subagent ${CHILD} was stopped before it finished.`],
+    ['refusal', `Background subagent ${CHILD} declined the task.`],
+    ['max-tokens', `Background subagent ${CHILD} ran out of room before it finished.`],
+    ['an unnameable stopReason', `Background subagent ${CHILD} ended abnormally (quantum) before it finished.`],
+  ] as const) {
+    const rows = mapDshEvent(settlement(text), createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+    check(`${name} is an unfinished ending, not a silent success`, rows[1]!.isError === true, JSON.stringify(rows[1]));
+  }
+
+  // A REPORT is content the child chose to send. It says nothing about how the
+  // child ended, so it never carries an error state — a different kind for a
+  // different fact, exactly as upstream separates the two source types.
+  const reportText = `Background subagent ${CHILD} reported:all clear`;
+  const report = mapDshEvent({
+    event: {
+      type: 'user/message', seq: 201, time: 7100,
+      data: {
+        content: [{ type: 'text', text: reportText }],
+        source: { kind: 'subagent-report', form: 'relay', senderSessionId: CHILD },
+        id: 'report-1',
+      },
+    } as never,
+  }, createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+  check(
+    'a child report is its own tool block with no error state',
+    report.length === 2
+      && report[0]!.type === 'tool-call' && report[1]!.type === 'tool-result'
+      && report[0]!.title === 'Background subagent reported'
+      && report[1]!.result === reportText
+      && report[1]!.isError === undefined,
+    JSON.stringify(report),
+  );
+
+  // One card PER EVENT: the key is the child id plus the event's own native
+  // message id, never live-ness or a claimed correlation to the parent's
+  // spawning tool/call. The same event replays onto the same card; a later
+  // report or the settlement from that child gets its own, because the client
+  // reduces tool rows by callId and a shared key let the generic settlement
+  // overwrite the child's report.
+  const live = mapDshEvent(settlement(failureText), createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+  const replay = mapDshEvent(settlement(failureText), createDshMapState(SESSION_ID, false)) as Array<Record<string, unknown>>;
+  check(
+    'the same settlement event keys identically live and on replay',
+    live[0]!.callId === replay[0]!.callId
+      && live[0]!.callId === `dsh:${SESSION_ID}:subagent:${CHILD}:settle-1`
+      && replay[0]!.callId === replay[1]!.callId,
+    `${String(live[0]!.callId)} vs ${String(replay[0]!.callId)}`,
+  );
+  check(
+    'a report and the settlement from ONE child are distinct cards, so the settlement cannot overwrite the report',
+    report[0]!.callId !== live[0]!.callId
+      && report[0]!.callId === `dsh:${SESSION_ID}:subagent:${CHILD}:report-1`,
+    `${String(report[0]!.callId)} vs ${String(live[0]!.callId)}`,
+  );
+  const unnumbered = mapDshEvent({
+    event: {
+      type: 'user/message', seq: 321, time: 7000,
+      data: {
+        content: [{ type: 'text', text: failureText }],
+        source: { kind: 'subagent-settled', form: 'notice', summary: failureText, senderSessionId: CHILD },
+      },
+    } as never,
+  }, createDshMapState(SESSION_ID, false)) as Array<Record<string, unknown>>;
+  check(
+    'a settlement the host left unnumbered falls back to its seq, which dsh history replays unchanged',
+    unnumbered[0]!.callId === `dsh:${SESSION_ID}:subagent:${CHILD}:321`,
+    String(unnumbered[0]!.callId),
+  );
+
+  // The default stays the default: a kind this build has never seen is still
+  // agent-visible material the user never typed.
+  const unknownKind = mapDshEvent({
+    event: {
+      type: 'user/message', seq: 202, time: 7200,
+      data: {
+        content: [{ type: 'text', text: 'catalog body' }],
+        source: { kind: 'skill-catalog', form: 'catalog' },
+        id: 'cat-1',
+      },
+    } as never,
+  }, createDshMapState(SESSION_ID, true)) as Array<Record<string, unknown>>;
+  check(
+    'a non-subagent, non-user source is still context injection, naming its own kind',
+    unknownKind.length === 1
+      && unknownKind[0]!.type === 'event'
+      && unknownKind[0]!.name === CONTEXT_INJECTION_EVENT
+      && (unknownKind[0]!.payload as { source: string }).source === 'skill-catalog',
+    JSON.stringify(unknownKind),
   );
 }
 

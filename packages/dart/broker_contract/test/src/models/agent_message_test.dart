@@ -587,6 +587,38 @@ void main() {
       expect(legacy.userMessageClientKey, isNull);
       expect(wrongType.userMessageClientKey, isNull);
     });
+
+    test('links a sent artifact to the user-message it travelled with', () {
+      final attachment = AgentMessage.fromJson({
+        'type': 'file-artifact',
+        'artifactKey': 'artifact-1',
+        'name': 'screenshot.png',
+        'userMessageKey': 'user-1',
+      });
+      final produced = AgentMessage.fromJson({
+        'type': 'file-artifact',
+        'artifactKey': 'artifact-2',
+        'name': 'report.pdf',
+      });
+      final blank = AgentMessage.fromJson({
+        'type': 'file-artifact',
+        'artifactKey': 'artifact-3',
+        'userMessageKey': '   ',
+      });
+      final wrongType = AgentMessage.fromJson({
+        'type': 'model-output',
+        'userMessageKey': 'user-1',
+        'text': 'not an artifact',
+      });
+
+      expect(attachment.fileArtifactUserMessageKey, 'user-1');
+      expect(attachment.isUserAttachment, isTrue);
+      expect(produced.fileArtifactUserMessageKey, isNull);
+      expect(produced.isUserAttachment, isFalse);
+      expect(blank.fileArtifactUserMessageKey, isNull);
+      expect(blank.isUserAttachment, isFalse);
+      expect(wrongType.fileArtifactUserMessageKey, isNull);
+    });
   });
 
   group('typed session state messages', () {

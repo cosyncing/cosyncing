@@ -82,9 +82,27 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the Ctrl modifier, so the next plain mouse-wheel scroll is not misread as
   Ctrl+scroll text zoom; the latched-key release also covers the composer's
   send chord and the attachment paste chord.
-- The expanded task/plan list in session detail now renders its rows roughly
-  three times larger — headline-scale titles, 40px status icons — instead of
-  the collapsed list's dense presentation.
+- The expanded task/plan list in session detail is taller, its rows use the
+  transcript's body type scale, and a finished list no longer archives itself
+  three seconds after it appears: it stays until you archive it.
+- A prompt sent to a driven Claude session while a turn is running now survives
+  a page reload: the adapter publishes the pending row itself and clears its
+  "queued" badge in place once the transcript delivers it. If Claude cannot be
+  launched, the send fails instead of leaving the session stuck on Running.
+- Claude session rows show the model for every family the adapter knows,
+  including Fable. Kimi rows show the server's own model names (for example
+  `K2.7 Coding`, `K3-256k`) instead of a raw alias or a guessed version, and
+  the client no longer turns a provider-qualified id into a display name.
+- Images sent with a prompt render inside your own message bubble on Kimi and
+  Claude sessions instead of as a downloadable artifact card.
+- Two cosyncing clients can share one Kimi Drive session: the second client
+  joins the existing driver instead of sitting on a read-only view.
+- DeepSeek Harness: subagent sessions nest under their parent in the session
+  list, a background subagent's completion report renders as a tool card rather
+  than a message, and the model and permission mode chosen at creation reach
+  the composer at attach instead of after the first prompt.
+- A send on an idle session no longer shows a "queued" badge just because a
+  subagent activity bar is still visible.
 
 ## 0.4.0 — 2026-08-18
 

@@ -62,7 +62,6 @@ import {
   KIMI_FOREIGN_WRITER_REASON,
   boundedKimiErrorMessage,
   kimiDemotedControlState,
-  mapKimiModelCatalog,
   mapKimiQuestionAnswers,
   mapKimiRunState,
   type KimiMappedRow,
@@ -384,7 +383,9 @@ export class KimiDriveConnection extends KimiObserveConnection {
    *    recorded and a walked row whose text starts with it is adopted.
    *  - an INLINE IMAGE echoes as a `file-artifact` row named from the
    *    rehydrated data URL's mime — `image.<ext>` — so that derived name is
-   *    recorded and matched against the row's name.
+   *    recorded and matched against the row's name. That echo also carries the
+   *    EMPTY user row the artifact is linked to (`mapping.ts`,
+   *    `userMessageKey`), which arrives first and is adopted by the same entry.
    *
    * Each entry adopts exactly one walked row and is then spent WHOLE ({@link
    * adoptUncorrelatedEcho}): every row of one prompt's echo shares one native
@@ -736,8 +737,9 @@ export class KimiDriveConnection extends KimiObserveConnection {
       this.uncorrelatedPromptTexts.push(echo.text);
     } else {
       // The ATTACHMENT-ONLY variant of the same accounting (`sendFile`
-      // submits an empty text part). Exact text cannot adopt this echo — an
-      // empty text part folds to no row — but the server REWRITES each file
+      // submits an empty text part). Exact text cannot adopt this echo — the
+      // submitted text is empty, and the only row it folds to is an empty one
+      // that no remembered text could match — but the server REWRITES each file
       // part into a text notice whose prefix up to the path is fully
       // reconstructible from the part itself (`buildAttachedFileNotice`,
       // upstream `promptMedia.ts`), and an inline image echoes as a
@@ -1049,14 +1051,9 @@ export class KimiDriveConnection extends KimiObserveConnection {
     return {};
   }
 
+  /** The picker's options — the same read the status overlay's label join uses. */
   async listModels(): Promise<ModelOption[]> {
-    if (this.transportInvalid && !(await this.ensureTransport())) return [];
-    const result = await this.transport.http.getJson<unknown>('/api/v1/models');
-    if (!result.ok) {
-      this.noteUnauthorized(result.reason);
-      return [];
-    }
-    return mapKimiModelCatalog(result.data);
+    return this.readModelCatalogRows();
   }
 
   async listModes(): Promise<ModeOption[]> {
@@ -1600,7 +1597,15 @@ export class KimiDriveConnection extends KimiObserveConnection {
         this.uncorrelatedPromptTexts.splice(textIndex, 1);
       } else {
         const evidenceIndex = this.uncorrelatedEchoEvidence.findIndex((entry) =>
-          entry.noticePrefixes.some((prefix) => message.text.startsWith(prefix)));
+          entry.noticePrefixes.some((prefix) => message.text.startsWith(prefix))
+          // ...or the EMPTY row an inline image's echo now carries. An
+          // image-only prompt folds to a user row with no text plus the
+          // artifact (`mapping.ts`), and the empty row comes FIRST — so it is
+          // the row the detector meets, and an entry that could only be spent
+          // by the artifact would leave this connection's own echo standing as
+          // the walk's unexplained user row. Suspicion is keyed by native
+          // message id, so whichever of the pair adopts covers the other.
+          || (message.text === '' && entry.imageNames.length > 0));
         if (evidenceIndex < 0) return false;
         this.uncorrelatedEchoEvidence.splice(evidenceIndex, 1);
       }

@@ -15,6 +15,7 @@
  */
 export {};
 import { CONTEXT_INJECTION_BODY_MAX_UNITS, CONTEXT_INJECTION_EVENT } from '@cosyncing/adapter-api';
+import type { ModelOption } from '@cosyncing/adapter-api';
 import {
   KIMI_APPROVAL_DETAIL_CAP_BYTES,
   KIMI_UNKEYABLE_QUESTION,
@@ -35,7 +36,10 @@ import {
   mapKimiRunState,
   mapKimiSession,
   mapKimiSessionStatus,
+  mapKimiModelCatalog,
   mapKimiWorkChanged,
+  KimiModelCatalogCache,
+  type KimiMappedRow,
 } from '../src/mapping.ts';
 
 const FIXTURE = await Bun.file(new URL('./fixtures/kimi-0.35.0.json', import.meta.url)).json() as {
@@ -521,6 +525,106 @@ const modelessInfo = modeless.find((m) => m.type === 'metadata-update' && m.key 
 check('a status without a permission mode invents none',
   !((modelessInfo?.type === 'metadata-update' ? modelessInfo.value : {}) as Record<string, unknown>).currentMode,
   JSON.stringify(modelessInfo));
+
+// ── P8: the roster label is the HOST CATALOG's display name ─────────────────
+//
+// Probed on a live Kimi Code 0.37.2: `/status` reports the catalog's `model`
+// verbatim, so the two join exactly. Without the join the client is left with a
+// bare alias and prints `kimi-code/kimi-for-coding`, or `Kimi`, or the
+// digit-scavenged `Kimi 3.256`.
+
+{
+  const catalog = mapKimiModelCatalog({
+    items: [
+      { provider: 'managed:kimi-code', model: 'kimi-code/kimi-for-coding', display_name: 'K2.7 Coding' },
+      { provider: 'managed:kimi-code', model: 'kimi-code/kimi-for-coding-highspeed', display_name: 'K2.7 Coding Highspeed' },
+      { provider: 'managed:kimi-code', model: 'kimi-code/k3', display_name: 'K3' },
+      { provider: 'managed:kimi-code', model: 'kimi-code/k3-256k', display_name: 'K3-256k' },
+    ],
+  });
+  const infoOf = (status: unknown, rows?: ModelOption[]) => {
+    const overlay = mapKimiSessionStatus(status, rows)
+      .find((m) => m.type === 'metadata-update' && m.key === 'sessionInfo');
+    return (overlay?.type === 'metadata-update' ? overlay.value : {}) as Record<string, unknown>;
+  };
+
+  const coding = infoOf({ model: 'kimi-code/kimi-for-coding' }, catalog);
+  check('a status model that joins the catalog carries the host display name',
+    JSON.stringify(coding.currentModel) === JSON.stringify({
+      providerID: 'managed:kimi-code', modelID: 'kimi-code/kimi-for-coding', label: 'K2.7 Coding',
+    }),
+    JSON.stringify(coding));
+  check('...and the raw alias stays on `model` for the tooltip',
+    coding.model === 'kimi-code/kimi-for-coding', JSON.stringify(coding));
+
+  const k3 = infoOf({ model: 'kimi-code/k3-256k' }, catalog);
+  check('the k3-256k alias labels as K3-256k, not the client\'s "Kimi 3.256" guess',
+    (k3.currentModel as { label?: string } | undefined)?.label === 'K3-256k', JSON.stringify(k3));
+
+  const unknown = infoOf({ model: 'kimi-code/k9-unreleased' }, catalog);
+  check('a model the catalog does not know keeps the bare alias and invents no label',
+    unknown.model === 'kimi-code/k9-unreleased' && unknown.currentModel === undefined,
+    JSON.stringify(unknown));
+  check('...and publishes an EXPLICIT clear, so a switch to it cannot leave the previous label folded in',
+    'currentModel' in unknown && unknown.currentModel === undefined, JSON.stringify(unknown));
+  const unreadCatalog = infoOf({ model: 'kimi-code/k9-unreleased' });
+  const emptyCatalog = infoOf({ model: 'kimi-code/k9-unreleased' }, []);
+  check('with no catalog loaded the overlay says nothing about the label either way',
+    !('currentModel' in unreadCatalog) && !('currentModel' in emptyCatalog), JSON.stringify({ unreadCatalog, emptyCatalog }));
+  const noCatalog = infoOf({ model: 'kimi-code/k3' });
+  check('...and with no catalog at all the mapping is exactly what it was',
+    noCatalog.model === 'kimi-code/k3' && noCatalog.currentModel === undefined,
+    JSON.stringify(noCatalog));
+
+  // The catalog is the only naming authority here: a row with no display_name
+  // labels as its own alias rather than as something this adapter invented.
+  const namelessCatalog = mapKimiModelCatalog({ items: [{ provider: 'kimi-code', model: 'k2' }] });
+  const nameless = infoOf({ model: 'k2' }, namelessCatalog);
+  check('a catalog row with no display_name labels as its own id',
+    (nameless.currentModel as { label?: string } | undefined)?.label === 'k2', JSON.stringify(nameless));
+}
+
+// The cache is what keeps a 10 s poll from re-reading a per-host constant, and
+// what still catches a model added mid-session.
+{
+  let reads = 0;
+  let rows: ModelOption[] = mapKimiModelCatalog({
+    items: [{ provider: 'managed:kimi-code', model: 'kimi-code/k3', display_name: 'K3' }],
+  });
+  const cache = new KimiModelCatalogCache();
+  const read = async () => { reads += 1; return rows; };
+
+  check('the first join reads the catalog once',
+    (await cache.optionsFor('kimi-code/k3', read)).length === 1 && reads === 1, `reads=${reads}`);
+  await cache.optionsFor('kimi-code/k3', read);
+  check('a known alias is answered from the cache', reads === 1, `reads=${reads}`);
+
+  // The host gained a model since this connection attached.
+  rows = mapKimiModelCatalog({
+    items: [
+      { provider: 'managed:kimi-code', model: 'kimi-code/k3', display_name: 'K3' },
+      { provider: 'managed:kimi-code', model: 'kimi-code/k4', display_name: 'K4' },
+    ],
+  });
+  const refreshed = await cache.optionsFor('kimi-code/k4', read);
+  check('an alias the cache lacks re-reads once and finds the new model',
+    reads === 2 && refreshed.some((option) => option.modelID === 'kimi-code/k4'), `reads=${reads}`);
+  await cache.optionsFor('kimi-code/k5-never-existed', read);
+  await cache.optionsFor('kimi-code/k5-never-existed', read);
+  check('an alias that stays unknown costs exactly one re-read, not one per poll',
+    reads === 3, `reads=${reads}`);
+
+  // A refused read must not forget a catalog the connection already has.
+  const failing = async () => { reads += 1; return [] as ModelOption[]; };
+  const kept = await cache.optionsFor('kimi-code/k6', failing);
+  check('a failed re-read keeps the rows already held',
+    kept.some((option) => option.modelID === 'kimi-code/k3'), JSON.stringify(kept.map((o) => o.modelID)));
+  const cold = new KimiModelCatalogCache();
+  check('a failed FIRST read yields no rows and no throw',
+    (await cold.optionsFor('kimi-code/k3', failing)).length === 0);
+  check('an absent model reads nothing at all',
+    (await cold.optionsFor(undefined, failing)).length === 0);
+}
 
 // ── Run state: idle is a CLAIM, not a default ───────────────────────────────
 //
@@ -1343,12 +1447,12 @@ type ActivityRow = {
     content: [{ type: 'image', source: { kind: 'url', url: dataUri } }],
   } as never);
   check('an echoed image with a data: URI surfaces as a real image artifact row',
-    imageRow.length === 1
-      && imageRow[0]!.message.type === 'file-artifact'
-      && (imageRow[0]!.message as { url?: string }).url === dataUri
-      && (imageRow[0]!.message as { mimeType?: string }).mimeType === 'image/png'
-      && (imageRow[0]!.message as { artifactKey?: string }).artifactKey === 'kimi:msg_img_1:0',
-    JSON.stringify(imageRow[0]));
+    imageRow.length === 2
+      && imageRow[1]!.message.type === 'file-artifact'
+      && (imageRow[1]!.message as { url?: string }).url === dataUri
+      && (imageRow[1]!.message as { mimeType?: string }).mimeType === 'image/png'
+      && (imageRow[1]!.message as { artifactKey?: string }).artifactKey === 'kimi:msg_img_1:0',
+    JSON.stringify(imageRow[1]));
 
   const missing = mapKimiMessage({
     id: 'msg_img_2', role: 'user',
@@ -1377,11 +1481,119 @@ type ActivityRow = {
     id: 'msg_img_3', role: 'user',
     content: [{ type: 'image', source: { kind: 'url', url: `data:image/png;base64,${'A'.repeat(7_000_100)}` } }],
   } as never);
+  const oversizedArtifact = oversized.find((row) => row.message.type === 'file-artifact');
   check('an image past the inline cap goes header-only rather than shipping the data URL',
-    oversized.length === 1
-      && oversized[0]!.message.type === 'file-artifact'
-      && (oversized[0]!.message as { url?: string }).url === undefined,
-    JSON.stringify(oversized[0]).slice(0, 120));
+    oversized.length === 2
+      && oversizedArtifact !== undefined
+      && (oversizedArtifact.message as { url?: string }).url === undefined,
+    JSON.stringify(oversized.map((row) => row.message.type)));
+}
+
+// ── P6: a sent image belongs to the user row it was sent with ───────────────
+//
+// The artifact carries `userMessageKey`, the protocol's ownership link, so the
+// client can render it inside the right-aligned user surface instead of as an
+// agent deliverable. An image-only prompt still gets a user row — empty text —
+// because the link needs a target and the person's send needs a bubble.
+
+{
+  const dataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk';
+  const image = (url = dataUri) => ({ type: 'image', source: { kind: 'url', url } });
+  const userRow = (rows: KimiMappedRow[]) =>
+    rows.find((row) => row.message.type === 'user-message')?.message as
+      { type: 'user-message'; text: string; key?: string; imageCount?: number } | undefined;
+  const artifacts = (rows: KimiMappedRow[]) =>
+    rows.filter((row) => row.message.type === 'file-artifact')
+      .map((row) => row.message as { name: string; artifactKey?: string; userMessageKey?: string });
+
+  const withText = mapKimiMessage({
+    id: 'msg_p6_1', role: 'user',
+    content: [{ type: 'text', text: 'what is in this screenshot?' }, image()],
+  } as never);
+  const withTextUser = userRow(withText);
+  check('a text+image prompt links the artifact to that prompt\'s user row',
+    withTextUser?.key === 'kimi:msg_p6_1:0'
+      && withTextUser.text === 'what is in this screenshot?'
+      && artifacts(withText).length === 1
+      && artifacts(withText)[0]!.userMessageKey === withTextUser.key,
+    JSON.stringify(withText.map((row) => row.message)));
+  check('...and the user row states how many images travelled with it',
+    withTextUser?.imageCount === 1, JSON.stringify(withTextUser));
+
+  // The reported defect: nothing but the attachment, so before this there was
+  // no user row at all and the card rendered detached.
+  const imageOnly = mapKimiMessage({
+    id: 'msg_p6_2', role: 'user', created_at: '2026-08-14T09:00:00.000Z',
+    content: [image()],
+  } as never);
+  const imageOnlyUser = userRow(imageOnly);
+  check('an image-only prompt still emits a user row, with empty text',
+    imageOnly[0]!.message.type === 'user-message'
+      && imageOnlyUser?.text === ''
+      && imageOnlyUser.key === 'kimi:msg_p6_2:u'
+      && imageOnlyUser.imageCount === 1,
+    JSON.stringify(imageOnly.map((row) => row.message)));
+  check('...and the artifact names it as its owner',
+    artifacts(imageOnly)[0]!.userMessageKey === 'kimi:msg_p6_2:u'
+      && artifacts(imageOnly)[0]!.artifactKey === 'kimi:msg_p6_2:0',
+    JSON.stringify(artifacts(imageOnly)));
+  check('...on a row that carries the native send time like any other user row',
+    (imageOnly[0]!.message as { sentAt?: number }).sentAt === Date.parse('2026-08-14T09:00:00.000Z'),
+    JSON.stringify(imageOnly[0]!.message));
+
+  // Several text parts: ONE deterministic owner, the first user row in part
+  // order, and the second text row is untouched.
+  const multiText = mapKimiMessage({
+    id: 'msg_p6_3', role: 'user',
+    content: [
+      { type: 'text', text: 'first' },
+      image(),
+      { type: 'text', text: 'second' },
+      image('data:image/jpeg;base64,AAAA'),
+    ],
+  } as never);
+  const multiUsers = multiText.filter((row) => row.message.type === 'user-message');
+  check('several text parts pick the FIRST user row as the deterministic owner',
+    multiUsers.length === 2
+      && (multiUsers[0]!.message as { key?: string }).key === 'kimi:msg_p6_3:0'
+      && (multiUsers[1]!.message as { imageCount?: number }).imageCount === undefined
+      && artifacts(multiText).every((artifact) => artifact.userMessageKey === 'kimi:msg_p6_3:0')
+      && (multiUsers[0]!.message as { imageCount?: number }).imageCount === 2,
+    JSON.stringify(multiText.map((row) => row.message)));
+
+  // Live and history read the same native record through the same mapper, so
+  // the keys the client dedupes on must be identical either way.
+  const native = {
+    id: 'msg_p6_4', role: 'user', created_at: '2026-08-14T09:00:00.000Z',
+    content: [{ type: 'text', text: 'look' }, image()],
+  };
+  const live = mapKimiMessage(native as never);
+  const history = mapKimiMessagePage({ items: [native], has_more: false } as never).rows;
+  check('history and live produce identical keys and links for one native message',
+    JSON.stringify(live.map((row) => [row.identity, row.message]))
+      === JSON.stringify(history.map((row) => [row.identity, row.message])),
+    JSON.stringify(history.map((row) => row.identity)));
+
+  // Only a USER row's image is an attachment. An assistant-produced image is a
+  // deliverable and must keep its detached artifact card.
+  const assistant = mapKimiMessage({
+    id: 'msg_p6_5', role: 'assistant',
+    content: [{ type: 'text', text: 'here it is' }, image()],
+  } as never);
+  check('an assistant image is a deliverable, not an attachment',
+    assistant.every((row) => row.message.type !== 'user-message')
+      && artifacts(assistant)[0]!.userMessageKey === undefined,
+    JSON.stringify(assistant.map((row) => row.message)));
+
+  // The event fallback is not an artifact, so an unresolvable ref links nothing
+  // and mints no bubble that would sit empty in the transcript.
+  const unresolvable = mapKimiMessage({
+    id: 'msg_p6_6', role: 'user',
+    content: [{ type: 'image', source: { kind: 'url', url: '[media missing]' } }],
+  } as never);
+  check('an unresolvable image mints no empty user row',
+    unresolvable.length === 1 && unresolvable[0]!.message.type === 'event',
+    JSON.stringify(unresolvable.map((row) => row.message)));
 }
 
 const failed = results.filter((r) => !r.ok).length;

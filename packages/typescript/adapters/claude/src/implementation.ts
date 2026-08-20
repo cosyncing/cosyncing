@@ -157,7 +157,6 @@ export const CLAUDE_TURN_END_GRACE_MS = 2_000;
 /** Bound on the never-echoed submitted-prompt FIFO (exoneration list). Real depth is ≤2 (one in
  *  flight, one queued); the cap only bounds a pathological no-echo run. */
 export const CLAUDE_SUBMITTED_TEXTS_LIMIT = 32;
-
 /**
  * A Claude session STORE: a `CLAUDE_CONFIG_DIR` and the launch binary that targets it. The official
  * account lives in `~/.claude`; each wrapper (`~/bin/claude-mi`, `claude-minimax`, …) redirects
@@ -279,7 +278,7 @@ function defaultStore(): ClaudeStore | undefined {
 }
 
 /** Claude's transcript-dir slug for a cwd: every non-alphanumeric char → '-' (verified against real
- *  project dirs, e.g. `/home/u/Proj/a_b` → `-home-u-Proj-a-b`). Lets createSession predict where Claude
+ *  project dirs, e.g. `/srv/Proj/a_b` → `-srv-Proj-a-b`). Lets createSession predict where Claude
  *  will write a new session's `<uuid>.jsonl` so the row's id/path are stable before the first turn. */
 function slugForCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
@@ -1255,6 +1254,7 @@ export class ClaudeAdapter implements AgentBackend {
             currentModel: {
               providerID: opts.model.providerID,
               modelID: opts.model.modelID,
+              ...labelOf(opts.model.modelID),
               ...(opts.model.reasoningEffort ? { reasoningEffort: opts.model.reasoningEffort } : {}),
             },
           }
@@ -1423,6 +1423,13 @@ export class ClaudeAdapter implements AgentBackend {
             cwd,
             // Label by the producing model so wrapper sessions read e.g. 'MiniMax-M3' (Issue D).
             model: store.isDefault ? model : store.model,
+            // The roster reads `currentModel.label`, never the raw id: a row discovered but not
+            // attached is the common case, so the authored label has to ride the discovery row too
+            // (P2 — `claude-fable-5` showed no model because only attach built a currentModel).
+            currentModel: (() => {
+              const id = store.isDefault ? model : store.model;
+              return id ? { providerID: store.isDefault ? 'anthropic' : 'wrapper', modelID: String(id), ...labelOf(String(id)) } : undefined;
+            })(),
             status,
             // Drivable now: resume is available, but observe is the SAFE default shown in the roster
             // (opening never spends quota); the UI's "Drive" affordance reattaches with ?mode=resume.
@@ -1491,6 +1498,7 @@ export class ClaudeAdapter implements AgentBackend {
               ? pending.model.providerID
               : store.isDefault ? 'anthropic' : 'wrapper',
             modelID: String(liveModel),
+            ...labelOf(String(liveModel)),
             ...(pending?.model?.modelID === liveModel && pending.model.reasoningEffort
               ? { reasoningEffort: pending.model.reasoningEffort }
               : {}),
@@ -2196,6 +2204,31 @@ const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
   { alias: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku', efforts: EFFORTS_NONE },
   { alias: 'fable', fullId: 'claude-fable-5', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
 ];
+/** Roster display label for a resolved model id, authored HERE because the adapter is the only party
+ *  that knows Claude's tiers: the client's family table has no `fable` entry, so `claude-fable-5` showed
+ *  no model at all while Opus/Sonnet/Haiku rendered. Family = a curated alias as a whole `-` segment (or
+ *  the bare alias); version = the id's numeric segments minus 8-digit date stamps, as `major[.minor]`
+ *  ('claude-opus-4-8-20260701' -> 'Opus 4.8', 'claude-3-7-sonnet-20250219' -> 'Sonnet 3.7', 'opus' ->
+ *  'Opus'). An unknown family (wrapper model, future tier) returns undefined — no label is the honest
+ *  answer, and the client's own fallback still renders the raw id. */
+export function claudeModelLabel(modelID: string): string | undefined {
+  const segs = String(modelID ?? '').toLowerCase().split('-').filter(Boolean);
+  const entry = CURATED_CLAUDE_CATALOG.find((c) => segs.includes(c.alias));
+  if (!entry) return undefined;
+  const version = segs
+    .filter((x) => /^\d+$/.test(x) && x.length !== 8) // an 8-digit segment is a release date stamp, not a version
+    .slice(0, 2)
+    .join('.');
+  return version ? `${entry.label} ${version}` : entry.label;
+}
+
+/** Spread-form of {@link claudeModelLabel}: an unlabellable model contributes NO key, so the roster
+ *  never carries an invented label. */
+function labelOf(modelID: string | undefined): { label?: string } {
+  const label = modelID ? claudeModelLabel(modelID) : undefined;
+  return label ? { label } : {};
+}
+
 export const CLAUDE_MAX_MODEL_OPTIONS = 64;
 export const CLAUDE_MAX_GATING_ENTRIES = 256;
 
@@ -2439,6 +2472,18 @@ export class ClaudeResumeConnection implements SessionConnection {
    *  the same tail that watches for foreign writers, so they must be accounted for, not flagged.
    *  Bounded: a never-echoed send would otherwise accumulate (cap is generous; real depth is ≤2). */
   private readonly submittedTexts: string[] = [];
+  /** Live-tail queued-send state (P1b): the delivered user line must claim the SAME key the queued row
+   *  was emitted under, exactly as the history pass does — otherwise the queued styling can never clear
+   *  and a later history refetch re-keys the row into an orphan. */
+  private readonly queuedSends = newClaudeQueuedSends();
+  /** Driven prompts this connection accepted whose transcript user line has not arrived yet (P1a). The
+   *  CLI records a cosyncing-DRIVEN send as a CONTENT-LESS enqueue/dequeue pair (measured: 123 such
+   *  enqueues across this machine's corpus), so the transcript carries no queued bubble and, between
+   *  send and delivery, the user's words live only in the client's memory — a page reload lost them.
+   *  getHistory() replays these rows, so the pending prompt has an owner that survives a reload.
+   *  Bounded like submittedTexts. */
+  private readonly pendingDriven: { key: string; text: string; sentAt: number; queued: boolean; sentAtPath: string; sentAtOffset: number }[] = [];
+  private drivenSendSeq = 0; // with connNonce, namespaces app keys apart from transcript `queued:<ts>:<len>` keys
   /** Wall clock of the last turn end OUR child produced (result or exit). The child's final transcript
    *  writes can land a moment after its stdout result, so assistant rows inside this grace window are
    *  attributed to our own turn's tail rather than flagged foreign. */
@@ -2507,7 +2552,10 @@ export class ClaudeResumeConnection implements SessionConnection {
       const ln = parseLineOrNull(raw);
       if (!ln) continue;
       if (ln.type === 'user') {
-        const frames = mapUser(ln, this.callMeta);
+        // P1b: pass the queued-send state, exactly as the history pass (mapTranscript) does. Without it
+        // the delivered line was keyed by its own uuid, so the queued bubble could never clear on the
+        // live tail and a later history refetch re-keyed the same row into an orphan.
+        const frames = mapUser(ln, this.callMeta, this.queuedSends);
         // Exoneration BEFORE emission: a user-message row this connection did not submit is a second
         // writer's prompt (the terminal's, or another driver's) — proven foreign, demote at once. Rows
         // mapUser suppresses (tool results, meta, command sidecars) carry no verdict either way. A
@@ -2524,8 +2572,18 @@ export class ClaudeResumeConnection implements SessionConnection {
           }
         }
         for (const m of frames) {
-          if (m.type === 'user-message') this.emit(m);
+          if (m.type !== 'user-message') continue;
+          this.retirePendingDriven(m);
+          this.emit(m);
         }
+      } else if (ln.type === 'queue-operation') {
+        // The CLI's queue sidecar on the live tail, through the SAME mapper the replay uses: a
+        // terminal-typed enqueue registers (and shows) its queued bubble, and a `remove` retires the
+        // link it names (see retireRemovedSend) so a DROPPED driven prompt cannot lend its key to the
+        // next identical prompt — before this the tail ignored the op and the stale link stole the
+        // later delivery. The dropped prompt's own row (pendingDriven) is untouched: it stays
+        // honestly queued.
+        for (const m of mapLine(ln, this.callMeta, this.seenTokenIds, this.queuedSends)) this.emit(m);
       } else if (!this.demoted && ln.type === 'assistant' && !this.running && Date.now() - this.lastTurnEndedAt > CLAUDE_TURN_END_GRACE_MS) {
         // An assistant row from nobody's live turn: our child is not running and the grace window for
         // its final writes has closed — a second writer is mid-turn on the shared transcript.
@@ -2533,6 +2591,31 @@ export class ClaudeResumeConnection implements SessionConnection {
         return;
       }
     }
+  }
+
+  /** Retire the pending row a delivered echo just claimed (P1a). mapUser never sets `queued`, so a
+   *  keyed row without the flag IS the delivery. A prompt the CLI dropped instead (content-less
+   *  `remove`, no user line ever) is never retired: its row stays queued in getHistory(), which is the
+   *  honest state — typed, never delivered — and matches how a transcript enqueue behaves on a drop. */
+  private retirePendingDriven(m: AgentMessage): void {
+    if (m.type !== 'user-message' || m.queued) return;
+    const i = this.pendingDriven.findIndex((p) => p.key === m.key);
+    if (i >= 0) this.pendingDriven.splice(i, 1);
+  }
+
+  /** The still-undelivered driven prompts as canonical rows (same shape sendPrompt emitted live). */
+  private pendingDrivenRows(): AgentMessage[] {
+    // Every row still here is UNDELIVERED at the time of the read — dropped, or not yet echoed — so it
+    // replays queued whatever the session was doing when it was sent. The live emit keeps the send-time
+    // flag (an idle send is not "queued" to the person who typed it); a replay that showed the same
+    // undelivered row without the badge would read as a message the agent received.
+    return this.pendingDriven.map((p) => ({
+      type: 'user-message' as const,
+      text: p.text,
+      key: p.key,
+      queued: true,
+      sentAt: p.sentAt,
+    }));
   }
 
   /** Account one appended user-message row against the FIFO of prompts this connection sent. Exact
@@ -2559,6 +2642,10 @@ export class ClaudeResumeConnection implements SessionConnection {
     if (this.demoted) return;
     this.demoted = true;
     this.submittedTexts.length = 0;
+    // The pending driven rows and their links are KEPT. Every one of them was already written to the
+    // child's stdin, and killing the child proves nothing about input it had buffered: if the line lands
+    // late the observer's tail must still hand it the app key, and if it never lands the user's words
+    // must survive a reload as an honestly queued row — the same shape as a prompt the CLI dropped.
     // Kill the drive child NOW: it shares the transcript file with the foreign writer, and every turn
     // it completes interleaves the two branches further. The user echo tail keeps running — watching
     // is the whole point of staying open.
@@ -2609,7 +2696,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     try {
       const buf = readFileBuffer(historyPath);
       const nl = buf.lastIndexOf(0x0a);
-      const lines = splitLines(buf.subarray(0, nl >= 0 ? nl + 1 : 0).toString('utf8')).map(parseLineOrNull);
+      const lines = parseLinesWithOffsets(buf.subarray(0, nl >= 0 ? nl + 1 : 0));
       for (const ln of lines) {
         if (!ln) continue;
         accumulateCallMeta(ln, this.callMeta);
@@ -2619,14 +2706,53 @@ export class ClaudeResumeConnection implements SessionConnection {
       // turns; an open trailing turn stays running. Live driven turns use stream start/result markers.
       this.runtime = new ClaudeRuntimeTracker(this.liveUuid, 'claude-transcript');
       this.taskLedger = new ClaudeTaskLedger();
-      const mapped = mapTranscript(lines, this.runtime, this.taskLedger);
+      // Replay against the LIVE correlation state, not a blank one (P1a/P1b). `byUuid` is shared by
+      // reference, so a line the replay keys is keyed identically when the 1 s tail reaches it.
+      // `pending` is a seeded COPY of the DRIVEN links only: a transcript user line that delivered a
+      // driven prompt before the tail saw it takes over the app key HERE, instead of being re-keyed by
+      // uuid beside the still-pending row — two identities for one prompt until the next full resync.
+      // A seeded link is claimable only by a line appended after its send — by byte offset in the file
+      // the send was recorded against, else by send time — so an older identical prompt cannot claim
+      // it; a link with no send record cannot be fenced and is not seeded. Terminal-typed links are
+      // NOT seeded: their enqueue line is in the file, so the replay rebuilds each one exactly where it
+      // was enqueued and only later lines can see it (a seeded copy had no such boundary, and an old
+      // identical line took it). A transcript `remove` never retires a seeded entry: the tail already
+      // applied that op to the live state.
+      const live = this.queuedSends;
+      const replay: ClaudeQueuedSends = {
+        pending: live.pending.flatMap((p): ClaudeQueuedSendEntry[] => {
+          if (!p.driven) return [];
+          const driven = this.pendingDriven.find((d) => d.key === p.key);
+          if (!driven) return [];
+          return [{ ...p, seeded: true as const, notBefore: driven.sentAt, ...(driven.sentAtPath === historyPath ? { notBeforeOffset: driven.sentAtOffset } : {}) }];
+        }),
+        byUuid: live.byUuid,
+      };
+      const mapped = mapTranscript(lines, this.runtime, this.taskLedger, newClaudeBlockOrdinals(), replay);
+      // Whatever the replay keyed from a seeded entry is DELIVERED: drop its live link and its row.
+      const delivered = new Set(live.byUuid.values());
+      for (let i = live.pending.length - 1; i >= 0; i--) if (delivered.has(live.pending[i]!.key)) live.pending.splice(i, 1);
+      for (let i = this.pendingDriven.length - 1; i >= 0; i--) if (delivered.has(this.pendingDriven[i]!.key)) this.pendingDriven.splice(i, 1);
+      // A TERMINAL-typed enqueue still pending at the end of the replay is waiting on the live tail,
+      // which may have attached after its enqueue line. Seed it ahead of the driven rows (it is older)
+      // so its delivering user line takes over its key; it cannot take a driven prompt's delivery
+      // (takeQueuedSendKey prefers the driven entry on equal text). Keyed dedupe keeps a resync from
+      // registering it twice.
+      const known = new Set(live.pending.map((p) => p.key));
+      const leftovers = replay.pending
+        .filter((p) => !p.seeded && !known.has(p.key) && !delivered.has(p.key))
+        .map(({ text, key }) => ({ text, key }));
+      if (leftovers.length) live.pending.splice(0, 0, ...leftovers);
       return [
         ...mapped,
         ...this.runtime.flush(),
         ...buildActivitySnapshot(claudeActivityDir(historyPath), this.resolvedToolUseIds, Date.now(), this.parentActivity()).map((f) => f.msg),
+        // Driven prompts still awaiting their transcript line: the CLI's content-less enqueue leaves no
+        // other trace, so without these rows a reload loses the user's words entirely (P1a).
+        ...this.pendingDrivenRows(),
       ];
     } catch {
-      return [];
+      return this.pendingDrivenRows(); // an unreadable transcript must not swallow an accepted prompt
     }
   }
 
@@ -2643,6 +2769,13 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {
+    return this.submitTurn(input, false);
+  }
+
+  /** `fromCommand` = a runCommand-originated slash send. Such a send gets NO pending driven row: the CLI
+   *  echoes it as a `<command-name>` wrapper that mapUser rewrites into its own uuid-keyed row, so a
+   *  pending row minted here could never be claimed and would sit queued forever. */
+  private async submitTurn(input: PromptInput, fromCommand: boolean): Promise<void> {
     // A demoted connection writes NOTHING (issue 15a): the session has a proven foreign writer, and any
     // further prompt from us is the two-writer hazard the demotion exists to prevent.
     if (this.demoted) {
@@ -2694,6 +2827,13 @@ export class ClaudeResumeConnection implements SessionConnection {
         explicitEffort ?? this.info.currentModel?.reasoningEffort,
       );
     }
+    // P1c: a failed (re)launch leaves NO child — killProc() already nulled `proc` and spawn threw. Refuse
+    // the send BEFORE any state mutation: writeLine's `this.proc?.stdin` is a SILENT no-op without one, so
+    // proceeding published a running turn and dropped the prompt. Throwing makes the broker answer the send
+    // with an error instead of an ack. Gate on the child itself, not relaunch's verdict — a relaunch we did
+    // not run this turn (warm child) is just as valid a reason to proceed.
+    if (!this.proc) throw new Error('Claude could not be launched, so the prompt was not sent.');
+    const wasRunning = this.running; // BEFORE the flip: a send during a live turn is the queued case
     this.running = true;
     this.emit({ type: 'status', status: 'running' });
     // Live driven turn starts now (stream events carry no native ts → broker wall clock). A turn = this user
@@ -2705,7 +2845,34 @@ export class ClaudeResumeConnection implements SessionConnection {
     // (mapUser renders the echo as the joined, trimmed block texts — the same string).
     this.submittedTexts.push(text.trim());
     while (this.submittedTexts.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) this.submittedTexts.shift();
+    if (!fromCommand) this.registerPendingDriven(text.trim(), wasRunning);
     this.writeLine({ type: 'user', message: { role: 'user', content } });
+  }
+
+  /** Give an accepted driven prompt a canonical, replayable row (P1a). The key is app-minted — the
+   *  `queued:app:` namespace cannot collide with a transcript-derived `queued:<ts>:<len>` key — and is
+   *  registered in `queuedSends.pending` so the delivering user line takes it over on the echo tail
+   *  (P1b) and the queued styling clears in place. `text` is the TRIMMED send: mapUser renders the echo
+   *  as the joined trimmed block text, and the client's legacy reconcile matches exact text. */
+  private registerPendingDriven(text: string, queued: boolean): void {
+    const key = `queued:app:${this.connNonce}.${++this.drivenSendSeq}`;
+    const sentAt = Date.now();
+    // The replay's ordering fence: the line that delivers THIS prompt is appended after the file's
+    // current end (the child has not read it from stdin yet). Recorded with its path — a rotated
+    // transcript rewrites the copied lines, and their offsets with them — so a replay of another file
+    // falls back to the send time.
+    const sentAtPath = this.liveTranscriptPath();
+    const sentAtOffset = statSafe(sentAtPath)?.size ?? 0;
+    this.queuedSends.pending.push({ text, key, driven: true });
+    this.pendingDriven.push({ key, text, sentAt, queued, sentAtPath, sentAtOffset });
+    while (this.pendingDriven.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) {
+      // Bounded TOGETHER with its correlation link: a link whose row is gone could only lend its key to
+      // a later repeat of the same words.
+      const gone = this.pendingDriven.shift()!;
+      const i = this.queuedSends.pending.findIndex((p) => p.key === gone.key);
+      if (i >= 0) this.queuedSends.pending.splice(i, 1);
+    }
+    this.emit({ type: 'user-message', text, key, ...(queued ? { queued: true } : {}), sentAt });
   }
 
   /** Deliver a standalone uploaded file to the driven session (no accompanying text). */
@@ -2744,7 +2911,10 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
   }
 
-  private relaunch(model?: string, mode?: string, effort?: string): void {
+  /** (Re)launch the drive child. Returns TRUE only when a child was actually installed: killProc() nulls
+   *  `proc` first, so a spawn throw leaves the connection with no process at all and the caller must not
+   *  treat the turn as started (P1c). */
+  private relaunch(model?: string, mode?: string, effort?: string): boolean {
     this.killProc();
     this.stdoutBuf = ''; // drop any partial fragment from the prior child so it can't bleed into the new stream
     this.blockAccum.clear();
@@ -2770,7 +2940,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       });
     } catch (e) {
       this.emit({ type: 'error', message: 'Claude launch failed: ' + String(e) });
-      return;
+      return false;
     }
     this.proc = proc;
     this.launchModel = model;
@@ -2805,6 +2975,7 @@ export class ClaudeResumeConnection implements SessionConnection {
         this.emit({ type: 'status', status: 'idle' });
       }
     });
+    return true;
   }
 
   private writeLine(obj: unknown): void {
@@ -3083,6 +3254,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
         modelID: o.model,
+        ...labelOf(o.model),
         ...(initEffort ? { reasoningEffort: initEffort } : {}),
       };
       this.emit({
@@ -3263,7 +3435,13 @@ export class ClaudeResumeConnection implements SessionConnection {
       return { notice: 'Interrupted the current turn.' };
     }
     // Any other slash command → send it as a turn-starting user message (Claude handles it in-stream).
-    await this.sendPrompt({ text: `/${name}${args ? ' ' + args : ''}` });
+    await this.submitTurn({ text: `/${name}${args ? ' ' + args : ''}` }, true);
+  }
+
+  private clearQueuedSendState(): void {
+    this.pendingDriven.length = 0;
+    this.queuedSends.pending.length = 0;
+    this.queuedSends.byUuid.clear();
   }
 
   private killProc(): void {
@@ -3291,6 +3469,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     this.echoTailBuf = '';
     this.submittedTexts.length = 0;
+    this.clearQueuedSendState();
     // Leave the adapter's drive registry (idempotent — a demotion already deregistered) so the roster
     // stops reporting this session as driven once its owner connection is gone (issue 15b).
     this.onClosed?.();
@@ -3406,7 +3585,57 @@ function claimBlockOrdinals(state: ClaudeBlockOrdinals | undefined, messageId: s
  *  can't steal its key. `byUuid` makes re-mapping the same user line idempotent (stdout + tail can both
  *  deliver it). Keys derive from the enqueue line itself (`queued:<ts>:<len>`) so the history pass and
  *  the live tail — separate state objects — agree on them. */
-export type ClaudeQueuedSends = { pending: { text: string; key: string }[]; byUuid: Map<string, string> };
+/** One text→key link awaiting its delivering user line. `seeded` and `notBefore` exist only on the REPLAY
+ *  copy ClaudeResumeConnection.getHistory() makes of the live state: a seeded entry is never retired by a
+ *  transcript `remove` (the live tail already applied that op to the live state), and is matched only by a
+ *  user line stamped at or after the send it stands for, so an older identical line cannot claim it. */
+/** One pending link from a queued prompt's row key to the transcript user line that will deliver it.
+ *  `driven`: minted by THIS connection's sendPrompt (`queued:app:` key; the CLI records no content for
+ *  its queue ops). `seeded`: a replay-only copy of a live entry (never retired, fenced by `notBefore`). */
+export type ClaudeQueuedSendEntry = { text: string; key: string; driven?: true; seeded?: true; notBefore?: number; notBeforeOffset?: number };
+
+/** Byte offset of a parsed transcript line within its file, stamped by parseLinesWithOffsets (history
+ *  replay only). The replay's ordering fence: a line that delivers a driven prompt was appended AFTER the
+ *  file's size at send time, whatever its clock says. */
+const CLAUDE_LINE_OFFSET: unique symbol = Symbol('claudeLineOffset');
+function lineOffsetOf(ln: any): number | undefined {
+  const v = ln?.[CLAUDE_LINE_OFFSET];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/** Parse a JSONL buffer into position-tolerant slots (null for a blank or malformed line), stamping each
+ *  parsed line with its byte offset under CLAUDE_LINE_OFFSET. Same slots as splitLines+parseLineOrNull. */
+function parseLinesWithOffsets(buf: Buffer): any[] {
+  const out: any[] = [];
+  let start = 0;
+  while (start < buf.length) {
+    let end = buf.indexOf(0x0a, start);
+    if (end < 0) end = buf.length;
+    const ln = parseLineOrNull(buf.subarray(start, end).toString('utf8'));
+    if (ln && typeof ln === 'object') Object.defineProperty(ln, CLAUDE_LINE_OFFSET, { value: start, enumerable: false });
+    out.push(ln);
+    start = end + 1;
+  }
+  return out;
+}
+
+/** Register a terminal-typed enqueue's link, bounded: past CLAUDE_SUBMITTED_TEXTS_LIMIT unresolved
+ *  terminal links the oldest is dropped (its bubble stays queued; a link that old could only lend its
+ *  key to a later repeat of the same words). Driven links are bounded with their rows in
+ *  registerPendingDriven, so the whole table is at most twice the limit. */
+function pushTerminalLink(state: ClaudeQueuedSends, text: string, key: string): void {
+  state.pending.push({ text, key });
+  let terminal = 0;
+  for (const p of state.pending) if (!p.driven) terminal++;
+  for (let i = 0; terminal > CLAUDE_SUBMITTED_TEXTS_LIMIT && i < state.pending.length; ) {
+    if (state.pending[i]!.driven) i++;
+    else {
+      state.pending.splice(i, 1);
+      terminal--;
+    }
+  }
+}
+export type ClaudeQueuedSends = { pending: ClaudeQueuedSendEntry[]; byUuid: Map<string, string> };
 export function newClaudeQueuedSends(): ClaudeQueuedSends {
   return { pending: [], byUuid: new Map() };
 }
@@ -3425,23 +3654,73 @@ function queuedSendKey(ln: any): string {
 export function feedQueuedSends(state: ClaudeQueuedSends, ln: any): void {
   if (!ln || typeof ln !== 'object') return;
   if (ln.type === 'queue-operation') {
-    if (isRenderableEnqueue(ln)) state.pending.push({ text: String(ln.content).trim(), key: queuedSendKey(ln) });
-    else if (ln.operation === 'remove') state.pending.shift(); // dropped without delivery — retire FIFO
+    if (isRenderableEnqueue(ln)) pushTerminalLink(state, String(ln.content).trim(), queuedSendKey(ln));
+    else if (ln.operation === 'remove') retireRemovedSend(state, ln); // dropped without delivery
     return;
   }
   if (ln.type === 'user' && state.pending.length) {
     const c = ln.message?.content;
     const text = (typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b: any) => b?.type === 'text').map((b: any) => String(b.text ?? '')).join('\n') : '').trim();
-    if (text) takeQueuedSendKey(state, String(ln.uuid ?? ''), text);
+    if (text) takeQueuedSendKey(state, String(ln.uuid ?? ''), text, timestampToMs(ln.timestamp), lineOffsetOf(ln));
   }
 }
 
-/** The delivered user line claims its pending enqueue's key (exact-text FIFO match); idempotent per
- *  line uuid. Returns undefined when this user line was never queued. */
-function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, text: string): string | undefined {
+/** Apply a `queue-operation: remove` to the pending links. WHICH entry the CLI dropped is read from the
+ *  line, never guessed FIFO — the queue mixes this connection's driven prompts with terminal-typed
+ *  enqueues, and a wrong guess unlinks a prompt that is still going to be delivered (its echo then
+ *  lands on a uuid key beside the row that stays queued forever). Local corpus, 1,716 removes,
+ *  CLI 2.1.107–2.1.238:
+ *  - `content` present: every terminal remove since 2.1.203 carries the retracted text verbatim, and
+ *    706/706 matched a pending enqueue exactly. Retire the transcript entry with that text — never a
+ *    driven one, for which the CLI writes no content (probed 2.1.207). No match (the enqueue was
+ *    harness noise we never registered) retires nothing.
+ *  - no `content`, a driven entry pending: the CLI dropped a driven prompt at turn end — oldest first.
+ *  - no `content`, none driven: a CLI ≤ 2.1.202 retracting a terminal message without recording the
+ *    text. 659 of those 1,010 are followed by a re-enqueue (an edit), so the retracted one is the
+ *    NEWEST; oldest-first was wrong nine times in ten.
+ *  A seeded (replay) copy is never retired: the live tail already applied the op to the live state. */
+function retireRemovedSend(state: ClaudeQueuedSends, ln: any): void {
+  const content = typeof ln?.content === 'string' ? ln.content.trim() : '';
+  const pending = state.pending;
+  let i: number;
+  if (content) i = pending.findIndex((p) => !p.seeded && !p.driven && p.text === content);
+  else {
+    i = pending.findIndex((p) => !p.seeded && p.driven);
+    if (i < 0) i = pending.findLastIndex((p) => !p.seeded && !p.driven);
+  }
+  if (i >= 0) pending.splice(i, 1);
+}
+
+/** The delivered user line claims its pending enqueue's key by exact text — a DRIVEN entry first, then
+ *  the oldest transcript entry. While this connection drives, a line repeating a prompt it sent is its
+ *  own delivery far more often than a second writer's identical words (exoneration already reads it
+ *  that way), and a terminal enqueue the replay seeded ahead of the driven rows must not take the
+ *  app's delivery. Idempotent per line uuid. Returns undefined when this user line was never queued. */
+function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, text: string, lineMs?: number, lineOffset?: number): string | undefined {
   if (!state) return undefined;
-  if (uuid && state.byUuid.has(uuid)) return state.byUuid.get(uuid);
-  const i = state.pending.findIndex((p) => p.text === text.trim());
+  if (uuid && state.byUuid.has(uuid)) {
+    const key = state.byUuid.get(uuid)!;
+    // Idempotent re-key. A link under that key is stale — the replay already resolved this line before
+    // the tail reached the enqueue and re-registered it — and would otherwise wait to lend the key to a
+    // later repeat of the same words.
+    const stale = state.pending.findIndex((p) => p.key === key && !p.seeded);
+    if (stale >= 0) state.pending.splice(stale, 1);
+    return key;
+  }
+  const trimmed = text.trim();
+  // A seeded (replay) entry is claimable only by a line APPENDED after its send: by byte offset when the
+  // replay reads the file the send was recorded against (exact, clock-free), else by timestamp with NO
+  // slack — same host, same clock, and every queued delivery in the local corpus is stamped after its
+  // enqueue (2,233/2,233, min +2 ms). An unpositioned, undated line cannot prove it is new and falls
+  // through to the uuid key. A terminal link carries no fence: the replay rebuilds it AT its enqueue
+  // line, so only later lines ever see it.
+  const claimable = (p: ClaudeQueuedSendEntry): boolean =>
+    p.text === trimmed
+    && (p.notBeforeOffset !== undefined
+      ? lineOffset !== undefined && lineOffset >= p.notBeforeOffset
+      : p.notBefore === undefined || (lineMs !== undefined && lineMs >= p.notBefore));
+  let i = state.pending.findIndex((p) => p.driven && claimable(p));
+  if (i < 0) i = state.pending.findIndex(claimable);
   if (i < 0) return undefined;
   const key = state.pending.splice(i, 1)[0]!.key;
   if (uuid) state.byUuid.set(uuid, key);
@@ -3474,11 +3753,11 @@ export function mapLine(ln: any, callMeta: Map<string, ClaudeCall>, seenTokenIds
       // dimmed bubble — honest "typed but never delivered".
       if (isRenderableEnqueue(ln)) {
         const key = queuedSendKey(ln);
-        if (queuedSends) queuedSends.pending.push({ text: String(ln.content).trim(), key });
+        if (queuedSends) pushTerminalLink(queuedSends, String(ln.content).trim(), key);
         const sentAt = timestampToMs(ln.timestamp);
         return [{ type: 'user-message', text: String(ln.content), key, queued: true, ...(sentAt !== undefined ? { sentAt } : {}) }];
       }
-      if (ln.operation === 'remove' && queuedSends) queuedSends.pending.shift();
+      if (ln.operation === 'remove' && queuedSends) retireRemovedSend(queuedSends, ln);
       return [];
     }
     default:
@@ -3779,7 +4058,7 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
     }
     // A delivered mid-run queued message claims its enqueue bubble's key → the app clears the
     // queued styling in place instead of drawing a duplicate (item-12 follow-up).
-    return [{ type: 'user-message', text: content, key: takeQueuedSendKey(queuedSends, uuid, content) ?? uuid, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) }];
+    return [{ type: 'user-message', text: content, key: takeQueuedSendKey(queuedSends, uuid, content, sentAt, lineOffsetOf(ln)) ?? uuid, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) }];
   }
   if (!Array.isArray(content)) return [];
 
@@ -3787,6 +4066,10 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
   let imageCount = 0;
   let sawToolResult = false;
   const texts: string[] = [];
+  /** Artifacts from THIS line's top-level image blocks — stamped with the owning user row's key below
+   *  (P6) so the client renders a pasted image inside the user bubble, not as a detached deliverable.
+   *  Same object references as in `out`, so stamping them stamps what is emitted. */
+  const sentImages: Extract<AgentMessage, { type: 'file-artifact' }>[] = [];
   content.forEach((b: any, i: number) => {
     if (b?.type === 'tool_result') {
       const cid = String(b.tool_use_id ?? '');
@@ -3814,7 +4097,10 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
     } else if (b?.type === 'image') {
       imageCount++; // keep the user-message chip count
       const art = inlineImageArtifact(b, uuid, i); // ALSO render the pasted/returned image
-      if (art) out.push(art);
+      if (art) {
+        out.push(art);
+        if (art.type === 'file-artifact') sentImages.push(art);
+      }
     } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
       texts.push(b.text);
     }
@@ -3837,7 +4123,13 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
         },
       });
     }
-    else out.push({ type: 'user-message', text, imageCount: imageCount || undefined, key: takeQueuedSendKey(queuedSends, uuid, text) ?? `${uuid}:u`, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) });
+    else {
+      // ONE key for the row and everything sent with it — takeQueuedSendKey MUTATES, so it must not be
+      // called twice. An image-only prompt still gets this (empty-text) row, so the link has a target.
+      const key = takeQueuedSendKey(queuedSends, uuid, text, sentAt, lineOffsetOf(ln)) ?? `${uuid}:u`;
+      for (const art of sentImages) art.userMessageKey = key; // P6: ownership link, not a dedupe key
+      out.push({ type: 'user-message', text, imageCount: imageCount || undefined, key, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) });
+    }
   }
   return out;
 }
@@ -4384,11 +4676,13 @@ export class ClaudeRuntimeTracker {
   }
 }
 
-export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, tasks: ClaudeTaskLedger = new ClaudeTaskLedger(), blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals()): AgentMessage[] {
+/** `queuedSends` (optional, MUTATED) links enqueue bubbles to their delivering user lines. A caller that
+ *  also drives a LIVE tail passes its own state seeded with the tail's `byUuid` map, so a line already
+ *  delivered under an app-minted key replays under that same key instead of being re-keyed by uuid. */
+export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, tasks: ClaudeTaskLedger = new ClaudeTaskLedger(), blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals(), queuedSends: ClaudeQueuedSends = newClaudeQueuedSends()): AgentMessage[] {
   const callMeta = new Map<string, ClaudeCall>();
   for (const ln of lines) if (ln) accumulateCallMeta(ln, callMeta);
   const seenTokenIds = new Set<string>();
-  const queuedSends = newClaudeQueuedSends(); // link enqueue bubbles to their delivering user lines
   const out: AgentMessage[] = [];
   for (const ln of lines) {
     if (!ln) continue;

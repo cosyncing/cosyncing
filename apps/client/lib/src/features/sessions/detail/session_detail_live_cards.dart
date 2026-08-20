@@ -31,43 +31,29 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
     debugLabel: 'session-live-state-flight-source',
   );
   late bool _expanded = widget.initiallyExpanded;
-  Timer? _doneArchiveTimer;
   double _dragOffset = 0;
   bool _committing = false;
   PointerDeviceKind? _pointerKind;
   AnimationController? _flightController;
   OverlayEntry? _flightOverlay;
 
-  @override
-  void initState() {
-    super.initState();
-    _scheduleDoneArchive();
-  }
-
+  // There is no auto-archive. A finished card stays until the reader dismisses
+  // it (swipe or the archive button): the protocol keeps a done task list
+  // pinned until `cleared`, and done goals/activities are dropped from the
+  // projection before they reach here, so the old 3-second timer only ever
+  // deleted a finished list out from under whoever had just opened it. It also
+  // keyed on the LOCALIZED status label, so it fired in English and never in
+  // Chinese.
   @override
   void didUpdateWidget(covariant _ArchivableLiveStateItem oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
       _expanded = true;
     }
-    if (oldWidget.item.fingerprint != widget.item.fingerprint) {
-      _scheduleDoneArchive();
-    }
-  }
-
-  void _scheduleDoneArchive() {
-    _doneArchiveTimer?.cancel();
-    if (widget.item.statusLabel == 'Done' && !widget.item.actionRequired) {
-      _doneArchiveTimer = Timer(
-        const Duration(seconds: 3),
-        () => unawaited(_commitArchive()),
-      );
-    }
   }
 
   @override
   void dispose() {
-    _doneArchiveTimer?.cancel();
     _flightOverlay?.remove();
     _flightController?.dispose();
     super.dispose();
@@ -1062,23 +1048,22 @@ class _TaskStateRow extends StatelessWidget {
       TaskItemStatus.cancelled => (Icons.cancel_outlined, tokens.statusIdle),
       TaskItemStatus.unknown => (Icons.help_outline, tokens.textTertiary),
     };
-    // The expanded rows are the detail view of the card and render roughly
-    // 3x the collapsed-list scale on request: no dense layout, headline-scale
-    // title, and a 40px leading icon (on the 4pt grid). Only these children
-    // change; the collapsed header/summary keeps its compact presentation.
+    // Expanded rows read at the transcript's own body scale. The request was a
+    // taller panel, and height is a separate knob from type size: the extra
+    // room comes from the surface's max height, not from headline text.
     return ListTile(
       key: Key('session-task-item-$index'),
-      leading: Icon(icon, size: 40, color: color),
+      leading: Icon(icon, size: 20, color: color),
       title: SelectionArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(item.title, style: textTheme.headlineMedium),
+            Text(item.title, style: textTheme.bodyLarge),
             if (item.detail case final detail?) ...[
               const SizedBox(height: 4),
               Text(
                 detail,
-                style: textTheme.headlineSmall?.copyWith(
+                style: textTheme.bodyMedium?.copyWith(
                   color: tokens.textSecondary,
                 ),
               ),
@@ -1090,7 +1075,7 @@ class _TaskStateRow extends StatelessWidget {
           ? null
           : Text(
               item.priority!,
-              style: textTheme.titleMedium?.copyWith(
+              style: textTheme.labelMedium?.copyWith(
                 color: tokens.textSecondary,
               ),
             ),

@@ -302,6 +302,22 @@ export function dshProjectionMessages(
         value: { agentRuntimeMs: llmMs, executionRuntimeMs: toolMs, turnCount: turns, source: 'dsh' },
       }];
     }
+    case 'permissions': {
+      // The host publishes the roster AND the current value here, and
+      // `currentMode` is the ONE contract field the picker preselects from —
+      // the broker Object.assigns this value onto SessionInfo, so any other
+      // key lands silently and the chip just reads blank. One case covers both
+      // the attach-time replay and a post-switch update, because the host
+      // republishes the whole projection on every change.
+      //
+      // An empty `currentValue` is "the host reported no mode" and publishes an
+      // EXPLICIT clear: the broker folds this value with Object.assign, so an
+      // omitted key would leave the previous mode on the chip after the host
+      // withdrew it. A projection that is not even an object says nothing.
+      const row = record(value);
+      if (!row) return [];
+      return [{ type: 'metadata-update', key: 'sessionInfo', value: { currentMode: optionalString(row.currentValue) } }];
+    }
     case 'todos':
       return dshTodoMessages(value, 'projection');
     case 'goal':
@@ -396,6 +412,12 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
   const title = optionalString(store.get('title'))
     ?? optionalString(options.workspaceTitle)
     ?? id;
+  // The host's current permission mode rides the summary's `permissions`
+  // projection. Seeding it on the ROW is what puts it on the info object before
+  // the first session frame: the runtime sends that frame before history, so a
+  // replayed overlay is too late for the chip at open. Later switches arrive as
+  // a live projection republish (see dshProjectionMessages).
+  const currentMode = optionalString(record(store.get('permissions'))?.currentValue);
   const cwd = optionalString(raw.cwd);
   const updatedAt = optionalNumber(raw.updatedAt);
   const driveSupported = options.driveSupported !== false;
@@ -403,6 +425,11 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
     id,
     tool: DSH_TOOL_ID,
     title,
+    // BOTH halves of the roster link. The client's nesting table is built only
+    // from rows carrying `nativeId`, so a child's `parentThreadId` resolves to
+    // nothing unless the parent published one — and every dsh row is a possible
+    // parent. dsh ids are already native, so `nativeId` equals `id`.
+    nativeId: id,
     ...(cwd ? { cwd } : {}),
     ...(raw.origin === 'subagent' ? { origin: 'subagent' as const } : {}),
     ...(optionalString(raw.parentSessionId) ? { parentThreadId: optionalString(raw.parentSessionId)! } : {}),
@@ -411,6 +438,7 @@ export function mapDshSession(raw: DshSessionSummary, options: DshSessionMapOpti
     attachMode: 'live',
     ...(updatedAt !== undefined ? { updatedAt } : {}),
     ...(optionalString(raw.agentPreset) ? { currentAgent: optionalString(raw.agentPreset)! } : {}),
+    ...(currentMode ? { currentMode } : {}),
     control: {
       drive: {
         state: driveSupported ? 'driving' : 'unavailable',
@@ -975,10 +1003,78 @@ export const DSH_SILENT_EVENT_TYPES: readonly string[] = Object.freeze([
   'approval/asked',
   'approval/decided',
   'approval/policy',
+  // Silent ON PURPOSE, and not a gap: the host republishes the whole
+  // `permissions` projection on every switch, and that republish is what
+  // carries the new `currentMode` (see dshProjectionMessages). Mapping the
+  // event too would emit the same chip update twice per switch.
   'permission/preset',
   'sandbox/mode',
   'agent/inbox/spliced',
 ]);
+
+/** The synthesized tool identity a background-child settlement card renders under. */
+const DSH_SUBAGENT_TOOL_NAME = 'subagent';
+
+/**
+ * The ONE ending `@deepseek-ai/dsh-subagent` treats as success.
+ *
+ * The outcome is not carried structurally. `SubagentSettledMessageSource`
+ * (dsh-subagent/lib/types/continuation.d.ts) is `kind` + `form` + `summary` +
+ * `senderSessionId` and nothing else, so the package's own English line is the
+ * only evidence of how the child ended — matched here as the package's literal
+ * rather than paraphrased. `settlementSummary()` has exactly one success arm
+ * (`stopReason: 'completed'`); aborted, max-tokens, refusal, error, and a
+ * variant it cannot name all report an unfinished ending, and its own comment
+ * states an unnameable ending is "reported as unfinished rather than silently
+ * as success". Anchored at the start so the child's closing message — appended
+ * to the same text — cannot spoof a success.
+ */
+const DSH_SUBAGENT_SETTLED_OK = /^Background subagent \S+ finished and will do no further work\b/;
+
+/**
+ * One background-child settlement or report, as a self-contained tool block.
+ *
+ * A `tool-call`/`tool-result` pair sharing a synthesized callId, rather than a
+ * message row: this is a completion report about work the session delegated,
+ * and the transcript's tool card is the surface that already presents that.
+ */
+function dshSubagentBlock(
+  sessionId: string,
+  source: Record<string, unknown>,
+  text: string,
+  seq: number,
+  messageId: string | undefined,
+): AgentMessage[] {
+  const child = optionalString(source.senderSessionId);
+  // One identity PER EVENT, not per child: a child can report several times
+  // before it settles, and the client reduces tool rows by callId, so a shared
+  // key would let the generic settlement overwrite the child's report. The
+  // native message id is stable across live and replay; `seq` (also stable for
+  // dsh history) is the fallback when the host omitted it.
+  const callId = `dsh:${sessionId}:subagent:${child ?? 'unknown'}:${messageId ?? seq}`;
+  const settled = source.kind === 'subagent-settled';
+  const title = settled ? 'Background subagent settled' : 'Background subagent reported';
+  // Only a SETTLEMENT can fail. A report is content the child chose to send and
+  // says nothing about how it ended, so it never carries an error state.
+  const failed = settled && !DSH_SUBAGENT_SETTLED_OK.test(text);
+  return [
+    {
+      type: 'tool-call',
+      callId,
+      toolName: DSH_SUBAGENT_TOOL_NAME,
+      title,
+      ...(child ? { args: { subagent: child } } : {}),
+    },
+    {
+      type: 'tool-result',
+      callId,
+      toolName: DSH_SUBAGENT_TOOL_NAME,
+      title,
+      result: text,
+      ...(failed ? { isError: true } : {}),
+    },
+  ];
+}
 
 /**
  * Map ONE session event into zero or more canonical rows.
@@ -997,6 +1093,34 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
   const key = `dsh:${state.sessionId}:${event.seq}`;
 
   switch (event.type) {
+    /**
+     * `user/message` is the host's carrier for anything delivered on the USER
+     * ROLE, which is far more than a human typing. `source.kind` is the only
+     * discriminator, and `MessageSourceMap` is merge-extensible, so this branch
+     * is written as three explicit categories plus a documented default.
+     *
+     * Every `kind` the installed packages declare, and where it lands:
+     *
+     *   user                @deepseek-ai/dsh-llm            human bubble
+     *   user-rpc            dsh-host-apiproxy               human bubble (kind stays 'user'; adds rpcId)
+     *   subagent-settled    dsh-subagent                    subagent tool block
+     *   subagent-report     dsh-subagent                    subagent tool block
+     *   plugin              dsh-llm (plan-mode, tool-goal,
+     *                       repeat-tool-reminder, …)        context injection
+     *   coordinator         dsh-subagent                    context injection (a parent's relay TO this agent)
+     *   goal                dsh-goal                        context injection
+     *   skill-invocation    dsh-skill                       context injection
+     *   skill-catalog       dsh-tool-skill                  context injection
+     *   agent-instructions  dsh-agent-instructions          context injection
+     *   session-reference   dsh-session-reference           context injection
+     *   model / tool        dsh-llm                         assistant/tool provenance; not seen on this event
+     *
+     * Everything below the two named categories is agent-visible material the
+     * user never typed — instructions, catalogs, snapshots, relays, recall —
+     * which is exactly the context-injection event's definition, so the default
+     * is a category and not a fallback. An unknown plugin `kind` lands there and
+     * still names its own origin.
+     */
     case 'user/message': {
       const source = record(data?.source);
       const text = dshContentText(data?.content);
@@ -1020,6 +1144,23 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
           ...(turnId ? { turnId } : {}),
           ...(clientKey ? { clientKey } : {}),
         }];
+      }
+      // A background child's settlement report is NEITHER a human bubble nor
+      // injected context: `@deepseek-ai/dsh-subagent` delivers the runtime's own
+      // account of what became of a child (`subagent-settled`, form `notice`)
+      // and a child's chosen report to its parent (`subagent-report`, form
+      // `relay`) as `user/message` events, so the context-injection default
+      // rendered a completion report as material the agent was handed.
+      //
+      // Both carry `senderSessionId` — the DURABLE child id, identical in live
+      // frames and in history replay — and each event keeps its own native
+      // message id, so every report and the settlement of one child is its own
+      // card. No correlation to the parent's spawning `tool/call` is claimed:
+      // the spawn-side field that would bind them is unproven on a live event,
+      // so the card stands alone rather than closing a bar it cannot prove it
+      // opened.
+      if (source?.kind === 'subagent-settled' || source?.kind === 'subagent-report') {
+        return dshSubagentBlock(state.sessionId, source, text, event.seq, optionalString(data?.id));
       }
       // Injected context is NOT a human bubble. It is agent-visible material the
       // user never typed, so it goes out as the provider-neutral context event

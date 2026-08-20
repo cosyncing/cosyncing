@@ -193,10 +193,21 @@ Widget buildToolTranscriptRenderer(
 ///
 /// No author icon or `User message` header: right alignment carries authorship.
 /// A queued prompt renders dimmed with a localized badge.
+///
+/// [attachments] are the file artifacts sent with this prompt; they render
+/// inside the bubble. [attachmentActionBuilder] supplies each one's existing
+/// download/open control, so the transcript keeps the controller out of the
+/// renderer library.
 Widget buildConversationUserBubble(
   BuildContext context,
-  AgentMessage message,
-) => _ConversationUserBubble(message: message);
+  AgentMessage message, {
+  List<AgentMessage> attachments = const [],
+  Widget? Function(AgentMessage attachment)? attachmentActionBuilder,
+}) => _ConversationUserBubble(
+  message: message,
+  attachments: attachments,
+  attachmentActionBuilder: attachmentActionBuilder,
+);
 
 /// Builds the continuous left-aligned model-output surface for a turn.
 ///
