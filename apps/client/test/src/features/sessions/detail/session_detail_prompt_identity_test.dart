@@ -10,6 +10,7 @@ import 'package:cosyncing_client/src/features/attention/controller/attention_fee
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_conversation_turns.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -730,6 +731,172 @@ void main() {
         'still visible',
       );
     });
+
+    test('a delivered echo whose anchored boundary left the window renders at '
+        'its canonical index and drags no later prompt down', () {
+      // The steered send anchored to a mid-turn tool row the window has since
+      // evicted, but its canonical echo is known and present at index 2. The
+      // last-index fallback is reserved for the still-pending prompt behind
+      // it — and that prompt's own anchor resolves, so nothing may move.
+      final state = SessionDetailState(
+        tool: 'codex',
+        sessionId: 'session-anchor-evicted',
+        events: [
+          HistoryWireEvent(
+            reset: true,
+            messages: [
+              message(const {
+                'type': 'user-message',
+                'key': 'u1',
+                'text': 'first',
+              }),
+              message(const {
+                'type': 'model-output',
+                'key': 'm1',
+                'text': 'one',
+                'final': true,
+              }),
+              message(const {
+                'type': 'user-message',
+                'key': 'e1',
+                'clientKey': 'cm-1',
+                'text': 'steered',
+              }),
+              message(const {
+                'type': 'model-output',
+                'key': 'm2',
+                'text': 'two',
+                'final': true,
+              }),
+              message(const {
+                'type': 'model-output',
+                'key': 'm3',
+                'text': 'three',
+                'final': true,
+              }),
+            ],
+          ),
+        ],
+        optimisticPrompts: const [
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-1',
+            text: 'steered',
+            sentAt: 1,
+            queued: true,
+            anchorMessageKey: 'tool-call:key:gone',
+            deliveredMessageKey: 'user-message:key:e1',
+          ),
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-2',
+            text: 'next',
+            sentAt: 2,
+            queued: true,
+            anchorMessageKey: 'model-output:key:m2',
+          ),
+        ],
+      );
+      expect(
+        [for (final m in state.transcriptMessageEvents) m.raw['key']],
+        ['u1', 'm1', 'e1', 'm2', 'optimistic:cm-2', 'm3'],
+      );
+    });
+
+    test('a steered prompt whose mid-turn anchor is evicted from the window '
+        'converges at its canonical position, retires, and drags no later '
+        'prompt down', () async {
+      final controller = await attach();
+      await seedEarlierTurn();
+      fakeConnection.emitSessionControl(
+        const {
+          'drive': {'state': 'driving', 'supported': true},
+          'terminalSync': {
+            'supported': false,
+            'syncAvailable': false,
+            'active': false,
+          },
+        },
+        status: 'working',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      // A mid-turn tool row is the insertion boundary the steer pins to.
+      emitMessage(const {
+        'type': 'tool-call',
+        'key': 'tc1',
+        'name': 'search-files',
+        'arguments': {'query': 'docs'},
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      await controller.sendPrompt('steer mid-turn');
+      final steeredId = fakeConnection.lastPromptClientMessageId!;
+      expect(
+        read().optimisticPrompts.single.anchorMessageKey,
+        'tool-call:key:tc1',
+      );
+
+      // The turn keeps running: output streams past the send, then the
+      // queued steer's echo lands at its queued slot, mid-stream.
+      for (var i = 1; i <= 60; i++) {
+        emitMessage({
+          'type': 'model-output',
+          'key': 'o$i',
+          'text': 'output $i',
+        });
+      }
+      emitMessage({
+        'type': 'user-message',
+        'key': 'steer-echo',
+        'clientKey': steeredId,
+        'text': 'steer mid-turn',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // While the anchor resolves, the holder pins the echo at its boundary.
+      expect(read().optimisticPrompts.single.isDelivered, isTrue);
+      expect(projectedRows().take(4), [
+        'user-message:u0',
+        'model-output:m0',
+        'tool-call:tc1',
+        'user-message:$steeredId',
+      ]);
+
+      // The turn runs long: the bounded tail evicts the anchor row while the
+      // echo stays in the window, followed by more of the turn's output.
+      for (var i = 61; i <= 140; i++) {
+        emitMessage({
+          'type': 'model-output',
+          'key': 'o$i',
+          'text': 'output $i',
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      // With the anchor gone the holder has nothing left to enforce: it
+      // retires, and the echo renders at its canonical position — NOT
+      // dragged to the tail behind the output it precedes.
+      expect(read().optimisticPrompts, isEmpty);
+      final rows = projectedRows();
+      final echoIndex = rows.indexOf('user-message:$steeredId');
+      expect(echoIndex, isNonNegative);
+      expect(rows[echoIndex - 1], 'model-output:o60');
+      expect(rows[echoIndex + 1], 'model-output:o61');
+      expect(echoIndex, lessThan(rows.length - 1));
+
+      // A later send anchors to the live tail and converges normally: no
+      // leaked holder blocks its retirement, no floor drags it down.
+      await controller.sendPrompt('follow up');
+      final followId = fakeConnection.lastPromptClientMessageId!;
+      emitMessage({
+        'type': 'user-message',
+        'key': 'follow-echo',
+        'clientKey': followId,
+        'text': 'follow up',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(read().optimisticPrompts, isEmpty);
+      expect(projectedRows().last, 'user-message:$followId');
+    });
   });
 
   group('bounded holder state over a long-lived session', () {
@@ -822,6 +989,170 @@ void main() {
       expect(
         userRows.map((m) => m.userMessageClientKey),
         ids,
+      );
+    });
+
+    test('a delivered holder whose anchor left the window retires and '
+        'unblocks the holders behind it', () {
+      final canonical = [
+        message(const {'type': 'user-message', 'key': 'u1', 'text': 'first'}),
+        message(const {
+          'type': 'model-output',
+          'key': 'm1',
+          'text': 'one',
+          'final': true,
+        }),
+        message(const {
+          'type': 'user-message',
+          'key': 'e1',
+          'clientKey': 'cm-1',
+          'text': 'steered',
+        }),
+        message(const {
+          'type': 'user-message',
+          'key': 'e2',
+          'clientKey': 'cm-2',
+          'text': 'settled',
+        }),
+      ];
+      final retired = retireSettledOptimisticHolders(
+        const [
+          // Head: delivered, but its mid-turn anchor is gone from the window,
+          // so its echo renders at the canonical index with or without it.
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-1',
+            text: 'steered',
+            sentAt: 1,
+            queued: true,
+            anchorMessageKey: 'tool-call:key:gone',
+            deliveredMessageKey: 'user-message:key:e1',
+          ),
+          // Behind it: delivered and settled — the lost-anchor head must not
+          // block its retirement.
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-2',
+            text: 'settled',
+            sentAt: 2,
+            queued: true,
+            anchorMessageKey: 'user-message:key:e1',
+            deliveredMessageKey: 'user-message:key:e2',
+          ),
+        ],
+        canonical,
+      );
+      expect(retired, isEmpty);
+
+      // A resolved anchor with a displaced echo is still doing work: kept.
+      final holding = retireSettledOptimisticHolders(
+        const [
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-3',
+            text: 'out of order',
+            sentAt: 3,
+            queued: true,
+            anchorMessageKey: 'user-message:key:u1',
+            deliveredMessageKey: 'user-message:key:e1',
+          ),
+        ],
+        canonical,
+      );
+      expect(holding, hasLength(1));
+    });
+  });
+
+  group('optimistic prompt run bucketing', () {
+    test('a delivered holder whose echo left the window claims no run and '
+        'drags no later prompt into the tail run', () {
+      final older = [
+        message(const {
+          'type': 'user-message',
+          'key': 'u-old',
+          'text': 'older ask',
+        }),
+        message(const {
+          'type': 'model-output',
+          'key': 'm-old',
+          'text': 'older answer',
+          'final': true,
+        }),
+      ];
+      var window = TranscriptHistoryWindow.fromHistory(
+        HistoryWireEvent(
+          reset: true,
+          olderCursor: 'page-1',
+          hasEarlier: true,
+          messages: [
+            message(const {
+              'type': 'user-message',
+              'key': 'u-new',
+              'text': 'newer ask',
+            }),
+            message(const {
+              'type': 'model-output',
+              'key': 'm-new',
+              'text': 'newer answer',
+              'final': true,
+            }),
+          ],
+        ),
+      );
+      final mutation = window.prependPage(
+        HistoryPageWireEvent(
+          messages: older,
+          hasMore: false,
+          endOfHistory: true,
+        ),
+        requestedCursor: 'page-1',
+      );
+      expect(mutation.accepted, isTrue);
+      window = mutation.window;
+
+      final segments = window.transcriptConversationSegmentsWith(
+        const [
+          // Delivered, but neither its echo nor its anchor is in any loaded
+          // run: it renders nothing and must not move the floor.
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-gone',
+            text: 'evicted echo',
+            sentAt: 1,
+            queued: false,
+            anchorMessageKey: 'user-message:key:gone',
+            deliveredMessageKey: 'user-message:key:gone-too',
+          ),
+          // A later pending prompt anchored in the OLDER run.
+          SessionOptimisticPrompt(
+            clientMessageId: 'cm-pending',
+            text: 'pending in older run',
+            sentAt: 2,
+            queued: false,
+            anchorMessageKey: 'model-output:key:m-old',
+          ),
+        ],
+        const {},
+        mode: ToolDisplayMode.responsive,
+      );
+      expect(segments, hasLength(2));
+      List<String> rowKeys(TranscriptConversationSegment segment) => [
+        for (final turn in segment.turns) ...[
+          if (turn.userMessage?.raw['key'] case final String opened) opened,
+          for (final entry
+              in turn.content.whereType<MessageTranscriptDisplayEntry>())
+            if (entry.message.raw['key'] case final String key) key,
+        ],
+      ];
+      expect(
+        rowKeys(segments[0]),
+        contains('optimistic:cm-pending'),
+        reason: 'the pending row keeps its anchored run',
+      );
+      expect(rowKeys(segments[1]), isNot(contains('optimistic:cm-pending')));
+      expect(
+        [
+          ...rowKeys(segments[0]),
+          ...rowKeys(segments[1]),
+        ].where((key) => key.contains('cm-gone')),
+        isEmpty,
+        reason: 'a delivered holder with no canonical echo renders nothing',
       );
     });
   });

@@ -1028,7 +1028,14 @@ class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
       SessionControlPill.driverActive => l10n.sessionControlDriverActive,
       SessionControlPill.syncAvailable => l10n.sessionControlSyncAvailable,
       SessionControlPill.observing => l10n.sessionControlObserving,
-      SessionControlPill.unavailable => l10n.sessionControlUnavailable,
+      // A demoted-but-takeable generation keeps the `unavailable` pill (that
+      // wire state is contract data) but reads "Observing" — "Unavailable"
+      // beside a working Take over button is false. Mirrors the pill label in
+      // session_detail_chrome and the takeover-aware description below.
+      SessionControlPill.unavailable =>
+        widget.control.canTakeOver
+            ? l10n.sessionControlObserving
+            : l10n.sessionControlUnavailable,
       SessionControlPill.unknown => l10n.sessionControlUnknownDescription,
     };
     final icon = switch (widget.control.pill) {
@@ -1037,6 +1044,10 @@ class _ObserveComposerBarState extends ConsumerState<_ObserveComposerBar> {
       SessionControlPill.syncAvailable when !takeOverOnly => Icons.sync,
       SessionControlPill.syncAvailable => Icons.visibility_outlined,
       SessionControlPill.driverActive => Icons.sports_esports_outlined,
+      // The demoted-but-takeable bar reads "Observing"; take the eye with the
+      // label so icon and text never disagree (mirrors the pill in chrome).
+      SessionControlPill.unavailable when widget.control.canTakeOver =>
+        Icons.visibility_outlined,
       _ => Icons.block_outlined,
     };
 

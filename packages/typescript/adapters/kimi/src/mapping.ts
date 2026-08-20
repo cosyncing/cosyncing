@@ -24,6 +24,7 @@ import type {
   SessionInfo,
 } from '@cosyncing/adapter-api';
 import type { KimiQuestionAnswer } from './drive-http.ts';
+import { basename } from 'node:path';
 
 // ── Control state ───────────────────────────────────────────────────────────
 
@@ -58,6 +59,22 @@ export const KIMI_OBSERVE_POSTURE_REASON = 'open this session live to drive it';
 export const KIMI_FOREIGN_WRITER_REASON = 'kimi-foreign-writer';
 
 /**
+ * The ready-to-paste terminal command that rejoins a session: `kimi -S <id>`
+ * is confirmed upstream (`-S, --session [id]`) and resolves the workspace from
+ * the session's own index entry, so it is NOT cwd-scoped — the `cd` only
+ * decides where the user's shell lands.
+ */
+export function kimiResumeTerminalCommand(sessionId: string, cwd?: string): string {
+  const cd = cwd ? `cd ${kimiShellQuote(cwd)} && ` : '';
+  return `${cd}kimi -S ${kimiShellQuote(sessionId)}`;
+}
+
+/** Codex-style: unquoted when every character is safe, single-quoted otherwise. */
+function kimiShellQuote(value: string): string {
+  return /^[A-Za-z0-9_/:=.,@%+\-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * The roster/connection control state of a session cosyncing created and still
  * owns.
  *
@@ -66,8 +83,17 @@ export const KIMI_FOREIGN_WRITER_REASON = 'kimi-foreign-writer';
  * because the server is the single writer and we are talking to it. It is also
  * what `sessionConnectionAuthority` reads to grant `canMutate`, and what routes
  * `createdSessionAttachMode` to a bare attach.
+ *
+ * The `terminalSync.command` is the status sheet's resume-in-terminal hint, in
+ * the same generic shape Claude publishes: sync itself stays `supported:false`
+ * (driving happens THROUGH the server, so there is no cosyncing bridge to make
+ * active), but a terminal CAN take the session over, and `handoffAvailable`
+ * already declared above is what makes showing the command while driving safe.
+ * Only the DRIVING state carries it — a foreign session may have a live
+ * terminal owner this adapter cannot see, and an owned session opened in
+ * observe is not being handed off from here.
  */
-export function kimiOwnedControlState(): SessionControlState {
+export function kimiOwnedControlState(sessionId: string, cwd?: string): SessionControlState {
   return {
     // Declared rather than left to be inferred from `attachModes`: kimi serves
     // a genuine read-only observe connection, so handing Drive back leaves the
@@ -79,6 +105,8 @@ export function kimiOwnedControlState(): SessionControlState {
       supported: false,
       syncAvailable: false,
       active: false,
+      label: 'Resume in terminal',
+      command: kimiResumeTerminalCommand(sessionId, cwd),
       reason: KIMI_OWNED_TERMINAL_SYNC_REASON,
     },
   };
@@ -225,24 +253,84 @@ export interface KimiMessagePage {
 }
 
 /**
- * Kimi's own statement of where a row came from — `metadata.origin.kind`.
+ * Kimi's own statement of where a row came from — `metadata.origin`, kept
+ * WHOLE rather than reduced to its kind, because the kind alone does not serve
+ * every reader: the injection rule needs only the kind, while splitting a
+ * skill-activation row takes the `skillName`/`skillArgs` the origin also
+ * carries (upstream `contextMemory/types.ts:14-22`), and the divergence
+ * detector in `drive.ts` reads the kind off {@link KimiMappedRow.originKind}.
  *
  * Observed on a live 0.36.1 server: `injection` for harness-handed context,
  * `user` for a person typing, `cron_job` for a schedule firing a real prompt.
- * Only the first is context, and only Kimi can say which — the TEXT cannot,
- * because a person may legitimately paste or quote a whole wrapper block and
- * that is still them writing.
+ * Only Kimi can say which — the TEXT cannot, because a person may legitimately
+ * paste or quote a whole wrapper block and that is still them writing.
  *
- * Absent, malformed, or any other kind reads as not-injected, which keeps the
- * message whole. That is the safe direction: showing a reminder verbatim is
- * untidy, folding someone's own words into a collapsed disclosure loses them.
+ * Absent or malformed reads as no origin, which keeps the message whole. That
+ * is the safe direction: showing a wrapper verbatim is untidy, folding
+ * someone's own words into a collapsed disclosure loses them.
  */
-function kimiOriginKind(metadata: unknown): string | undefined {
+function kimiOrigin(metadata: unknown): Record<string, unknown> | undefined {
   if (typeof metadata !== 'object' || metadata === null) return undefined;
   const origin = (metadata as { origin?: unknown }).origin;
-  if (typeof origin !== 'object' || origin === null) return undefined;
-  const kind = (origin as { kind?: unknown }).kind;
+  if (typeof origin !== 'object' || origin === null || Array.isArray(origin)) return undefined;
+  return origin as Record<string, unknown>;
+}
+
+function kimiOriginKind(metadata: unknown): string | undefined {
+  const kind = kimiOrigin(metadata)?.kind;
   return typeof kind === 'string' ? kind : undefined;
+}
+
+/**
+ * The slash action a skill/plugin activation row stands for, built from the
+ * ORIGIN rather than the text — upstream derives the session's own title the
+ * same way (`promptMetadataTextFromSkill` /
+ * `promptMetadataTextFromPluginCommand`), so this shows what the user DID
+ * (`/name args`) without parsing prose out of the loaded body.
+ *
+ * Undefined when the origin carries no name, which is the caller's signal to
+ * leave the row whole: an activation that cannot be named cannot be split
+ * without hiding the material behind an action this adapter invented.
+ */
+function activationActionText(origin: Record<string, unknown>, kind: string): string | undefined {
+  // Upstream trims the args before rendering them; a whitespace-only args is
+  // no args.
+  const withArgs = (command: string, rawArgs: unknown): string => {
+    const args = typeof rawArgs === 'string' ? rawArgs.trim() : '';
+    return args ? `${command} ${args}` : command;
+  };
+  if (kind === 'skill_activation') {
+    const name = optionalString(origin.skillName);
+    return name ? withArgs(`/${name}`, origin.skillArgs) : undefined;
+  }
+  if (kind === 'plugin_command') {
+    const command = optionalString(origin.commandName);
+    if (!command) return undefined;
+    const plugin = optionalString(origin.pluginId);
+    return withArgs(plugin ? `/${plugin}:${command}` : `/${command}`, origin.commandArgs);
+  }
+  return undefined;
+}
+
+/**
+ * Parse the `<skill-loaded name="…" …>…</skill-loaded>` envelope KIMI-SIDE.
+ *
+ * The shared `unwrapContextBlock` cannot: it accepts no attributes on the tag
+ * and no prose ahead of it, and upstream's activation text has both — a
+ * boilerplate lead-in line, then the attributed envelope
+ * (`agent/skill/prompt.ts:renderUserSlashSkillPrompt`). Strict in the same
+ * spirit, though: the block must CLOSE the message, so an activation whose
+ * text merely contains the envelope is not unwrapped here. Whatever prose led
+ * the envelope in is kept ahead of the body rather than dropped — nothing the
+ * server sent is silently erased.
+ */
+function unwrapSkillLoadedBlock(text: string): { source: string; body: string } | undefined {
+  const match = /^([\s\S]*?)<skill-loaded(?:\s[^>]*)?>([\s\S]*?)<\/skill-loaded>\s*$/i.exec(text.trim());
+  if (!match) return undefined;
+  const prose = (match[1] ?? '').trim();
+  const body = (match[2] ?? '').trim();
+  if (!body) return undefined;
+  return { source: 'skill-loaded', body: prose ? `${prose}\n\n${body}` : body };
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
@@ -279,6 +367,19 @@ function optionalEpochMs(value: unknown): number | undefined {
 }
 
 /**
+ * The human-readable title for a session the host never named: the codex/pi
+ * shape `basename(cwd) · id[0:8]`, never the raw `session_<uuid>` id. The
+ * client's header suppresses titles equal to the session id, so mapping an
+ * untitled row AS its id renders "Untitled session" there while the roster
+ * shows the raw id — one session, two names. With no cwd there is nothing
+ * better than the id, and the id is returned so the two surfaces at least
+ * agree.
+ */
+export function kimiFallbackTitle(id: string, cwd?: string): string {
+  return cwd ? `${basename(cwd)} · ${id.slice(0, 8)}` : id;
+}
+
+/**
  * Map one v2 session row. Returns undefined only when the row has no usable id;
  * everything else degrades to an absent optional field.
  *
@@ -296,8 +397,8 @@ export function mapKimiSession(
   const id = optionalString(raw?.id);
   if (!id) return undefined;
   const meta = raw.meta ?? {};
-  const title = optionalString(meta.title) ?? optionalString(meta.last_prompt) ?? id;
   const cwd = optionalString(raw.workspace?.cwd);
+  const title = optionalString(meta.title) ?? optionalString(meta.last_prompt) ?? kimiFallbackTitle(id, cwd);
   const createdAt = optionalEpochMs(meta.created_at);
   const updatedAt = optionalEpochMs(meta.updated_at);
   const owned = isOwned?.(id) === true;
@@ -311,7 +412,7 @@ export function mapKimiSession(
     attachMode: owned ? 'live' : 'observe',
     ...(createdAt !== undefined ? { createdAt } : {}),
     ...(updatedAt !== undefined ? { updatedAt } : {}),
-    control: owned ? kimiOwnedControlState() : kimiForeignControlState(),
+    control: owned ? kimiOwnedControlState(id, cwd) : kimiForeignControlState(),
   };
 }
 
@@ -361,7 +462,7 @@ export function mapKimiCreatedSession(raw: KimiV1Session | undefined): SessionIn
   return {
     id,
     tool: 'kimi',
-    title: optionalString(raw.title) ?? optionalString(raw.last_prompt) ?? id,
+    title: optionalString(raw.title) ?? optionalString(raw.last_prompt) ?? kimiFallbackTitle(id, cwd),
     ...(cwd ? { cwd } : {}),
     // A create answer with unreadable liveness fields still describes a session
     // that has never run a turn — nothing has been submitted to it yet — so the
@@ -376,7 +477,7 @@ export function mapKimiCreatedSession(raw: KimiV1Session | undefined): SessionIn
     attachMode: 'live',
     ...(createdAt !== undefined ? { createdAt } : {}),
     ...(updatedAt !== undefined ? { updatedAt } : {}),
-    control: kimiOwnedControlState(),
+    control: kimiOwnedControlState(id, cwd),
   };
 }
 
@@ -476,6 +577,13 @@ function partKey(messageId: string, index: number): string {
   return `kimi:${messageId}:${index}`;
 }
 
+/**
+ * Longest inline `data:` URI an echoed image row may carry, URL characters
+ * included. Mirrors claude's `ARTIFACT_INLINE_CAP` (5_000_000, the broker's
+ * emitArtifact ceiling) with the base64 inflation already inside the figure.
+ */
+const KIMI_INLINE_IMAGE_DATA_URL_CAP = 7_000_000;
+
 function contentParts(raw: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(raw)) return [];
   return raw.filter((part): part is Record<string, unknown> =>
@@ -518,6 +626,360 @@ export interface KimiMappedRow {
    * visible as itself rather than degrade into one this version knows.
    */
   nativeRole?: string;
+  /**
+   * Kimi's own provenance for this row — `metadata.origin.kind`, verbatim.
+   *
+   * One plumbing, two readers: the mapper splits `skill_activation` /
+   * `plugin_command` rows on it, and the divergence detector (`drive.ts`)
+   * suspects ONLY a row whose kind is `'user'` or whose origin is ABSENT —
+   * every harness kind (`injection`, `skill_activation`, `cron_job`, …) is the
+   * server writing to its own session, never a foreign prompt. Absent stays
+   * suspect because an older server sends no origin at all, and a real
+   * terminal prompt carries kind `'user'` (`USER_PROMPT_ORIGIN` upstream).
+   */
+  originKind?: string;
+}
+
+/**
+ * Per-connection correlation state for the message fold.
+ *
+ * Two correlations cannot be done inside one native message: a TodoList RESULT
+ * carries no tool name on the REST fold (only `tool_call_id`), so suppressing
+ * the panel's acknowledgment echo needs the set of TodoList call ids the fold
+ * has seen; and a background task's settlement notification names the TASK id,
+ * which is linked to the originating tool call only by the `task_id:` line that
+ * opens the spawn result's output. Both are recorded here as the fold walks
+ * rows oldest-first.
+ *
+ * This is CONNECTION state, never module state: task and call ids are
+ * session-scoped, so two connections must never resolve each other's, and a
+ * fresh attach re-derives both from its own history walk. Callers that fold a
+ * single message in isolation omit it; every correlation then degrades to its
+ * documented fallback (the result renders; the notification becomes a notice;
+ * no subagent bar is opened).
+ */
+export interface KimiMappingState {
+  /** Every tool_use's callId → toolName, so a correlated row can name its tool. */
+  readonly toolNames: Map<string, string>;
+  /** Call ids of TodoList calls THAT EMITTED the panel, so only their results are suppressed. */
+  readonly todoListCallIds: Set<string>;
+  /** Background task id → the callId of the tool call that spawned it. */
+  readonly backgroundTasks: Map<string, string>;
+  /** Call id → an open subagent bar; set by the Agent call, consumed by its result or settlement. */
+  readonly agentActivities: Map<string, KimiPendingAgentActivity>;
+  /**
+   * Call ids of tool_results folded BEFORE their calls. The incremental walk
+   * folds pages newest-first, so a call/result pair straddling a page boundary
+   * meets its result first; an Agent call whose result already passed must NOT
+   * open a bar, because nothing will ever close it. Bounded; see
+   * {@link rememberBounded}.
+   */
+  readonly orphanedResultCallIds: Set<string>;
+  /**
+   * Task ids whose settlement notification folded BEFORE the spawn result that
+   * would have opened their bar (the same newest-first straddle, one hop
+   * longer). A spawn result for an already-settled task must not open a bar
+   * that can never close. Bounded; see {@link rememberBounded}.
+   */
+  readonly settledTaskIds: Set<string>;
+}
+
+export function createKimiMappingState(): KimiMappingState {
+  return {
+    toolNames: new Map(),
+    todoListCallIds: new Set(),
+    backgroundTasks: new Map(),
+    agentActivities: new Map(),
+    orphanedResultCallIds: new Set(),
+    settledTaskIds: new Set(),
+  };
+}
+
+/**
+ * Bounded insertion-ordered set memory (the same oldest-first eviction
+ * `KimiWireTail.admit` uses), so a long-lived connection's correlation guards
+ * cannot grow without limit. Eviction costs a guard its memory — a straddled
+ * pair then degrades to the no-bar direction, which is the safe one.
+ */
+const KIMI_GUARD_SET_LIMIT = 1_024;
+
+function rememberBounded(set: Set<string>, value: string): void {
+  if (set.has(value)) return;
+  set.add(value);
+  if (set.size <= KIMI_GUARD_SET_LIMIT) return;
+  for (const oldest of set) {
+    set.delete(oldest);
+    if (set.size <= KIMI_GUARD_SET_LIMIT) break;
+  }
+}
+
+/** Kimi's todo tool, registered upstream as `{ name: 'TodoList', domain: 'todo' }`. */
+const KIMI_TODO_LIST_TOOL = 'TodoList';
+
+/**
+ * A TodoList tool_use → the canonical `task-list-state` panel (ONE upserted
+ * ledger, not a stack of raw tool cards), or UNDEFINED when the call is not a
+ * well-formed write — including `{}`, which upstream defines as a QUERY that
+ * changes nothing (`agent/tools/todo-list/todo-list.ts`). Absent `todos` must
+ * leave the panel alone; only an explicit empty list clears it; a NONEMPTY
+ * list whose items are all unusable is drift, not a clear, and falls through
+ * too. Undefined is the caller's signal to fall through to a normal tool-call
+ * row, the same null-return rule as claude's `todoListState`.
+ */
+function kimiTodoListState(
+  input: unknown,
+): Extract<AgentMessage, { type: 'task-list-state' }> | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const rawTodos = (input as { todos?: unknown }).todos;
+  if (!Array.isArray(rawTodos)) return undefined;
+  const items: Array<{ title: string; status: 'open' | 'in-progress' | 'done' }> = [];
+  for (const raw of rawTodos) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const rawTitle = (raw as { title?: unknown }).title;
+    const title = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+    if (!title) continue;
+    const status = (raw as { status?: unknown }).status;
+    // Kimi's enum is closed — pending | in_progress | done — so nothing maps to
+    // `cancelled`, and an unknown value degrades to `open` rather than dropping
+    // the item or the panel.
+    items.push({
+      title,
+      status: status === 'done' ? 'done' : status === 'in_progress' ? 'in-progress' : 'open',
+    });
+  }
+  // A NONEMPTY list that produced ZERO usable items is not a clear: the input
+  // was unreadable, and the malformed-falls-through rule governs — degrade to a
+  // plain tool card and leave the panel alone. Only an explicit EMPTY list
+  // clears; conflating the two would wipe the panel on drifted input.
+  if (rawTodos.length > 0 && items.length === 0) return undefined;
+  const allDone = items.length > 0 && items.every((item) => item.status === 'done');
+  return {
+    type: 'task-list-state',
+    key: 'kimi:todos',
+    title: 'Tasks',
+    status: items.length === 0 ? 'cleared' : allDone ? 'done' : 'running',
+    source: 'tool-call',
+    sourceTool: KIMI_TODO_LIST_TOOL,
+    items,
+  };
+}
+
+// ── Subagent activity (the `Agent` tool) ────────────────────────────────────
+
+/**
+ * Kimi's subagent spawn tool — the ONLY tool that produces an `agent-N` child,
+ * verified against a parent journal's full tool-call histogram. Args: `prompt`
+ * and `description` always; `subagent_type` usually; `run_in_background` only
+ * on detached spawns.
+ */
+const KIMI_AGENT_SPAWN_TOOL = 'Agent';
+
+/**
+ * One subagent run in flight, opened by the Agent tool_use and closed by its
+ * tool_result (foreground) or its settlement notification (detached). Same
+ * shape dsh's `DshPendingAgentActivity` produces; the client upserts by
+ * {@link key}.
+ */
+export interface KimiPendingAgentActivity {
+  /** `agent:<callId>` — keyed on the PARENT's toolCallId, the only pre-spawn handle. */
+  key: string;
+  title: string;
+  subtitle?: string;
+  /** The call message's `created_at`; the terminal bar's elapsed is measured from it. */
+  startedAt?: number;
+  /**
+   * A DETACHED spawn (`run_in_background: true`): the call/result pair does not
+   * bracket the run — the result returns immediately — so the running bar opens
+   * only when the spawn result confirms a task id, and closes at the settlement
+   * notification.
+   */
+  detached: boolean;
+  /** Detached only: the running bar has actually been emitted (at the spawn result). */
+  opened: boolean;
+}
+
+/**
+ * An Agent tool_use → the bar it opens, or UNDEFINED when the input is not a
+ * readable spawn. The child id is runtime-assigned and NEVER in the call, and
+ * the title is parent-side only (`args.description` — child journals carry no
+ * title), so the bar keys on the parent's toolCallId and takes its title from
+ * the call. Foreground and detached spawns both produce a pending entry; the
+ * caller decides when each emits.
+ */
+function kimiAgentActivityFromCall(
+  input: unknown,
+  callId: string,
+  startedAt: number | undefined,
+): KimiPendingAgentActivity | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const args = input as Record<string, unknown>;
+  const prompt = optionalString(args.prompt);
+  const firstPromptLine = prompt?.split('\n').find((line) => line.trim())?.trim();
+  return {
+    key: `agent:${callId}`,
+    title: optionalString(args.description) ?? firstPromptLine ?? 'Subagent task',
+    ...(optionalString(args.subagent_type) ? { subtitle: optionalString(args.subagent_type) } : {}),
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    detached: args.run_in_background === true,
+    opened: false,
+  };
+}
+
+/** One canonical `agent-activity` emission for a pending subagent run. */
+function kimiAgentActivityMessage(
+  pending: KimiPendingAgentActivity,
+  status: 'running' | 'done' | 'error',
+  elapsedMs?: number,
+): AgentMessage {
+  return {
+    type: 'agent-activity',
+    key: pending.key,
+    kind: 'subagent',
+    title: pending.title,
+    ...(pending.subtitle ? { subtitle: pending.subtitle } : {}),
+    status,
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(status === 'running' && pending.startedAt !== undefined ? { startedAtMs: pending.startedAt } : {}),
+    agentsDone: status === 'running' ? 0 : 1,
+    agentsTotal: 1,
+  };
+}
+
+/** Elapsed between two message timestamps, or nothing: an unusable or reversed endpoint is dropped, never zeroed. */
+function kimiElapsedMs(startedAt: number | undefined, endedAt: number | undefined): number | undefined {
+  return startedAt !== undefined && endedAt !== undefined && endedAt >= startedAt
+    ? endedAt - startedAt
+    : undefined;
+}
+
+/** The parsed contents of a `<notification …>` task-settlement envelope. */
+interface KimiTaskNotification {
+  type?: string;
+  severity?: string;
+  title?: string;
+  body: string;
+  outputFile?: string;
+}
+
+function unescapeXmlAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Parse the `<notification …>` envelope KIMI-SIDE, in the same spirit as
+ * {@link unwrapSkillLoadedBlock}: the shared `unwrapContextBlock` cannot take
+ * it — five tag attributes, `Title:`/`Severity:` prose lines ahead of the body,
+ * and a nested `<output-file>`/`<output-preview>` child all defeat it
+ * (upstream `agent/task/notificationXml.ts`). Strict the same way too: the
+ * envelope must be the WHOLE text, so a message that merely quotes one is not
+ * unwrapped here.
+ */
+function parseKimiTaskNotification(text: string): KimiTaskNotification | undefined {
+  const match = /^<notification((?:\s+[a-zA-Z_-]+="[^"]*")*)\s*>([\s\S]*?)<\/notification>\s*$/.exec(text.trim());
+  if (!match) return undefined;
+  const attrs = match[1] ?? '';
+  let inner = (match[2] ?? '').trim();
+  const fileTag = /<output-file\b[^>]*>/.exec(inner)?.[0];
+  const outputFile = fileTag ? /\bpath="([^"]*)"/.exec(fileTag)?.[1] : undefined;
+  inner = inner
+    .replace(/<output-file\b[\s\S]*?<\/output-file>/g, '')
+    .replace(/<output-preview\b[\s\S]*?<\/output-preview>/g, '')
+    .trim();
+  let title: string | undefined;
+  let severity: string | undefined;
+  const bodyLines: string[] = [];
+  for (const line of inner.split('\n')) {
+    if (title === undefined && line.startsWith('Title: ')) {
+      title = line.slice('Title: '.length).trim();
+    } else if (severity === undefined && line.startsWith('Severity: ')) {
+      severity = line.slice('Severity: '.length).trim();
+    } else {
+      bodyLines.push(line);
+    }
+  }
+  const body = bodyLines.join('\n').trim();
+  if (!title && !body) return undefined;
+  const type = /\btype="([^"]*)"/.exec(attrs)?.[1];
+  return {
+    ...(type ? { type } : {}),
+    ...(severity ? { severity } : {}),
+    ...(title ? { title } : {}),
+    body,
+    ...(outputFile ? { outputFile: unescapeXmlAttr(outputFile) } : {}),
+  };
+}
+
+/**
+ * A detached background task's settlement row → its canonical rows.
+ *
+ * The row is the completion of a background call the user watched start, so
+ * when the spawn result's `task_id:` line resolved the correlation it IS that
+ * call's deferred `tool-result`. When it cannot resolve — a task started before
+ * this attach, a reattach, an unparseable spawn result — it is a `notice`
+ * carrying the severity, title, body, and task id. Failures stay visible either
+ * way (`isError` on the fold, a severity tag on the notice); neither path is
+ * ever a user-message, because the origin already says the server wrote it. An
+ * envelope that will not parse degrades to a notice of the raw text: visible,
+ * but never attributed to the operator.
+ *
+ * The settlement of a detached AGENT task is also the close of its subagent bar
+ * (issues 11 and 13 are the same wire event for a detached spawn): when the
+ * correlation lands on a call whose bar is open, a terminal `agent-activity`
+ * row rides alongside the deferred tool-result. An UNRESOLVED settlement is
+ * recorded in `state.settledTaskIds`, so a spawn result folding after it — a
+ * multi-page catch-up walk folds pages newest-first — cannot open a bar that
+ * nothing will ever close.
+ */
+function kimiTaskNotificationMessage(
+  text: string,
+  origin: Record<string, unknown> | undefined,
+  state: KimiMappingState | undefined,
+  sentAt: number | undefined,
+): AgentMessage[] {
+  const parsed = parseKimiTaskNotification(text);
+  if (!parsed) return [{ type: 'notice', message: text }];
+  const taskId = optionalString(origin?.taskId);
+  const status = optionalString(origin?.status);
+  const failed = parsed.severity === 'warning'
+    || parsed.type === 'task.failed'
+    || (status !== undefined && status !== 'completed');
+  const callId = taskId ? state?.backgroundTasks.get(taskId) : undefined;
+  if (state && taskId && !callId) rememberBounded(state.settledTaskIds, taskId);
+  const headline = [parsed.title, parsed.body].filter((line): line is string => !!line);
+  const rows: AgentMessage[] = [];
+  if (callId) {
+    const lines = [...headline];
+    if (parsed.outputFile) lines.push(`Full output: ${parsed.outputFile}`);
+    rows.push({
+      type: 'tool-result',
+      callId,
+      toolName: state?.toolNames.get(callId) ?? '',
+      result: lines.join('\n'),
+      ...(failed ? { isError: true } : {}),
+    });
+    const pending = state?.agentActivities.get(callId);
+    if (pending?.detached && pending.opened) {
+      state?.agentActivities.delete(callId);
+      rows.push(kimiAgentActivityMessage(pending, failed ? 'error' : 'done', kimiElapsedMs(pending.startedAt, sentAt)));
+    }
+    return rows;
+  }
+  const refs = [
+    taskId ? `task ${taskId}` : undefined,
+    parsed.outputFile ? `output: ${parsed.outputFile}` : undefined,
+  ].filter((ref): ref is string => !!ref);
+  const severityTag = parsed.severity && parsed.severity !== 'info' ? `[${parsed.severity}] ` : '';
+  rows.push({
+    type: 'notice',
+    message: `${severityTag}${headline.join(' — ') || 'Background task notification'}`
+      + `${refs.length > 0 ? ` (${refs.join(', ')})` : ''}`,
+  });
+  return rows;
 }
 
 /**
@@ -527,14 +989,19 @@ export interface KimiMappedRow {
  * tool calls in one record), so the fan-out is one canonical message per part,
  * each keyed by its position so history replay and the live tail dedupe against
  * the same identity.
+ *
+ * `state` is the per-connection correlation record (see {@link KimiMappingState});
+ * folds that span messages — the TodoList result suppression and the background
+ * task notification fold — are no-ops without it.
  */
-export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
+export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): KimiMappedRow[] {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
   const id = optionalString(raw.id);
   if (!id) return [];
   const role = raw.role;
   const parts = contentParts(raw.content);
   const sentAt = optionalEpochMs(raw.created_at);
+  const origin = kimiOrigin(raw.metadata);
   const originKind = kimiOriginKind(raw.metadata);
   const nativeRole = typeof role === 'string' ? role : undefined;
   const rows: KimiMappedRow[] = [];
@@ -545,6 +1012,7 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
         identity: `${message.type}:${nativeKey}`,
         nativeMessageId: id,
         ...(nativeRole !== undefined ? { nativeRole } : {}),
+        ...(originKind !== undefined ? { originKind } : {}),
       });
     },
   };
@@ -557,6 +1025,63 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
     if (kind === 'text') {
       const text = textOf(part, 'text');
       if (!text) continue;
+      // A detached background task settling arrives as a `role: 'user'` row
+      // whose origin kind is `task` (upstream `TaskOrigin`) and whose text is a
+      // `<notification …>` envelope — the row exists to WAKE THE AGENT, so it
+      // is never something the operator typed, and `unwrapContextBlock` could
+      // not parse it anyway. The third consumer of the `originKind` plumbing:
+      // folded onto the spawning call as its deferred tool-result when the
+      // correlation resolves, a visible notice when it cannot.
+      if (role === 'user' && originKind === 'task') {
+        for (const message of kimiTaskNotificationMessage(text, origin, state, sentAt)) {
+          out.push(message, key);
+        }
+        continue;
+      }
+      // A skill or plugin activation arrives as a `role: 'user'` row whose
+      // TEXT is the whole loaded body — upstream enqueues the expanded skill
+      // as a user message tagged `skill_activation` / `plugin_command`
+      // (`agent/skill/prompt.ts`, `agent/pluginCommand/pluginCommandService.ts`).
+      // Rendered as one user message that body is a giant card the operator
+      // never typed, so the row is SPLIT, never folded away:
+      //
+      //  (a) a short user row for the ACTION the user took — `/name args`
+      //      from the origin, closer to what the person actually did than the
+      //      kilobytes the harness attached to it; and
+      //  (b) the body itself as a context-injection event, the same mechanism
+      //      and ceiling as the `injection` path below.
+      //
+      // Both rows keep the origin kind, so the divergence detector in
+      // `drive.ts` still reads this as the server writing to its own session,
+      // never as a foreign prompt. An activation whose origin carries no name
+      // falls THROUGH to the ordinary handling: a row that cannot be
+      // attributed stays whole, because the safe direction for one we cannot
+      // explain is to show it, not to collapse it.
+      if (role === 'user' && origin !== undefined
+        && (originKind === 'skill_activation' || originKind === 'plugin_command')) {
+        const action = activationActionText(origin, originKind);
+        if (action !== undefined) {
+          out.push({
+            type: 'user-message',
+            text: action,
+            key,
+            ...(sentAt !== undefined ? { sentAt } : {}),
+          }, key);
+          const block = (originKind === 'skill_activation' ? unwrapSkillLoadedBlock(text) : undefined)
+            // A body that is not the expected envelope is still what the origin
+            // says it is; the kind labels it when no wrapper did.
+            ?? { source: originKind, body: text };
+          out.push({
+            type: 'event',
+            name: CONTEXT_INJECTION_EVENT,
+            payload: {
+              source: block.source,
+              ...boundContextBody(block.body),
+            } satisfies ContextInjectionPayload,
+          }, key);
+          continue;
+        }
+      }
       // Injected context is recognized on the USER row as well as the system
       // one, because the user row is where Kimi actually delivers it: every
       // `<system-reminder>` block a live server returns arrives as
@@ -631,6 +1156,49 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
         out.push(degradedPart(key, 'tool_use'), key);
         continue;
       }
+      state?.toolNames.set(callId, toolName);
+      // The todo ledger is SESSION STATE, not a tool invocation: ONE upserted
+      // task-list-state panel keyed `kimi:todos`, never a stack of raw TodoList
+      // cards — the same surface claude/codex/opencode/dsh already emit. A call
+      // that is not a well-formed write (malformed input, or `{}`, the upstream
+      // QUERY) falls through to the ordinary tool-call row and leaves the
+      // panel alone.
+      if (toolName === KIMI_TODO_LIST_TOOL) {
+        const panel = kimiTodoListState(part.input);
+        if (panel) {
+          // Suppress the paired result ONLY when the panel actually emitted: a
+          // `{}` query renders a plain call card, and its non-error result —
+          // the only surface a query has — must still reach the transcript.
+          state?.todoListCallIds.add(callId);
+          out.push(panel, key);
+          continue;
+        }
+      }
+      // The Agent spawn tool ALSO opens the canonical `agent-activity` bar — the
+      // same foreground tier dsh built for issue 11. The plain tool-call card
+      // stays (what claude does with its Task card); the bar is the live
+      // surface. FOREGROUND calls (no `run_in_background`) open `running` here
+      // and close at the paired result; DETACHED spawns open nothing yet — their
+      // pair brackets only the parent's wait for a task id, so the bar opens at
+      // the spawn result and closes at the settlement notification. An Agent
+      // call whose result already folded (the page-straddle guard) opens no bar
+      // at all, because nothing would ever close it.
+      if (toolName === KIMI_AGENT_SPAWN_TOOL && state) {
+        const pending = kimiAgentActivityFromCall(part.input, callId, sentAt);
+        if (pending && !state.orphanedResultCallIds.has(callId)) {
+          state.agentActivities.set(callId, pending);
+          if (!pending.detached) {
+            out.push({
+              type: 'tool-call',
+              callId,
+              toolName,
+              ...(part.input !== undefined ? { args: part.input } : {}),
+            }, key);
+            out.push(kimiAgentActivityMessage(pending, 'running'), key);
+            continue;
+          }
+        }
+      }
       out.push({
         type: 'tool-call',
         callId,
@@ -645,18 +1213,104 @@ export function mapKimiMessage(raw: KimiMessage): KimiMappedRow[] {
         out.push(degradedPart(key, 'tool_result'), key);
         continue;
       }
-      out.push({
+      // A background-spawn result OPENS with a `task_id: <id>` line (upstream
+      // `bashTool.backgroundStartedResult`); that line is the ONLY link between
+      // a detached task and the call the user watched start, so it is recorded
+      // for the notification fold. Anchored to the FIRST line on purpose: a
+      // foreground call's truncation footer mentions a task id too, and that
+      // task is never detached, so it never settles into a notification.
+      let spawnedTaskId: string | undefined;
+      if (state && typeof part.output === 'string') {
+        const spawned = /^task_id: (\S+)/.exec(part.output);
+        if (spawned) {
+          spawnedTaskId = spawned[1]!;
+          state.backgroundTasks.set(spawnedTaskId, callId);
+        }
+      }
+      // A result whose CALL has not folded (a page-straddling pair meets its
+      // result first in a newest-first walk) is remembered, so the call — when
+      // it folds moments later — does not open a subagent bar nothing will
+      // close. Results whose call already folded (the normal order) never land
+      // here: `toolNames` knows them.
+      if (state && !state.toolNames.has(callId)) rememberBounded(state.orphanedResultCallIds, callId);
+      // The panel emitted for the TodoList CALL is the surface; the paired
+      // result is an acknowledgment echo and would only stack a second card —
+      // the same suppression as claude's TodoWrite result, and like there a
+      // FAILED call keeps its error row. Without state the result renders,
+      // which is the safe direction.
+      if (part.is_error !== true && state?.todoListCallIds.has(callId)) continue;
+      const resultRow: AgentMessage = {
         type: 'tool-result',
         callId,
         toolName: optionalString(part.tool_name) ?? '',
         ...(part.output !== undefined ? { result: part.output } : {}),
         ...(part.is_error === true ? { isError: true } : {}),
-      }, key);
+      };
+      const pendingAgent = state?.agentActivities.get(callId);
+      if (state && pendingAgent) {
+        if (!pendingAgent.detached) {
+          // FOREGROUND: the call/result pair brackets the run exactly, so the
+          // result closes the bar the call opened. Elapsed is the parent's tool
+          // wait (call → result message timestamps).
+          state.agentActivities.delete(callId);
+          out.push(resultRow, key);
+          out.push(
+            kimiAgentActivityMessage(
+              pendingAgent,
+              part.is_error === true ? 'error' : 'done',
+              kimiElapsedMs(pendingAgent.startedAt, sentAt),
+            ),
+            key,
+          );
+          continue;
+        }
+        // DETACHED: the result returns immediately, so it is not the run's end —
+        // it is the run's CONFIRMATION. The running bar opens here, once the
+        // spawn result proves a task id exists, and closes at the settlement
+        // notification. A task whose settlement already folded, or a failed
+        // spawn, opens no bar at all.
+        if (part.is_error !== true && spawnedTaskId && !state.settledTaskIds.has(spawnedTaskId)) {
+          pendingAgent.opened = true;
+          out.push(resultRow, key);
+          out.push(kimiAgentActivityMessage(pendingAgent, 'running'), key);
+          continue;
+        }
+        state.agentActivities.delete(callId);
+      }
+      out.push(resultRow, key);
       continue;
     }
     if (kind === 'image' || kind === 'video') {
-      // Observe has no artifact bytes to serve and must not fabricate a URL, so
-      // the row records that media was present rather than dropping it silently.
+      // History rows arrive with `blobref:` media REHYDRATED into a real `data:`
+      // URI upstream (`services/messages/messageHistory.ts:165-187`), so an
+      // echoed image carries its bytes on the row:
+      // `{type:'image', source:{kind:'url', url:'data:image/…'}}`. That shape
+      // surfaces as the canonical artifact row — the same `file-artifact` with
+      // an inline data URL that claude emits for inline image blocks. Every
+      // other shape (an unresolvable ref, which upstream rewrites to the literal
+      // `[media missing]`; a non-url source; video) keeps the event fallback:
+      // observe has no artifact bytes to serve and must not fabricate a URL.
+      const source = part.source && typeof part.source === 'object' && !Array.isArray(part.source)
+        ? part.source as Record<string, unknown>
+        : undefined;
+      const url = source?.kind === 'url' ? optionalString(source.url) : undefined;
+      if (kind === 'image' && url !== undefined && url.startsWith('data:')) {
+        const mimeType = /^data:([^;,]+)/.exec(url)?.[1]
+          ?? optionalString(part.media_type)
+          ?? 'image/png';
+        out.push({
+          type: 'file-artifact',
+          path: key,
+          name: `image.${mimeType.split('/')[1] ?? 'png'}`,
+          mimeType,
+          artifactKey: key,
+          // Past the inline cap the row goes header-only, matching the broker's
+          // own emitArtifact ceiling rather than shipping an unbounded data URL
+          // in every history replay.
+          ...(url.length <= KIMI_INLINE_IMAGE_DATA_URL_CAP ? { url } : {}),
+        }, key);
+        continue;
+      }
       out.push({ type: 'event', name: `kimi.${kind}`, payload: { key } }, key);
       continue;
     }
@@ -701,7 +1355,7 @@ function degradedPart(key: string, nativeKind: string): AgentMessage {
  * `created_at` instead would reorder same-millisecond pairs — a user prompt and
  * its assistant reply routinely share a millisecond in real captures.
  */
-export function mapKimiMessagePage(page: KimiMessagePage | undefined): {
+export function mapKimiMessagePage(page: KimiMessagePage | undefined, state?: KimiMappingState): {
   rows: KimiMappedRow[];
   hasMore: boolean;
   oldestId?: string;
@@ -709,7 +1363,7 @@ export function mapKimiMessagePage(page: KimiMessagePage | undefined): {
   const items = Array.isArray(page?.items) ? page.items : [];
   const ascending = [...items].reverse();
   const rows: KimiMappedRow[] = [];
-  for (const item of ascending) rows.push(...mapKimiMessage((item ?? {}) as KimiMessage));
+  for (const item of ascending) rows.push(...mapKimiMessage((item ?? {}) as KimiMessage, state));
   const oldest = ascending[0] as KimiMessage | undefined;
   const oldestId = optionalString(oldest?.id);
   return {

@@ -1118,6 +1118,219 @@ function typesOf(messages: Array<{ type: string }>): string {
     freeMessage.some((row) => row.type === 'token-count'),
     JSON.stringify(freeMessage),
   );
+
+  // A user message typed inside an open turn carries that turn's id so the
+  // client can attach the turn-keyed `run-summary` to the segment this row
+  // opens; outside a turn (and after turn/end) there is no id to carry.
+  const turnKeyed = createDshMapState(SESSION_ID, false);
+  const keyedFeed = (seq: number, time: number, type: string, data: Record<string, unknown>) =>
+    mapDshEvent({ event: { type, seq, time, data } }, turnKeyed) as Array<Record<string, unknown>>;
+  const userEvent = (id: string, text: string) =>
+    ({ content: [{ type: 'text', text }], source: { kind: 'user' }, id });
+  const outsideTurn = keyedFeed(1, 900, 'user/message', userEvent('m0', 'before any turn'));
+  keyedFeed(2, 1000, 'turn/start', { turn: 1 });
+  const insideTurn = keyedFeed(3, 1100, 'user/message', userEvent('m1', 'steer the turn'));
+  keyedFeed(4, 2000, 'turn/end', { turn: 1, reason: { kind: 'completed' } });
+  const afterTurn = keyedFeed(5, 2100, 'user/message', userEvent('m2', 'after the turn'));
+  check(
+    'a user message inside an open turn carries its turnId; outside a turn it carries none',
+    outsideTurn[0]!.type === 'user-message' && outsideTurn[0]!.turnId === undefined
+      && insideTurn[0]!.type === 'user-message' && insideTurn[0]!.turnId === `dsh:${SESSION_ID}:turn1`
+      && afterTurn[0]!.type === 'user-message' && afterTurn[0]!.turnId === undefined,
+    JSON.stringify([outsideTurn[0], insideTurn[0], afterTurn[0]]),
+  );
+}
+
+// ── 11. Foreground spawn/workflow agent-activity ────────────────────────────
+
+{
+  // The host's spawn/orchestration tools (request/header, fixture seq 11) are
+  // the one tool-name branch: a FOREGROUND call/result pair brackets a real
+  // child run, so it also emits the canonical agent-activity bar. Background
+  // spawns default `run_in_background: true` and return a durable id
+  // immediately — their pair brackets nothing and stays a plain tool card.
+  const spawnState = createDshMapState(SESSION_ID, true);
+  const spawnFeed = (seq: number, time: number, type: string, data: Record<string, unknown>) =>
+    mapDshEvent({ event: { type, seq, time, data } }, spawnState) as Array<Record<string, unknown>>;
+  spawnFeed(1, 1000, 'turn/start', { turn: 1 });
+  const fgCall = spawnFeed(2, 1100, 'tool/call', {
+    turn: 1, step: 1, callId: 'sp-1', name: 'subagent',
+    arguments: JSON.stringify({ description: 'Audit token usage', prompt: 'Count tokens in src/', run_in_background: false }),
+  });
+  const fgBar = fgCall[1]!;
+  check(
+    'a foreground subagent call opens a running agent-activity bar titled from its input',
+    fgCall.length === 2 && fgCall[0]!.type === 'tool-call'
+      && fgBar.type === 'agent-activity' && fgBar.kind === 'subagent'
+      && fgBar.key === 'agent:sp-1' && fgBar.title === 'Audit token usage'
+      && fgBar.status === 'running' && fgBar.startedAtMs === 1100
+      && fgBar.agentsDone === 0 && fgBar.agentsTotal === 1,
+    JSON.stringify(fgCall),
+  );
+  const fgResult = spawnFeed(3, 1900, 'tool/result', {
+    turn: 1, step: 1,
+    message: { role: 'tool', content: [{ toolCallId: 'sp-1', content: [{ type: 'text', text: 'done report' }] }] },
+  });
+  const fgDone = fgResult[1]!;
+  check(
+    'the result closes the bar as done with elapsed from the parent tool wait',
+    fgResult.length === 2 && fgResult[0]!.type === 'tool-result'
+      && fgDone.type === 'agent-activity' && fgDone.key === 'agent:sp-1'
+      && fgDone.status === 'done' && fgDone.elapsedMs === 800
+      && fgDone.agentsDone === 1 && fgDone.agentsTotal === 1,
+    JSON.stringify(fgResult),
+  );
+
+  // A failed foreground run closes its bar as error, not done.
+  const errCall = spawnFeed(4, 2000, 'tool/call', {
+    turn: 1, step: 2, callId: 'sp-2', name: 'subagent_fork',
+    arguments: { description: 'Review this diff', prompt: 'Look at the diff', run_in_background: false },
+  });
+  const errResult = spawnFeed(5, 2600, 'tool/result', {
+    turn: 1, step: 2,
+    message: { role: 'tool', content: [{ toolCallId: 'sp-2', content: [{ type: 'text', text: 'boom' }], isError: true }] },
+  });
+  check(
+    'a foreground subagent_fork failure closes its bar as error',
+    errCall.length === 2 && (errCall[1] as { kind?: string }).kind === 'subagent'
+      && errResult.length === 2
+      && (errResult[1] as { status?: string; elapsedMs?: number }).status === 'error'
+      && (errResult[1] as { elapsedMs?: number }).elapsedMs === 600,
+    JSON.stringify(errResult),
+  );
+
+  // Title fallback mirrors opencode: description, else the prompt's first line,
+  // else a generic label.
+  const noDesc = spawnFeed(6, 3000, 'tool/call', {
+    turn: 1, step: 3, callId: 'sp-3', name: 'subagent',
+    arguments: { prompt: '\nFirst line of the task\nrest', run_in_background: false },
+  });
+  const bareCall = spawnFeed(7, 3100, 'tool/call', {
+    turn: 1, step: 3, callId: 'sp-4', name: 'subagent',
+    arguments: { run_in_background: false },
+  });
+  check(
+    'the bar title falls back to the prompt first line, then to a generic label',
+    (noDesc[1] as { title?: string }).title === 'First line of the task'
+      && (bareCall[1] as { title?: string }).title === 'Subagent task',
+    JSON.stringify([noDesc[1], bareCall[1]]),
+  );
+
+  // `workflow` runs in the foreground by contract, so every pair qualifies;
+  // the bar is kind 'workflow', keyed by the wf: convention, titled by meta.
+  const wfCall = spawnFeed(8, 4000, 'tool/call', {
+    turn: 1, step: 4, callId: 'wf-1', name: 'workflow',
+    arguments: { script: 'return 1', meta: { name: 'audit-files', description: 'Audit every file' } },
+  });
+  const wfResult = spawnFeed(9, 5200, 'tool/result', {
+    turn: 1, step: 4,
+    message: { role: 'tool', content: [{ toolCallId: 'wf-1', content: [{ type: 'text', text: '1' }] }] },
+  });
+  check(
+    'a workflow call/result pair maps to a workflow-kind bar titled from meta',
+    wfCall.length === 2
+      && (wfCall[1] as Record<string, unknown>).type === 'agent-activity'
+      && (wfCall[1] as Record<string, unknown>).key === 'wf:wf-1'
+      && (wfCall[1] as Record<string, unknown>).kind === 'workflow'
+      && (wfCall[1] as Record<string, unknown>).title === 'audit-files'
+      && (wfCall[1] as Record<string, unknown>).subtitle === 'Audit every file'
+      && (wfResult[1] as Record<string, unknown>).status === 'done'
+      && (wfResult[1] as Record<string, unknown>).elapsedMs === 1200,
+    JSON.stringify([wfCall[1], wfResult[1]]),
+  );
+
+  // BACKGROUND spawns: explicit true and absent (the host default) alike — the
+  // pair returns a durable id immediately, so no bar; the plain tool card and
+  // its result stay exactly as today. The roster's origin:'subagent' linkage
+  // covers the child instead.
+  for (const [callId, args] of [
+    ['bg-1', { description: 'Background audit', prompt: 'x', run_in_background: true }],
+    ['bg-2', { description: 'Default background', prompt: 'x' }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const bgCall = spawnFeed(10, 6000, 'tool/call', { turn: 1, step: 5, callId, name: 'subagent', arguments: args });
+    const bgResult = spawnFeed(11, 6050, 'tool/result', {
+      turn: 1, step: 5,
+      message: { role: 'tool', content: [{ toolCallId: callId, content: [{ type: 'text', text: 'agent-abc' }] }] },
+    });
+    check(
+      `a background spawn (${callId}) emits NO agent-activity bar, only the plain tool card`,
+      bgCall.length === 1 && bgCall[0]!.type === 'tool-call'
+        && bgResult.length === 1 && bgResult[0]!.type === 'tool-result'
+        && bgResult[0]!.toolName === 'subagent',
+      JSON.stringify([bgCall, bgResult]),
+    );
+  }
+
+  // The control tools are not spawns: plain cards, no bar.
+  for (const [callId, name, args] of [
+    ['ctl-1', 'list_agents', { scope: 'children' }],
+    ['ctl-2', 'interrupt_agent', { agent_id: 'agent-abc' }],
+  ] as Array<[string, string, Record<string, unknown>]>) {
+    const ctlCall = spawnFeed(12, 7000, 'tool/call', { turn: 1, step: 6, callId, name, arguments: args });
+    const ctlResult = spawnFeed(13, 7100, 'tool/result', {
+      turn: 1, step: 6,
+      message: { role: 'tool', content: [{ toolCallId: callId, content: [{ type: 'text', text: 'ok' }] }] },
+    });
+    check(
+      `${name} stays a plain tool card pair with no agent-activity`,
+      ctlCall.length === 1 && ctlCall[0]!.type === 'tool-call'
+        && ctlResult.length === 1 && ctlResult[0]!.type === 'tool-result',
+      JSON.stringify([ctlCall, ctlResult]),
+    );
+  }
+
+  // A result whose call fell outside the fold window has no bar to close and
+  // must not invent one.
+  const orphanState = createDshMapState(SESSION_ID, true);
+  const orphanResult = mapDshEvent({
+    event: {
+      type: 'tool/result', seq: 20, time: 9000,
+      data: { turn: 9, step: 1, message: { role: 'tool', content: [{ toolCallId: 'unseen', content: 'ok' }] } },
+    },
+  }, orphanState) as Array<Record<string, unknown>>;
+  check(
+    'a result without an in-window call closes no bar',
+    orphanResult.length === 1 && orphanResult[0]!.type === 'tool-result',
+    JSON.stringify(orphanResult),
+  );
+
+  // An unusable result timestamp drops the elapsed figure rather than
+  // publishing a measured-looking zero — the bar still closes.
+  const untimedState = createDshMapState(SESSION_ID, true);
+  mapDshEvent({
+    event: {
+      type: 'tool/call', seq: 30, time: 8000,
+      data: { turn: 1, step: 1, callId: 'sp-t', name: 'subagent', arguments: { description: 'Timed?', prompt: 'x', run_in_background: false } },
+    },
+  }, untimedState);
+  const untimedResult = mapDshEvent({
+    event: {
+      type: 'tool/result', seq: 31, time: Number.NaN,
+      data: { turn: 1, step: 1, message: { role: 'tool', content: [{ toolCallId: 'sp-t', content: 'ok' }] } },
+    } as never,
+  }, untimedState) as Array<Record<string, unknown>>;
+  check(
+    'an unusable result time closes the bar without an elapsed figure',
+    untimedResult.length === 2
+      && (untimedResult[1] as Record<string, unknown>).status === 'done'
+      && (untimedResult[1] as Record<string, unknown>).elapsedMs === undefined,
+    JSON.stringify(untimedResult[1]),
+  );
+
+  // An unparsable argument string cannot prove run_in_background: false, so it
+  // fails closed to the plain card.
+  const brokenState = createDshMapState(SESSION_ID, true);
+  const brokenCall = mapDshEvent({
+    event: {
+      type: 'tool/call', seq: 40, time: 9000,
+      data: { turn: 1, step: 1, callId: 'sp-b', name: 'subagent', arguments: '{not json' },
+    },
+  }, brokenState) as Array<Record<string, unknown>>;
+  check(
+    'an unparsable spawn argument string emits no bar',
+    brokenCall.length === 1 && brokenCall[0]!.type === 'tool-call',
+    JSON.stringify(brokenCall),
+  );
 }
 
 const failed = results.filter((result) => !result.ok).length;

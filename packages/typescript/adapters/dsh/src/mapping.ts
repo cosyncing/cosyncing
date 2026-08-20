@@ -20,8 +20,13 @@
  *     {@link mapToolResultView} switch on the `card` discriminant of the
  *     `dsh-tools` presentation vocabulary and NOTHING else. An absent view, an
  *     unknown card, or a structurally wrong one renders through the generic JSON
- *     card, which is the product's own documented default. There is no per-tool
- *     branch anywhere in this package.
+ *     card, which is the product's own documented default. There is exactly one
+ *     per-tool branch, and it is presentational only: the host's documented
+ *     spawn/orchestration tools (`subagent`, `subagent_fork`, `workflow`)
+ *     additionally emit the canonical tool-agnostic `agent-activity` progress
+ *     row from a FOREGROUND call/result pair (see {@link dshAgentActivityFromCall});
+ *     their tool cards still come from the view vocabulary alone, and the
+ *     control tools (`list_agents`, `interrupt_agent`) stay plain cards.
  *  3. GENERIC PROJECTION STORE. {@link DshProjectionStore} keeps every key the
  *     host publishes under higher-seq-wins. Named consumers read the keys they
  *     understand; unknown keys are kept and readable, never discarded, and never
@@ -726,6 +731,94 @@ export function mapToolResultView(view: unknown, fallbackResult: unknown): DshTo
   }
 }
 
+// ── Agent activity (foreground spawns only) ─────────────────────────────────
+
+/**
+ * One foreground spawn/orchestration run in flight, opened by `tool/call` and
+ * closed by its `tool/result`. Same shape opencode's `agentActivityFromOpenCodeTask`
+ * produces; the client upserts by {@link key}.
+ */
+interface DshPendingAgentActivity {
+  key: string;
+  kind: 'subagent' | 'workflow';
+  title: string;
+  subtitle?: string;
+  /** Validated tool/call time; the done/error bar's elapsed is measured from it. */
+  startedAt?: number;
+}
+
+function firstLine(value: unknown): string | undefined {
+  const line = String(value ?? '').split('\n').find((s) => s.trim());
+  return line?.trim();
+}
+
+/**
+ * The ONE tool-name branch in this package, and only for the host's documented
+ * spawn/orchestration vocabulary: `subagent` and `subagent_fork` map to
+ * `kind: 'subagent'`, `workflow` to `kind: 'workflow'`.
+ *
+ * FOREGROUND SPAWNS ONLY. `subagent`/`subagent_fork` default
+ * `run_in_background: true`, and a background spawn returns a durable child id
+ * IMMEDIATELY — the call/result pair brackets the parent's wait for that id,
+ * not the child's run, so a bar built from it would read "done" while the
+ * child is still working. Only an explicit `run_in_background: false` in the
+ * tool input proves the pair brackets a real run. `workflow` runs in the
+ * foreground by contract ("this call returns when the whole script finishes"),
+ * so every workflow pair qualifies. Background spawns keep the plain tool card;
+ * their sessions are roster-linked via `origin: 'subagent'` already.
+ *
+ * Anything unproven fails CLOSED to no bar: an unparsed argument string, a
+ * missing or truthy `run_in_background`, or a title-less input all leave the
+ * plain tool card as the only row.
+ */
+function dshAgentActivityFromCall(
+  name: string,
+  args: unknown,
+  callId: string,
+  startedAt: number | undefined,
+): DshPendingAgentActivity | undefined {
+  const input = record(args);
+  if (!input) return undefined;
+  if (name === 'subagent' || name === 'subagent_fork') {
+    if (input.run_in_background !== false) return undefined;
+    const title = optionalString(input.description) ?? firstLine(input.prompt) ?? 'Subagent task';
+    return { key: `agent:${callId}`, kind: 'subagent', title, startedAt };
+  }
+  if (name === 'workflow') {
+    const meta = record(input.meta);
+    const metaName = optionalString(meta?.name);
+    const metaDescription = optionalString(meta?.description);
+    const title = metaName ?? metaDescription ?? 'Workflow';
+    return {
+      key: `wf:${callId}`,
+      kind: 'workflow',
+      title,
+      ...(metaName && metaDescription ? { subtitle: metaDescription } : {}),
+      startedAt,
+    };
+  }
+  return undefined;
+}
+
+function dshAgentActivityMessage(
+  pending: DshPendingAgentActivity,
+  status: 'running' | 'done' | 'error',
+  elapsedMs?: number,
+): AgentMessage {
+  return {
+    type: 'agent-activity',
+    key: pending.key,
+    kind: pending.kind,
+    title: pending.title,
+    ...(pending.subtitle ? { subtitle: pending.subtitle } : {}),
+    status,
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(status === 'running' && pending.startedAt !== undefined ? { startedAtMs: pending.startedAt } : {}),
+    agentsDone: status === 'running' ? 0 : 1,
+    agentsTotal: 1,
+  };
+}
+
 // ── Event mapping ───────────────────────────────────────────────────────────
 
 /**
@@ -738,6 +831,8 @@ export function mapToolResultView(view: unknown, fallbackResult: unknown): DshTo
 export interface DshMapState {
   sessionId: string;
   toolNames: Map<string, string>;
+  /** callId → open foreground spawn/workflow bar; set by tool/call, consumed by tool/result. */
+  agentActivities: Map<string, DshPendingAgentActivity>;
   /** rpcId of a prompt this adapter sent → the broker's clientMessageId, for echo correlation. */
   clientKeys: Map<string, string>;
   /** Live frames stream token deltas; a history replay already has the assembled message. */
@@ -805,7 +900,7 @@ interface DshOpenTurn {
 }
 
 export function createDshMapState(sessionId: string, live: boolean): DshMapState {
-  return { sessionId, toolNames: new Map(), clientKeys: new Map(), live };
+  return { sessionId, toolNames: new Map(), agentActivities: new Map(), clientKeys: new Map(), live };
 }
 
 /** A timestamp the fold may use: a finite, non-negative epoch-ms number. */
@@ -913,11 +1008,16 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         // carries too: when the agent claims a queued item, the durable row
         // replaces the dimmed one in place instead of doubling it.
         const messageId = optionalString(data?.id);
+        // Carry the open turn's id so the client can attach the turn's
+        // `run-summary` (keyed only by turnId) to the segment this row opens —
+        // without it every dsh summary is dropped client-side.
+        const turnId = state.openTurn?.turnId;
         return [{
           type: 'user-message',
           text,
           key: messageId ? dshMessageKey(state.sessionId, messageId) : key,
           sentAt: event.time,
+          ...(turnId ? { turnId } : {}),
           ...(clientKey ? { clientKey } : {}),
         }];
       }
@@ -1058,7 +1158,7 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         }
       }
       const presentation = mapToolCallView(entry.view);
-      return [{
+      const rows: AgentMessage[] = [{
         type: 'tool-call',
         callId,
         toolName: name,
@@ -1067,6 +1167,16 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         ...(presentation.toolClass ? { toolClass: presentation.toolClass } : {}),
         ...(presentation.semantic ? { semantic: presentation.semantic } : {}),
       }];
+      // A FOREGROUND spawn/orchestration call also opens the canonical
+      // agent-activity bar, closed by its tool/result; a background spawn's
+      // pair brackets nothing (it returns a durable id immediately) and stays
+      // a plain tool card. See dshAgentActivityFromCall.
+      const activity = dshAgentActivityFromCall(name, args, callId, callTime);
+      if (activity) {
+        state.agentActivities.set(callId, activity);
+        rows.push(dshAgentActivityMessage(activity, 'running'));
+      }
+      return rows;
     }
 
     case 'tool/result': {
@@ -1085,7 +1195,7 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
       const nativeError = record(data?.error);
       const presentation = mapToolResultView(entry.view, dshContentText(block?.content) || block?.content);
       const isError = block?.isError === true || nativeError !== undefined;
-      return [{
+      const rows: AgentMessage[] = [{
         type: 'tool-result',
         callId,
         toolName: state.toolNames.get(callId) ?? '',
@@ -1099,6 +1209,19 @@ export function mapDshEvent(entry: DshHistoryEntry, state: DshMapState): AgentMe
         ...(presentation.result !== undefined ? { result: presentation.result } : {}),
         ...(isError ? { isError: true } : {}),
       }];
+      // Close the bar a foreground spawn/workflow call opened. Elapsed is the
+      // parent's tool wait (call → result); an unusable or reversed endpoint
+      // drops the figure rather than publishing a measured-looking zero.
+      const activity = state.agentActivities.get(callId);
+      if (activity) {
+        state.agentActivities.delete(callId);
+        const resultTime = usableTime(event.time);
+        const elapsed = activity.startedAt !== undefined && resultTime !== undefined && resultTime >= activity.startedAt
+          ? resultTime - activity.startedAt
+          : undefined;
+        rows.push(dshAgentActivityMessage(activity, isError ? 'error' : 'done', elapsed));
+      }
+      return rows;
     }
 
     case 'step/start': {

@@ -87,10 +87,10 @@
       "nativeId": "claude:cli:--fork-session",
       "agent": "claude",
       "version": "2.1.203",
-      "mappedStatus": "mapped",
+      "mappedStatus": "excluded",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/claude/src/implementation.ts (resumeArgs, '--fork-session')"],
-      "traceRefs": ["packages/typescript/adapters/claude/test/test-claude-control.ts"]
+      "adapterRefs": ["packages/typescript/adapters/claude/src/implementation.ts (issue 15a — demote, never fork)"],
+      "traceRefs": ["packages/typescript/adapters/claude/test/test-claude-control.ts", "packages/typescript/adapters/claude/test/test-claude-takeover.ts"]
     },
     {
       "schemaVersion": 1,

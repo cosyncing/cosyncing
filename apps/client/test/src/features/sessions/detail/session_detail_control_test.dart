@@ -268,6 +268,96 @@ void main() {
       semantics.dispose();
     });
 
+    // An OBSERVED claude session already publishes
+    // `control.terminalSync.command` (`cd <cwd> && claude --resume <uuid>`),
+    // but the status sheet only rendered that command for the join/handoff
+    // actions, which an observing session never gets — the command was
+    // invisible until the user took over. The sheet now shows it under the
+    // same Terminal section presentation, as a plain copy: the app is already
+    // observing, so copying must NOT trigger a handoff or reattach.
+    testWidgets('an observed session shows its published resume command', (
+      tester,
+    ) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final connection = controlConnection(const {
+        'drive': {'state': 'observing', 'supported': true},
+        'terminalSync': {
+          'supported': true,
+          'syncAvailable': false,
+          'active': false,
+          'command': 'cd /work && claude --resume abc-123',
+        },
+      });
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(events: const [], connection: connection),
+      );
+      await tester.pumpAndSettle();
+      await openStatusSheet(tester);
+
+      expect(find.text('Terminal (optional)'), findsOneWidget);
+      expect(find.text('Resume in terminal'), findsOneWidget);
+      expect(
+        find.text('cd /work && claude --resume abc-123'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('session-detail-status-copy-command')),
+        findsOneWidget,
+      );
+      // Take over stays reachable beside the command.
+      expect(
+        find.byKey(
+          const Key('session-detail-take-over-button'),
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const Key('session-detail-status-copy-command')),
+      );
+      await tester.pumpAndSettle();
+      expect(connection.sendHandoffCount, 0);
+      expect(connection.reattachModes, isEmpty);
+    });
+
+    // Symmetric guard: without a published command the observing sheet must
+    // not sprout an empty Terminal section.
+    testWidgets('an observed session without a command shows no copy row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: const [],
+          connection: controlConnection(const {
+            'drive': {'state': 'observing', 'supported': true},
+            'terminalSync': {
+              'supported': true,
+              'syncAvailable': false,
+              'active': false,
+            },
+          }),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openStatusSheet(tester);
+
+      expect(
+        find.byKey(const Key('session-detail-status-copy-command')),
+        findsNothing,
+      );
+      expect(find.text('Terminal (optional)'), findsNothing);
+    });
+
     testWidgets('answer-only sync keeps the pill Synced but blocks the '
         'composer', (tester) async {
       addTearDown(() {
@@ -1060,6 +1150,20 @@ void main() {
         ),
         findsWidgets,
       );
+
+      await openStatusSheet(tester);
+      // The wire state stays `unavailable` — it is contract data, and the pill
+      // key keeps naming it — but the LABEL reads "Observing", matching the
+      // takeable observing shape, because "Unavailable" beside a working Take
+      // over button is false.
+      expect(
+        find.byKey(
+          const Key('session-detail-status-sheet-control-pill-unavailable'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Observing'), findsAtLeastNWidgets(1));
+      expect(find.text('Unavailable'), findsNothing);
     });
 
     testWidgets('Take over pending disables the composer sync copy action', (
@@ -1271,9 +1375,18 @@ void main() {
       }
     });
 
-    testWidgets('willFork shows the fork confirm wording', (tester) async {
+    testWidgets('terminal-attached takeover uses the routine confirm wording', (
+      tester,
+    ) async {
+      // Issue 15a (demote, never fork): the fork confirm is gone. The
+      // adapter's terminal-attached warning travels in drive.reason; the
+      // confirm itself is the standard, suppressible one.
       final connection = controlConnection(const {
-        'drive': {'state': 'observing', 'supported': true, 'willFork': true},
+        'drive': {
+          'state': 'observing',
+          'supported': true,
+          'reason': 'A terminal is attached to this session right now.',
+        },
         'terminalSync': {
           'supported': false,
           'syncAvailable': false,
@@ -1286,8 +1399,12 @@ void main() {
       await tester.pumpAndSettle();
       await openSheetAndTakeOver(tester);
 
-      expect(find.text('Take over — continue in a fork'), findsOneWidget);
-      expect(find.text('Take over (fork)'), findsOneWidget);
+      expect(find.text('Take over this session'), findsOneWidget);
+      expect(find.text('Take over — continue in a fork'), findsNothing);
+      expect(
+        find.byKey(const Key('session-detail-take-over-never-warn')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('cancelling the confirm does not drive', (tester) async {
@@ -1376,42 +1493,7 @@ void main() {
       expect(routineConnection.reattachModes, ['resume']);
     });
 
-    testWidgets('suppression never skips a fork confirm', (tester) async {
-      final forkPrefs = InMemorySessionControlPreferencesStore()
-        ..suppressed = true;
-      final forkConnection = controlConnection(const {
-        'drive': {'state': 'observing', 'supported': true, 'willFork': true},
-        'terminalSync': {
-          'supported': false,
-          'syncAvailable': false,
-          'active': false,
-        },
-      });
-      await tester.pumpWidget(
-        buildSessionDetailTestPage(
-          events: const [],
-          connection: forkConnection,
-          controlPreferencesStore: forkPrefs,
-        ),
-      );
-      await tester.pumpAndSettle();
-      await openSheetAndTakeOver(tester);
-
-      expect(
-        find.byKey(const Key('session-detail-take-over-dialog')),
-        findsOneWidget,
-      );
-      expect(find.text('Take over — continue in a fork'), findsOneWidget);
-      expect(
-        find.byKey(const Key('session-detail-take-over-never-warn')),
-        findsNothing,
-      );
-      expect(forkConnection.reattachModes, isEmpty);
-    });
-
-    testWidgets('open sheet and dialog track live willFork changes', (
-      tester,
-    ) async {
+    testWidgets('open dialog tracks a live control change', (tester) async {
       final connection = controlConnection(const {
         'drive': {'state': 'observing', 'supported': true},
         'terminalSync': {
@@ -1427,8 +1509,10 @@ void main() {
       await openSheetAndTakeOver(tester);
       expect(find.text('Take over this session'), findsOneWidget);
 
+      // Ownership changes while the confirm is open → the dialog re-derives
+      // live and refuses the stale action instead of confirming blind.
       connection.emitSessionControl(const {
-        'drive': {'state': 'observing', 'supported': true, 'willFork': true},
+        'drive': {'state': 'unavailable', 'supported': false},
         'terminalSync': {
           'supported': false,
           'syncAvailable': false,
@@ -1437,11 +1521,16 @@ void main() {
       });
       await tester.pumpAndSettle();
 
-      expect(find.text('Take over — continue in a fork'), findsOneWidget);
-      expect(find.text('Take over (fork)'), findsOneWidget);
+      expect(find.text('Session control changed'), findsOneWidget);
     });
 
-    testWidgets('Claude Observe hides its structurally unsafe resume command', (
+    // Superseded by the 2026-08-18 resume-in-terminal decision: this used to
+    // hide an observed claude session's resume command as "structurally
+    // unsafe". The reviewed scope now is that codex/pi/opencode all show a
+    // copyable terminal command on observed sessions and claude matches them —
+    // the command is published by the adapter and rendering it here is a
+    // client-only display change.
+    testWidgets('Claude Observe shows its published resume command', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -1461,11 +1550,12 @@ void main() {
       await tester.pumpAndSettle();
       await openStatusSheet(tester);
 
-      expect(find.text('cd /w && claude --resume original'), findsNothing);
+      expect(find.text('cd /w && claude --resume original'), findsOneWidget);
       expect(
         find.byKey(const Key('session-detail-status-copy-command')),
-        findsNothing,
+        findsOneWidget,
       );
+      expect(find.text('Resume in terminal'), findsOneWidget);
     });
 
     testWidgets('sync command copy never demotes a sync-available session', (

@@ -4,9 +4,9 @@
  * All of them live here rather than beside the read paths so the mutating
  * surface is one file long and can be read in a sitting: prompt, cancel,
  * create, rename, model selection, command execution, and the answer route that
- * settles a question or an approval. Two reads keep them company — the model
- * catalog and the command roster — only because a catalog and the call that
- * acts on it are unreadable apart.
+ * settles a question or an approval. Three reads keep them company — the two
+ * model catalogs (session-scoped and host-wide) and the command roster — only
+ * because a catalog and the call that acts on it are unreadable apart.
  *
  * Two properties matter more than the code:
  *
@@ -23,7 +23,7 @@
  */
 import { dirname, resolve } from 'node:path';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { PRODUCT_IDENTITY, type PromptInput } from '@cosyncing/adapter-api';
+import { PRODUCT_IDENTITY, type ModelOption, type PromptInput } from '@cosyncing/adapter-api';
 import {
   describeDshFailure,
   type DshFailure,
@@ -133,6 +133,100 @@ export interface DshCommandDescriptor {
   name: string;
   description: string;
   input?: { hint: string };
+}
+
+/**
+ * Parse the provider-group list that `session.models` and `llm.models` share —
+ * the two catalogs differ only in their per-session slots (`current`,
+ * `routable`), so both read their `groups` through this one decoder.
+ *
+ * Malformed rows are skipped, not fatal: a single bad provider entry must not
+ * cost the user every other model on the host.
+ */
+function parseModelGroups(raw: unknown): DshModelProviderGroup[] {
+  const groups: DshModelProviderGroup[] = [];
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    const group = entry as { id?: unknown; name?: unknown; models?: unknown };
+    if (typeof group.id !== 'string' || group.id.length === 0) continue;
+    const models: DshModelCatalogModel[] = [];
+    for (const candidate of Array.isArray(group.models) ? group.models : []) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      const model = candidate as { id?: unknown; name?: unknown; description?: unknown; reasoning?: unknown };
+      if (typeof model.id !== 'string' || model.id.length === 0) continue;
+      const reasoning = model.reasoning as { efforts?: unknown; defaultEffort?: unknown } | undefined;
+      const efforts: { id: string; name: string; description?: string }[] = [];
+      for (const effort of Array.isArray(reasoning?.efforts) ? reasoning.efforts : []) {
+        if (!effort || typeof effort !== 'object') continue;
+        const row = effort as { id?: unknown; name?: unknown; description?: unknown };
+        if (typeof row.id !== 'string' || row.id.length === 0) continue;
+        efforts.push({
+          id: row.id,
+          name: typeof row.name === 'string' && row.name ? row.name : row.id,
+          ...(typeof row.description === 'string' ? { description: row.description } : {}),
+        });
+      }
+      models.push({
+        id: model.id,
+        name: typeof model.name === 'string' && model.name ? model.name : model.id,
+        ...(typeof model.description === 'string' ? { description: model.description } : {}),
+        ...(efforts.length > 0
+          ? {
+              reasoning: {
+                efforts,
+                ...(typeof reasoning?.defaultEffort === 'string'
+                  ? { defaultEffort: reasoning.defaultEffort }
+                  : {}),
+              },
+            }
+          : {}),
+      });
+    }
+    groups.push({
+      id: group.id,
+      name: typeof group.name === 'string' && group.name ? group.name : group.id,
+      models,
+    });
+  }
+  return groups;
+}
+
+/**
+ * Flatten provider groups into picker options.
+ *
+ * Shared by the session-scoped catalog (`DshSessionConnection.listModels`) and
+ * the pre-session one (`DshAdapter.listModels`), so the create dialog and the
+ * attached picker show the SAME rows for the same host. Group order is the
+ * host's advertised order — picker order. The provider qualifies each label
+ * because two providers can serve the same model id, and a picker showing it
+ * twice is unreadable.
+ */
+export function dshModelOptions(groups: readonly DshModelProviderGroup[]): ModelOption[] {
+  const options: ModelOption[] = [];
+  for (const group of groups) {
+    for (const model of group.models) {
+      const efforts = model.reasoning?.efforts ?? [];
+      options.push({
+        providerID: group.id,
+        modelID: model.id,
+        label: `${model.name} (${group.name})`,
+        ...(model.description ? { description: model.description } : {}),
+        ...(efforts.length > 0
+          ? {
+              reasoningEfforts: efforts.map((effort) => ({
+                effort: effort.id,
+                label: effort.name,
+                ...(effort.description ? { description: effort.description } : {}),
+              })),
+            }
+          : {}),
+        ...(model.reasoning?.defaultEffort
+          ? { defaultReasoningEffort: model.reasoning.defaultEffort }
+          : {}),
+      });
+    }
+  }
+  return options;
 }
 
 /** A settled command execution, paired with its lifecycle events by `commandId`. */
@@ -408,57 +502,11 @@ export class DshDriver {
     }
     const row = value as { current?: unknown; routable?: unknown; groups?: unknown };
     const current = row.current as { provider?: unknown; model?: unknown; reasoningEffort?: unknown } | undefined;
-    const groups: DshModelProviderGroup[] = [];
-    // Malformed rows are skipped, not fatal: a single bad provider entry must
-    // not cost the user every other model on the host.
-    for (const entry of Array.isArray(row.groups) ? row.groups : []) {
-      if (!entry || typeof entry !== 'object') continue;
-      const group = entry as { id?: unknown; name?: unknown; models?: unknown };
-      if (typeof group.id !== 'string' || group.id.length === 0) continue;
-      const models: DshModelCatalogModel[] = [];
-      for (const candidate of Array.isArray(group.models) ? group.models : []) {
-        if (!candidate || typeof candidate !== 'object') continue;
-        const model = candidate as { id?: unknown; name?: unknown; description?: unknown; reasoning?: unknown };
-        if (typeof model.id !== 'string' || model.id.length === 0) continue;
-        const reasoning = model.reasoning as { efforts?: unknown; defaultEffort?: unknown } | undefined;
-        const efforts: { id: string; name: string; description?: string }[] = [];
-        for (const raw of Array.isArray(reasoning?.efforts) ? reasoning.efforts : []) {
-          if (!raw || typeof raw !== 'object') continue;
-          const effort = raw as { id?: unknown; name?: unknown; description?: unknown };
-          if (typeof effort.id !== 'string' || effort.id.length === 0) continue;
-          efforts.push({
-            id: effort.id,
-            name: typeof effort.name === 'string' && effort.name ? effort.name : effort.id,
-            ...(typeof effort.description === 'string' ? { description: effort.description } : {}),
-          });
-        }
-        models.push({
-          id: model.id,
-          name: typeof model.name === 'string' && model.name ? model.name : model.id,
-          ...(typeof model.description === 'string' ? { description: model.description } : {}),
-          ...(efforts.length > 0
-            ? {
-                reasoning: {
-                  efforts,
-                  ...(typeof reasoning?.defaultEffort === 'string'
-                    ? { defaultEffort: reasoning.defaultEffort }
-                    : {}),
-                },
-              }
-            : {}),
-        });
-      }
-      groups.push({
-        id: group.id,
-        name: typeof group.name === 'string' && group.name ? group.name : group.id,
-        models,
-      });
-    }
     return {
       // A non-boolean `routable` fails CLOSED. It gates whether a turn can start
       // at all, and guessing `true` would offer a composer the host will refuse.
       routable: row.routable === true,
-      groups,
+      groups: parseModelGroups(row.groups),
       ...(current && typeof current.provider === 'string' && typeof current.model === 'string'
         ? {
             current: {
@@ -471,6 +519,31 @@ export class DshDriver {
           }
         : {}),
     };
+  }
+
+  /**
+   * The HOST-WIDE model catalog: the same provider groups `session.models`
+   * serves one session, with no per-session selection or routability. It exists
+   * for surfaces that pick a model BEFORE a session exists — the create dialog —
+   * so there is deliberately no `current`/`routable` to read here, and a new
+   * session is not gated on a route check made for a different one.
+   *
+   * Host-scoped like the workspace registry: the provider topology outlives a
+   * downlink epoch, and a generation rotation does not make the answer wrong.
+   */
+  async catalog(): Promise<DshModelProviderGroup[]> {
+    const outcome = await this.rpc.call<unknown>('llm.models', {}, { generationLoss: 'host-scoped' });
+    if (!outcome.ok) throw new DshDriveError('model catalog', outcome.failure);
+    const value = outcome.value;
+    if (!value || typeof value !== 'object') {
+      throw new DshDriveError('model catalog', {
+        kind: 'transport',
+        reason: 'invalid-envelope',
+        retryable: false,
+        detail: 'llm.models did not return an object',
+      });
+    }
+    return parseModelGroups((value as { groups?: unknown }).groups);
   }
 
   /**

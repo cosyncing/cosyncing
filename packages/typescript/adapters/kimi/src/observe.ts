@@ -54,6 +54,7 @@ import { KimiReadOnlyHttp, isKimiReadOnlyWsFrame, type KimiReadOnlyWsFrame } fro
 import type { KimiDriveHttp } from './drive-http.ts';
 import {
   KIMI_MAIN_AGENT_ID,
+  createKimiMappingState,
   mapKimiApprovalRequest,
   mapKimiApprovalResolved,
   mapKimiMessagePage,
@@ -393,6 +394,44 @@ export interface KimiPendingSnapshot {
 }
 
 /**
+ * One turn's terminal event, snapshotted AT CLOSE TIME and awaiting its
+ * content walk. See {@link KimiObserveConnection.pendingCloses}.
+ *
+ * The snapshot is what makes the deferral safe: the walk may fill a key the
+ * close did not capture, but it can never re-key the entry onto the NEXT
+ * turn's opener, and {@link closedAt} is the fence that keeps a row created
+ * after the close from keying it at all.
+ */
+interface KimiPendingTurnClose {
+  status: 'done' | 'error' | 'cancelled';
+  ref: string;
+  /** The opener's key as the close captured it; a keyless snapshot is filled by the deferral walk. */
+  userMessageKey?: string;
+  startedAt?: number;
+  /**
+   * The close's LOCAL arrival time. A walk row may fill a missing key only when
+   * its native `created_at` is not later than this: a row created after the
+   * close is the next turn's opener, never this one's.
+   */
+  closedAt: number;
+}
+
+/**
+ * Bound on {@link KimiObserveConnection.pendingCloses}. Depth beyond a couple
+ * means closes are arriving faster than their walks settle; the oldest entry
+ * is then flushed WITHOUT its deferral rather than dropped, so no footer is
+ * ever silently swallowed.
+ */
+const KIMI_PENDING_CLOSE_LIMIT = 8;
+
+/**
+ * Bound on {@link KimiObserveConnection.closedTurnRefs}. Wider than the
+ * pending queue: a replay can arrive long after the close it copies was
+ * flushed, so the memory must outlive the deferral it guards.
+ */
+const KIMI_CLOSED_TURN_REF_LIMIT = 32;
+
+/**
  * Identity for a message with no native identity attached.
  *
  * Rows produced by {@link mapKimiMessagePage} carry their own
@@ -483,6 +522,16 @@ export class KimiObserveConnection implements SessionConnection {
   /** Native item/option ids per open question, so an answer of LABELS can be translated back. */
   protected readonly questionRecords = new Map<string, KimiQuestionRecord>();
   /**
+   * Transcript correlation state for {@link mapKimiMessagePage}: the TodoList
+   * call ids whose acknowledgment results are suppressed, and the background
+   * task ids a settlement notification can fold back onto. Per connection —
+   * task and call ids are session-scoped, and a fresh attach re-derives both
+   * from its own history walk, so a task started before the walk's reach simply
+   * resolves to the notification's notice fallback rather than to another
+   * session's call.
+   */
+  private readonly mappingState = createKimiMappingState();
+  /**
    * Requests THIS connection resolved. A resolution arriving for anything else
    * was settled by another client of the shared owner, which the protocol calls
    * `'external'` — reporting it as a decision we did not make would attribute
@@ -530,6 +579,83 @@ export class KimiObserveConnection implements SessionConnection {
   private liveActivityValue = 0;
   /** Ordinal of run-state emissions, so a repeated value still carries a fresh identity. */
   private statusEmissions = 0;
+
+  // ── Turn timing (run-summary) ─────────────────────────────────────────────
+  //
+  // Kimi has no `turn.started` event, so a turn's opening is reconstructed from
+  // the two signals that do exist: the user-message echo row (which carries the
+  // native `created_at`) and the first busy transition of `work_changed`. The
+  // terminal events — `prompt.completed` / `prompt.aborted` / `turn.ended` —
+  // close it. What closes is emitted as a canonical `run-summary`, keyed to the
+  // turn's user row so the client can attach the footer.
+
+  /**
+   * The turn currently open, if this connection has seen one open.
+   *
+   * Opened keyless by a busy transition (the common live order: `busy:true`
+   * arrives on the socket long before the poll walk delivers the echo), or
+   * keyed by the echo row itself when no transition was seen (poll-only
+   * observe, or the attach-time history seeding the LAST turn's opener). A
+   * user row whose key differs from the held one REPLACES it: one turn has one
+   * opener, so a second distinct user row is the next turn talking. The turn's
+   * terminal event SNAPSHOTS this record into {@link pendingCloses} and clears
+   * it, so a turn that opens during the deferral walk starts clean.
+   *
+   * `claimedAt` is the LOCAL time this opener evidence arrived and `seeded`
+   * marks an opener keyed by the attach-time history read rather than a live
+   * walk; the busy edge reads both to tell a stale held opener (seeded from
+   * history, or orphaned by a terminal frame lost before the current idle
+   * period) from a fresh echo that outran its own busy edge. See
+   * {@link applyRunState}.
+   */
+  private openTurn?: { userMessageKey?: string; startedAt?: number; claimedAt: number; seeded: boolean };
+  /**
+   * The LOCAL time the current idle period began, stamped only on a real
+   * transition INTO idle — a replayed or repeated idle frame does not extend
+   * it. `undefined` means this connection never observed the session leave
+   * idle (an attach into an idle session), in which case every live-walked
+   * opener counts as keyed during the current idle period.
+   */
+  private idleSince?: number;
+  /**
+   * Terminal events observed, awaiting their content walks before emission.
+   *
+   * The walk the terminal event triggers usually carries the turn's echo row —
+   * the row whose key the client attaches the footer to — so the summary is
+   * flushed only after {@link settleContent} has let that walk land. Each entry
+   * SNAPSHOTS the open turn AT CLOSE TIME (key, startedAt, and the close's
+   * arrival time): the deferral walk may fill a key the snapshot lacked, but
+   * never re-key one, and never from a row created after the close. The FIRST
+   * qualifying row claims a keyless close — the walk is oldest-first, so that
+   * row is the closing turn's own opener; a later row that still predates the
+   * close is a prompt QUEUED while the turn ran, which belongs to the next
+   * turn and must reach the open-turn slot, not steal this footer.
+   *
+   * A small QUEUE, not one slot: a second turn can both open and close while
+   * the first turn's walk is still in flight, and one slot would either
+   * misattach the first summary to the second turn's opener or swallow the
+   * second close outright. A close arriving with NO turn open is the duplicate
+   * terminal frame of one ending (`prompt.aborted` plus the matching
+   * `turn.ended reason:'cancelled'`) — the FIRST event wins and the duplicate
+   * is dropped, so one ending still produces one footer. A REPLAYED frame —
+   * the same ref delivered again by a resubscribe — is dropped by
+   * {@link closedTurnRefs} even when it arrives while the NEXT turn is open.
+   */
+  private pendingCloses: KimiPendingTurnClose[] = [];
+  /**
+   * Refs of terminal events already accounted for, bounded oldest-first.
+   *
+   * A resubscribe can serve frames this connection already processed; a
+   * REPLAYED terminal frame must not snapshot the next turn under the old
+   * turn's ref — the first arrival's verdict stands and the open turn keeps
+   * waiting for its own close. Distinct endings never share a ref (a `turnId`
+   * is per-turn, a `promptId` per prompt), so recording is unconditional, even
+   * for a close dropped because no turn was open: a later frame carrying the
+   * same ref is by definition a replay of an ending already accounted for.
+   * Cleared on a journal epoch change ({@link adoptSeq}): a new incarnation
+   * may restart its turn numbering, so a ref from the old one proves nothing.
+   */
+  private readonly closedTurnRefs = new Set<string>();
 
   // ── Telemetry (the wire-journal sidecar) ──────────────────────────────────
   private readonly wireRoot?: string;
@@ -818,7 +944,7 @@ export class KimiObserveConnection implements SessionConnection {
     if (this.transportInvalid && !(await this.ensureTransport())) {
       return [{ type: 'notice', message: KIMI_HISTORY_UNAVAILABLE_NOTICE }];
     }
-    const pages: KimiMappedRow[][] = [];
+    const rawPages: KimiMessagePage[] = [];
     let beforeId: string | undefined;
     let readFailed = false;
     let reachedCeiling = false;
@@ -850,15 +976,36 @@ export class KimiObserveConnection implements SessionConnection {
         break;
       }
       pagesRead += 1;
-      const mapped = mapKimiMessagePage(result.data);
-      pages.unshift(mapped.rows);
-      if (!mapped.hasMore || !mapped.oldestId || mapped.oldestId === beforeId) break;
-      beforeId = mapped.oldestId;
+      const data = result.data ?? {};
+      rawPages.push(data);
+      // Paging facts WITHOUT folding (the fold happens below, oldest-first):
+      // the page is NEWEST-FIRST, so its oldest row is the LAST item — the same
+      // fields mapKimiMessagePage derives.
+      const items = Array.isArray(data.items) ? data.items : [];
+      const oldestRaw = items.length > 0 ? (items[items.length - 1] as { id?: unknown }).id : undefined;
+      const oldest = typeof oldestRaw === 'string' && oldestRaw ? oldestRaw : undefined;
+      if (data.has_more !== true || !oldest || oldest === beforeId) break;
+      beforeId = oldest;
       // Older history exists but this read will not reach it.
       if (page === KIMI_HISTORY_MAX_PAGES - 1) reachedCeiling = true;
     }
 
+    // Fold OLDEST-FIRST, not in the newest-first order the pages were read. The
+    // correlation state (TodoList suppression, background task ids, subagent
+    // bars) is recorded as the fold walks, and a call must fold BEFORE its
+    // result for the fold to see it — a pair straddling a page boundary
+    // otherwise meets its result first and its bar would never close.
+    const pages: KimiMappedRow[][] = [];
+    for (let index = rawPages.length - 1; index >= 0; index -= 1) {
+      pages.push(mapKimiMessagePage(rawPages[index], this.mappingState).rows);
+    }
+
     const rows = pages.flat();
+    // Seed the open turn from history: a turn that started before this attach
+    // and ends after it still gets a footer keyed to its opener. Seeded
+    // openers are marked as such, so the next busy edge can tell this
+    // attach-time evidence from a live-walked echo.
+    this.noteTranscriptRows(rows, true);
     // Seed dedupe from what history actually delivered, so the live tail never
     // repeats a row the reset already carried. A closed connection has no live
     // tail left, so neither the seeding nor the priming below applies to it.
@@ -1430,7 +1577,7 @@ export class KimiObserveConnection implements SessionConnection {
         outcome = 'error';
         break;
       }
-      const mapped = mapKimiMessagePage(result.data);
+      const mapped = mapKimiMessagePage(result.data, this.mappingState);
       pages.unshift(mapped.rows);
       const overlaps = mapped.rows.some((row) => this.seen.has(row.identity));
       // Stop as soon as the window overlaps what we hold, or the source ends.
@@ -1448,6 +1595,7 @@ export class KimiObserveConnection implements SessionConnection {
     // left, so the rows it gathered can reach nobody.
     if (this.closed) return outcome;
     const walked = pages.flat();
+    this.noteTranscriptRows(walked);
     // BEFORE emission, deliberately: the detector must see every row this walk
     // gathered, including the ones the seen-set is about to swallow. A foreign
     // prompt that already emitted once is still a foreign prompt.
@@ -1921,6 +2069,10 @@ export class KimiObserveConnection implements SessionConnection {
   private onSessionEvent(type: string, payload: Record<string, unknown>): void {
     switch (type) {
       case 'event.session.work_changed': {
+        // A subagent's busy edge says nothing about the MAIN turn: the
+        // fan-out tags every agent's frames, and an unguarded read let a
+        // subagent's work flip this session's run state.
+        if (!this.isMainAgentFrame(payload)) return;
         const status = mapKimiWorkChanged(payload);
         // IGNORED, not defaulted. `undefined` means the frame carried no
         // readable run state, and this connection already holds a state that
@@ -1936,19 +2088,36 @@ export class KimiObserveConnection implements SessionConnection {
       case 'prompt.aborted': {
         // camelCase upstream (`events-zod.ts:908-919`), unlike the snake_case
         // session/interaction families.
+        //
+        // Main-agent frames ONLY: a subagent's settlement must not clear the
+        // drive layer's fences nor close the main turn's summary.
+        if (!this.isMainAgentFrame(payload)) return;
         const promptId = typeof payload.promptId === 'string' ? payload.promptId : undefined;
-        if (promptId) this.onPromptSettled(promptId, type === 'prompt.aborted');
+        if (!promptId) return;
+        this.onPromptSettled(promptId, type === 'prompt.aborted');
+        this.closeTurnRun(type === 'prompt.aborted' ? 'cancelled' : 'done', promptId);
         return;
       }
       case 'turn.ended': {
         if (!this.isMainAgentFrame(payload)) return;
-        if (payload.reason !== 'failed') return;
         // `turnId` is a NUMBER upstream (`events-zod.ts:681-690`), so the
         // identity stringifies it rather than assuming a string id.
-        this.emit(
-          { type: 'error', message: mapKimiTurnFailure(payload) },
-          `error:kimi-turn-failed:${String(payload.turnId ?? 'unknown')}`,
-        );
+        const turnRef = typeof payload.turnId === 'number' || typeof payload.turnId === 'string'
+          ? String(payload.turnId)
+          : undefined;
+        if (payload.reason === 'failed') {
+          this.emit(
+            { type: 'error', message: mapKimiTurnFailure(payload) },
+            `error:kimi-turn-failed:${String(payload.turnId ?? 'unknown')}`,
+          );
+          if (turnRef) this.closeTurnRun('error', turnRef);
+          return;
+        }
+        // The non-failed endings close the run-summary ONLY. `prompt.completed`
+        // / `prompt.aborted` usually arrive for the same turn, and whichever
+        // lands first wins; the second finds no open turn and emits nothing.
+        if (turnRef && payload.reason === 'completed') this.closeTurnRun('done', turnRef);
+        if (turnRef && payload.reason === 'cancelled') this.closeTurnRun('cancelled', turnRef);
         return;
       }
       case 'event.approval.requested': {
@@ -2024,6 +2193,38 @@ export class KimiObserveConnection implements SessionConnection {
     this.beforeRunState(status);
     const previous = this.info.status;
     this.info.status = status;
+    // The idle period's LOCAL start, stamped on a real transition only: a
+    // replayed or repeated idle frame must not extend it, or an echo keyed
+    // during the genuinely-idle gap would read as older than the gap.
+    if (status === 'idle' && previous !== 'idle') {
+      this.idleSince = this.nowImpl();
+    }
+    // A working edge is the ONLY start signal a turn whose echo row has not
+    // been walked yet gets — there is no `turn.started`. What it does to a
+    // HELD opener depends on the gap before it:
+    //
+    //  - previous === 'idle': the previous turn ENDED, so an opener held from
+    //    BEFORE the idle period is stale — seeded from history at attach, or
+    //    orphaned by a terminal frame lost to a stream gap — and the new turn
+    //    starts keyless rather than letting the close snapshot someone else's
+    //    opener (the deferral walk fills a missing key, but never replaces a
+    //    captured one — see pendingCloses). An opener keyed DURING the idle
+    //    period is the opposite case: the new turn's own echo outrunning its
+    //    busy edge (a poll walked it while the socket lagged), and resetting
+    //    it would throw the key away — the echo is already in the seen-set,
+    //    so nothing would ever re-fill it and the footer would emit keyless.
+    //  - previous === 'needs-input': a blocked turn RESUMING — the same turn
+    //    continuing, and its echo may already have keyed it. Kept.
+    //  - previous === 'working' with no turn open (a close cleared it but the
+    //    idle frame was missed): the new turn still gets its keyless open.
+    if (status === 'working' && previous !== 'working') {
+      const held = this.openTurn;
+      const stale = held !== undefined && previous === 'idle'
+        && (held.seeded || (this.idleSince !== undefined && held.claimedAt < this.idleSince));
+      if (!held || stale) {
+        this.openTurn = { startedAt: this.nowImpl(), claimedAt: this.nowImpl(), seeded: false };
+      }
+    }
     // The transcript `status` row carries the RUN state and nothing else —
     // `needs-input` is not one of its values, and it does not need to be: a
     // blocked session is not running, and the thing the user must act on
@@ -2043,6 +2244,172 @@ export class KimiObserveConnection implements SessionConnection {
 
   /** One prompt reached its terminal event. Base does nothing; the drive layer clears its fence. */
   protected onPromptSettled(_promptId: string, _aborted: boolean): void {}
+
+  /**
+   * Fold the turn-opener evidence out of one batch of transcript rows, in
+   * transcript order (both callers deliver oldest-first).
+   *
+   * Only `user-message` rows open or re-key a turn, and only ones this
+   * connection has NOT delivered yet: a row the seen-set already holds belongs
+   * to an older turn, and letting it key a turn a busy edge just opened would
+   * point the footer at the PREVIOUS turn's opener whenever the terminal
+   * event's walk outruns the journal. The fill rule serves the dominant live
+   * order — `busy:true` opens the turn keyless, and the echo row a later walk
+   * delivers supplies the key and the NATIVE start time. The replace rule
+   * serves the next turn: a fresh user row under a different key than the held
+   * opener is a new turn's opener, never a second opener for the one in
+   * flight. Oldest-first order is what makes one batch self-correcting: when a
+   * walk carries several turns' openers at once, the LAST one wins, and that
+   * is the turn the next terminal event is about.
+   *
+   * `seeded` marks the attach-time history read: an opener keyed there may
+   * belong to a turn that ENDED before this connection existed, so the next
+   * busy edge treats it as resettable evidence, unlike a live-walked opener
+   * (see {@link applyRunState}).
+   *
+   * The FIRST claim on a fresh user row is not the open turn's, though: a
+   * close whose snapshot had no key yet ({@link pendingCloses}) may still be
+   * keyed by the walk that closes it. Two fences keep that fill honest —
+   * only a MISSING key is filled (a close that has its opener, captured at
+   * close time or filled by an earlier row of this walk, is never re-keyed),
+   * and only from a row created BEFORE the close arrived, judged by the row's
+   * native `created_at` against the close's local arrival time. FIRST
+   * qualifying row claims, not last: the walk is oldest-first, so the first
+   * row preceding the close is the closing turn's own opener, while a LATER
+   * row that still predates the close is a prompt queued while the turn ran —
+   * it belongs to the next turn, and claiming it here would both misattach
+   * this footer and (a claimed row never reaches the open turn) leave the new
+   * turn keyless. A row that fills a pending close belongs to a turn already
+   * ending, so it never touches the open turn below.
+   */
+  private noteTranscriptRows(rows: KimiMappedRow[], seeded = false): void {
+    for (const row of rows) {
+      if (row.message.type !== 'user-message') continue;
+      if (this.seen.has(row.identity)) continue;
+      const key = row.message.key;
+      if (typeof key !== 'string' || !key) continue;
+      const sentAt = typeof row.message.sentAt === 'number' ? row.message.sentAt : undefined;
+      // The OLDEST still-keyless close this row precedes claims it, and is
+      // then CLOSED to later rows: a second qualifying row is a queued prompt
+      // predating the close, not a better opener for the ending turn. A row
+      // with no usable `created_at` cannot be fenced and is allowed to fill,
+      // matching the pre-fence behavior for timestamp-less rows rather than
+      // dropping the key entirely.
+      let claimed = false;
+      for (const pending of this.pendingCloses) {
+        if (pending.userMessageKey !== undefined) continue;
+        if (sentAt !== undefined && sentAt > pending.closedAt) continue;
+        pending.userMessageKey = key;
+        if (sentAt !== undefined) pending.startedAt = sentAt;
+        claimed = true;
+        break;
+      }
+      if (claimed) continue;
+      const claimedAt = this.nowImpl();
+      if (!this.openTurn) {
+        this.openTurn = { userMessageKey: key, ...(sentAt !== undefined ? { startedAt: sentAt } : {}), claimedAt, seeded };
+      } else if (this.openTurn.userMessageKey === undefined) {
+        this.openTurn.userMessageKey = key;
+        if (sentAt !== undefined) this.openTurn.startedAt = sentAt;
+        this.openTurn.claimedAt = claimedAt;
+      } else if (this.openTurn.userMessageKey !== key) {
+        this.openTurn = { userMessageKey: key, ...(sentAt !== undefined ? { startedAt: sentAt } : {}), claimedAt, seeded };
+      }
+    }
+  }
+
+  /**
+   * A MAIN-agent terminal event names the end of the open turn. The turn is
+   * SNAPSHOTTED into the pending queue — key, startedAt, and the close's
+   * arrival time captured NOW, not at flush time — and the open-turn slot is
+   * cleared, so a turn opening during the deferral (a steered or queued
+   * prompt) is tracked as itself and closed by its OWN terminal event.
+   * Emission is deferred past the content walk the same event triggers, so
+   * the echo row the walk carries can fill a key the snapshot lacked; a turn
+   * nobody saw open has no footer to emit, and a close arriving with no turn
+   * open is the duplicate terminal frame of an ending already queued — the
+   * first event's verdict stands.
+   *
+   * A frame whose ref was already accounted for is a REPLAY — a resubscribe
+   * serving what this connection already processed — and is dropped BEFORE
+   * the open-turn read: arriving while the next turn is open, it would
+   * otherwise snapshot that turn under the old ref, and the new turn's real
+   * close would then be dropped as the duplicate. See
+   * {@link closedTurnRefs}.
+   *
+   * No event, no summary: a turn whose terminal frame was lost to a stream gap
+   * stays open until the next opener replaces it, and no timing is invented
+   * for it. That is the honest miss — the alternative (closing on the idle
+   * status) would have to GUESS done/cancelled, and an abort mislabeled done
+   * is worse than a missing footer.
+   */
+  private closeTurnRun(status: 'done' | 'error' | 'cancelled', ref: string): void {
+    if (this.closedTurnRefs.has(ref)) return;
+    this.rememberClosedTurnRef(ref);
+    const turn = this.openTurn;
+    if (!turn) return;
+    this.openTurn = undefined;
+    this.pendingCloses.push({
+      status,
+      ref,
+      ...(turn.userMessageKey !== undefined ? { userMessageKey: turn.userMessageKey } : {}),
+      ...(turn.startedAt !== undefined ? { startedAt: turn.startedAt } : {}),
+      closedAt: this.nowImpl(),
+    });
+    // Overflow means closes are outrunning their walks: flush the oldest NOW
+    // rather than drop it — an undeferred footer beats none.
+    if (this.pendingCloses.length > KIMI_PENDING_CLOSE_LIMIT) this.flushRunSummary();
+    void this.settleContent().then(
+      () => this.flushRunSummary(),
+      // A failed settle is a stale transcript, not a reason to withhold the
+      // footer: emit against whatever the close captured and the walk filled.
+      () => this.flushRunSummary(),
+    );
+  }
+
+  /** Record a terminal event's ref, evicting oldest-first past the bound. See {@link closedTurnRefs}. */
+  private rememberClosedTurnRef(ref: string): void {
+    this.closedTurnRefs.delete(ref);
+    this.closedTurnRefs.add(ref);
+    while (this.closedTurnRefs.size > KIMI_CLOSED_TURN_REF_LIMIT) {
+      // Sets iterate in insertion order, so the first key is the oldest.
+      const oldest = this.closedTurnRefs.keys().next();
+      if (oldest.done) break;
+      this.closedTurnRefs.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Emit the OLDEST pending close against its snapshot, as keyed after the
+   * content walk. One flush emits one summary, so two closes queued during one
+   * deferral both produce their footer, each on its own turn's opener; the
+   * open turn is not touched — it belongs to a turn still running.
+   */
+  private flushRunSummary(): void {
+    const pending = this.pendingCloses.shift();
+    if (!pending || this.closed) return;
+    const completedAt = this.nowImpl();
+    const totalRuntimeMs = pending.startedAt !== undefined
+      ? Math.max(0, completedAt - pending.startedAt)
+      : undefined;
+    // No token figures: the wire journal reads counts per STREAM, never per
+    // turn, and attributing a window of them to this turn would invent a
+    // number the server never reported. Missing fields stay absent.
+    this.emit(
+      {
+        type: 'run-summary',
+        key: `run-summary:kimi:${pending.ref}`,
+        turnId: pending.ref,
+        ...(pending.userMessageKey ? { userMessageKey: pending.userMessageKey } : {}),
+        status: pending.status,
+        ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}),
+        completedAt,
+        ...(totalRuntimeMs !== undefined ? { totalRuntimeMs } : {}),
+        source: 'kimi-events',
+      },
+      `run-summary:kimi:${pending.ref}`,
+    );
+  }
 
   /** Retain a question's native ids, bounded oldest-first. See {@link KIMI_INTERACTION_REGISTRY_LIMIT}. */
   protected rememberQuestion(record: KimiQuestionRecord): void {
@@ -2080,6 +2447,9 @@ export class KimiObserveConnection implements SessionConnection {
       // the stream alone.
       this.noteStreamBreak();
       this.onStreamRestored();
+      // Turn numbering may restart with the journal, so a terminal-event ref
+      // remembered from the old incarnation would falsely dedup the new one's.
+      this.closedTurnRefs.clear();
       if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0) {
         // The frame is FROM the new incarnation, so its own seq is a current
         // watermark for that journal — adopt it rather than an invented zero,

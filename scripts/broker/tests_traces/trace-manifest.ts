@@ -221,6 +221,13 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
+    file: 'packages/typescript/adapters/claude/test/test-claude-takeover.ts',
+    title: 'Claude takeover refusal and roster-visible shared drive ownership (issue 15a/15b)',
+    coverage: [
+      { fn: 'F14', level: 'L2', agents: ['claude'], note: 'mid-turn terminal takeover refused; idle terminal resumes in place; adapter drive registry publishes driving on the roster and reverts on close' },
+    ],
+  },
+  {
     file: 'packages/typescript/adapters/claude/test/test-claude-jsonl.ts',
     title: 'Claude transcript mapping, streaming lanes, tool enrichment, and token suite',
     coverage: [

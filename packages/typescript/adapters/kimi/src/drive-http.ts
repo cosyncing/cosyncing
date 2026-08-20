@@ -3,19 +3,25 @@
  *
  * {@link KimiReadOnlyHttp} proves "this cannot write" by exposing one GET-only
  * operation. The mirror-image property is proved here: {@link KimiDriveHttp}
- * exposes exactly six named operations and has no generic `post(path, body)`
+ * exposes exactly ten named operations and has no generic `post(path, body)`
  * door, no verb parameter, and no escape hatch reaching the underlying fetch.
  * So the set of writes this adapter can perform is not a convention a later
- * refactor could widen — it is the list of methods on this class, and adding a
- * seventh write means adding a seventh method, in review, on purpose.
+ * refactor could widen — it is the list of methods on this class, and adding an
+ * eleventh write means adding an eleventh method, in review, on purpose.
  *
  * Why the bar is that high: two processes writing one Kimi session silently
  * fork its journal. A terminal `kimi -S <id>` resuming a session cosyncing owns
  * appends to the same on-disk wire journal while the server re-folds history
- * from disk — the two writers never see each other's turns. Every method here
- * is therefore reachable ONLY from a drive connection on a session this process
- * created (see the ownership model in `implementation.ts`), and a proven
- * foreign write demotes that connection to observe before another write lands.
+ * from disk — the two writers never see each other's turns. Nine of the ten
+ * methods are therefore reachable ONLY from a drive connection on a session
+ * this process created (see the ownership model in `implementation.ts`), and a
+ * proven foreign write demotes that connection to observe before another write
+ * lands. The tenth, {@link KimiDriveHttp.renameSession}, is the reviewed
+ * exception: a title is metadata the SERVER applies through its own
+ * `ISessionMetadata.setTitle` and broadcasts as `session.meta.updated` — it
+ * appends nothing to the wire journal, so it carries none of the fork risk the
+ * other nine exist to prevent, and the adapter's rename hook may reach it for
+ * any session the server lists.
  *
  * Transport policy is SHARED with the read door rather than restated: the same
  * bearer discipline, the same timeout, the same bounded streaming body read
@@ -50,13 +56,82 @@ export interface KimiCreateSessionBody {
   metadata: { cwd: string };
 }
 
-/** `POST /api/v1/sessions/{sid}/prompts` — `promptSubmissionSchema` (`protocol/rest-prompt.ts:32-51`). */
+/**
+ * One content part of a prompt submission — the text, image, and file members
+ * of upstream `messageContentSchema` (`protocol/message.ts:8-63`).
+ *
+ * Images go INLINE as base64 (`imageSourceSchema` kind `base64`); everything
+ * byte-bearing and non-image goes through `POST /api/v1/files` first and rides
+ * the prompt as a `file` part carrying the returned `file_id`
+ * (`fileContentSchema`). The tool_use/tool_result/thinking members exist on the
+ * wire for messages the SERVER writes; a client submission never carries them.
+ */
+export type KimiPromptContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { kind: 'base64'; media_type: string; data: string } }
+  | { type: 'file'; file_id: string; name: string; media_type: string; size: number };
+
+/** `POST /api/v1/sessions/{sid}/prompts` — `promptSubmissionSchema` (`protocol/rest-prompt.ts:46-64`). */
 export interface KimiPromptSubmissionBody {
-  content: Array<{ type: 'text'; text: string }>;
+  content: KimiPromptContentPart[];
   model?: string;
   /** Free-form string upstream (`promptThinkingSchema` is `z.string().min(1)`), not an enum. */
   thinking?: string;
   permission_mode?: 'manual' | 'yolo' | 'auto';
+  /**
+   * Goal creation/control triggers, applied by the prompt service as the prompt
+   * launches (`promptService.ts`, `pickAgentStatePatch`). `goal_objective` rides
+   * the objective's own kickoff prompt; `goal_control` is accepted on the schema
+   * but this adapter sends control through {@link KimiDriveHttp.controlGoal}
+   * instead, because a pause/cancel must not enqueue a stray user message.
+   */
+  goal_objective?: string;
+  goal_control?: 'pause' | 'resume' | 'cancel';
+}
+
+/**
+ * `POST /api/v1/files` — one multipart `file` field (`routes/files.ts:88-131`).
+ *
+ * The door builds the form itself: the multipart field names are wire schema,
+ * so they live here with the path rather than in the caller. `expires_in_sec`
+ * and the `name` override field exist upstream and are deliberately unused —
+ * the part's filename IS the name, and the store's default expiry is the
+ * server's business.
+ */
+export interface KimiFileUpload {
+  name: string;
+  mediaType: string;
+  bytes: Uint8Array;
+}
+
+/** Upload response `data` — `fileMetaSchema` (`protocol/file.ts`). Only the fields this adapter reads. */
+export interface KimiUploadedFileMeta {
+  id: string;
+  name: string;
+  media_type: string;
+  size: number;
+}
+
+/**
+ * Goal pause/resume/cancel through `POST /api/v1/sessions/{sid}/profile` — the
+ * `agent_config` half of `updateSessionProfileRequestSchema`, dispatched by
+ * `applySessionAgentConfig` (`routes/sessionAgentConfig.ts:70-84`) straight to
+ * the goal service. Unlike a prompt-body `goal_control` this appends NOTHING to
+ * the transcript: no user row, no turn — which is exactly what pausing or
+ * cancelling a goal must not do.
+ */
+export interface KimiGoalControlBody {
+  agent_config: { goal_control: 'pause' | 'resume' | 'cancel' };
+}
+
+/**
+ * `POST /api/v1/sessions/{sid}/skills/{name}:activate` —
+ * `activateSkillRequestSchema` (`protocol/rest-skill.ts`). The `attachments`
+ * field exists upstream and is deliberately unused: a slash command carries an
+ * argument string, and attachments belong to the prompt that carries them.
+ */
+export interface KimiSkillActivateBody {
+  args?: string;
 }
 
 /** `POST /api/v1/sessions/{sid}/approvals/{id}` — `approvalResponseSchema` (`protocol/approval.ts:24-29`). */
@@ -77,6 +152,21 @@ export type KimiQuestionAnswer =
 /** `POST /api/v1/sessions/{sid}/questions/{id}` — `questionResponseSchema` (`protocol/question.ts:51-55`). */
 export interface KimiQuestionAnswerBody {
   answers: Record<string, KimiQuestionAnswer>;
+}
+
+/**
+ * `POST /api/v1/sessions/{sid}/profile` — the title half of
+ * `updateSessionProfileRequestSchema` (`sessionProtocol.ts`; route
+ * `routes/sessionProfile.ts`).
+ *
+ * Only `title` is modeled. The schema also accepts `metadata`, `agent_config`,
+ * and `permission_rules`, none of which this adapter has a reviewed use for —
+ * the request type stays as narrow as the write it names. The schema requires
+ * a non-empty string, so a CLEARED title is the caller's problem to resolve
+ * into one, not something this body can express.
+ */
+export interface KimiRenameSessionBody {
+  title: string;
 }
 
 // ── Outcomes ────────────────────────────────────────────────────────────────
@@ -172,7 +262,7 @@ export function isKimiUnauthorizedWrite(error: unknown): boolean {
  */
 export type KimiWriteFetch = (
   url: string,
-  init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal },
+  init: { method: 'POST'; headers: Record<string, string>; body: string | FormData; signal: AbortSignal },
 ) => Promise<{
   status: number;
   body?: ReadableStream<Uint8Array> | null;
@@ -208,7 +298,7 @@ export class KimiDriveHttp {
     return this.baseUrl;
   }
 
-  // ── The allowlist. Six operations, no seventh door. ───────────────────────
+  // ── The allowlist. Ten operations, no eleventh door. ──────────────────────
 
   /** Create a session. One of `workspace_id`/`metadata.cwd` is required; this adapter always sends cwd. */
   createSession(body: KimiCreateSessionBody): Promise<KimiWriteOutcome> {
@@ -259,12 +349,59 @@ export class KimiDriveHttp {
     );
   }
 
+  /**
+   * Rename a session. The one write reachable OUTSIDE a drive connection — see
+   * the file header: the server applies the title to its own metadata document
+   * and broadcasts `session.meta.updated`, so the journal-fork case the other
+   * nine methods are gated against does not exist here.
+   */
+  renameSession(sessionId: string, body: KimiRenameSessionBody): Promise<KimiWriteOutcome> {
+    return this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/profile`, body);
+  }
+
+  /**
+   * Upload a file's bytes — `POST /api/v1/files`, one multipart `file` field
+   * whose filename and content-type carry the name and media type
+   * (`routes/files.ts:104-124`). The answer's `data` is a `FileMeta`; the
+   * caller turns it into a prompt `file` content part. Session-less by design:
+   * the store is server-global with its own expiry, so the upload appends
+   * nothing to any session's journal.
+   */
+  uploadFile(file: KimiFileUpload): Promise<KimiWriteOutcome> {
+    const form = new FormData();
+    form.append('file', new Blob([file.bytes.slice()], { type: file.mediaType }), file.name);
+    return this.#postMultipart('/api/v1/files', form);
+  }
+
+  /**
+   * Pause, resume, or cancel the session's goal through the profile route's
+   * `agent_config` dispatch. Shares the path with {@link renameSession} but not
+   * its exemption: a goal control is answered for the session's agent, so it is
+   * reachable only from a drive connection, like the other eight.
+   */
+  controlGoal(sessionId: string, body: KimiGoalControlBody): Promise<KimiWriteOutcome> {
+    return this.#post(`/api/v1/sessions/${encodeURIComponent(sessionId)}/profile`, body);
+  }
+
+  /**
+   * Activate a skill — starts a turn whose user row carries the
+   * `skill_activation` origin (`routes/skills.ts`, `IAgentSkillService`). The
+   * colon is the literal ACTION SUFFIX on the skill name, same convention as
+   * {@link abortSession} uses on the session id.
+   */
+  activateSkill(sessionId: string, name: string, body: KimiSkillActivateBody): Promise<KimiWriteOutcome> {
+    return this.#post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/skills/${encodeURIComponent(name)}:activate`,
+      body,
+    );
+  }
+
   // ── The single transport, private on purpose ──────────────────────────────
 
   /**
    * An ECMAScript PRIVATE method, and that is the whole allowlist mechanism: no
    * caller outside this class can name a path, so the reachable write set is
-   * exactly the six methods above.
+   * exactly the ten methods above.
    *
    * `#post` rather than `private post`, deliberately. TypeScript's `private` is
    * erased at compile time — the method still lands on the prototype and
@@ -275,6 +412,25 @@ export class KimiDriveHttp {
    * asserts the prototype surface for exactly this reason.
    */
   async #post(path: string, body: unknown): Promise<KimiWriteOutcome> {
+    return this.#send(path, JSON.stringify(body), 'application/json');
+  }
+
+  /**
+   * The multipart half of the transport, for {@link uploadFile} alone. No
+   * `content-type` header: `fetch` sets it with the form's boundary, and a
+   * header written here would REPLACE that and leave the body unparsable.
+   */
+  async #postMultipart(path: string, form: FormData): Promise<KimiWriteOutcome> {
+    return this.#send(path, form);
+  }
+
+  /**
+   * The one dispatch every write funnels through: timeout, bearer, bounded
+   * body read, envelope decode. The body is already serialized — JSON by
+   * {@link #post}, multipart by {@link #postMultipart} — so the verb and the
+   * failure taxonomy live exactly once.
+   */
+  async #send(path: string, body: string | FormData, contentType?: string): Promise<KimiWriteOutcome> {
     let url: string;
     try {
       url = new URL(path.startsWith('/') ? path : `/${path}`, `${this.baseUrl}/`).toString();
@@ -291,10 +447,10 @@ export class KimiDriveHttp {
         method: 'POST',
         headers: {
           accept: 'application/json',
-          'content-type': 'application/json',
+          ...(contentType ? { 'content-type': contentType } : {}),
           ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
         },
-        body: JSON.stringify(body),
+        body,
         signal: controller.signal,
       });
       status = response.status;

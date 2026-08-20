@@ -549,6 +549,346 @@ try {
     await cardConn.close();
   }
 
+  // ── Turn footers: the run-summary emission ────────────────────────────────
+  //
+  // The client renders "Ran for … · Finished at …" from a canonical
+  // `run-summary`, and attaches it to a turn ONLY by key — a summary without
+  // the opener's `userMessageKey` is silently dropped. Kimi has no
+  // `turn.started`, so the turn is reconstructed: the echo row keys it (native
+  // `created_at` as the start), a busy edge opens it keyless when the echo has
+  // not been walked yet, and `prompt.completed` / `prompt.aborted` /
+  // `turn.ended` close it — deferred past the content walk the terminal event
+  // itself triggers, so a fast turn's echo lands before its footer is built.
+  {
+    const t0 = Date.parse('2026-08-18T09:00:00.000Z');
+    const t1 = Date.parse('2026-08-18T10:00:00.000Z');
+    const t2 = Date.parse('2026-08-18T11:00:00.000Z');
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const turnUser = (id: string, at: number) => ({
+      id, session_id: 's-turn', role: 'user',
+      content: [{ type: 'text', text: `prompt ${id}` }], created_at: iso(at),
+    });
+    const turnReply = (id: string, at: number) => ({
+      id, session_id: 's-turn', role: 'assistant',
+      content: [{ type: 'text', text: `reply ${id}` }], created_at: iso(at),
+    });
+    // `/messages` answers NEWEST-FIRST; the whole history, re-served per read.
+    const oldRows = [turnReply('msg_turn_old_reply', t0 + 1_000), turnUser('msg_turn_old_user', t0)];
+    let turnBody = JSON.stringify({
+      code: 0, msg: 'success', data: { items: oldRows, has_more: false }, request_id: 'r',
+    });
+    let nowMs = t1 + 90_000;
+    const turnClient = new KimiReadOnlyHttp({
+      baseUrl: 'http://127.0.0.1:1',
+      fetchImpl: async () => ({ status: 200, text: async () => turnBody }),
+    });
+    let turnSocket: FakeSocket | undefined;
+    const turnConn = new KimiObserveConnection(
+      {
+        id: 's-turn', tool: 'kimi', title: 's-turn', status: 'idle',
+        attachMode: 'observe', launchSurface: 'unknown',
+        control: {
+          drive: { state: 'observing', supported: false, reason: 'kimi-observe-only' },
+          terminalSync: { supported: false, syncAvailable: false, active: false, reason: 'kimi-observe-only' },
+        },
+      },
+      turnClient, 'ws://127.0.0.1:1/api/v1/ws', undefined,
+      {
+        socketFactory: () => { turnSocket = new FakeSocket(); return turnSocket; },
+        setInterval: () => 1,
+        clearInterval: () => {},
+        now: () => nowMs,
+      },
+    );
+    const turnRows: AgentMessage[] = [];
+    turnConn.subscribe((message) => turnRows.push(message));
+    await turnConn.getHistory();
+    turnSocket!.fire('open', {});
+    const summaries = () => turnRows.filter(
+      (message): message is Extract<AgentMessage, { type: 'run-summary' }> =>
+        message.type === 'run-summary');
+    const turnEnvelope = (type: string, seq: number, payload: Record<string, unknown>) => ({
+      type, seq, epoch: 'ep_turn', session_id: 's-turn', timestamp: 't',
+      payload: { type, agentId: 'main', sessionId: 's-turn', ...payload },
+    });
+
+    // A completed turn: busy on the socket, the echo in the walk the terminal
+    // event triggers, and the footer keyed to the NEW opener — not the
+    // historical one the attach seeded.
+    const completedRows = [turnReply('msg_turn_new_reply', t1 + 60_000), turnUser('msg_turn_new_user', t1), ...oldRows];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success', data: { items: completedRows, has_more: false }, request_id: 'r',
+    });
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 100, { busy: true }));
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 101, { promptId: 'p1' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 150, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('a completed turn emits exactly one run-summary',
+      summaries().length === 1, JSON.stringify(summaries()));
+    const doneSummary = summaries()[0];
+    check('the summary attaches by the NEW echo\'s key with native start and wall-clock end',
+      doneSummary?.key === 'run-summary:kimi:p1' && doneSummary.turnId === 'p1'
+        && doneSummary.userMessageKey === 'kimi:msg_turn_new_user:0'
+        && doneSummary.status === 'done'
+        && doneSummary.startedAt === t1 && doneSummary.completedAt === nowMs
+        && doneSummary.totalRuntimeMs === 90_000
+        && doneSummary.source === 'kimi-events',
+      JSON.stringify(doneSummary));
+    check('the turn\'s rows arrived before the summary was built',
+      turnRows.some((m) => m.type === 'user-message' && m.key === 'kimi:msg_turn_new_user:0'),
+      turnRows.map((m) => m.type).join(','));
+
+    // An aborted turn: opened KEYLESS by the busy edge (the echo is not walked
+    // until the terminal event), keyed by the echo during the deferred flush,
+    // and reported `cancelled` — claude's convention for a user stop.
+    const abortedRows = [turnReply('msg_turn_abort_reply', t2 + 30_000), turnUser('msg_turn_abort_user', t2), ...completedRows];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success', data: { items: abortedRows, has_more: false }, request_id: 'r',
+    });
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 200, { busy: true }));
+    nowMs = t2 + 5_000;
+    turnSocket!.deliver(turnEnvelope('prompt.aborted', 201, { promptId: 'p2' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 250, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    const abortedSummary = summaries()[1];
+    check('an aborted turn is reported cancelled, keyed by the echo walked during the deferral',
+      summaries().length === 2
+        && abortedSummary?.status === 'cancelled'
+        && abortedSummary.userMessageKey === 'kimi:msg_turn_abort_user:0'
+        && abortedSummary.startedAt === t2 && abortedSummary.completedAt === nowMs
+        && abortedSummary.totalRuntimeMs === 5_000,
+      JSON.stringify(abortedSummary));
+
+    // A subagent's frames ride the same fan-out tagged `agentId` — none of
+    // them may move the MAIN turn: not its run state, not its fence, not its
+    // footer.
+    const summariesBeforeSub = summaries().length;
+    const statusesBeforeSub = turnRows.filter((m) => m.type === 'status').length;
+    const errorsBeforeSub = turnRows.filter((m) => m.type === 'error').length;
+    turnSocket!.deliver({
+      type: 'event.session.work_changed', seq: 300, epoch: 'ep_turn', session_id: 's-turn', timestamp: 't',
+      payload: { type: 'event.session.work_changed', agentId: 'agent-9', sessionId: 's-turn', busy: true },
+    });
+    turnSocket!.deliver({
+      type: 'prompt.completed', seq: 301, epoch: 'ep_turn', session_id: 's-turn', timestamp: 't',
+      payload: { type: 'prompt.completed', agentId: 'agent-9', sessionId: 's-turn', promptId: 'p-sub' },
+    });
+    turnSocket!.deliver({
+      type: 'turn.ended', seq: 302, epoch: 'ep_turn', session_id: 's-turn', timestamp: 't',
+      payload: { type: 'turn.ended', agentId: 'agent-9', sessionId: 's-turn', turnId: 42, reason: 'completed' },
+    });
+    await Bun.sleep(80);
+    check('a subagent\'s busy edge, completion, and turn end are all ignored by the main turn',
+      summaries().length === summariesBeforeSub
+        && turnRows.filter((m) => m.type === 'status').length === statusesBeforeSub
+        && turnRows.filter((m) => m.type === 'error').length === errorsBeforeSub,
+      `summaries=${summaries().length} statuses=${turnRows.filter((m) => m.type === 'status').length}`);
+
+    // A FAILED turn closes `error` off `turn.ended` alone, and the two
+    // terminal frames of one ending produce ONE footer: `prompt.completed`
+    // plus `turn.ended reason:'completed'` is the ordinary double, and the
+    // first event's verdict stands.
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 400, { busy: true }));
+    turnSocket!.deliver(turnEnvelope('turn.ended', 401, {
+      turnId: 7, reason: 'failed', error: { message: 'the provider refused' },
+    }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 450, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    const failedSummary = summaries()[2];
+    check('a failed turn emits an error summary even without an echo key',
+      summaries().length === 3
+        && failedSummary?.status === 'error' && failedSummary.turnId === '7'
+        && failedSummary.userMessageKey === undefined
+        && failedSummary.startedAt === nowMs && failedSummary.completedAt === nowMs
+        && failedSummary.totalRuntimeMs === 0,
+      JSON.stringify(failedSummary));
+
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 500, { busy: true }));
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 501, { promptId: 'p3' }));
+    turnSocket!.deliver(turnEnvelope('turn.ended', 502, { turnId: 8, reason: 'completed' }));
+    await Bun.sleep(80);
+    check('two terminal frames for one turn emit one summary',
+      summaries().length === 4 && summaries()[3]?.status === 'done',
+      `summaries=${summaries().length} ${JSON.stringify(summaries()[3])}`);
+
+    // THE MISATTACHMENT WINDOW: a steered/queued prompt whose echo lands in the
+    // SAME settle walk as the previous turn's. Both turns close inside one
+    // deferral — the close snapshots its own turn at close time, the walk fills
+    // only a missing key and only from a row created before the close, and the
+    // queue gives each close its own footer. Before the fix, turn A's summary
+    // attached to turn B's opener with B's startedAt, and the one-slot
+    // pendingClose swallowed B's close entirely.
+    const t3 = Date.parse('2026-08-18T12:00:00.000Z');
+    const steerARows = [turnReply('msg_turn_sa_reply', t3 + 10_000), turnUser('msg_turn_sa_user', t3)];
+    const steerBRows = [turnReply('msg_turn_sb_reply', t3 + 40_000), turnUser('msg_turn_sb_user', t3 + 30_000)];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success',
+      data: { items: [...steerBRows, ...steerARows, ...abortedRows], has_more: false }, request_id: 'r',
+    });
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 599, { busy: false, pending_interaction: 'none' }));
+    nowMs = t3;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 600, { busy: true }));
+    nowMs = t3 + 20_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 601, { promptId: 'pA' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 602, { busy: false, pending_interaction: 'none' }));
+    // B opens and closes while A's deferral walk is still in flight.
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 603, { busy: true }));
+    nowMs = t3 + 50_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 604, { promptId: 'pB' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 605, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('two turns closing inside one deferral each get a footer on their OWN opener and start time',
+      summaries().length === 6
+        && summaries()[4]?.turnId === 'pA'
+        && summaries()[4]?.userMessageKey === 'kimi:msg_turn_sa_user:0'
+        && summaries()[4]?.startedAt === t3
+        && summaries()[5]?.turnId === 'pB'
+        && summaries()[5]?.userMessageKey === 'kimi:msg_turn_sb_user:0'
+        && summaries()[5]?.startedAt === t3 + 30_000,
+      JSON.stringify(summaries().slice(4)));
+
+    // The same window with the echo walked BEFORE the close: the snapshot
+    // captured a real key, so the deferral walk must not re-key it onto the
+    // next turn's echo — and the next turn still closes with its own footer.
+    const t4 = Date.parse('2026-08-18T13:00:00.000Z');
+    const queuedCRows = [turnReply('msg_turn_qc_reply', t4 + 10_000), turnUser('msg_turn_qc_user', t4)];
+    const queuedDRows = [turnReply('msg_turn_qd_reply', t4 + 40_000), turnUser('msg_turn_qd_user', t4 + 30_000)];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success',
+      data: { items: [...queuedCRows, ...steerBRows, ...steerARows, ...abortedRows], has_more: false },
+      request_id: 'r',
+    });
+    nowMs = t4;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 700, { busy: true }));
+    await turnConn.refresh(); // the walk delivers C's echo, keying the open turn
+    // D's echo reaches the server before C's terminal frame's walk has run.
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success',
+      data: {
+        items: [...queuedDRows, ...queuedCRows, ...steerBRows, ...steerARows, ...abortedRows],
+        has_more: false,
+      },
+      request_id: 'r',
+    });
+    nowMs = t4 + 20_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 701, { promptId: 'pC' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 702, { busy: false, pending_interaction: 'none' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 703, { busy: true }));
+    nowMs = t4 + 50_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 704, { promptId: 'pD' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 705, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('a close that captured its opener is never re-keyed onto the next turn\'s echo',
+      summaries().length === 8
+        && summaries()[6]?.turnId === 'pC'
+        && summaries()[6]?.userMessageKey === 'kimi:msg_turn_qc_user:0'
+        && summaries()[6]?.startedAt === t4
+        && summaries()[7]?.turnId === 'pD'
+        && summaries()[7]?.userMessageKey === 'kimi:msg_turn_qd_user:0'
+        && summaries()[7]?.startedAt === t4 + 30_000,
+      JSON.stringify(summaries().slice(6)));
+
+    // THE QUEUED-ROW RE-FILL: a keyless close whose deferral walk carries BOTH
+    // the closing turn's echo AND a prompt queued while the turn ran — created
+    // BEFORE the close, so it passes the created_at fence. The FIRST qualifying
+    // row claims the close (the walk is oldest-first, so that is the closing
+    // turn's own opener); the queued row belongs to the NEXT turn and must key
+    // the open-turn slot instead. Before the fix, last-qualifying-wins re-filled
+    // the close onto the queued row, misattaching the footer AND leaving the
+    // next turn keyless (a claimed row never reaches the open turn).
+    const t5 = Date.parse('2026-08-18T14:00:00.000Z');
+    const steerERows = [turnReply('msg_turn_se_reply', t5 + 10_000), turnUser('msg_turn_se_user', t5)];
+    const queuedFRows = [turnReply('msg_turn_qf_reply', t5 + 40_000), turnUser('msg_turn_qf_user', t5 + 15_000)];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success',
+      data: {
+        items: [...queuedFRows, ...steerERows, ...queuedDRows, ...queuedCRows, ...steerBRows, ...steerARows, ...abortedRows],
+        has_more: false,
+      },
+      request_id: 'r',
+    });
+    nowMs = t5 + 5_000;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 800, { busy: true }));
+    nowMs = t5 + 20_000;
+    // E closes with its echo not yet walked — a keyless snapshot.
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 801, { promptId: 'pE' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 802, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('a keyless close is keyed by the FIRST qualifying row — the queued prompt predating the close does not steal it',
+      summaries().length === 9
+        && summaries()[8]?.turnId === 'pE'
+        && summaries()[8]?.userMessageKey === 'kimi:msg_turn_se_user:0'
+        && summaries()[8]?.startedAt === t5,
+      JSON.stringify(summaries()[8]));
+
+    // THE LAGGING BUSY EDGE: F's echo already keyed the open turn during the
+    // idle gap (the deferral walk outran the socket). The busy edge that now
+    // arrives must KEEP that opener — it is the new turn's own echo, not the
+    // stale leftover the previous===idle reset exists for. Before the fix the
+    // reset threw the key away, the echo was already in the seen-set, and F's
+    // footer emitted keyless.
+    nowMs = t5 + 35_000;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 803, { busy: true }));
+    nowMs = t5 + 50_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 804, { promptId: 'pF' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 805, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('a busy edge keeps the opener keyed during the idle gap, so the next turn\'s footer lands keyed',
+      summaries().length === 10
+        && summaries()[9]?.turnId === 'pF'
+        && summaries()[9]?.userMessageKey === 'kimi:msg_turn_qf_user:0'
+        && summaries()[9]?.startedAt === t5 + 15_000,
+      JSON.stringify(summaries()[9]));
+
+    // THE REPLAYED TERMINAL FRAME: a resubscribe serves G's prompt.completed a
+    // SECOND time, while the NEXT turn is open. The replay must be dropped by
+    // its ref — snapshotting the open turn under the old ref would emit a
+    // second G footer on H's opener and strand H's real close as a "duplicate".
+    const t6 = Date.parse('2026-08-18T15:00:00.000Z');
+    const turnGRows = [turnReply('msg_turn_g_reply', t6 + 10_000), turnUser('msg_turn_g_user', t6)];
+    const turnHRows = [turnReply('msg_turn_h_reply', t6 + 40_000), turnUser('msg_turn_h_user', t6 + 30_000)];
+    turnBody = JSON.stringify({
+      code: 0, msg: 'success',
+      data: {
+        items: [...turnHRows, ...turnGRows, ...queuedFRows, ...steerERows, ...queuedDRows, ...queuedCRows, ...steerBRows, ...steerARows, ...abortedRows],
+        has_more: false,
+      },
+      request_id: 'r',
+    });
+    nowMs = t6;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 900, { busy: true }));
+    nowMs = t6 + 20_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 901, { promptId: 'pG' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 902, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('G closes once, keyed by its own echo',
+      summaries().length === 11
+        && summaries()[10]?.turnId === 'pG'
+        && summaries()[10]?.userMessageKey === 'kimi:msg_turn_g_user:0',
+      JSON.stringify(summaries()[10]));
+    // H's busy edge keeps the opener H's echo keyed during the idle gap (the
+    // same rule as F above), then the REPLAY arrives while H is open.
+    nowMs = t6 + 35_000;
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 903, { busy: true }));
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 904, { promptId: 'pG' }));
+    await Bun.sleep(80);
+    check('a replayed terminal frame with an already-accounted ref is dropped, not snapshotted onto the open turn',
+      summaries().length === 11
+        && summaries().filter((s) => s.turnId === 'pG').length === 1,
+      `summaries=${summaries().length} pG=${summaries().filter((s) => s.turnId === 'pG').length}`);
+    nowMs = t6 + 50_000;
+    turnSocket!.deliver(turnEnvelope('prompt.completed', 905, { promptId: 'pH' }));
+    turnSocket!.deliver(turnEnvelope('event.session.work_changed', 906, { busy: false, pending_interaction: 'none' }));
+    await Bun.sleep(80);
+    check('the open turn\'s own close still lands after the replay, keyed to its own opener',
+      summaries().length === 12
+        && summaries()[11]?.turnId === 'pH'
+        && summaries()[11]?.userMessageKey === 'kimi:msg_turn_h_user:0'
+        && summaries()[11]?.startedAt === t6 + 30_000,
+      JSON.stringify(summaries()[11]));
+    await turnConn.close();
+  }
+
   // `notice` and `file-artifact` rows carry no key, no callId and no payload. A
   // payload-only identity collapsed every notice to one value, so the second
   // distinct one was silently swallowed.
@@ -991,6 +1331,57 @@ try {
         && [KIMI_HISTORY_UNAVAILABLE_NOTICE, KIMI_HISTORY_PARTIAL_NOTICE, KIMI_HISTORY_TRUNCATED_NOTICE]
           .includes(m.message)),
       `${complete.length} rows`);
+    await conn.close();
+  }
+
+  // ── Subagent bars across a page boundary ──────────────────────────────────
+  //
+  // getHistory reads pages NEWEST-first but must FOLD them oldest-first: the
+  // correlation state is recorded as the fold walks, and an Agent call/result
+  // pair straddling the boundary otherwise meets its result first — the bar
+  // the call opens would then never close (the page-straddle guard would, and
+  // should, suppress it entirely).
+
+  {
+    const restore = FIXTURE.rest.messagesAll!;
+    const filler = (index: number) => ({
+      id: `msg_straddle_filler_${index}`, session_id: FIXTURE.sessionId, role: 'assistant',
+      content: [{ type: 'text', text: `filler ${index}` }],
+      created_at: '2026-08-19T09:00:00.000Z',
+    });
+    // Newest-first: the RESULT sits at the end of page 1 (index 99), its CALL
+    // opens page 2 (index 100) — the pair straddles the boundary, call older.
+    const items = [
+      ...Array.from({ length: 99 }, (_unused, index) => filler(index)),
+      {
+        id: 'msg_straddle_result', session_id: FIXTURE.sessionId, role: 'tool',
+        content: [{ type: 'tool_result', tool_call_id: 'call_straddle', output: 'agent_id: agent-0\n\nDone.' }],
+        created_at: '2026-08-19T10:05:00.000Z',
+      },
+      {
+        id: 'msg_straddle_call', session_id: FIXTURE.sessionId, role: 'assistant',
+        content: [{
+          type: 'tool_use', tool_call_id: 'call_straddle', tool_name: 'Agent',
+          input: { prompt: 'Investigate the paging layer.', description: 'Investigate paging', subagent_type: 'explore' },
+        }],
+        created_at: '2026-08-19T10:00:00.000Z',
+      },
+      filler(100),
+    ];
+    FIXTURE.rest.messagesAll = { code: 0, msg: 'success', data: { items } };
+    const conn = await observing.attach(FIXTURE.sessionId) as KimiObserveConnection;
+    const history = await conn.getHistory();
+    FIXTURE.rest.messagesAll = restore;
+    const bars = history.filter((m) => m.type === 'agent-activity') as Array<{
+      key?: string; status?: string; title?: string; elapsedMs?: number;
+    }>;
+    check('a foreground Agent pair straddling a page boundary still gets its bar, opened then closed',
+      bars.length === 2
+        && bars[0]!.key === 'agent:call_straddle' && bars[0]!.status === 'running'
+        && bars[0]!.title === 'Investigate paging'
+        && bars[1]!.key === 'agent:call_straddle' && bars[1]!.status === 'done'
+        && bars[1]!.elapsedMs === 5 * 60 * 1000,
+      JSON.stringify(bars));
     await conn.close();
   }
 

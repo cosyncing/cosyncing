@@ -620,7 +620,9 @@ void main() {
       );
     });
 
-    testWidgets('falls back to session ID when title is empty', (tester) async {
+    testWidgets('shows the untitled placeholder when title is empty', (
+      tester,
+    ) async {
       final sessions = [
         const SessionInfo(
           id: 'session-abc-123',
@@ -635,7 +637,10 @@ void main() {
       await tester.pumpAndSettle();
       await expandRosterProject(tester);
 
-      expect(find.text('session-abc-123'), findsOneWidget);
+      final row = find.byKey(const Key('session-row-claude/session-abc-123'));
+      final l10n = AppLocalizations.of(tester.element(row));
+      expect(find.text(l10n.sessionDetailTitleUntitled), findsOneWidget);
+      expect(find.text('session-abc-123'), findsNothing);
     });
 
     testWidgets('shows status badge for working status', (tester) async {

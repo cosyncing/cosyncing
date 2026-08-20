@@ -212,6 +212,61 @@ void main() {
       },
     );
 
+    testWidgets('expanded task rows render at the enlarged presentation', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            mutableSession(),
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage.fromJson({
+                'type': 'task-list-state',
+                'key': 'plan',
+                'status': 'running',
+                'title': 'Launch checklist',
+                'items': [
+                  {
+                    'title': 'Current task',
+                    'status': 'in-progress',
+                    'detail': 'Halfway there',
+                    'priority': 'high',
+                  },
+                ],
+              }),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('session-live-strip-task-list:plan')),
+      );
+      await tester.pumpAndSettle();
+
+      final row = find.byKey(const Key('session-task-item-0'));
+      expect(row, findsOneWidget);
+      final tile = tester.widget<ListTile>(row);
+      expect(tile.dense, isNot(true));
+
+      final icon = tester.widget<Icon>(
+        find.descendant(of: row, matching: find.byIcon(Icons.pending_outlined)),
+      );
+      expect(icon.size, 40);
+
+      final textTheme = Theme.of(tester.element(row)).textTheme;
+      final title = tester.widget<Text>(
+        find.descendant(of: row, matching: find.text('Current task')),
+      );
+      expect(title.style?.fontSize, textTheme.headlineMedium?.fontSize);
+      final detail = tester.widget<Text>(
+        find.descendant(of: row, matching: find.text('Halfway there')),
+      );
+      expect(detail.style?.fontSize, textTheme.headlineSmall?.fontSize);
+    });
+
     testWidgets(
       'dispatches advertised goal actions and waits for broker state',
       (

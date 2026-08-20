@@ -1051,6 +1051,7 @@ class _TaskStateRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final textTheme = Theme.of(context).textTheme;
     final (icon, color) = switch (item.status) {
       TaskItemStatus.open => (Icons.radio_button_unchecked, tokens.statusIdle),
       TaskItemStatus.inProgress => (
@@ -1061,20 +1062,23 @@ class _TaskStateRow extends StatelessWidget {
       TaskItemStatus.cancelled => (Icons.cancel_outlined, tokens.statusIdle),
       TaskItemStatus.unknown => (Icons.help_outline, tokens.textTertiary),
     };
+    // The expanded rows are the detail view of the card and render roughly
+    // 3x the collapsed-list scale on request: no dense layout, headline-scale
+    // title, and a 40px leading icon (on the 4pt grid). Only these children
+    // change; the collapsed header/summary keeps its compact presentation.
     return ListTile(
       key: Key('session-task-item-$index'),
-      dense: true,
-      leading: Icon(icon, size: 20, color: color),
+      leading: Icon(icon, size: 40, color: color),
       title: SelectionArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(item.title),
+            Text(item.title, style: textTheme.headlineMedium),
             if (item.detail case final detail?) ...[
               const SizedBox(height: 4),
               Text(
                 detail,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: textTheme.headlineSmall?.copyWith(
                   color: tokens.textSecondary,
                 ),
               ),
@@ -1086,7 +1090,7 @@ class _TaskStateRow extends StatelessWidget {
           ? null
           : Text(
               item.priority!,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              style: textTheme.titleMedium?.copyWith(
                 color: tokens.textSecondary,
               ),
             ),

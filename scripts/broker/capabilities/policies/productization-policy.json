@@ -104,6 +104,19 @@
       "reason": "Claude channel true-sync (--channels MCP bridge) is architecturally dead: claude.ai only honors permission replies from channels on Anthropic's curated allowlist, so the channel can display but not control. Reviewed out until Anthropic allowlists it; Claude sync stays Observe + Drive + PreToolUse hooks.",
       "reviewedAt": "2026-07-08",
       "reviewer": "maintainer (archived 2026-06-22; discovery-recorded 2026-07-08)"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "claude.cli.fork_session",
+      "agent": "claude",
+      "nativeId": "claude:cli:--fork-session",
+      "decision": "not-productized",
+      "risk": "medium",
+      "riskClass": "R1",
+      "reviewRequired": true,
+      "reason": "Issue 15a (2026-08-19): Drive never forks. A forked resume writes a second branch on the shared transcript tree that the terminal owner cannot see, and the activity watcher and resume hints all had to re-point mid-flight. Takeover now resumes in place; a mid-turn terminal owner is refused at attach, and a later terminal write demotes the drive to observe.",
+      "reviewedAt": "2026-08-19",
+      "reviewer": "maintainer"
     }
   ]
 }

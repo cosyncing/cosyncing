@@ -67,7 +67,6 @@ class SessionControlView {
     required this.action,
     required this.canMutate,
     required this.canPrompt,
-    required this.willFork,
     required this.answerOnly,
     this.canTakeOver = false,
     this.takeoverMode,
@@ -138,7 +137,6 @@ class SessionControlView {
         action: SessionControlAction.disabled,
         canMutate: false,
         canPrompt: false,
-        willFork: false,
         answerOnly: false,
       );
     }
@@ -271,7 +269,6 @@ class SessionControlView {
       action: action,
       canMutate: canMutate,
       canPrompt: canPrompt,
-      willFork: drive.willFork ?? false,
       answerOnly: answerOnly,
       // Drive recovery must stay reachable on EVERY supported Observing
       // session — including when terminal sync is merely available (the pill
@@ -312,10 +309,6 @@ class SessionControlView {
   /// Whether the composer may send a new prompt right now ([canMutate] minus
   /// answer-only sync).
   final bool canPrompt;
-
-  /// Whether taking over will continue in a fork (Claude's live-owner probe;
-  /// always false for Codex/OpenCode/Pi, which never fork).
-  final bool willFork;
 
   /// Whether the session is synced but accepts answers only — cards are live,
   /// the composer stays read-only (Claude hooks-sync).

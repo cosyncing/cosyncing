@@ -46,7 +46,7 @@ import type {
   Unsubscribe,
 } from '@cosyncing/adapter-api';
 import type { DshDownlinkFrame, DshRpcClient } from './server.ts';
-import { DshDriver, type DshImageLimits } from './drive.ts';
+import { DshDriver, dshModelOptions, type DshImageLimits } from './drive.ts';
 import {
   createDshMapState,
   dshMessageKey,
@@ -867,33 +867,9 @@ export class DshSessionConnection implements SessionConnection {
   async listModels(): Promise<ModelOption[]> {
     const catalog = await this.driver.models(this.info.id);
     if (!catalog.routable) return [];
-    const options: ModelOption[] = [];
-    for (const group of catalog.groups) {
-      for (const model of group.models) {
-        const efforts = model.reasoning?.efforts ?? [];
-        options.push({
-          providerID: group.id,
-          modelID: model.id,
-          // The provider qualifies the label because two providers can serve
-          // the same model id, and a picker showing it twice is unreadable.
-          label: `${model.name} (${group.name})`,
-          ...(model.description ? { description: model.description } : {}),
-          ...(efforts.length > 0
-            ? {
-                reasoningEfforts: efforts.map((effort) => ({
-                  effort: effort.id,
-                  label: effort.name,
-                  ...(effort.description ? { description: effort.description } : {}),
-                })),
-              }
-            : {}),
-          ...(model.reasoning?.defaultEffort
-            ? { defaultReasoningEffort: model.reasoning.defaultEffort }
-            : {}),
-        });
-      }
-    }
-    return options;
+    // Flattened through the shared mapper, so the attached picker shows the
+    // same rows the pre-session catalog (`DshAdapter.listModels`) offered.
+    return dshModelOptions(catalog.groups);
   }
 
   /**

@@ -94,6 +94,7 @@ import {
   searchGroup,
   searchSemantic,
   webSemantic,
+  OwnershipConflictError,
 } from '@cosyncing/adapter-api';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 
@@ -124,6 +125,38 @@ const DEFAULT_PROJECTS_ROOT = join(DEFAULT_CONFIG_DIR, 'projects');
 const DEFAULT_BIN = process.env.COSYNCING_CLAUDE_BIN?.trim() || 'claude';
 /** Deferred rows are process-local and disappear on restart, so retain only a bounded FIFO working set. */
 export const CLAUDE_MAX_PENDING_CREATES = 256;
+
+/** Why a takeover was refused, in the caller's language: the terminal owner is mid-turn, so driving
+ *  now would be a guaranteed two-writer collision on one transcript (issue 15a). */
+export const CLAUDE_TERMINAL_BUSY_REFUSAL =
+  'A terminal attached to this Claude session is running a turn right now. cosyncing will not take '
+  + 'over mid-turn — two writers on one session fork its history into sibling branches. Wait for the '
+  + 'turn to finish, or quit the terminal, then take over.';
+/** Machine conflict category for the refusal above; the broker relays it as an `attach-conflict`. */
+export const CLAUDE_TERMINAL_BUSY_CONFLICT = 'claude-terminal-busy';
+
+/** Machine `drive.reason` for a connection demoted after a foreign write was proven (issue 15a).
+ *  Mirrors kimi's `kimi-foreign-writer`. */
+export const CLAUDE_FOREIGN_WRITER_REASON = 'claude-foreign-writer';
+
+/** Said once, when driving stops. States the hazard, not the mechanism. */
+export const CLAUDE_DIVERGENCE_MESSAGE =
+  'Another program wrote to this Claude session — most likely its terminal. cosyncing has stopped '
+  + 'driving it and is now observing only: two writers on one Claude session silently fork its history '
+  + 'into sibling branches. Quit the other program and take over again to keep driving.';
+
+/** Refusal text for every prompt attempted after demotion. */
+export const CLAUDE_DEMOTED_REFUSAL =
+  'this Claude session is being written by another program, so cosyncing is observing it only';
+
+/** Post-turn window in which trailing transcript writes are still attributed to OUR just-finished turn
+ *  rather than flagged foreign (issue 15a). The child flushes its final assistant rows within
+ *  milliseconds of the stdout result; the echo tail polls every 1 s, so one poll interval of grace
+ *  covers the lag without giving a real foreign writer meaningful room. */
+export const CLAUDE_TURN_END_GRACE_MS = 2_000;
+/** Bound on the never-echoed submitted-prompt FIFO (exoneration list). Real depth is ≤2 (one in
+ *  flight, one queued); the cap only bounds a pathological no-echo run. */
+export const CLAUDE_SUBMITTED_TEXTS_LIMIT = 32;
 
 /**
  * A Claude session STORE: a `CLAUDE_CONFIG_DIR` and the launch binary that targets it. The official
@@ -267,9 +300,9 @@ function slugForCwd(cwd: string): string {
  * blocked EVERY live local subscription session (verified: this host's own running terminal session
  * carries a `bridgeSessionId` yet is plainly drivable), while third-party wrapper stores — which have no
  * such pid-files — stayed drivable. A locally-launched `kind:"interactive" entrypoint:"cli"` session is a
- * normal terminal session we CAN drive (and `--fork-session` resume is single-owner safe regardless), so
- * it is NOT treated as remote-controlled; only a bridged session that is NOT a local interactive CLI
- * launch is.
+ * normal terminal session we CAN drive (a mid-turn one is refused at takeover; a later write demotes
+ * the drive — issue 15a), so it is NOT treated as remote-controlled; only a bridged session that is
+ * NOT a local interactive CLI launch is.
  *
  * Join key is the `sessionId` field, never the pid (pids recycle; one sessionId can appear in several pid
  * files — any bridged file for it marks the session). Liveness-guarded on Linux (`/proc/<pid>`) so a
@@ -322,13 +355,14 @@ function pidAlive(pid: unknown): boolean {
 
 /** Live local terminal owner for a Claude transcript uuid, from `<configDir>/sessions/*.json`.
  *  This is broader than {@link bridgedUuids}: any alive pid-file naming the uuid means another
- *  terminal process may have in-memory ownership, so app Drive must fork instead of mutating in place. */
+ *  terminal process may have in-memory ownership — a takeover against one that is MID-TURN is refused,
+ *  and a later write from one demotes the drive (issue 15a). */
 export function liveTerminalOwner(store: ClaudeStore, uuid: string, opts?: { fresh?: boolean }): number | null {
   return liveOwnerMap(store, opts?.fresh === true).get(uuid) ?? null;
 }
 
-// One sessions-dir scan per store per few seconds — claudeControl now asks per ROSTER ROW (willFork,
-// issues-part2), and an uncached scan would be O(rows × pid-files) reads per poll.
+// One sessions-dir scan per store per few seconds — claudeControl asks per ROSTER ROW (the terminal-
+// attached warning, issues-part2), and an uncached scan would be O(rows × pid-files) reads per poll.
 const _ownerMapCache = new Map<string, { at: number; map: Map<string, number> }>();
 const OWNER_MAP_TTL_MS = 4000;
 
@@ -719,8 +753,9 @@ export function syncCommand(store: ClaudeStore, uuid: string): string {
 /**
  * Build the explicit control state for one Claude session.
  *  - Observe+Drive is REAL: Drive = a broker-owned `claude -p --resume` (lazy on first prompt).
- *    `observing` when the terminal still owns it; `driving` when we own the resume fork; `unavailable`
- *    on a remote-control collision or a vanished workspace (resume is cwd-scoped).
+ *    `observing` when the terminal still owns it; `driving` when we own the resume child; `unavailable`
+ *    on a remote-control collision, a vanished workspace (resume is cwd-scoped), or a proven foreign
+ *    writer (issue 15a demotion).
  *  - True-Sync via the claude/channel bridge plugin: `active:true` when a live bridge socket exists for
  *    this session (terminal + app share one live owner); otherwise `supported:true` with the exact
  *    `--channels` setup command. A remote-controlled session can be NEITHER driven NOR synced.
@@ -763,15 +798,15 @@ export function claudeControl(opts: {
   } else if (cwd && !existsSync(cwd)) {
     drive = { state: 'unavailable', supported: false, reason: 'Workspace no longer exists — cannot resume.' };
   } else {
-    // A live TUI owner means the first driven prompt forks (single-owner safety) — surface that BEFORE
-    // the user drives, not after the fork already happened (issues-part2 divergence trap).
+    // A live TUI owner no longer forks the drive (issue 15a — demote, never fork): takeover attaches
+    // in place, and a terminal write demotes the connection back to observe. Keep a pre-drive warning
+    // (the replaced willFork signal) so the user is told BEFORE driving, not after the demote.
     const owned = liveTerminalOwner(store, uuid) !== null;
     drive = {
       state: 'observing',
       supported: true,
-      ...(owned ? { willFork: true } : {}),
       reason: owned
-        ? 'A terminal is attached to this session right now. Driving will continue in a FORK (new uuid) so two owners never write the same transcript — quit the terminal first to drive the same session in place.'
+        ? 'A terminal is attached to this session right now — if it writes, cosyncing will stop driving and revert to observe. Quit the terminal first to drive without interruption.'
         : store.isDefault
           ? 'Driving resumes this session via claude -p --resume on your Claude subscription (no API cost).'
           : `Driving runs ${store.model ?? 'this wrapper'} on its own endpoint.`,
@@ -797,8 +832,8 @@ export function claudeControl(opts: {
       // Claude has no live terminal sync (channel sync archived), but a terminal CAN rejoin this
       // conversation by resuming it. Provide that command GENERICALLY (label + command) so the app's
       // "sync your terminal" tip needs no `tool === 'claude'` branch — it just renders `command`. The
-      // uuid here is the base session id; the live connection refreshes it to the fork uuid on the
-      // single-owner-safety fork (issues-part2), so the tip always targets the conversation the app drives.
+      // uuid here is the base session id; the live connection refreshes it if the process ever reports
+      // a rotated id (defensive liveUuid path, issue 15a), so the tip always targets the live conversation.
       label: 'Resume in terminal',
       command: claudeResumeTerminalCommand(uuid, cwd),
       // Packaged v1 deliberately exposes no hook setup or live-sync promise. The source-only hooks
@@ -814,14 +849,14 @@ export function claudeControl(opts: {
 }
 
 /**
- * Argv for a resume launch. Exported so tests can assert cost safety (`--bare` is forbidden) and the
- * live-owner guard: unowned sessions resume in place; terminal-owned sessions fork.
+ * Argv for a resume launch. Exported so tests can assert cost safety (`--bare` is forbidden). Sessions
+ * always resume IN PLACE (issue 15a — demote, never fork): `--fork-session` is never emitted, so the
+ * driven turns stay on the SAME uuid the terminal and the roster see.
  */
-export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; effort?: string; isDefault: boolean; fresh?: boolean; fork?: boolean }): string[] {
+export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; effort?: string; isDefault: boolean; fresh?: boolean }): string[] {
   // A brand-new (broker-created) session has no transcript yet: START it with `--session-id <uuid>`
-  // (Claude creates the conversation under that exact id), NOT `--resume` (which needs an existing one)
-  // and without `--fork-session` (nothing to fork). An existing session resumes and forks (single-owner
-  // safe). Verified on a free wrapper: `--session-id <new-uuid>` creates the transcript, `--resume` then
+  // (Claude creates the conversation under that exact id), NOT `--resume` (which needs an existing one).
+  // Verified on a free wrapper: `--session-id <new-uuid>` creates the transcript, `--resume` then
   // drives it.
   // --permission-prompt-tool stdio: WITHOUT it, headless -p never asks — a gated tool is silently
   // auto-denied ("This command requires approval" tool error) and the app shows NO permission popup
@@ -830,7 +865,7 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
   // until our control_response). The existing control_request handler was dead code until this flag.
   const args = opts.fresh
     ? ['-p', '--session-id', uuid, '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio']
-    : ['-p', '--resume', uuid, ...(opts.fork ? ['--fork-session'] : []), '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio'];
+    : ['-p', '--resume', uuid, '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio'];
   // Model: the default store sends an alias (opus/sonnet/haiku); a wrapper sends one of its OWN discovered
   // backend models (claude-mi pro vs non-pro), so pass --model for BOTH so a wrapper can switch among them.
   if (opts.model) args.push('--model', opts.model);
@@ -1118,6 +1153,11 @@ export class ClaudeAdapter implements AgentBackend {
    *  creation cannot silently fall back to Claude's defaults. In-memory is sufficient: the virtual
    *  row itself only lives until a broker restart. FIFO-bounded below. */
   private readonly pendingCreates = new Map<string, { cwd: string; model?: PromptInput['model'] }>();
+  /** Roster-visible drive ownership, mirroring kimi's `ownedSessions` (issue 15b): a resume attach
+   *  registers its roster row id here and the connection deregisters on close/demote, so EVERY
+   *  client's roster row reports `driving` — not only the client holding the connection. In-memory
+   *  is sufficient: a broker restart drops every live connection with it. */
+  private readonly drivenSessions = new Map<string, ClaudeResumeConnection>();
 
   async isAvailable(): Promise<boolean> {
     return claudeStores().some((s) => existsSync(s.projectsRoot)) || resolveBin('claude') !== null;
@@ -1203,8 +1243,9 @@ export class ClaudeAdapter implements AgentBackend {
     }
     const eligible = eligibleForChannels(store, cwd);
     const now = Date.now();
+    const rowId = enc(path);
     return {
-      id: enc(path),
+      id: rowId,
       tool: this.id,
       title: opts.title?.trim() || basename(cwd) || 'Claude session',
       cwd,
@@ -1224,7 +1265,7 @@ export class ClaudeAdapter implements AgentBackend {
       attachMode: 'observe',
       createdAt: now,
       updatedAt: now,
-      control: claudeControl({ store, uuid, cwd, bridged: false, driving: false, channelsEligible: eligible }),
+      control: claudeControl({ store, uuid, cwd, bridged: false, driving: this.drivenSessions.has(rowId), channelsEligible: eligible }),
     };
   }
 
@@ -1372,8 +1413,9 @@ export class ClaudeAdapter implements AgentBackend {
           // `agents --json` row is idle even if its final durable record was a tool_use.
           const conversationTs = lastConversationTs(full) ?? st.mtimeMs;
           const status = await claudeSessionStatus(full, raw, now);
+          const rowId = enc(full); // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
           out.push({
-            id: enc(full), // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
+            id: rowId,
             lineageId: firstUserUuid,
             tool: this.id,
             ...(nativeId ? { nativeId } : {}),
@@ -1389,7 +1431,9 @@ export class ClaudeAdapter implements AgentBackend {
             control: (() => {
               const eligible = eligibleFor(cwd); // first-party (incl. project-settings) check, cwd-cached
               // channel sync archived → a live socket no longer flips terminalSync.active (syncedSet dormant).
-              return claudeControl({ store, uuid, cwd, bridged: bridged.has(uuid), channelsEligible: eligible });
+              // driving comes from the ADAPTER's registry (issue 15b) so every client's roster row shows
+              // the drive, not just the client holding the resume connection.
+              return claudeControl({ store, uuid, cwd, bridged: bridged.has(uuid), driving: this.drivenSessions.has(rowId), channelsEligible: eligible });
             })(),
             updatedAt: conversationTs,
           });
@@ -1458,7 +1502,32 @@ export class ClaudeAdapter implements AgentBackend {
       // remote-controlled/cwd-gone session is unavailable for Drive. Channel sync is archived.
       control: claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
     };
-    if (mode === 'resume') return new ClaudeResumeConnection(store, path, info);
+    if (mode === 'resume') {
+      // Single-writer rule (issue 15a — demote, never fork): a live terminal owner MID-TURN makes the
+      // takeover a guaranteed two-writer collision, so refuse it instead of forking. An idle terminal
+      // is joined in place, and a later terminal write is caught by the connection's foreign-write
+      // demotion. A session this adapter already drives re-attaches without re-checking — the owner
+      // map can see our own warm child, and the hub joins the existing connection anyway.
+      if (!this.drivenSessions.has(sessionId) && liveTerminalOwner(store, uuid, { fresh: true }) !== null) {
+        const liveRow = (await liveStatusByStore(store)).get(uuid);
+        const status = existsSync(path)
+          ? await claudeSessionStatus(path, liveRow?.status, Date.now())
+          : liveRow?.status;
+        if (status === 'working' || status === 'needs-input') {
+          throw new OwnershipConflictError(CLAUDE_TERMINAL_BUSY_REFUSAL, CLAUDE_TERMINAL_BUSY_CONFLICT);
+        }
+      }
+      // Identity-aware registration: the hub's replaceForTakeover attaches the replacement BEFORE
+      // closing the stale (demoted) incumbent, so an unconditional delete on close would deregister
+      // the replacement that just took over. Only the registered owner may remove the entry.
+      const conn = new ClaudeResumeConnection(store, path, info, () => {
+        if (this.drivenSessions.get(sessionId) === conn) {
+          this.drivenSessions.delete(sessionId);
+        }
+      });
+      this.drivenSessions.set(sessionId, conn);
+      return conn;
+    }
     // Observe: surface WHY a session is blocked (its `<bin> agents --json` waiting reason) so the app
     // can render the real on-disk question, or an honest read-only notice, instead of a silent transcript. (Issue G.)
     const liveRow = (await liveStatusByStore(store)).get(uuid);
@@ -2270,11 +2339,12 @@ function collectMdCommands(base: string, dir: string, out: Map<string, SlashComm
 
 /**
  * Drives a session via a long-lived
- *   <bin> -p --resume <uuid> --fork-session --output-format stream-json --input-format stream-json
+ *   <bin> -p --resume <uuid> --output-format stream-json --input-format stream-json
  *         --include-partial-messages --verbose [--model X] [--permission-mode M]
  * process. History = the existing transcript replay (reuse {@link mapTranscript}); live turns are the
- * process's stream-json stdout, mapped with the SAME verified mappers ({@link mapLine}). `--fork-session`
- * keeps the original session/terminal untouched (single-owner safety). The process launches LAZILY on
+ * process's stream-json stdout, mapped with the SAME verified mappers ({@link mapLine}). The resume is
+ * always IN PLACE (issue 15a — demote, never fork): a terminal that writes mid-drive is proven by the
+ * echo tail and ends the drive instead of forking it. The process launches LAZILY on
  * the FIRST sendPrompt — never on attach — so opening even a paid official session spends nothing until
  * you actually drive it. Model/permission-mode are launch args, so changing them relaunches. `bin` is
  * the wrapper path for wrapper sessions, so the right provider/model + CLAUDE_CONFIG_DIR are used.
@@ -2294,7 +2364,7 @@ export class ClaudeResumeConnection implements SessionConnection {
   private readonly callMeta = new Map<string, ClaudeCall>();
   private readonly seenTokenIds = new Set<string>();
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
-   *  watcher re-points to the forked uuid's activity dir once the live process reports its session id. */
+   *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
   private readonly resolvedToolUseIds = new Set<string>();
   private readonly backgroundToolUseIds = new Set<string>();
@@ -2338,22 +2408,49 @@ export class ClaudeResumeConnection implements SessionConnection {
   private readonly connNonce = ++resumeConnSeq; // process-unique per connection → live-turn keys never collide across a reconnect rebuild (liveTurnSeq resets to 0 on a fresh connection)
   private readonly blockAccum = new Map<number, string>(); // index → accumulated streamed text (this message)
   private readonly blockKind = new Map<number, 'text' | 'thinking'>(); // index → block kind
-  /** USER-ECHO TAIL (item-12 follow-up). Drive stdout emits NO user events at all (probed 2.1.207) —
-   *  neither for a direct prompt nor for a mid-turn message the CLI queued and later delivered. The
-   *  app therefore draws its own optimistic bubble on send, but a QUEUED send's dimmed bubble could
-   *  never clear: the delivery proof exists only as a user line in the transcript. This narrow tail
-   *  polls the live transcript and emits ONLY user-message frames from appended lines (everything
-   *  else — tool results, assistant turns — already arrives via stdout and must not double). */
+  /** USER-ECHO TAIL + FOREIGN-WRITE DETECTION (item-12 follow-up; issue 15a). Drive stdout emits NO
+   *  user events at all (probed 2.1.207) — neither for a direct prompt nor for a mid-turn message the
+   *  CLI queued and later delivered. The app therefore draws its own optimistic bubble on send, but a
+   *  QUEUED send's dimmed bubble could never clear: the delivery proof exists only as a user line in
+   *  the transcript. This narrow tail polls the live transcript and emits ONLY user-message frames from
+   *  appended lines (everything else — tool results, assistant turns — already arrives via stdout and
+   *  must not double).
+   *
+   *  Issue 15a gives the same tail a second job: takeover now resumes IN PLACE on a transcript a
+   *  terminal may also write, and Claude's JSONL is a parent-linked tree — two writers produce sibling
+   *  branches off a common parent, so a foreign write is structurally provable. An appended
+   *  conversation row is FOREIGN when it is not accounted for by this connection:
+   *   - a user-message row whose text matches a submitted send (FIFO) is our own echo — exonerated;
+   *   - an assistant row appended while our child is running, or inside the post-turn grace window, is
+   *     our own turn's output — exonerated;
+   *   - anything else proves a second writer → demote to observe (kill the child, keep watching).
+   *  Non-conversation rows (summary, file-history-snapshot, tool-result-only user rows, meta/sidecar
+   *  lines mapUser suppresses) never convict: they are bookkeeping, not a writer's turn. */
   private echoTailPath?: string;
   private echoTailOffset = 0;
   private echoTailBuf = '';
   private echoTailTimer?: ReturnType<typeof setInterval>;
   private readonly echoDecoder = new TextDecoder(); // NOT this.decoder — that one holds stdout stream state
+  /** Set once a foreign write is PROVEN on the shared transcript (issue 15a): the connection stays
+   *  open and observing, kills its child, and refuses every further write — demote, never fork. */
+  private demoted = false;
+  /** FIFO of prompt texts this connection submitted whose transcript echo has not been seen yet — the
+   *  exoneration list for foreign-write detection. Our own sends echo back as transcript user rows on
+   *  the same tail that watches for foreign writers, so they must be accounted for, not flagged.
+   *  Bounded: a never-echoed send would otherwise accumulate (cap is generous; real depth is ≤2). */
+  private readonly submittedTexts: string[] = [];
+  /** Wall clock of the last turn end OUR child produced (result or exit). The child's final transcript
+   *  writes can land a moment after its stdout result, so assistant rows inside this grace window are
+   *  attributed to our own turn's tail rather than flagged foreign. */
+  private lastTurnEndedAt = 0;
 
   constructor(
     private readonly store: ClaudeStore,
     private readonly path: string,
     readonly info: SessionInfo,
+    /** Deregisters this session from the adapter's drive registry (issue 15b) on close AND on demote —
+     *  either way this connection no longer owns the drive, and the roster must stop saying so. */
+    private readonly onClosed?: () => void,
   ) {
     this.uuid = basename(path).replace(/\.jsonl$/, '');
     this.liveUuid = this.uuid;
@@ -2362,7 +2459,7 @@ export class ClaudeResumeConnection implements SessionConnection {
   subscribe(handler: AgentMessageHandler): Unsubscribe {
     this.handlers.add(handler);
     // Surface existing subagents/workflows even before the first prompt (a zero-prompt Drive attach
-    // still shows what's on disk). The watcher re-points to the fork dir once the process reports it.
+    // still shows what's on disk). The watcher re-points if the process ever reports a rotated id.
     if (!this.activity) {
       this.activity = new ClaudeActivityWatcher(
         claudeActivityDir(this.path),
@@ -2380,9 +2477,11 @@ export class ClaudeResumeConnection implements SessionConnection {
     return () => this.handlers.delete(handler);
   }
 
-  /** Poll the live transcript for appended lines and emit ONLY their user-message frames (the drive
-   *  child's delivery echo — see the field doc above). Self-repoints when a fork moves the live file;
-   *  a path change re-baselines to the file's current size so copied history never re-emits. */
+  /** Poll the live transcript for appended lines: emit ONLY their user-message frames (the drive
+   *  child's delivery echo — see the field doc above) and detect foreign writes (issue 15a).
+   *  Self-repoints when the live process reports a rotated session id; a path change re-baselines to
+   *  the file's current size so copied history never re-emits — and pre-existing rows can never be
+   *  mistaken for a foreign write, since only lines appended AFTER the baseline are examined. */
   private drainUserEcho(): void {
     const p = this.liveTranscriptPath();
     if (p !== this.echoTailPath) {
@@ -2406,11 +2505,91 @@ export class ClaudeResumeConnection implements SessionConnection {
       const raw = this.echoTailBuf.slice(0, nl);
       this.echoTailBuf = this.echoTailBuf.slice(nl + 1);
       const ln = parseLineOrNull(raw);
-      if (!ln || ln.type !== 'user') continue;
-      for (const m of mapUser(ln, this.callMeta)) {
-        if (m.type === 'user-message') this.emit(m);
+      if (!ln) continue;
+      if (ln.type === 'user') {
+        const frames = mapUser(ln, this.callMeta);
+        // Exoneration BEFORE emission: a user-message row this connection did not submit is a second
+        // writer's prompt (the terminal's, or another driver's) — proven foreign, demote at once. Rows
+        // mapUser suppresses (tool results, meta, command sidecars) carry no verdict either way. A
+        // DEMOTED connection skips the verdict and keeps emitting: it is a pure observer now, and the
+        // foreign writer's prompts are exactly what the user still wants to see.
+        if (!this.demoted) {
+          for (const m of frames) {
+            if (m.type === 'user-message' && !this.exonerateSubmitted(m.text)) {
+              this.demoteToObserve();
+              // Fall through and still emit: this row is the foreign writer's prompt, and the
+              // demoted observer must show it.
+              break;
+            }
+          }
+        }
+        for (const m of frames) {
+          if (m.type === 'user-message') this.emit(m);
+        }
+      } else if (!this.demoted && ln.type === 'assistant' && !this.running && Date.now() - this.lastTurnEndedAt > CLAUDE_TURN_END_GRACE_MS) {
+        // An assistant row from nobody's live turn: our child is not running and the grace window for
+        // its final writes has closed — a second writer is mid-turn on the shared transcript.
+        this.demoteToObserve();
+        return;
       }
     }
+  }
+
+  /** Account one appended user-message row against the FIFO of prompts this connection sent. Exact
+   *  text match, oldest first — the transcript preserves the text we wrote, so equality is sufficient
+   *  and a foreign row that happens to repeat our text is at worst one missed detection, never a
+   *  false demotion of an innocent session. */
+  private exonerateSubmitted(text: string): boolean {
+    // The string-content branch of mapUser carries the text UNtrimmed while the array branch trims —
+    // normalize on this side so both echo shapes match the trimmed submission.
+    const i = this.submittedTexts.indexOf(text.trim());
+    if (i === -1) return false;
+    this.submittedTexts.splice(i, 1);
+    return true;
+  }
+
+  /**
+   * Stop driving, in place, and say why (issue 15a — demote, never fork; mirrors kimi's demotion).
+   *
+   * The connection stays OPEN and keeps observing: the user still wants to see the session, and
+   * closing it would look like a crash. It sends NOTHING more — no abort prompt, no farewell — because
+   * a write to a session that already has two writers is the exact hazard this is avoiding.
+   */
+  private demoteToObserve(): void {
+    if (this.demoted) return;
+    this.demoted = true;
+    this.submittedTexts.length = 0;
+    // Kill the drive child NOW: it shares the transcript file with the foreign writer, and every turn
+    // it completes interleaves the two branches further. The user echo tail keeps running — watching
+    // is the whole point of staying open.
+    this.killProc();
+    if (this.running) {
+      this.running = false;
+      this.emit({ type: 'status', status: 'idle' });
+    }
+    // Leave the adapter's drive registry so every client's roster row flips back to observing (15b).
+    this.onClosed?.();
+    this.info.attachMode = 'observe';
+    this.info.control = {
+      drive: {
+        // `unavailable` + `supported: false`: this generation is finished — re-driving it would fork
+        // the transcript the foreign writer already touched. Re-takeover stays legitimate as a FRESH
+        // user confirmation opening a fresh connection (absent takeoverMode = the default 'resume').
+        supported: false,
+        state: 'unavailable',
+        reason: CLAUDE_FOREIGN_WRITER_REASON,
+        takeoverAvailable: true,
+      },
+      // Unchanged: demotion is a statement about the DRIVE half only.
+      terminalSync: this.info.control?.terminalSync
+        ?? { supported: false, syncAvailable: false, active: false, reason: CLAUDE_FOREIGN_WRITER_REASON },
+    };
+    this.emit({
+      type: 'metadata-update',
+      key: 'sessionInfo',
+      value: { attachMode: this.info.attachMode, control: this.info.control },
+    });
+    this.emit({ type: 'error', message: CLAUDE_DIVERGENCE_MESSAGE });
   }
   private emit(m: AgentMessage): void {
     for (const h of this.handlers) {
@@ -2423,9 +2602,9 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async getHistory(): Promise<AgentMessage[]> {
-    // The conversation so far is the active transcript. Unowned Drive resumes in place; if live-owner
-    // safety forced a fork, follow the learned fork uuid because it contains the copied history plus
-    // driven turns.
+    // The conversation so far is the active transcript. Drive resumes in place; if the live process
+    // ever reported a rotated session id (defensive liveUuid path — issue 15a), follow it because
+    // that file contains the driven turns.
     const historyPath = this.liveTranscriptPath();
     try {
       const buf = readFileBuffer(historyPath);
@@ -2464,6 +2643,12 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {
+    // A demoted connection writes NOTHING (issue 15a): the session has a proven foreign writer, and any
+    // further prompt from us is the two-writer hazard the demotion exists to prevent.
+    if (this.demoted) {
+      this.emit({ type: 'error', message: CLAUDE_DEMOTED_REFUSAL });
+      return;
+    }
     let text = String(input.text ?? '');
     // Resume is cwd-scoped: if the recorded workspace is gone, `claude --resume` can't find the session
     // (it would fail cryptically with "No conversation found"). Surface a clear reason instead of a
@@ -2483,7 +2668,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       text = text.trim() ? `${text}\n\n${note}` : note;
     }
     // Build the turn content FIRST and bail on an empty turn BEFORE touching the process — a no-op prompt
-    // must never kill/re-fork the warm child (Native image blocks use the Anthropic base64 block shape).
+    // must never kill/relaunch the warm child (Native image blocks use the Anthropic base64 block shape).
     const content: any[] = [];
     if (text.trim()) content.push({ type: 'text', text });
     for (const img of input.images ?? []) {
@@ -2516,6 +2701,10 @@ export class ClaudeResumeConnection implements SessionConnection {
     if (this.runtime) this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
     // The child rewrites this send as a transcript user line with no id we control, so the echo
     // stays unstamped (clientMessageId unused); the client's narrow legacy reconcile converges it.
+    // Record the exact text FIRST so the echo tail's foreign-write detection exonerates our own echo
+    // (mapUser renders the echo as the joined, trimmed block texts — the same string).
+    this.submittedTexts.push(text.trim());
+    while (this.submittedTexts.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) this.submittedTexts.shift();
     this.writeLine({ type: 'user', message: { role: 'user', content } });
   }
 
@@ -2564,10 +2753,9 @@ export class ClaudeResumeConnection implements SessionConnection {
     // rather than --resume; once that first turn materializes the file, later (re)launches resume normally.
     const targetUuid = this.liveUuid;
     const targetPath = this.liveTranscriptPath();
-    // `fresh: true` bypasses the owner-map TTL — "quit the TUI, then press send" must resume in place
-    // immediately, not fork off a stale 4s-old owner snapshot.
-    const fork = targetUuid === this.uuid && liveTerminalOwner(this.store, this.uuid, { fresh: true }) !== null;
-    const args = resumeArgs(targetUuid, { model, mode, effort, isDefault: this.store.isDefault, fresh: !existsSync(targetPath), fork });
+    // Issue 15a: always resume IN PLACE — no fork decision. A mid-turn terminal owner is refused at
+    // attach; a later terminal write demotes this connection instead of forking it.
+    const args = resumeArgs(targetUuid, { model, mode, effort, isDefault: this.store.isDefault, fresh: !existsSync(targetPath) });
     let proc: ChildProcessWithoutNullStreams;
     try {
       proc = spawn(this.store.bin, args, {
@@ -2610,6 +2798,9 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.pendingPermCard = undefined;
       this.pendingPermInput = undefined;
       if (this.running) {
+        // A dying child's trailing transcript writes are its own — give them the same post-turn grace
+        // the result path does so they can't be flagged foreign (issue 15a).
+        this.lastTurnEndedAt = Date.now();
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
       }
@@ -2702,6 +2893,11 @@ export class ClaudeResumeConnection implements SessionConnection {
         }
         this.pendingQuestionControlId = undefined;
         this.pendingQuestionControlInput = undefined;
+        // Drain the transcript tail NOW, while the turn still counts as running: the child's final rows
+        // already on disk are attributed to this turn, and the grace stamp covers any that land in the
+        // next milliseconds — neither can be misread as a foreign write by the next poll (issue 15a).
+        this.drainUserEcho();
+        this.lastTurnEndedAt = Date.now();
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
         return;
@@ -2899,22 +3095,23 @@ export class ClaudeResumeConnection implements SessionConnection {
       });
     }
     if (typeof o.permissionMode === 'string' && o.permissionMode) this.info.currentMode = o.permissionMode;
-    // `--fork-session` runs under a NEW uuid; its live subagents/workflows hang off that uuid's dir.
-    // Re-point the activity watcher there once the process reports its (forked) session id.
+    // DEFENSIVE id rotation (issue 15a): we never pass `--fork-session`, but the live process can still
+    // report a session id different from ours (Claude rotates ids for its own reasons). Cope, don't
+    // cause: follow the reported id for history/activity, and keep every hint pointing at it.
     const sid = typeof o.session_id === 'string' ? o.session_id : typeof o.sessionId === 'string' ? o.sessionId : undefined;
     if (sid && sid !== this.liveUuid) {
       this.liveUuid = sid;
       if (sid !== this.uuid) {
-        // A silent fork was the issues-part2 divergence trap: the TUI kept the ORIGINAL uuid, our
+        // A silent id change was the issues-part2 divergence trap: the TUI kept the ORIGINAL uuid, our
         // Sync-TUI notice cited the original too, and Claude's /resume picker hides sdk-created
         // sessions — so the driven turns looked simply lost. Say it loudly and hand the app the
-        // CURRENT uuid (`liveUuid`) so every "resume in terminal" hint targets the fork.
+        // CURRENT uuid (`liveUuid`) so every "resume in terminal" hint targets the live conversation.
         this.emit({
           type: 'notice',
-          message: `Your terminal still owns the original session, so driving continues in a fork. This conversation now lives at uuid ${sid} — to follow it in a terminal, quit the old TUI and run: ${claudeResumeTerminalCommand(sid, this.info.cwd)}`,
+          message: `Claude moved this conversation to a new session id (${sid}) — to follow it in a terminal, run: ${claudeResumeTerminalCommand(sid, this.info.cwd)}`,
         });
         (this.info as { liveUuid?: string }).liveUuid = sid; // direct too — the hub merge only covers hub-managed paths
-        // Keep the generic terminalSync command pointing at the fork uuid so the app's resume tip is
+        // Keep the generic terminalSync command pointing at the live uuid so the app's resume tip is
         // correct without a tool-name branch (the hub Object.assign-merges the control we send here).
         if (this.info.control?.terminalSync) this.info.control.terminalSync.command = claudeResumeTerminalCommand(sid, this.info.cwd);
         this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { liveUuid: sid, ...(this.info.control ? { control: this.info.control } : {}) } });
@@ -3093,6 +3290,10 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.echoTailTimer = undefined;
     }
     this.echoTailBuf = '';
+    this.submittedTexts.length = 0;
+    // Leave the adapter's drive registry (idempotent — a demotion already deregistered) so the roster
+    // stops reporting this session as driven once its owner connection is gone (issue 15b).
+    this.onClosed?.();
     this.activity?.close();
     this.activity = undefined;
     this.handlers.clear();
@@ -4630,7 +4831,8 @@ export class ClaudeActivityWatcher {
     this.sweep();
   }
 
-  /** Re-point at a new activity dir — a resume `--fork-session` writes live activity under the FORKED uuid. */
+  /** Re-point at a new activity dir — the live process can report a rotated session id whose activity
+   *  hangs off the NEW uuid's directory (defensive liveUuid path, issue 15a). */
   repoint(dir: string): void {
     if (dir === this.dir) return;
     this.stopWatchers();

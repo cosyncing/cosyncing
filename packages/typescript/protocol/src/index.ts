@@ -2090,10 +2090,6 @@ export interface SessionDriveControl {
   state: DriveState;
   supported: boolean;
   reason?: string;
-  /** A live terminal currently owns this session, so driving now will CONTINUE IN A FORK (new uuid)
-   *  for single-owner safety. The app must warn before the first driven prompt: quitting the terminal
-   *  first keeps the SAME session instead. */
-  willFork?: boolean;
   /** Can Drive be RELEASED to a terminal for this session? Absent keeps the established behavior —
    *  a driving session offers handoff — so every adapter that predates this field is unchanged.
    *

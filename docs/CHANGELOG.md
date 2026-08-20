@@ -11,6 +11,81 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Kimi sessions support file and image attachments: images go inline as
+  vision input, other files upload through the kimi server's own file API.
+- Kimi sessions expose slash commands: `/goal` (set, status, pause, resume,
+  clear) and the server's skills as prompt commands.
+- Kimi sessions can be renamed; the rename lands in kimi's own session
+  metadata.
+- Kimi driving sessions show a copyable "Resume in terminal" command
+  (`kimi -S <id>`), and observed Claude sessions now show the `claude --resume`
+  command the adapter already published.
+- DeepSeek Harness sessions can select a model at creation time, from the
+  host's global model catalog.
+- DeepSeek Harness foreground subagent and workflow tool runs show live
+  activity bars, matching the existing codex and OpenCode display. Background
+  spawns stay linked through the roster as before.
+- Kimi `Agent` tool runs show live subagent activity bars: foreground spawns
+  are bracketed by the call/result pair, and detached spawns settle through
+  the task-completion path.
+- Images attached to kimi prompts echo back as real image rows in history
+  instead of a generic `kimi.image` event card.
+
+### Changed
+
+- Claude take-over no longer forks the session. Driving a terminal-owned
+  Claude session now resumes it in place: a takeover against a terminal that is
+  mid-turn is refused with an explanation, and if the terminal writes later,
+  cosyncing stops driving and reverts to observe instead of forking — two
+  writers on one transcript would silently split its history. The pre-drive
+  fork warning is replaced by a terminal-attached notice, and the fork-specific
+  confirmation dialog is retired.
+- Every client now sees when a Claude session is being driven, not just the
+  client that took it over: drive ownership is tracked by the adapter and
+  published on the roster row.
+- The `willFork` flag is gone from the session control contract. Nothing forks
+  any more, so it had no state left to report; the terminal-attached warning
+  travels in the drive `reason` text instead.
+- A takeable-but-demoted session now reads "Observing" instead of
+  "Unavailable", matching the takeover wording already used elsewhere.
+
+### Fixed
+
+- Kimi Drive no longer falsely reports "another program wrote to this session"
+  when the server appends its own harness rows (injections, skill activations,
+  scheduled jobs) or when a prompt echo's correlation id is lost.
+- Kimi skill and plugin activations no longer render as a giant user message:
+  the transcript shows the `/name args` action and the loaded body as a
+  collapsible context block.
+- Kimi todo lists render in the shared task panel instead of dumping the raw
+  tool arguments, and background-task completions are attributed to the
+  originating tool call as its result card (or surface as a plain notice when
+  the call cannot be found) instead of appearing as messages the operator
+  never sent.
+- The model and permission mode chosen at kimi session creation are now
+  reflected in the composer immediately, seeded at attach instead of waiting
+  for the first status poll.
+- Untitled kimi sessions show a readable `directory · id` fallback title
+  instead of the raw session id, and the session list suppresses placeholder
+  titles the same way the header already did.
+- Kimi and DeepSeek Harness turns now show the "Ran for … · Finished at …"
+  footer; kimi subagent activity frames can no longer close the main turn's
+  summary or flip its run state.
+- A prompt sent while a turn was running (steering) no longer drags itself and
+  every later prompt to the bottom of the transcript: once the prompt's echo
+  is known, its canonical position wins over the send-time anchor, and
+  delivered position holders retire once their anchor leaves the loaded
+  window.
+- On Windows, switching a virtual desktop with Ctrl+Win+Arrow no longer latches
+  the Ctrl modifier, so the next plain mouse-wheel scroll is not misread as
+  Ctrl+scroll text zoom; the latched-key release also covers the composer's
+  send chord and the attachment paste chord.
+- The expanded task/plan list in session detail now renders its rows roughly
+  three times larger — headline-scale titles, 40px status icons — instead of
+  the collapsed list's dense presentation.
+
 ## 0.4.0 — 2026-08-18
 
 ### Added

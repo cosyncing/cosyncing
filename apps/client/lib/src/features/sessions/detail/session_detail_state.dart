@@ -1327,19 +1327,29 @@ final class TranscriptHistoryWindow {
     for (final prompt in optimisticPrompts) {
       final deliveredKey = prompt.deliveredMessageKey;
       final anchorKey = prompt.anchorMessageKey;
-      var target = -1;
-      final lookupKey = deliveredKey ?? anchorKey;
-      if (lookupKey != null) {
-        target = derivedRuns.indexWhere(
-          (run) => run.stableKeys.contains(lookupKey),
+      final int target;
+      if (deliveredKey != null) {
+        final runIndex = derivedRuns.indexWhere(
+          (run) => run.stableKeys.contains(deliveredKey),
         );
+        // A delivered holder whose echo no run carries renders nothing (the
+        // run projection skips it). Bucketing it to the last run would only
+        // drag every later prompt down through the monotonic floor.
+        if (runIndex < 0) continue;
+        target = runIndex;
+      } else if (anchorKey != null) {
+        final runIndex = derivedRuns.indexWhere(
+          (run) => run.stableKeys.contains(anchorKey),
+        );
+        // A pending prompt has no canonical row; when its anchor is gone the
+        // last run is the reserved fallback.
+        target = runIndex < 0 ? pageRuns.length - 1 : runIndex;
       } else {
         target = 0;
       }
-      if (target < 0) target = pageRuns.length - 1;
-      if (target < runFloor) target = runFloor;
-      runFloor = target;
-      (promptBuckets[target] ??= <SessionOptimisticPrompt>[]).add(prompt);
+      final resolved = target < runFloor ? runFloor : target;
+      runFloor = resolved;
+      (promptBuckets[resolved] ??= <SessionOptimisticPrompt>[]).add(prompt);
     }
 
     final result = <TranscriptConversationSegment>[];
@@ -2460,11 +2470,13 @@ List<AgentMessage> projectOptimisticTranscriptMessages(
   var slotFloor = -1;
   for (final prompt in optimisticPrompts) {
     final AgentMessage row;
+    final int? deliveredIndex;
     if (prompt.deliveredMessageKey case final String deliveredKey?) {
-      final deliveredIndex = indexByKey[deliveredKey];
-      if (deliveredIndex == null) continue;
-      suppressedIndices.add(deliveredIndex);
-      final delivered = transcriptMessages[deliveredIndex];
+      final index = indexByKey[deliveredKey];
+      if (index == null) continue;
+      deliveredIndex = index;
+      suppressedIndices.add(index);
+      final delivered = transcriptMessages[index];
       row = delivered.raw['clientKey'] is String
           ? delivered
           : AgentMessage(
@@ -2479,12 +2491,21 @@ List<AgentMessage> projectOptimisticTranscriptMessages(
               },
             );
     } else {
+      deliveredIndex = null;
       row = prompt.toAgentMessage();
     }
     final anchorKey = prompt.anchorMessageKey;
+    // A delivered holder whose anchored boundary has left the window falls
+    // back to its echo's canonical index — the only position still known to
+    // be correct. Falling back to the tail instead would displace the echo
+    // behind rows it precedes and, through the monotonic floor, drag every
+    // later prompt down with it. The last-index fallback is reserved for
+    // pending prompts that genuinely have no canonical row.
     final slot = anchorKey == null
         ? -1
-        : indexByKey[anchorKey] ?? transcriptMessages.length - 1;
+        : indexByKey[anchorKey] ??
+              deliveredIndex ??
+              transcriptMessages.length - 1;
     final resolved = slot < slotFloor ? slotFloor : slot;
     slotFloor = resolved;
     (rowsBySlot[resolved] ??= []).add(row);
@@ -2930,11 +2951,15 @@ const int kMaxRetainedTranscriptClientKeys = 64;
 /// Retires delivered position holders whose work is done, oldest first.
 ///
 /// A delivered holder is redundant once rendering without it produces the same
-/// order — its canonical echo sits immediately after its anchored slot. Rows
-/// behind a retiring holder that were anchored before its echo are re-pinned
-/// to that echo, which is exactly the boundary the holder was enforcing for
-/// them, so the projected order never changes. A holder whose echo vanished
-/// from the canonical transcript renders nothing and is dropped outright.
+/// order — its canonical echo sits immediately after its anchored slot. It is
+/// equally redundant once its anchored boundary has left the window: the
+/// projection renders such an echo at its canonical index with or without the
+/// holder, so keeping it would change nothing while blocking every later
+/// holder from retiring behind it. Rows behind a retiring holder that were
+/// anchored before its echo are re-pinned to that echo, which is exactly the
+/// boundary the holder was enforcing for them, so the projected order never
+/// changes. A holder whose echo vanished from the canonical transcript renders
+/// nothing and is dropped outright.
 ///
 /// Out-of-order echoes keep their holders (that IS the display guarantee), but
 /// never more than [kMaxDeliveredOptimisticHolders]: beyond the cap the oldest
@@ -2986,7 +3011,14 @@ List<SessionOptimisticPrompt> retireSettledOptimisticHolders(
     final head = result.first;
     if (!head.isDelivered) break;
     final echoIndex = indexByKey[head.deliveredMessageKey!];
-    if (echoIndex != null && echoIndex != slotOf(head) + 1) break;
+    if (echoIndex != null) {
+      final anchorKey = head.anchorMessageKey;
+      final anchorIndex = anchorKey == null ? -1 : indexByKey[anchorKey];
+      // An anchor the window no longer carries gives the holder nothing left
+      // to enforce: the echo renders at its canonical index either way. Only
+      // a resolved anchor with a displaced echo is still doing work.
+      if (anchorIndex != null && echoIndex != anchorIndex + 1) break;
+    }
     release(0);
   }
 

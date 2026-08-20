@@ -180,18 +180,24 @@ async function main(): Promise<void> {
     await conn.close();
   }
 
-  // ── item-12 follow-up: USER-ECHO TAIL — drive stdout has NO user events (probed 2.1.207), so the
-  //    delivery proof for a mid-turn queued send is the user line the child appends to the transcript.
-  //    The tail must emit ONLY user-message frames from appended lines and never re-emit history. ──
+  // ── item-12 follow-up + issue 15a: USER-ECHO TAIL & FOREIGN-WRITE DETECTION — drive stdout has NO
+  //    user events (probed 2.1.207), so the delivery proof for a mid-turn queued send is the user line
+  //    the child appends to the transcript. The tail emits ONLY user-message frames from appended lines,
+  //    never re-emits history — and because takeover now resumes IN PLACE on a shared transcript, an
+  //    appended conversation row this connection did not produce is proof of a second writer → demote. ──
   {
-    const { conn, msgs } = newConn(); // subscribe() baselines the tail at the file's current size
+    const { conn, stdin, killed, msgs } = newConn(); // subscribe() baselines the tail at the file's current size
     const um = () => msgs.filter((m: any) => m.type === 'user-message') as any[];
+    const errors = () => msgs.filter((m: any) => m.type === 'error') as any[];
     const append = (o: any) => writeFileSync(TRANSCRIPT, JSON.stringify(o) + '\n', { flag: 'a' });
     const drain = () => (conn as any).drainUserEcho();
 
+    // Our own send's echo is exonerated by the submitted-text FIFO: emits as the delivery proof, no demote.
+    await conn.sendPrompt({ text: 'the queued message, delivered' }); // installs the fake proc (running)
     append({ type: 'user', uuid: 'echo-1', timestamp: '2026-07-14T10:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'the queued message, delivered' }] } });
     drain();
-    check('echo tail: an appended plain user line emits a user-message frame', um().length === 1 && um()[0].text === 'the queued message, delivered', JSON.stringify(um()));
+    check('echo tail: our own send echo emits a user-message frame', um().length === 1 && um()[0].text === 'the queued message, delivered', JSON.stringify(um()));
+    check('echo tail: our own echo is NOT flagged foreign', errors().length === 0 && conn.info.attachMode === 'resume');
     drain();
     check('echo tail: re-drain emits nothing (offset advanced)', um().length === 1);
 
@@ -201,20 +207,70 @@ async function main(): Promise<void> {
     append({ type: 'queue-operation', operation: 'enqueue', timestamp: '2026-07-14T10:00:01.000Z' }); // driven enqueues are contentless
     drain();
     check('echo tail: assistant/tool_result/queue-op lines emit NOTHING (stdout owns those)', msgs.length === before, JSON.stringify(msgs.slice(before)));
+    check('echo tail: an assistant row while OUR child is running is ours — no demote', conn.info.attachMode === 'resume' && errors().length === 0);
 
-    // a fork moves the live file: the tail must re-baseline there and NEVER re-emit its copied history
-    const forkPath = join(DIR, 'fork-echo.jsonl');
-    writeFileSync(forkPath, JSON.stringify({ type: 'user', uuid: 'copied-1', message: { role: 'user', content: 'copied history line' } }) + '\n');
-    (conn as any).liveUuid = 'fork-echo';
-    drain(); // repoint + baseline tick
-    drain(); // nothing new yet
-    check('echo tail: fork repoint does NOT re-emit copied history', !um().some((u) => u.text === 'copied history line'));
-    writeFileSync(forkPath, JSON.stringify({ type: 'user', uuid: 'fork-new', message: { role: 'user', content: 'typed after the fork' } }) + '\n', { flag: 'a' });
+    // The turn ends (result on stdout): trailing assistant rows inside the grace window are our tail.
+    (conn as any).handleEvent({ type: 'result', usage: {}, is_error: false });
+    check('echo tail: result ends the turn (idle)', msgs.some((m: any) => m.type === 'status' && m.status === 'idle'));
+    append({ type: 'assistant', uuid: 'echo-tail-late', message: { id: 'em2', role: 'assistant', content: [{ type: 'text', text: 'late flush' }] } });
     drain();
-    check('echo tail: appended user line on the FORK file emits', um().some((u) => u.text === 'typed after the fork'), JSON.stringify(um().map((u) => u.text)));
+    check('echo tail: assistant row inside the post-turn grace window is NOT foreign', errors().length === 0 && conn.info.attachMode === 'resume');
+
+    // A user row this connection never submitted is the second writer's prompt → demote, never fork.
+    append({ type: 'user', uuid: 'foreign-1', timestamp: '2026-07-14T10:01:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'typed in the terminal' }] } });
+    drain();
+    check('15a: a foreign user row demotes the drive (error + observe metadata)',
+      errors().some((m) => /another program wrote/i.test(String(m.message)))
+        && conn.info.attachMode === 'observe'
+        && conn.info.control?.drive.state === 'unavailable'
+        && conn.info.control?.drive.supported === false
+        && conn.info.control?.drive.reason === 'claude-foreign-writer'
+        && conn.info.control?.drive.takeoverAvailable === true,
+      JSON.stringify({ attachMode: conn.info.attachMode, control: conn.info.control }));
+    check('15a: demotion publishes the demoted control over the wire',
+      msgs.some((m: any) => m.type === 'metadata-update' && m.value?.control?.drive?.state === 'unavailable'));
+    check('15a: demotion kills the drive child (two writers never share the file)', killed());
+    check('15a: the foreign prompt still renders — a demoted connection keeps observing',
+      um().some((u) => u.text === 'typed in the terminal'));
+
+    // Demoted: further writes are refused with the honest reason, and nothing reaches stdin.
+    const stdinBefore = stdin.length;
+    await conn.sendPrompt({ text: 'one more from the app' });
+    check('15a: a demoted connection refuses prompts (error, no stdin write)',
+      stdin.length === stdinBefore && errors().some((m) => /observing it only/i.test(String(m.message))));
+    // ...and further foreign rows keep flowing through as an observer (no double-demote, no suppression).
+    append({ type: 'user', uuid: 'foreign-2', timestamp: '2026-07-14T10:02:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'terminal follow-up' }] } });
+    drain();
+    check('15a: a demoted connection keeps emitting the foreign writer’s rows', um().some((u) => u.text === 'terminal follow-up'));
+    check('15a: demotion fires once (no duplicate divergence error)', errors().filter((m) => /another program wrote/i.test(String(m.message))).length === 1);
+
+    // An idle-turn assistant row past the grace window is a foreign turn mid-flight → demotes too.
+    (conn as any).demoted = false; // reset the verdict to test the assistant path on this same conn
+    (conn as any).lastTurnEndedAt = 0; // outside any grace window
+    append({ type: 'assistant', uuid: 'foreign-a', message: { id: 'em9', role: 'assistant', content: [{ type: 'text', text: 'foreign turn output' }] } });
+    drain();
+    check('15a: an assistant row from NOBODY’s live turn (past grace) demotes', (conn as any).demoted === true);
 
     await conn.close();
     check('echo tail: close() stops the poll timer', (conn as any).echoTailTimer === undefined);
+  }
+
+  // ── 15a: rotated live uuid re-baselines the tail (defensive liveUuid path) without re-emitting ──
+  {
+    const { conn, msgs } = newConn();
+    const um = () => msgs.filter((m: any) => m.type === 'user-message') as any[];
+    const drain = () => (conn as any).drainUserEcho();
+    const rotatedPath = join(DIR, 'rotated-echo.jsonl');
+    writeFileSync(rotatedPath, JSON.stringify({ type: 'user', uuid: 'copied-1', message: { role: 'user', content: 'copied history line' } }) + '\n');
+    (conn as any).liveUuid = 'rotated-echo';
+    drain(); // repoint + baseline tick
+    drain(); // nothing new yet
+    check('echo tail: id-rotation repoint does NOT re-emit copied history', !um().some((u) => u.text === 'copied history line'));
+    await conn.sendPrompt({ text: 'typed after the rotation' });
+    writeFileSync(rotatedPath, JSON.stringify({ type: 'user', uuid: 'rot-new', message: { role: 'user', content: 'typed after the rotation' } }) + '\n', { flag: 'a' });
+    drain();
+    check('echo tail: our appended echo on the ROTATED file emits', um().some((u) => u.text === 'typed after the rotation'), JSON.stringify(um().map((u) => u.text)));
+    await conn.close();
   }
 }
 

@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 SessionControlState _control({
   required DriveState driveState,
   bool driveSupported = true,
-  bool? willFork,
   bool? handoffAvailable,
   bool? takeoverAvailable,
   AttachMode? takeoverMode,
@@ -25,7 +24,6 @@ SessionControlState _control({
       state: driveState,
       supported: driveSupported,
       reason: driveReason,
-      willFork: willFork,
       handoffAvailable: handoffAvailable,
       takeoverAvailable: takeoverAvailable,
       takeoverMode: takeoverMode,
@@ -87,11 +85,10 @@ void main() {
       expect(view.canPrompt, isFalse, reason: 'composer is not live');
     });
 
-    test('driving preserves action and willFork', () {
+    test('driving preserves action and command', () {
       final view = SessionControlView.fromControl(
         _control(
           driveState: DriveState.driving,
-          willFork: true,
           command: 'cd /w && claude --resume abc',
           terminalAction: TerminalSyncAction.handoff,
         ),
@@ -100,7 +97,6 @@ void main() {
       expect(view.action, SessionControlAction.handoff);
       expect(view.canMutate, isTrue);
       expect(view.canPrompt, isTrue);
-      expect(view.willFork, isTrue);
       expect(view.command, 'cd /w && claude --resume abc');
     });
 
@@ -560,12 +556,21 @@ void main() {
       expect(view.action, SessionControlAction.join);
     });
 
-    test('willFork defaults false when absent (non-Claude agents)', () {
-      final view = SessionControlView.fromControl(
-        _control(driveState: DriveState.observing),
-      );
-      expect(view.willFork, isFalse);
-    });
+    test(
+      'observing keeps the adapter reason visible (terminal-attached warning)',
+      () {
+        // Issue 15a: the pre-drive warning is the adapter's drive.reason
+        // copy now that the machine-readable willFork flag is gone.
+        final view = SessionControlView.fromControl(
+          _control(
+            driveState: DriveState.observing,
+            driveReason: 'A terminal is attached to this session right now.',
+          ),
+        );
+        expect(view.pill, SessionControlPill.observing);
+        expect(view.reason, contains('terminal is attached'));
+      },
+    );
 
     test('unsupported drive cannot render Driving or pass either gate', () {
       final view = SessionControlView.fromControl(
