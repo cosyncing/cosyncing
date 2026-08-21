@@ -3,25 +3,29 @@
 These are broker-independent Flutter clients. Install and run the broker first,
 then use `cosy pair` to authorize the client.
 
-## What's new in 0.4.0
+## What's new in 0.4.1
 
-- Two more agents appear alongside Claude Code, Codex, OpenCode, and Pi. Both
-  are provisional, and both need a broker running 0.4.0.
-- **Kimi Code**: every session on the local `kimi web` server is discoverable and
-  observable, whoever started it. Sessions cosyncing created are drivable —
-  prompts, approvals, question replies, interruption, model selection — a
-  session it did not create can be taken over explicitly, and Drive can be handed
-  back to the terminal. File and image input are not implemented yet.
-- **DeepSeek Harness**: session discovery, history, and shared foreground
-  control against a `dsh web` host, with model and reasoning-effort selection,
-  permission presets, the host's own commands, and image attachments. General
-  file attachments are unavailable because the host accepts image content only.
-- Neither host needs a terminal left open. An installed broker service starts,
-  supervises, and stops a host it owns; one you started yourself is never
-  stopped, replaced, or reconfigured.
-- The client no longer offers a control the session cannot grant, and a session
-  whose attach mode it cannot decode stays read-only instead of arming Drive on
-  a guess. The broker enforces that rather than trusting the client.
+- **Claude Code:** take-over resumes the existing session instead of forking
+  it. A prompt accepted while Claude is busy keeps its queued row through a
+  reload, and another authorized client can join the broker's existing Claude
+  Drive without starting a second writer.
+- **Kimi Code:** file and image attachments, `/goal` and skill commands,
+  session rename, and a copyable resume-in-terminal command are available from
+  the session UI. Images echo inside the sender's message, model names come from
+  the server, and server-authored harness rows no longer trigger a false
+  foreign-writer demotion.
+- **DeepSeek Harness:** model selection is available during session creation;
+  foreground subagent and workflow runs show live activity; subagent sessions
+  nest under their parent; and the selected model and permission mode appear as
+  soon as the session attaches.
+- The expanded task list is taller, uses transcript body text, and stays visible
+  until you archive it. Finished cards no longer disappear after three seconds.
+- Windows no longer leaves Ctrl latched after Ctrl+Win+Arrow, which previously
+  made the next plain wheel gesture change text zoom.
+- Claude and Kimi session rows show provider-authored model names, including
+  Claude Fable and the Kimi server's display names.
+
+For the complete behavior above, use a 0.4.1 client with a 0.4.1 broker.
 
 ## Known issue
 
