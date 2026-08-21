@@ -66,8 +66,10 @@ function check(name: string, ok: boolean, detail = ''): void {
   const expectedMethods = [
     'host.describe', 'workspace.list', 'session.list', 'session.history',
     'session.create', 'session.prompt', 'session.cancel', 'session.rename',
-    // The model surface, verified against the installed 0.1.0-rc.6 host.
-    'session.models', 'session.selectModel',
+    // The model surface, verified against the installed 0.1.0-rc.6 host:
+    // session-scoped catalog + selection, and the host-wide catalog the
+    // create dialog reads before any session exists.
+    'session.models', 'session.selectModel', 'llm.models',
   ];
   check(
     'the unary method allowlist is exactly the verified set',
@@ -1068,11 +1070,29 @@ class FakeSocket implements DshSocketLike {
   // so the link's readiness gate does not cover them. A canCreateSession
   // preflight minutes earlier says nothing about the process on the port NOW:
   // EACH write verifies the host itself, immediately before issuing.
+  const LLM_GROUPS = [
+    {
+      id: 'deepseek-official',
+      name: 'DeepSeek',
+      models: [
+        {
+          id: 'deepseek-v4-flash',
+          name: 'DeepSeek-V4-Flash',
+          reasoning: {
+            efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'high',
+          },
+        },
+      ],
+    },
+    { id: 'minimax-cn', name: 'MiniMax CN', models: [{ id: 'MiniMax-M3', name: 'MiniMax-M3' }] },
+  ];
+
   const make = (describes: unknown[], failRoutes: string[] = []): { adapter: DshAdapter; sent: string[] } => {
     const sent: string[] = [];
     let describeCalls = 0;
     const fetchImpl: DshFetch = async (url, init) => {
-      const body = JSON.parse(init.body) as { rpcId: string };
+      const body = JSON.parse(init.body) as { rpcId: string; payload?: Record<string, unknown> };
       const route = new URL(url).pathname.replace('/api/', '');
       sent.push(route);
       const failed = failRoutes.includes(route);
@@ -1082,6 +1102,17 @@ class FakeSocket implements DshSocketLike {
           ? { items: [{ workspaceId: 'w1', path: '/w', title: 'W', sessionIds: [] }] }
         : route === 'session.create' ? { sessionId: 's-new' }
         : route === 'session.rename' ? { title: 'T' }
+        : route === 'llm.models' ? { groups: LLM_GROUPS, failures: [] }
+        : route === 'session.selectModel'
+          ? {
+            selected: {
+              provider: body.payload?.provider,
+              model: body.payload?.model,
+              ...(typeof body.payload?.reasoningEffort === 'string'
+                ? { reasoningEffort: body.payload.reasoningEffort }
+                : {}),
+            },
+          }
         : {};
       return {
         status: 200,
@@ -1144,6 +1175,198 @@ class FakeSocket implements DshSocketLike {
       && renameBroken.sent.join(',')
         === ['workspace.list', 'host.describe', 'session.create', 'host.describe', 'session.rename'].join(','),
     `${JSON.stringify(untitled)} via ${renameBroken.sent.join(',')}`,
+  );
+
+  // ── The pre-session model surface ─────────────────────────────────────────
+  //
+  // Presence of `listModels` is the broker's gate for the create dialog's model
+  // picker (`canSelectModelAtCreation` and the models route), and it reads the
+  // host-wide `llm.models` catalog — no session exists yet to ask.
+  const catalog = make([valid]);
+  const options = await catalog.adapter.listModels!();
+  check(
+    'the pre-session catalog flattens llm.models groups, qualifying each label with its provider',
+    catalog.sent.join(',') === 'llm.models'
+      && options.length === 2
+      && options[0]!.providerID === 'deepseek-official'
+      && options[0]!.modelID === 'deepseek-v4-flash'
+      && options[0]!.label === 'DeepSeek-V4-Flash (DeepSeek)'
+      && options[0]!.defaultReasoningEffort === 'high'
+      && JSON.stringify(options[0]!.reasoningEfforts) === JSON.stringify([
+        { effort: 'off', label: 'Off' },
+        { effort: 'high', label: 'High' },
+      ])
+      && options[1]!.providerID === 'minimax-cn'
+      && options[1]!.reasoningEfforts === undefined,
+    JSON.stringify(options),
+  );
+
+  const catalogBroken = make([valid], ['llm.models']);
+  let catalogError: unknown;
+  try {
+    await catalogBroken.adapter.listModels!();
+  } catch (error) {
+    catalogError = error;
+  }
+  check(
+    'a failed catalog read THROWS, so the broker answers 503 MODEL_CATALOG_UNAVAILABLE instead of a silently empty picker',
+    catalogError != null,
+  );
+
+  // A requested model is applied after the create through session.selectModel
+  // (the host has no per-create model field), verified fresh like every write.
+  const modeled = make([valid, valid]);
+  const withModel = await modeled.adapter.createSession({
+    model: { providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' },
+  });
+  check(
+    'createSession applies a requested model via session.selectModel and advertises it on the returned info',
+    modeled.sent.join(',')
+      === ['workspace.list', 'host.describe', 'session.create', 'host.describe', 'session.selectModel'].join(',')
+      && withModel.model === 'deepseek-v4-flash'
+      && JSON.stringify(withModel.currentModel)
+        === JSON.stringify({ providerID: 'deepseek-official', modelID: 'deepseek-v4-flash', reasoningEffort: 'high' }),
+    `${JSON.stringify(withModel)} via ${modeled.sent.join(',')}`,
+  );
+
+  // The selection failing after the create is the rename's partial-success
+  // rule: the session exists, so the create succeeds with the tool default and
+  // no advertised model rather than failing into a duplicating retry.
+  const selectionBroken = make([valid, valid], ['session.selectModel']);
+  const defaulted = await selectionBroken.adapter.createSession({
+    model: { providerID: 'minimax-cn', modelID: 'MiniMax-M3' },
+  });
+  check(
+    'a failed model selection after create degrades to the tool default rather than failing the create',
+    defaulted.id === 's-new'
+      && defaulted.currentModel === undefined
+      && defaulted.model === undefined
+      && selectionBroken.sent.includes('session.selectModel'),
+    `${JSON.stringify(defaulted)} via ${selectionBroken.sent.join(',')}`,
+  );
+}
+
+// ── 10. Attach seeds the composer's model from the authoritative read ───────
+
+{
+  // `createSession` puts the selected model on its returned info, but that
+  // value is spent on navigation: `attach()` rebuilds the info from the roster
+  // read, and `mapDshSession` maps no model at all. Without an authoritative
+  // read here the picker sits blank until the FIRST PROMPT's `request/header`
+  // publishes one — the reported symptom, "not after the first prompt".
+  const SESSION = 'session-7723d8e8-cf1c-4e0a-8748-3a600aa396fc';
+  const MODELS = {
+    current: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' },
+    routable: true,
+    groups: [
+      {
+        id: 'deepseek-official',
+        name: 'DeepSeek',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
+      },
+      // A host that published no display name: `parseModelGroups` defaults the
+      // name to the id, and forwarding that would publish a raw id as an
+      // authored label.
+      { id: 'minimax-cn', name: 'MiniMax CN', models: [{ id: 'MiniMax-M3', name: 'MiniMax-M3' }] },
+    ],
+    failures: [],
+  };
+
+  const attachWith = async (models: unknown, failModels = false) => {
+    const sockets: FakeSocket[] = [];
+    const fetchImpl: DshFetch = async (url, init) => {
+      const body = JSON.parse(init.body) as { rpcId: string };
+      const route = new URL(url).pathname.replace('/api/', '');
+      if (route === 'session.models' && failModels) {
+        return {
+          status: 200,
+          text: async () => JSON.stringify({
+            type: 'server-response',
+            rpcId: body.rpcId,
+            result: { ok: false, error: { code: 'internal', message: 'boom', details: {} } },
+          }),
+        };
+      }
+      const value = route === 'host.describe' ? FIXTURE.hostDescribe.body.result.value
+        : route === 'session.list' ? FIXTURE.sessionList.body.result.value
+        : route === 'workspace.list' ? FIXTURE.workspaceList.body.result.value
+        : route === 'session.models' ? models
+        : { events: [], hasMore: false };
+      return {
+        status: 200,
+        text: async () => JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }),
+      };
+    };
+    const adapter = new DshAdapter({
+      env: {},
+      fetchImpl,
+      socketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    });
+    const connection = await adapter.attach(SESSION, 'live');
+    return { connection, close: () => connection.close() };
+  };
+
+  // Read BEFORE any prompt, any history read, any live frame: this is the state
+  // the composer opens with.
+  const seeded = await attachWith(MODELS);
+  check(
+    "attach seeds the composer's model from session.models, before any prompt",
+    seeded.connection.info.model === 'deepseek-v4-flash'
+      && seeded.connection.info.currentModel?.providerID === 'deepseek-official'
+      && seeded.connection.info.currentModel?.modelID === 'deepseek-v4-flash'
+      && seeded.connection.info.currentModel?.reasoningEffort === 'high',
+    JSON.stringify(seeded.connection.info.currentModel),
+  );
+  // The roster reads labels from the adapter, never from a client heuristic.
+  // Not provider-qualified: `currentModel` already carries `providerID`, and
+  // the client strips the model id out of the label before showing it.
+  check(
+    "the host's display name rides along as currentModel.label",
+    seeded.connection.info.currentModel?.label === 'DeepSeek-V4-Flash',
+    JSON.stringify(seeded.connection.info.currentModel),
+  );
+  await seeded.close();
+
+  const unnamed = await attachWith({ ...MODELS, current: { provider: 'minimax-cn', model: 'MiniMax-M3' } });
+  check(
+    'a model the host published no NAME for gets no invented label',
+    unnamed.connection.info.currentModel?.modelID === 'MiniMax-M3'
+      && unnamed.connection.info.currentModel?.label === undefined
+      && unnamed.connection.info.currentModel?.reasoningEffort === undefined,
+    JSON.stringify(unnamed.connection.info.currentModel),
+  );
+  await unnamed.close();
+
+  // Best effort by design: an attach must not fail over a picker seed, and the
+  // `request/header` path stays the fallback.
+  const broken = await attachWith(MODELS, true);
+  check(
+    'a failed session.models still attaches, seeding neither field',
+    broken.connection.info.model === undefined && broken.connection.info.currentModel === undefined,
+    JSON.stringify(broken.connection.info),
+  );
+  await broken.close();
+
+  // A host with no usable current selection is not an error either.
+  const noCurrent = await attachWith({ routable: true, groups: MODELS.groups, failures: [] });
+  check(
+    'a catalog with no current selection seeds nothing rather than guessing one',
+    noCurrent.connection.info.model === undefined && noCurrent.connection.info.currentModel === undefined,
+    JSON.stringify(noCurrent.connection.info),
+  );
+  await noCurrent.close();
+
+  // P4's parent half, on the path attach actually takes.
+  check(
+    'the attached info carries nativeId, so its children can nest under it',
+    seeded.connection.info.nativeId === SESSION,
+    JSON.stringify(seeded.connection.info.nativeId),
   );
 }
 

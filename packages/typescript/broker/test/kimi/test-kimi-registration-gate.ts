@@ -259,8 +259,8 @@ try {
       && capabilities?.supportsModelSwitch === true
       && capabilities?.permissionGranularity === 'per-session',
     JSON.stringify(capabilities));
-  check('the served kimi row still advertises no native file input or artifact signal',
-    capabilities?.supportsNativeFileInput === false
+  check('the served kimi row advertises native file input and still no artifact signal',
+    capabilities?.supportsNativeFileInput === true
       && capabilities?.supportsNativeArtifact === false,
     JSON.stringify(capabilities));
   // `canSelectModelAtCreation` is derived from HOOK PRESENCE
@@ -269,10 +269,10 @@ try {
   // point: the route derives it as "the hook exists AND the adapter says it can
   // create right now", and this fixture host runs no `kimi web`, so the
   // adapter's live probe correctly answers no.
-  check('create-time model selection is wired, and no other write-class action is',
+  check('create-time model selection and native rename are wired, and no other write-class action is',
     kimiRow?.canSelectModelAtCreation === true
       && kimiRow?.canCreateSession === false
-      && kimiRow?.canRenameNative === false
+      && kimiRow?.canRenameNative === true
       && kimiRow?.canFork === false && kimiRow?.canClone === false
       && kimiRow?.canTranscriptExport === false,
     JSON.stringify(kimiRow));

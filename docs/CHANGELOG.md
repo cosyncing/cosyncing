@@ -11,6 +11,105 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Kimi sessions support file and image attachments: images go inline as
+  vision input, other files upload through the kimi server's own file API.
+- Kimi sessions expose slash commands: `/goal` (set, status, pause, resume,
+  clear) and the server's skills as prompt commands.
+- Kimi sessions can be renamed; the rename lands in kimi's own session
+  metadata.
+- Kimi driving sessions show a copyable "Resume in terminal" command
+  (`kimi -S <id>`), and observed Claude sessions now show the `claude --resume`
+  command the adapter already published.
+- DeepSeek Harness sessions can select a model at creation time, from the
+  host's global model catalog.
+- DeepSeek Harness foreground subagent and workflow tool runs show live
+  activity bars, matching the existing codex and OpenCode display. Background
+  spawns stay linked through the roster as before.
+- Kimi `Agent` tool runs show live subagent activity bars: foreground spawns
+  are bracketed by the call/result pair, and detached spawns settle through
+  the task-completion path.
+- Images attached to kimi prompts echo back as real image rows in history
+  instead of a generic `kimi.image` event card.
+
+### Changed
+
+- Claude take-over no longer forks the session. Driving a terminal-owned
+  Claude session now resumes it in place: a takeover against a terminal that is
+  mid-turn is refused with an explanation, and if the terminal writes later,
+  cosyncing stops driving and reverts to observe instead of forking — two
+  writers on one transcript would silently split its history. The pre-drive
+  fork warning is replaced by a terminal-attached notice, and the fork-specific
+  confirmation dialog is retired.
+- Every client now sees when a Claude session is being driven, not just the
+  client that took it over: drive ownership is tracked by the adapter and
+  published on the roster row.
+- The `willFork` flag is gone from the session control contract. Nothing forks
+  any more, so it had no state left to report; the terminal-attached warning
+  travels in the drive `reason` text instead.
+- A takeable-but-demoted session now reads "Observing" instead of
+  "Unavailable", matching the takeover wording already used elsewhere.
+
+### Fixed
+
+- Kimi Drive no longer falsely reports "another program wrote to this session"
+  when the server appends its own harness rows (injections, skill activations,
+  scheduled jobs) or when a prompt echo's correlation id is lost.
+- Kimi skill and plugin activations no longer render as a giant user message:
+  the transcript shows the `/name args` action and the loaded body as a
+  collapsible context block.
+- Kimi todo lists render in the shared task panel instead of dumping the raw
+  tool arguments, and background-task completions are attributed to the
+  originating tool call as its result card (or surface as a plain notice when
+  the call cannot be found) instead of appearing as messages the operator
+  never sent.
+- The model and permission mode chosen at kimi session creation are now
+  reflected in the composer immediately, seeded at attach instead of waiting
+  for the first status poll.
+- Untitled kimi sessions show a readable `directory · id` fallback title
+  instead of the raw session id, and the session list suppresses placeholder
+  titles the same way the header already did.
+- Kimi and DeepSeek Harness turns now show the "Ran for … · Finished at …"
+  footer; kimi subagent activity frames can no longer close the main turn's
+  summary or flip its run state.
+- A prompt sent while a turn was running (steering) no longer drags itself and
+  every later prompt to the bottom of the transcript: once the prompt's echo
+  is known, its canonical position wins over the send-time anchor, and
+  delivered position holders retire once their anchor leaves the loaded
+  window.
+- On Windows, switching a virtual desktop with Ctrl+Win+Arrow no longer latches
+  the Ctrl modifier, so the next plain mouse-wheel scroll is not misread as
+  Ctrl+scroll text zoom; the latched-key release also covers the composer's
+  send chord and the attachment paste chord.
+- The expanded task/plan list in session detail is taller, its rows use the
+  transcript's body type scale, and a finished list no longer archives itself
+  three seconds after it appears: it stays until you archive it.
+- A prompt sent to a driven Claude session while a turn is running now survives
+  a page reload: the adapter publishes the pending row itself and clears its
+  "queued" badge in place once the transcript delivers it. If Claude cannot be
+  launched, the send fails instead of leaving the session stuck on Running.
+- A reloaded page that can no longer prove it was driving a Claude session
+  (cleared browser storage, an expired take-over lease, a different device)
+  used to land on the read-only view — an "Observing" header and a vanished
+  queued prompt — while the broker's own Claude drive kept running. The broker
+  now offers that page its existing Claude drive to join, as it already does
+  for Kimi and dsh, and the queued prompt comes back with it.
+- Claude session rows show the model for every family the adapter knows,
+  including Fable. Kimi rows show the server's own model names (for example
+  `K2.7 Coding`, `K3-256k`) instead of a raw alias or a guessed version, and
+  the client no longer turns a provider-qualified id into a display name.
+- Images sent with a prompt render inside your own message bubble on Kimi and
+  Claude sessions instead of as a downloadable artifact card.
+- Two cosyncing clients can share one Kimi Drive session: the second client
+  joins the existing driver instead of sitting on a read-only view.
+- DeepSeek Harness: subagent sessions nest under their parent in the session
+  list, a background subagent's completion report renders as a tool card rather
+  than a message, and the model and permission mode chosen at creation reach
+  the composer at attach instead of after the first prompt.
+- A send on an idle session no longer shows a "queued" badge just because a
+  subagent activity bar is still visible.
+
 ## 0.4.0 — 2026-08-18
 
 ### Added

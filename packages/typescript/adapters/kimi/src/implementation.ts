@@ -13,10 +13,12 @@
  * a process it can prove it started, so a server the user runs is never
  * touched.
  *
- * THE WRITE BOUNDARY, precisely. The only write door is the six enumerated
- * methods of {@link KimiDriveHttp}, and it is reachable only from a
+ * THE WRITE BOUNDARY, precisely. The only write door is the ten enumerated
+ * methods of {@link KimiDriveHttp}. Nine of them are reachable only from a
  * {@link KimiDriveConnection} on a session in {@link KimiAdapter.ownedSessions}
  * — that is, one this process created through {@link KimiAdapter.createSession}.
+ * The tenth, {@link KimiAdapter.renameSession}, is metadata-only (see its own
+ * contract for why the fork risk below does not apply to it).
  * Every other session is FOREIGN: listed, observed read-only through
  * {@link KimiReadOnlyHttp.getJson}, and refused a live attach. That is not
  * caution about an unfinished feature; it is the coexistence rule. Two
@@ -72,6 +74,7 @@ import {
   OwnershipConflictError,
   SessionCreateTemporarilyUnavailableError,
   type AgentBackend,
+  type AgentMessage,
   type AgentCapabilities,
   type AgentSetupDiagnosis,
   type AttachMode,
@@ -86,7 +89,7 @@ import {
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { diagnoseKimiSetup } from './diagnostics.ts';
 import {
   KIMI_INSTANCE_SCAN_MAX_FILES,
@@ -108,11 +111,15 @@ import { KimiDriveHttp, type KimiWriteFetch } from './drive-http.ts';
 import {
   KIMI_FOREIGN_DRIVE_REASON,
   KIMI_OBSERVE_ONLY_REASON,
+  KimiModelCatalogCache,
+  kimiForeignControlState,
   kimiOwnedControlState,
   kimiOwnedObserveControlState,
+  kimiStatusModel,
   mapKimiCreatedSession,
   mapKimiModelCatalog,
   mapKimiSessionPage,
+  mapKimiSessionStatus,
   type KimiV1Session,
   type KimiV2SessionPage,
 } from './mapping.ts';
@@ -291,13 +298,39 @@ function kimiCapabilities(): AgentCapabilities {
     // session for it to resume INTO.
     supportsResume: false,
     supportsLiveAttach: true,
+    // TWO COSYNCING CLIENTS MAY SHARE ONE DRIVE CONNECTION, and this is what
+    // makes that safe here: a joining socket is handed the EXISTING
+    // {@link KimiDriveConnection} (`Hub.joinExisting` never attaches), so there
+    // is still exactly ONE writer against the Kimi session — the same single
+    // journal writer the whole ownership boundary above exists to guarantee.
+    // Everything a second socket could race is already state this connection
+    // shares with the terminal:
+    //
+    //  - a send's echo correlation is keyed by the SERVER's `user_message_id`
+    //    (`drive.ts`, `clientKeys`), which is per submission, not per client;
+    //  - an approval or question answered twice is the 40902/40909 race the
+    //    resolve path already treats as an outcome rather than an error, and
+    //    the losing claim is released so the card reports whose decision it
+    //    actually was;
+    //  - the divergence detector accounts for every row THIS connection
+    //    caused, so a peer socket's prompt can never look like a foreign
+    //    writer; and
+    //  - a demotion emits the new control state to every subscriber at once,
+    //    so both sockets lose Drive together instead of one keeping a stale
+    //    claim.
+    //
+    // Without the flag a second client is never offered the join and sits on
+    // its own read-only observe connection forever, which is the "one client
+    // driving, the other observing" the 2026-08-20 pass reported.
+    supportsCrossClientDriveSharing: true,
     // The server has no "send this file to the user" signal; artifacts are
     // detected from content like every filesystem-only adapter.
     supportsNativeArtifact: false,
-    // The prompt schema accepts image/file content parts, but nothing here
-    // uploads bytes or resolves a workspace path into one yet, so claiming it
-    // would advertise an input the adapter then refuses.
-    supportsNativeFileInput: false,
+    // Prompt content parts carry images inline (base64) and files through the
+    // server's own `/api/v1/files` store (`drive.ts`, `assembleContent`), and
+    // the broker's staging supplies the bytes — so the adapter can take what
+    // the attach affordance offers.
+    supportsNativeFileInput: true,
     // Model selection is a WRITE — it rides the prompt body, and only a drive
     // connection sends one, which the ones this process owns are.
     supportsModelSwitch: true,
@@ -835,6 +868,64 @@ export class KimiAdapter implements AgentBackend {
   }
 
   /**
+   * One synchronous `/status` read for the attach itself — the SAME route and
+   * the SAME mapping ({@link mapKimiSessionStatus}) the observe poll uses, so
+   * an attach and a poll can never decode the host's answer differently.
+   *
+   * Returns only the fields attach actually seeds: the roster-shaped model
+   * string and the host-reported permission mode. Everything else the overlay
+   * carries (context usage, plan/swarm flags) has the poll as its established
+   * channel and would only duplicate it here.
+   *
+   * Total by construction: an unreachable server, a refused read, an odd
+   * body, or a never-prompted session's empty config all yield `undefined`
+   * rather than an attach failure or an invented value — the poll remains
+   * the fallback for anything this read missed.
+   */
+  private async readAttachStatusOverlay(
+    http: KimiReadOnlyHttp,
+    sessionId: string,
+    catalog: KimiModelCatalogCache,
+  ): Promise<{ model?: string; currentModel?: SessionInfo['currentModel']; currentMode?: string } | undefined> {
+    const result = await http.getJson<unknown>(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/status`,
+    );
+    if (!result.ok) return undefined;
+    // The catalog read is the label's only source, and it is TOTAL like the
+    // status read above: a refused `/api/v1/models` yields no rows, the join
+    // matches nothing, and the attach still seeds the bare alias.
+    const options = await catalog.optionsFor(
+      kimiStatusModel(result.data),
+      () => this.readCatalogFrom(http),
+    );
+    const overlay = mapKimiSessionStatus(result.data, options).find(
+      (message): message is Extract<AgentMessage, { type: 'metadata-update' }> =>
+        message.type === 'metadata-update' && message.key === 'sessionInfo',
+    );
+    const value = overlay?.value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const model = typeof record.model === 'string' && record.model.length > 0 ? record.model : undefined;
+    const currentModel = record.currentModel as SessionInfo['currentModel'] | undefined;
+    const currentMode = typeof record.currentMode === 'string' && record.currentMode.length > 0
+      ? record.currentMode
+      : undefined;
+    if (!model && !currentMode) return undefined;
+    return {
+      ...(model ? { model } : {}),
+      ...(currentModel ? { currentModel } : {}),
+      ...(currentMode ? { currentMode } : {}),
+    };
+  }
+
+  /** `/api/v1/models` against an ALREADY verified client — the attach's own generation. */
+  private async readCatalogFrom(http: KimiReadOnlyHttp): Promise<ModelOption[]> {
+    const result = await http.getJson<unknown>('/api/v1/models');
+    if (!result.ok) return [];
+    return mapKimiModelCatalog(result.data);
+  }
+
+  /**
    * The attach itself, with the promotion latch already held when one is owed.
    *
    * Split from {@link attach} so the latch has exactly one acquisition and one
@@ -905,7 +996,54 @@ export class KimiAdapter implements AgentBackend {
     // get.
     if (owned || promoting) {
       info.attachMode = drive ? 'live' : 'observe';
-      info.control = drive ? kimiOwnedControlState() : kimiOwnedObserveControlState();
+      info.control = drive ? kimiOwnedControlState(sessionId, info.cwd) : kimiOwnedObserveControlState();
+    }
+    // ── Attach-time display seeding ─────────────────────────────────────────
+    //
+    // The composer's model picker and permission chip read `sessionInfo` from
+    // THIS info object: the create response is spent on navigation alone, and
+    // the 10 s `/status` poll would otherwise be the first time either field
+    // reaches the client (on a fresh session with empty config, possibly
+    // never). Seed both here, before the first session frame:
+    //
+    // - The create-time model choice still pending for this session, exactly
+    //   as `createOwnedSession` advertises it — the roster row carries no
+    //   model and the synthesized fallback above is bare. Only an OWNED
+    //   session can have one: `pendingModels` is written by the create path
+    //   and dropped with drive eligibility, so an entry implies ownership,
+    //   and the `owned` guard keeps that invariant load-bearing rather than
+    //   incidental. The entry is NOT consumed here — handing a connection
+    //   out spends nothing; the first prompt does, via `onModelConsumed`.
+    // - The host's OWN reported state, read once through the same route and
+    //   mapping the poll uses, so the chip shows the real permission mode
+    //   (and the roster-shaped model string) immediately rather than a
+    //   default this adapter invented. A never-prompted session reports an
+    //   empty config; the mapping's `optionalString` turns empty strings
+    //   into ABSENT, which stays the honest answer — no chip, not a guessed
+    //   one. A failed read seeds nothing and the poll remains the fallback.
+    //   The model also arrives LABELLED: `/status.model` is the host catalog's
+    //   own alias, so it joins `/api/v1/models` exactly and the roster shows
+    //   the host's `display_name` instead of the client's guess at one. The
+    //   cache is per ATTACH and is handed to the connection below, so the
+    //   poll's own join costs no second read.
+    const modelCatalog = new KimiModelCatalogCache();
+    const attachStatus = await this.readAttachStatusOverlay(http, sessionId, modelCatalog);
+    if (attachStatus?.model && !info.model) info.model = attachStatus.model;
+    if (attachStatus?.currentModel && !info.currentModel) info.currentModel = attachStatus.currentModel;
+    if (attachStatus?.currentMode) info.currentMode = attachStatus.currentMode;
+    const pendingModel = owned ? this.pendingModels.get(sessionId) : undefined;
+    if (pendingModel?.modelID) {
+      info.model = pendingModel.modelID;
+      // A create-time choice gets the SAME catalog label the host-reported one
+      // does. `PromptInput.model` carries no label — the picker sends provider
+      // and id — so without the join the roster falls back to its own guess for
+      // the one session whose model this process itself chose. An id the
+      // catalog does not know keeps exactly what the picker sent.
+      const chosen = (await modelCatalog.optionsFor(
+        pendingModel.modelID,
+        () => this.readCatalogFrom(http),
+      )).find((option) => option.modelID === pendingModel.modelID);
+      info.currentModel = { ...pendingModel, ...(chosen ? { label: chosen.label } : {}) };
     }
     const options: KimiDriveOptions = {
       // The journal root is derived from the SAME home every other path
@@ -913,6 +1051,9 @@ export class KimiAdapter implements AgentBackend {
       // its own journals rather than the user's real ones. Injected options
       // win: a test names its own root.
       wireRoot: kimiSessionWireRoot(this.home()),
+      // The attach's catalog, so the poll labels a status reading from the rows
+      // this attach already paid for.
+      modelCatalog,
       // The verification above proves an identity for one moment; the
       // connection outlives it. A Kimi restart, a port another process now
       // owns, or a rotated token leaves the pinned client, url, and token
@@ -943,7 +1084,6 @@ export class KimiAdapter implements AgentBackend {
     // create-time model choice with it and leave the next attach running the
     // first turn on the session default. The entry is dropped when the request
     // is actually SPENT, through `onModelConsumed` below.
-    const pendingModel = this.pendingModels.get(sessionId);
     const connection = new KimiDriveConnection(info, http, wsUrlFor(instance), token, {
       ...options,
       ...(this.options.writeStreamWaitMs !== undefined
@@ -1110,5 +1250,48 @@ export class KimiAdapter implements AgentBackend {
       if (oldest.done) break;
       this.pendingModels.delete(oldest.value);
     }
+  }
+
+  // ── Rename ────────────────────────────────────────────────────────────────
+
+  /**
+   * Native rename through the server's profile route — the reviewed exception
+   * among the write door's ten methods.
+   *
+   * Deliberately NOT gated on {@link ownedSessions}: a title is metadata the
+   * server applies through its own `ISessionMetadata.setTitle` and broadcasts
+   * as `session.meta.updated`. It appends nothing to the wire journal, so the
+   * two-writers-fork-the-journal case that gates every other write does not
+   * exist here, and a terminal-owned session renamed in the app shows that name
+   * in the terminal too — which a broker-side alias never could.
+   *
+   * `null` (a cleared display-title override) has no native expression — the
+   * profile schema requires a non-empty string — so it resolves to the same
+   * human-readable name codex uses for a cleared title, the session's cwd
+   * basename; with no cwd on record there is nothing honest to write and the
+   * call is a no-op, dsh-style.
+   */
+  async renameSession(sessionId: string, title: string | null): Promise<SessionInfo | void> {
+    const { resolved, token } = await this.verifiedInstance();
+    if (!resolved.ok) {
+      throw new Error(ATTACH_REFUSAL[resolved.reason]);
+    }
+    // The roster row supplies the cwd the null-case fallback is composed from,
+    // and is the base the returned info is patched over, so an open session's
+    // facts survive the rename rather than being reconstructed bare.
+    const known = (await this.discoverFrom(resolved.http)).find((session) => session.id === sessionId);
+    const name = title?.trim() || (known?.cwd ? basename(known.cwd) : '');
+    if (!name) return;
+    await this.driveClient(resolved.instance, token).renameSession(sessionId, { title: name });
+    if (known) return { ...known, title: name };
+    return {
+      id: sessionId,
+      tool: this.id,
+      title: name,
+      status: 'idle',
+      attachMode: 'observe',
+      launchSurface: 'unknown',
+      control: kimiForeignControlState(),
+    };
   }
 }

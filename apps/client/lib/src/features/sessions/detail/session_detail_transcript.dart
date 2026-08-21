@@ -163,11 +163,14 @@ sealed class _ChatItem {
 /// the message rather than the turn is also what lets one instance outlive the
 /// stitched turns that re-wrap it.
 class _ChatUserItem extends _ChatItem {
-  _ChatUserItem(this.message)
+  _ChatUserItem(this.message, {this.attachments = const []})
     : identity = 'user:${_messageIdentity(message)}',
       canonicalMessageKey = stableTranscriptMessageKey(message);
 
   final AgentMessage message;
+
+  /// File artifacts the user sent with this prompt, drawn inside the bubble.
+  final List<AgentMessage> attachments;
 
   @override
   final String identity;
@@ -334,7 +337,15 @@ List<_ChatItem> _turnRows(
 
   final items = <_ChatItem>[];
   if (turn.userMessage case final userMessage?) {
-    items.add(_chatUserRow(userMessage, work: work));
+    if (turn.userAttachments.isEmpty) {
+      items.add(_chatUserRow(userMessage, work: work));
+    } else {
+      // Not message-cached: an attachment can be delivered after its prompt
+      // row, and the per-message cache would hand back the attachment-less
+      // instance forever. The row identity is unchanged, so anchors hold.
+      work?.derivedRows += 1;
+      items.add(_ChatUserItem(userMessage, attachments: turn.userAttachments));
+    }
   }
   for (final entry in turn.content) {
     if (reportView && !_reportVisibleEntry(entry)) continue;
@@ -2008,12 +2019,36 @@ class _TranscriptSurfaceState extends ConsumerState<_TranscriptSurface> {
             };
           }
 
+          // The artifact the user sent keeps the same download/open control
+          // the standalone artifact row has; only its placement changes.
+          Widget? userAttachmentAction(AgentMessage attachment) {
+            final descriptor = SessionArtifactDescriptor.fromMessage(
+              attachment,
+            );
+            if (descriptor == null || !descriptor.isDownloadable) return null;
+            return _TranscriptArtifactDownloadAction(
+              descriptor: descriptor,
+              actionState: _artifactActionStateForMessage(
+                widget.state,
+                attachment,
+              ),
+              hasActiveBrokerClient: widget.hasActiveBrokerClient,
+              onDownload: () => widget.controller.downloadArtifact(descriptor),
+            );
+          }
+
           Widget buildChatItem(_ChatItem item) {
             return switch (item) {
-              _ChatUserItem(:final message) => wrapContextRegion(
-                message,
-                buildConversationUserBubble(scopedContext, message),
-              ),
+              _ChatUserItem(:final message, :final attachments) =>
+                wrapContextRegion(
+                  message,
+                  buildConversationUserBubble(
+                    scopedContext,
+                    message,
+                    attachments: attachments,
+                    attachmentActionBuilder: userAttachmentAction,
+                  ),
+                ),
               _ChatEntryItem(:final entry) => buildTurnEntryRow(entry),
               _ChatFooterItem(:final turn) => _ConversationTurnFooter(
                 key: ValueKey('turn-footer-${turn.turnKey}'),

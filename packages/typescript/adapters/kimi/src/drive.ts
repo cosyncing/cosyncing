@@ -16,7 +16,7 @@
  *     because a session whose live owner is unknown must never gain a second
  *     writer.
  *  2. AN ALLOWLISTED DOOR. Writes go through {@link KimiDriveHttp}, which has
- *     six methods and no generic post.
+ *     ten methods and no generic post.
  *  3. DIVERGENCE DETECTION. Ownership is an in-memory belief, and a terminal
  *     `kimi -S <id>` can silently falsify it at any moment: the CLI runs its
  *     own in-process event bus and journal (verified upstream), so its turns
@@ -32,6 +32,7 @@ import type {
   AgentMessage,
   CommandInput,
   CommandResult,
+  FileInput,
   ModeOption,
   ModelOption,
   PermissionDecision,
@@ -39,6 +40,9 @@ import type {
   SessionInfo,
   SlashCommand,
 } from '@cosyncing/adapter-api';
+import { PRODUCT_IDENTITY } from '@cosyncing/adapter-api';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import {
   KimiObserveConnection,
   type KimiObserveOptions,
@@ -50,13 +54,14 @@ import {
   isKimiIdempotentWriteCode,
   isKimiWriteError,
   type KimiDriveHttp,
+  type KimiPromptContentPart,
   type KimiPromptSubmissionBody,
+  type KimiUploadedFileMeta,
 } from './drive-http.ts';
 import {
   KIMI_FOREIGN_WRITER_REASON,
   boundedKimiErrorMessage,
   kimiDemotedControlState,
-  mapKimiModelCatalog,
   mapKimiQuestionAnswers,
   mapKimiRunState,
   type KimiMappedRow,
@@ -202,13 +207,16 @@ export const KIMI_OPEN_PROVENANCE_REFUSAL =
   + 'nothing else is writing the session. It will not send until that settles, because two writers on '
   + 'one Kimi session silently fork its history.';
 
-/** File and image input are a later round; the refusal says so rather than dropping the attachment. */
-export const KIMI_NO_FILE_INPUT_MESSAGE =
-  'sending files or images to Kimi is not supported yet; send the text prompt on its own';
-
 /** Notices the stop command returns to its requester. */
 export const KIMI_STOP_NOTICE = 'Stopped the running turn.';
 export const KIMI_STOP_ALREADY_DONE_NOTICE = 'The turn had already finished.';
+
+/**
+ * Envelope code for `GOAL_NOT_FOUND` (`protocol/error-codes.ts:104`): the goal
+ * control asked about a goal that does not exist. A notice, not a failure —
+ * the session is already in the state the command asked for.
+ */
+const KIMI_GOAL_NOT_FOUND_CODE = 40_914;
 
 /**
  * The permission modes this server accepts, verbatim
@@ -237,17 +245,29 @@ const KIMI_MODE_OPTIONS: readonly ModeOption[] = Object.freeze([
 ] as const);
 
 /**
- * The only command this connection offers.
+ * The builtin commands this connection offers.
  *
- * `kind: 'action'` rather than `'prompt'`: it hits an endpoint and starts no
- * turn. Rename, fork, compact, and undo all exist upstream as sibling action
- * suffixes on the same route and are deliberately NOT here — each needs its own
- * transcript semantics on the cosyncing side, and an action that silently
- * rewrote history would be worse than an absent one.
+ * `kind: 'action'` for both rather than `'prompt'`: each hits an endpoint
+ * rather than being handed to the model as template text. A goal SET does
+ * start a turn — the objective is its own kickoff prompt — but the command
+ * itself is a lifecycle action, the same contract codex's `goal` uses (and
+ * the client's goal chip gates on `kind: 'action'`).
+ *
+ * Compact, undo, and fork all exist upstream as sibling action suffixes on the
+ * session route and are deliberately NOT here — each rewrites transcript
+ * history, and an action that silently rewrote history would be worse than an
+ * absent one. Goal and skill activation do NOT rewrite history, which is why
+ * they are the commands that made it across that line.
  */
 const KIMI_STOP_COMMAND: SlashCommand = {
   name: 'stop',
   description: 'Stop the running turn',
+  kind: 'action',
+};
+
+const KIMI_GOAL_COMMAND: SlashCommand = {
+  name: 'goal',
+  description: 'Set a goal, or use pause, resume, or clear',
   kind: 'action',
 };
 
@@ -338,6 +358,43 @@ export class KimiDriveConnection extends KimiObserveConnection {
   private readonly pendingPrompts = new Set<string>();
   /** `user_message_id`s this connection caused, so their echoes are never suspects. */
   private readonly sentUserMessageIds = new Set<string>();
+  /**
+   * Texts of prompts this connection submitted whose response carried NO
+   * `user_message_id`, in submission order. Without the id the echo cannot be
+   * correlated by identity, so the text is the only evidence left; each entry
+   * adopts exactly one walked row ({@link adoptUncorrelatedEcho}) and is then
+   * spent. Bounded at {@link KIMI_PROMPT_MEMORY_LIMIT} like the id memories.
+   */
+  private readonly uncorrelatedPromptTexts: string[] = [];
+  /**
+   * Echo evidence for ATTACHMENT-ONLY prompts this connection submitted whose
+   * response carried no `user_message_id` — one entry per submission, the
+   * attachment half of {@link uncorrelatedPromptTexts}.
+   *
+   * The submission's text part is EMPTY and folds to no row of its own, so
+   * the echo is whatever the server made of the attachments:
+   *
+   *  - an uploaded FILE is materialized server-side and its content part is
+   *    REPLACED by a plain text notice — `Attached file "<name>"
+   *    (<media_type>, <size> bytes): <path> — open it with the Read tool`
+   *    (upstream `promptMedia.ts` `buildAttachedFileNotice`) — which walks in
+   *    as an ordinary `user-message` row. Everything up to the path is
+   *    reconstructible from the upload answer's own meta, so that PREFIX is
+   *    recorded and a walked row whose text starts with it is adopted.
+   *  - an INLINE IMAGE echoes as a `file-artifact` row named from the
+   *    rehydrated data URL's mime — `image.<ext>` — so that derived name is
+   *    recorded and matched against the row's name. That echo also carries the
+   *    EMPTY user row the artifact is linked to (`mapping.ts`,
+   *    `userMessageKey`), which arrives first and is adopted by the same entry.
+   *
+   * Each entry adopts exactly one walked row and is then spent WHOLE ({@link
+   * adoptUncorrelatedEcho}): every row of one prompt's echo shares one native
+   * message id, which the adoption records, so the sibling rows are accounted
+   * for by id — leaving the leftover evidence behind would let a later
+   * FOREIGN attachment that happens to match be forgiven. Bounded at {@link
+   * KIMI_PROMPT_MEMORY_LIMIT} like the id memories.
+   */
+  private readonly uncorrelatedEchoEvidence: Array<{ noticePrefixes: string[]; imageNames: string[] }> = [];
   /** `user_message_id` → the send's `clientMessageId`, stamped onto the echo row. */
   private readonly clientKeys = new Map<string, string>();
   private pendingModel?: PromptInput['model'];
@@ -506,28 +563,109 @@ export class KimiDriveConnection extends KimiObserveConnection {
 
   override async sendPrompt(input: PromptInput): Promise<void> {
     this.assertWritable();
-    // Checked BEFORE the transport is touched, so a refused prompt issues no
-    // HTTP at all: half-sending an attachment-bearing prompt as text-only would
-    // silently drop the attachment the user was told about.
-    if ((input.files?.length ?? 0) > 0 || (input.images?.length ?? 0) > 0) {
-      throw new Error(KIMI_NO_FILE_INPUT_MESSAGE);
-    }
+    // Assembled BEFORE the submission body is built, so an attachment that
+    // cannot be read refuses the prompt with zero session HTTP issued —
+    // half-sending an attachment-bearing prompt as text-only would silently
+    // drop the attachment the user was told about. An upload that then fails
+    // leaves at most an orphaned, self-expiring blob in the server-global file
+    // store; it touches no session's journal.
+    const content = await this.assembleContent(input);
     // An explicit per-prompt model wins over the create-time request: the user
     // picked it just now, and the pending one is a default from earlier.
     const model = input.model ?? this.pendingModel;
     const permissionMode = (KIMI_PERMISSION_MODES as readonly string[]).includes(input.permissionMode ?? '')
       ? input.permissionMode as KimiPromptSubmissionBody['permission_mode']
       : undefined;
-    // Built BEFORE the door, so a refusal still costs zero HTTP and nothing
-    // that could fail is left between the door's last check and the POST.
-    const body: KimiPromptSubmissionBody = {
-      content: [{ type: 'text', text: input.text }],
+    await this.submitBody({
+      content,
       ...(model?.modelID ? { model: model.modelID } : {}),
       // Upstream `thinking` is a free string, not an enum, so the canonical
       // reasoning effort passes through as itself.
       ...(model?.reasoningEffort ? { thinking: model.reasoningEffort } : {}),
       ...(permissionMode ? { permission_mode: permissionMode } : {}),
+    }, input);
+  }
+
+  /** Legacy standalone attachment: the same pipeline, with no text of its own. */
+  async sendFile(file: FileInput): Promise<void> {
+    await this.sendPrompt({ text: '', files: [file] });
+  }
+
+  /**
+   * Text, image, and file parts for one prompt, in that order.
+   *
+   * Images go INLINE as base64 content parts (`imageContentSchema`); files are
+   * too large for that contract, so each is uploaded to the server's file store
+   * first and rides the prompt as a `file` part naming the returned `file_id`
+   * (`fileContentSchema`).
+   *
+   * An image-mime entry in `files` goes inline too. The Flutter client has no
+   * `images` wire field, so an image attached in the app ARRIVES as a file
+   * entry — and whether the server presents an image-mime `file` part to the
+   * model as vision input is unverified, while the `image` part is the
+   * contract upstream's own vision path uses. The bytes are already in hand
+   * from the staging read, so the detour through the file store buys nothing.
+   */
+  private async assembleContent(input: PromptInput): Promise<KimiPromptContentPart[]> {
+    const parts: KimiPromptContentPart[] = [{ type: 'text', text: input.text }];
+    for (const image of input.images ?? []) {
+      parts.push({
+        type: 'image',
+        source: { kind: 'base64', media_type: image.mimeType, data: image.data },
+      });
+    }
+    for (const file of input.files ?? []) {
+      parts.push(file.mimeType.trim().toLowerCase().startsWith('image/')
+        ? inlineImageAttachment(this.info.cwd, file)
+        : await this.uploadAttachment(file));
+    }
+    return parts;
+  }
+
+  /**
+   * Upload one attachment's bytes and turn the answer into a `file` part.
+   *
+   * The bytes are read and validated BEFORE any HTTP, so a refused attachment
+   * costs the transport nothing. The upload itself IS a content write — it is
+   * half of sending this prompt, and a prompt this connection may not send is
+   * an upload it may not make either.
+   */
+  private async uploadAttachment(file: FileInput): Promise<KimiPromptContentPart> {
+    const bytes = readAttachmentBytes(this.info.cwd, file);
+    const outcome = await this.withContentWrite((drive) =>
+      drive.uploadFile({ name: file.name, mediaType: file.mimeType, bytes }));
+    const meta = outcome.data as Partial<KimiUploadedFileMeta> | undefined;
+    // An upload without a usable id is no upload at all: referencing it would
+    // send a file part the server resolves to FILE_NOT_FOUND mid-prompt.
+    if (typeof meta?.id !== 'string' || !meta.id) {
+      throw new Error('the Kimi server accepted the upload but returned no file id');
+    }
+    return {
+      type: 'file',
+      file_id: meta.id,
+      name: typeof meta.name === 'string' && meta.name ? meta.name : file.name,
+      media_type: typeof meta.media_type === 'string' && meta.media_type ? meta.media_type : file.mimeType,
+      size: typeof meta.size === 'number' && meta.size >= 0 ? meta.size : bytes.length,
     };
+  }
+
+  /**
+   * Submit an assembled prompt body: the submission fence, the content-write
+   * door, and the echo-correlation bookkeeping, shared by {@link sendPrompt}
+   * and a goal-setting command — both enqueue a user row this connection must
+   * be able to correlate.
+   *
+   * `echo.text` is the text the server will fold into the user row; it is the
+   * fallback correlation evidence when the submit response carries no
+   * `user_message_id` ({@link adoptUncorrelatedEcho}). For an attachment-only
+   * prompt the text is empty and folds to no row of its own, so the evidence
+   * derivable from the attachments in `body` is remembered instead ({@link
+   * uncorrelatedEchoEvidence}).
+   */
+  private async submitBody(
+    body: KimiPromptSubmissionBody,
+    echo: { text: string; clientMessageId?: string },
+  ): Promise<void> {
     // THE SUBMISSION FENCE opens INSIDE the write's own frame, one statement
     // before the POST leaves. Upstream can publish `prompt.completed` for a turn
     // it blocked or failed BEFORE this request's response is written
@@ -582,8 +720,50 @@ export class KimiDriveConnection extends KimiObserveConnection {
       // set (or as a promoted suspect); the id arriving here is the evidence
       // that resolves it, and it resolves it at whatever point it lands.
       this.exonerate(data.user_message_id);
-      if (input.clientMessageId) {
-        boundedSet(this.clientKeys, data.user_message_id, input.clientMessageId, KIMI_PROMPT_MEMORY_LIMIT);
+      if (echo.clientMessageId) {
+        boundedSet(this.clientKeys, data.user_message_id, echo.clientMessageId, KIMI_PROMPT_MEMORY_LIMIT);
+      }
+    } else if (echo.text) {
+      // DEFENSIVE ACCOUNTING. A response can come back without the id — the
+      // prompt persisted server-side while the correlation was lost — and the
+      // echo then walks in as a row nobody owns, which is exactly the false
+      // "another program wrote here" this connection exists to prevent. The
+      // TEXT is the only evidence left, so it is remembered and a walked user
+      // row matching it is adopted as ours, one-for-one
+      // ({@link adoptUncorrelatedEcho}).
+      if (this.uncorrelatedPromptTexts.length >= KIMI_PROMPT_MEMORY_LIMIT) {
+        this.uncorrelatedPromptTexts.shift();
+      }
+      this.uncorrelatedPromptTexts.push(echo.text);
+    } else {
+      // The ATTACHMENT-ONLY variant of the same accounting (`sendFile`
+      // submits an empty text part). Exact text cannot adopt this echo — the
+      // submitted text is empty, and the only row it folds to is an empty one
+      // that no remembered text could match — but the server REWRITES each file
+      // part into a text notice whose prefix up to the path is fully
+      // reconstructible from the part itself (`buildAttachedFileNotice`,
+      // upstream `promptMedia.ts`), and an inline image echoes as a
+      // `file-artifact` row named from its mime. That evidence is remembered,
+      // one entry per submission; see {@link uncorrelatedEchoEvidence} for
+      // why an entry is spent whole. An empty text with NO attachments
+      // records nothing: it echoes no row at all, so there is nothing to
+      // adopt.
+      const evidence = { noticePrefixes: [] as string[], imageNames: [] as string[] };
+      for (const part of body.content) {
+        if (part.type === 'file') {
+          evidence.noticePrefixes.push(
+            `Attached file "${part.name}" (${part.media_type}, ${part.size} bytes): `);
+        } else if (part.type === 'image') {
+          // The echo row is named from the rehydrated data URL's mime, which
+          // is the media type sent here (`mapping.ts`): `image.png`, …
+          evidence.imageNames.push(`image.${part.source.media_type.split('/')[1] ?? 'png'}`);
+        }
+      }
+      if (evidence.noticePrefixes.length > 0 || evidence.imageNames.length > 0) {
+        if (this.uncorrelatedEchoEvidence.length >= KIMI_PROMPT_MEMORY_LIMIT) {
+          this.uncorrelatedEchoEvidence.shift();
+        }
+        this.uncorrelatedEchoEvidence.push(evidence);
       }
     }
     // Nothing synthetic is emitted here. The server writes the user-message row
@@ -687,16 +867,61 @@ export class KimiDriveConnection extends KimiObserveConnection {
   }
 
   async listCommands(): Promise<SlashCommand[]> {
-    return [KIMI_STOP_COMMAND];
+    const builtins: SlashCommand[] = [KIMI_STOP_COMMAND, KIMI_GOAL_COMMAND];
+    const skills = await this.listServerSkills();
+    // A skill named like a builtin keeps the builtin: the builtin's behavior is
+    // the one the client's affordances are wired to.
+    const used = new Set(builtins.map((command) => command.name));
+    return [...builtins, ...skills.filter((skill) => !used.has(skill.name))];
   }
 
-  async runCommand(name: string, _args?: string, _input?: CommandInput): Promise<CommandResult> {
+  /**
+   * The session's skill catalog as prompt-kind commands — the claude/codex
+   * pattern: a skill IS a prompt template, and running one starts a turn.
+   *
+   * Degrades to nothing on any read failure: an older server has no skills
+   * route, and a failed read must not cost the composer its whole slash menu —
+   * the builtins still stand.
+   */
+  private async listServerSkills(): Promise<SlashCommand[]> {
+    if (this.transportInvalid && !(await this.ensureTransport())) return [];
+    const result = await this.transport.http.getJson<unknown>(
+      `/api/v1/sessions/${encodeURIComponent(this.info.id)}/skills`,
+    );
+    if (!result.ok) {
+      this.noteUnauthorized(result.reason);
+      return [];
+    }
+    const items = (result.data as { skills?: unknown } | undefined)?.skills;
+    if (!Array.isArray(items)) return [];
+    const commands: SlashCommand[] = [];
+    for (const item of items) {
+      const name = (item as { name?: unknown } | undefined)?.name;
+      if (typeof name !== 'string' || !name) continue;
+      const description = (item as { description?: unknown }).description;
+      commands.push({
+        name,
+        description: typeof description === 'string' && description ? description : `Use the Kimi skill ${name}`,
+        kind: 'prompt',
+      });
+    }
+    return commands;
+  }
+
+  async runCommand(name: string, args?: string, input?: CommandInput): Promise<CommandResult> {
     // `abort` is accepted as an alias for the same reason OpenCode accepts it:
     // it is what the stop affordance is called on several surfaces, and a
     // command that exists under one name and not the other is a broken button.
-    if (name !== 'stop' && name !== 'abort') {
-      throw new Error(`kimi has no '${name}' command`);
-    }
+    if (name === 'stop' || name === 'abort') return this.runStopCommand();
+    if (name === 'goal') return this.runGoalCommand(args, input);
+    // Anything else advertised must be a server skill; activating one starts a
+    // turn with a `skill_activation` origin row, which rewrites no history.
+    const skills = await this.listServerSkills();
+    if (skills.some((skill) => skill.name === name)) return this.runSkillActivation(name, args);
+    throw new Error(`kimi has no '${name}' command`);
+  }
+
+  private async runStopCommand(): Promise<CommandResult> {
     this.assertWritable();
     // EXEMPT from the content-write gate, uniquely and deliberately. Every other
     // write ADDS something a user then has to be able to answer; this one takes
@@ -717,14 +942,118 @@ export class KimiDriveConnection extends KimiObserveConnection {
     return { notice: aborted === false ? KIMI_STOP_ALREADY_DONE_NOTICE : KIMI_STOP_NOTICE };
   }
 
-  async listModels(): Promise<ModelOption[]> {
-    if (this.transportInvalid && !(await this.ensureTransport())) return [];
-    const result = await this.transport.http.getJson<unknown>('/api/v1/models');
-    if (!result.ok) {
-      this.noteUnauthorized(result.reason);
-      return [];
+  /**
+   * The goal lifecycle, mirroring codex's argument contract:
+   * `/goal <objective>` sets and starts, `pause`/`resume`/`clear` control.
+   *
+   * SET rides the prompt body (`goal_objective` on the objective's own kickoff
+   * prompt — what the TUI does as `createGoal` + `sendNormalUserInput`), so it
+   * goes through the full content gate and submission fence. CONTROL goes
+   * through the profile route's `agent_config` dispatch instead of a
+   * prompt-body `goal_control`: the schema requires a content part, and a
+   * pause or clear that enqueued a stray user message and started a turn would
+   * be the opposite of braking.
+   */
+  private async runGoalCommand(args: string | undefined, input?: CommandInput): Promise<CommandResult> {
+    this.assertWritable();
+    const goalArgs = args?.trim() ?? '';
+    if (!goalArgs) {
+      // A bare /goal is a READ of the server's own snapshot, null when none.
+      if (this.transportInvalid && !(await this.ensureTransport())) {
+        throw new Error('the Kimi server could not be re-verified, so cosyncing will not read its goal');
+      }
+      const result = await this.transport.http.getJson<unknown>(
+        `/api/v1/sessions/${encodeURIComponent(this.info.id)}/goal`,
+      );
+      if (!result.ok) {
+        this.noteUnauthorized(result.reason);
+        throw new Error('the Kimi server would not report this session\'s goal');
+      }
+      const goal = result.data as { objective?: unknown; status?: unknown } | null | undefined;
+      return {
+        notice: goal && typeof goal.objective === 'string'
+          ? `Goal ${typeof goal.status === 'string' && goal.status ? goal.status : 'active'}: ${goal.objective}`
+          : 'No goal is set. Use /goal <objective>, /goal pause, /goal resume, or /goal clear.',
+      };
     }
-    return mapKimiModelCatalog(result.data);
+    const subcommand = goalArgs.toLowerCase();
+    if (subcommand === 'pause' || subcommand === 'resume' || subcommand === 'clear' || subcommand === 'cancel') {
+      const control = subcommand === 'pause' ? 'pause' : subcommand === 'resume' ? 'resume' : 'cancel';
+      const outcome = await this.writeGoalControl(control);
+      if (outcome) return outcome;
+      // Mirror the TUI (`tui/commands/goal.ts`): pausing or cancelling brakes
+      // the in-flight turn too — upstream `pause` gates only FUTURE goal turns,
+      // and the user who pauses means "stop working".
+      if (control !== 'resume' && (this.info.status === 'working' || this.info.status === 'needs-input')) {
+        const drive = await this.writeClient();
+        await this.write(() => drive.abortSession(this.info.id));
+      }
+      return {
+        notice: control === 'pause'
+          ? 'Goal paused. Use /goal resume to continue.'
+          : control === 'resume'
+            ? 'Goal resumed — Kimi continues working toward it.'
+            : 'Goal cleared.',
+      };
+    }
+    const objective = /^set\s+/i.test(goalArgs) ? goalArgs.replace(/^set\s+/i, '').trim() : goalArgs;
+    if (!objective) return { notice: 'Add an objective after /goal set.' };
+    const model = input?.model ?? this.pendingModel;
+    const permissionMode = (KIMI_PERMISSION_MODES as readonly string[]).includes(input?.permissionMode ?? '')
+      ? input?.permissionMode as KimiPromptSubmissionBody['permission_mode']
+      : undefined;
+    await this.submitBody({
+      content: [{ type: 'text', text: objective }],
+      goal_objective: objective,
+      ...(model?.modelID ? { model: model.modelID } : {}),
+      ...(model?.reasoningEffort ? { thinking: model.reasoningEffort } : {}),
+      ...(permissionMode ? { permission_mode: permissionMode } : {}),
+    }, { text: objective });
+    return { notice: `Goal set: ${objective}` };
+  }
+
+  /**
+   * One goal control write. Returns the NOTICE to short-circuit with when the
+   * server reports there was no goal to control — the session is already in
+   * the state asked for, which is not a failure.
+   *
+   * Gated like `stop` (write client + {@link assertWritable}, no content gate):
+   * pause and cancel take work AWAY, the same defensive class as abort. Resume
+   * is the odd one out — it restarts work — but the work it restarts is the
+   * goal loop the user already started, and refusing it on a stream blip would
+   * leave a paused goal unreachable for the outage's length.
+   */
+  private async writeGoalControl(control: 'pause' | 'resume' | 'cancel'): Promise<CommandResult | undefined> {
+    const drive = await this.writeClient();
+    try {
+      await this.write(() => drive.controlGoal(this.info.id, { agent_config: { goal_control: control } }));
+    } catch (error) {
+      if (isKimiWriteError(error) && error.code === KIMI_GOAL_NOT_FOUND_CODE) {
+        return { notice: 'No goal is set. Use /goal <objective> to start one.' };
+      }
+      throw error;
+    }
+    return undefined;
+  }
+
+  /**
+   * Activate a server skill — a CONTENT write: the activation starts a turn
+   * whose approvals arrive on the safety stream, and whose `skill_activation`
+   * user row lands in the transcript this connection must still own. The
+   * response carries no `user_message_id` (`activateSkillResultSchema` is
+   * `{activated, skill_name}`) and none is needed: the row's origin kind keeps
+   * the divergence detector from ever suspecting it.
+   */
+  private async runSkillActivation(name: string, args?: string): Promise<CommandResult> {
+    this.assertWritable();
+    await this.withContentWrite((drive) =>
+      drive.activateSkill(this.info.id, name, args ? { args } : {}));
+    return {};
+  }
+
+  /** The picker's options — the same read the status overlay's label join uses. */
+  async listModels(): Promise<ModelOption[]> {
+    return this.readModelCatalogRows();
   }
 
   async listModes(): Promise<ModeOption[]> {
@@ -1243,6 +1572,56 @@ export class KimiDriveConnection extends KimiObserveConnection {
   }
 
   /**
+   * Adopt a walked row as this connection's own echo when the submit response
+   * carried no `user_message_id` to correlate by: a `user-message` row is
+   * recognized by its exact TEXT, or — for an attachment-only prompt, whose
+   * echo IS the server's `Attached file "…"` notice — by the recorded notice
+   * PREFIX; an inline image's `file-artifact` row is recognized by the
+   * derived echo name ({@link uncorrelatedEchoEvidence}).
+   *
+   * Recorded in BOTH sets, exactly like the id-carrying path in
+   * {@link sendPrompt}: `sent`, because the suspect loop checks that set alone
+   * — a row already in `suspects` is not protected by `known` — and `known`,
+   * so the walk's own tail keeps it accounted for. Each remembered text adopts
+   * exactly one row: two identical prompts leave two entries, and a match
+   * forgives one of them, never a class of rows. An evidence entry is likewise
+   * spent WHOLE on its first match — the prompt's other echo rows share the
+   * adopted row's native message id and are covered by it, so keeping the
+   * leftover prefixes or names would only ever forgive a FOREIGN attachment.
+   */
+  private adoptUncorrelatedEcho(row: KimiMappedRow): boolean {
+    const message = row.message;
+    if (message.type === 'user-message') {
+      const textIndex = this.uncorrelatedPromptTexts.indexOf(message.text);
+      if (textIndex >= 0) {
+        this.uncorrelatedPromptTexts.splice(textIndex, 1);
+      } else {
+        const evidenceIndex = this.uncorrelatedEchoEvidence.findIndex((entry) =>
+          entry.noticePrefixes.some((prefix) => message.text.startsWith(prefix))
+          // ...or the EMPTY row an inline image's echo now carries. An
+          // image-only prompt folds to a user row with no text plus the
+          // artifact (`mapping.ts`), and the empty row comes FIRST — so it is
+          // the row the detector meets, and an entry that could only be spent
+          // by the artifact would leave this connection's own echo standing as
+          // the walk's unexplained user row. Suspicion is keyed by native
+          // message id, so whichever of the pair adopts covers the other.
+          || (message.text === '' && entry.imageNames.length > 0));
+        if (evidenceIndex < 0) return false;
+        this.uncorrelatedEchoEvidence.splice(evidenceIndex, 1);
+      }
+    } else if (message.type === 'file-artifact') {
+      const index = this.uncorrelatedEchoEvidence.findIndex((entry) => entry.imageNames.includes(message.name));
+      if (index < 0) return false;
+      this.uncorrelatedEchoEvidence.splice(index, 1);
+    } else {
+      return false;
+    }
+    boundedAdd(this.sentUserMessageIds, row.nativeMessageId, KIMI_PROMPT_MEMORY_LIMIT);
+    boundedAdd(this.knownUserMessageIds, row.nativeMessageId, KIMI_DIVERGENCE_ID_LIMIT);
+    return true;
+  }
+
+  /**
    * The detector proper, run once per completed bounded walk.
    *
    * Restricted to USER-role rows on purpose. Every foreign turn begins with a
@@ -1252,6 +1631,11 @@ export class KimiDriveConnection extends KimiObserveConnection {
    * (`services/messages/messageHistory.ts:125-136`, `ensureMainAgent`), so a
    * subagent's work cannot appear here as a REST-only row at all, and subagent
    * turns never carry a user origin regardless (`runAgentTurn.ts:31-34`).
+   *
+   * Within user rows, narrowed further by Kimi's own provenance — see
+   * {@link isForeignPromptCandidate}: only `origin.kind === 'user'` or an
+   * ABSENT origin can be a foreign prompt, so a harness row (an injection, a
+   * skill activation, a cron firing) written during WS silence never demotes.
    *
    * DISARMED until history has primed the connection: before the baseline
    * exists, every pre-existing user message in the transcript looks new.
@@ -1284,6 +1668,11 @@ export class KimiDriveConnection extends KimiObserveConnection {
         // the server itself answering for it.
         if (suspect.activity !== activity) {
           this.suspects.delete(id);
+          // Recorded KNOWN, not merely un-suspected — symmetric with the
+          // unresolved-set path below. Deleting alone left a suspect promoted
+          // out of an outage (which the tail never saw, the row having aged
+          // out of the page) re-suspectable by a later deep resync walk.
+          boundedAdd(this.knownUserMessageIds, id, KIMI_DIVERGENCE_ID_LIMIT);
           continue;
         }
         // The view had a hole. For a suspect first seen under a healthy stream
@@ -1351,10 +1740,13 @@ export class KimiDriveConnection extends KimiObserveConnection {
       }
 
       for (const row of rows) {
-        if (row.nativeRole !== 'user') continue;
+        if (!isForeignPromptCandidate(row)) continue;
         const id = row.nativeMessageId;
         if (this.knownUserMessageIds.has(id) || this.sentUserMessageIds.has(id)) continue;
         if (this.suspects.has(id)) continue;
+        // Our own echo, recognized by text when the submit response carried no
+        // id to correlate by — adopted, never suspected.
+        if (this.adoptUncorrelatedEcho(row)) continue;
         // AT THE CAP, DEMOTE — the same rule `addUnresolved` follows, for the
         // same reason, and the 65th unexplained row is the trigger on both
         // sides. Stopping the loop instead let the tail below record the
@@ -1373,7 +1765,10 @@ export class KimiDriveConnection extends KimiObserveConnection {
     // AFTER evaluation, never before: an id marked known first could never
     // become a suspect at all.
     for (const row of rows) {
-      if (row.nativeRole !== 'user') continue;
+      // Harness-origin rows are never suspects (see isForeignPromptCandidate),
+      // so they are never RECORDED either: not held during an outage, and not
+      // spending the known-set's bound on rows that can never need it.
+      if (!isForeignPromptCandidate(row)) continue;
       const id = row.nativeMessageId;
       const accounted = this.knownUserMessageIds.has(id) || this.sentUserMessageIds.has(id);
       // While the stream is DOWN, an unexplained row must not be recorded as
@@ -1381,7 +1776,7 @@ export class KimiDriveConnection extends KimiObserveConnection {
       // this interval, which is exactly why the row is being held instead. Rows
       // that are ours, or that were already known, register as they always did.
       if (!healthy) {
-        if (!accounted) this.addUnresolved(id);
+        if (!accounted && !this.adoptUncorrelatedEcho(row)) this.addUnresolved(id);
         else boundedAdd(this.knownUserMessageIds, id, KIMI_DIVERGENCE_ID_LIMIT);
         continue;
       }
@@ -1716,6 +2111,69 @@ export class KimiDriveConnection extends KimiObserveConnection {
       throw error;
     }
   }
+}
+
+/**
+ * Whether a walked row can be evidence of a FOREIGN prompt at all.
+ *
+ * The INVERTED rule: suspect only a `user`-role row Kimi itself labels a user
+ * prompt (`origin.kind === 'user'` — what a terminal `kimi -S` turn carries,
+ * `USER_PROMPT_ORIGIN` upstream) or one whose origin is ABSENT, because an
+ * older server sends none and absent must stay suspect or the detector goes
+ * blind against exactly the servers that need it. Every harness kind —
+ * `injection`, `skill_activation`, `cron_job`, and the rest of the twelve
+ * upstream defines — is the server writing to its OWN session; a skip-list of
+ * those kinds would drift the day upstream adds a thirteenth, so the rule
+ * names what IS suspect rather than what is not.
+ */
+function isForeignPromptCandidate(row: KimiMappedRow): boolean {
+  return row.nativeRole === 'user'
+    && (row.originKind === undefined || row.originKind === 'user');
+}
+
+/**
+ * Turn an image-mime attachment into an inline base64 image part.
+ *
+ * The bytes come from the same staging-validated read an upload would make
+ * ({@link readAttachmentBytes}), still BEFORE any HTTP, so a refused image
+ * costs the transport nothing. No size bound is applied here because none
+ * exists to apply: the inline `input.images` path this mirrors receives its
+ * bytes already decoded, and EVERY staged attachment — inline or uploaded —
+ * has already been bounded by the broker's per-file upload limit before this
+ * adapter is handed the path (`broker/src/artifacts/upload-staging.ts`).
+ */
+function inlineImageAttachment(cwd: string | undefined, file: FileInput): KimiPromptContentPart {
+  const bytes = readAttachmentBytes(cwd, file);
+  return {
+    type: 'image',
+    source: { kind: 'base64', media_type: file.mimeType, data: Buffer.from(bytes).toString('base64') },
+  };
+}
+
+/**
+ * Resolve one attachment to its bytes, BEFORE any HTTP is issued for it.
+ *
+ * The broker stages uploads into `<cwd>/.cosyncing/inbox` and hands the adapter
+ * the path as `brokerPath` (`broker/src/artifacts/upload-staging.ts`,
+ * `FileInput` in the protocol). That inbox is the ONLY directory an attachment
+ * path may name — anything else is a client-supplied path, which the contract
+ * forbids accepting — so the check is the same one claude and codex apply.
+ * Inline `data` is the protocol's other form; the broker normally resolves it
+ * to `brokerPath` before this adapter ever sees it, and decoding it here is the
+ * fallback, not the design.
+ */
+function readAttachmentBytes(cwd: string | undefined, file: FileInput): Uint8Array {
+  if (file.brokerPath) {
+    if (!cwd) throw new Error('Kimi attachment delivery requires a workspace.');
+    const inbox = resolve(cwd, PRODUCT_IDENTITY.repositoryDirectoryName, 'inbox');
+    const brokerPath = resolve(file.brokerPath);
+    if (dirname(brokerPath) !== inbox || !existsSync(brokerPath)) {
+      throw new Error('Kimi rejected an untrusted broker attachment path.');
+    }
+    return new Uint8Array(readFileSync(brokerPath));
+  }
+  if (typeof file.data === 'string') return new Uint8Array(Buffer.from(file.data, 'base64'));
+  throw new Error(`Kimi attachment ${file.name} has no bytes to send.`);
 }
 
 /** Insertion-ordered add with an oldest-first ceiling. Sets iterate in insertion order. */

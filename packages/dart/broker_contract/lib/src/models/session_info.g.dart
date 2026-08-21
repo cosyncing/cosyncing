@@ -11,7 +11,6 @@ SessionDriveControl _$SessionDriveControlFromJson(Map<String, dynamic> json) =>
       state: $enumDecode(_$DriveStateEnumMap, json['state']),
       supported: json['supported'] as bool,
       reason: json['reason'] as String?,
-      willFork: json['willFork'] as bool?,
       handoffAvailable: json['handoffAvailable'] as bool?,
       takeoverAvailable: json['takeoverAvailable'] as bool?,
       takeoverMode: $enumDecodeNullable(
@@ -27,7 +26,6 @@ Map<String, dynamic> _$SessionDriveControlToJson(
   'state': _$DriveStateEnumMap[instance.state]!,
   'supported': instance.supported,
   'reason': instance.reason,
-  'willFork': instance.willFork,
   'handoffAvailable': instance.handoffAvailable,
   'takeoverAvailable': instance.takeoverAvailable,
   'takeoverMode': _$AttachModeEnumMap[instance.takeoverMode],

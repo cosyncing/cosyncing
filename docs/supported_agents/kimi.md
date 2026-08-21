@@ -37,10 +37,11 @@ the same when `COSYNCING_KIMI_MANAGED_HOST=1` is set in its environment.
 
 Authorization is not ownership. The broker acts only on a process it can prove
 it started — pid, a start token that survives pid reuse, the boot it started in,
-the executable name, and the address the claim was recorded for must all match,
-re-proved immediately before every signal. A `kimi web` you started yourself is
-never stopped, replaced, or reconfigured, and neither is one the machine will not
-let cosyncing identify.
+and the address the claim was recorded for must all match, re-proved immediately
+before every signal. The command name is recorded as diagnostic evidence but is
+not part of the proof: a process can rename itself at runtime. A `kimi web` you
+started yourself is never stopped, replaced, or reconfigured, and neither is one
+the machine will not let cosyncing identify.
 
 `cosyncing doctor` reports what it found either way, but what it tells you to do
 depends on whether cosyncing manages the Kimi home you are pointed at — the one

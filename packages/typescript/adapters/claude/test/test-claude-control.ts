@@ -7,7 +7,7 @@
  *     /proc liveness), keyed by sessionId.
  *   - claudeControl(): drive observing / driving / unavailable(collision|cwd-gone); terminalSync honest
  *     supported:false with the future --channels setup command.
- *   - resumeArgs(): never --bare, --fork-session only when live-owner safety requires it.
+ *   - resumeArgs(): never --bare, never --fork-session (issue 15a: demote, never fork).
  *   - resumeEnv(): default store scrubs ANTHROPIC_API_KEY/AUTH_TOKEN; wrappers keep them.
  *
  *   bun run packages/typescript/adapters/claude/test/test-claude-control.ts      (exit 0 = all pass)
@@ -98,7 +98,7 @@ if (isLinux) {
 }
 check('bridgedUuids: missing sessions dir → empty set', bridgedUuids(wrapperStore).size === 0);
 
-// ── liveTerminalOwner: no-fork Drive guard ───────────────────────────────────
+// ── liveTerminalOwner: takeover-refusal / demote trigger ─────────────────────
 check('liveTerminalOwner: live pid owning uuid detected', liveTerminalOwner(defaultStore, U_PLAIN) === process.pid);
 check('liveTerminalOwner: dead pid ignored', liveTerminalOwner(defaultStore, U_DEAD) === null);
 check('liveTerminalOwner: missing sessions dir → null', liveTerminalOwner(wrapperStore, U_PLAIN) === null);
@@ -106,12 +106,12 @@ check('liveTerminalOwner: missing sessions dir → null', liveTerminalOwner(wrap
 // ── claudeControl: drive states ────────────────────────────────────────────────
 const observing = claudeControl({ store: defaultStore, uuid: U_PLAIN, cwd: existingCwd, bridged: false, channelsEligible: true });
 check('drive: normal default session → observing+supported', observing.drive.state === 'observing' && observing.drive.supported === true);
-// U_PLAIN has a LIVE terminal owner (pid-file 1003) → the issues-part2 divergence fix must warn that
-// driving forks, and set the machine-readable willFork for the app's takeover dialog.
-check('drive: live-owned session → willFork + fork warning reason', observing.drive.willFork === true && /fork/i.test(observing.drive.reason || ''));
+// U_PLAIN has a LIVE terminal owner (pid-file 1003) → the issue-15a design (demote, never fork) must
+// warn BEFORE driving that a terminal write ends the drive — the replaced willFork signal, now copy only.
+check('drive: live-owned session → terminal-attached warning reason (no willFork)', /terminal is attached/i.test(observing.drive.reason || '') && /stop driving/i.test(observing.drive.reason || '') && !('willFork' in observing.drive));
 const U_FREE = '77777777-7777-7777-7777-777777777777'; // no pid-file → unowned
 const freeObserving = claudeControl({ store: defaultStore, uuid: U_FREE, cwd: existingCwd, bridged: false, channelsEligible: true });
-check('drive: UNOWNED default session reason mentions subscription (no willFork)', /subscription/i.test(freeObserving.drive.reason || '') && freeObserving.drive.willFork === undefined);
+check('drive: UNOWNED default session reason mentions subscription (no terminal warning)', /subscription/i.test(freeObserving.drive.reason || '') && !/terminal is attached/i.test(freeObserving.drive.reason || ''));
 
 const wrapObserving = claudeControl({ store: wrapperStore, uuid: U_PLAIN, cwd: existingCwd, bridged: false, channelsEligible: false });
 check('drive: wrapper observing reason mentions its endpoint/model', /endpoint|qwen/i.test(wrapObserving.drive.reason || ''));
@@ -125,9 +125,9 @@ check('drive: vanished workspace → unavailable', cwdGone.drive.state === 'unav
 
 const drivingNow = claudeControl({ store: defaultStore, uuid: U_PLAIN, cwd: existingCwd, bridged: false, driving: true, channelsEligible: true });
 check('drive: resume attach → driving+supported', drivingNow.drive.state === 'driving' && drivingNow.drive.supported === true);
-// bridged+driving: once we actually own the fork the state is driving (collision is gated upstream at the disabled Drive button)
+// bridged+driving: once we actually own the session the state is driving (collision is gated upstream at the disabled Drive button)
 const drivingBridged = claudeControl({ store: defaultStore, uuid: U_BRIDGED, cwd: existingCwd, bridged: true, driving: true, channelsEligible: true });
-check('drive: driving overrides collision once we own the fork', drivingBridged.drive.state === 'driving');
+check('drive: driving overrides collision once we own the session', drivingBridged.drive.state === 'driving');
 
 // ── eligibleForChannels: first-party only — generalized across config sources (adversarially reviewed) ──
 {
@@ -198,10 +198,10 @@ check('sync(v1, ineligible wrapper): reason names the wrapper and promises only 
 // remote-controlled session → still not synced (and observed-only); reason mentions remote control
 check('sync: remote-control → supported:false with reason', collided.terminalSync.supported === false && /remote control/i.test(collided.terminalSync.reason || ''));
 
-// ── resumeArgs: cost-safety + conditional single-owner fork ────────────────────
-const argsDef = resumeArgs(U_PLAIN, { model: 'opus', mode: 'acceptEdits', isDefault: true, fork: false });
+// ── resumeArgs: cost-safety + always-in-place resume (issue 15a: demote, never fork) ──
+const argsDef = resumeArgs(U_PLAIN, { model: 'opus', mode: 'acceptEdits', isDefault: true });
 check('args: NEVER contains --bare (would force API billing)', !argsDef.includes('--bare'));
-check('args: no live owner → no --fork-session', !argsDef.includes('--fork-session'));
+check('args: NEVER contains --fork-session (takeover resumes in place; a terminal write demotes)', !argsDef.includes('--fork-session'));
 check('args: carries --resume <uuid>', argsDef.includes('--resume') && argsDef.includes(U_PLAIN));
 check('args: default store passes --model', argsDef.includes('--model') && argsDef.includes('opus'));
 check('args: passes --permission-mode', argsDef.includes('--permission-mode') && argsDef.includes('acceptEdits'));
@@ -210,7 +210,7 @@ check('args: passes --permission-mode', argsDef.includes('--permission-mode') &&
 // (issues-part2 13.1c, probed live on 2.1.207). Both resume AND fresh spawns must ask via stdio.
 check('args: passes --permission-prompt-tool stdio (drive permissions ASK, never silently deny)', argsDef[argsDef.indexOf('--permission-prompt-tool') + 1] === 'stdio');
 check('args(fresh): passes --permission-prompt-tool stdio too', (() => { const a = resumeArgs(U_PLAIN, { isDefault: true, fresh: true }); return a[a.indexOf('--permission-prompt-tool') + 1] === 'stdio'; })());
-check('args: live owner → includes --fork-session', resumeArgs(U_PLAIN, { isDefault: true, fork: true }).includes('--fork-session'));
+check('args(fresh): no --fork-session either (nothing to fork; the id is ours)', !resumeArgs(U_PLAIN, { isDefault: true, fresh: true }).includes('--fork-session'));
 const argsWrap = resumeArgs(U_PLAIN, { model: 'mimo-v2.5[1m]', effort: 'xhigh', isDefault: false });
 check('args: wrapper store PASSES --model (switch among its own backend models, e.g. claude-mi pro↔non-pro)', argsWrap.includes('--model') && argsWrap.includes('mimo-v2.5[1m]'));
 check('args: wrapper endpoints DO honor effort → --effort passed (verified live on minimax/mimo)', argsWrap.includes('--effort') && argsWrap.includes('xhigh'));

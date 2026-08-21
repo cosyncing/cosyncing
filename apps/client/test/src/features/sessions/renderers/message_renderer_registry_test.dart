@@ -968,7 +968,190 @@ void main() {
         reason: 'type-driven dispatch',
       );
     });
+
+    // P6. An image the user SENT used to arrive as a standalone artifact card
+    // on the agent side of the transcript, detached from the prompt it went
+    // with. `file-artifact.userMessageKey` is the ownership link.
+    group('user attachments', () {
+      AgentMessage userMessage(String text) => AgentMessage.fromJson({
+        'type': 'user-message',
+        'key': 'user-1',
+        'text': text,
+      });
+
+      AgentMessage attachment({
+        required String name,
+        required String mimeType,
+        String? url,
+        int? size,
+        String? userMessageKey = 'user-1',
+      }) => AgentMessage.fromJson({
+        'type': 'file-artifact',
+        'artifactKey': 'artifact-$name',
+        'name': name,
+        'mimeType': mimeType,
+        if (url != null) 'url': url,
+        if (size != null) 'size': size,
+        if (userMessageKey != null) 'userMessageKey': userMessageKey,
+      });
+
+      testWidgets('previews a sent image inside the right-aligned bubble', (
+        tester,
+      ) async {
+        await _pumpUserBubble(
+          tester,
+          message: userMessage('Look at this'),
+          attachments: [
+            attachment(
+              name: 'screenshot.png',
+              mimeType: 'image/png',
+              url: _onePixelPngDataUrl,
+            ),
+          ],
+        );
+
+        expect(find.text('Look at this'), findsOneWidget);
+        expect(
+          find.byKey(const Key('user-attachment-image')),
+          findsOneWidget,
+        );
+        final surfaceWidth = tester.getSize(find.byType(Scaffold)).width;
+        expect(
+          tester.getCenter(find.byKey(const Key('user-attachment-0'))).dx,
+          greaterThan(surfaceWidth / 2),
+          reason: 'a sent artifact belongs on the user side',
+        );
+      });
+
+      testWidgets('shows a compact chip for a non-image attachment', (
+        tester,
+      ) async {
+        await _pumpUserBubble(
+          tester,
+          message: userMessage('Here is the spec'),
+          attachments: [
+            attachment(
+              name: 'spec.pdf',
+              mimeType: 'application/pdf',
+              url: 'https://broker.example/artifacts/spec.pdf',
+              size: 2048,
+            ),
+          ],
+        );
+
+        expect(find.text('spec.pdf'), findsOneWidget);
+        expect(find.textContaining('2048'), findsOneWidget);
+        expect(find.byKey(const Key('user-attachment-image')), findsNothing);
+      });
+
+      testWidgets('an attachment-only prompt renders no empty body', (
+        tester,
+      ) async {
+        await _pumpUserBubble(
+          tester,
+          message: userMessage(''),
+          attachments: [
+            attachment(
+              name: 'spec.pdf',
+              mimeType: 'application/pdf',
+              url: 'https://broker.example/artifacts/spec.pdf',
+            ),
+          ],
+        );
+
+        expect(find.byKey(const Key('user-attachment-0')), findsOneWidget);
+        // An empty markdown body still renders a `Text('')` that occupies its
+        // slot; an attachment-only prompt must not carry one.
+        expect(find.text(''), findsNothing);
+      });
+
+      testWidgets('a linked artifact with no owner row still reads user-sent', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          attachment(
+            name: 'screenshot.png',
+            mimeType: 'image/png',
+            url: _onePixelPngDataUrl,
+          ),
+        );
+
+        final align = tester.widget<Align>(
+          find
+              .ancestor(
+                of: find.byType(FractionallySizedBox),
+                matching: find.byType(Align),
+              )
+              .first,
+        );
+        expect(align.alignment, Alignment.centerRight);
+        final theme = Theme.of(tester.element(find.byType(Card)));
+        expect(
+          tester.widget<Card>(find.byType(Card)).color,
+          theme.colorScheme.primaryContainer.withValues(alpha: 0.75),
+        );
+      });
+
+      testWidgets('an unlinked artifact still renders as an agent row', (
+        tester,
+      ) async {
+        await _pumpRenderer(
+          tester,
+          attachment(
+            name: 'report.pdf',
+            mimeType: 'application/pdf',
+            userMessageKey: null,
+          ),
+        );
+
+        final align = tester.widget<Align>(
+          find
+              .ancestor(
+                of: find.byType(FractionallySizedBox),
+                matching: find.byType(Align),
+              )
+              .first,
+        );
+        expect(align.alignment, Alignment.centerLeft);
+        final theme = Theme.of(tester.element(find.byType(Card)));
+        expect(
+          tester.widget<Card>(find.byType(Card)).color,
+          theme.colorScheme.surfaceContainerHighest,
+        );
+      });
+    });
   });
+}
+
+/// A 1x1 transparent PNG, the smallest valid inline image source.
+const _onePixelPngDataUrl =
+    'data:image/png;base64,'
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8'
+    'BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+Future<void> _pumpUserBubble(
+  WidgetTester tester, {
+  required AgentMessage message,
+  List<AgentMessage> attachments = const [],
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      theme: buildAppTheme(softMinimalistTheme.light, Brightness.light),
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => buildConversationUserBubble(
+            context,
+            message,
+            attachments: attachments,
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
 }
 
 String _sanitizeSourceForBranchCheck(String source) {

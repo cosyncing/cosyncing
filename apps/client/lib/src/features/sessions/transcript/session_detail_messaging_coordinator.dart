@@ -209,9 +209,11 @@ extension _SessionDetailMessaging on SessionDetailController {
             _attachmentPromptClientMessageId = clientMessageId;
             _attachmentPromptResult = Completer<bool>();
           }
-          final queued =
-              state.sessionInfo?.status == SessionStatus.working ||
-              state.liveState.activities.isNotEmpty;
+          // Only a working session can queue a prompt. A live agent-activity
+          // bar is a progress overlay that can outlive its turn, so keying on
+          // it marked every send on an idle session queued — and the flag is
+          // immutable after capture, so that badge never cleared.
+          final queued = state.sessionInfo?.status == SessionStatus.working;
           state = state.copyWith(
             optimisticPrompts: [
               ...state.optimisticPrompts,

@@ -102,7 +102,6 @@ class SessionDriveControl {
     required this.state,
     required this.supported,
     this.reason,
-    this.willFork,
     this.handoffAvailable,
     this.takeoverAvailable,
     this.takeoverMode,
@@ -120,11 +119,6 @@ class SessionDriveControl {
 
   /// Optional reason for the current state.
   final String? reason;
-
-  /// If this session is currently driven, whether the next action will fork.
-  ///
-  /// See `docs/protocol/contract-sync.md`.
-  final bool? willFork;
 
   /// Whether Drive can be released to a terminal for this session.
   ///

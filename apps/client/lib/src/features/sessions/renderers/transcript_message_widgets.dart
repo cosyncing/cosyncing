@@ -237,6 +237,11 @@ class _TranscriptBoxMessage extends StatelessWidget {
 }
 
 /// One-line file-artifact presentation with the existing download widget.
+///
+/// An artifact the user SENT (one carrying a `userMessageKey`) reads user-side
+/// here too: right-aligned on the user surface colour. This is the fallback for
+/// a linked artifact whose owning row is outside the retained window, and for
+/// the non-turn display modes that render artifacts as standalone rows.
 class _TranscriptArtifactRow extends StatelessWidget {
   const _TranscriptArtifactRow({required this.message, this.action});
 
@@ -257,13 +262,18 @@ class _TranscriptArtifactRow extends StatelessWidget {
         ? descriptorPath!
         : l10n.sessionArtifactUntitled;
     final size = descriptor?.size;
+    final userSent = message.isUserAttachment;
+    final alignment = userSent ? Alignment.centerRight : Alignment.centerLeft;
 
     return Align(
-      alignment: Alignment.centerLeft,
+      alignment: alignment,
       child: FractionallySizedBox(
+        alignment: alignment,
         widthFactor: _transcriptBubbleWidthFactor,
         child: Card(
-          color: theme.colorScheme.surfaceContainerHighest,
+          color: userSent
+              ? theme.colorScheme.primaryContainer.withValues(alpha: 0.75)
+              : theme.colorScheme.surfaceContainerHighest,
           margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(tokens.radiusLg),

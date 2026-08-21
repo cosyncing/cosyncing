@@ -48,6 +48,10 @@ full support claim:
   factors.
 - Keep shared behavior agent-neutral; provider-specific code stays inside its
   adapter.
+- Show subagent sessions as nested roster rows for Claude Code, Kimi Code, and
+  OpenCode. Codex and DeepSeek Harness nest them under the parent session today;
+  the other three surface subagent work inside the transcript only, so the
+  roster's background-session toggle has nothing to collapse.
 
 ## Later
 

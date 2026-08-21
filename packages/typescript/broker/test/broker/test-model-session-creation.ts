@@ -312,7 +312,9 @@ try {
   );
   assert.deepEqual(
     immediate.body.session.currentModel,
-    selected,
+    // The adapter authors the roster label from its own catalog; the selection
+    // itself (provider, id, effort) must arrive exactly as sent.
+    { ...selected, label: "Opus" },
     "exact immediate selection reaches the adapter",
   );
 

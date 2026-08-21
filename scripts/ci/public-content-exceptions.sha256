@@ -1,7 +1,6 @@
 # Exact reviewed files containing synthetic paths/credentials or policy terms.
-bc1e3f63d6af273a2f1670880bca21be1625841a60f976e94177cb8599ed13a6  packages/typescript/adapters/claude/src/implementation.ts
 a1ccfb43a52a05c68250ea7958f0f37e6c2c446f6c4fedb4e1da5c7e07cb69b3  packages/typescript/adapters/claude/test/test-claude-activity.ts
-da5b1119273563b00f4740528ec9dcc5709b206eb9c47c839583c57fde627121  packages/typescript/adapters/claude/test/test-claude-control.ts
+cf0f80af4ad10e57cee937d52087a8004fd4f0a3147794a4e3223e89004cbb76  packages/typescript/adapters/claude/test/test-claude-control.ts
 9d550c4e58b893921d272f0252c2c3e00fc5908e49e4573850ecd7cd9eab5a2e  packages/typescript/broker/test/security-r2/test-r2-export.ts
 328f8ddbe80fd5ccce9cdf37e89d64f24ef8cf80321c7a2ab84032fb48f755ee  packages/typescript/broker/test/security-r2/test-r2-redactor.ts
 ff59dc729f4490e5e438f43e8fff6481de0dea1a7f7518d349410a508e939618  scripts/broker/tailscale-serve.sh

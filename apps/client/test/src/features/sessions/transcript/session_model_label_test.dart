@@ -60,6 +60,63 @@ void main() {
     );
   });
 
+  // P2/P8. A provider-qualified id is a raw id even without a digit, so it must
+  // never reach the roster as if it were a name, and the family/version guess
+  // must not invent one from it either. The adapter authors the label.
+  test('never shows a provider-qualified id as a human label', () {
+    // Exactly what the kimi adapter reports today: the bare `/status.model`
+    // string in the legacy slot and no authored label at all.
+    final kimi = _session(model: 'kimi-code/kimi-for-coding');
+
+    expect(sessionModelLabel(kimi), isNull);
+    expect(sessionModelTechnicalId(kimi), 'kimi-code/kimi-for-coding');
+
+    final claude = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'anthropic',
+        modelID: 'claude-fable-5',
+      ),
+    );
+
+    expect(sessionModelLabel(claude), isNull);
+    expect(sessionModelTechnicalId(claude), 'anthropic/claude-fable-5');
+  });
+
+  test('shows the adapter-authored label for a provider-qualified id', () {
+    final coding = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'managed:kimi-code',
+        modelID: 'kimi-code/kimi-for-coding',
+        label: 'K2.7 Coding',
+      ),
+    );
+
+    expect(sessionModelLabel(coding), 'K2.7 Coding');
+
+    final k3 = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'managed:kimi-code',
+        modelID: 'kimi-code/k3-256k',
+        label: 'K3-256k',
+      ),
+    );
+
+    expect(sessionModelLabel(k3), 'K3-256k');
+    // The tooltip keeps the provider-qualified identity the roster refuses to
+    // print inline.
+    expect(sessionModelTechnicalId(k3), contains('kimi-code/k3-256k'));
+
+    final fable = _session(
+      currentModel: const SessionCurrentModel(
+        providerID: 'anthropic',
+        modelID: 'claude-fable-5',
+        label: 'Fable 5',
+      ),
+    );
+
+    expect(sessionModelLabel(fable), 'Fable 5');
+  });
+
   test('omits an unknown raw id instead of showing debug text inline', () {
     final session = _session(
       currentModel: const SessionCurrentModel(

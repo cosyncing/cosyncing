@@ -228,6 +228,22 @@ await sleep(GRACE_MS * 3);
 check('D2 a folded resume socket releases the actual bare owner after the grace',
   bareDrivingConn.closed === 1, `closed=${bareDrivingConn.closed}`);
 
+// A joinExisting socket keeps `mode=resume` while the Kimi/dsh owner it joined
+// is registered under `#live`; releasing by the requested key alone matched
+// neither `#resume` nor the bare key and left the owner alive until dispose.
+const liveOwner = await hub.ensure('fake', 's4', 'live');
+const liveOwnerConn = liveOwner.conn as FakeConn;
+liveOwner.conn.info.control = {
+  drive: { supported: true, state: 'driving' },
+  terminalSync: { supported: false, syncAvailable: false, active: false },
+} as any;
+liveOwner.addClient(noopClient);
+liveOwner.removeClient(noopClient);
+hub.releaseAttached('fake', 's4', 'resume', liveOwner);
+await sleep(GRACE_MS * 3);
+check('D2b a joined resume socket releases the #live owner it actually holds',
+  liveOwnerConn.closed === 1, `closed=${liveOwnerConn.closed}`);
+
 const bridge = fakeConn(observing('s3'));
 hub.adopt('fake', 's3', bridge);
 const joinedBridge = await hub.ensure('fake', 's3', 'resume', 'lease-restore');

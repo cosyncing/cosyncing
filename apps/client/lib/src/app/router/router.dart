@@ -407,6 +407,77 @@ bool get _browserOwnsZoom => debugBrowserOwnsZoomOverride ?? kIsWeb;
 @visibleForTesting
 bool? debugBrowserOwnsZoomOverride;
 
+/// Releases every key [HardwareKeyboard] still believes is pressed by feeding
+/// it synthesized key-ups.
+///
+/// [HardwareKeyboard.clearState] is not an option here: it is
+/// `@visibleForTesting`, does not synthesize cancel key-ups, and clears the
+/// registered handler list along with the pressed keys (dropping, for example,
+/// an open [MenuAnchor]'s keyboard handler). Synthesized key-ups clear only
+/// the pressed-key state and notify handlers through the normal dispatch path.
+void _releaseLatchedKeyboardKeys() {
+  final keyboard = HardwareKeyboard.instance;
+  // physicalKeysPressed returns a copy, so mutating the pressed-key map via
+  // handleKeyEvent while iterating is safe.
+  for (final physicalKey in keyboard.physicalKeysPressed) {
+    final logicalKey = keyboard.lookUpLayout(physicalKey);
+    if (logicalKey == null) {
+      continue;
+    }
+    keyboard.handleKeyEvent(
+      KeyUpEvent(
+        physicalKey: physicalKey,
+        logicalKey: logicalKey,
+        timeStamp: Duration.zero,
+        synthesized: true,
+      ),
+    );
+  }
+}
+
+/// Clears modifier state [HardwareKeyboard] latched while the app is unfocused.
+///
+/// Switching a Windows virtual desktop with Ctrl+Win+Arrow moves focus away
+/// before the Ctrl key-up is delivered, so `HardwareKeyboard.isControlPressed`
+/// stays latched true and the next plain wheel scroll is misread as
+/// Ctrl+scroll text zoom ([_AppCommandShell._handlePointerSignal]); the
+/// composer's send chord and the attachment paste chord read the same latched
+/// state. Desktop window blur maps to `AppLifecycleState.inactive` (followed
+/// by `hidden`), so both callbacks release the latched keys. On platforms
+/// where neither lifecycle event fires on blur, nothing changes.
+class _LatchedKeyboardStateGuard extends StatefulWidget {
+  const _LatchedKeyboardStateGuard({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_LatchedKeyboardStateGuard> createState() =>
+      _LatchedKeyboardStateGuardState();
+}
+
+class _LatchedKeyboardStateGuardState
+    extends State<_LatchedKeyboardStateGuard> {
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle = AppLifecycleListener(
+      onInactive: _releaseLatchedKeyboardKeys,
+      onHide: _releaseLatchedKeyboardKeys,
+    );
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 /// App-level shell for broker-independent shortcuts and platform menus.
 ///
 /// See `docs/architecture/client-ui.md`.
@@ -520,7 +591,7 @@ class _AppCommandShell extends ConsumerWidget {
       child: CallbackShortcuts(bindings: shortcutBindings, child: shellChild),
     );
 
-    return menuBar;
+    return _LatchedKeyboardStateGuard(child: menuBar);
   }
 }
 

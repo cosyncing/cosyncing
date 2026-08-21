@@ -4732,22 +4732,20 @@ async function requestDrive(s) {
   // Best-effort "is it working" (observe status is a lagging filesystem signal, so this can miss) — when
   // we DO know it's working, escalate to a red warning; otherwise the unconditional caution still applies.
   const working = agentBusy || currentRosterStatus === 'working' || (s && s.status === 'working');
-  // The adapter proves a live terminal owner (control.drive.willFork): driving NOW forks to a new uuid.
-  // Say so up front with the escape hatch — quitting the terminal first keeps the same session (issues-part2).
-  const willFork = !!s?.control?.drive?.willFork;
+  // The adapter warns in control.drive.reason when a terminal is attached (issue 15a — demote, never
+  // fork): if the terminal writes, the drive demotes back to observe. Surface the adapter's own words.
+  const reason = s?.control?.drive?.reason;
   const ok = await confirmDialog({
     title: 'Take over this session?',
     body:
       'Driving takes over the session as a new owner so you can send prompts from here. If a run is in ' +
       'progress it will be interrupted, and the takeover can diverge from the live terminal session. ' +
       'Strongly recommended: Drive only when the session is idle or done — not while it is working.' +
-      (willFork
-        ? '\n\n⚠ A terminal is attached to this session RIGHT NOW, so your first prompt here will continue in a FORK (new uuid). To keep the SAME session instead: quit the terminal (Ctrl+C / Ctrl+D) first, then Drive.'
-        : '') +
+      (reason ? `\n\n${reason}` : '') +
       (working ? '\n\n⚠ This session looks like it is still working right now.' : ''),
-    confirmText: willFork ? 'Drive (fork)' : 'Drive',
+    confirmText: 'Drive',
     cancelText: 'Cancel',
-    danger: working || willFork,
+    danger: working,
   });
   if (ok) attach(s, 'resume');
 }

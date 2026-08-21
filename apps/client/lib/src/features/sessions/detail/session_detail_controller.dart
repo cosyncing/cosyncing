@@ -923,9 +923,10 @@ class SessionDetailController
   }
 
   /// Takes over the session from the terminal: re-attaches in `resume` (Drive)
-  /// mode so the app becomes the mutating owner. When a live terminal owns the
-  /// session the broker continues it single-owner-safe in a fork (Claude
-  /// `willFork`); the caller must show the confirm first. No-op when detached.
+  /// mode so the app becomes the mutating owner. A terminal mid-turn is refused
+  /// broker-side (Claude, issue 15a); a terminal that writes later demotes the
+  /// drive back to observe. The caller must show the confirm first. No-op when
+  /// detached.
   Future<bool> takeOver() async {
     final connection = _connection;
     final control = SessionControlView.fromSessionDetailState(state);

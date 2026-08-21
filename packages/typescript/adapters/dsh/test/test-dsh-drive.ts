@@ -607,6 +607,31 @@ async function attached(
 }
 
 {
+  // The host-wide catalog the create dialog reads: same groups, no session.
+  const { rpc, sent } = client({ 'llm.models': { groups: CATALOG.groups, failures: [] } });
+  const driver = new DshDriver(rpc);
+  const groups = await driver.catalog();
+  check(
+    'the host-wide catalog reads llm.models with no session and parses the shared group shape',
+    sent.length === 1
+      && sent[0]!.path === 'llm.models'
+      && JSON.stringify(sent[0]!.body.payload) === '{}'
+      && groups.length === 2
+      && groups[0]!.id === 'deepseek-official'
+      && groups[0]!.models[0]!.reasoning?.defaultEffort === 'high'
+      && groups[1]!.id === 'minimax-cn',
+    JSON.stringify(groups),
+  );
+}
+
+{
+  const { rpc } = client({ 'llm.models': 'not an object' });
+  let threw = false;
+  await new DshDriver(rpc).catalog().catch(() => { threw = true; });
+  check('a non-object llm.models answer fails closed as drift', threw);
+}
+
+{
   const { connection, sent } = await attached({ 'session.models': CATALOG });
   await connection.sendPrompt({ text: 'go', model: { providerID: 'minimax-cn', modelID: 'MiniMax-M3' } });
   check(

@@ -38,12 +38,18 @@ final class SessionLiveState {
       for (final value in this.activities) value.key: value,
     };
 
-    if (message.agentMessageStatus == AgentMessageStatus.idle) {
-      // `agent-activity` is a volatile progress overlay. A canonical idle
-      // status is the authoritative turn boundary and prevents a missed
-      // terminal activity frame from leaving a forever-running card.
+    // `agent-activity` is a volatile progress overlay. A canonical idle status
+    // is the authoritative turn boundary and prevents a missed terminal
+    // activity frame from leaving a forever-running card. Only a `status`
+    // frame carries that boundary, and the sweep runs ALONGSIDE the type
+    // dispatch below: chaining it in front dropped any state frame that also
+    // reported a status.
+    if (message.type == AgentMessageType.status &&
+        message.agentMessageStatus == AgentMessageStatus.idle) {
       activities.clear();
-    } else if (GoalStateSnapshot.fromMessage(message)
+    }
+
+    if (GoalStateSnapshot.fromMessage(message)
         case final GoalStateSnapshot goal) {
       switch (goal.status) {
         case GoalStateStatus.active:

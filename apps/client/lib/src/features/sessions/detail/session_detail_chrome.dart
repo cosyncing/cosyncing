@@ -271,6 +271,7 @@ class _StatusChipButton extends StatelessWidget {
           Theme.of(context),
           l10n,
           control.pill,
+          canTakeOver: control.canTakeOver,
         ).$1;
     return Tooltip(
       message: label == null
@@ -377,7 +378,12 @@ class _SessionControlPill extends StatelessWidget {
                 ? tokens.statusWorking
                 : tokens.textSecondary,
           )
-        : _controlPillStyle(theme, l10n, control.pill);
+        : _controlPillStyle(
+            theme,
+            l10n,
+            control.pill,
+            canTakeOver: control.canTakeOver,
+          );
     if (label == null || icon == null || color == null) {
       return const SizedBox.shrink();
     }
@@ -460,8 +466,9 @@ String _controlPillStateName({
 (String?, IconData?, Color?) _controlPillStyle(
   ThemeData theme,
   AppLocalizations l10n,
-  SessionControlPill pill,
-) {
+  SessionControlPill pill, {
+  bool canTakeOver = false,
+}) {
   final scheme = theme.colorScheme;
   return switch (pill) {
     SessionControlPill.synced => (
@@ -493,9 +500,17 @@ String _controlPillStateName({
       Icons.visibility_outlined,
       scheme.onSurfaceVariant,
     ),
+    // A demoted generation whose wire state is `unavailable` but that can be
+    // taken over reads "Observing" — the same word the observing pill uses —
+    // because "Unavailable" beside a working Take over button is false, and it
+    // takes the eye icon with the label so the two never disagree. The
+    // wire value stays `unavailable` (it is contract data); only the rendered
+    // label softens, mirroring the takeover-aware description below.
     SessionControlPill.unavailable => (
-      l10n.sessionControlUnavailable,
-      Icons.block_outlined,
+      canTakeOver
+          ? l10n.sessionControlObserving
+          : l10n.sessionControlUnavailable,
+      canTakeOver ? Icons.visibility_outlined : Icons.block_outlined,
       scheme.onSurfaceVariant,
     ),
     SessionControlPill.unknown => (null, null, null),
@@ -720,8 +735,8 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     // Re-derive control LIVE from the watched controller — never a snapshot
-    // frozen at open time — so `willFork` and the pill stay honest if the
-    // terminal quits/reopens while the sheet is up.
+    // frozen at open time — so the pill stays honest if the terminal
+    // quits/reopens while the sheet is up.
     final state = watchQualifiedDetail(ref, widget.sessionKey);
     final control = SessionControlView.fromSessionDetailState(state);
     final freshness = SessionDetailFreshnessPresentation.fromState(state);
@@ -780,11 +795,25 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
         : null;
     final joinPresentation =
         compatibleControls && control.action == SessionControlAction.join;
+    // An OBSERVED session never gets the join or handoff action, so its
+    // published resume command (claude's `cd <cwd> && claude --resume <uuid>`)
+    // used to be invisible here even though the same command shows the moment
+    // the session is driven. Render it for the observing pill under the same
+    // Terminal section presentation.
+    final observingCommand =
+        compatibleControls &&
+            control.pill == SessionControlPill.observing &&
+            (control.command?.trim().isNotEmpty ?? false)
+        ? control.command
+        : null;
     final showTerminalStatus =
         control.terminalPresence == TerminalSyncPresence.private ||
         (control.terminalBehind ?? false);
     final showTerminalSection =
-        !joinPresentation && (handoffCommand != null || showTerminalStatus);
+        !joinPresentation &&
+        (handoffCommand != null ||
+            showTerminalStatus ||
+            observingCommand != null);
     // U3-E. In exactly one state — connected, compatible, Synced (not
     // answer-only), with the terminal actually shared and not behind — the card
     // said the same thing three times: the pill, a general "Synced with your
@@ -1022,6 +1051,14 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
                           ),
                         ),
                       ],
+                      if (observingCommand != null) ...[
+                        const SizedBox(height: 8),
+                        _CopyCommandRow(
+                          label: l10n.sessionResumeInTerminal,
+                          command: observingCommand,
+                          enabled: isConnected && compatibleControls,
+                        ),
+                      ],
                     ],
                     if (handoffCommand != null) ...[
                       const SizedBox(height: 8),
@@ -1190,9 +1227,9 @@ class _StatusTabPanelState extends ConsumerState<_StatusTabPanel> {
   }
 }
 
-/// Take-over routing. The preference can skip routine non-fork confirms, but a
-/// live `willFork` always gets the load-bearing red warning. Control is read
-/// again after every await so a terminal owner change cannot use stale copy.
+/// Take-over routing. The preference can skip routine confirms. Control is
+/// read again after every await so a terminal owner change cannot use stale
+/// copy.
 Future<bool> _confirmAndTakeOver(
   BuildContext context,
   WidgetRef ref,
@@ -1204,7 +1241,6 @@ Future<bool> _confirmAndTakeOver(
   );
   var suppressed = await prefs.isRoutineTakeoverWarningSuppressed();
   var confirmedTakeOver = false;
-  var confirmedFork = false;
   if (!context.mounted) {
     return false;
   }
@@ -1217,24 +1253,18 @@ Future<bool> _confirmAndTakeOver(
         !control.canTakeOver) {
       return false;
     }
-    final needsConfirm = control.willFork
-        ? !confirmedFork
-        : !confirmedTakeOver && !suppressed;
+    final needsConfirm = !confirmedTakeOver && !suppressed;
     if (!needsConfirm) {
       break;
     }
     final choice = await showDialog<_TakeOverChoice>(
       context: context,
-      builder: (context) => _TakeOverConfirmDialog(
-        sessionKey: sessionKey,
-        allowSuppression: !control.willFork,
-      ),
+      builder: (context) => _TakeOverConfirmDialog(sessionKey: sessionKey),
     );
     if (!context.mounted || choice == null) {
       return false;
     }
     confirmedTakeOver = true;
-    confirmedFork = confirmedFork || choice.confirmedFork;
     if (choice.neverWarnAgain) {
       await prefs.setRoutineTakeoverWarningSuppressed(suppressed: true);
       suppressed = true;
@@ -1250,8 +1280,7 @@ Future<bool> _confirmAndTakeOver(
   final latestState = readQualifiedDetail(ref, sessionKey);
   final latestControl = SessionControlView.fromSessionDetailState(latestState);
   if (latestState.connectionStatus != SessionDetailConnectionStatus.connected ||
-      !latestControl.canTakeOver ||
-      (latestControl.willFork && !confirmedFork)) {
+      !latestControl.canTakeOver) {
     return false;
   }
   final conflictBefore = latestState.driveRestoreConflict;
@@ -1278,26 +1307,16 @@ Future<bool> _confirmAndTakeOver(
 
 /// Result of the take-over confirm dialog (null = cancelled).
 class _TakeOverChoice {
-  const _TakeOverChoice({
-    required this.neverWarnAgain,
-    required this.confirmedFork,
-  });
+  const _TakeOverChoice({required this.neverWarnAgain});
 
   /// Whether the user ticked "Don't warn me again" (persist the opt-out).
   final bool neverWarnAgain;
-
-  /// Whether the live dialog explicitly showed and confirmed fork semantics.
-  final bool confirmedFork;
 }
 
 class _TakeOverConfirmDialog extends ConsumerStatefulWidget {
-  const _TakeOverConfirmDialog({
-    required this.sessionKey,
-    required this.allowSuppression,
-  });
+  const _TakeOverConfirmDialog({required this.sessionKey});
 
   final SessionDetailKey sessionKey;
-  final bool allowSuppression;
 
   @override
   ConsumerState<_TakeOverConfirmDialog> createState() =>
@@ -1310,24 +1329,18 @@ class _TakeOverConfirmDialogState
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
     final state = watchQualifiedDetail(ref, widget.sessionKey);
     final control = SessionControlView.fromSessionDetailState(state);
     final actionable =
         state.connectionStatus == SessionDetailConnectionStatus.connected &&
         control.canTakeOver;
-    final willFork = actionable && control.willFork;
-    final title = !actionable
-        ? l10n.sessionTakeoverChangedTitle
-        : willFork
-        ? l10n.sessionTakeoverForkTitle
-        : l10n.sessionTakeoverTitle;
-    final body = !actionable
-        ? l10n.sessionTakeoverChangedBody
-        : willFork
-        ? l10n.sessionTakeoverForkBody
-        : l10n.sessionTakeoverBody;
+    final title = actionable
+        ? l10n.sessionTakeoverTitle
+        : l10n.sessionTakeoverChangedTitle;
+    final body = actionable
+        ? l10n.sessionTakeoverBody
+        : l10n.sessionTakeoverChangedBody;
     return AlertDialog(
       key: const Key('session-detail-take-over-dialog'),
       title: Text(title),
@@ -1337,17 +1350,16 @@ class _TakeOverConfirmDialogState
         children: [
           SelectableText(body),
           const SizedBox(height: 8),
-          if (widget.allowSuppression && !willFork)
-            CheckboxListTile(
-              key: const Key('session-detail-take-over-never-warn'),
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _neverWarnAgain,
-              onChanged: actionable
-                  ? (value) => setState(() => _neverWarnAgain = value ?? false)
-                  : null,
-              title: Text(l10n.sessionTakeoverDontWarn),
-            ),
+          CheckboxListTile(
+            key: const Key('session-detail-take-over-never-warn'),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: _neverWarnAgain,
+            onChanged: actionable
+                ? (value) => setState(() => _neverWarnAgain = value ?? false)
+                : null,
+            title: Text(l10n.sessionTakeoverDontWarn),
+          ),
         ],
       ),
       actions: [
@@ -1357,23 +1369,12 @@ class _TakeOverConfirmDialogState
         ),
         FilledButton(
           key: const Key('session-detail-take-over-confirm'),
-          style: willFork
-              ? FilledButton.styleFrom(
-                  backgroundColor: theme.colorScheme.error,
-                  foregroundColor: theme.colorScheme.onError,
-                )
-              : null,
           onPressed: actionable
-              ? () => Navigator.of(context).pop(
-                  _TakeOverChoice(
-                    neverWarnAgain: !willFork && _neverWarnAgain,
-                    confirmedFork: willFork,
-                  ),
-                )
+              ? () => Navigator.of(
+                  context,
+                ).pop(_TakeOverChoice(neverWarnAgain: _neverWarnAgain))
               : null,
-          child: Text(
-            willFork ? l10n.sessionTakeoverForkAction : l10n.sessionTakeOver,
-          ),
+          child: Text(l10n.sessionTakeOver),
         ),
       ],
     );

@@ -902,6 +902,82 @@ function liveAssistant(seq: number, time: number, text: string): Record<string, 
   );
 }
 
+// ── 9. The permission-mode chip ─────────────────────────────────────────────
+
+{
+  // The host publishes the roster AND the current value in ONE `permissions`
+  // projection, and republishes the whole thing on every switch. The adapter
+  // held it only for the picker and an "already in this mode" short-circuit, so
+  // the chip stayed blank while the host had plainly reported a mode.
+  //
+  // `currentMode` is the contract field the picker preselects from. The broker
+  // Object.assigns this value onto SessionInfo, so any other key would land
+  // silently and read as blank — asserted by name, not by shape.
+  const permissions = (currentValue: string) => ({
+    options: [
+      { value: 'read-only', name: 'Read only' },
+      { value: 'auto-edit', name: 'Auto edit' },
+    ],
+    currentValue,
+  });
+  const seeded = (values: Record<string, unknown>) => historyClient([{
+    value: { events: [], hasMore: false, projections: { asOfSeq: 1, values } },
+  }]);
+
+  {
+    const { rpc } = seeded({ permissions: permissions('auto-edit') });
+    const connection = new DshSessionConnection(info, { rpc });
+    await connection.getHistory();
+    const overlays = await connection.getHistoryOverlays() as Array<{ type: string; key?: string; value?: unknown }>;
+    const chip = overlays.filter((message) => message.type === 'metadata-update' && message.key === 'sessionInfo');
+    check(
+      'the attach-time replay publishes the host permission mode as currentMode',
+      chip.length === 1 && JSON.stringify(chip[0]!.value) === JSON.stringify({ currentMode: 'auto-edit' }),
+      JSON.stringify(overlays),
+    );
+  }
+
+  {
+    const { rpc } = seeded({ permissions: permissions('read-only') });
+    const connection = new DshSessionConnection(info, { rpc });
+    await connection.getHistory();
+    const seen: AgentMessage[] = [];
+    connection.subscribe((message) => seen.push(message));
+    connection.handleMuxFrame(frame('session/projection', { key: 'permissions', value: permissions('auto-edit'), seq: 50 }));
+    const updates = seen.filter((message) =>
+      message.type === 'metadata-update' && message.key === 'sessionInfo'
+    ) as Array<{ value: { currentMode?: string } }>;
+    check(
+      'a live permissions republish moves the chip to the new mode',
+      updates.length === 1 && updates[0]!.value.currentMode === 'auto-edit',
+      JSON.stringify(seen),
+    );
+  }
+
+  {
+    // "The host reported no mode" is not a mode, and it is published as an
+    // EXPLICIT clear: the broker folds the value with Object.assign, so an
+    // omitted key would leave the previous mode on the chip after the host
+    // withdrew it.
+    const { rpc } = seeded({ permissions: permissions('') });
+    const connection = new DshSessionConnection(info, { rpc });
+    await connection.getHistory();
+    const seen: AgentMessage[] = [];
+    connection.subscribe((message) => seen.push(message));
+    const overlays = await connection.getHistoryOverlays();
+    connection.handleMuxFrame(frame('session/projection', { key: 'permissions', value: { options: [] }, seq: 51 }));
+    const clears = (rows: AgentMessage[]) => rows.filter((message) =>
+      message.type === 'metadata-update' && message.key === 'sessionInfo'
+      && typeof message.value === 'object' && message.value !== null
+      && 'currentMode' in message.value && (message.value as { currentMode?: unknown }).currentMode === undefined);
+    check(
+      'an empty or absent currentValue publishes an EXPLICIT clear, live and on replay',
+      clears(overlays).length === 1 && clears(seen).length === 1,
+      JSON.stringify({ overlays, seen }),
+    );
+  }
+}
+
 const failed = results.filter((result) => !result.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

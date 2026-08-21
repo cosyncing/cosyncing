@@ -823,6 +823,14 @@ export type AgentMessage =
       fetchUrl?: string;
       /** agent flagged this as important / push-worthy */
       proactive?: boolean;
+      /** The `key` of the user-message this artifact was SENT WITH. Present only on a user
+       *  attachment (an image or file the user put on a prompt), never on something the agent
+       *  produced. Clients render such an artifact inside the right-aligned user surface, grouped
+       *  under the user-message whose `key` matches; when that row is not (yet) in view the
+       *  artifact still renders user-side rather than as an agent deliverable. Identity stays
+       *  {@link artifactKey}/`path` — this is an ownership link, not a dedupe key. A prompt that was
+       *  only an attachment still gets a user-message row (empty `text`) so the link has a target. */
+      userMessageKey?: string;
       /** Delivery class. Absent/`interactive` = existing inline sandboxed-HTML path. `export-attachment`
        *  = an R2 transcript export: download-only, never inline-rendered, short retention. */
       deliveryClass?: 'interactive' | 'export-attachment';
@@ -2090,10 +2098,6 @@ export interface SessionDriveControl {
   state: DriveState;
   supported: boolean;
   reason?: string;
-  /** A live terminal currently owns this session, so driving now will CONTINUE IN A FORK (new uuid)
-   *  for single-owner safety. The app must warn before the first driven prompt: quitting the terminal
-   *  first keeps the SAME session instead. */
-  willFork?: boolean;
   /** Can Drive be RELEASED to a terminal for this session? Absent keeps the established behavior —
    *  a driving session offers handoff — so every adapter that predates this field is unchanged.
    *

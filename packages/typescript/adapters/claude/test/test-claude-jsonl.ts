@@ -212,6 +212,33 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('all emitted types are canonical', bad.length === 0, bad.join(',') || 'ok');
 }
 
+// ── P6: a pasted image belongs to the prompt it was SENT WITH ───────────────────────────────────
+//    An image block became a standalone top-level file-artifact with its own identity, so the client
+//    rendered it as a detached agent deliverable next to (not inside) the user's bubble. The artifact
+//    now carries `userMessageKey` — the key of the user row it was sent with — as an ownership link;
+//    identity stays artifactKey/path. Only a line that actually PRODUCES a user row stamps it.
+{
+  const lines: any[] = [
+    { type: 'user', uuid: 'p6-a', message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }, { type: 'text', text: 'what is in this screenshot' }] } },
+    { type: 'user', uuid: 'p6-b', message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/webp', data: 'BBBB' } }] } },
+    // a meta line produces NO user row → its image must stay unstamped (nothing to own it)
+    { type: 'user', uuid: 'p6-c', isMeta: true, message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCC' } }] } },
+  ];
+  const out = mapTranscript(lines);
+  const arts = out.filter((m: any) => m.type === 'file-artifact') as any[];
+  const users = out.filter((m: any) => m.type === 'user-message') as any[];
+  const withText = users.find((u) => u.text === 'what is in this screenshot');
+  const artA = arts.find((a) => a.path === 'image:p6-a:0');
+  check('P6: an image sent with text is linked to that user row', !!artA && !!withText && artA.userMessageKey === withText.key, JSON.stringify({ artA, withText }));
+  const imageOnly = users.find((u) => u.key === 'p6-b:u');
+  const artB = arts.find((a) => a.path === 'image:p6-b:0');
+  check('P6: an image-only prompt still gets an (empty-text) user row for the link to target', !!imageOnly && imageOnly.text === '' && imageOnly.imageCount === 1, JSON.stringify(imageOnly));
+  check('P6: the image-only artifact is linked to that row', !!artB && artB.userMessageKey === imageOnly?.key, JSON.stringify(artB));
+  const artC = arts.find((a) => a.path === 'image:p6-c:0');
+  check('P6: a line that produces no user row leaves its artifact unstamped', !!artC && artC.userMessageKey === undefined, JSON.stringify(artC));
+  check('P6: the link never becomes the artifact identity', arts.every((a) => a.path.startsWith('image:')));
+}
+
 // ── bridge line-type regression (Claude 2.1.x claude.ai bridge): a real bridge transcript interleaves ~10
 //    sidecar line types the mapper had never seen — they must map to NOTHING and never throw, so a real
 //    user prompt + assistant turn still render around them (maintainer's live AIGC session, verified). ──

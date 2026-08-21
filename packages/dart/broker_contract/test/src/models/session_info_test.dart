@@ -33,7 +33,7 @@ void main() {
           'drive': {
             'state': 'observing',
             'supported': true,
-            'willFork': true,
+            'takeoverAvailable': true,
           },
           'terminalSync': {
             'supported': true,
@@ -63,7 +63,7 @@ void main() {
       expect(session.currentModel?.label, 'Sonnet 4.6');
       expect(session.control, isNotNull);
       expect(session.control!.drive.state, DriveState.observing);
-      expect(session.control!.drive.willFork, isTrue);
+      expect(session.control!.drive.takeoverAvailable, isTrue);
       expect(session.control!.terminalSync.active, isTrue);
       expect(session.sessionOwner?.state, SessionOwnerState.drive);
       expect(session.sessionOwner?.revision.epoch, 'broker-process-1');
@@ -327,7 +327,7 @@ void main() {
           'drive': {
             'state': 'observing',
             'supported': true,
-            'willFork': false,
+            'takeoverAvailable': false,
           },
           'terminalSync': {
             'supported': true,
@@ -349,7 +349,7 @@ void main() {
       expect(restored.nativeId, 'native-id');
       expect(restored.status, session.status);
       expect(restored.attachMode, session.attachMode);
-      expect(restored.control!.drive.willFork, isFalse);
+      expect(restored.control!.drive.takeoverAvailable, isFalse);
     });
 
     test('tolerates unknown fields', () {

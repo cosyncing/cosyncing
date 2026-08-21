@@ -28,8 +28,12 @@
  *   bun run packages/typescript/adapters/kimi/test/test-kimi-drive.ts   (exit 0 = all pass)
  */
 export {};
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { isOwnershipConflictError, isSessionCreateTemporarilyUnavailableError } from '@cosyncing/adapter-api';
 import type { AgentMessage, SessionInfo } from '@cosyncing/adapter-api';
+import { CONTEXT_INJECTION_EVENT } from '@cosyncing/adapter-api';
 import { KimiAdapter } from '../src/index.ts';
 import { KimiReadOnlyHttp, type KimiInstanceScan } from '../src/server.ts';
 import {
@@ -44,7 +48,6 @@ import {
   KIMI_DIVERGENCE_MESSAGE,
   KIMI_DIVERGENCE_SUSPECT_LIMIT,
   KIMI_INTERACTION_RECONCILE_PASS_MAX,
-  KIMI_NO_FILE_INPUT_MESSAGE,
   KIMI_NO_STREAM_REFUSAL,
   KIMI_OPEN_PROVENANCE_REFUSAL,
   KIMI_STOP_ALREADY_DONE_NOTICE,
@@ -116,13 +119,48 @@ let acceptedToken = 'fixture-token';
 
 /** Newest-first, exactly like `GET .../messages` answers. */
 let messages: Array<Record<string, unknown>> = [];
-const userRow = (id: string, text: string) => ({
+const userRow = (id: string, text: string, metadata?: unknown) => ({
   id, session_id: CREATED_ID, role: 'user',
   content: [{ type: 'text', text }], created_at: '2026-08-14T09:00:00.000Z',
+  // Kimi's own provenance (`metadata.origin`) — absent unless the case stages
+  // it, because an OLDER server sends none and the detector must treat absent
+  // as suspect.
+  ...(metadata !== undefined ? { metadata } : {}),
 });
 const assistantRow = (id: string, text: string) => ({
   id, session_id: CREATED_ID, role: 'assistant',
   content: [{ type: 'text', text }], created_at: '2026-08-14T09:00:01.000Z',
+});
+/**
+ * The REST echo of a FILE-ONLY prompt: the server materialized the upload and
+ * REPLACED its content part with a plain text notice (upstream
+ * `promptMedia.ts` `buildAttachedFileNotice`), so the echo is an ordinary
+ * user-message text row. The path is the server's materialization location,
+ * which the client never learns — adoption is by the reconstructible PREFIX
+ * up to it, so the fixture's path is deliberately arbitrary.
+ */
+const fileNoticeRow = (id: string, name: string, mediaType: string, size: number) =>
+  userRow(id, `Attached file "${name}" (${mediaType}, ${size} bytes): /srv/kimi/attachments/file_x-${name} — open it with the Read tool`);
+/** The REST echo of an IMAGE-ONLY prompt: the inline image rehydrated into a `data:` URL (`messageHistory.ts:165-187`). */
+const imageEchoRow = (id: string) => ({
+  id, session_id: CREATED_ID, role: 'user',
+  content: [{ type: 'image', source: { kind: 'url', url: 'data:image/png;base64,iVBORw0KGgo=' } }],
+  created_at: '2026-08-14T09:00:00.000Z',
+});
+
+/**
+ * The model catalog, mutable so a REFUSED read can be staged: the label join
+ * has to degrade to the bare alias rather than cost the attach.
+ */
+let modelsAnswer: unknown = ok({
+  items: [
+    { provider: 'kimi-code', model: 'k3-256k', display_name: 'K3 256k', max_context_size: 262_144, support_efforts: ['low', 'high'], default_effort: 'high' },
+    { provider: 'kimi-code', model: 'k2', max_context_size: 131_072 },
+    // Structurally broken: no `model`, so no selection token exists behind
+    // it. Must be SKIPPED, never surfaced as an option the broker would
+    // then validate a create against.
+    { provider: 'kimi-code', display_name: 'nameless' },
+  ],
 });
 
 /** Mutable route answers, so one fake server can stand in for many server states. */
@@ -144,6 +182,12 @@ let sessionRowAnswer: unknown = ok({
   id: CREATED_ID, busy: false, pending_interaction: 'none', last_turn_reason: 'completed',
   metadata: { cwd: WORKSPACE }, title: 'from cosyncing',
 });
+/**
+ * The `/status` answer. Mutable so a test can stage what a REAL server reports
+ * at a given moment — a live permission mode, or a never-prompted session's
+ * empty config — rather than hardwiring one reading for the whole suite.
+ */
+let statusAnswer: unknown = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'kimi-code/k3-256k' });
 let pendingApprovals: unknown[] = [];
 let pendingQuestions: unknown[] = [];
 /**
@@ -158,6 +202,22 @@ let pendingQuestions: unknown[] = [];
 let questionsFail = false;
 /** Sessions the v2 roster lists. Ownership is applied by the adapter, not by the server. */
 let rosterIds: string[] = [CREATED_ID, FOREIGN_ID];
+/**
+ * The cwd the roster rows report. Mutable so a file-attachment case can run
+ * against a REAL directory — the broker-staging contract the upload path
+ * validates is `<cwd>/.cosyncing/inbox`, and a fake path would make the
+ * fixture's own disk writes indistinguishable from the untrusted-path case.
+ */
+let rosterCwd = WORKSPACE;
+/** The `/goal` answer: the current goal snapshot, or null when none is set. */
+let goalAnswer: unknown = ok(null);
+/** The `/skills` catalog the session reports. */
+let skillsAnswer: unknown[] = [];
+/** The profile route's answer to a goal-control write (rename is covered in the server suite). */
+let profileAnswer: unknown = ok({ id: CREATED_ID });
+/** Multipart uploads the fake server received, parsed into plain fields for assertions. */
+const uploads: Array<{ name: string; mediaType: string; text: string }> = [];
+let nextFileId = 0;
 
 /**
  * Route-level parking gates, so a test can hold ONE request open and order the
@@ -204,7 +264,11 @@ const server = Bun.serve({
     let body: unknown;
     if (request.method === 'POST') {
       try {
-        body = await request.json();
+        // JSON only: a multipart upload's body is parsed by its own route, and
+        // a failed json() read can consume the stream before formData() gets it.
+        if ((request.headers.get('content-type') ?? '').includes('application/json')) {
+          body = await request.json();
+        }
       } catch {
         body = undefined;
       }
@@ -233,21 +297,12 @@ const server = Bun.serve({
       return Response.json(ok(SERVER_META));
     }
     if (path === '/api/v1/models') {
-      return Response.json(ok({
-        items: [
-          { provider: 'kimi-code', model: 'k3-256k', display_name: 'K3 256k', max_context_size: 262_144, support_efforts: ['low', 'high'], default_effort: 'high' },
-          { provider: 'kimi-code', model: 'k2', max_context_size: 131_072 },
-          // Structurally broken: no `model`, so no selection token exists behind
-          // it. Must be SKIPPED, never surfaced as an option the broker would
-          // then validate a create against.
-          { provider: 'kimi-code', display_name: 'nameless' },
-        ],
-      }));
+      return Response.json(modelsAnswer);
     }
     if (path === '/api/v2/sessions') {
       return Response.json(ok({
         items: rosterIds.map((id) => ({
-          id, workspace: { id: 'wd_0001', cwd: WORKSPACE },
+          id, workspace: { id: 'wd_0001', cwd: rosterCwd },
           meta: { title: id, created_at: '2026-08-14T09:00:00.000Z', updated_at: '2026-08-14T09:00:00.000Z' },
           activity: { status: 'idle' },
         })),
@@ -255,12 +310,34 @@ const server = Bun.serve({
       }));
     }
     if (request.method === 'POST' && path === '/api/v1/sessions') return Response.json(createAnswer);
+    if (request.method === 'POST' && path === '/api/v1/files') {
+      const form = await request.formData();
+      const part = form.get('file');
+      if (!(part instanceof File)) {
+        return Response.json({ code: 40001, msg: 'missing `file` field', data: null, request_id: 'r' });
+      }
+      const text = await part.text();
+      uploads.push({ name: part.name, mediaType: part.type, text });
+      nextFileId += 1;
+      return Response.json(ok({
+        id: `file_${nextFileId}`, name: part.name,
+        media_type: part.type || 'application/octet-stream',
+        size: text.length, created_at: '2026-08-14T09:00:00.000Z',
+      }));
+    }
 
     const session = path.match(/^\/api\/v1\/sessions\/([^/]+?)(?::(\w+))?(?:\/(.*))?$/);
     if (session) {
       const tail = session[3];
       const action = session[2];
       if (request.method === 'POST' && action === 'abort') return Response.json(abortAnswer);
+      if (request.method === 'POST' && tail === 'profile') return Response.json(profileAnswer);
+      if (request.method === 'POST' && tail?.startsWith('skills/') && tail.endsWith(':activate')) {
+        return Response.json(ok({
+          activated: true,
+          skill_name: tail.slice('skills/'.length, -':activate'.length),
+        }));
+      }
       if (request.method === 'POST' && tail?.startsWith('approvals/')) {
         return Response.json(approvalResolveAnswer);
       }
@@ -289,7 +366,13 @@ const server = Bun.serve({
         return Response.json(ok({ items: window, has_more: start + window.length < messages.length }));
       }
       if (tail === 'status') {
-        return Response.json(ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'kimi-code/k3-256k' }));
+        return Response.json(statusAnswer);
+      }
+      if (tail === 'goal') {
+        return Response.json(goalAnswer);
+      }
+      if (tail === 'skills') {
+        return Response.json(ok({ skills: skillsAnswer }));
       }
       if (tail === 'approvals') {
         // Chosen when the REQUEST arrives, never when the reply is released: a
@@ -809,21 +892,22 @@ try {
       !JSON.stringify(writes().at(-1)?.body).includes('permission_mode'),
       JSON.stringify(writes().at(-1)?.body));
 
-    // NEGATIVE CONTROL: file/image input is refused BEFORE the transport is
-    // touched. Sending the text alone would silently drop the attachment.
-    const beforeFiles = requests.length;
-    const withFile = await threw(() => conn.sendPrompt({
-      text: 'here you go', files: [{ name: 'a.txt', path: '/tmp/a.txt' } as never],
-    }));
-    const withImage = await threw(() => conn.sendPrompt({
-      text: 'look', images: [{ data: 'x', mediaType: 'image/png' } as never],
-    }));
-    check('files and images are refused with zero HTTP issued',
-      !!withFile && !!withImage
-        && withFile.message === KIMI_NO_FILE_INPUT_MESSAGE
-        && withImage.message === KIMI_NO_FILE_INPUT_MESSAGE
-        && requests.length === beforeFiles,
-      `calls=${requests.length - beforeFiles}`);
+    // Images ride the prompt INLINE as base64 content parts — no upload, one
+    // POST, the part naming the media type and the bytes verbatim.
+    promptAnswer = ok({ prompt_id: 'prompt_img', user_message_id: 'msg_img', status: 'running', content: [], created_at: 'x' });
+    const beforeImage = requests.length;
+    await conn.sendPrompt({
+      text: 'look', images: [{ data: 'aW1nLWJ5dGVz', mimeType: 'image/png', name: 'p.png' }],
+    });
+    check('an image becomes an inline base64 content part on the same POST',
+      requests.length === beforeImage + 1
+        && JSON.stringify(writes().at(-1)?.body) === JSON.stringify({
+          content: [
+            { type: 'text', text: 'look' },
+            { type: 'image', source: { kind: 'base64', media_type: 'image/png', data: 'aW1nLWJ5dGVz' } },
+          ],
+        }),
+      JSON.stringify(writes().at(-1)?.body));
 
     // The echo comes from the SERVER, and the correlation token is stamped on
     // the row whose native id the submission handed back.
@@ -882,6 +966,225 @@ try {
     await third.close();
   }
 
+  // ── 3c. Attach seeds the composer's model and permission mode ─────────────
+  //
+  // The composer's picker and chip read `sessionInfo` from the ATTACH-time
+  // info: the create response is spent on navigation, and the 10 s `/status`
+  // poll would otherwise be the first time either field reaches the client.
+
+  {
+    const adapter = makeAdapter();
+    // The host's REAL reported mode — a value this adapter does not know, so a
+    // hardcoded "auto" would be caught here. A never-prompted session's empty
+    // config is staged separately below.
+    statusAnswer = ok({ context_tokens: 0, max_context_tokens: 262_144, model: '', permission: 'a-mode-from-the-future' });
+    await adapter.createSession({
+      directory: WORKSPACE,
+      model: { providerID: 'kimi-code', modelID: 'k3-256k', reasoningEffort: 'high' },
+    });
+
+    // The BARE attach is the common foreground path after a create.
+    const bare = await adapter.attach(CREATED_ID);
+    check('attach after create seeds the pending model onto the info the composer reads',
+      bare.info.model === 'k3-256k'
+        && bare.info.currentModel?.modelID === 'k3-256k'
+        && bare.info.currentModel.providerID === 'kimi-code'
+        && bare.info.currentModel.reasoningEffort === 'high',
+      JSON.stringify(bare.info.currentModel));
+    // The picker sends provider and id and no label, so a create-time choice
+    // would otherwise reach the roster unnamed and be printed by the client's
+    // own guess. It gets the SAME catalog label a host-reported model gets.
+    check('...and the create-time choice carries the host catalog label too',
+      bare.info.currentModel?.label === 'K3 256k', JSON.stringify(bare.info.currentModel));
+    check('attach seeds the permission chip from the host-reported mode, pass-through',
+      bare.info.currentMode === 'a-mode-from-the-future', JSON.stringify(bare.info.currentMode));
+    await bare.close();
+
+    // A LIVE attach sees the same seeding, and seeding must not SPEND the
+    // pending model: the first prompt still carries it.
+    const live = await adapter.attach(CREATED_ID, 'live') as KimiDriveConnection;
+    check('a live attach carries the same model and mode seeding',
+      live.info.currentModel?.modelID === 'k3-256k' && live.info.currentMode === 'a-mode-from-the-future',
+      JSON.stringify({ model: live.info.currentModel, mode: live.info.currentMode }));
+    promptAnswer = ok({ prompt_id: 'prompt_seeded', user_message_id: 'msg_seeded', status: 'running', content: [], created_at: 'x' });
+    await live.sendPrompt({ text: 'run it' });
+    check('the seeded model is still spent by the first prompt, not by the attach',
+      JSON.stringify(writes().at(-1)?.body) === JSON.stringify({
+        content: [{ type: 'text', text: 'run it' }], model: 'k3-256k', thinking: 'high',
+      }),
+      JSON.stringify(writes().at(-1)?.body));
+    await live.close();
+
+    // SPENT: once the first prompt consumed the pending model, a later attach
+    // falls back to the host's own report — the roster-shaped model string the
+    // status read carries — rather than re-pinning the create-time choice.
+    statusAnswer = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'kimi-code/k3-256k', permission: 'auto' });
+    const spent = await adapter.attach(CREATED_ID);
+    check('a spent pending model leaves the status-reported model string and mode',
+      spent.info.model === 'kimi-code/k3-256k' && spent.info.currentModel === undefined
+        && spent.info.currentMode === 'auto',
+      JSON.stringify({ model: spent.info.model, current: spent.info.currentModel, mode: spent.info.currentMode }));
+    await spent.close();
+
+    // EMPTY CONFIG: a never-prompted session reports empty strings, and the
+    // mapping's optionalString turns those into ABSENT — no chip and no crash,
+    // exactly like the poll's overlay. Inventing a mode here would have the
+    // composer claim an approval posture the host never reported.
+    statusAnswer = ok({ context_tokens: 0, max_context_tokens: 262_144, model: '', permission: '' });
+    await adapter.createSession({ directory: WORKSPACE });
+    const fresh = await adapter.attach(CREATED_ID);
+    check('a fresh session with empty config yields no currentMode and no model seed',
+      fresh.info.currentMode === undefined && fresh.info.model === undefined
+        && fresh.info.currentModel === undefined,
+      JSON.stringify({ mode: fresh.info.currentMode, model: fresh.info.model }));
+    await fresh.close();
+
+    // A FAILED status read must not fail the attach — the poll stays the
+    // fallback for anything this read missed.
+    statusAnswer = fail(50_001, null, 'status unavailable');
+    const degraded = await adapter.attach(CREATED_ID);
+    check('a failed status read leaves the attach working, seeding nothing',
+      degraded.info.currentMode === undefined && degraded.info.attachMode === 'observe',
+      JSON.stringify({ mode: degraded.info.currentMode, attach: degraded.info.attachMode }));
+    await degraded.close();
+
+    // ...and so must a failed CATALOG read: the label has one source, and
+    // losing it costs the name, never the attach or the selection itself.
+    const savedModels = modelsAnswer;
+    modelsAnswer = fail(50_001, null, 'models unavailable');
+    statusAnswer = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'k3-256k' });
+    const catalogAdapter = makeAdapter();
+    await catalogAdapter.createSession({
+      directory: WORKSPACE,
+      model: { providerID: 'kimi-code', modelID: 'k3-256k' },
+    });
+    const unlabelled = await catalogAdapter.attach(CREATED_ID);
+    check('a failed catalog read leaves the attach working, with the bare model and no label',
+      unlabelled.info.model === 'k3-256k'
+        && unlabelled.info.currentModel?.modelID === 'k3-256k'
+        && unlabelled.info.currentModel.label === undefined,
+      JSON.stringify(unlabelled.info.currentModel));
+    await unlabelled.close();
+    modelsAnswer = savedModels;
+
+    statusAnswer = ok({ context_tokens: 100, max_context_tokens: 262_144, model: 'kimi-code/k3-256k' });
+  }
+
+  // ── 3d. File attachments upload through the server's file store ──────────
+  //
+  // Files are too large for the prompt frame, so the pipeline is two POSTs:
+  // the bytes to `/api/v1/files` (multipart), then the prompt carrying a
+  // `file` content part that names the returned `file_id`. The broker stages
+  // uploads into `<cwd>/.cosyncing/inbox`, so this block runs against a REAL
+  // temporary workspace — the path validation it exercises is meaningless
+  // against a directory that cannot exist.
+
+  {
+    const workspace = mkdtempSync(join(tmpdir(), 'kimi-drive-files-'));
+    try {
+      const inbox = join(workspace, '.cosyncing', 'inbox');
+      mkdirSync(inbox, { recursive: true });
+      writeFileSync(join(inbox, 'a.txt'), 'the staged attachment bytes');
+      rosterCwd = workspace;
+      const adapter = makeAdapter();
+      await adapter.createSession({ directory: workspace });
+      const conn = await adapter.attach(CREATED_ID, 'live') as KimiDriveConnection;
+      messages = [];
+      await conn.getHistory();
+
+      const uploadsBefore = uploads.length;
+      promptAnswer = ok({ prompt_id: 'prompt_file', user_message_id: 'msg_file', status: 'running', content: [], created_at: 'x' });
+      await conn.sendPrompt({
+        text: 'see attached',
+        files: [{ name: 'a.txt', mimeType: 'text/plain', brokerPath: join(inbox, 'a.txt') }],
+      });
+      // The part's media type is a PASS-THROUGH of the server's FileMeta: the
+      // multipart serializer may annotate text/* types with a charset, and what
+      // the prompt part must echo is what the store recorded, not the request.
+      const uploadedMediaType = uploads.at(-1)?.mediaType;
+      check('the bytes upload first, multipart, with the name and media type',
+        uploads.length === uploadsBefore + 1
+          && uploads.at(-1)?.name === 'a.txt'
+          && uploadedMediaType?.split(';')[0] === 'text/plain'
+          && uploads.at(-1)?.text === 'the staged attachment bytes',
+        JSON.stringify(uploads.at(-1)));
+      check('the prompt then carries a file content part naming the uploaded id',
+        JSON.stringify(writes().at(-1)?.body) === JSON.stringify({
+          content: [
+            { type: 'text', text: 'see attached' },
+            {
+              type: 'file', file_id: `file_${nextFileId}`, name: 'a.txt',
+              media_type: uploadedMediaType, size: 'the staged attachment bytes'.length,
+            },
+          ],
+        }),
+        JSON.stringify(writes().at(-1)?.body));
+
+      // NEGATIVE CONTROL: a path OUTSIDE the staging inbox is a client-supplied
+      // path, which the contract forbids — refused before any HTTP, and the
+      // prompt is not half-sent as text-only.
+      const beforeRefusal = requests.length;
+      const untrusted = await threw(() => conn.sendPrompt({
+        text: 'here', files: [{ name: 'passwd', mimeType: 'text/plain', brokerPath: '/etc/passwd' }],
+      }));
+      check('an attachment path outside the staging inbox refuses with zero HTTP issued',
+        !!untrusted && /untrusted broker attachment path/.test(untrusted.message)
+          && requests.length === beforeRefusal,
+        `${untrusted?.message} calls=${requests.length - beforeRefusal}`);
+
+      // The legacy standalone-file message takes the same pipeline.
+      promptAnswer = ok({ prompt_id: 'prompt_standalone', user_message_id: 'msg_standalone', status: 'running', content: [], created_at: 'x' });
+      await conn.sendFile({ name: 'a.txt', mimeType: 'text/plain', brokerPath: join(inbox, 'a.txt') });
+      check('a standalone sendFile rides the same upload-then-prompt pipeline',
+        uploads.length === uploadsBefore + 2
+          && JSON.stringify((writes().at(-1)?.body as { content?: unknown[] })?.content?.[1])
+            === JSON.stringify({ type: 'file', file_id: `file_${nextFileId}`, name: 'a.txt', media_type: uploadedMediaType, size: 'the staged attachment bytes'.length }),
+        JSON.stringify(writes().at(-1)?.body));
+
+      // AN IMAGE ATTACHED AS A FILE. The app has no `images` wire field, so an
+      // image picked there ARRIVES as a `files` entry — and it must go inline
+      // as a base64 `image` part like an `input.images` entry, not through the
+      // file store: whether the server presents an image-mime `file` part to
+      // the model as vision input is unverified, while the `image` part is the
+      // contract's own vision path. The staging read already holds the bytes,
+      // so NO upload POST is issued. The `a.txt` checks above pin the other
+      // half: a non-image file still uploads.
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      writeFileSync(join(inbox, 'pixel.png'), png);
+      const uploadsBeforeImage = uploads.length;
+      promptAnswer = ok({ prompt_id: 'prompt_image', user_message_id: 'msg_image', status: 'running', content: [], created_at: 'x' });
+      await conn.sendPrompt({
+        text: 'look',
+        files: [{ name: 'pixel.png', mimeType: 'image/png', brokerPath: join(inbox, 'pixel.png') }],
+      });
+      check('an image-mime file from the staging inbox rides inline as base64, with NO upload POST',
+        uploads.length === uploadsBeforeImage
+          && JSON.stringify(writes().at(-1)?.body) === JSON.stringify({
+            content: [
+              { type: 'text', text: 'look' },
+              { type: 'image', source: { kind: 'base64', media_type: 'image/png', data: png.toString('base64') } },
+            ],
+          }),
+        JSON.stringify(writes().at(-1)?.body));
+
+      // The inline path holds the same staging-inbox boundary as the upload
+      // path — the read is shared, so this is the same refusal, proven for the
+      // branch that never reaches `uploadAttachment`.
+      const beforeImageRefusal = requests.length;
+      const untrustedImage = await threw(() => conn.sendPrompt({
+        text: 'here', files: [{ name: 'x.png', mimeType: 'image/png', brokerPath: '/etc/passwd' }],
+      }));
+      check('an image attachment path outside the staging inbox refuses with zero HTTP issued',
+        !!untrustedImage && /untrusted broker attachment path/.test(untrustedImage.message)
+          && requests.length === beforeImageRefusal,
+        `${untrustedImage?.message} calls=${requests.length - beforeImageRefusal}`);
+      await conn.close();
+    } finally {
+      rosterCwd = WORKSPACE;
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
   // ── 4. Stop ───────────────────────────────────────────────────────────────
 
   {
@@ -889,9 +1192,10 @@ try {
     await adapter.createSession({ directory: WORKSPACE });
     const conn = await adapter.attach(CREATED_ID, 'live') as KimiDriveConnection;
 
-    check('the command list is the single stop action',
+    check('the command list is the stop and goal actions when the server lists no skills',
       JSON.stringify(await conn.listCommands()) === JSON.stringify([
         { name: 'stop', description: 'Stop the running turn', kind: 'action' },
+        { name: 'goal', description: 'Set a goal, or use pause, resume, or clear', kind: 'action' },
       ]),
       JSON.stringify(await conn.listCommands()));
 
@@ -934,6 +1238,133 @@ try {
       (await conn.listModels()).map((model) => model.modelID).join(',') === 'k3-256k,k2');
     await conn.close();
   }
+
+  // ── 4b. Goal and skills ─────────────────────────────────────────────────────
+  //
+  // Goal and skill activation don't rewrite history, so they crossed the line
+  // compact/undo never will. Goal SET rides the objective's own kickoff prompt
+  // (`goal_objective` on the prompt body); pause/resume/clear go through the
+  // profile route's `agent_config` dispatch, which starts no turn and appends
+  // no user row. Skills are the server's own catalog, listed as prompt-kind
+  // commands and activated through the `:activate` action suffix.
+
+  {
+    skillsAnswer = [
+      { name: 'review', description: 'Review the current diff', path: '/skills/review.md', source: 'builtin' },
+      // A skill named like a builtin keeps the BUILTIN: the client's goal chip
+      // and stop affordance are wired to the builtin behavior.
+      { name: 'goal', description: 'not the builtin', path: '/skills/goal.md', source: 'project' },
+      // No description of its own: the fallback names the skill rather than
+      // inventing one.
+      { name: 'bare', description: '', path: '/skills/bare.md', source: 'user' },
+    ];
+    const adapter = makeAdapter();
+    await adapter.createSession({ directory: WORKSPACE });
+    const conn = await adapter.attach(CREATED_ID, 'live') as KimiDriveConnection;
+    messages = [];
+    await conn.getHistory();
+
+    check('the command list is the builtins plus the server\'s skills as prompt-kind commands',
+      JSON.stringify(await conn.listCommands()) === JSON.stringify([
+        { name: 'stop', description: 'Stop the running turn', kind: 'action' },
+        { name: 'goal', description: 'Set a goal, or use pause, resume, or clear', kind: 'action' },
+        { name: 'review', description: 'Review the current diff', kind: 'prompt' },
+        { name: 'bare', description: 'Use the Kimi skill bare', kind: 'prompt' },
+      ]),
+      JSON.stringify(await conn.listCommands()));
+
+    // SET: the objective becomes its own kickoff prompt, carrying
+    // `goal_objective` so the server creates the goal AS the turn launches.
+    promptAnswer = ok({ prompt_id: 'prompt_goal', user_message_id: 'msg_goal', status: 'running', content: [], created_at: 'x' });
+    const set = await conn.runCommand('goal', 'Ship feature X');
+    check('goal set submits the objective as a prompt carrying goal_objective',
+      set?.notice === 'Goal set: Ship feature X'
+        && JSON.stringify(writes().at(-1)?.body) === JSON.stringify({
+          content: [{ type: 'text', text: 'Ship feature X' }],
+          goal_objective: 'Ship feature X',
+        })
+        && writes().at(-1)?.path === `/api/v1/sessions/${CREATED_ID}/prompts`,
+      `${set?.notice} ${JSON.stringify(writes().at(-1)?.body)}`);
+
+    // STATUS: a bare /goal is a read of the server's snapshot, null when none.
+    goalAnswer = ok({ goalId: 'g1', objective: 'Ship feature X', status: 'active', turnsUsed: 2, tokensUsed: 100, wallClockMs: 1000, budget: {} });
+    check('a bare /goal reports the current goal from the server read',
+      (await conn.runCommand('goal'))?.notice === 'Goal active: Ship feature X');
+    goalAnswer = ok(null);
+    check('a bare /goal with no goal says so and names the syntax',
+      (await conn.runCommand('goal'))?.notice
+        === 'No goal is set. Use /goal <objective>, /goal pause, /goal resume, or /goal clear.');
+    goalAnswer = ok(null);
+
+    // PAUSE: the profile route's agent_config dispatch, and — mirroring the TUI
+    // — the in-flight turn is braked too, because the session is busy.
+    const socket = sockets.at(-1)!;
+    socket.deliver(frame('event.session.work_changed', { busy: true, main_turn_active: true, pending_interaction: 'none' }));
+    await settle();
+    const paused = await conn.runCommand('goal', 'pause');
+    const pauseWrite = writes().at(-2);
+    check('goal pause posts goal_control through the profile route, then brakes the running turn',
+      paused?.notice === 'Goal paused. Use /goal resume to continue.'
+        && pauseWrite?.path === `/api/v1/sessions/${CREATED_ID}/profile`
+        && JSON.stringify(pauseWrite?.body) === JSON.stringify({ agent_config: { goal_control: 'pause' } })
+        && writes().at(-1)?.path === `/api/v1/sessions/${CREATED_ID}:abort`,
+      `${JSON.stringify(pauseWrite)} ${JSON.stringify(writes().at(-1))}`);
+    socket.deliver(frame('event.session.work_changed', { busy: false, pending_interaction: 'none', last_turn_reason: 'cancelled' }));
+    await settle();
+
+    // RESUME: the same dispatch, no braking, no kickoff prompt — upstream
+    // resumes with continueIfPaused/continueIfBlocked, so none is needed.
+    const resumed = await conn.runCommand('goal', 'resume');
+    check('goal resume posts goal_control resume and nothing else',
+      resumed?.notice === 'Goal resumed — Kimi continues working toward it.'
+        && JSON.stringify(writes().at(-1)?.body) === JSON.stringify({ agent_config: { goal_control: 'resume' } }),
+      `${resumed?.notice} ${JSON.stringify(writes().at(-1)?.body)}`);
+
+    // CLEAR maps to upstream's `cancel`, and CANCEL is accepted as the same word.
+    check('goal clear posts goal_control cancel',
+      (await conn.runCommand('goal', 'clear'))?.notice === 'Goal cleared.'
+        && JSON.stringify(writes().at(-1)?.body) === JSON.stringify({ agent_config: { goal_control: 'cancel' } }));
+    check('goal cancel is accepted as the same control',
+      (await conn.runCommand('goal', 'cancel'))?.notice === 'Goal cleared.');
+
+    // 40914 GOAL_NOT_FOUND: nothing to pause — already in the state asked for,
+    // so a notice, not a failure.
+    profileAnswer = fail(40_914, null, 'goal not found');
+    check('controlling a nonexistent goal is a notice, not an error',
+      (await conn.runCommand('goal', 'pause'))?.notice === 'No goal is set. Use /goal <objective> to start one.');
+    profileAnswer = ok({ id: CREATED_ID });
+
+    // A goal-setting prompt that FAILS still propagates (e.g. 40913
+    // GOAL_ALREADY_EXISTS) — the user must see that the set did not happen.
+    promptAnswer = fail(40_913, null, 'a goal is already active');
+    const duplicate = await threw(() => conn.runCommand('goal', 'Another objective'));
+    check('a refused goal set surfaces the server\'s error',
+      !!duplicate && /already active/.test(duplicate.message), duplicate?.message);
+    promptAnswer = ok({ prompt_id: 'prompt_ok', user_message_id: 'msg_ok', status: 'running', content: [], created_at: 'x' });
+
+    // SKILL ACTIVATION: the colon action suffix on the skill name, args passed
+    // through, the answer's activated flag carried back as an empty result (the
+    // skill's turn streams back as ordinary session messages).
+    const activated = await conn.runCommand('review', '--fix');
+    const activate = writes().at(-1);
+    check('a skill command posts to the activate action suffix with the args',
+      activated !== undefined
+        && activate?.path === `/api/v1/sessions/${CREATED_ID}/skills/review:activate`
+        && JSON.stringify(activate?.body) === JSON.stringify({ args: '--fix' }),
+      `${activate?.path} ${JSON.stringify(activate?.body)}`);
+
+    // The skill named `goal` never shadows the builtin: runCommand routes the
+    // name to the goal path above, not to the skill.
+    check('a skill named like a builtin stays unreachable behind it',
+      (await conn.runCommand('goal', 'pause'))?.notice === 'Goal paused. Use /goal resume to continue.');
+
+    const unknown = await threw(() => conn.runCommand('compact'));
+    check('an unadvertised command is still refused',
+      !!unknown && /compact/.test(unknown.message), unknown?.message);
+    await conn.close();
+    skillsAnswer = [];
+  }
+
 
   // ── 5. Approvals ──────────────────────────────────────────────────────────
 
@@ -2206,6 +2637,210 @@ try {
     const forgiven = floodIds(0, overflow).filter((id) => conn.accountedUserMessageIds.has(id));
     check('NONE of the overflow rows is recorded as accounted for',
       forgiven.length === 0, `forgiven=${forgiven.length}/${overflow}`);
+    await conn.close();
+  }
+
+  // ── 9d. Origin kinds: only a real prompt can be a foreign write ──────────
+  //
+  // The detector's rule is INVERTED: suspect only a row Kimi itself labels
+  // `origin.kind === 'user'` or one whose origin is ABSENT (an older server
+  // sends none). Every harness kind — `injection`, `skill_activation`,
+  // `cron_job`, and the rest of the twelve upstream defines — is the server
+  // writing to its OWN session, and a skip-list of those kinds would drift the
+  // day upstream adds a thirteenth.
+
+  {
+    // Harness-origin rows observed during WS silence were the 1-in-5 false
+    // demotion: an injection or a skill activation walked in under a healthy,
+    // silent stream and confirmed like a terminal prompt.
+    const { conn, rows } = await drivenSession();
+    const skillWire = [
+      'User activated the skill "commit". Follow the loaded skill instructions.',
+      '',
+      '<skill-loaded name="commit" trigger="user-slash" source="project" args="please review">',
+      '# Commit',
+      'Stage, write the message, commit.',
+      '</skill-loaded>',
+    ].join('\n');
+    messages = [
+      userRow('msg_origin_injection', '<system-reminder>\nAuto permission mode is active.\n</system-reminder>',
+        { origin: { kind: 'injection', variant: 'permission_mode' } }),
+      userRow('msg_origin_skill', skillWire,
+        { origin: { kind: 'skill_activation', activationId: 'act_1', skillName: 'commit', skillArgs: 'please review', trigger: 'user-slash' } }),
+      userRow('msg_origin_cron', 'run the nightly digest',
+        { origin: { kind: 'cron_job', jobId: 'job_1', cron: '0 0 * * *', recurring: true, coalescedCount: 0, stale: false } }),
+      ...messages,
+    ];
+    // More polls than the confirmation budget: if any of these rows could be
+    // suspected, the session would be demoted by now.
+    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS + 1; poll += 1) await conn.refresh('poll');
+    check('harness-origin user rows (injection, skill_activation, cron_job) never demote',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    check('...and are never recorded as accounted for either — they simply do not enter the detector',
+      ['msg_origin_injection', 'msg_origin_skill', 'msg_origin_cron']
+        .every((id) => !conn.accountedUserMessageIds.has(id)));
+    // The skill row still SPLITS on its way to the transcript — the action the
+    // user took as a short user row, the loaded body as collapsed context —
+    // and neither half looked like a foreign prompt on the way.
+    check('the skill activation renders as a `/name args` action row plus a collapsed context event',
+      rows.some((row) => row.type === 'user-message' && row.text === '/commit please review')
+        && rows.some((row) => row.type === 'event' && row.name === CONTEXT_INJECTION_EVENT
+          && (row.payload as { source?: string }).source === 'skill-loaded'),
+      JSON.stringify(rows.filter((row) => row.type === 'user-message').map((row) => row.text)));
+    await conn.close();
+  }
+
+  {
+    // The other direction of the inversion: a REAL terminal prompt on a
+    // current server carries `origin.kind === 'user'` (USER_PROMPT_ORIGIN
+    // upstream), and it must stay exactly as suspect as an origin-absent row —
+    // otherwise the rule change is an off switch, not a fix.
+    const { conn } = await drivenSession();
+    messages = [userRow('msg_origin_user', 'typed in a terminal', { origin: { kind: 'user' } }), ...messages];
+    await conn.refresh('poll');
+    check("an origin-kind 'user' row is suspected like an origin-absent one",
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    await conn.refresh('poll');
+    check('...and confirms to a demotion by the ordinary rule',
+      conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
+    await conn.close();
+  }
+
+  {
+    // EXONERATION IS RECORDED. A suspect the server's activity clears must
+    // become KNOWN, not merely un-suspected — the rule the unresolved-set path
+    // already followed. The gap needed a suspect the walk's tail never saw: a
+    // row HELD during an outage, then buried under newer rows before the
+    // stream returned, so the promoting walk (3 pages of 20) never reaches it
+    // and nothing records it. Activity then exonerates it — and if that
+    // exoneration does not record the row, the deep resync at the end
+    // re-suspects it and demotes a session the server already answered for.
+    const { conn } = await drivenSession();
+    const retired = sockets.at(-1)!;
+    retired.fire('close', {});
+    await settle();
+    messages = [userRow('msg_promoted_exonerated', 'arrived while the stream was down'), ...messages];
+    await heldRow(conn);
+    // Buried DEEPER than a refresh walk reaches, by rows that are not user
+    // prompts — assistant rows are nobody's suspect and change no accounting.
+    messages = [
+      ...Array.from({ length: 65 }, (_, index) => assistantRow(`msg_bury_${index}`, `burying row ${index}`)),
+      ...messages,
+    ];
+    intervalHandler?.();
+    const replacement = await replacementSocket(retired);
+    await waitOutWalk(conn);
+    // An EVENT walk, not a poll: it spends none of the suspect's budget, but
+    // its healthy evaluation is what promotes the held row if the tick's own
+    // walk did not. Either way the row is a suspect before the server answers.
+    await conn.refresh();
+    check('the buried row is promoted to a suspect without demoting',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    // The server answers for it. The suspect is exonerated by the activity —
+    // and the exoneration is what must record the row KNOWN, because the tail
+    // cannot: the row is still outside every page this connection reads.
+    replacement.deliver(frame('turn.started', { turnId: 41, origin: { kind: 'user' } }));
+    await conn.refresh('poll');
+    check('an activity-exonerated suspect is recorded as accounted for, not just dropped',
+      conn.demotedToObserve === false && conn.accountedUserMessageIds.has('msg_promoted_exonerated'),
+      `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_promoted_exonerated')}`);
+    // The deep resync the diagnosis named: it pages far enough to re-surface
+    // the row, and a recorded row is never re-suspected.
+    replacement.deliver(resyncFrame(61));
+    await settle();
+    await settle();
+    await conn.refresh('poll');
+    await conn.refresh('poll');
+    check('a later deep resync does not re-suspect the exonerated row',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    await conn.close();
+  }
+
+  {
+    // SUBMIT WITHOUT AN ECHO ID. The server persisted the prompt but the
+    // response carried no `user_message_id` — a client-side timeout that still
+    // landed is the upstream shape — so correlation by id is impossible. The
+    // echo must still be recognized, by TEXT, or the detector would suspect
+    // this connection's own prompt.
+    const { conn } = await drivenSession();
+    const savedPromptAnswer = promptAnswer;
+    promptAnswer = ok({ prompt_id: 'prompt_noid', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({ text: 'a prompt whose echo id was lost' });
+    messages = [userRow('msg_noid_echo', 'a prompt whose echo id was lost'), ...messages];
+    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS + 1; poll += 1) await conn.refresh('poll');
+    check('an echo whose submit response carried no user_message_id is adopted by text and never demotes',
+      conn.demotedToObserve === false && conn.accountedUserMessageIds.has('msg_noid_echo'),
+      `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_noid_echo')}`);
+    promptAnswer = savedPromptAnswer;
+    await conn.close();
+  }
+
+  {
+    // THE FILE-ONLY VARIANT of the same lost id. The submission's text part
+    // is EMPTY and folds to no row of its own; the echo is the server's
+    // `Attached file "…"` NOTICE, an ordinary user-message text row whose
+    // prefix up to the materialization path is reconstructible from the
+    // upload answer's own meta. The row is staged from the fixture's recorded
+    // upload exactly as the server builds it from its store.
+    const { conn, rows } = await drivenSession();
+    const savedPromptAnswer = promptAnswer;
+    promptAnswer = ok({ prompt_id: 'prompt_noid_file', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({
+      text: '',
+      files: [{ name: 'notes.txt', mimeType: 'text/plain', data: Buffer.from('attachment bytes!').toString('base64') }],
+    });
+    const upload = uploads.at(-1)!;
+    messages = [fileNoticeRow('msg_noid_file_echo', upload.name, upload.mediaType, upload.text.length), ...messages];
+    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS + 1; poll += 1) await conn.refresh('poll');
+    check('a file-only echo whose submit response carried no user_message_id is adopted by the notice prefix and never demotes',
+      conn.demotedToObserve === false && conn.accountedUserMessageIds.has('msg_noid_file_echo'),
+      `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_noid_file_echo')}`);
+
+    // The IMAGE-ONLY case is the app's attachment path (no `images` wire
+    // field): the file went INLINE, so the echo is the artifact row named from
+    // the rehydrated data URL's mime — `image.png` — plus the EMPTY user row
+    // that artifact is linked to. The empty row walks in FIRST, so it is the
+    // row the detector meets and the one that spends this submission's
+    // attachment evidence; the artifact behind it is covered by the shared
+    // native message id.
+    promptAnswer = ok({ prompt_id: 'prompt_noid_img', status: 'running', content: [], created_at: 'x' });
+    await conn.sendPrompt({
+      text: '',
+      files: [{ name: 'pixel.png', mimeType: 'image/png', data: Buffer.from([0x89, 0x50]).toString('base64') }],
+    });
+    messages = [imageEchoRow('msg_noid_img_echo'), ...messages];
+    for (let poll = 0; poll < KIMI_DIVERGENCE_CONFIRM_POLLS + 1; poll += 1) await conn.refresh('poll');
+    check('an image-only echo without a user_message_id is adopted by its own attachment evidence and never demotes',
+      conn.demotedToObserve === false && conn.accountedUserMessageIds.has('msg_noid_img_echo'),
+      `demoted=${conn.demotedToObserve} known=${conn.accountedUserMessageIds.has('msg_noid_img_echo')}`);
+    const echoedArtifact = rows.find((row) =>
+      row.type === 'file-artifact' && row.artifactKey === 'kimi:msg_noid_img_echo:0');
+    const echoedUserRow = rows.find((row) =>
+      row.type === 'user-message' && row.key === 'kimi:msg_noid_img_echo:u');
+    check('...and the live echo delivers the image linked to its own user row',
+      echoedArtifact !== undefined && echoedUserRow !== undefined
+        && (echoedArtifact as { userMessageKey?: string }).userMessageKey
+          === (echoedUserRow as { key?: string }).key
+        && (echoedUserRow as { text?: string }).text === ''
+        && (echoedUserRow as { imageCount?: number }).imageCount === 1,
+      JSON.stringify([echoedUserRow, echoedArtifact]));
+    promptAnswer = savedPromptAnswer;
+    await conn.close();
+  }
+
+  {
+    // NEGATIVE CONTROL, at the exact notice the previous block submitted: the
+    // evidence memory is per-connection and one-for-one, so a notice row
+    // nobody HERE submitted is a foreign prompt like any other — the guard
+    // adopts what it recorded, never a class of rows.
+    const { conn } = await drivenSession();
+    messages = [fileNoticeRow('msg_foreign_file', 'notes.txt', 'text/plain', 17), ...messages];
+    await conn.refresh('poll');
+    check('an unsubmitted file-notice row is suspected, not adopted',
+      conn.demotedToObserve === false, `demoted=${conn.demotedToObserve}`);
+    await conn.refresh('poll');
+    check('...and confirms to a demotion by the ordinary rule',
+      conn.demotedToObserve === true, `demoted=${conn.demotedToObserve}`);
     await conn.close();
   }
 

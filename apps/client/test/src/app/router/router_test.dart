@@ -932,6 +932,43 @@ void main() {
       expect(store.values.containsKey(uiTextScaleSettingKey), isFalse);
     });
 
+    // A Windows virtual-desktop switch (Ctrl+Win+Arrow) takes focus before the
+    // Ctrl key-up is delivered, latching `isControlPressed`; without the
+    // lifecycle guard the next plain wheel scroll would be misread as
+    // Ctrl+scroll zoom. See `_LatchedKeyboardStateGuard` in router.dart.
+    testWidgets(
+      'losing focus clears a latched Ctrl so plain wheel does not zoom',
+      (tester) async {
+        final store = _InMemoryUiPreferencesStore();
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(600, 900),
+          overrides: [uiPreferencesStoreProvider.overrideWithValue(store)],
+        );
+
+        // Ctrl goes down; the key-up is then lost with the window focus.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        expect(HardwareKeyboard.instance.isControlPressed, isTrue);
+
+        addTearDown(
+          () => tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          ),
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        await tester.pump();
+
+        expect(HardwareKeyboard.instance.isControlPressed, isFalse);
+
+        // A plain wheel scroll afterwards must not zoom.
+        await _sendScroll(tester, deltaY: -120);
+        await _sendScroll(tester, deltaY: 120);
+        expect(store.values.containsKey(uiTextScaleSettingKey), isFalse);
+      },
+    );
+
     testWidgets('unmodified wheel scrolling still scrolls a list', (
       tester,
     ) async {

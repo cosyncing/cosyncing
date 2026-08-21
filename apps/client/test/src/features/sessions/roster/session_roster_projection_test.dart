@@ -151,6 +151,46 @@ void main() {
     expect(expanded.parentFor(ocChildTwo)?.id, 'ses_parent');
   });
 
+  test('groups dsh background subagents under their spawning parent', () {
+    // Same agent-neutral shape again: the projection nests on
+    // (machine, tool, nativeId), so dsh needs no client branch — only the
+    // adapter emitting `nativeId` on the parent row.
+    final dshParent = _session(
+      id: 'dsh-parent',
+      title: 'Refactor the loader',
+      tool: 'dsh',
+      nativeId: 'p',
+    );
+    final dshChild = _session(
+      id: 'dsh-child',
+      title: 'Background subagent',
+      tool: 'dsh',
+      origin: SessionOrigin.subagent,
+      nativeId: 'c',
+      parentThreadId: 'p',
+    );
+
+    final collapsed = SessionRosterProjection.build(
+      sessions: [dshParent, dshChild],
+      preferences: const SessionVisibilityPreferences(),
+    );
+    expect(collapsed.visibleSessions.map((s) => s.id), ['dsh-parent']);
+    expect(collapsed.childCountFor(dshParent), 1);
+
+    final expandedDsh = SessionRosterProjection.build(
+      sessions: [dshParent, dshChild],
+      preferences: const SessionVisibilityPreferences(),
+      childExpansion: {
+        sessionCompositeRosterKey(dshParent): SessionChildExpansion.expanded,
+      },
+    );
+    expect(expandedDsh.visibleSessions.map((s) => s.id), [
+      'dsh-parent',
+      'dsh-child',
+    ]);
+    expect(expandedDsh.parentFor(dshChild)?.id, 'dsh-parent');
+  });
+
   test('child peek identity never crosses machines', () {
     final parentA = _session(
       id: 'parent',

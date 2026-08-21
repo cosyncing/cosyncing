@@ -31,43 +31,29 @@ class _ArchivableLiveStateItemState extends State<_ArchivableLiveStateItem>
     debugLabel: 'session-live-state-flight-source',
   );
   late bool _expanded = widget.initiallyExpanded;
-  Timer? _doneArchiveTimer;
   double _dragOffset = 0;
   bool _committing = false;
   PointerDeviceKind? _pointerKind;
   AnimationController? _flightController;
   OverlayEntry? _flightOverlay;
 
-  @override
-  void initState() {
-    super.initState();
-    _scheduleDoneArchive();
-  }
-
+  // There is no auto-archive. A finished card stays until the reader dismisses
+  // it (swipe or the archive button): the protocol keeps a done task list
+  // pinned until `cleared`, and done goals/activities are dropped from the
+  // projection before they reach here, so the old 3-second timer only ever
+  // deleted a finished list out from under whoever had just opened it. It also
+  // keyed on the LOCALIZED status label, so it fired in English and never in
+  // Chinese.
   @override
   void didUpdateWidget(covariant _ArchivableLiveStateItem oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.initiallyExpanded && !oldWidget.initiallyExpanded) {
       _expanded = true;
     }
-    if (oldWidget.item.fingerprint != widget.item.fingerprint) {
-      _scheduleDoneArchive();
-    }
-  }
-
-  void _scheduleDoneArchive() {
-    _doneArchiveTimer?.cancel();
-    if (widget.item.statusLabel == 'Done' && !widget.item.actionRequired) {
-      _doneArchiveTimer = Timer(
-        const Duration(seconds: 3),
-        () => unawaited(_commitArchive()),
-      );
-    }
   }
 
   @override
   void dispose() {
-    _doneArchiveTimer?.cancel();
     _flightOverlay?.remove();
     _flightController?.dispose();
     super.dispose();
@@ -1051,6 +1037,7 @@ class _TaskStateRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final textTheme = Theme.of(context).textTheme;
     final (icon, color) = switch (item.status) {
       TaskItemStatus.open => (Icons.radio_button_unchecked, tokens.statusIdle),
       TaskItemStatus.inProgress => (
@@ -1061,20 +1048,22 @@ class _TaskStateRow extends StatelessWidget {
       TaskItemStatus.cancelled => (Icons.cancel_outlined, tokens.statusIdle),
       TaskItemStatus.unknown => (Icons.help_outline, tokens.textTertiary),
     };
+    // Expanded rows read at the transcript's own body scale. The request was a
+    // taller panel, and height is a separate knob from type size: the extra
+    // room comes from the surface's max height, not from headline text.
     return ListTile(
       key: Key('session-task-item-$index'),
-      dense: true,
       leading: Icon(icon, size: 20, color: color),
       title: SelectionArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(item.title),
+            Text(item.title, style: textTheme.bodyLarge),
             if (item.detail case final detail?) ...[
               const SizedBox(height: 4),
               Text(
                 detail,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                style: textTheme.bodyMedium?.copyWith(
                   color: tokens.textSecondary,
                 ),
               ),
@@ -1086,7 +1075,7 @@ class _TaskStateRow extends StatelessWidget {
           ? null
           : Text(
               item.priority!,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              style: textTheme.labelMedium?.copyWith(
                 color: tokens.textSecondary,
               ),
             ),

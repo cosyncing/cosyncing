@@ -164,6 +164,33 @@ void main() {
       );
     });
 
+    testWidgets('suppresses id-placeholder and blank titles', (tester) async {
+      // Kimi reports `title ?? last_prompt ?? id`, so an untitled session's
+      // title IS its raw id; the row used to render that fingerprint while
+      // the tab/header suppressed it via `knownSessionTitle`. The roster now
+      // applies the same suppression, so both shapes read "Untitled session".
+      await tester.pumpWidget(
+        host(
+          SessionListPane(
+            sessions: [
+              _session('kimi', 'session_019ff', title: 'session_019ff'),
+              _session('kimi', 'session_blank', title: '   '),
+              _session('codex', 'real', title: 'A real title'),
+            ],
+            activeKey: null,
+            onOpen: (_) {},
+            visibilityPreferences: const SessionVisibilityPreferences(),
+          ),
+        ),
+      );
+      await expandProject(tester, ungrouped);
+
+      expect(find.text('session_019ff'), findsNothing);
+      expect(find.text('session_blank'), findsNothing);
+      expect(find.text('Untitled session'), findsNWidgets(2));
+      expect(find.text('A real title'), findsOneWidget);
+    });
+
     testWidgets('the roster carries no selection machinery at all', (
       tester,
     ) async {

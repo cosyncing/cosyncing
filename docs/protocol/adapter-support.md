@@ -104,7 +104,9 @@ figures. Read that comment before computing anything from token buckets.
 ## Claude control boundary
 
 Claude opens in read-only Observe. Drive is an explicit broker-owned Take-over
-path and may fork when a live terminal owns the transcript. The experimental
+path that resumes the session in place; a takeover against a terminal that is
+mid-turn is refused, and a terminal that writes later demotes the drive back to
+Observe (two writers on one transcript would fork its history). The experimental
 channel path is not a supported true-live control surface because current
 runtime evidence does not provide the required permission-answer authority.
 Packaged v1 therefore advertises Observe plus Take over, never true terminal

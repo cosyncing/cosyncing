@@ -906,7 +906,82 @@ void main() {
       );
     });
   });
+
+  // P6. A user-sent artifact arrives as its own top-level `file-artifact`. The
+  // ownership link is `userMessageKey`; without it the image rendered as an
+  // agent deliverable, detached from the prompt it went with.
+  group('user attachments', () {
+    List<AgentMessage> artifactsIn(ConversationTurn turn) => [
+      for (final entry in turn.content)
+        if (entry case MessageTranscriptDisplayEntry(:final message))
+          if (message.type == AgentMessageType.fileArtifact) message,
+    ];
+
+    test('nests a sent artifact under its own prompt and drops it from '
+        'content', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _user('u1', 'Look at this'),
+          _artifact('screenshot.png', userMessageKey: 'u1'),
+          _model('a1', 'I see it'),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      final turn = turns.single;
+      expect(
+        turn.userAttachments.map((m) => m.raw['name']),
+        ['screenshot.png'],
+      );
+      expect(artifactsIn(turn), isEmpty);
+      expect(turn.modelText, 'I see it');
+    });
+
+    test('preserves order and never duplicates', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _user('u1', 'Two files'),
+          _artifact('one.png', userMessageKey: 'u1'),
+          _artifact('two.png', userMessageKey: 'u1'),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(
+        turns.single.userAttachments.map((m) => m.raw['name']),
+        ['one.png', 'two.png'],
+      );
+      expect(artifactsIn(turns.single), isEmpty);
+    });
+
+    test('keeps an artifact whose owner row is not projected in content', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _user('u1', 'Unrelated'),
+          _artifact('evicted.png', userMessageKey: 'u-evicted'),
+          _artifact('report.pdf'),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      final turn = turns.single;
+      expect(turn.userAttachments, isEmpty);
+      expect(
+        artifactsIn(turn).map((m) => m.raw['name']),
+        ['evicted.png', 'report.pdf'],
+      );
+    });
+  });
 }
+
+AgentMessage _artifact(
+  String name, {
+  String? userMessageKey,
+}) => _msg('file-artifact', {
+  'artifactKey': 'artifact-$name',
+  'name': name,
+  if (userMessageKey != null) 'userMessageKey': userMessageKey,
+});
 
 AgentMessage _user(
   String key,

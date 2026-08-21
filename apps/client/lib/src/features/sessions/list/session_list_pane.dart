@@ -1186,7 +1186,12 @@ class _SessionRow extends StatelessWidget {
     final tokens = context.tokens;
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
-    final title = session.title.isNotEmpty ? session.title : session.id;
+    // Same suppression the tab/header apply: adapters that report the raw
+    // session id as the title (untitled kimi sessions) render the neutral
+    // label, not a fingerprint.
+    final title =
+        knownSessionTitle([session.title], sessionId: session.id) ??
+        l10n.sessionDetailTitleUntitled;
     final indentDepth = row.depth < _kSessionRowMaxIndentDepth
         ? row.depth
         : _kSessionRowMaxIndentDepth;

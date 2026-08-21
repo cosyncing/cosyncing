@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "25d51a2b9d67be8eab3dffe14bbf756aa33d0738",
+  "acceptedBase": "8477cd0f580e3bc289bbec2885ecf83a7bf2d596",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -8,6 +8,8 @@
     "broker.artifact-session-isolation",
     "broker.attach-identity",
     "broker.capabilities",
+    "broker.claude-cross-client-join",
+    "broker.claude-driven-queue",
     "broker.claude-hooks",
     "broker.claude-hooks-surface",
     "broker.claude-transcript",
@@ -44,6 +46,7 @@
     "broker.history-cache",
     "broker.history-paging",
     "broker.kimi-attach-priming",
+    "broker.kimi-cross-client-join",
     "broker.kimi-diagnosis",
     "broker.kimi-drive",
     "broker.kimi-drive-authority",
@@ -118,7 +121,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:655ba76157a10d715815b3c84f8d0d6aa5a0b5dc0bef32fcd4c872f8cbd5da55"
+      "fingerprint": "sha256:8e7f8eaee287ab915dfc97ca43cf0ecad28aaf684ff6edd0815213c872c8def0"
     },
     {
       "id": "capabilities",
@@ -275,6 +278,14 @@
       "fingerprint": "sha256:6b23aeef25478db8c4a45c104174bdfa43d05b8e45c6633cc610a405b4b4eef1"
     },
     {
+      "id": "claude-cross-client-join",
+      "fingerprint": "sha256:0586336ff9c5d04c37c0920f17cdc680537e21bd7782164ec765a4be929a31f4"
+    },
+    {
+      "id": "claude-driven-queue",
+      "fingerprint": "sha256:8ec3ea56229a1ace0a9d8ff5418499b7ec2e79b5a4016c34348d979b16b8b8c3"
+    },
+    {
       "id": "claude-hooks",
       "fingerprint": "sha256:61db0641061f5909e0f924c1fd2332c15f83cbb2a54ca65745fe3cb57e66467b"
     },
@@ -421,6 +432,10 @@
     {
       "id": "kimi-attach-priming",
       "fingerprint": "sha256:86c3114e2bae574b51f07870b7af5956619829dc7ebc232ae3cf16d64f605e11"
+    },
+    {
+      "id": "kimi-cross-client-join",
+      "fingerprint": "sha256:20581b6e30463edd2811557b1ad1c134a787b17439a083d8fff4408447e5a21f"
     },
     {
       "id": "kimi-diagnostics",

@@ -2606,6 +2606,10 @@ try {
       const npmBinary = join(machineRoot, 'npm-global', 'lib', 'node_modules', 'cosyncing', 'bin', 'cosyncing');
       mkdirSync(join(machineRoot, 'npm-global', 'lib', 'node_modules', 'cosyncing', 'bin'), { recursive: true });
       writeFileSync(npmBinary, content, { mode: 0o755 });
+      // writeFileSync's mode is umask-masked; chmod explicitly (the product
+      // does the same after every creation) so a restrictive umask cannot
+      // flake the exact-mode assertions below.
+      chmodSync(npmBinary, 0o755);
       return npmBinary;
     };
     const binaryReceipt = (home: string) => {
@@ -2646,6 +2650,7 @@ try {
 
     // `npm update -g cosyncing` replaces the acquisition artifact; the next setup re-copies and re-measures.
     writeFileSync(npmBinary, 'npm-packaged-binary-v2', { mode: 0o755 });
+    chmodSync(npmBinary, 0o755);
     const v2Sha = createHash('sha256').update('npm-packaged-binary-v2').digest('hex');
     const upgraded = await runSetup(npmSetupOptions(machine, new ScriptedPresenter(), npmBinary));
     check('setup after an npm update re-copies the changed binary and refreshes its measured receipt',

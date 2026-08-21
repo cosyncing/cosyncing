@@ -5,8 +5,8 @@
  * The posture rests on the write set being closed by construction rather than
  * by convention, so the first block asserts it structurally — over both class
  * surfaces and over the source text — rather than by "we did not call it": the
- * shared HTTP door names only GET, the one write door exposes exactly six named
- * POST operations with no generic post, no other adapter source names a
+ * shared HTTP door names only GET, the one write door exposes exactly ten
+ * named POST operations with no generic post, no other adapter source names a
  * mutating verb, and the socket's frame set excludes every mutating frame. The
  * rest asserts the gate fails CLOSED: no live server, several live servers, an
  * unreachable `/meta`, unreadable metadata, a disabled token gate, a record that
@@ -135,7 +135,7 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
 
   // `drive-http.ts` is deliberately NOT in this list — it is the one file
   // allowed to name POST. Every other source, including the drive CONNECTION,
-  // must reach a write only by calling one of that file's six named methods.
+  // must reach a write only by calling one of that file's ten named methods.
   const adapterSources = [
     'index.ts', 'implementation.ts', 'observe.ts', 'mapping.ts', 'diagnostics.ts',
     'drive.ts', 'usage.ts', 'timing.ts', 'server.ts',
@@ -150,9 +150,9 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
   // ── The write door, allowlisted by construction ──────────────────────────
   //
   // The mirror of the read door's proof. `KimiDriveHttp` can write, so what has
-  // to be provable is that the set of writes is CLOSED: six named operations,
+  // to be provable is that the set of writes is CLOSED: ten named operations,
   // no generic `post(path, body)`, and no other exported way to reach the
-  // transport. A seventh write must cost a seventh method, in review.
+  // transport. An eleventh write must cost an eleventh method, in review.
   {
     const surface = new Set<string>();
     for (
@@ -165,10 +165,11 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
     surface.delete('constructor');
     surface.delete('origin');
     const expected = [
-      'abortSession', 'answerQuestion', 'createSession',
-      'dismissQuestion', 'resolveApproval', 'submitPrompt',
+      'abortSession', 'activateSkill', 'answerQuestion', 'controlGoal',
+      'createSession', 'dismissQuestion', 'renameSession', 'resolveApproval',
+      'submitPrompt', 'uploadFile',
     ];
-    check('the write door exposes exactly the six allowlisted operations',
+    check('the write door exposes exactly the ten allowlisted operations',
       [...surface].sort().join(',') === expected.join(','),
       [...surface].sort().join(','));
 
@@ -1351,6 +1352,9 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
 
 interface ServerLog { method: string; path: string }
 const requests: ServerLog[] = [];
+const profilePosts: Array<{ id: string; title: unknown }> = [];
+/** Multipart uploads the fake server received, parsed into plain fields for assertions. */
+const uploadPosts: Array<{ name: string; mediaType: string; text: string }> = [];
 let sessionPages = 0;
 /** undefined = serve the captured meta verbatim; otherwise patch its `data` first. */
 let metaPatch: ((data: Record<string, unknown>) => Record<string, unknown>) | undefined;
@@ -1358,12 +1362,50 @@ let metaPatch: ((data: Record<string, unknown>) => Record<string, unknown>) | un
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
-  fetch(request) {
+  async fetch(request) {
     const url = new URL(request.url);
     requests.push({ method: request.method, path: url.pathname });
+    const authorized = request.headers.get('authorization') === 'Bearer fixture-token';
+    if (request.method === 'POST') {
+      // The two writes the fake serves: the native rename route, answering with
+      // the success envelope around a session-shaped row like upstream's
+      // `sessionProfile.ts` handler does, and the file store's multipart
+      // upload, answering the `FileMeta` the door turns into a content part.
+      const profile = url.pathname.match(/^\/api\/v1\/sessions\/([^/]+)\/profile$/);
+      if (!authorized) return Response.json(FIXTURE.rest.metaUnauthorized, { status: 401 });
+      if (url.pathname === '/api/v1/files') {
+        const form = await request.formData();
+        const part = form.get('file');
+        if (!(part instanceof File)) {
+          return Response.json({ code: 40001, msg: 'missing `file` field', data: null, request_id: 'fixture' });
+        }
+        const text = await part.text();
+        uploadPosts.push({ name: part.name, mediaType: part.type, text });
+        return Response.json({
+          code: 0,
+          msg: 'success',
+          data: {
+            id: 'file_fixture_1', name: part.name,
+            media_type: part.type || 'application/octet-stream',
+            size: text.length, created_at: '2026-08-14T09:00:00.000Z',
+          },
+          request_id: 'fixture',
+        });
+      }
+      if (profile) {
+        const body = await request.json() as { title?: unknown };
+        profilePosts.push({ id: decodeURIComponent(profile[1]!), title: body?.title });
+        return Response.json({
+          code: 0,
+          msg: 'success',
+          data: { id: decodeURIComponent(profile[1]!), title: body?.title },
+          request_id: 'fixture',
+        });
+      }
+      return new Response('method not allowed', { status: 405 });
+    }
     if (request.method !== 'GET') return new Response('method not allowed', { status: 405 });
     if (url.pathname === '/api/v1/healthz') return Response.json(FIXTURE.rest.healthz);
-    const authorized = request.headers.get('authorization') === 'Bearer fixture-token';
     if (!authorized) return Response.json(FIXTURE.rest.metaUnauthorized, { status: 401 });
     if (url.pathname === '/api/v1/meta') {
       if (!metaPatch) return Response.json(FIXTURE.rest.meta);
@@ -1434,12 +1476,19 @@ try {
       && adapter.capabilities.supportsModelSwitch === true
       && adapter.capabilities.permissionGranularity === 'per-session',
     JSON.stringify(adapter.capabilities));
-  // Native file input stays OFF while `PromptInput.files`/`images` are refused
-  // outright: advertising an input the adapter then throws on is worse than not
-  // advertising it at all.
-  check('adapter still advertises no native file input or artifact signal',
-    adapter.capabilities.supportsNativeFileInput === false
+  // Native file input is ON: the prompt schema's image/file content parts are
+  // backed by a real pipeline (inline base64 images, `/api/v1/files` uploads),
+  // so the capability the broker and client both gate on tells the truth.
+  check('adapter advertises native file input and still no artifact signal',
+    adapter.capabilities.supportsNativeFileInput === true
       && adapter.capabilities.supportsNativeArtifact === false);
+  // Cross-client Drive sharing is a claim about the CONNECTION, not the wire:
+  // a joining socket is handed the existing drive connection, so the session
+  // keeps exactly one writer. Without the flag the broker offers a second
+  // client no join at all and it observes forever. The wire behaviour itself is
+  // proved in `broker/test/broker/test-kimi-cross-client-join.ts`.
+  check('adapter declares that two clients may share one drive connection',
+    adapter.capabilities.supportsCrossClientDriveSharing === true);
   check('adapter advertises session creation and its readiness boundary',
     typeof (adapter as { createSession?: unknown }).createSession === 'function'
       && typeof (adapter as { canCreateSession?: unknown }).canCreateSession === 'function'
@@ -1484,9 +1533,12 @@ try {
     isOwnershipConflictError(foreignLive), `${foreignLive?.name ?? '(did not throw)'}`);
   // Every OTHER write-class native action stays absent: each needs its own
   // transcript semantics, and an unimplemented one must not be advertised.
-  check('adapter advertises no other native write action',
-    ['renameSession', 'forkSession', 'cloneSession', 'exportTranscript', 'setAgent']
-      .every((name) => typeof (adapter as unknown as Record<string, unknown>)[name] !== 'function'));
+  // Rename is the exception — implemented natively through the profile route,
+  // which is also what flips the broker's `canRenameNative`.
+  check('adapter advertises native rename and no other unimplemented write action',
+    typeof (adapter as unknown as Record<string, unknown>).renameSession === 'function'
+      && ['forkSession', 'cloneSession', 'exportTranscript', 'setAgent']
+        .every((name) => typeof (adapter as unknown as Record<string, unknown>)[name] !== 'function'));
   // The distinction between the two integration kinds, asserted rather than
   // assumed. `managedRuntime` means a runtime the broker OWNS as its own child
   // and may restart at will — Codex's daemon, OpenCode's serve. `kimi web` is
@@ -1660,13 +1712,93 @@ try {
     await adapter.attach(FIXTURE.sessionId, 'resume').then(() => false, (error: Error) =>
       !isOwnershipConflictError(error) && /resume/.test(error.message)));
 
+  // ── Native rename through the profile route ───────────────────────────────
+  //
+  // The broker's rename endpoint passes a title, or null when the user clears
+  // a display-title override. Null has no native expression (the profile schema
+  // requires a non-empty string), so it resolves to the session's cwd basename
+  // — the same name codex uses for a cleared title.
+  //
+  // The rename block runs LAST among the server-consuming checks: it is the one
+  // path here allowed to POST, and the GET-only audit below is taken over the
+  // requests that precede it.
+  const getOnlyRequestCount = requests.length;
+  {
+    const renamed = await adapter.renameSession(FIXTURE.sessionId, 'Renamed from cosyncing');
+    const post = profilePosts.at(-1);
+    check('rename posts the title to the session profile route',
+      post?.id === FIXTURE.sessionId && post.title === 'Renamed from cosyncing',
+      JSON.stringify(post));
+    check('rename returns the session info patched to the accepted title',
+      !!renamed && renamed.id === FIXTURE.sessionId && renamed.title === 'Renamed from cosyncing'
+        && renamed.tool === 'kimi' && renamed.cwd === '/fixture/workspace',
+      JSON.stringify(renamed));
+
+    // The fixture row's cwd is `/fixture/workspace`, so a cleared override is
+    // written back as its basename rather than sent as an empty title the
+    // upstream schema would refuse.
+    const cleared = await adapter.renameSession(FIXTURE.sessionId, null);
+    check('a cleared override renames to the cwd basename, codex-style',
+      profilePosts.at(-1)?.title === 'workspace'
+        && !!cleared && cleared.title === 'workspace',
+      JSON.stringify(profilePosts.at(-1)));
+
+    // An unknown session has no cwd on record: nothing honest to write, so the
+    // call is a no-op rather than a guess at a title.
+    const beforeUnknown = profilePosts.length;
+    const unknown = await adapter.renameSession('session-not-listed', null);
+    check('clearing the title of an unlisted session writes nothing',
+      unknown === undefined && profilePosts.length === beforeUnknown);
+
+    const down = new KimiAdapter({
+      env: {}, homeDir: '/fixture/home',
+      instanceScan: () => ({ live: [], stale: 1, invalid: 0, truncated: false }),
+      readToken: () => undefined,
+    });
+    check('rename with no running server refuses',
+      await down.renameSession(FIXTURE.sessionId, 'x').then(() => false, (error: Error) =>
+        /no local Kimi server/.test(error.message)));
+  }
+
+  // ── The upload write door, against the same fake server ──────────────────
+  //
+  // Exercised DIRECTLY (not through an adapter): the connection-level assembly
+  // — broker-staged bytes in, a `file` content part out — is pinned in the
+  // drive suite; what belongs here is the door itself, one multipart POST with
+  // the part's filename and content-type carrying the name and media type.
+  {
+    const door = new KimiDriveHttp({ baseUrl, token: 'fixture-token' });
+    const outcome = await door.uploadFile({
+      name: 'notes.txt', mediaType: 'text/plain',
+      bytes: new TextEncoder().encode('hello from the upload door'),
+    });
+    const upload = uploadPosts.at(-1);
+    check('upload posts one multipart file field to /api/v1/files',
+      upload?.name === 'notes.txt' && upload.mediaType.split(';')[0] === 'text/plain'
+        && upload.text === 'hello from the upload door',
+      JSON.stringify(upload));
+    check('upload returns the server FileMeta with the file id the prompt part needs',
+      outcome.code === 0
+        && (outcome.data as { id?: unknown })?.id === 'file_fixture_1'
+        && (outcome.data as { size?: unknown })?.size === 'hello from the upload door'.length,
+      JSON.stringify(outcome.data));
+  }
+
   // The whole K1 surface — availability, discovery, observe attach, history —
-  // ran above. None of it may have issued anything but a GET: the write door is
-  // reachable only from a drive connection on an owned session, and this
-  // adapter never created one.
-  check('the fake server saw only GET requests',
-    requests.length > 0 && requests.every((entry) => entry.method === 'GET'),
-    `${requests.length} requests`);
+  // ran above the rename block. None of it may have issued anything but a GET:
+  // the write door is reachable only from a drive connection on an owned
+  // session (and the reviewed rename hook), and this adapter never created one.
+  check('the fake server saw only GET requests before the rename block',
+    getOnlyRequestCount > 0
+      && requests.slice(0, getOnlyRequestCount).every((entry) => entry.method === 'GET'),
+    `${getOnlyRequestCount} requests`);
+  check('the only POSTs the fake server ever saw are the profile renames and the upload-door test',
+    requests.slice(getOnlyRequestCount).filter((entry) => entry.method !== 'GET')
+      .every((entry) => entry.method === 'POST'
+        && (entry.path.endsWith('/profile') || entry.path === '/api/v1/files'))
+      && profilePosts.length === 2 && uploadPosts.length === 1,
+    requests.slice(getOnlyRequestCount).filter((entry) => entry.method !== 'GET')
+      .map((entry) => `${entry.method} ${entry.path}`).join(','));
 } catch (error) {
   check('test harness completed', false, error instanceof Error ? error.message : String(error));
 } finally {

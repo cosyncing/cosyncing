@@ -8,7 +8,7 @@
  *
  *  1. ONE PATH BUILDER. {@link dshApiPath} is the only function in the package
  *     that produces an `/api/...` string, and it refuses any route outside
- *     {@link DSH_API_ROUTES}. That surface is ten unary methods
+ *     {@link DSH_API_ROUTES}. That surface is eleven unary methods
  *     ({@link DSH_RPC_METHODS}), the two `commands/*` Typert Remote endpoints
  *     ({@link DSH_REMOTE_METHODS}), `respond`, and the two streams; every other
  *     method the host serves (settings, credentials, agent presets, directory
@@ -111,6 +111,7 @@ export const DSH_RPC_METHODS = Object.freeze([
   'session.rename',
   'session.models',
   'session.selectModel',
+  'llm.models',
 ] as const);
 
 export type DshRpcMethod = (typeof DSH_RPC_METHODS)[number];
@@ -169,8 +170,11 @@ export const DSH_API_ROUTES: readonly string[] = Object.freeze([
 // The names below are the host's REAL method names (apiproxy `rpc-map.ts` at
 // 0.1.0-rc.6), so a wiring round widens the allowlist by moving lines, not by
 // re-deriving the surface — which is exactly how `session.models` and
-// `session.selectModel` left this list. Not listed: `session.export` (a GET
-// download route, not an RPC) and the Typert Remote namespaces
+// `session.selectModel` left this list, and later `llm.models` (the
+// session-independent catalog the create dialog needs; `llm.providers` is a
+// settings-surface view and `llm.discoverModels` carries a draft apiKey, so
+// both stay deferred). Not listed: `session.export` (a GET download route, not
+// an RPC) and the Typert Remote namespaces
 // (`goals/create`, `messageFeedback/put`, `pluginInventory/list`, …), which ride
 // `POST /api/<namespace>/<method>` outside `RpcMethodMap`; the two `commands/*`
 // endpoints of that family are now allowlisted in {@link DSH_REMOTE_METHODS}.
@@ -217,7 +221,6 @@ export const DSH_DEFERRED_RPC_METHODS: readonly string[] = Object.freeze([
   'credentials.set',
   'credentials.unset',
   'llm.providers',
-  'llm.models',
   'llm.discoverModels',
   'host.pickDirectory',
   'host.listDirectory',

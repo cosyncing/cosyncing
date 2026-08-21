@@ -35,13 +35,15 @@ import {
   type AvailabilityOptions,
   type ManagedHostDescriptor,
   type ManagedHostIdentityInputs,
+  type ModelOption,
+  type PromptInput,
   type SessionConnection,
   type SessionDiscoveryOptions,
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME } from './diagnostics.ts';
-import { DshDriver } from './drive.ts';
+import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
 import { DshSessionConnection, type DshConnectionOptions } from './observe.ts';
 import {
@@ -684,11 +686,39 @@ export class DshAdapter implements AgentBackend {
     const info: SessionInfo = known ?? {
       id: sessionId,
       tool: this.id,
+      // Same parent half of the roster link the mapped rows carry. The
+      // synthesized fallback is still a real session that can own children.
+      nativeId: sessionId,
       title: sessionId,
       status: 'idle',
       attachMode: 'live',
       launchSurface: 'unknown',
     };
+    // The composer's model picker preselects from `info.currentModel`, and the
+    // roster read this info came from maps no model at all — so without this
+    // seed the picker sits blank until the FIRST PROMPT's `request/header`
+    // publishes one. `session.models` is the authoritative per-session read and
+    // is already allowlisted, so ask it here.
+    //
+    // Best effort by design: a host that cannot answer leaves both fields
+    // absent and the `request/header` path stays the fallback. An attach must
+    // not fail over a picker seed.
+    try {
+      const catalog = await new DshDriver(this.rpc()).models(sessionId);
+      const current = catalog.current;
+      if (current) {
+        const label = dshModelDisplayName(catalog.groups, current.provider, current.model);
+        info.model = current.model;
+        info.currentModel = {
+          providerID: current.provider,
+          modelID: current.model,
+          ...(label ? { label } : {}),
+          ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}),
+        };
+      }
+    } catch {
+      /* no authoritative model right now; request/header still publishes one */
+    }
     const link = this.hostLink();
     let connection: DshSessionConnection;
     connection = new DshSessionConnection(info, {
@@ -716,6 +746,24 @@ export class DshAdapter implements AgentBackend {
   }
 
   /**
+   * The pre-session model catalog, from the host-wide `llm.models` RPC.
+   *
+   * Presence of this method is what opens the create dialog's model picker at
+   * all (the broker gates `canSelectModelAtCreation` and the models route on
+   * it), and the rows are flattened through the SAME mapper the attached
+   * session's picker uses, so a selection validated here decodes exactly like
+   * the one a prompt later sends.
+   *
+   * A failed read THROWS: the broker turns that into a retryable 503
+   * MODEL_CATALOG_UNAVAILABLE on both the models route and create-time
+   * validation, while an empty array would render as a silently empty picker —
+   * or worse, a misleading 409 "no longer available" for a valid selection.
+   */
+  async listModels(): Promise<ModelOption[]> {
+    return dshModelOptions(await new DshDriver(this.rpc()).catalog());
+  }
+
+  /**
    * Every adapter-level write first proves the endpoint speaks the contract
    * RIGHT NOW. A `canCreateSession` preflight minutes earlier says nothing
    * about the process on the port at write time, so the write path verifies
@@ -736,13 +784,23 @@ export class DshAdapter implements AgentBackend {
    * with that fact rather than silently landing the session somewhere else.
    *
    * Verification happens immediately before EACH write — the create, and the
-   * optional rename — not once at the top: a describe before `workspace.list`
-   * says nothing about the process on the port when the write lands. Once the
-   * create has succeeded the method returns the created session even if the
-   * rename then fails — the rename is cosmetic, and reporting a creation
-   * failure for a session that exists invites a duplicating retry.
+   * optional rename or model selection — not once at the top: a describe before
+   * `workspace.list` says nothing about the process on the port when the write
+   * lands. Once the create has succeeded the method returns the created session
+   * even if a follow-up write then fails — both are cosmetic next to the
+   * session's existence, and reporting a creation failure for a session that
+   * exists invites a duplicating retry.
+   *
+   * A requested `model` is applied AFTER the create through
+   * `session.selectModel`, the only model route this host has (dsh has no
+   * per-prompt or per-create model field). dsh model selections are durable
+   * session state, so the fresh session simply starts out running it.
    */
-  async createSession(opts?: { directory?: string; title?: string }): Promise<SessionInfo> {
+  async createSession(opts?: {
+    directory?: string;
+    title?: string;
+    model?: PromptInput['model'];
+  }): Promise<SessionInfo> {
     const workspaces = await this.workspaces();
     if (workspaces.length === 0) {
       throw new Error('the DeepSeek Harness host has no workspace to create a session in');
@@ -773,15 +831,46 @@ export class DshAdapter implements AgentBackend {
         title = undefined;
       }
     }
+    let currentModel: SessionInfo['currentModel'];
+    const requestedModel = opts?.model;
+    if (requestedModel) {
+      // Same partial-success rule as the rename: the session already exists, so
+      // a failed selection degrades to the tool default rather than reporting
+      // a create failure that a retry would duplicate. dsh has no `variant`
+      // notion; the broker validates the selection against this adapter's own
+      // catalog before this call, so what arrives here is a servable route.
+      try {
+        await this.requireVerifiedHost();
+        const selected = await driver.selectModel(created.sessionId, {
+          provider: requestedModel.providerID,
+          model: requestedModel.modelID,
+          ...(requestedModel.reasoningEffort ? { reasoningEffort: requestedModel.reasoningEffort } : {}),
+        });
+        // Advertised on the returned info so the composer preselects what was
+        // asked for without waiting for a session.models round trip.
+        currentModel = {
+          providerID: selected.provider,
+          modelID: selected.model,
+          ...(selected.reasoningEffort ? { reasoningEffort: selected.reasoningEffort } : {}),
+        };
+      } catch {
+        currentModel = undefined;
+      }
+    }
     return {
       id: created.sessionId,
       tool: this.id,
+      // The parent half of the roster link — see mapDshSession. A session
+      // created here can spawn children immediately, so the row it returns has
+      // to carry it too or those children render flat until the next discovery.
+      nativeId: created.sessionId,
       title: title || chosen.title,
       cwd: chosen.path,
       status: 'idle',
       attachMode: 'live',
       launchSurface: 'app',
       ...(created.agentPreset ? { currentAgent: created.agentPreset } : {}),
+      ...(currentModel ? { model: currentModel.modelID, currentModel } : {}),
     };
   }
 

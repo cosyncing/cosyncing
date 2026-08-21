@@ -94,6 +94,7 @@ import {
   searchGroup,
   searchSemantic,
   webSemantic,
+  OwnershipConflictError,
 } from '@cosyncing/adapter-api';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 
@@ -113,6 +114,20 @@ const CAPS: AgentCapabilities = {
   supportsNativeFileInput: true, // resume sendPrompt: native image blocks + files staged to .cosyncing/inbox; live sendFile too
   supportsModelSwitch: true, // resume relaunches with `--model`; observe ignores it
   permissionGranularity: 'per-session', // resume launches with a chosen `--permission-mode`
+  // Two sockets may share ONE Drive connection through the broker's join action (physical pass, P1:
+  // "steering badge lost on refresh" / "queued message gone after refresh"). The Drive owner is this
+  // broker's own `claude -p --resume` child; a reloaded page that cannot prove its Drive provenance
+  // locally (storage reset, lease lapsed, another device) attaches bare and used to be handed the
+  // read-only observe connection — whose history is the transcript alone — while the driving
+  // connection, its child, and its still-undelivered prompts sat alive under `#resume` with nothing
+  // telling the page about them. With the flag, Hub.sessionDetailFrame offers that socket the join,
+  // the client reattaches onto the EXISTING owner (Hub.joinExisting never attaches), and the owner's
+  // getHistory() — pending driven rows included — is what it replays.
+  // What makes the share safe here: the join hands out the existing child, so the session still has
+  // exactly one writer; both sockets' prompts reach one stdin in order, the driven-row FIFO and the
+  // foreign-write exoneration are per CONNECTION (a peer socket's prompt is never a foreign writer),
+  // and a demotion publishes the new control state to every subscriber at once.
+  supportsCrossClientDriveSharing: true,
 };
 
 // The default store honors CLAUDE_CONFIG_DIR exactly as the real `claude` binary does (so a user — or a
@@ -125,6 +140,37 @@ const DEFAULT_BIN = process.env.COSYNCING_CLAUDE_BIN?.trim() || 'claude';
 /** Deferred rows are process-local and disappear on restart, so retain only a bounded FIFO working set. */
 export const CLAUDE_MAX_PENDING_CREATES = 256;
 
+/** Why a takeover was refused, in the caller's language: the terminal owner is mid-turn, so driving
+ *  now would be a guaranteed two-writer collision on one transcript (issue 15a). */
+export const CLAUDE_TERMINAL_BUSY_REFUSAL =
+  'A terminal attached to this Claude session is running a turn right now. cosyncing will not take '
+  + 'over mid-turn — two writers on one session fork its history into sibling branches. Wait for the '
+  + 'turn to finish, or quit the terminal, then take over.';
+/** Machine conflict category for the refusal above; the broker relays it as an `attach-conflict`. */
+export const CLAUDE_TERMINAL_BUSY_CONFLICT = 'claude-terminal-busy';
+
+/** Machine `drive.reason` for a connection demoted after a foreign write was proven (issue 15a).
+ *  Mirrors kimi's `kimi-foreign-writer`. */
+export const CLAUDE_FOREIGN_WRITER_REASON = 'claude-foreign-writer';
+
+/** Said once, when driving stops. States the hazard, not the mechanism. */
+export const CLAUDE_DIVERGENCE_MESSAGE =
+  'Another program wrote to this Claude session — most likely its terminal. cosyncing has stopped '
+  + 'driving it and is now observing only: two writers on one Claude session silently fork its history '
+  + 'into sibling branches. Quit the other program and take over again to keep driving.';
+
+/** Refusal text for every prompt attempted after demotion. */
+export const CLAUDE_DEMOTED_REFUSAL =
+  'this Claude session is being written by another program, so cosyncing is observing it only';
+
+/** Post-turn window in which trailing transcript writes are still attributed to OUR just-finished turn
+ *  rather than flagged foreign (issue 15a). The child flushes its final assistant rows within
+ *  milliseconds of the stdout result; the echo tail polls every 1 s, so one poll interval of grace
+ *  covers the lag without giving a real foreign writer meaningful room. */
+export const CLAUDE_TURN_END_GRACE_MS = 2_000;
+/** Bound on the never-echoed submitted-prompt FIFO (exoneration list). Real depth is ≤2 (one in
+ *  flight, one queued); the cap only bounds a pathological no-echo run. */
+export const CLAUDE_SUBMITTED_TEXTS_LIMIT = 32;
 /**
  * A Claude session STORE: a `CLAUDE_CONFIG_DIR` and the launch binary that targets it. The official
  * account lives in `~/.claude`; each wrapper (`~/bin/claude-mi`, `claude-minimax`, …) redirects
@@ -246,7 +292,7 @@ function defaultStore(): ClaudeStore | undefined {
 }
 
 /** Claude's transcript-dir slug for a cwd: every non-alphanumeric char → '-' (verified against real
- *  project dirs, e.g. `/home/u/Proj/a_b` → `-home-u-Proj-a-b`). Lets createSession predict where Claude
+ *  project dirs, e.g. `/srv/Proj/a_b` → `-srv-Proj-a-b`). Lets createSession predict where Claude
  *  will write a new session's `<uuid>.jsonl` so the row's id/path are stable before the first turn. */
 function slugForCwd(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
@@ -267,9 +313,9 @@ function slugForCwd(cwd: string): string {
  * blocked EVERY live local subscription session (verified: this host's own running terminal session
  * carries a `bridgeSessionId` yet is plainly drivable), while third-party wrapper stores — which have no
  * such pid-files — stayed drivable. A locally-launched `kind:"interactive" entrypoint:"cli"` session is a
- * normal terminal session we CAN drive (and `--fork-session` resume is single-owner safe regardless), so
- * it is NOT treated as remote-controlled; only a bridged session that is NOT a local interactive CLI
- * launch is.
+ * normal terminal session we CAN drive (a mid-turn one is refused at takeover; a later write demotes
+ * the drive — issue 15a), so it is NOT treated as remote-controlled; only a bridged session that is
+ * NOT a local interactive CLI launch is.
  *
  * Join key is the `sessionId` field, never the pid (pids recycle; one sessionId can appear in several pid
  * files — any bridged file for it marks the session). Liveness-guarded on Linux (`/proc/<pid>`) so a
@@ -322,13 +368,14 @@ function pidAlive(pid: unknown): boolean {
 
 /** Live local terminal owner for a Claude transcript uuid, from `<configDir>/sessions/*.json`.
  *  This is broader than {@link bridgedUuids}: any alive pid-file naming the uuid means another
- *  terminal process may have in-memory ownership, so app Drive must fork instead of mutating in place. */
+ *  terminal process may have in-memory ownership — a takeover against one that is MID-TURN is refused,
+ *  and a later write from one demotes the drive (issue 15a). */
 export function liveTerminalOwner(store: ClaudeStore, uuid: string, opts?: { fresh?: boolean }): number | null {
   return liveOwnerMap(store, opts?.fresh === true).get(uuid) ?? null;
 }
 
-// One sessions-dir scan per store per few seconds — claudeControl now asks per ROSTER ROW (willFork,
-// issues-part2), and an uncached scan would be O(rows × pid-files) reads per poll.
+// One sessions-dir scan per store per few seconds — claudeControl asks per ROSTER ROW (the terminal-
+// attached warning, issues-part2), and an uncached scan would be O(rows × pid-files) reads per poll.
 const _ownerMapCache = new Map<string, { at: number; map: Map<string, number> }>();
 const OWNER_MAP_TTL_MS = 4000;
 
@@ -719,8 +766,9 @@ export function syncCommand(store: ClaudeStore, uuid: string): string {
 /**
  * Build the explicit control state for one Claude session.
  *  - Observe+Drive is REAL: Drive = a broker-owned `claude -p --resume` (lazy on first prompt).
- *    `observing` when the terminal still owns it; `driving` when we own the resume fork; `unavailable`
- *    on a remote-control collision or a vanished workspace (resume is cwd-scoped).
+ *    `observing` when the terminal still owns it; `driving` when we own the resume child; `unavailable`
+ *    on a remote-control collision, a vanished workspace (resume is cwd-scoped), or a proven foreign
+ *    writer (issue 15a demotion).
  *  - True-Sync via the claude/channel bridge plugin: `active:true` when a live bridge socket exists for
  *    this session (terminal + app share one live owner); otherwise `supported:true` with the exact
  *    `--channels` setup command. A remote-controlled session can be NEITHER driven NOR synced.
@@ -763,15 +811,15 @@ export function claudeControl(opts: {
   } else if (cwd && !existsSync(cwd)) {
     drive = { state: 'unavailable', supported: false, reason: 'Workspace no longer exists — cannot resume.' };
   } else {
-    // A live TUI owner means the first driven prompt forks (single-owner safety) — surface that BEFORE
-    // the user drives, not after the fork already happened (issues-part2 divergence trap).
+    // A live TUI owner no longer forks the drive (issue 15a — demote, never fork): takeover attaches
+    // in place, and a terminal write demotes the connection back to observe. Keep a pre-drive warning
+    // (the replaced willFork signal) so the user is told BEFORE driving, not after the demote.
     const owned = liveTerminalOwner(store, uuid) !== null;
     drive = {
       state: 'observing',
       supported: true,
-      ...(owned ? { willFork: true } : {}),
       reason: owned
-        ? 'A terminal is attached to this session right now. Driving will continue in a FORK (new uuid) so two owners never write the same transcript — quit the terminal first to drive the same session in place.'
+        ? 'A terminal is attached to this session right now — if it writes, cosyncing will stop driving and revert to observe. Quit the terminal first to drive without interruption.'
         : store.isDefault
           ? 'Driving resumes this session via claude -p --resume on your Claude subscription (no API cost).'
           : `Driving runs ${store.model ?? 'this wrapper'} on its own endpoint.`,
@@ -797,8 +845,8 @@ export function claudeControl(opts: {
       // Claude has no live terminal sync (channel sync archived), but a terminal CAN rejoin this
       // conversation by resuming it. Provide that command GENERICALLY (label + command) so the app's
       // "sync your terminal" tip needs no `tool === 'claude'` branch — it just renders `command`. The
-      // uuid here is the base session id; the live connection refreshes it to the fork uuid on the
-      // single-owner-safety fork (issues-part2), so the tip always targets the conversation the app drives.
+      // uuid here is the base session id; the live connection refreshes it if the process ever reports
+      // a rotated id (defensive liveUuid path, issue 15a), so the tip always targets the live conversation.
       label: 'Resume in terminal',
       command: claudeResumeTerminalCommand(uuid, cwd),
       // Packaged v1 deliberately exposes no hook setup or live-sync promise. The source-only hooks
@@ -814,14 +862,14 @@ export function claudeControl(opts: {
 }
 
 /**
- * Argv for a resume launch. Exported so tests can assert cost safety (`--bare` is forbidden) and the
- * live-owner guard: unowned sessions resume in place; terminal-owned sessions fork.
+ * Argv for a resume launch. Exported so tests can assert cost safety (`--bare` is forbidden). Sessions
+ * always resume IN PLACE (issue 15a — demote, never fork): `--fork-session` is never emitted, so the
+ * driven turns stay on the SAME uuid the terminal and the roster see.
  */
-export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; effort?: string; isDefault: boolean; fresh?: boolean; fork?: boolean }): string[] {
+export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; effort?: string; isDefault: boolean; fresh?: boolean }): string[] {
   // A brand-new (broker-created) session has no transcript yet: START it with `--session-id <uuid>`
-  // (Claude creates the conversation under that exact id), NOT `--resume` (which needs an existing one)
-  // and without `--fork-session` (nothing to fork). An existing session resumes and forks (single-owner
-  // safe). Verified on a free wrapper: `--session-id <new-uuid>` creates the transcript, `--resume` then
+  // (Claude creates the conversation under that exact id), NOT `--resume` (which needs an existing one).
+  // Verified on a free wrapper: `--session-id <new-uuid>` creates the transcript, `--resume` then
   // drives it.
   // --permission-prompt-tool stdio: WITHOUT it, headless -p never asks — a gated tool is silently
   // auto-denied ("This command requires approval" tool error) and the app shows NO permission popup
@@ -830,7 +878,7 @@ export function resumeArgs(uuid: string, opts: { model?: string; mode?: string; 
   // until our control_response). The existing control_request handler was dead code until this flag.
   const args = opts.fresh
     ? ['-p', '--session-id', uuid, '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio']
-    : ['-p', '--resume', uuid, ...(opts.fork ? ['--fork-session'] : []), '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio'];
+    : ['-p', '--resume', uuid, '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose', '--permission-prompt-tool', 'stdio'];
   // Model: the default store sends an alias (opus/sonnet/haiku); a wrapper sends one of its OWN discovered
   // backend models (claude-mi pro vs non-pro), so pass --model for BOTH so a wrapper can switch among them.
   if (opts.model) args.push('--model', opts.model);
@@ -1118,6 +1166,11 @@ export class ClaudeAdapter implements AgentBackend {
    *  creation cannot silently fall back to Claude's defaults. In-memory is sufficient: the virtual
    *  row itself only lives until a broker restart. FIFO-bounded below. */
   private readonly pendingCreates = new Map<string, { cwd: string; model?: PromptInput['model'] }>();
+  /** Roster-visible drive ownership, mirroring kimi's `ownedSessions` (issue 15b): a resume attach
+   *  registers its roster row id here and the connection deregisters on close/demote, so EVERY
+   *  client's roster row reports `driving` — not only the client holding the connection. In-memory
+   *  is sufficient: a broker restart drops every live connection with it. */
+  private readonly drivenSessions = new Map<string, ClaudeResumeConnection>();
 
   async isAvailable(): Promise<boolean> {
     return claudeStores().some((s) => existsSync(s.projectsRoot)) || resolveBin('claude') !== null;
@@ -1203,8 +1256,9 @@ export class ClaudeAdapter implements AgentBackend {
     }
     const eligible = eligibleForChannels(store, cwd);
     const now = Date.now();
+    const rowId = enc(path);
     return {
-      id: enc(path),
+      id: rowId,
       tool: this.id,
       title: opts.title?.trim() || basename(cwd) || 'Claude session',
       cwd,
@@ -1214,6 +1268,7 @@ export class ClaudeAdapter implements AgentBackend {
             currentModel: {
               providerID: opts.model.providerID,
               modelID: opts.model.modelID,
+              ...labelOf(opts.model.modelID),
               ...(opts.model.reasoningEffort ? { reasoningEffort: opts.model.reasoningEffort } : {}),
             },
           }
@@ -1224,7 +1279,7 @@ export class ClaudeAdapter implements AgentBackend {
       attachMode: 'observe',
       createdAt: now,
       updatedAt: now,
-      control: claudeControl({ store, uuid, cwd, bridged: false, driving: false, channelsEligible: eligible }),
+      control: claudeControl({ store, uuid, cwd, bridged: false, driving: this.drivenSessions.has(rowId), channelsEligible: eligible }),
     };
   }
 
@@ -1372,8 +1427,9 @@ export class ClaudeAdapter implements AgentBackend {
           // `agents --json` row is idle even if its final durable record was a tool_use.
           const conversationTs = lastConversationTs(full) ?? st.mtimeMs;
           const status = await claudeSessionStatus(full, raw, now);
+          const rowId = enc(full); // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
           out.push({
-            id: enc(full), // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
+            id: rowId,
             lineageId: firstUserUuid,
             tool: this.id,
             ...(nativeId ? { nativeId } : {}),
@@ -1381,6 +1437,13 @@ export class ClaudeAdapter implements AgentBackend {
             cwd,
             // Label by the producing model so wrapper sessions read e.g. 'MiniMax-M3' (Issue D).
             model: store.isDefault ? model : store.model,
+            // The roster reads `currentModel.label`, never the raw id: a row discovered but not
+            // attached is the common case, so the authored label has to ride the discovery row too
+            // (P2 — `claude-fable-5` showed no model because only attach built a currentModel).
+            currentModel: (() => {
+              const id = store.isDefault ? model : store.model;
+              return id ? { providerID: store.isDefault ? 'anthropic' : 'wrapper', modelID: String(id), ...labelOf(String(id)) } : undefined;
+            })(),
             status,
             // Drivable now: resume is available, but observe is the SAFE default shown in the roster
             // (opening never spends quota); the UI's "Drive" affordance reattaches with ?mode=resume.
@@ -1389,7 +1452,9 @@ export class ClaudeAdapter implements AgentBackend {
             control: (() => {
               const eligible = eligibleFor(cwd); // first-party (incl. project-settings) check, cwd-cached
               // channel sync archived → a live socket no longer flips terminalSync.active (syncedSet dormant).
-              return claudeControl({ store, uuid, cwd, bridged: bridged.has(uuid), channelsEligible: eligible });
+              // driving comes from the ADAPTER's registry (issue 15b) so every client's roster row shows
+              // the drive, not just the client holding the resume connection.
+              return claudeControl({ store, uuid, cwd, bridged: bridged.has(uuid), driving: this.drivenSessions.has(rowId), channelsEligible: eligible });
             })(),
             updatedAt: conversationTs,
           });
@@ -1447,6 +1512,7 @@ export class ClaudeAdapter implements AgentBackend {
               ? pending.model.providerID
               : store.isDefault ? 'anthropic' : 'wrapper',
             modelID: String(liveModel),
+            ...labelOf(String(liveModel)),
             ...(pending?.model?.modelID === liveModel && pending.model.reasoningEffort
               ? { reasoningEffort: pending.model.reasoningEffort }
               : {}),
@@ -1458,7 +1524,32 @@ export class ClaudeAdapter implements AgentBackend {
       // remote-controlled/cwd-gone session is unavailable for Drive. Channel sync is archived.
       control: claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
     };
-    if (mode === 'resume') return new ClaudeResumeConnection(store, path, info);
+    if (mode === 'resume') {
+      // Single-writer rule (issue 15a — demote, never fork): a live terminal owner MID-TURN makes the
+      // takeover a guaranteed two-writer collision, so refuse it instead of forking. An idle terminal
+      // is joined in place, and a later terminal write is caught by the connection's foreign-write
+      // demotion. A session this adapter already drives re-attaches without re-checking — the owner
+      // map can see our own warm child, and the hub joins the existing connection anyway.
+      if (!this.drivenSessions.has(sessionId) && liveTerminalOwner(store, uuid, { fresh: true }) !== null) {
+        const liveRow = (await liveStatusByStore(store)).get(uuid);
+        const status = existsSync(path)
+          ? await claudeSessionStatus(path, liveRow?.status, Date.now())
+          : liveRow?.status;
+        if (status === 'working' || status === 'needs-input') {
+          throw new OwnershipConflictError(CLAUDE_TERMINAL_BUSY_REFUSAL, CLAUDE_TERMINAL_BUSY_CONFLICT);
+        }
+      }
+      // Identity-aware registration: the hub's replaceForTakeover attaches the replacement BEFORE
+      // closing the stale (demoted) incumbent, so an unconditional delete on close would deregister
+      // the replacement that just took over. Only the registered owner may remove the entry.
+      const conn = new ClaudeResumeConnection(store, path, info, () => {
+        if (this.drivenSessions.get(sessionId) === conn) {
+          this.drivenSessions.delete(sessionId);
+        }
+      });
+      this.drivenSessions.set(sessionId, conn);
+      return conn;
+    }
     // Observe: surface WHY a session is blocked (its `<bin> agents --json` waiting reason) so the app
     // can render the real on-disk question, or an honest read-only notice, instead of a silent transcript. (Issue G.)
     const liveRow = (await liveStatusByStore(store)).get(uuid);
@@ -2127,6 +2218,31 @@ const CURATED_CLAUDE_CATALOG: CatalogEntry[] = [
   { alias: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku', efforts: EFFORTS_NONE },
   { alias: 'fable', fullId: 'claude-fable-5', label: 'Fable', efforts: EFFORTS_FULL_ULTRA, defaultEffort: 'high' },
 ];
+/** Roster display label for a resolved model id, authored HERE because the adapter is the only party
+ *  that knows Claude's tiers: the client's family table has no `fable` entry, so `claude-fable-5` showed
+ *  no model at all while Opus/Sonnet/Haiku rendered. Family = a curated alias as a whole `-` segment (or
+ *  the bare alias); version = the id's numeric segments minus 8-digit date stamps, as `major[.minor]`
+ *  ('claude-opus-4-8-20260701' -> 'Opus 4.8', 'claude-3-7-sonnet-20250219' -> 'Sonnet 3.7', 'opus' ->
+ *  'Opus'). An unknown family (wrapper model, future tier) returns undefined — no label is the honest
+ *  answer, and the client's own fallback still renders the raw id. */
+export function claudeModelLabel(modelID: string): string | undefined {
+  const segs = String(modelID ?? '').toLowerCase().split('-').filter(Boolean);
+  const entry = CURATED_CLAUDE_CATALOG.find((c) => segs.includes(c.alias));
+  if (!entry) return undefined;
+  const version = segs
+    .filter((x) => /^\d+$/.test(x) && x.length !== 8) // an 8-digit segment is a release date stamp, not a version
+    .slice(0, 2)
+    .join('.');
+  return version ? `${entry.label} ${version}` : entry.label;
+}
+
+/** Spread-form of {@link claudeModelLabel}: an unlabellable model contributes NO key, so the roster
+ *  never carries an invented label. */
+function labelOf(modelID: string | undefined): { label?: string } {
+  const label = modelID ? claudeModelLabel(modelID) : undefined;
+  return label ? { label } : {};
+}
+
 export const CLAUDE_MAX_MODEL_OPTIONS = 64;
 export const CLAUDE_MAX_GATING_ENTRIES = 256;
 
@@ -2270,11 +2386,12 @@ function collectMdCommands(base: string, dir: string, out: Map<string, SlashComm
 
 /**
  * Drives a session via a long-lived
- *   <bin> -p --resume <uuid> --fork-session --output-format stream-json --input-format stream-json
+ *   <bin> -p --resume <uuid> --output-format stream-json --input-format stream-json
  *         --include-partial-messages --verbose [--model X] [--permission-mode M]
  * process. History = the existing transcript replay (reuse {@link mapTranscript}); live turns are the
- * process's stream-json stdout, mapped with the SAME verified mappers ({@link mapLine}). `--fork-session`
- * keeps the original session/terminal untouched (single-owner safety). The process launches LAZILY on
+ * process's stream-json stdout, mapped with the SAME verified mappers ({@link mapLine}). The resume is
+ * always IN PLACE (issue 15a — demote, never fork): a terminal that writes mid-drive is proven by the
+ * echo tail and ends the drive instead of forking it. The process launches LAZILY on
  * the FIRST sendPrompt — never on attach — so opening even a paid official session spends nothing until
  * you actually drive it. Model/permission-mode are launch args, so changing them relaunches. `bin` is
  * the wrapper path for wrapper sessions, so the right provider/model + CLAUDE_CONFIG_DIR are used.
@@ -2294,7 +2411,7 @@ export class ClaudeResumeConnection implements SessionConnection {
   private readonly callMeta = new Map<string, ClaudeCall>();
   private readonly seenTokenIds = new Set<string>();
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
-   *  watcher re-points to the forked uuid's activity dir once the live process reports its session id. */
+   *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
   private readonly resolvedToolUseIds = new Set<string>();
   private readonly backgroundToolUseIds = new Set<string>();
@@ -2338,22 +2455,61 @@ export class ClaudeResumeConnection implements SessionConnection {
   private readonly connNonce = ++resumeConnSeq; // process-unique per connection → live-turn keys never collide across a reconnect rebuild (liveTurnSeq resets to 0 on a fresh connection)
   private readonly blockAccum = new Map<number, string>(); // index → accumulated streamed text (this message)
   private readonly blockKind = new Map<number, 'text' | 'thinking'>(); // index → block kind
-  /** USER-ECHO TAIL (item-12 follow-up). Drive stdout emits NO user events at all (probed 2.1.207) —
-   *  neither for a direct prompt nor for a mid-turn message the CLI queued and later delivered. The
-   *  app therefore draws its own optimistic bubble on send, but a QUEUED send's dimmed bubble could
-   *  never clear: the delivery proof exists only as a user line in the transcript. This narrow tail
-   *  polls the live transcript and emits ONLY user-message frames from appended lines (everything
-   *  else — tool results, assistant turns — already arrives via stdout and must not double). */
+  /** USER-ECHO TAIL + FOREIGN-WRITE DETECTION (item-12 follow-up; issue 15a). Drive stdout emits NO
+   *  user events at all (probed 2.1.207) — neither for a direct prompt nor for a mid-turn message the
+   *  CLI queued and later delivered. The app therefore draws its own optimistic bubble on send, but a
+   *  QUEUED send's dimmed bubble could never clear: the delivery proof exists only as a user line in
+   *  the transcript. This narrow tail polls the live transcript and emits ONLY user-message frames from
+   *  appended lines (everything else — tool results, assistant turns — already arrives via stdout and
+   *  must not double).
+   *
+   *  Issue 15a gives the same tail a second job: takeover now resumes IN PLACE on a transcript a
+   *  terminal may also write, and Claude's JSONL is a parent-linked tree — two writers produce sibling
+   *  branches off a common parent, so a foreign write is structurally provable. An appended
+   *  conversation row is FOREIGN when it is not accounted for by this connection:
+   *   - a user-message row whose text matches a submitted send (FIFO) is our own echo — exonerated;
+   *   - an assistant row appended while our child is running, or inside the post-turn grace window, is
+   *     our own turn's output — exonerated;
+   *   - anything else proves a second writer → demote to observe (kill the child, keep watching).
+   *  Non-conversation rows (summary, file-history-snapshot, tool-result-only user rows, meta/sidecar
+   *  lines mapUser suppresses) never convict: they are bookkeeping, not a writer's turn. */
   private echoTailPath?: string;
   private echoTailOffset = 0;
   private echoTailBuf = '';
   private echoTailTimer?: ReturnType<typeof setInterval>;
   private readonly echoDecoder = new TextDecoder(); // NOT this.decoder — that one holds stdout stream state
+  /** Set once a foreign write is PROVEN on the shared transcript (issue 15a): the connection stays
+   *  open and observing, kills its child, and refuses every further write — demote, never fork. */
+  private demoted = false;
+  /** FIFO of prompt texts this connection submitted whose transcript echo has not been seen yet — the
+   *  exoneration list for foreign-write detection. Our own sends echo back as transcript user rows on
+   *  the same tail that watches for foreign writers, so they must be accounted for, not flagged.
+   *  Bounded: a never-echoed send would otherwise accumulate (cap is generous; real depth is ≤2). */
+  private readonly submittedTexts: string[] = [];
+  /** Live-tail queued-send state (P1b): the delivered user line must claim the SAME key the queued row
+   *  was emitted under, exactly as the history pass does — otherwise the queued styling can never clear
+   *  and a later history refetch re-keys the row into an orphan. */
+  private readonly queuedSends = newClaudeQueuedSends();
+  /** Driven prompts this connection accepted whose transcript user line has not arrived yet (P1a). The
+   *  CLI records a cosyncing-DRIVEN send as a CONTENT-LESS enqueue/dequeue pair (measured: 123 such
+   *  enqueues across this machine's corpus), so the transcript carries no queued bubble and, between
+   *  send and delivery, the user's words live only in the client's memory — a page reload lost them.
+   *  getHistory() replays these rows, so the pending prompt has an owner that survives a reload.
+   *  Bounded like submittedTexts. */
+  private readonly pendingDriven: { key: string; text: string; sentAt: number; queued: boolean; sentAtPath: string; sentAtOffset: number }[] = [];
+  private drivenSendSeq = 0; // with connNonce, namespaces app keys apart from transcript `queued:<ts>:<len>` keys
+  /** Wall clock of the last turn end OUR child produced (result or exit). The child's final transcript
+   *  writes can land a moment after its stdout result, so assistant rows inside this grace window are
+   *  attributed to our own turn's tail rather than flagged foreign. */
+  private lastTurnEndedAt = 0;
 
   constructor(
     private readonly store: ClaudeStore,
     private readonly path: string,
     readonly info: SessionInfo,
+    /** Deregisters this session from the adapter's drive registry (issue 15b) on close AND on demote —
+     *  either way this connection no longer owns the drive, and the roster must stop saying so. */
+    private readonly onClosed?: () => void,
   ) {
     this.uuid = basename(path).replace(/\.jsonl$/, '');
     this.liveUuid = this.uuid;
@@ -2362,7 +2518,7 @@ export class ClaudeResumeConnection implements SessionConnection {
   subscribe(handler: AgentMessageHandler): Unsubscribe {
     this.handlers.add(handler);
     // Surface existing subagents/workflows even before the first prompt (a zero-prompt Drive attach
-    // still shows what's on disk). The watcher re-points to the fork dir once the process reports it.
+    // still shows what's on disk). The watcher re-points if the process ever reports a rotated id.
     if (!this.activity) {
       this.activity = new ClaudeActivityWatcher(
         claudeActivityDir(this.path),
@@ -2380,9 +2536,11 @@ export class ClaudeResumeConnection implements SessionConnection {
     return () => this.handlers.delete(handler);
   }
 
-  /** Poll the live transcript for appended lines and emit ONLY their user-message frames (the drive
-   *  child's delivery echo — see the field doc above). Self-repoints when a fork moves the live file;
-   *  a path change re-baselines to the file's current size so copied history never re-emits. */
+  /** Poll the live transcript for appended lines: emit ONLY their user-message frames (the drive
+   *  child's delivery echo — see the field doc above) and detect foreign writes (issue 15a).
+   *  Self-repoints when the live process reports a rotated session id; a path change re-baselines to
+   *  the file's current size so copied history never re-emits — and pre-existing rows can never be
+   *  mistaken for a foreign write, since only lines appended AFTER the baseline are examined. */
   private drainUserEcho(): void {
     const p = this.liveTranscriptPath();
     if (p !== this.echoTailPath) {
@@ -2406,11 +2564,133 @@ export class ClaudeResumeConnection implements SessionConnection {
       const raw = this.echoTailBuf.slice(0, nl);
       this.echoTailBuf = this.echoTailBuf.slice(nl + 1);
       const ln = parseLineOrNull(raw);
-      if (!ln || ln.type !== 'user') continue;
-      for (const m of mapUser(ln, this.callMeta)) {
-        if (m.type === 'user-message') this.emit(m);
+      if (!ln) continue;
+      if (ln.type === 'user') {
+        // P1b: pass the queued-send state, exactly as the history pass (mapTranscript) does. Without it
+        // the delivered line was keyed by its own uuid, so the queued bubble could never clear on the
+        // live tail and a later history refetch re-keyed the same row into an orphan.
+        const frames = mapUser(ln, this.callMeta, this.queuedSends);
+        // Exoneration BEFORE emission: a user-message row this connection did not submit is a second
+        // writer's prompt (the terminal's, or another driver's) — proven foreign, demote at once. Rows
+        // mapUser suppresses (tool results, meta, command sidecars) carry no verdict either way. A
+        // DEMOTED connection skips the verdict and keeps emitting: it is a pure observer now, and the
+        // foreign writer's prompts are exactly what the user still wants to see.
+        if (!this.demoted) {
+          for (const m of frames) {
+            if (m.type === 'user-message' && !this.exonerateSubmitted(m.text)) {
+              this.demoteToObserve();
+              // Fall through and still emit: this row is the foreign writer's prompt, and the
+              // demoted observer must show it.
+              break;
+            }
+          }
+        }
+        for (const m of frames) {
+          if (m.type !== 'user-message') continue;
+          this.retirePendingDriven(m);
+          this.emit(m);
+        }
+      } else if (ln.type === 'queue-operation') {
+        // The CLI's queue sidecar on the live tail, through the SAME mapper the replay uses: a
+        // terminal-typed enqueue registers (and shows) its queued bubble, and a `remove` retires the
+        // link it names (see retireRemovedSend) so a DROPPED driven prompt cannot lend its key to the
+        // next identical prompt — before this the tail ignored the op and the stale link stole the
+        // later delivery. The dropped prompt's own row (pendingDriven) is untouched: it stays
+        // honestly queued.
+        for (const m of mapLine(ln, this.callMeta, this.seenTokenIds, this.queuedSends)) this.emit(m);
+      } else if (!this.demoted && ln.type === 'assistant' && !this.running && Date.now() - this.lastTurnEndedAt > CLAUDE_TURN_END_GRACE_MS) {
+        // An assistant row from nobody's live turn: our child is not running and the grace window for
+        // its final writes has closed — a second writer is mid-turn on the shared transcript.
+        this.demoteToObserve();
+        return;
       }
     }
+  }
+
+  /** Retire the pending row a delivered echo just claimed (P1a). mapUser never sets `queued`, so a
+   *  keyed row without the flag IS the delivery. A prompt the CLI dropped instead (content-less
+   *  `remove`, no user line ever) is never retired: its row stays queued in getHistory(), which is the
+   *  honest state — typed, never delivered — and matches how a transcript enqueue behaves on a drop. */
+  private retirePendingDriven(m: AgentMessage): void {
+    if (m.type !== 'user-message' || m.queued) return;
+    const i = this.pendingDriven.findIndex((p) => p.key === m.key);
+    if (i >= 0) this.pendingDriven.splice(i, 1);
+  }
+
+  /** The still-undelivered driven prompts as canonical rows (same shape sendPrompt emitted live). */
+  private pendingDrivenRows(): AgentMessage[] {
+    // Every row still here is UNDELIVERED at the time of the read — dropped, or not yet echoed — so it
+    // replays queued whatever the session was doing when it was sent. The live emit keeps the send-time
+    // flag (an idle send is not "queued" to the person who typed it); a replay that showed the same
+    // undelivered row without the badge would read as a message the agent received.
+    return this.pendingDriven.map((p) => ({
+      type: 'user-message' as const,
+      text: p.text,
+      key: p.key,
+      queued: true,
+      sentAt: p.sentAt,
+    }));
+  }
+
+  /** Account one appended user-message row against the FIFO of prompts this connection sent. Exact
+   *  text match, oldest first — the transcript preserves the text we wrote, so equality is sufficient
+   *  and a foreign row that happens to repeat our text is at worst one missed detection, never a
+   *  false demotion of an innocent session. */
+  private exonerateSubmitted(text: string): boolean {
+    // The string-content branch of mapUser carries the text UNtrimmed while the array branch trims —
+    // normalize on this side so both echo shapes match the trimmed submission.
+    const i = this.submittedTexts.indexOf(text.trim());
+    if (i === -1) return false;
+    this.submittedTexts.splice(i, 1);
+    return true;
+  }
+
+  /**
+   * Stop driving, in place, and say why (issue 15a — demote, never fork; mirrors kimi's demotion).
+   *
+   * The connection stays OPEN and keeps observing: the user still wants to see the session, and
+   * closing it would look like a crash. It sends NOTHING more — no abort prompt, no farewell — because
+   * a write to a session that already has two writers is the exact hazard this is avoiding.
+   */
+  private demoteToObserve(): void {
+    if (this.demoted) return;
+    this.demoted = true;
+    this.submittedTexts.length = 0;
+    // The pending driven rows and their links are KEPT. Every one of them was already written to the
+    // child's stdin, and killing the child proves nothing about input it had buffered: if the line lands
+    // late the observer's tail must still hand it the app key, and if it never lands the user's words
+    // must survive a reload as an honestly queued row — the same shape as a prompt the CLI dropped.
+    // Kill the drive child NOW: it shares the transcript file with the foreign writer, and every turn
+    // it completes interleaves the two branches further. The user echo tail keeps running — watching
+    // is the whole point of staying open.
+    this.killProc();
+    if (this.running) {
+      this.running = false;
+      this.emit({ type: 'status', status: 'idle' });
+    }
+    // Leave the adapter's drive registry so every client's roster row flips back to observing (15b).
+    this.onClosed?.();
+    this.info.attachMode = 'observe';
+    this.info.control = {
+      drive: {
+        // `unavailable` + `supported: false`: this generation is finished — re-driving it would fork
+        // the transcript the foreign writer already touched. Re-takeover stays legitimate as a FRESH
+        // user confirmation opening a fresh connection (absent takeoverMode = the default 'resume').
+        supported: false,
+        state: 'unavailable',
+        reason: CLAUDE_FOREIGN_WRITER_REASON,
+        takeoverAvailable: true,
+      },
+      // Unchanged: demotion is a statement about the DRIVE half only.
+      terminalSync: this.info.control?.terminalSync
+        ?? { supported: false, syncAvailable: false, active: false, reason: CLAUDE_FOREIGN_WRITER_REASON },
+    };
+    this.emit({
+      type: 'metadata-update',
+      key: 'sessionInfo',
+      value: { attachMode: this.info.attachMode, control: this.info.control },
+    });
+    this.emit({ type: 'error', message: CLAUDE_DIVERGENCE_MESSAGE });
   }
   private emit(m: AgentMessage): void {
     for (const h of this.handlers) {
@@ -2423,14 +2703,14 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async getHistory(): Promise<AgentMessage[]> {
-    // The conversation so far is the active transcript. Unowned Drive resumes in place; if live-owner
-    // safety forced a fork, follow the learned fork uuid because it contains the copied history plus
-    // driven turns.
+    // The conversation so far is the active transcript. Drive resumes in place; if the live process
+    // ever reported a rotated session id (defensive liveUuid path — issue 15a), follow it because
+    // that file contains the driven turns.
     const historyPath = this.liveTranscriptPath();
     try {
       const buf = readFileBuffer(historyPath);
       const nl = buf.lastIndexOf(0x0a);
-      const lines = splitLines(buf.subarray(0, nl >= 0 ? nl + 1 : 0).toString('utf8')).map(parseLineOrNull);
+      const lines = parseLinesWithOffsets(buf.subarray(0, nl >= 0 ? nl + 1 : 0));
       for (const ln of lines) {
         if (!ln) continue;
         accumulateCallMeta(ln, this.callMeta);
@@ -2440,14 +2720,53 @@ export class ClaudeResumeConnection implements SessionConnection {
       // turns; an open trailing turn stays running. Live driven turns use stream start/result markers.
       this.runtime = new ClaudeRuntimeTracker(this.liveUuid, 'claude-transcript');
       this.taskLedger = new ClaudeTaskLedger();
-      const mapped = mapTranscript(lines, this.runtime, this.taskLedger);
+      // Replay against the LIVE correlation state, not a blank one (P1a/P1b). `byUuid` is shared by
+      // reference, so a line the replay keys is keyed identically when the 1 s tail reaches it.
+      // `pending` is a seeded COPY of the DRIVEN links only: a transcript user line that delivered a
+      // driven prompt before the tail saw it takes over the app key HERE, instead of being re-keyed by
+      // uuid beside the still-pending row — two identities for one prompt until the next full resync.
+      // A seeded link is claimable only by a line appended after its send — by byte offset in the file
+      // the send was recorded against, else by send time — so an older identical prompt cannot claim
+      // it; a link with no send record cannot be fenced and is not seeded. Terminal-typed links are
+      // NOT seeded: their enqueue line is in the file, so the replay rebuilds each one exactly where it
+      // was enqueued and only later lines can see it (a seeded copy had no such boundary, and an old
+      // identical line took it). A transcript `remove` never retires a seeded entry: the tail already
+      // applied that op to the live state.
+      const live = this.queuedSends;
+      const replay: ClaudeQueuedSends = {
+        pending: live.pending.flatMap((p): ClaudeQueuedSendEntry[] => {
+          if (!p.driven) return [];
+          const driven = this.pendingDriven.find((d) => d.key === p.key);
+          if (!driven) return [];
+          return [{ ...p, seeded: true as const, notBefore: driven.sentAt, ...(driven.sentAtPath === historyPath ? { notBeforeOffset: driven.sentAtOffset } : {}) }];
+        }),
+        byUuid: live.byUuid,
+      };
+      const mapped = mapTranscript(lines, this.runtime, this.taskLedger, newClaudeBlockOrdinals(), replay);
+      // Whatever the replay keyed from a seeded entry is DELIVERED: drop its live link and its row.
+      const delivered = new Set(live.byUuid.values());
+      for (let i = live.pending.length - 1; i >= 0; i--) if (delivered.has(live.pending[i]!.key)) live.pending.splice(i, 1);
+      for (let i = this.pendingDriven.length - 1; i >= 0; i--) if (delivered.has(this.pendingDriven[i]!.key)) this.pendingDriven.splice(i, 1);
+      // A TERMINAL-typed enqueue still pending at the end of the replay is waiting on the live tail,
+      // which may have attached after its enqueue line. Seed it ahead of the driven rows (it is older)
+      // so its delivering user line takes over its key; it cannot take a driven prompt's delivery
+      // (takeQueuedSendKey prefers the driven entry on equal text). Keyed dedupe keeps a resync from
+      // registering it twice.
+      const known = new Set(live.pending.map((p) => p.key));
+      const leftovers = replay.pending
+        .filter((p) => !p.seeded && !known.has(p.key) && !delivered.has(p.key))
+        .map(({ text, key }) => ({ text, key }));
+      if (leftovers.length) live.pending.splice(0, 0, ...leftovers);
       return [
         ...mapped,
         ...this.runtime.flush(),
         ...buildActivitySnapshot(claudeActivityDir(historyPath), this.resolvedToolUseIds, Date.now(), this.parentActivity()).map((f) => f.msg),
+        // Driven prompts still awaiting their transcript line: the CLI's content-less enqueue leaves no
+        // other trace, so without these rows a reload loses the user's words entirely (P1a).
+        ...this.pendingDrivenRows(),
       ];
     } catch {
-      return [];
+      return this.pendingDrivenRows(); // an unreadable transcript must not swallow an accepted prompt
     }
   }
 
@@ -2464,6 +2783,19 @@ export class ClaudeResumeConnection implements SessionConnection {
   }
 
   async sendPrompt(input: PromptInput): Promise<void> {
+    return this.submitTurn(input, false);
+  }
+
+  /** `fromCommand` = a runCommand-originated slash send. Such a send gets NO pending driven row: the CLI
+   *  echoes it as a `<command-name>` wrapper that mapUser rewrites into its own uuid-keyed row, so a
+   *  pending row minted here could never be claimed and would sit queued forever. */
+  private async submitTurn(input: PromptInput, fromCommand: boolean): Promise<void> {
+    // A demoted connection writes NOTHING (issue 15a): the session has a proven foreign writer, and any
+    // further prompt from us is the two-writer hazard the demotion exists to prevent.
+    if (this.demoted) {
+      this.emit({ type: 'error', message: CLAUDE_DEMOTED_REFUSAL });
+      return;
+    }
     let text = String(input.text ?? '');
     // Resume is cwd-scoped: if the recorded workspace is gone, `claude --resume` can't find the session
     // (it would fail cryptically with "No conversation found"). Surface a clear reason instead of a
@@ -2483,7 +2815,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       text = text.trim() ? `${text}\n\n${note}` : note;
     }
     // Build the turn content FIRST and bail on an empty turn BEFORE touching the process — a no-op prompt
-    // must never kill/re-fork the warm child (Native image blocks use the Anthropic base64 block shape).
+    // must never kill/relaunch the warm child (Native image blocks use the Anthropic base64 block shape).
     const content: any[] = [];
     if (text.trim()) content.push({ type: 'text', text });
     for (const img of input.images ?? []) {
@@ -2509,6 +2841,13 @@ export class ClaudeResumeConnection implements SessionConnection {
         explicitEffort ?? this.info.currentModel?.reasoningEffort,
       );
     }
+    // P1c: a failed (re)launch leaves NO child — killProc() already nulled `proc` and spawn threw. Refuse
+    // the send BEFORE any state mutation: writeLine's `this.proc?.stdin` is a SILENT no-op without one, so
+    // proceeding published a running turn and dropped the prompt. Throwing makes the broker answer the send
+    // with an error instead of an ack. Gate on the child itself, not relaunch's verdict — a relaunch we did
+    // not run this turn (warm child) is just as valid a reason to proceed.
+    if (!this.proc) throw new Error('Claude could not be launched, so the prompt was not sent.');
+    const wasRunning = this.running; // BEFORE the flip: a send during a live turn is the queued case
     this.running = true;
     this.emit({ type: 'status', status: 'running' });
     // Live driven turn starts now (stream events carry no native ts → broker wall clock). A turn = this user
@@ -2516,7 +2855,38 @@ export class ClaudeResumeConnection implements SessionConnection {
     if (this.runtime) this.emit(this.runtime.startLive(`live${this.connNonce}.${++this.liveTurnSeq}`, Date.now()));
     // The child rewrites this send as a transcript user line with no id we control, so the echo
     // stays unstamped (clientMessageId unused); the client's narrow legacy reconcile converges it.
+    // Record the exact text FIRST so the echo tail's foreign-write detection exonerates our own echo
+    // (mapUser renders the echo as the joined, trimmed block texts — the same string).
+    this.submittedTexts.push(text.trim());
+    while (this.submittedTexts.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) this.submittedTexts.shift();
+    if (!fromCommand) this.registerPendingDriven(text.trim(), wasRunning);
     this.writeLine({ type: 'user', message: { role: 'user', content } });
+  }
+
+  /** Give an accepted driven prompt a canonical, replayable row (P1a). The key is app-minted — the
+   *  `queued:app:` namespace cannot collide with a transcript-derived `queued:<ts>:<len>` key — and is
+   *  registered in `queuedSends.pending` so the delivering user line takes it over on the echo tail
+   *  (P1b) and the queued styling clears in place. `text` is the TRIMMED send: mapUser renders the echo
+   *  as the joined trimmed block text, and the client's legacy reconcile matches exact text. */
+  private registerPendingDriven(text: string, queued: boolean): void {
+    const key = `queued:app:${this.connNonce}.${++this.drivenSendSeq}`;
+    const sentAt = Date.now();
+    // The replay's ordering fence: the line that delivers THIS prompt is appended after the file's
+    // current end (the child has not read it from stdin yet). Recorded with its path — a rotated
+    // transcript rewrites the copied lines, and their offsets with them — so a replay of another file
+    // falls back to the send time.
+    const sentAtPath = this.liveTranscriptPath();
+    const sentAtOffset = statSafe(sentAtPath)?.size ?? 0;
+    this.queuedSends.pending.push({ text, key, driven: true });
+    this.pendingDriven.push({ key, text, sentAt, queued, sentAtPath, sentAtOffset });
+    while (this.pendingDriven.length > CLAUDE_SUBMITTED_TEXTS_LIMIT) {
+      // Bounded TOGETHER with its correlation link: a link whose row is gone could only lend its key to
+      // a later repeat of the same words.
+      const gone = this.pendingDriven.shift()!;
+      const i = this.queuedSends.pending.findIndex((p) => p.key === gone.key);
+      if (i >= 0) this.queuedSends.pending.splice(i, 1);
+    }
+    this.emit({ type: 'user-message', text, key, ...(queued ? { queued: true } : {}), sentAt });
   }
 
   /** Deliver a standalone uploaded file to the driven session (no accompanying text). */
@@ -2555,7 +2925,10 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
   }
 
-  private relaunch(model?: string, mode?: string, effort?: string): void {
+  /** (Re)launch the drive child. Returns TRUE only when a child was actually installed: killProc() nulls
+   *  `proc` first, so a spawn throw leaves the connection with no process at all and the caller must not
+   *  treat the turn as started (P1c). */
+  private relaunch(model?: string, mode?: string, effort?: string): boolean {
     this.killProc();
     this.stdoutBuf = ''; // drop any partial fragment from the prior child so it can't bleed into the new stream
     this.blockAccum.clear();
@@ -2564,10 +2937,9 @@ export class ClaudeResumeConnection implements SessionConnection {
     // rather than --resume; once that first turn materializes the file, later (re)launches resume normally.
     const targetUuid = this.liveUuid;
     const targetPath = this.liveTranscriptPath();
-    // `fresh: true` bypasses the owner-map TTL — "quit the TUI, then press send" must resume in place
-    // immediately, not fork off a stale 4s-old owner snapshot.
-    const fork = targetUuid === this.uuid && liveTerminalOwner(this.store, this.uuid, { fresh: true }) !== null;
-    const args = resumeArgs(targetUuid, { model, mode, effort, isDefault: this.store.isDefault, fresh: !existsSync(targetPath), fork });
+    // Issue 15a: always resume IN PLACE — no fork decision. A mid-turn terminal owner is refused at
+    // attach; a later terminal write demotes this connection instead of forking it.
+    const args = resumeArgs(targetUuid, { model, mode, effort, isDefault: this.store.isDefault, fresh: !existsSync(targetPath) });
     let proc: ChildProcessWithoutNullStreams;
     try {
       proc = spawn(this.store.bin, args, {
@@ -2582,7 +2954,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       });
     } catch (e) {
       this.emit({ type: 'error', message: 'Claude launch failed: ' + String(e) });
-      return;
+      return false;
     }
     this.proc = proc;
     this.launchModel = model;
@@ -2610,10 +2982,14 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.pendingPermCard = undefined;
       this.pendingPermInput = undefined;
       if (this.running) {
+        // A dying child's trailing transcript writes are its own — give them the same post-turn grace
+        // the result path does so they can't be flagged foreign (issue 15a).
+        this.lastTurnEndedAt = Date.now();
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
       }
     });
+    return true;
   }
 
   private writeLine(obj: unknown): void {
@@ -2702,6 +3078,11 @@ export class ClaudeResumeConnection implements SessionConnection {
         }
         this.pendingQuestionControlId = undefined;
         this.pendingQuestionControlInput = undefined;
+        // Drain the transcript tail NOW, while the turn still counts as running: the child's final rows
+        // already on disk are attributed to this turn, and the grace stamp covers any that land in the
+        // next milliseconds — neither can be misread as a foreign write by the next poll (issue 15a).
+        this.drainUserEcho();
+        this.lastTurnEndedAt = Date.now();
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
         return;
@@ -2887,6 +3268,7 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
         modelID: o.model,
+        ...labelOf(o.model),
         ...(initEffort ? { reasoningEffort: initEffort } : {}),
       };
       this.emit({
@@ -2899,22 +3281,23 @@ export class ClaudeResumeConnection implements SessionConnection {
       });
     }
     if (typeof o.permissionMode === 'string' && o.permissionMode) this.info.currentMode = o.permissionMode;
-    // `--fork-session` runs under a NEW uuid; its live subagents/workflows hang off that uuid's dir.
-    // Re-point the activity watcher there once the process reports its (forked) session id.
+    // DEFENSIVE id rotation (issue 15a): we never pass `--fork-session`, but the live process can still
+    // report a session id different from ours (Claude rotates ids for its own reasons). Cope, don't
+    // cause: follow the reported id for history/activity, and keep every hint pointing at it.
     const sid = typeof o.session_id === 'string' ? o.session_id : typeof o.sessionId === 'string' ? o.sessionId : undefined;
     if (sid && sid !== this.liveUuid) {
       this.liveUuid = sid;
       if (sid !== this.uuid) {
-        // A silent fork was the issues-part2 divergence trap: the TUI kept the ORIGINAL uuid, our
+        // A silent id change was the issues-part2 divergence trap: the TUI kept the ORIGINAL uuid, our
         // Sync-TUI notice cited the original too, and Claude's /resume picker hides sdk-created
         // sessions — so the driven turns looked simply lost. Say it loudly and hand the app the
-        // CURRENT uuid (`liveUuid`) so every "resume in terminal" hint targets the fork.
+        // CURRENT uuid (`liveUuid`) so every "resume in terminal" hint targets the live conversation.
         this.emit({
           type: 'notice',
-          message: `Your terminal still owns the original session, so driving continues in a fork. This conversation now lives at uuid ${sid} — to follow it in a terminal, quit the old TUI and run: ${claudeResumeTerminalCommand(sid, this.info.cwd)}`,
+          message: `Claude moved this conversation to a new session id (${sid}) — to follow it in a terminal, run: ${claudeResumeTerminalCommand(sid, this.info.cwd)}`,
         });
         (this.info as { liveUuid?: string }).liveUuid = sid; // direct too — the hub merge only covers hub-managed paths
-        // Keep the generic terminalSync command pointing at the fork uuid so the app's resume tip is
+        // Keep the generic terminalSync command pointing at the live uuid so the app's resume tip is
         // correct without a tool-name branch (the hub Object.assign-merges the control we send here).
         if (this.info.control?.terminalSync) this.info.control.terminalSync.command = claudeResumeTerminalCommand(sid, this.info.cwd);
         this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { liveUuid: sid, ...(this.info.control ? { control: this.info.control } : {}) } });
@@ -3066,7 +3449,13 @@ export class ClaudeResumeConnection implements SessionConnection {
       return { notice: 'Interrupted the current turn.' };
     }
     // Any other slash command → send it as a turn-starting user message (Claude handles it in-stream).
-    await this.sendPrompt({ text: `/${name}${args ? ' ' + args : ''}` });
+    await this.submitTurn({ text: `/${name}${args ? ' ' + args : ''}` }, true);
+  }
+
+  private clearQueuedSendState(): void {
+    this.pendingDriven.length = 0;
+    this.queuedSends.pending.length = 0;
+    this.queuedSends.byUuid.clear();
   }
 
   private killProc(): void {
@@ -3093,6 +3482,11 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.echoTailTimer = undefined;
     }
     this.echoTailBuf = '';
+    this.submittedTexts.length = 0;
+    this.clearQueuedSendState();
+    // Leave the adapter's drive registry (idempotent — a demotion already deregistered) so the roster
+    // stops reporting this session as driven once its owner connection is gone (issue 15b).
+    this.onClosed?.();
     this.activity?.close();
     this.activity = undefined;
     this.handlers.clear();
@@ -3205,7 +3599,57 @@ function claimBlockOrdinals(state: ClaudeBlockOrdinals | undefined, messageId: s
  *  can't steal its key. `byUuid` makes re-mapping the same user line idempotent (stdout + tail can both
  *  deliver it). Keys derive from the enqueue line itself (`queued:<ts>:<len>`) so the history pass and
  *  the live tail — separate state objects — agree on them. */
-export type ClaudeQueuedSends = { pending: { text: string; key: string }[]; byUuid: Map<string, string> };
+/** One text→key link awaiting its delivering user line. `seeded` and `notBefore` exist only on the REPLAY
+ *  copy ClaudeResumeConnection.getHistory() makes of the live state: a seeded entry is never retired by a
+ *  transcript `remove` (the live tail already applied that op to the live state), and is matched only by a
+ *  user line stamped at or after the send it stands for, so an older identical line cannot claim it. */
+/** One pending link from a queued prompt's row key to the transcript user line that will deliver it.
+ *  `driven`: minted by THIS connection's sendPrompt (`queued:app:` key; the CLI records no content for
+ *  its queue ops). `seeded`: a replay-only copy of a live entry (never retired, fenced by `notBefore`). */
+export type ClaudeQueuedSendEntry = { text: string; key: string; driven?: true; seeded?: true; notBefore?: number; notBeforeOffset?: number };
+
+/** Byte offset of a parsed transcript line within its file, stamped by parseLinesWithOffsets (history
+ *  replay only). The replay's ordering fence: a line that delivers a driven prompt was appended AFTER the
+ *  file's size at send time, whatever its clock says. */
+const CLAUDE_LINE_OFFSET: unique symbol = Symbol('claudeLineOffset');
+function lineOffsetOf(ln: any): number | undefined {
+  const v = ln?.[CLAUDE_LINE_OFFSET];
+  return typeof v === 'number' ? v : undefined;
+}
+
+/** Parse a JSONL buffer into position-tolerant slots (null for a blank or malformed line), stamping each
+ *  parsed line with its byte offset under CLAUDE_LINE_OFFSET. Same slots as splitLines+parseLineOrNull. */
+function parseLinesWithOffsets(buf: Buffer): any[] {
+  const out: any[] = [];
+  let start = 0;
+  while (start < buf.length) {
+    let end = buf.indexOf(0x0a, start);
+    if (end < 0) end = buf.length;
+    const ln = parseLineOrNull(buf.subarray(start, end).toString('utf8'));
+    if (ln && typeof ln === 'object') Object.defineProperty(ln, CLAUDE_LINE_OFFSET, { value: start, enumerable: false });
+    out.push(ln);
+    start = end + 1;
+  }
+  return out;
+}
+
+/** Register a terminal-typed enqueue's link, bounded: past CLAUDE_SUBMITTED_TEXTS_LIMIT unresolved
+ *  terminal links the oldest is dropped (its bubble stays queued; a link that old could only lend its
+ *  key to a later repeat of the same words). Driven links are bounded with their rows in
+ *  registerPendingDriven, so the whole table is at most twice the limit. */
+function pushTerminalLink(state: ClaudeQueuedSends, text: string, key: string): void {
+  state.pending.push({ text, key });
+  let terminal = 0;
+  for (const p of state.pending) if (!p.driven) terminal++;
+  for (let i = 0; terminal > CLAUDE_SUBMITTED_TEXTS_LIMIT && i < state.pending.length; ) {
+    if (state.pending[i]!.driven) i++;
+    else {
+      state.pending.splice(i, 1);
+      terminal--;
+    }
+  }
+}
+export type ClaudeQueuedSends = { pending: ClaudeQueuedSendEntry[]; byUuid: Map<string, string> };
 export function newClaudeQueuedSends(): ClaudeQueuedSends {
   return { pending: [], byUuid: new Map() };
 }
@@ -3224,23 +3668,73 @@ function queuedSendKey(ln: any): string {
 export function feedQueuedSends(state: ClaudeQueuedSends, ln: any): void {
   if (!ln || typeof ln !== 'object') return;
   if (ln.type === 'queue-operation') {
-    if (isRenderableEnqueue(ln)) state.pending.push({ text: String(ln.content).trim(), key: queuedSendKey(ln) });
-    else if (ln.operation === 'remove') state.pending.shift(); // dropped without delivery — retire FIFO
+    if (isRenderableEnqueue(ln)) pushTerminalLink(state, String(ln.content).trim(), queuedSendKey(ln));
+    else if (ln.operation === 'remove') retireRemovedSend(state, ln); // dropped without delivery
     return;
   }
   if (ln.type === 'user' && state.pending.length) {
     const c = ln.message?.content;
     const text = (typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b: any) => b?.type === 'text').map((b: any) => String(b.text ?? '')).join('\n') : '').trim();
-    if (text) takeQueuedSendKey(state, String(ln.uuid ?? ''), text);
+    if (text) takeQueuedSendKey(state, String(ln.uuid ?? ''), text, timestampToMs(ln.timestamp), lineOffsetOf(ln));
   }
 }
 
-/** The delivered user line claims its pending enqueue's key (exact-text FIFO match); idempotent per
- *  line uuid. Returns undefined when this user line was never queued. */
-function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, text: string): string | undefined {
+/** Apply a `queue-operation: remove` to the pending links. WHICH entry the CLI dropped is read from the
+ *  line, never guessed FIFO — the queue mixes this connection's driven prompts with terminal-typed
+ *  enqueues, and a wrong guess unlinks a prompt that is still going to be delivered (its echo then
+ *  lands on a uuid key beside the row that stays queued forever). Local corpus, 1,716 removes,
+ *  CLI 2.1.107–2.1.238:
+ *  - `content` present: every terminal remove since 2.1.203 carries the retracted text verbatim, and
+ *    706/706 matched a pending enqueue exactly. Retire the transcript entry with that text — never a
+ *    driven one, for which the CLI writes no content (probed 2.1.207). No match (the enqueue was
+ *    harness noise we never registered) retires nothing.
+ *  - no `content`, a driven entry pending: the CLI dropped a driven prompt at turn end — oldest first.
+ *  - no `content`, none driven: a CLI ≤ 2.1.202 retracting a terminal message without recording the
+ *    text. 659 of those 1,010 are followed by a re-enqueue (an edit), so the retracted one is the
+ *    NEWEST; oldest-first was wrong nine times in ten.
+ *  A seeded (replay) copy is never retired: the live tail already applied the op to the live state. */
+function retireRemovedSend(state: ClaudeQueuedSends, ln: any): void {
+  const content = typeof ln?.content === 'string' ? ln.content.trim() : '';
+  const pending = state.pending;
+  let i: number;
+  if (content) i = pending.findIndex((p) => !p.seeded && !p.driven && p.text === content);
+  else {
+    i = pending.findIndex((p) => !p.seeded && p.driven);
+    if (i < 0) i = pending.findLastIndex((p) => !p.seeded && !p.driven);
+  }
+  if (i >= 0) pending.splice(i, 1);
+}
+
+/** The delivered user line claims its pending enqueue's key by exact text — a DRIVEN entry first, then
+ *  the oldest transcript entry. While this connection drives, a line repeating a prompt it sent is its
+ *  own delivery far more often than a second writer's identical words (exoneration already reads it
+ *  that way), and a terminal enqueue the replay seeded ahead of the driven rows must not take the
+ *  app's delivery. Idempotent per line uuid. Returns undefined when this user line was never queued. */
+function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, text: string, lineMs?: number, lineOffset?: number): string | undefined {
   if (!state) return undefined;
-  if (uuid && state.byUuid.has(uuid)) return state.byUuid.get(uuid);
-  const i = state.pending.findIndex((p) => p.text === text.trim());
+  if (uuid && state.byUuid.has(uuid)) {
+    const key = state.byUuid.get(uuid)!;
+    // Idempotent re-key. A link under that key is stale — the replay already resolved this line before
+    // the tail reached the enqueue and re-registered it — and would otherwise wait to lend the key to a
+    // later repeat of the same words.
+    const stale = state.pending.findIndex((p) => p.key === key && !p.seeded);
+    if (stale >= 0) state.pending.splice(stale, 1);
+    return key;
+  }
+  const trimmed = text.trim();
+  // A seeded (replay) entry is claimable only by a line APPENDED after its send: by byte offset when the
+  // replay reads the file the send was recorded against (exact, clock-free), else by timestamp with NO
+  // slack — same host, same clock, and every queued delivery in the local corpus is stamped after its
+  // enqueue (2,233/2,233, min +2 ms). An unpositioned, undated line cannot prove it is new and falls
+  // through to the uuid key. A terminal link carries no fence: the replay rebuilds it AT its enqueue
+  // line, so only later lines ever see it.
+  const claimable = (p: ClaudeQueuedSendEntry): boolean =>
+    p.text === trimmed
+    && (p.notBeforeOffset !== undefined
+      ? lineOffset !== undefined && lineOffset >= p.notBeforeOffset
+      : p.notBefore === undefined || (lineMs !== undefined && lineMs >= p.notBefore));
+  let i = state.pending.findIndex((p) => p.driven && claimable(p));
+  if (i < 0) i = state.pending.findIndex(claimable);
   if (i < 0) return undefined;
   const key = state.pending.splice(i, 1)[0]!.key;
   if (uuid) state.byUuid.set(uuid, key);
@@ -3273,11 +3767,11 @@ export function mapLine(ln: any, callMeta: Map<string, ClaudeCall>, seenTokenIds
       // dimmed bubble — honest "typed but never delivered".
       if (isRenderableEnqueue(ln)) {
         const key = queuedSendKey(ln);
-        if (queuedSends) queuedSends.pending.push({ text: String(ln.content).trim(), key });
+        if (queuedSends) pushTerminalLink(queuedSends, String(ln.content).trim(), key);
         const sentAt = timestampToMs(ln.timestamp);
         return [{ type: 'user-message', text: String(ln.content), key, queued: true, ...(sentAt !== undefined ? { sentAt } : {}) }];
       }
-      if (ln.operation === 'remove' && queuedSends) queuedSends.pending.shift();
+      if (ln.operation === 'remove' && queuedSends) retireRemovedSend(queuedSends, ln);
       return [];
     }
     default:
@@ -3578,7 +4072,7 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
     }
     // A delivered mid-run queued message claims its enqueue bubble's key → the app clears the
     // queued styling in place instead of drawing a duplicate (item-12 follow-up).
-    return [{ type: 'user-message', text: content, key: takeQueuedSendKey(queuedSends, uuid, content) ?? uuid, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) }];
+    return [{ type: 'user-message', text: content, key: takeQueuedSendKey(queuedSends, uuid, content, sentAt, lineOffsetOf(ln)) ?? uuid, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) }];
   }
   if (!Array.isArray(content)) return [];
 
@@ -3586,6 +4080,10 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
   let imageCount = 0;
   let sawToolResult = false;
   const texts: string[] = [];
+  /** Artifacts from THIS line's top-level image blocks — stamped with the owning user row's key below
+   *  (P6) so the client renders a pasted image inside the user bubble, not as a detached deliverable.
+   *  Same object references as in `out`, so stamping them stamps what is emitted. */
+  const sentImages: Extract<AgentMessage, { type: 'file-artifact' }>[] = [];
   content.forEach((b: any, i: number) => {
     if (b?.type === 'tool_result') {
       const cid = String(b.tool_use_id ?? '');
@@ -3613,7 +4111,10 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
     } else if (b?.type === 'image') {
       imageCount++; // keep the user-message chip count
       const art = inlineImageArtifact(b, uuid, i); // ALSO render the pasted/returned image
-      if (art) out.push(art);
+      if (art) {
+        out.push(art);
+        if (art.type === 'file-artifact') sentImages.push(art);
+      }
     } else if (b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
       texts.push(b.text);
     }
@@ -3636,7 +4137,13 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
         },
       });
     }
-    else out.push({ type: 'user-message', text, imageCount: imageCount || undefined, key: takeQueuedSendKey(queuedSends, uuid, text) ?? `${uuid}:u`, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) });
+    else {
+      // ONE key for the row and everything sent with it — takeQueuedSendKey MUTATES, so it must not be
+      // called twice. An image-only prompt still gets this (empty-text) row, so the link has a target.
+      const key = takeQueuedSendKey(queuedSends, uuid, text, sentAt, lineOffsetOf(ln)) ?? `${uuid}:u`;
+      for (const art of sentImages) art.userMessageKey = key; // P6: ownership link, not a dedupe key
+      out.push({ type: 'user-message', text, imageCount: imageCount || undefined, key, turnId: uuid, ...(sentAt !== undefined ? { sentAt } : {}) });
+    }
   }
   return out;
 }
@@ -4183,11 +4690,13 @@ export class ClaudeRuntimeTracker {
   }
 }
 
-export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, tasks: ClaudeTaskLedger = new ClaudeTaskLedger(), blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals()): AgentMessage[] {
+/** `queuedSends` (optional, MUTATED) links enqueue bubbles to their delivering user lines. A caller that
+ *  also drives a LIVE tail passes its own state seeded with the tail's `byUuid` map, so a line already
+ *  delivered under an app-minted key replays under that same key instead of being re-keyed by uuid. */
+export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, tasks: ClaudeTaskLedger = new ClaudeTaskLedger(), blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals(), queuedSends: ClaudeQueuedSends = newClaudeQueuedSends()): AgentMessage[] {
   const callMeta = new Map<string, ClaudeCall>();
   for (const ln of lines) if (ln) accumulateCallMeta(ln, callMeta);
   const seenTokenIds = new Set<string>();
-  const queuedSends = newClaudeQueuedSends(); // link enqueue bubbles to their delivering user lines
   const out: AgentMessage[] = [];
   for (const ln of lines) {
     if (!ln) continue;
@@ -4630,7 +5139,8 @@ export class ClaudeActivityWatcher {
     this.sweep();
   }
 
-  /** Re-point at a new activity dir — a resume `--fork-session` writes live activity under the FORKED uuid. */
+  /** Re-point at a new activity dir — the live process can report a rotated session id whose activity
+   *  hangs off the NEW uuid's directory (defensive liveUuid path, issue 15a). */
   repoint(dir: string): void {
     if (dir === this.dir) return;
     this.stopWatchers();

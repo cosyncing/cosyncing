@@ -321,13 +321,12 @@ try {
   // Write-class actions are derived from HOOK PRESENCE (`runtime.ts`), so this
   // asserts which hooks the adapter actually defines. Rename exists; fork,
   // clone and transcript export do not, because their upstream methods are on
-  // the deferred list the path builder refuses. Create-time model selection
-  // stays absent for a different reason: `session.models` is per-session and
-  // `session.create` takes no model, so there is no pre-session catalog to
-  // offer — the picker appears once the session exists.
-  check('the served dsh row offers native rename and NO other write-class action',
+  // the deferred list the path builder refuses. Create-time model selection is
+  // offered: `listModels` reads the host-wide `llm.models` catalog and
+  // `createSession` applies the choice via `session.selectModel` after create.
+  check('the served dsh row offers native rename and create-time model selection, and NO other write-class action',
     canonicalRow?.canRenameNative === true
-      && canonicalRow?.canSelectModelAtCreation === false
+      && canonicalRow?.canSelectModelAtCreation === true
       && canonicalRow?.canFork === false
       && canonicalRow?.canClone === false
       && canonicalRow?.canTranscriptExport === false,

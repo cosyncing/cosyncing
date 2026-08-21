@@ -1125,6 +1125,30 @@ extension UserAgentMessage on AgentMessage {
       type == AgentMessageType.userMessage && raw['queued'] == true;
 }
 
+/// Typed accessors for a `file-artifact`'s ownership link to a user message.
+extension FileArtifactAgentMessage on AgentMessage {
+  /// The `key` of the user-message this artifact was SENT WITH, or `null`.
+  ///
+  /// Present only on a user attachment — an image or file the user put on a
+  /// prompt — never on something the agent produced. This is an ownership
+  /// link, not identity: dedupe still keys on `artifactKey`/`path`.
+  String? get fileArtifactUserMessageKey {
+    if (type != AgentMessageType.fileArtifact) return null;
+    final value = raw['userMessageKey'];
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  /// Whether this artifact was sent by the user rather than produced by the
+  /// agent.
+  ///
+  /// Presentation reads this on its own so a linked artifact whose owning row
+  /// is outside the retained window still renders user-side instead of as an
+  /// agent deliverable.
+  bool get isUserAttachment => fileArtifactUserMessageKey != null;
+}
+
 /// Broker-side truncation of a message body, for bounded history replay.
 extension TruncatedBodyAgentMessage on AgentMessage {
   /// Whether the broker shortened this message's body to fit a bounded replay.
