@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.4.1 — 2026-08-21
+
 ### Added
 
 - Kimi sessions support file and image attachments: images go inline as
