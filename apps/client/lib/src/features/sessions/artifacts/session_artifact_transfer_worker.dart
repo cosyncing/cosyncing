@@ -1435,20 +1435,28 @@ class SessionArtifactTransferWorker {
     final client = brokerClient;
     final source = Uri.tryParse(descriptor.downloadSourceUrl ?? '');
     final broker = client == null ? null : Uri.tryParse(client.baseUrl);
+    Uri? resolvedSource;
+    if (source != null && broker != null) {
+      if (source.hasScheme) {
+        resolvedSource = source;
+      } else if (!source.hasAuthority && source.path.startsWith('/')) {
+        resolvedSource = broker.resolveUri(source);
+      }
+    }
     final artifactKey = descriptor.artifactKey?.trim() ?? '';
     final contentHash = descriptor.contentHash?.trim() ?? '';
     if (source == null ||
         broker == null ||
-        !source.hasScheme ||
-        source.userInfo.isNotEmpty ||
-        !_sameOrigin(source, broker) ||
+        resolvedSource == null ||
+        resolvedSource.userInfo.isNotEmpty ||
+        !_sameOrigin(resolvedSource, broker) ||
         artifactKey.isEmpty ||
         contentHash.isEmpty ||
-        source.queryParameters['expires']?.isNotEmpty != true ||
-        source.queryParameters['sig']?.isNotEmpty != true) {
+        resolvedSource.queryParameters['expires']?.isNotEmpty != true ||
+        resolvedSource.queryParameters['sig']?.isNotEmpty != true) {
       return _artifactReferenceMismatchMessage;
     }
-    final segments = source.pathSegments;
+    final segments = resolvedSource.pathSegments;
     if (segments.length != 6 ||
         segments[0] != 'api' ||
         segments[1] != 'sessions' ||

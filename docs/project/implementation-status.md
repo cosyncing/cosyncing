@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-14.
+Last updated: 2026-08-22.
 
 ## Publication state
 
@@ -32,9 +32,11 @@ contract. Capabilities remain adapter-specific and are reported by the broker
 rather than inferred by the client. Setup, status, doctor, repair, restart, and
 uninstall share the persisted setup language and receipt-owned resource model.
 
-The supported cross-device installation path requires Tailscale on the server
-and clients. Packaged setup retains loopback-only operation for local diagnosis,
-but it is not the documented cross-device path. Tokdash quota tracking remains
+The broker always listens on `127.0.0.1`. Local operation is complete without
+network software; cross-device connectivity is configured and owned separately
+through a proxy, tunnel, VPN, mesh, or other forwarding layer. A one-time pairing
+URL tells a client where to connect without becoming persisted broker state.
+Tokdash quota tracking remains
 optional and consented: setup reuses an existing instance or, when pipx is
 available, can install and configure one without making broker installation
 depend on it. The web app is mounted at `/cosy`; paired clients receive per-device

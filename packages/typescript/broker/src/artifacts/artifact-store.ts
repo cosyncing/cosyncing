@@ -811,16 +811,12 @@ export class ArtifactStore {
     };
   }
 
-  private signedUrl(tool: string, sessionId: string, artifactKey: string, brokerUrl = this.brokerUrl, ttlMs = SIGNATURE_TTL_MS): string {
+  private signedUrl(tool: string, sessionId: string, artifactKey: string, _brokerUrl = this.brokerUrl, ttlMs = SIGNATURE_TTL_MS): string {
     const expires = Date.now() + ttlMs;
     const sig = this.sign(tool, sessionId, artifactKey, expires);
-    const url = new URL(
-      `/api/sessions/${safePart(tool)}/${safePart(sessionId)}/artifact/${safePart(artifactKey)}`,
-      brokerUrl,
-    );
-    url.searchParams.set('expires', String(expires));
-    url.searchParams.set('sig', sig);
-    return url.toString();
+    const path = `/api/sessions/${safePart(tool)}/${safePart(sessionId)}/artifact/${safePart(artifactKey)}`;
+    const query = new URLSearchParams({ expires: String(expires), sig });
+    return `${path}?${query}`;
   }
 
   private sign(tool: string, sessionId: string, artifactKey: string, expires: number): string {

@@ -40,12 +40,12 @@ export interface DurableSchemaSpec {
   root: 'state' | 'cache';
   relativePath: string;
   versionField: 'schemaVersion' | 'version';
-  currentVersion: 1;
+  currentVersion: 1 | 2;
   sensitive: boolean;
 }
 
 export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.freeze([
-  { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
+  { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 2, sensitive: false },
   { id: 'setup', root: 'state', relativePath: 'setup-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'install', root: 'state', relativePath: 'install-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 1, sensitive: true },

@@ -536,12 +536,10 @@ try {
     const lifecyclePort = portLease.port;
     await portLease.release();
     writeFileSync(join(stateHome, 'config.json'), `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       broker: {
-        host: '127.0.0.1',
         port: lifecyclePort,
         machineLabel: 'npm-package-lifecycle',
-        internalUrl: `http://127.0.0.1:${lifecyclePort}`,
       },
       update: { channel: 'stable' },
     }, null, 2)}\n`, { mode: 0o600 });

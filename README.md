@@ -92,9 +92,9 @@ version-checked. See [supported-agent setup](docs/supported_agents/README.md) fo
 
 ## Prerequisites
 
-Supported cross-device use requires [Tailscale](https://tailscale.com/) on the server and client
-devices. The server requires [Bun](https://bun.sh) 1.3.8 or newer to run cosyncing and Node.js/npm
-to install and update it.
+The server requires [Bun](https://bun.sh) 1.3.8 or newer to run cosyncing and Node.js/npm to install
+and update it. The broker is local-only by default. Cross-device use requires a proxy, tunnel, VPN,
+mesh network, or another [operator-owned connectivity method](docs/connectivity/README.md).
 [Tokdash](https://github.com/JingbiaoMei/tokdash) is optional but strongly recommended for quota
 tracking and warnings.
 
@@ -143,7 +143,10 @@ cosy setup
 `cosy update` reports this package-manager-owned update path; it does not run npm or modify the
 global package.
 
-`cosy pair` prints a five-minute, one-use QR code. Scan it from a client to grant that device access;
+`cosy pair --broker-url https://cosy.example.com` includes that client-reachable origin in a
+five-minute, one-use QR code. The URL is not persisted or probed. Omit the flag for an
+authentication-only offer when the client already knows its broker URL. See the
+[connectivity chooser](docs/connectivity/README.md). Scan the QR from a client to grant access;
 `cosy devices list` lists paired devices, and `cosy devices revoke <id>` revokes one.
 
 After setup, `cosy doctor` diagnoses the machine without changing it, and `cosy status` summarizes
@@ -195,15 +198,16 @@ The iOS client will follow later through TestFlight.
 </p>
 
 Native Windows and Intel macOS server hosting are not supported in this release. On Windows, run
-the broker inside WSL, where it is a supported Linux host; install Tailscale inside WSL too, since
-Windows-host Tailscale cannot proxy WSL loopback.
+the broker inside WSL, where it is a supported Linux host. Connectivity software that forwards
+broker loopback must run where it can reach the WSL broker; see the method-specific guides.
 
 ## Privacy and security
 
 The broker runs on your machine, under your account. Broker state is stored there; session content
 is sent only to authenticated clients over the network you choose. cosyncing operates no hosted
 service in that connection path and includes no analytics or advertising telemetry. Optional
-features contact only the services they name, such as Tailscale Serve and local Tokdash quota data.
+features contact only the services they name, such as local Tokdash quota data. cosyncing does not
+configure or contact connectivity providers; any proxy, tunnel, VPN, or mesh is operator-owned.
 The npm-installed broker does not silently replace itself: npm owns package updates, and `cosy setup`
 reconciles the installed service after an update.
 

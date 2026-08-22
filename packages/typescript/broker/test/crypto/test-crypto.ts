@@ -97,6 +97,20 @@ await test('QR pairing payload carries direct and relay transport bootstraps', (
     publicKey: keyPair.publicKey,
     pairingId: 'pairing-published-v2',
   });
+  const brokerUrl = createQrPairingPayload({
+    version: 3,
+    brokerId: 'desktop-1',
+    transport: { kind: 'broker-url', url: 'https://cosy.example.com' },
+    publicKey: keyPair.publicKey,
+    pairingId: 'pairing-published-v3',
+  });
+  const urlFree = createQrPairingPayload({
+    version: 3,
+    brokerId: 'desktop-1',
+    transport: { kind: 'broker-url' },
+    publicKey: keyPair.publicKey,
+    pairingId: 'pairing-url-free-v3',
+  });
 
   assert.equal(parseQrPairingPayload(direct).transport.kind, 'tailscale-direct');
   assert.equal(parseQrPairingPayload(legacy).version, 1);
@@ -108,6 +122,11 @@ await test('QR pairing payload carries direct and relay transport bootstraps', (
   assert.equal((parsedWithId as any).pairingId, 'pairing-published-v2');
   assert.equal(parsedRelay.publicKey, keyPair.publicKey);
   assert.equal((parseQrPairingPayload(legacy) as any).pairingId, undefined);
+  assert.deepEqual(parseQrPairingPayload(brokerUrl).transport, {
+    kind: 'broker-url',
+    url: 'https://cosy.example.com',
+  });
+  assert.deepEqual(parseQrPairingPayload(urlFree).transport, { kind: 'broker-url' });
 });
 
 if (failed) {

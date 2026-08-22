@@ -91,21 +91,34 @@ Uint8List base64UrlDecodeNoPadding(String value) {
 @immutable
 class PairingTransport {
   /// Creates a transport descriptor.
-  const PairingTransport({required this.kind, required this.url, this.mailbox});
+  const PairingTransport({required this.kind, this.url, this.mailbox});
 
   /// Parses broker JSON.
-  factory PairingTransport.fromJson(Map<String, Object?> json) {
+  factory PairingTransport.fromJson(
+    Map<String, Object?> json, {
+    required int payloadVersion,
+  }) {
     final kind = json['kind'] as String?;
     final rawUrl = json['url'] as String?;
     if (kind == null || kind.isEmpty) {
       throw const PairingCryptoException('pairing transport kind is required');
     }
-    if (rawUrl == null || rawUrl.isEmpty) {
-      throw const PairingCryptoException('pairing transport URL is required');
-    }
-    final url = Uri.tryParse(rawUrl);
-    if (url == null || !url.hasScheme || url.host.isEmpty) {
+    final url = rawUrl == null || rawUrl.isEmpty ? null : Uri.tryParse(rawUrl);
+    if (rawUrl != null &&
+        rawUrl.isNotEmpty &&
+        (url == null || !url.hasScheme || url.host.isEmpty)) {
       throw const PairingCryptoException('pairing transport URL is invalid');
+    }
+    if (payloadVersion == 3) {
+      if (kind != 'broker-url') {
+        throw const PairingCryptoException(
+          'version 3 pairing transport must be broker-url',
+        );
+      }
+      return PairingTransport(kind: kind, url: url);
+    }
+    if (url == null) {
+      throw const PairingCryptoException('pairing transport URL is required');
     }
     if (kind == 'relay') {
       final mailbox = json['mailbox'] as String?;
@@ -124,7 +137,7 @@ class PairingTransport {
   final String kind;
 
   /// Transport base URL.
-  final Uri url;
+  final Uri? url;
 
   /// Relay mailbox id, when kind is `relay`.
   final String? mailbox;
@@ -166,7 +179,7 @@ class QrPairingPayload {
     final publicKey = json['publicKey'] as String?;
     final transport = json['transport'];
     final pairingId = json['pairingId'] as String?;
-    if (version is! int || (version != 1 && version != 2)) {
+    if (version is! int || (version != 1 && version != 2 && version != 3)) {
       throw const PairingCryptoException('unsupported pairing payload version');
     }
     if (brokerId == null || brokerId.isEmpty) {
@@ -184,7 +197,8 @@ class QrPairingPayload {
         'pairing payload transport is required',
       );
     }
-    if (version == 2 && (pairingId == null || pairingId.isEmpty)) {
+    if ((version == 2 || version == 3) &&
+        (pairingId == null || pairingId.isEmpty)) {
       throw const PairingCryptoException(
         'pairing payload pairingId is required',
       );
@@ -193,7 +207,7 @@ class QrPairingPayload {
       version: version,
       brokerId: brokerId,
       publicKey: publicKey,
-      transport: PairingTransport.fromJson(transport),
+      transport: PairingTransport.fromJson(transport, payloadVersion: version),
       pairingId: pairingId,
     );
   }
@@ -210,12 +224,14 @@ class QrPairingPayload {
   /// Transport descriptor.
   final PairingTransport transport;
 
-  /// One-time pairing id for v2 payloads.
+  /// One-time pairing id for v2 and v3 payloads.
   final String? pairingId;
 
   /// Whether this payload can be accepted without the legacy token path.
   bool get canAccept =>
-      version == 2 && pairingId != null && pairingId!.isNotEmpty;
+      (version == 2 || version == 3) &&
+      pairingId != null &&
+      pairingId!.isNotEmpty;
 }
 
 /// Ed25519 identity keypair exported as DER base64url.

@@ -107,6 +107,11 @@ import {
   type SetupState,
 } from './setup-state.ts';
 import {
+  hasLegacyConnectivityIntent,
+  LEGACY_TAILSCALE_RESOURCE_ID,
+  LEGACY_TAILSCALE_SETUP_FIELD,
+} from './legacy-connectivity-migration.ts';
+import {
   executeSetupTransaction,
   readSetupFailureDiagnostic,
   readSetupTransactionJournal,
@@ -117,20 +122,6 @@ import {
   type SetupPlanAction,
   type SetupTransactionPlan,
 } from './setup-transaction.ts';
-import {
-  createTailscaleServeSetupAction,
-  inspectTailscaleServe,
-  tailscaleRouteReceiptTarget,
-  TAILSCALE_SERVE_OWNERSHIP_MARKER,
-  TAILSCALE_SERVE_RESOURCE_ID,
-  TailscaleServeProvider,
-  resolveTailscaleAddresses,
-  verifyAdvertisedBrokerEndpoint,
-  type AdvertisedBrokerEndpointVerificationOptions,
-  type TailscaleServeInspection,
-  type TailscaleServeProviderOptions,
-  type TailscaleServeRouteProvider,
-} from './tailscale-serve.ts';
 
 /**
  * How the broker runs after setup. Exactly one durable option is offered per host — `systemd` on linux,
@@ -151,7 +142,6 @@ export interface SetupChoices {
   language: SetupLanguage;
   service: SetupServiceChoice;
   enableLingering: boolean;
-  tailscaleServe: boolean;
   quotaWarnings: boolean;
   installAgentSkill: boolean;
   installOpencodeShim: boolean;
@@ -249,8 +239,6 @@ export interface SetupInspection {
   systemdDefinitionPath?: string;
   systemdEnvironmentPath?: string;
   systemdPersistenceTarget?: string;
-  tailscaleAvailable: boolean;
-  tailscale: TailscaleServeInspection;
   /**
    * Whether THIS build can actually serve the browser client. The Flutter bundle ships beside a packaged
    * executable and is routinely absent from the npm tarball, so the outro reads this rather than assuming
@@ -294,9 +282,9 @@ export interface SetupPresenter {
   intro(inspection: Readonly<SetupInspection>): Promise<void> | void;
   showBlockers(issues: readonly SetupBlockingIssue[]): Promise<void> | void;
   /**
-   * Non-prompting resolution of the flag-driven choices (agent skill, opencode shim, Tailscale Serve) for the committed-setup
+   * Non-prompting resolution of flag-driven choices for the committed-setup
    * no-op short-circuit. The non-interactive presenter returns its flag-resolved intent so an EXPLICIT
-   * `--install-opencode-shim`, `--no-install-agent-skill`, or `--enable-tailscale-serve` on an
+   * `--install-opencode-shim` or `--no-install-agent-skill` on an
    * already-committed install is not silently dropped by the early-return. Omitted by the interactive
    * presenter (flags are inert there), so the early-return falls back to the stored choices and never prompts
    * on a genuine no-op re-run.
@@ -304,7 +292,6 @@ export interface SetupPresenter {
   intendedChoices?(inspection: Readonly<SetupInspection>): {
     installAgentSkill: boolean;
     installOpencodeShim: boolean;
-    tailscaleServe: boolean;
   };
   confirmManagedRuntime(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmLegacyPiBridge?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
@@ -312,7 +299,6 @@ export interface SetupPresenter {
   confirmLegacyAgentSkill?(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmOpencodeShim(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   chooseService(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<SetupServiceChoice>>;
-  confirmTailscale(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   confirmQuotaWarnings(inspection: Readonly<SetupInspection>): Promise<SetupPromptResult<boolean>>;
   showPlan(plan: Readonly<SetupPlan>, inspection: Readonly<SetupInspection>): Promise<void> | void;
   confirmApply(plan: Readonly<SetupPlan>): Promise<SetupPromptResult<boolean>>;
@@ -364,6 +350,8 @@ export interface SetupCommandResult {
    * `exitCode`, because quota tracking is optional and its failure is not the setup's failure.
    */
   tokdash?: TokdashProvisionOutcome;
+  /** External routes relinquished by this run. The routes themselves are never inspected or changed. */
+  legacyConnectivityMigration?: { preservedTargets: string[] };
   issueCodes?: string[];
   failure?: SetupFailureReport;
 }
@@ -392,13 +380,7 @@ export interface SetupDependencies {
   acquireLock?: (options: { command: 'setup'; home: string }) => InstallationLockHandle;
   actionCatalogFactory?: typeof createSetupActionCatalog;
   systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
-  tailscaleProviderFactory?: (options: TailscaleServeProviderOptions) => TailscaleServeRouteProvider;
   serviceHealthAttempts?: number;
-  /** Readiness-loop tuning and clock seam; setup always supplies the endpoint and expected broker identity. */
-  advertisedEndpointVerification?: Omit<
-    AdvertisedBrokerEndpointVerificationOptions,
-    'context' | 'advertisedUrl' | 'machineLabel'
-  >;
 }
 
 function hash(value: unknown): string {
@@ -655,8 +637,6 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     systemdDefinitionPath: input.systemdDefinitionPath,
     systemdEnvironmentPath: input.systemdEnvironmentPath,
     systemdPersistenceTarget: input.systemdPersistenceTarget,
-    tailscaleAvailable: input.tailscaleAvailable,
-    tailscale: input.tailscale,
     blockingIssueCodes: input.blockingIssues.map((issue) => issue.code).sort(),
   };
 }
@@ -705,15 +685,12 @@ export async function inspectSetupEnvironment(options: {
     stateRoot: options.home,
     cacheRoot,
   }));
-  const [doctor, tailscale] = await Promise.all([
-    collectDoctorReport({
-      buildInfo: options.buildInfo,
-      context: options.context,
-      assetReport: inspectRuntimeAssets(),
-      stateHome: options.home,
-    }),
-    inspectTailscaleServe({ context: options.context, internalUrl: targetConfig.broker.internalUrl }),
-  ]);
+  const doctor = await collectDoctorReport({
+    buildInfo: options.buildInfo,
+    context: options.context,
+    assetReport: inspectRuntimeAssets(),
+    stateHome: options.home,
+  });
   const agents = agentSummaries(doctor);
   const agentExecutableDirectories = serviceAgentExecutableDirectories(options.context);
   const agentExecutableOverrides = serviceAgentExecutableOverrides(options.context);
@@ -844,13 +821,6 @@ export async function inspectSetupEnvironment(options: {
       systemdEnvironmentPath: systemdProvider.environmentPath,
       systemdPersistenceTarget: systemdProvider.persistenceTarget,
     } : {}),
-    tailscaleAvailable: tailscale.backend === 'running'
-      && tailscale.httpsCapability === 'ready'
-      && tailscale.route !== 'unavailable'
-      && tailscale.route !== 'malformed'
-      && tailscale.route !== 'conflict'
-      && tailscale.route !== 'funnel-conflict',
-    tailscale,
     webAppAvailable: existsSync(join(resolveFlutterWebRoot({
       override: options.context.env.COSYNCING_WEB_DIR,
       packaged: options.buildInfo.packaged,
@@ -889,7 +859,6 @@ function desiredState(options: {
     managedRuntimeAcknowledgedAt: options.acknowledgedAt,
     serviceChoice: options.choices.service,
     systemdLingeringRequested: options.choices.enableLingering,
-    tailscaleServeRequested: options.choices.tailscaleServe,
     agentSkillRequested: options.choices.installAgentSkill,
     opencodeShimRequested: options.choices.installOpencodeShim,
     quotaWarningsEnabled: options.choices.quotaWarnings,
@@ -899,11 +868,11 @@ function desiredState(options: {
 
 function setupStateMatches(actual: SetupState, expected: SetupState): boolean {
   return actual.schemaVersion === 1
+    && !(LEGACY_TAILSCALE_SETUP_FIELD in actual)
     && actual.agents?.codex === expected.agents?.codex
     && actual.managedRuntimeAcknowledgedAt === expected.managedRuntimeAcknowledgedAt
     && actual.serviceChoice === expected.serviceChoice
     && actual.systemdLingeringRequested === expected.systemdLingeringRequested
-    && actual.tailscaleServeRequested === expected.tailscaleServeRequested
     && actual.agentSkillRequested === expected.agentSkillRequested
     && actual.opencodeShimRequested === expected.opencodeShimRequested
     && actual.quotaWarningsEnabled === expected.quotaWarningsEnabled
@@ -912,13 +881,15 @@ function setupStateMatches(actual: SetupState, expected: SetupState): boolean {
 
 function installMetadataMatches(inspection: SetupInspection, choices: SetupChoices): boolean {
   if (!inspection.installState.committed) return false;
+  if (inspection.installState.state.resources.some((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)) {
+    return false;
+  }
   const installer = inspection.installState.state.installer;
   if (!installer || typeof installer !== 'object' || Array.isArray(installer)) return false;
   const record = installer as Record<string, unknown>;
   return record.version === inspection.version
     && record.serviceChoice === choices.service
-    && record.systemdLingeringRequested === choices.enableLingering
-    && record.tailscaleServeRequested === choices.tailscaleServe;
+    && record.systemdLingeringRequested === choices.enableLingering;
 }
 
 export function existingSetupChoices(inspection: Readonly<SetupInspection>): SetupChoices {
@@ -930,7 +901,6 @@ export function existingSetupChoices(inspection: Readonly<SetupInspection>): Set
       ? inspection.durableServiceProvider
       : 'foreground',
     enableLingering: inspection.setupState.systemdLingeringRequested === true,
-    tailscaleServe: inspection.setupState.tailscaleServeRequested === true,
     quotaWarnings: inspection.setupState.quotaWarningsEnabled === true,
     installAgentSkill: inspection.setupState.agentSkillRequested !== false,
     installOpencodeShim: inspection.setupState.opencodeShimRequested !== false,
@@ -1053,29 +1023,8 @@ function systemdOwnership(inspection: SetupInspection): {
   };
 }
 
-function tailscaleOwnership(inspection: SetupInspection): boolean {
-  const resource = installedResource(inspection, TAILSCALE_SERVE_RESOURCE_ID);
-  if (!resource || resource.kind !== 'other' || resource.ownership?.proof !== 'receipt'
-      || resource.ownership.marker !== TAILSCALE_SERVE_OWNERSHIP_MARKER
-      || !inspection.tailscale.advertisedUrl) return false;
-  return resource.target === tailscaleRouteReceiptTarget(inspection.tailscale);
-}
-
-function targetConfigForChoices(inspection: SetupInspection, choices: SetupChoices): BrokerConfig {
-  const base = inspection.targetConfig;
-  if (choices.tailscaleServe && inspection.tailscale.advertisedUrl) {
-    return {
-      ...base,
-      broker: { ...base.broker, advertisedUrl: inspection.tailscale.advertisedUrl },
-    };
-  }
-  if (!choices.tailscaleServe
-      && (inspection.setupState.tailscaleServeRequested === true || tailscaleOwnership(inspection))) {
-    const broker = { ...base.broker };
-    delete broker.advertisedUrl;
-    return { ...base, broker };
-  }
-  return base;
+function targetConfigForChoices(inspection: SetupInspection, _choices: SetupChoices): BrokerConfig {
+  return inspection.targetConfig;
 }
 
 export function buildSetupPlan(options: {
@@ -1111,7 +1060,6 @@ export function buildSetupPlan(options: {
       kind: 'config',
       configPath: join(options.inspection.stateHome, 'config.json'),
       internalUrl: targetConfig.broker.internalUrl,
-      ...(targetConfig.broker.advertisedUrl ? { advertisedUrl: targetConfig.broker.advertisedUrl } : {}),
     }, { id: 'config.ensure', title: 'Write broker configuration', reversible: true }));
   }
   if (options.inspection.brokerCredential.status === 'missing'
@@ -1373,46 +1321,6 @@ export function buildSetupPlan(options: {
       },
     ));
   }
-  const ownsTailscaleRoute = tailscaleOwnership(options.inspection);
-  if (options.choices.tailscaleServe) {
-    if (!durableServiceChoice(options.choices)) {
-      blockingIssues.push({
-        code: 'tailscale-serve-requires-durable-service',
-        summary: `Verified Tailscale Serve setup requires the broker to run as the selected ${provider} user service.`,
-        remediation: `Choose ${provider} service mode, or keep this foreground installation loopback-only.`,
-      });
-    } else if (!options.inspection.tailscaleAvailable || !options.inspection.tailscale.advertisedUrl) {
-      blockingIssues.push({
-        code: options.inspection.tailscale.detailCode,
-        summary: options.inspection.tailscale.summary,
-        remediation: options.inspection.tailscale.topology === 'windows-host-only'
-          ? 'Install and run Tailscale inside WSL; Windows-host Tailscale cannot proxy WSL loopback.'
-          : 'Start and log in to Tailscale explicitly, enable private HTTPS Serve if required, then rerun setup.',
-      });
-    } else if (options.inspection.tailscale.route === 'missing') {
-      actions.push(planned({
-        kind: 'tailscale-register',
-        advertisedUrl: options.inspection.tailscale.advertisedUrl ?? '',
-        target: options.inspection.tailscale.desiredTarget,
-      }, { id: 'network.tailscale-serve', title: 'Register private Tailscale HTTPS route', reversible: true }));
-    } else if (options.inspection.tailscale.route === 'desired' && !ownsTailscaleRoute) {
-      extraSteps.push({ kind: 'tailscale-reuse' });
-    }
-  } else if (ownsTailscaleRoute) {
-    if (options.inspection.tailscale.route === 'conflict' || options.inspection.tailscale.route === 'funnel-conflict'
-        || options.inspection.tailscale.route === 'malformed' || options.inspection.tailscale.route === 'unavailable') {
-      blockingIssues.push({
-        code: 'tailscale-owned-route-drifted',
-        summary: 'The receipt-owned Tailscale route has drifted and cannot be removed safely by setup.',
-        remediation: `Inspect the route and run \`${PRODUCT_IDENTITY.primaryBinary} repair\`; unrelated Serve configuration is preserved.`,
-      });
-    } else {
-      actions.push(planned(
-        { kind: 'tailscale-remove', advertisedUrl: options.inspection.tailscale.advertisedUrl ?? '' },
-        { id: 'network.tailscale-serve', title: 'Remove package-owned Tailscale HTTPS route', reversible: true },
-      ));
-    }
-  }
   if (options.inspection.portStatus === 'owned-running' && mutationsPending() && !serviceAction) {
     blockingIssues.push({
       code: 'foreground-broker-reconfigure-required',
@@ -1494,13 +1402,15 @@ function actionInputs(options: {
 }): SetupActionInputs {
   const removeResourceIds: string[] = [];
   const removeAgentSkillResourceIds: string[] = [];
+  if (options.inspection.installState.committed
+      && options.inspection.installState.state.resources.some(
+        (resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID,
+      )) {
+    removeResourceIds.push(LEGACY_TAILSCALE_RESOURCE_ID);
+  }
   if (options.plan.choices.service === 'foreground'
       && options.plan.actions.some((action) => action.id === 'service.systemd')) {
     removeResourceIds.push(...SERVICE_RESOURCE_IDS);
-  }
-  if (!options.plan.choices.tailscaleServe
-      && options.plan.actions.some((action) => action.id === 'network.tailscale-serve')) {
-    removeResourceIds.push(TAILSCALE_SERVE_RESOURCE_ID);
   }
   if (!options.plan.choices.installAgentSkill
       && options.plan.actions.some((action) => action.id === 'agent-skill.reconcile')) {
@@ -1541,7 +1451,6 @@ function actionInputs(options: {
       aliasPath: options.aliasPath,
       serviceChoice: options.plan.choices.service,
       systemdLingeringRequested: options.plan.choices.enableLingering,
-      tailscaleServeRequested: options.plan.choices.tailscaleServe,
     },
     removeResourceIds,
     now: options.now,
@@ -1602,19 +1511,13 @@ async function verifySetup(options: {
  * rather than from what setup offered. Both presenters render this instead of composing URLs themselves, so
  * the outro cannot name an endpoint the plan did not produce.
  *
- * `tailscaleUrl` is present only when the applied plan carries an advertised URL — i.e. the Serve route was
- * requested AND Tailscale supplied a name — because that is the same condition under which the route is
- * registered and post-commit verified. There is deliberately no LAN URL: the broker binds
- * `config.broker.host`, which setup only ever writes as 127.0.0.1, so a printed 192.168.x.x address would
- * name an endpoint nothing is listening on.
+ * There is deliberately no external URL: connectivity is configured and owned outside cosyncing.
  */
 export interface SetupAccessReport {
   /** Every credential, config file, and receipt this install owns lives under here. */
   stateHome: string;
   /** Loopback origin of the broker on this host. */
   loopbackUrl: string;
-  /** Private tailnet origin, present only once the applied plan registered the Serve route. */
-  tailscaleUrl?: string;
   /**
    * False when this build ships no Flutter web bundle — the npm tarball routinely does not. The outro must
    * then send the operator to a paired client instead of an app URL that would answer "not built".
@@ -1639,7 +1542,6 @@ function accessReport(
   return {
     stateHome: inspection.stateHome,
     loopbackUrl: broker.internalUrl,
-    ...(broker.advertisedUrl ? { tailscaleUrl: broker.advertisedUrl } : {}),
     webApp: inspection.webAppAvailable,
     brokerListening: brokerVerified || inspection.portStatus === 'owned-running',
   };
@@ -1658,6 +1560,7 @@ function result(options: {
   /** Set only where the transaction's post-commit health check ran and passed. See {@link SetupAccessReport}. */
   brokerVerified?: boolean;
   tokdash?: TokdashProvisionOutcome;
+  legacyConnectivityMigration?: { preservedTargets: string[] };
   actions?: string[];
   issues?: readonly SetupBlockingIssue[];
   failure?: SetupFailureReport;
@@ -1676,9 +1579,25 @@ function result(options: {
     access: accessReport(options.inspection, options.targetConfig, options.brokerVerified),
     recoveredInterruptedTransaction: options.recovered,
     ...(options.tokdash ? { tokdash: options.tokdash } : {}),
+    ...(options.legacyConnectivityMigration
+      ? { legacyConnectivityMigration: options.legacyConnectivityMigration }
+      : {}),
     ...(options.issues?.length ? { issueCodes: options.issues.map((issue) => issue.code) } : {}),
     ...(options.failure ? { failure: options.failure } : {}),
   };
+}
+
+function legacyConnectivityMigration(
+  inspection: Readonly<SetupInspection>,
+): SetupCommandResult['legacyConnectivityMigration'] {
+  const preservedTargets = inspection.installState.committed
+    ? inspection.installState.state.resources
+      .filter((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)
+      .map((resource) => resource.target)
+    : [];
+  return hasLegacyConnectivityIntent(inspection.setupState) || preservedTargets.length > 0
+    ? { preservedTargets }
+    : undefined;
 }
 
 /**
@@ -1840,19 +1759,6 @@ function createSystemdProviderForSetup(options: {
   });
 }
 
-function createTailscaleProviderForSetup(options: {
-  context: SetupDiagnosisContext;
-  internalUrl: string;
-  executablePath?: string;
-  factory?: (options: TailscaleServeProviderOptions) => TailscaleServeRouteProvider;
-}): TailscaleServeRouteProvider {
-  return (options.factory ?? ((providerOptions) => new TailscaleServeProvider(providerOptions)))({
-    context: options.context,
-    internalUrl: options.internalUrl,
-    executablePath: options.executablePath,
-  });
-}
-
 export async function runSetup(dependencies: SetupDependencies): Promise<SetupCommandResult> {
   const home = dependencies.home ?? setupStateHome();
   const context = dependencies.context ?? createSetupDiagnosisContext();
@@ -1887,7 +1793,6 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           aliasPath,
           serviceChoice: 'foreground',
           systemdLingeringRequested: false,
-          tailscaleServeRequested: false,
         },
         now: dependencies.now,
       };
@@ -1911,18 +1816,6 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           enableLingering: false,
           lingeringAlreadyOwned: false,
         }));
-      }
-      if (pendingJournal.plan.actions.some((action) => action.id === 'network.tailscale-serve')) {
-        const recoveredConfig = inspectBrokerConfig(home);
-        const internalUrl = recoveredConfig.status === 'ok'
-          ? recoveredConfig.config.broker.internalUrl
-          : defaultBrokerConfig().broker.internalUrl;
-        const recoveryProvider = createTailscaleProviderForSetup({
-          context,
-          internalUrl,
-          factory: dependencies.tailscaleProviderFactory,
-        });
-        recoveryActions.push(createTailscaleServeSetupAction(recoveryProvider, { desired: 'installed' }));
       }
       recovered = await recoverSetupTransaction({
         home,
@@ -1967,8 +1860,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   }
 
   // Fold any flag intent (non-interactive presenter) into the stored choices so the committed-setup no-op
-  // short-circuit below reflects `--install-opencode-shim`, `--no-install-agent-skill`, and the explicit
-  // Tailscale Serve choice rather than silently dropping them. The interactive presenter omits
+  // short-circuit below reflects `--install-opencode-shim` and `--no-install-agent-skill` rather than
+  // silently dropping them. The interactive presenter omits
   // intendedChoices, so this is a pure stored re-run.
   const intended = dependencies.presenter.intendedChoices?.(inspection);
   // The just-chosen language folds in the same way: picking a new one on an already-committed install is a
@@ -1980,7 +1873,6 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           ...existingSetupChoices(inspection),
           installAgentSkill: intended.installAgentSkill,
           installOpencodeShim: intended.installOpencodeShim,
-          tailscaleServe: intended.tailscaleServe,
         }
       : existingSetupChoices(inspection)),
     language,
@@ -2118,15 +2010,12 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   // one prompt later. It remains separately RECEIPTED, so uninstall still only reverses what setup enabled.
   // launchd has no equivalent and keeps its documented divergence: the agent runs GUI login to logout.
   const lingering = service === 'systemd';
-  const tailscale = await dependencies.presenter.confirmTailscale(inspection);
-  if (tailscale === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'Tailscale choice');
   const quota = await dependencies.presenter.confirmQuotaWarnings(inspection);
   if (quota === SETUP_PROMPT_CANCELLED) return cancelled(dependencies, inspection, recovered, 'quota-warning choice');
   const choices: SetupChoices = {
     language,
     service,
     enableLingering: lingering,
-    tailscaleServe: tailscale,
     quotaWarnings: quota,
     installAgentSkill,
     installOpencodeShim,
@@ -2219,26 +2108,12 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           factory: dependencies.systemdProviderFactory,
         })
       : undefined;
-    const hasTailscaleAction = lockedPlan.actions.some((action) => action.id === 'network.tailscale-serve');
-    const tailscaleProvider = hasTailscaleAction
-      ? createTailscaleProviderForSetup({
-          context,
-          internalUrl: lockedPlan.targetConfig.broker.internalUrl,
-          executablePath: inspection.tailscale.executablePath,
-          factory: dependencies.tailscaleProviderFactory,
-        })
-      : undefined;
     const transactionActions = [...catalog.actions];
     if (systemdProvider && hasSystemdAction) {
       transactionActions.unshift(createSystemdSetupAction(systemdProvider, {
         desired: durableServiceChoice(lockedPlan.choices) ? 'installed' : 'absent',
         enableLingering: lockedPlan.choices.enableLingering,
         lingeringAlreadyOwned: systemdOwnership(inspection).lingering,
-      }));
-    }
-    if (tailscaleProvider) {
-      transactionActions.push(createTailscaleServeSetupAction(tailscaleProvider, {
-        desired: lockedPlan.choices.tailscaleServe ? 'installed' : 'absent',
       }));
     }
     await executeSetupTransaction({
@@ -2261,32 +2136,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
             attempts: dependencies.serviceHealthAttempts,
           });
           if (!serviceReady.ok) return serviceReady;
-          if (!lockedPlan.choices.tailscaleServe) return true;
-          const advertisedUrl = lockedPlan.targetConfig.broker.advertisedUrl;
-          // Read this node's own Tailscale addresses so verification survives a host whose MagicDNS
-          // resolution is broken. They are only ever consulted after the advertised NAME fails to
-          // connect; a name that answers wrongly is a verification failure, not a lookup problem.
-          const injected = dependencies.advertisedEndpointVerification;
-          const fallbackAddresses = injected?.fallbackAddresses
-            ?? (inspection.tailscale.executablePath
-              ? await resolveTailscaleAddresses({
-                  context,
-                  executablePath: inspection.tailscale.executablePath,
-                })
-              : []);
-          const advertisedReachable = !!advertisedUrl && await verifyAdvertisedBrokerEndpoint({
-            ...(injected ?? {}),
-            context,
-            advertisedUrl,
-            machineLabel: lockedPlan.targetConfig.broker.machineLabel,
-            fallbackAddresses,
-          });
-          return advertisedReachable ? true : {
-            ok: false,
-            detail: advertisedUrl
-              ? `the private Tailscale endpoint ${advertisedUrl} did not answer as this broker`
-              : 'the plan requested a Tailscale Serve route but produced no advertised URL to verify',
-          };
+          return true;
         },
       } : {}),
       now: dependencies.now,
@@ -2312,6 +2162,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         : 'complete',
       inspection,
       recovered,
+      legacyConnectivityMigration: legacyConnectivityMigration(inspection),
       targetConfig: lockedPlan.targetConfig,
       // The durable-service branch above wires `verifyCommitted`, which starts the service and health-checks
       // it; reaching here means that check passed. A foreground choice runs no such check and starts nothing,

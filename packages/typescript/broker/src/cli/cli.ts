@@ -55,7 +55,6 @@ export interface CliDependencies {
     yes: boolean;
     acceptManagedRuntimeOwnership: boolean;
     enableSystemdLingering: boolean;
-    enableTailscaleServe: boolean;
     installAgentSkill: boolean;
     opencodeShimSignal: OpencodeShimSignal;
     replaceLegacyPiBridge: boolean;
@@ -64,6 +63,7 @@ export interface CliDependencies {
   runPair?: (options: {
     json: boolean;
     wait: boolean;
+    brokerUrl?: string;
     clientLabel?: string;
     invocation: string;
     stdout: CliWriter;
@@ -171,8 +171,8 @@ function help(command: string, packaged: boolean): string {
 
 Usage:
   ${brokerUsage}
-  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--enable-tailscale-serve] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
-  ${command} pair [--label <device>] [--wait] [--json]
+  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
+  ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
   ${command} devices list [--json]
   ${command} devices revoke <id> [--yes] [--json]
   ${command} status [--json]
@@ -281,7 +281,6 @@ async function defaultRunSetup(options: {
   yes: boolean;
   acceptManagedRuntimeOwnership: boolean;
   enableSystemdLingering: boolean;
-  enableTailscaleServe: boolean;
   installAgentSkill: boolean;
   opencodeShimSignal: OpencodeShimSignal;
   replaceLegacyPiBridge: boolean;
@@ -297,7 +296,6 @@ async function defaultRunSetup(options: {
     ? presenters.createNonInteractiveSetupPresenter(options.stdout, {
         acceptManagedRuntimeOwnership: options.acceptManagedRuntimeOwnership,
         enableSystemdLingering: options.enableSystemdLingering,
-        enableTailscaleServe: options.enableTailscaleServe,
         installAgentSkill: options.installAgentSkill,
         opencodeShim: options.opencodeShimSignal,
         replaceLegacyPiBridge: options.replaceLegacyPiBridge,
@@ -314,6 +312,7 @@ async function defaultRunSetup(options: {
 async function defaultRunPair(options: {
   json: boolean;
   wait: boolean;
+  brokerUrl?: string;
   clientLabel?: string;
   invocation: string;
   stdout: CliWriter;
@@ -653,7 +652,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       '--yes',
       '--accept-managed-runtime-ownership',
       '--enable-systemd-lingering',
-      '--enable-tailscale-serve',
       '--no-install-agent-skill',
       '--install-opencode-shim',
       '--no-install-opencode-shim',
@@ -669,7 +667,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const yes = args.includes('--yes');
     const acceptManagedRuntimeOwnership = args.includes('--accept-managed-runtime-ownership');
     const enableSystemdLingering = args.includes('--enable-systemd-lingering');
-    const enableTailscaleServe = args.includes('--enable-tailscale-serve');
     const installAgentSkill = !args.includes('--no-install-agent-skill');
     const replaceLegacyPiBridge = args.includes('--replace-legacy-pi-bridge');
     const upgradeLegacyAgentSkill = args.includes('--upgrade-legacy-agent-skill');
@@ -682,7 +679,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         : 'unset';
     // Non-interactive negative flags require --yes; the bare positive opt-in (--install-opencode-shim) does not
     // — it only informs the non-interactive presenter and is inert in the interactive (clack) path.
-    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering || enableTailscaleServe
+    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering
       || !installAgentSkill || opencodeShimSignal === 'off' || replaceLegacyPiBridge || upgradeLegacyAgentSkill)) {
       stderr.write(`${command}: non-interactive setup flags require --yes\n`);
       return 2;
@@ -705,7 +702,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             yes,
             acceptManagedRuntimeOwnership,
             enableSystemdLingering,
-            enableTailscaleServe,
             installAgentSkill,
             opencodeShimSignal,
             replaceLegacyPiBridge,
@@ -715,7 +711,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             yes,
             acceptManagedRuntimeOwnership,
             enableSystemdLingering,
-            enableTailscaleServe,
             installAgentSkill,
             opencodeShimSignal,
             replaceLegacyPiBridge,
@@ -733,11 +728,22 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   if (requested === 'pair') {
     let json = false;
     let wait = false;
+    let brokerUrl: string | undefined;
     let clientLabel: string | undefined;
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index]!;
       if (arg === '--json' && !json) { json = true; continue; }
       if (arg === '--wait' && !wait) { wait = true; continue; }
+      if (arg === '--broker-url' && brokerUrl === undefined) {
+        const value = args[index + 1]?.trim();
+        if (!value || value.startsWith('--')) {
+          stderr.write(`${command} pair: --broker-url requires an HTTP or HTTPS URL\n`);
+          return 2;
+        }
+        brokerUrl = value;
+        index += 1;
+        continue;
+      }
       if (arg === '--label' && clientLabel === undefined) {
         const value = args[index + 1]?.trim();
         if (!value || value.startsWith('--') || value.length > 128 || /[\0\r\n]/.test(value)) {
@@ -754,6 +760,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const pair = await (dependencies.runPair ?? defaultRunPair)({
       json,
       wait,
+      ...(brokerUrl ? { brokerUrl } : {}),
       ...(clientLabel ? { clientLabel } : {}),
       invocation: command,
       stdout,

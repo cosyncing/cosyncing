@@ -65,7 +65,7 @@
     "test:broker-doctor-real": "bun run scripts/broker/tests/host/test-doctor-real.ts",
     "test:broker-setup": "bun run packages/typescript/broker/test/broker/test-transactional-setup.ts",
     "test:broker-service": "bun run packages/typescript/broker/test/broker/test-service-lifecycle.ts",
-    "test:broker-pairing": "bun run packages/typescript/broker/test/broker/test-tailscale-pairing.ts",
+    "test:broker-pairing": "bun run packages/typescript/broker/test/broker/test-pairing.ts",
     "test:broker-lifecycle": "bun run packages/typescript/broker/test/broker/test-broker-lifecycle.ts",
     "test:broker-opencode-shim-symmetry": "bun run packages/typescript/broker/test/broker/test-opencode-shim-symmetry.ts",
     "test:broker-opencode-shim-runtime": "bun run packages/typescript/broker/test/broker/test-opencode-shim-runtime.ts",
@@ -173,7 +173,6 @@
     "capabilities:claude-check": "bun run scripts/broker/capabilities/check.ts --agent claude --mode fixture",
     "capabilities:tool-branches": "bun run scripts/broker/capabilities/check-no-tool-branches.ts --write-output output/capabilities/tool-branches",
     "test:capabilities": "bun run packages/typescript/broker/test/capabilities/test-capabilities.ts",
-    "serve:tailscale": "bash scripts/broker/tailscale-serve.sh",
     "trace:real-agent-p0": "bash scripts/broker/tests_traces/run-real-agent-p0.sh",
     "trace:opencode-reconnect": "COSYNCING_OPENCODE_RECONNECT_TRACE=1 bun run scripts/broker/tests_traces/opencode-reconnect-trace.ts"
   },

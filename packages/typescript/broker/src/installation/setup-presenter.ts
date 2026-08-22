@@ -72,14 +72,7 @@ function outroEntries(access: Readonly<SetupAccessReport>, text: SetupMessages):
     ? (access.brokerListening ? text.outroOpenHere(here) : text.outroOpenHereAfterStart(here))
     : (access.brokerListening ? text.outroPairPageHere(here) : text.outroPairPageHereAfterStart(here)));
   push('access', text.outroLocalServerAddress(access.loopbackUrl));
-  if (access.tailscaleUrl) {
-    const tailnet = browserClientUrl(access.tailscaleUrl);
-    push('access', access.webApp
-      ? (access.brokerListening ? text.outroOpenTailnet(tailnet) : text.outroOpenTailnetAfterStart(tailnet))
-      : (access.brokerListening ? text.outroPairPageTailnet(tailnet) : text.outroPairPageTailnetAfterStart(tailnet)));
-    push('access', text.outroTailnetServerAddress(access.tailscaleUrl));
-  }
-  if (!access.tailscaleUrl) push('access', text.outroLoopbackOnly);
+  push('access', text.outroLoopbackOnly);
   push('access', text.outroShortCommand(PRODUCT_IDENTITY.aliasBinary, [
     `${PRODUCT_IDENTITY.aliasBinary} status`,
     `${PRODUCT_IDENTITY.aliasBinary} doctor`,
@@ -191,12 +184,7 @@ export function createClackSetupPresenter(): SetupPresenter {
         text().installationTitle,
       );
       note(agentPreflightLines(inspection.agents, language), text().agentPreflightTitle);
-      const external = inspection.targetConfig.broker.advertisedUrl
-        ? text().networkAuthenticated(inspection.targetConfig.broker.advertisedUrl)
-        : inspection.tailscale.advertisedUrl
-          ? text().networkServeAvailable(inspection.tailscale.advertisedUrl)
-          : text().networkLoopback(inspection.tailscale.summary);
-      note(external, text().networkTitle);
+      note(text().networkLoopback('External connectivity is managed by the operator.'), text().networkTitle);
     },
     showBlockers(issues): void {
       for (const issue of issues) {
@@ -267,21 +255,6 @@ export function createClackSetupPresenter(): SetupPresenter {
       if (!isCancel(value) && value === 'launchd') log.info(text().launchdSessionNote);
       return cancelled(value);
     },
-    async confirmTailscale(inspection): Promise<SetupPromptResult<boolean>> {
-      if (!inspection.tailscaleAvailable) {
-        log.info(text().tailscaleUnavailableNote);
-        return false;
-      }
-      // The MagicDNS name is already on screen in the Network panel, so the prompt can name the URL this
-      // route produces rather than the mechanism. `tailscaleAvailable` implies a resolved name; the fallback
-      // is only so a hypothetical inspection without one cannot render `undefined/cosy`.
-      return cancelled(await confirm({
-        message: text().tailscaleConfirm(
-          browserClientUrl(inspection.tailscale.advertisedUrl ?? inspection.tailscale.desiredTarget),
-        ),
-        initialValue: inspection.setupState.tailscaleServeRequested !== false,
-      }));
-    },
     async confirmQuotaWarnings(inspection): Promise<SetupPromptResult<boolean>> {
       // Same resolver, same variable, same process as the setup run this prompt belongs to, so the URL
       // consented to here is the one that gets provisioned and polled. A refused override says so first:
@@ -322,6 +295,9 @@ export function createClackSetupPresenter(): SetupPresenter {
       const quota = quotaNotice(result, text());
       if (quota) {
         if (result.tokdash?.status === 'unavailable') log.warn(quota); else log.info(quota);
+      }
+      if (result.legacyConnectivityMigration) {
+        log.warn(text().legacyConnectivityPreserved(result.legacyConnectivityMigration.preservedTargets));
       }
       const body = outroEntries(result.access, text()).map((entry) => entry.text).join('\n');
       note(body, text().outroTitle(PRODUCT_IDENTITY.productName));
@@ -364,7 +340,6 @@ export interface NonInteractiveSetupOptions {
   /** Accepted for compatibility and now implied: choosing the systemd service enables lingering with it,
    *  so `--enable-systemd-lingering` no longer changes the outcome. Still separately receipted. */
   enableSystemdLingering: boolean;
-  enableTailscaleServe: boolean;
   installAgentSkill: boolean;
   opencodeShim: OpencodeShimSignal;
   replaceLegacyPiBridge?: boolean;
@@ -379,7 +354,6 @@ export function createNonInteractiveSetupPresenter(
   options: NonInteractiveSetupOptions = {
     acceptManagedRuntimeOwnership: true,
     enableSystemdLingering: false,
-    enableTailscaleServe: false,
     installAgentSkill: true,
     opencodeShim: 'unset',
     replaceLegacyPiBridge: false,
@@ -394,10 +368,6 @@ export function createNonInteractiveSetupPresenter(
     if (options.opencodeShim === 'on') return true;
     return inspection.setupState.opencodeShimRequested === true;
   };
-  // There is no --no-enable-tailscale-serve flag. Omission therefore preserves an existing opt-in while a
-  // fresh install stays local-only; the positive flag can enable Serve on either a fresh or committed setup.
-  const resolveTailscaleServe = (inspection: Readonly<SetupInspection>): boolean =>
-    options.enableTailscaleServe || inspection.setupState.tailscaleServeRequested === true;
   // There is no prompt here, so language comes from what the operator already declared: an explicit flag,
   // then the choice a previous interactive run persisted, then the env override, then English.
   const resolveLanguage = (inspection: Readonly<SetupInspection>): SetupLanguage =>
@@ -447,21 +417,17 @@ export function createNonInteractiveSetupPresenter(
     intendedChoices(inspection): {
       installAgentSkill: boolean;
       installOpencodeShim: boolean;
-      tailscaleServe: boolean;
     } {
       // Same resolution the confirm* calls use, but non-prompting, so the committed-setup no-op short-circuit
-      // sees the flag-resolved intent. Tailscale has only a positive flag, so omission preserves a stored
-      // opt-in rather than silently disabling an existing route during a non-interactive package update.
+      // sees the flag-resolved intent.
       return {
         installAgentSkill: options.installAgentSkill,
         installOpencodeShim: resolveOpencodeShim(inspection),
-        tailscaleServe: resolveTailscaleServe(inspection),
       };
     },
     async chooseService(inspection): Promise<SetupServiceChoice> {
       return inspection.systemdAvailable ? inspection.durableServiceProvider : 'foreground';
     },
-    async confirmTailscale(inspection): Promise<boolean> { return resolveTailscaleServe(inspection); },
     async confirmQuotaWarnings(inspection): Promise<boolean> {
       // Reported here too, at the same point the wizard reports it, so a scripted install is not the one
       // path where a refused override is silent. Tagged and English like every machine-readable line, and
@@ -484,6 +450,11 @@ export function createNonInteractiveSetupPresenter(
       // parsing it; the endpoint facts are new and get their own tag rather than overloading that one.
       for (const entry of outroEntries(result.access, setupMessages(language))) {
         line(`[${entry.tag}] ${entry.text}`);
+      }
+      if (result.legacyConnectivityMigration) {
+        line(`[migration] ${setupMessages(language).legacyConnectivityPreserved(
+          result.legacyConnectivityMigration.preservedTargets,
+        )}`);
       }
       // Tagged and English, like every other machine-readable line here: the status word is what a script
       // branches on, and the detail is what a bug report quotes.

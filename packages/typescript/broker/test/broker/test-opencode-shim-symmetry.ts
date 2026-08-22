@@ -25,7 +25,7 @@ import {
 } from '../../src/installation/install-state.ts';
 import { KNOWN_INSTALL_RESOURCE_IDS } from '../../src/installation/install-state.ts';
 import { AGENT_SKILL_RESOURCE_IDS, agentSkillTargets } from '../../src/installation/agent-skill.ts';
-import { TAILSCALE_SERVE_RESOURCE_ID } from '../../src/installation/tailscale-serve.ts';
+import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import {
   OPENCODE_SHIM_BLOCK_BEGIN,
   OPENCODE_SHIM_RC_RESOURCE_IDS,
@@ -163,7 +163,6 @@ function actionInputsFor(m: Machine): SetupActionInputs {
       executablePath: m.binary,
       serviceChoice: 'foreground',
       systemdLingeringRequested: false,
-      tailscaleServeRequested: false,
     },
   };
 }
@@ -190,7 +189,6 @@ function fullActionInputsFor(m: Machine): SetupActionInputs {
       aliasPath: join(m.home, 'bin', 'cosync'),
       serviceChoice: 'foreground',
       systemdLingeringRequested: false,
-      tailscaleServeRequested: false,
     },
   };
 }
@@ -252,7 +250,7 @@ try {
     const knownConstants = [
       'broker-binary', 'broker-binary-previous', 'broker-alias',
       'service-systemd', 'service-environment', 'service-systemd-linger',
-      'pi-bridge', TAILSCALE_SERVE_RESOURCE_ID,
+      'pi-bridge', LEGACY_TAILSCALE_RESOURCE_ID,
       ...Object.values(AGENT_SKILL_RESOURCE_IDS),
       OPENCODE_SHIM_RESOURCE_ID, ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
     ];
@@ -517,7 +515,6 @@ try {
         executablePath: binary,
         serviceChoice: 'foreground',
         systemdLingeringRequested: false,
-        tailscaleServeRequested: false,
       },
     };
     const txContext: SetupTransactionContext = {

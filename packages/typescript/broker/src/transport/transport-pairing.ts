@@ -12,6 +12,7 @@ import {
   type WrappedDataKey,
 } from '@cosyncing/crypto';
 import { setupStateHome } from '../installation/setup-state.ts';
+import { normalizePairingBrokerUrl, PairingBrokerUrlError } from './pairing-url.ts';
 
 export interface AcceptedTransportPeer {
   peerId: string;
@@ -80,7 +81,6 @@ export class TransportPairingRegistry {
 
   constructor(
     private readonly opts: {
-      brokerUrl: string;
       broker?: QrBrokerDescriptor;
       ttlMs?: number;
       home?: string;
@@ -93,7 +93,7 @@ export class TransportPairingRegistry {
     this.load();
   }
 
-  createOffer(input: { clientLabel?: string } = {}): {
+  createOffer(input: { clientLabel?: string; brokerUrl?: string } = {}): {
     pairingId: string;
     qr: string;
     expiresAt: string;
@@ -115,12 +115,22 @@ export class TransportPairingRegistry {
     // field, and the client learns the same version/contract from `/api/health`, from the pairing-accept
     // response, and from the WebSocket hello's compatibility handshake, all of which it must complete
     // anyway. `parseQrPairingPayload` still accepts the field so payloads stored by older brokers parse.
+    let brokerUrl: string | undefined;
+    try {
+      brokerUrl = normalizePairingBrokerUrl(input.brokerUrl);
+    } catch (error) {
+      throw new PairingHttpError(
+        400,
+        'PAIRING_INVALID_INPUT',
+        error instanceof PairingBrokerUrlError ? error.message : 'brokerUrl is invalid',
+      );
+    }
     const qr = createQrPairingPayload({
-      version: 2,
+      version: 3,
       brokerId: brokerPeerId,
       pairingId,
       publicKey: keys.exchange.publicKey,
-      transport: { kind: 'tailscale-direct', url: this.opts.brokerUrl },
+      transport: { kind: 'broker-url', ...(brokerUrl ? { url: brokerUrl } : {}) },
     });
     this.offers.set(pairingId, {
       pairingId,

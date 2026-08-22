@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:net';
 import { generateDataKey, generateIdentityKeyPair } from '../../../crypto/src/index.ts';
-import { MemoryRelay, TailscaleDirectTransport } from '../../../transport/src/index.ts';
+import { BrokerHttpTransport, MemoryRelay } from '../../../transport/src/index.ts';
 import {
   createSecureTransportPair,
   parseCipherEnvelope,
@@ -45,14 +45,14 @@ await test('secure transport client pairs real identities, round-trips through b
       remotePeerId: 'broker',
       remotePeerToken: 'broker-token',
     });
-    const phoneTransport = new TailscaleDirectTransport({
+    const phoneTransport = new BrokerHttpTransport({
       baseUrl,
       peerId: paired.local.peerId,
       peerToken: paired.local.peerToken,
       pollMs: 1,
       headers: { 'x-cosyncing-token': token },
     });
-    const brokerTransport = new TailscaleDirectTransport({
+    const brokerTransport = new BrokerHttpTransport({
       baseUrl,
       peerId: paired.remote.peerId,
       peerToken: paired.remote.peerToken,
@@ -212,7 +212,7 @@ if (failed) {
 
 console.log('\nPASS secure transport client tests');
 
-async function firstEnvelope(transport: TailscaleDirectTransport): Promise<Awaited<ReturnType<SecureTransportClient['seal']>>> {
+async function firstEnvelope(transport: BrokerHttpTransport): Promise<Awaited<ReturnType<SecureTransportClient['seal']>>> {
   const ac = new AbortController();
   for await (const envelope of transport.receive(ac.signal)) {
     ac.abort();

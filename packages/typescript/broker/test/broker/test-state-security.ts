@@ -28,8 +28,11 @@ import {
 } from '../../../../../scripts/verification/supervised-process.ts';
 import {
   BROKER_CONFIG_SCHEMA_VERSION,
+  BROKER_LISTEN_HOST,
+  brokerInternalUrl,
   defaultBrokerConfig,
   inspectBrokerConfig,
+  migrateBrokerConfigV1,
   planRepoEraConfigurationMigration,
   resolveBrokerConfiguration,
   validateBrokerConfig,
@@ -120,12 +123,18 @@ try {
     const home = join(root, 'config-home');
     const written = writeBrokerConfig(fixtureConfig() as any, home);
     const inspected = inspectBrokerConfig(home);
-    check('config writes schema v1 through an owner-only atomic boundary',
+    check('config writes schema v2 through an owner-only atomic boundary',
       written.schemaVersion === BROKER_CONFIG_SCHEMA_VERSION && inspected.status === 'ok' &&
         ownerOnlyMode(join(home, 'config.json')) === 0o600 && ownerOnlyMode(home) === 0o700);
     check('unknown additive config fields survive validation and a read/write cycle',
       inspected.status === 'ok' && (inspected.config.ownerExtension as any)?.preserved === true &&
         inspected.config.broker.nestedExtension === 'keep-me');
+    const persisted = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as any;
+    check('persisted config omits every listener and advertised URL field',
+      persisted.schemaVersion === 2
+        && persisted.broker.host === undefined
+        && persisted.broker.internalUrl === undefined
+        && persisted.broker.advertisedUrl === undefined);
 
     const source = resolveBrokerConfiguration({
       packaged: false,
@@ -139,11 +148,15 @@ try {
         COSYNCING_UPDATE_CHANNEL: 'beta',
       },
     });
-    check('source runtime reports explicit environment precedence without raw environment output',
+    check('source runtime ignores removed listener variables and derives loopback from PORT',
       source.config.broker.port === 8844 && source.config.broker.machineLabel === 'fixture-machine' &&
         source.config.broker.internalUrl === 'http://127.0.0.1:8844' &&
-        source.config.broker.advertisedUrl === 'https://fixture.tailnet.example' &&
-        source.source.internalUrl === 'legacy-environment' && source.environmentOverrides.includes('COSYNCING_BROKER'));
+        source.config.broker.host === BROKER_LISTEN_HOST &&
+        source.config.broker.advertisedUrl === undefined &&
+        source.source.internalUrl === 'derived'
+        && !source.environmentOverrides.includes('HOST')
+        && !source.environmentOverrides.includes('COSYNCING_BROKER')
+        && !source.environmentOverrides.includes('COSYNCING_ADVERTISED_BROKER'));
 
     const packaged = resolveBrokerConfiguration({
       packaged: true,
@@ -155,10 +168,52 @@ try {
         packaged.config.broker.internalUrl === 'http://127.0.0.1:7734' && packaged.environmentOverrides.length === 0);
 
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, port: 0 } }));
-    assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, internalUrl: 'http://10.0.0.1:7734' } }));
-    assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, advertisedUrl: 'http://remote.example' } }));
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), update: { channel: 'surprise' } }));
-    check('invalid port, internal URL, advertised transport, and update channel fail closed', true);
+    const reserved = validateBrokerConfig({
+      ...fixtureConfig(),
+      broker: {
+        ...fixtureConfig().broker,
+        host: '0.0.0.0',
+        internalUrl: 'http://10.0.0.1:7734',
+        advertisedUrl: 'http://remote.example',
+      },
+    });
+    check('removed persisted fields cannot alter the loopback listener',
+      reserved.broker.host === BROKER_LISTEN_HOST
+        && reserved.broker.internalUrl === brokerInternalUrl(reserved.broker.port)
+        && reserved.broker.advertisedUrl === undefined);
+    check('invalid port and update channel still fail closed', true);
+
+    const legacyHome = join(root, 'legacy-config-home');
+    mkdirSync(legacyHome, { recursive: true, mode: 0o700 });
+    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({
+      schemaVersion: 1,
+      ownerExtension: { preserved: true },
+      broker: {
+        host: '0.0.0.0',
+        port: 8844,
+        machineLabel: 'legacy-machine',
+        internalUrl: 'http://127.0.0.1:8844',
+        advertisedUrl: 'https://legacy.example.com',
+        nestedExtension: 'keep-me',
+      },
+      update: { channel: 'beta' },
+    }), { mode: 0o600 });
+    const legacyInspection = inspectBrokerConfig(legacyHome);
+    check('v1 inspection derives loopback while preserving non-reserved fields',
+      legacyInspection.status === 'ok'
+        && legacyInspection.migratedFrom === 1
+        && legacyInspection.previousHost === '0.0.0.0'
+        && legacyInspection.config.broker.port === 8844
+        && legacyInspection.config.broker.nestedExtension === 'keep-me'
+        && (legacyInspection.config.ownerExtension as any)?.preserved === true);
+    const migration = migrateBrokerConfigV1(legacyHome);
+    const migrated = JSON.parse(readFileSync(join(legacyHome, 'config.json'), 'utf8')) as any;
+    check('v1 migration backs up and transactionally writes schema v2',
+      migration.migrated && migration.backupPath != null && existsSync(migration.backupPath)
+        && migrated.schemaVersion === 2 && migrated.broker.port === 8844
+        && migrated.broker.host === undefined && migrated.broker.internalUrl === undefined
+        && migrated.broker.advertisedUrl === undefined);
 
     writeFileSync(join(home, 'config.json'), '{bad json', { mode: 0o600 });
     check('malformed config is visible instead of silently defaulting', inspectBrokerConfig(home).status === 'error');
@@ -456,12 +511,12 @@ try {
       const pairing = await fetch(`${base}/api/transport/pairings`, {
         method: 'POST',
         headers: { ...sharedHeader, 'content-type': 'application/json' },
-        body: JSON.stringify({ clientLabel: 'state-security-fixture' }),
+        body: JSON.stringify({ clientLabel: 'state-security-fixture', brokerUrl: advertised }),
       });
       const offer = await pairing.json() as any;
       const qr = parseQrPairingPayload(offer.qr);
-      check('remote pairing QR uses the configured advertised HTTPS URL, never loopback',
-        pairing.status === 201 && qr.transport.kind === 'tailscale-direct' &&
+      check('remote pairing QR uses the one-time requested HTTPS URL, never loopback',
+        pairing.status === 201 && qr.transport.kind === 'broker-url' &&
           qr.transport.url === advertised && !offer.qr.includes(credentials.brokerToken));
 
       const processArgs = Bun.spawnSync(['ps', '-o', 'args=', '-p', String(child.pid)]).stdout.toString();

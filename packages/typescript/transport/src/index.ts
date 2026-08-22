@@ -125,7 +125,7 @@ export class RelayTransport implements Transport {
   }
 }
 
-export interface TailscaleDirectTransportOptions {
+export interface BrokerHttpTransportOptions {
   baseUrl: string;
   peerId?: string;
   peerToken?: string;
@@ -134,8 +134,8 @@ export interface TailscaleDirectTransportOptions {
   fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 }
 
-export class TailscaleDirectTransport implements Transport {
-  readonly kind = 'tailscale-direct';
+export class BrokerHttpTransport implements Transport {
+  readonly kind = 'broker-url';
   private readonly baseUrl: string;
   private readonly peerId?: string;
   private readonly peerToken?: string;
@@ -143,7 +143,7 @@ export class TailscaleDirectTransport implements Transport {
   private readonly headers: Record<string, string>;
   private readonly fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-  constructor(options: TailscaleDirectTransportOptions) {
+  constructor(options: BrokerHttpTransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.peerId = options.peerId;
     this.peerToken = options.peerToken;
@@ -158,16 +158,16 @@ export class TailscaleDirectTransport implements Transport {
       headers: { ...this.headers, ...envelopeHeaders(envelope) },
       body: exactArrayBuffer(envelope.bytes),
     });
-    if (!res.ok) throw new Error(`tailscale-direct send failed: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`broker-url send failed: HTTP ${res.status}`);
   }
 
   async *receive(signal?: AbortSignal): AsyncIterable<TransportEnvelope> {
-    if (!this.peerId) throw new Error('tailscale-direct receive requires peerId');
-    if (!this.peerToken) throw new Error('tailscale-direct receive requires peerToken');
+    if (!this.peerId) throw new Error('broker-url receive requires peerId');
+    if (!this.peerToken) throw new Error('broker-url receive requires peerToken');
     while (!signal?.aborted) {
       const url = `${this.baseUrl}/api/transport/envelopes?peer=${encodeURIComponent(this.peerId)}`;
       const res = await this.fetchImpl(url, { headers: { ...this.headers, accept: 'application/json', 'x-cosyncing-peer-token': this.peerToken }, signal });
-      if (!res.ok) throw new Error(`tailscale-direct receive failed: HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`broker-url receive failed: HTTP ${res.status}`);
       const body: any = await res.json();
       for (const item of Array.isArray(body?.envelopes) ? body.envelopes : []) yield envelopeFromJson(item);
       if (signal?.aborted) return;
@@ -175,6 +175,12 @@ export class TailscaleDirectTransport implements Transport {
     }
   }
 }
+
+/** @deprecated Use BrokerHttpTransportOptions. */
+export interface TailscaleDirectTransportOptions extends BrokerHttpTransportOptions {}
+
+/** @deprecated Use BrokerHttpTransport. */
+export class TailscaleDirectTransport extends BrokerHttpTransport {}
 
 function envelopeHeaders(envelope: TransportEnvelope): Record<string, string> {
   return {

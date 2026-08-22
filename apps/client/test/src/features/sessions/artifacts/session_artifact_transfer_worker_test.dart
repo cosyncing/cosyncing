@@ -32,7 +32,7 @@ void main() {
       artifactKey: 'artifact-1',
       contentHash: 'version-1',
       fetchUrl:
-          'http://127.0.0.1:7734/api/sessions/claude/session-1/'
+          '/api/sessions/claude/session-1/'
           'artifact/artifact-1?expires=1&sig=exact',
     );
     const previewDescriptor = SessionArtifactDescriptor(

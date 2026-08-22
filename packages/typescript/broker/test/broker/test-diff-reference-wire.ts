@@ -175,11 +175,10 @@ try {
     JSON.stringify(tr?.fileChanges),
   );
 
-  // 3. Fetch the signed diffRef URL directly (bearer material, no auth header) and
-  //    confirm the FULL body is served. Rewrite the origin to the test broker so
-  //    the fetch works regardless of the broker's advertised public URL.
+  // 3. Resolve the relative signed diffRef against the connected broker and
+  //    confirm the FULL body is served (bearer material, no auth header).
   if (tr?.diffRef?.fetchUrl) {
-    const u = new URL(tr.diffRef.fetchUrl);
+    const u = new URL(tr.diffRef.fetchUrl, BROKER);
     const resp = await fetch(`${BROKER}${u.pathname}${u.search}`);
     const body = await resp.text();
     check('signed diffRef URL serves the body (HTTP 200)', resp.status === 200, `status=${resp.status}`);

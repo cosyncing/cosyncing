@@ -48,8 +48,9 @@ agent list.
 ## Requirements
 
 - Complete the shared [installation prerequisites](../installation/prerequisites.md):
-  Tailscale for supported cross-device use and Bun 1.3.8 or newer for the
-  broker host. Node.js/npm installs and updates cosyncing. Tokdash is optional
+  Bun 1.3.8 or newer for the broker host. Node.js/npm installs and updates
+  cosyncing. Cross-device connectivity is an independent operator choice;
+  [compare the supported topologies](../connectivity/README.md). Tokdash is optional
   but strongly recommended for quota tracking and warnings.
 - Every agent you want cosyncing to manage must meet the version in the table
   above.

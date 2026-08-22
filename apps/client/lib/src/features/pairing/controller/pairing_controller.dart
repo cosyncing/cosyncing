@@ -71,6 +71,12 @@ enum PairingNotice {
   /// The scanned QR code does not contain pairing data.
   invalidQr,
 
+  /// A URL-free pairing code needs a client-reachable Broker URL.
+  brokerUrlRequired,
+
+  /// The separately supplied Broker URL is invalid.
+  brokerUrlInvalid,
+
   /// The pairing code uses an unsupported legacy format.
   oldQr,
 
@@ -150,7 +156,7 @@ class PairingController extends Notifier<PairingControllerState> {
       ref.read(transportPairingStoreProvider);
 
   /// Parses and persists a pairing payload.
-  Future<void> importPayload(String rawPayload) async {
+  Future<void> importPayload(String rawPayload, {String? brokerUrl}) async {
     final trimmedInput = rawPayload.trim();
     if (trimmedInput.isEmpty) {
       state = PairingControllerState(notice: PairingNotice.emptyInput);
@@ -159,7 +165,17 @@ class PairingController extends Notifier<PairingControllerState> {
 
     final transportQr = _tryParseTransportQr(trimmedInput);
     if (transportQr != null) {
-      await _acceptTransportQr(transportQr);
+      final effectiveBrokerUrl =
+          transportQr.transportUrl ?? _parsePairingBrokerUrl(brokerUrl);
+      if (effectiveBrokerUrl == null) {
+        state = PairingControllerState(
+          notice: brokerUrl == null || brokerUrl.trim().isEmpty
+              ? PairingNotice.brokerUrlRequired
+              : PairingNotice.brokerUrlInvalid,
+        );
+        return;
+      }
+      await _acceptTransportQr(transportQr, effectiveBrokerUrl);
       return;
     }
 
@@ -268,7 +284,10 @@ class PairingController extends Notifier<PairingControllerState> {
     });
   }
 
-  Future<void> _acceptTransportQr(TransportQrPayload payload) async {
+  Future<void> _acceptTransportQr(
+    TransportQrPayload payload,
+    Uri brokerUrl,
+  ) async {
     if (!payload.canAccept) {
       state = PairingControllerState(notice: PairingNotice.oldQr);
       return;
@@ -287,6 +306,7 @@ class PairingController extends Notifier<PairingControllerState> {
 
       final accepted = await _transportPairingAcceptService.accept(
         payload,
+        brokerUrl: brokerUrl,
         peerId: localPeerId,
         peerToken: localPeerToken,
         identityPublicKey: identity.publicKey,
@@ -319,7 +339,7 @@ class PairingController extends Notifier<PairingControllerState> {
       final credentials = TransportPairingCredentials(
         id: credentialsId,
         brokerId: payload.brokerId,
-        brokerUrl: payload.transportUrl,
+        brokerUrl: brokerUrl,
         localPeerId: localPeerId,
         localPeerToken: localPeerToken,
         identityPublicKey: identity.publicKey,
@@ -334,6 +354,7 @@ class PairingController extends Notifier<PairingControllerState> {
       );
       final adopted = await _adoptTransportPairing(
         payload: payload,
+        brokerUrl: brokerUrl,
         credentials: credentials,
         brokerPeerToken: brokerPeerToken,
         now: now,
@@ -358,11 +379,12 @@ class PairingController extends Notifier<PairingControllerState> {
 
   Future<bool> _adoptTransportPairing({
     required TransportQrPayload payload,
+    required Uri brokerUrl,
     required TransportPairingCredentials credentials,
     required String brokerPeerToken,
     required DateTime now,
   }) async {
-    final profileBaseUri = brokerBaseFromOrigin(payload.transportUrl);
+    final profileBaseUri = brokerBaseFromOrigin(brokerUrl);
     final profileId = profileBaseUri.toString();
     final credentialKey = brokerPeerTokenCredentialKey(profileId);
     return _profileMutationGate.runForCurrent(profileId, (
@@ -389,7 +411,7 @@ class PairingController extends Notifier<PairingControllerState> {
           id: profileId,
           displayName:
               previousProfile?.displayName ??
-              (brokerLabel.isEmpty ? payload.transportUrl.host : brokerLabel),
+              (brokerLabel.isEmpty ? brokerUrl.host : brokerLabel),
           baseUri: profileBaseUri,
           createdAt: previousProfile?.createdAt ?? now,
           incarnationId: previousProfile?.incarnationId,
@@ -478,6 +500,16 @@ class PairingController extends Notifier<PairingControllerState> {
     } on Object {
       // Best-effort cleanup only. Surface the original import failure instead.
     }
+  }
+}
+
+Uri? _parsePairingBrokerUrl(String? input) {
+  if (input == null || input.trim().isEmpty) return null;
+  try {
+    final normalized = normalizeBrokerUrl(input);
+    return validateBrokerUrl(normalized).isEmpty ? normalized : null;
+  } on FormatException {
+    return null;
   }
 }
 

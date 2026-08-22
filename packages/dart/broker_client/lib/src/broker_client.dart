@@ -1004,11 +1004,11 @@ class BrokerClient {
 
   /// Fetches an artifact URL directly.
   ///
-  /// Uses a byte response mode and accepts any fully-qualified URL,
-  /// including signed broker URLs.
+  /// Uses a byte response mode and accepts either a fully-qualified legacy URL
+  /// or a root-relative URL resolved against this client's broker.
   Future<ArtifactDownload> fetchArtifactUrl(String url) async {
     try {
-      final response = await _getBytes(url);
+      final response = await _getBytes(_resolveArtifactUrl(url));
       final headers = response.headers;
 
       return ArtifactDownload(
@@ -1061,8 +1061,9 @@ class BrokerClient {
     final cancelToken = CancelToken();
     var overLimit = false;
     try {
+      final resolvedUrl = _resolveArtifactUrl(url);
       final response = await _dio.get<List<int>>(
-        url,
+        resolvedUrl,
         options: Options(responseType: ResponseType.bytes),
         cancelToken: cancelToken,
         onReceiveProgress: (received, total) {
@@ -1356,6 +1357,20 @@ class BrokerClient {
       path,
       options: Options(responseType: ResponseType.bytes),
     );
+  }
+
+  String _resolveArtifactUrl(String value) {
+    final source = Uri.tryParse(value.trim());
+    if (source == null || value.trim().isEmpty) {
+      throw const BrokerException(message: 'Artifact fetch URL is invalid');
+    }
+    if (source.hasScheme) {
+      return source.toString();
+    }
+    if (source.hasAuthority || !source.path.startsWith('/')) {
+      throw const BrokerException(message: 'Artifact fetch URL is invalid');
+    }
+    return Uri.parse(_resolver.baseUrl).resolveUri(source).toString();
   }
 
   int? _parseContentLength(String? value) {
