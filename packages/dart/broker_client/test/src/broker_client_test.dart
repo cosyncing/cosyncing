@@ -2034,6 +2034,22 @@ void main() {
         expect(artifact.sourceUrl, signedUrl);
         expect(artifact.bytes, [122]);
       });
+
+      test('resolves root-relative artifact URLs against the broker', () async {
+        const relativeUrl =
+            '/api/sessions/opencode/session-1/artifact/signed?expires=1700000000&sig=token';
+        const resolvedUrl =
+            'http://127.0.0.1:7734/api/sessions/opencode/session-1/artifact/signed?expires=1700000000&sig=token';
+
+        dioAdapter.onGet(
+          resolvedUrl,
+          (server) => server.reply(200, [114]),
+        );
+
+        final artifact = await client.fetchArtifactUrl(relativeUrl);
+        expect(artifact.sourceUrl, resolvedUrl);
+        expect(artifact.bytes, isNotEmpty);
+      });
     });
 
     group('with token', () {
@@ -2092,6 +2108,19 @@ void main() {
           maxBytes: 4096,
         );
         expect(download.bytes.length, body.length);
+      });
+
+      test('resolves a bounded root-relative URL against the broker', () async {
+        final body = utf8.encode('bounded relative body');
+        dioAdapter.onGet(
+          'http://127.0.0.1:7734/api/relative-diff',
+          (server) => server.reply(200, body),
+        );
+        final download = await client.fetchArtifactUrlBounded(
+          '/api/relative-diff',
+          maxBytes: 4096,
+        );
+        expect(download.bytes, body);
       });
 
       test('throws ArtifactTooLargeException when the body exceeds the '
