@@ -170,7 +170,7 @@ const artifactNamed = (name: string) => (frame: any): boolean =>
   frame?.kind === 'message' && frame.message?.type === 'file-artifact' && frame.message?.name === name;
 
 function urlForSession(message: Artifact, sessionId: string, origin?: string): string {
-  const url = new URL(String(message.fetchUrl));
+  const url = new URL(String(message.fetchUrl), origin ?? 'http://broker.test');
   if (origin) {
     const target = new URL(origin);
     url.protocol = target.protocol;
@@ -262,10 +262,10 @@ try {
   check('2a owner WebSocket receives exactly one artifact', artifactFrames(owner).length === 1, `count=${artifactFrames(owner).length}`);
   check('2b simultaneous peer WebSocket receives no artifact', artifactFrames(peer).length === 0, `count=${artifactFrames(peer).length}`);
   const first = firstFrame?.message as Artifact | undefined;
-  const exactResponse = first?.fetchUrl ? await fetch(first.fetchUrl) : undefined;
+  const exactResponse = first?.fetchUrl ? await fetch(new URL(first.fetchUrl, brokerA.origin)) : undefined;
   const exactBytes = exactResponse ? await exactResponse.text() : '';
   check('2c signed HTTP reference returns exact owner bytes', exactResponse?.status === 200 && exactBytes === 'version one', `status=${exactResponse?.status ?? 0}`);
-  const wrongSessionResponse = first ? await fetch(urlForSession(first, idB)) : undefined;
+  const wrongSessionResponse = first ? await fetch(urlForSession(first, idB, brokerA.origin)) : undefined;
   check('2d another session cannot download the owner reference', wrongSessionResponse?.status === 403, `status=${wrongSessionResponse?.status ?? 0}`);
 
   owner.close();
@@ -300,7 +300,9 @@ try {
     restartedOwner.waitFrame((frame) => frame?.kind === 'history'),
     restartedPeer.waitFrame((frame) => frame?.kind === 'history'),
   ]);
-  const oldReferenceAfterRestart = first?.fetchUrl ? await fetch(first.fetchUrl) : undefined;
+  const oldReferenceAfterRestart = first?.fetchUrl
+    ? await fetch(new URL(first.fetchUrl, brokerA.origin))
+    : undefined;
   check('4 process restart hydrates the owner artifact over WebSocket', artifactFrames(restartedOwner).length === 1);
   check('4a process restart does not cross-attribute it to the peer', artifactFrames(restartedPeer).length === 0);
   check('4b the durable signed reference still returns exact bytes after restart',
@@ -313,7 +315,7 @@ try {
   );
   const versions = artifactFrames(restartedOwner).filter((message) => message.name === 'report.txt');
   const versionBodies = await Promise.all(versions.map(async (message) =>
-    message.fetchUrl ? (await fetch(message.fetchUrl)).text() : ''
+    message.fetchUrl ? (await fetch(new URL(message.fetchUrl, brokerA!.origin))).text() : ''
   ));
   check('5 rewritten path is accepted through the exact owner route', sentSecond.status === 200);
   check('5a owner retains two immutable versions at the same path',
@@ -596,7 +598,7 @@ try {
     check('13 frozen-clock pressure retains the acknowledged reverse-sorted key',
       collisionJson.records?.length === 1 && collisionJson.records[0]?.artifactKey === 'a',
       (collisionJson.records ?? []).map((record) => record.artifactKey).join(','));
-    const acceptedUrl = new URL(String(accepted.fetchUrl));
+    const acceptedUrl = new URL(String(accepted.fetchUrl), 'http://broker.test');
     const immediate = collisionStore.serve(
       'pi',
       'owner',

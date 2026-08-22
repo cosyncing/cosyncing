@@ -66,9 +66,10 @@ async function testArtifactStore(): Promise<void> {
     assert(!ref.url, 'reference-mode artifact must not keep inline data URL');
     assert(ref.artifactKey, 'reference-mode artifact should expose an artifact key');
     assert(ref.contentHash, 'reference-mode artifact should expose a content hash');
-    assert(ref.fetchUrl?.startsWith('http://phone.magicdns:7734/'), 'artifact fetch URL should use the client-visible broker origin');
+    assert(ref.fetchUrl?.startsWith('/api/sessions/'), 'artifact fetch URL should be relative to the client profile origin');
+    assert(!ref.fetchUrl?.includes('phone.magicdns'), 'request-local origins must not enter artifact references');
 
-    const url = new URL(ref.fetchUrl!);
+    const url = new URL(ref.fetchUrl!, 'http://client.example');
     assert(ref.interactionPolicy?.mode === 'display-only', 'non-HTML reference should advertise display-only policy');
     const served = store.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), url.searchParams.get('sig'));
     assert(served.status === 200, `signed artifact URL should serve bytes, got ${served.status}`);
@@ -112,7 +113,7 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
       size: 90,
       url: 'data:text/html;base64,' + Buffer.from('<form id="f"><input name="answer" value="42"><button data-cosyncing-action="save">Save</button></form>').toString('base64'),
     }) as AgentMessage & { type: 'file-artifact' };
-    const url = new URL(ref.fetchUrl!);
+    const url = new URL(ref.fetchUrl!, 'http://client.example');
     assert(ref.interactionPolicy?.mode === 'structured', 'HTML reference should advertise structured interaction policy');
     assert(ref.interactionPolicy?.bridgeVersion === 1 && ref.interactionPolicy?.schemaVersion === 1,
       'HTML interaction policy should version both bridge and payload schema');
@@ -188,7 +189,7 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
       size: 5,
       url: 'data:text/plain;base64,aGVsbG8=',
     }) as AgentMessage & { type: 'file-artifact' };
-    const plainUrl = new URL(plain.fetchUrl!);
+    const plainUrl = new URL(plain.fetchUrl!, 'http://client.example');
     assert(plain.interactionPolicy?.mode === 'display-only' && plain.interactionPolicy.allowedActions.length === 0,
       'non-HTML artifact should advertise display-only policy');
     policyError(() => store.authorizeInteraction(
@@ -211,7 +212,7 @@ async function testArtifactStoreEnvAndEviction(): Promise<void> {
         { tool: 'opencode', id: 's1' },
         { type: 'file-artifact', path: 'a.txt', name: 'a.txt', mimeType: 'text/plain', url: 'data:text/plain;base64,YQ==' },
       ) as AgentMessage & { type: 'file-artifact' };
-      const url = new URL(ref.fetchUrl!);
+      const url = new URL(ref.fetchUrl!, 'http://client.example');
       const served = store.serve('opencode', 's1', ref.artifactKey!, url.searchParams.get('expires'), url.searchParams.get('sig'));
       assert(served.status === 200, 'blank/garbage artifact cache env values should fall back to defaults, not evict immediately');
     } finally {

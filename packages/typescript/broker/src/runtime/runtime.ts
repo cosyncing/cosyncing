@@ -199,7 +199,11 @@ import {
   type BrokerServiceBoundary,
 } from './service-boundary.ts';
 import { resolveFlutterWebRoot } from './runtime-assets.ts';
-import { resolveBrokerConfiguration } from './configuration.ts';
+import {
+  BROKER_LISTEN_HOST,
+  migrateBrokerConfigV1,
+  resolveBrokerConfiguration,
+} from './configuration.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
 import { inspectDurableCorruptionEvidence, inspectDurableSchemas } from '../security/durable-state.ts';
 import { remoteFilesystemAllowed } from '../sessions/client-message-policy.ts';
@@ -356,12 +360,18 @@ let shuttingDown = false;
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 const SERVICE_BOUNDARY = detectBrokerServiceBoundary();
 
+const configMigration = migrateBrokerConfigV1();
+if (configMigration.migrated && configMigration.previousHost !== BROKER_LISTEN_HOST) {
+  console.warn(
+    `${LOG_PREFIX} migrated broker configuration to loopback; any existing external route remains operator-owned`,
+  );
+}
 const EFFECTIVE_CONFIGURATION = resolveBrokerConfiguration({ packaged: BUILD_INFO.packaged });
 const PORT = EFFECTIVE_CONFIGURATION.config.broker.port;
-const HOST = EFFECTIVE_CONFIGURATION.config.broker.host;
+const HOST = BROKER_LISTEN_HOST;
+if (EFFECTIVE_CONFIGURATION.config.broker.host !== HOST) throw new Error('broker-listener-host-invariant');
 const MACHINE = EFFECTIVE_CONFIGURATION.config.broker.machineLabel;
 const BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.internalUrl;
-const ADVERTISED_BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.advertisedUrl;
 const RUNTIME_CREDENTIALS = resolveRuntimeCredentials({
   packaged: BUILD_INFO.packaged,
   internalUrl: BROKER_URL,
@@ -406,7 +416,6 @@ const WEB_COI = /^(1|true|yes|on)$/i.test(process.env.COSYNCING_WEB_COI?.trim() 
 // source-only hook, and the OpenCode send_file tool read the legacy environment override. The token can approve
 // destructive tool calls, so an unauthenticated broker MUST NOT be exposed beyond loopback — see the
 // non-loopback bind guard below. (Review findings 2026-06-23 + 2026-06-24: HIGH/no-auth, then default-deny.)
-const HOST_IS_LOOPBACK = HOST === '127.0.0.1' || HOST.startsWith('127.') || HOST === '::1' || HOST === 'localhost';
 /** True when the request may touch a control path: no token configured → L0 loopback baseline; else the
  *  request must carry the secret as `x-cosyncing-token` or `?token=`. The Pi integration credential is accepted
  *  only on `/pi/bridge/*` and never becomes a general broker credential. */
@@ -662,14 +671,14 @@ latestBrokerHealth = brokerHealth.snapshot();
 let artifactFallbackRoot: string | undefined;
 let artifactStore: ArtifactStore;
 try {
-  artifactStore = new ArtifactStore(ADVERTISED_BROKER_URL ?? BROKER_URL, artifactCacheRoot(), {
+  artifactStore = new ArtifactStore(BROKER_URL, artifactCacheRoot(), {
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
   });
 } catch (error) {
   brokerHealth.recordStoreWrite('artifact-store', false);
   console.error(`${LOG_PREFIX} artifact cache unavailable; using a process-local fallback: ${error instanceof Error ? error.message : String(error)}`);
   artifactFallbackRoot = mkdtempSync(join(os.tmpdir(), 'cosyncing-artifacts-fallback-'));
-  artifactStore = new ArtifactStore(ADVERTISED_BROKER_URL ?? BROKER_URL, artifactFallbackRoot, {
+  artifactStore = new ArtifactStore(BROKER_URL, artifactFallbackRoot, {
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
   });
 }
@@ -1613,7 +1622,6 @@ async function discoverLocalSessions(
 }
 
 async function discoverMachineRosters(
-  localBaseUrl: string,
   visibility: RosterVisibility,
 ): Promise<AggregatedMachines> {
   const generatedAt = Date.now();
@@ -1623,7 +1631,7 @@ async function discoverMachineRosters(
   // current client (see `fetchPeerMachineRoster`), so what arrives is everything
   // this broker can decode, and this narrows it to what the CALLER can.
   const local = localMachineRoster(
-    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), localBaseUrl, generatedAt,
+    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), undefined, generatedAt,
   );
   const peers = (await Promise.all(MACHINE_PEER_CONFIG.peers.map((peer) => fetchPeerMachineRoster(peer))))
     .map((peer) => ({
@@ -1751,8 +1759,6 @@ interface WsData {
   historyLimit?: number;
   /** New clients request artifact refs; old clients omit it and receive inline adapter artifacts. */
   artifactMode?: 'inline' | 'reference';
-  /** Origin visible to this browser, used for absolute lazy-artifact URLs on phone/Tailscale clients. */
-  publicBrokerUrl?: string;
   /** Credential-scoped, non-secret durable journal namespace. */
   identity: string;
   /** Credential/profile/incarnation-scoped staged-upload namespace. */
@@ -2335,13 +2341,6 @@ function handleProtocolReceipt(ws: ServerWebSocket<WsData>, msg: any): void {
   });
 }
 
-function publicBrokerUrl(req: Request, url: URL): string {
-  if (ADVERTISED_BROKER_URL) return ADVERTISED_BROKER_URL;
-  const host = req.headers.get('x-forwarded-host') || req.headers.get('host') || url.host;
-  const proto = req.headers.get('x-forwarded-proto') || url.protocol.replace(':', '') || 'http';
-  return `${proto}://${host}`;
-}
-
 function healthWithSecurityState(): Record<string, unknown> {
   const inspections = inspectDurableSchemas();
   const recoveredCorruption = inspectDurableCorruptionEvidence();
@@ -2635,7 +2634,6 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     ws.data.id,
     ws.data.artifactMode,
     page.messages,
-    ws.data.publicBrokerUrl,
   );
   send({
     kind: 'history-page',
@@ -3749,15 +3747,6 @@ async function serveFlutter(rawRel: string): Promise<Response> {
   return new Response(index, { headers: applyCoi(headers) });
 }
 
-// Refuse to expose an unauthenticated broker beyond loopback. Packaged setup provisions the shared secret
-// file; source development may still supply the legacy environment override for fixtures.
-if (!HOST_IS_LOOPBACK && !TOKEN) {
-  throw new Error(
-    `refusing to bind non-loopback HOST=${HOST} without an installed broker credential — ` +
-      `run '${PRODUCT_IDENTITY.primaryBinary} setup' or '${PRODUCT_IDENTITY.primaryBinary} repair'.`,
-  );
-}
-
 // Fail-closed at boot on an unsafe R2 registry: a session-mutating action bound to the weak
 // `session-timestamp` revision is refused before we listen (maintainer Decision #2, 2026-07-08).
 assertR2ActionsSafe();
@@ -3947,7 +3936,6 @@ server = Bun.serve<WsData>({
           since,
           historyLimit,
           artifactMode,
-          publicBrokerUrl: publicBrokerUrl(req, url),
           identity: requestCredentialIdentity(req, url),
           uploadIdentity: requestUploadIdentity(req, url),
           compatibility,
@@ -4643,7 +4631,6 @@ server = Bun.serve<WsData>({
         action,
         session: { tool, id, cwd: base.cwd, title: base.title },
         artifactStore,
-        brokerUrl: publicBrokerUrl(req, url),
       });
       if (!result.ok) return json({ error: result.error, code: result.code }, result.status);
       return json({ ok: true, artifact: result.artifact });
@@ -5339,7 +5326,6 @@ server = Bun.serve<WsData>({
       }
       const resolution = resolveMachineSession(
         await discoverMachineRosters(
-          publicBrokerUrl(req, url),
           rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
         ),
         { machineId, tool, sessionId },
@@ -5358,7 +5344,6 @@ server = Bun.serve<WsData>({
       return json({
         ok: true,
         ...(await discoverMachineRosters(
-          publicBrokerUrl(req, url),
           rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
         )),
       });
@@ -5526,7 +5511,7 @@ server = Bun.serve<WsData>({
     // partial record. Compression is opportunistic; image/base64-heavy histories may not shrink much.
     // Target design: docs/architecture/client-ui.md
     async open(ws) {
-      const { tool, id, reason, expectedOwnerRevision, since, artifactMode, publicBrokerUrl } = ws.data;
+      const { tool, id, reason, expectedOwnerRevision, since, artifactMode } = ws.data;
       const sessionOptionsAbort = new AbortController();
       ws.data.sessionOptionsAbort = sessionOptionsAbort;
       let mode = ws.data.mode;
@@ -5535,9 +5520,9 @@ server = Bun.serve<WsData>({
         try {
           const prepared =
             ev.kind === 'message'
-              ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message, publicBrokerUrl) }
+              ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message) }
               : ev.kind === 'history'
-                ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages, publicBrokerUrl) }
+                ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages) }
                 : ev.kind === 'session' && ws.data.mc
                   ? hub.sessionDetailFrame(
                     ws.data.mc,

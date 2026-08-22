@@ -25,7 +25,7 @@ export const BUILD_INFO_SCHEMA_VERSION = 2 as const;
 /** Public compatibility versions stamped into every packaged binary and release provenance. */
 export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
   buildInfo: BUILD_INFO_SCHEMA_VERSION,
-  brokerConfig: 1,
+  brokerConfig: 2,
   setupState: 1,
   installState: 1,
   durableStores: Object.freeze({
