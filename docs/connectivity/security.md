@@ -24,6 +24,17 @@ Before exposing the broker:
 - Patch the proxy, tunnel, VPN, and host OS. Their lifecycle is independent of
   `cosy setup`, `repair`, and `uninstall`.
 
+## Source-development brokers
+
+The unconfigured source runtime retains a tokenless loopback mode for local
+development and isolated test fixtures. It prints a security warning at startup.
+That mode has no application authentication boundary: do not put it behind a
+proxy, tunnel, VPN, mesh route, or port forward.
+
+Any remotely reachable deployment must use setup-managed credentials or an
+explicit development credential. The loopback bind alone does not make a
+forwarded request local or authenticated.
+
 Removal means stopping and deleting the operator-owned ingress, removing its DNS
 and firewall exposure, and rotating credentials if the endpoint was exposed to
 an untrusted network. `cosy uninstall` intentionally does none of those tasks.

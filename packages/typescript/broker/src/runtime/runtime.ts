@@ -6049,6 +6049,13 @@ server = Bun.serve<WsData>({
 
 console.log(`${LOG_PREFIX} broker on http://${server.hostname}:${server.port}  (machine: ${MACHINE})`);
 console.log(`${LOG_PREFIX} adapters: ${registry.list().map((b) => b.id).join(', ')}`);
+if (!TOKEN) {
+  console.warn(
+    `${LOG_PREFIX} SECURITY WARNING: this source-development broker has no application credential; `
+    + 'protected HTTP and WebSocket routes are open. Keep it on loopback only and do not expose it through '
+    + 'a proxy, tunnel, VPN, mesh, or port forward.',
+  );
+}
 
 // D20: bring up a broker-owned `opencode serve` so OpenCode is sync-by-default. Best-effort and
 // non-fatal — skips cleanly when a serve is already running, the binary is absent, the URL is remote,
