@@ -44,10 +44,7 @@ void main() {
     });
 
     test('parses provider-neutral v3 with and without a Broker URL', () {
-      for (final brokerUrl in <String?>[
-        'https://cosy.example.com',
-        null,
-      ]) {
+      for (final brokerUrl in <String?>['https://cosy.example.com', null]) {
         final payloadJson = jsonEncode({
           'version': 3,
           'brokerId': 'broker-test',
@@ -65,7 +62,10 @@ void main() {
 
         expect(payload.version, 3);
         expect(payload.transport.kind, 'broker-url');
-        expect(payload.transport.url, brokerUrl == null ? isNull : Uri.parse(brokerUrl));
+        expect(
+          payload.transport.url,
+          brokerUrl == null ? isNull : Uri.parse(brokerUrl),
+        );
         expect(payload.canAccept, isTrue);
       }
     });

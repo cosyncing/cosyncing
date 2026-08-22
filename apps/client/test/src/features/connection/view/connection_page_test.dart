@@ -79,9 +79,10 @@ void main() {
       await tester.pumpWidget(buildSubject());
 
       expect(find.text('Connection'), findsOneWidget);
-      expect(find.byType(TextFormField), findsNWidgets(2));
+      expect(find.byType(TextFormField), findsNWidgets(3));
       expect(find.byKey(serverAddressField), findsOneWidget);
       expect(find.byKey(const Key('pairing-payload-field')), findsOneWidget);
+      expect(find.byKey(const Key('pairing-broker-url-field')), findsOneWidget);
       expect(find.text('Connect directly'), findsOneWidget);
       expect(find.text('Pair this device'), findsOneWidget);
       expect(find.text('Connect'), findsOneWidget);

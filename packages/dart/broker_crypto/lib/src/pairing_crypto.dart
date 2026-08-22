@@ -104,7 +104,8 @@ class PairingTransport {
       throw const PairingCryptoException('pairing transport kind is required');
     }
     final url = rawUrl == null || rawUrl.isEmpty ? null : Uri.tryParse(rawUrl);
-    if (rawUrl != null && rawUrl.isNotEmpty &&
+    if (rawUrl != null &&
+        rawUrl.isNotEmpty &&
         (url == null || !url.hasScheme || url.host.isEmpty)) {
       throw const PairingCryptoException('pairing transport URL is invalid');
     }
@@ -206,10 +207,7 @@ class QrPairingPayload {
       version: version,
       brokerId: brokerId,
       publicKey: publicKey,
-      transport: PairingTransport.fromJson(
-        transport,
-        payloadVersion: version,
-      ),
+      transport: PairingTransport.fromJson(transport, payloadVersion: version),
       pairingId: pairingId,
     );
   }

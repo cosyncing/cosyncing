@@ -52,7 +52,7 @@ async function main() {
     // 1. stashDiff → signed reference; serve returns the exact body + content hash.
     const ref = store.stashDiff('codex', 'sess-1', 'sess-1:call-1', body, 'http://broker.default:7734');
     check('stashDiff returns a signed fetch URL + hash + size', ref.fetchUrl.includes('/artifact/') && ref.contentHash.length === 64 && ref.byteSize === bytes, ref.fetchUrl);
-    const url = new URL(ref.fetchUrl);
+    const url = new URL(ref.fetchUrl, 'http://broker.default:7734');
     const key = url.pathname.split('/').pop()!;
     const served = store.serve('codex', 'sess-1', decodeURIComponent(key), url.searchParams.get('expires'), url.searchParams.get('sig'));
     check('served body is byte-identical', served.status === 200 && (await served.text()) === body);

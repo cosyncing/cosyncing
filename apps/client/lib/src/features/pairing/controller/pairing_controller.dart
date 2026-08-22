@@ -165,8 +165,8 @@ class PairingController extends Notifier<PairingControllerState> {
 
     final transportQr = _tryParseTransportQr(trimmedInput);
     if (transportQr != null) {
-      final effectiveBrokerUrl = transportQr.transportUrl ??
-          _parsePairingBrokerUrl(brokerUrl);
+      final effectiveBrokerUrl =
+          transportQr.transportUrl ?? _parsePairingBrokerUrl(brokerUrl);
       if (effectiveBrokerUrl == null) {
         state = PairingControllerState(
           notice: brokerUrl == null || brokerUrl.trim().isEmpty
