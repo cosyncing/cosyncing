@@ -314,7 +314,7 @@ void main() {
         // client's contract revision, or the broker treats it as the oldest
         // possible client and withholds every agent it might not decode.
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/agents?contractRevision=15',
+          'http://127.0.0.1:7734/api/agents?contractRevision=$cosyncingClientContractRevision',
           (server) => server.reply(200, [
             {
               'id': 'opencode',

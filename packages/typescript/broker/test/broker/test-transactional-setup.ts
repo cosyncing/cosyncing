@@ -402,6 +402,7 @@ try {
         && !('tailscaleServeRequested' in readSetupState(home))
         && after.committed
         && !after.state.resources.some((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)
+        && after.state.legacyConnectivityMigration?.preservedTargets.includes(target) === true
         && !presenter.calls.some((call) => /tailscale/i.test(call)),
       `${presenter.calls.join(',')}:${JSON.stringify(migrated.legacyConnectivityMigration)}`);
   }

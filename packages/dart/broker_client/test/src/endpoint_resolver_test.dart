@@ -3,8 +3,8 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=15&minimumBrokerRevision=2&'
-    'contractSurfaceHash=fnv1a32%3A095f3c3c';
+    'clientVersion=0.0.0-dev&contractRevision=16&minimumBrokerRevision=2&'
+    'contractSurfaceHash=fnv1a32%3Aeff55ab5';
 
 void main() {
   group('EndpointResolver', () {
@@ -372,27 +372,47 @@ void main() {
         );
       });
 
-      test('includes token query param when set', () {
+      test('never includes the shared credential in the URL', () {
         final withToken = EndpointResolver(
           baseUrl: 'http://127.0.0.1:7734',
           token: 'test-token',
         );
         expect(
           withToken.streamEndpoint('opencode', 'session-123'),
-          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?token=test-token&$_identityQuery',
+          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?$_identityQuery',
         );
       });
 
-      test('includes paired-device token query param when set', () {
+      test('never includes the paired-device credential in the URL', () {
         final withPeerToken = EndpointResolver(
           baseUrl: 'http://127.0.0.1:7734',
           peerToken: 'peer-token',
         );
         expect(
           withPeerToken.streamEndpoint('opencode', 'session-123'),
-          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?peerToken=peer-token&$_identityQuery',
+          'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?$_identityQuery',
         );
       });
+
+      test(
+        'legacy credential query requires an explicit old-broker branch',
+        () {
+          final withToken = EndpointResolver(
+            baseUrl: 'https://old-broker.example.com',
+            token: 'rollout-token',
+          );
+          expect(
+            Uri.parse(
+              withToken.streamEndpoint(
+                'opencode',
+                'session-123',
+                legacyCredentialQuery: true,
+              ),
+            ).queryParameters['token'],
+            'rollout-token',
+          );
+        },
+      );
 
       test('includes mode query param', () {
         expect(
@@ -559,12 +579,29 @@ void main() {
             'ws://127.0.0.1:7734/api/sessions/opencode/session-123/stream?',
           ),
         );
-        expect(url, contains('token=test-token'));
+        expect(url, isNot(contains('token=test-token')));
         expect(url, contains('mode=resume'));
         expect(url, contains('ticket=cursor-xyz'));
         expect(url, contains('initialHistory=250'));
         expect(url, contains('artifactMode=reference'));
         expect(url, contains(_identityQuery));
+      });
+
+      test('one-use authorization ticket is the only WebSocket query', () {
+        final url =
+            EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'long-lived-secret',
+            ).streamEndpoint(
+              'opencode',
+              'session-123',
+              mode: 'resume',
+              wsAuthTicket: 'short-lived-ticket',
+            );
+        expect(
+          url,
+          'wss://broker.example.com/api/sessions/opencode/session-123/stream?wsAuthTicket=short-lived-ticket',
+        );
       });
 
       test('encodes special characters in tool and id', () {
@@ -597,7 +634,7 @@ void main() {
       });
     });
 
-    test('profile and incarnation scope every REST and WebSocket request', () {
+    test('profile and incarnation scope authenticated HTTP requests', () {
       final scoped = EndpointResolver(
         baseUrl: 'http://127.0.0.1:7734',
         token: 'shared',
@@ -610,14 +647,9 @@ void main() {
         'x-cosyncing-client-profile': 'profile-a',
         'x-cosyncing-client-incarnation': 'incarnation-2',
       });
-      final stream = Uri.parse(
-        scoped.streamEndpoint('codex', 'session-a'),
-      );
-      expect(stream.queryParameters['clientProfileId'], 'profile-a');
-      expect(
-        stream.queryParameters['clientProfileIncarnation'],
-        'incarnation-2',
-      );
+      final stream = scoped.streamEndpoint('codex', 'session-a');
+      expect(stream, isNot(contains('clientProfileId')));
+      expect(stream, isNot(contains('clientProfileIncarnation')));
     });
 
     test('rejects a partial client profile scope', () {
@@ -630,24 +662,24 @@ void main() {
       );
     });
 
-    test('authQueryParams is empty when no token', () {
-      expect(resolver.authQueryParams, isEmpty);
+    test('hasCredential is false when no token is configured', () {
+      expect(resolver.hasCredential, isFalse);
     });
 
-    test('authQueryParams contains token when set', () {
+    test('hasCredential recognizes a shared token', () {
       final withToken = EndpointResolver(
         baseUrl: 'http://127.0.0.1:7734',
         token: 'test-token',
       );
-      expect(withToken.authQueryParams, {'token': 'test-token'});
+      expect(withToken.hasCredential, isTrue);
     });
 
-    test('authQueryParams contains paired-device token when set', () {
+    test('hasCredential recognizes a paired-device token', () {
       final withPeerToken = EndpointResolver(
         baseUrl: 'http://127.0.0.1:7734',
         peerToken: 'peer-token',
       );
-      expect(withPeerToken.authQueryParams, {'peerToken': 'peer-token'});
+      expect(withPeerToken.hasCredential, isTrue);
     });
 
     test('shared and paired-device credentials are mutually exclusive', () {

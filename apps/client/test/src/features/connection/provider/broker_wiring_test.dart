@@ -137,7 +137,7 @@ void main() {
       });
       expect(
         client?.resolver.streamEndpoint('codex', 'thread-1'),
-        contains('peerToken=paired-runtime-token'),
+        isNot(contains('paired-runtime-token')),
       );
 
       container.dispose();

@@ -485,6 +485,49 @@ try {
   check('9c disposal removes native subscriptions and closes connections',
     historyOwnerConn.subscribers === 0 && historyPeerConn.subscribers === 0 && historyOwnerConn.closed && historyPeerConn.closed);
 
+  // Base releases keyed the durable index and signatures to the advertised
+  // URL. A new installation identity adopts those records once, while old
+  // URL-derived signatures intentionally expire.
+  const legacyArtifactRoot = join(root, 'legacy-advertised-artifacts');
+  const legacySource = 'https://legacy.tailnet.ts.net';
+  const stableSource = 'broker-instance:broker_fixture_stable_identity_1234567890';
+  const legacySession = { tool: 'pi', id: 'legacy-session' };
+  const legacyStore = new ArtifactStore(legacySource, legacyArtifactRoot);
+  const legacyReference = legacyStore.putBytes(
+    legacySession,
+    {
+      type: 'file-artifact',
+      name: 'before-upgrade.txt',
+      path: 'before-upgrade.txt',
+      mimeType: 'text/plain',
+    },
+    Buffer.from('survives identity migration'),
+    'text/plain',
+  ) as Artifact;
+  const legacyUrl = new URL(String(legacyReference.fetchUrl), legacySource);
+  const migratedStore = new ArtifactStore(stableSource, legacyArtifactRoot, {
+    legacyBrokerSources: [legacySource],
+  });
+  const migratedReference = migratedStore.toReference(legacySession, legacyReference) as Artifact;
+  const migratedUrl = new URL(String(migratedReference.fetchUrl), 'http://127.0.0.1:7734');
+  const oldSignatureResponse = migratedStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(legacyReference.artifactKey),
+    legacyUrl.searchParams.get('expires'),
+    legacyUrl.searchParams.get('sig'),
+  );
+  const migratedResponse = migratedStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(migratedReference.artifactKey),
+    migratedUrl.searchParams.get('expires'),
+    migratedUrl.searchParams.get('sig'),
+  );
+  check('9d legacy advertised-URL artifact index is adopted by the stable installation identity',
+    migratedResponse.status === 200 && await migratedResponse.text() === 'survives identity migration');
+  check('9e legacy URL-derived artifact signatures explicitly expire after migration', oldSignatureResponse.status === 403);
+
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.
   const oversizedRoot = join(root, 'oversized-index');

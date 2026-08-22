@@ -27,6 +27,7 @@ import {
 } from '../../../crypto/src/index.ts';
 import {
   captureProcessOutput,
+  fixtureWsUrl,
   isolatedBrokerFixtureEnvironment,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
@@ -301,7 +302,14 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
       method: 'POST', headers: integrationHeaders,
     })).status, 401);
 
-    const shared = await openSocket(`${wsBase}${streamPath}&token=${encodeURIComponent(credentials.brokerToken)}`);
+    const shared = await openSocket(await fixtureWsUrl(
+      base,
+      wsBase,
+      sharedHeaders,
+      'pi',
+      sessionId,
+      { mode: 'resume' },
+    ));
     sharedSocket = shared.socket;
     const commandPollAbort = new AbortController();
     const commandPoll = fetch(
@@ -365,9 +373,17 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
     assert.equal(acceptedResponse.status, 200);
     const accepted = await acceptedResponse.json() as any;
     const brokerPeerToken = String(accepted.broker.peerToken);
-    assert.equal((await fetch(`${base}/api/machines?peerToken=${encodeURIComponent(brokerPeerToken)}`)).status, 200,
+    const peerHeaders = { 'x-cosyncing-peer-token': brokerPeerToken };
+    assert.equal((await fetch(`${base}/api/machines`, { headers: peerHeaders })).status, 200,
       'a v1 peer token intentionally has full broker access');
-    const peer = await openSocket(`${wsBase}${streamPath}&peerToken=${encodeURIComponent(brokerPeerToken)}`);
+    const peer = await openSocket(await fixtureWsUrl(
+      base,
+      wsBase,
+      peerHeaders,
+      'pi',
+      sessionId,
+      { mode: 'resume' },
+    ));
     peerSocket = peer.socket;
 
     const healthResponse = await fetch(`${base}/api/broker/health`, { headers: sharedHeaders });

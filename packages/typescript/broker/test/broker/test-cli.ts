@@ -38,6 +38,7 @@ import { ensureInstallationCredentials } from '../../src/security/credentials.ts
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import { detectBrokerServiceBoundary } from '../../src/runtime/service-boundary.ts';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
+import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import {
   codexTuiReadinessCheck,
   type DoctorReport,
@@ -671,7 +672,10 @@ try {
   const exportPath = join(exportTemp, 'review.json');
   writeFileSync(exportPath, '{"redacted":true}\n');
   const exitPort = await freePort();
-  const seededStore = new ArtifactStore(`http://127.0.0.1:${exitPort}`, exitCache);
+  const seededStore = new ArtifactStore(
+    `broker-instance:${loadOrCreateBrokerInstanceId(exitHome)}`,
+    exitCache,
+  );
   seededStore.putExportAttachment(
     { tool: 'fixture', id: 'exit-backstop' },
     { name: 'review', format: 'json', retentionMs: 60_000 },

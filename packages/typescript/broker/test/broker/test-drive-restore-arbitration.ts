@@ -28,6 +28,7 @@
  */
 import {
   captureProcessOutput,
+  fixtureWsUrl,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
   settledProcessOutput,
@@ -417,6 +418,19 @@ for await (const chunk of Bun.stdin.stream()) {
   });
   const brokerOutput = captureProcessOutput(broker);
   const base = `http://127.0.0.1:${port}`;
+  const wsBase = `ws://127.0.0.1:${port}`;
+  const credentialHeaders = { 'x-cosyncing-token': token };
+  const ticketedStreamUrl = (
+    params: Record<string, string>,
+    websocket = false,
+  ) => fixtureWsUrl(
+    base,
+    websocket ? wsBase : base,
+    credentialHeaders,
+    'codex',
+    sessionId,
+    params,
+  );
 
   const wsFrames = (url: string, done: (frames: any[]) => boolean, timeoutMs = 15_000): Promise<any[]> =>
     new Promise((resolve, reject) => {
@@ -465,16 +479,18 @@ for await (const chunk of Bun.stdin.stream()) {
     check('G1 fixture broker starts for the WebSocket arbitration path', ready);
 
     const streamPath = `/api/sessions/codex/${encodeURIComponent(sessionId)}/stream`;
-    const badReason = await fetch(`${base}${streamPath}?token=${token}&mode=resume&reason=bogus`);
+    const badReason = await fetch(await ticketedStreamUrl({ mode: 'resume', reason: 'bogus' }));
     check('G2 an unknown attach reason is rejected before the upgrade', badReason.status === 400);
-    const reasonWithoutMode = await fetch(`${base}${streamPath}?token=${token}&reason=app-restore`);
+    const reasonWithoutMode = await fetch(await ticketedStreamUrl({ reason: 'app-restore' }));
     check('G3 a reason without mode=resume is rejected before the upgrade', reasonWithoutMode.status === 400);
     const joinWithoutRevision = await fetch(
-      `${base}${streamPath}?token=${token}&mode=resume&reason=join-existing`,
+      await ticketedStreamUrl({ mode: 'resume', reason: 'join-existing' }),
     );
     check('G3b join-existing without an owner revision is rejected before the upgrade', joinWithoutRevision.status === 400);
     const revisionOnRestore = await fetch(
-      `${base}${streamPath}?token=${token}&mode=resume&reason=app-restore&ownerEpoch=epoch&ownerSeq=1`,
+      await ticketedStreamUrl({
+        mode: 'resume', reason: 'app-restore', ownerEpoch: 'epoch', ownerSeq: '1',
+      }),
     );
     check('G3c owner revisions are accepted only for join-existing', revisionOnRestore.status === 400);
     const unauthenticatedJoin = await fetch(
@@ -493,12 +509,16 @@ for await (const chunk of Bun.stdin.stream()) {
     // `join-existing` resolves an exact app-owned Drive connection by owner
     // revision, which only the resume path can do.
     const joinOnLive = await fetch(
-      `${base}${streamPath}?token=${token}&mode=live&reason=join-existing&ownerEpoch=epoch&ownerSeq=1`,
+      await ticketedStreamUrl({
+        mode: 'live', reason: 'join-existing', ownerEpoch: 'epoch', ownerSeq: '1',
+      }),
     );
     check('G3i join-existing is still refused on a live attach', joinOnLive.status === 400,
       `status=${joinOnLive.status}`);
     const revisionOnTakeover = await fetch(
-      `${base}${streamPath}?token=${token}&mode=live&reason=takeover&ownerEpoch=epoch&ownerSeq=1`,
+      await ticketedStreamUrl({
+        mode: 'live', reason: 'takeover', ownerEpoch: 'epoch', ownerSeq: '1',
+      }),
     );
     check('G3j an owner revision still requires join-existing, on live too',
       revisionOnTakeover.status === 400, `status=${revisionOnTakeover.status}`);
@@ -511,20 +531,20 @@ for await (const chunk of Bun.stdin.stream()) {
     // created. Only `takeover` means "seize the running session".
     const nonTakeoverOnLive: string[] = [];
     for (const badReason of ['create', 'app-restore', 'lease-restore']) {
-      const answer = await fetch(`${base}${streamPath}?token=${token}&mode=live&reason=${badReason}`);
+      const answer = await fetch(await ticketedStreamUrl({ mode: 'live', reason: badReason }));
       if (answer.status !== 400) nonTakeoverOnLive.push(`${badReason}=${answer.status}`);
     }
     check('G3k only takeover is a valid reason on a live attach',
       nonTakeoverOnLive.length === 0, nonTakeoverOnLive.join(' ') || '(all refused 400)');
     // ...and the positive control, so the matrix is not simply refusing live.
-    const takeoverOnLive = await fetch(`${base}${streamPath}?token=${token}&mode=live&reason=takeover`);
+    const takeoverOnLive = await fetch(await ticketedStreamUrl({ mode: 'live', reason: 'takeover' }));
     check('G3k2 ...while takeover itself is accepted past parameter validation',
       takeoverOnLive.status !== 400, `status=${takeoverOnLive.status}`);
     // Every one of them stays valid on resume, which is the half that would
     // break silently if the matrix were written as a blanket live refusal.
     const stillValidOnResume: string[] = [];
     for (const goodReason of ['create', 'app-restore', 'lease-restore', 'takeover']) {
-      const answer = await fetch(`${base}${streamPath}?token=${token}&mode=resume&reason=${goodReason}`);
+      const answer = await fetch(await ticketedStreamUrl({ mode: 'resume', reason: goodReason }));
       if (answer.status === 400) stillValidOnResume.push(goodReason);
     }
     check('G3k3 ...and every reason remains valid on resume',
@@ -535,11 +555,13 @@ for await (const chunk of Bun.stdin.stream()) {
     // competing owner is restored before the denial checks below.
     daemon.configure({ ignoreMethods: [] });
     rmSync(competingProcDir, { recursive: true, force: true });
+    const handoffUrl = await ticketedStreamUrl(
+      { mode: 'resume', reason: 'takeover' },
+      true,
+    );
     const handoffFrames = await new Promise<any[]>((resolve, reject) => {
       const seen: any[] = [];
-      const ws = new WebSocket(
-        `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=takeover`,
-      );
+      const ws = new WebSocket(handoffUrl);
       let requested = false;
       const timer = setTimeout(() => {
         ws.close();
@@ -586,11 +608,13 @@ for await (const chunk of Bun.stdin.stream()) {
     // adapter, refused by another, and full-authority for a third, so the
     // client's silence cannot be the guarantee — the broker's enforcement is.
     const resumeSpawnsBeforeReadOnly = resumeOwnerSpawnCount();
+    const readOnlyUrl = await ticketedStreamUrl(
+      { mode: 'resume', reason: 'takeover', readOnly: '1' },
+      true,
+    );
     const readOnlyFrames = await new Promise<any[]>((resolve, reject) => {
       const seen: any[] = [];
-      const ws = new WebSocket(
-        `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=takeover&readOnly=1`,
-      );
+      const ws = new WebSocket(readOnlyUrl);
       let asked = false;
       const timer = setTimeout(() => { ws.close(); resolve(seen); }, 15_000);
       ws.onmessage = (event) => {
@@ -644,9 +668,13 @@ for await (const chunk of Bun.stdin.stream()) {
     // updating. It must not be masked by the gentler declared-read-only
     // wording, and the client must still be able to record it globally.
     const bothFrames = await wsFrames(
-      `ws://127.0.0.1:${port}${streamPath}?token=${token}&readOnly=1`
-        + '&clientVersion=0.0.1&contractRevision=15&minimumBrokerRevision=999'
-        + '&contractSurfaceHash=fnv1a32:00000000',
+      await ticketedStreamUrl({
+        readOnly: '1',
+        clientVersion: '0.0.1',
+        contractRevision: '15',
+        minimumBrokerRevision: '999',
+        contractSurfaceHash: 'fnv1a32:00000000',
+      }, true),
       (seen) => seen.some((frame) => frame.kind === 'session'),
     );
     const bothHello = bothFrames.find((frame) => frame.kind === 'hello');
@@ -665,7 +693,7 @@ for await (const chunk of Bun.stdin.stream()) {
     const resumeSpawnsAfterHandoff = resumeOwnerSpawnCount();
 
     const frames = await wsFrames(
-      `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=resume&reason=app-restore`,
+      await ticketedStreamUrl({ mode: 'resume', reason: 'app-restore' }, true),
       (seen) => seen.some((f) => f.kind === 'attach-conflict') && seen.some((f) => f.kind === 'session'),
     );
     const conflictIndex = frames.findIndex((f) => f.kind === 'attach-conflict');
@@ -706,7 +734,7 @@ for await (const chunk of Bun.stdin.stream()) {
     // has to be told the answer. Ordered the other way round, this socket would
     // arrive at Observe with no conflict frame at all — G13b is what fails then.
     const liveTakeoverFrames = await wsFrames(
-      `ws://127.0.0.1:${port}${streamPath}?token=${token}&mode=live&reason=takeover`,
+      await ticketedStreamUrl({ mode: 'live', reason: 'takeover' }, true),
       (seen) => seen.some((f) => f.kind === 'session'),
     );
     const liveConflict = liveTakeoverFrames.find((f) => f.kind === 'attach-conflict');
@@ -724,7 +752,7 @@ for await (const chunk of Bun.stdin.stream()) {
       JSON.stringify(liveTakeoverFrames.find((f) => f.kind === 'session')?.info?.attachMode));
 
     const bareFrames = await wsFrames(
-      `ws://127.0.0.1:${port}${streamPath}?token=${token}`,
+      await ticketedStreamUrl({}, true),
       (seen) => seen.some((f) => f.kind === 'session'),
     );
     check(
@@ -739,9 +767,7 @@ for await (const chunk of Bun.stdin.stream()) {
     // for Codex's delayed session-index rediscovery would leave this socket and
     // the client roster at the old title.
     const renameFrames: any[] = [];
-    const renameSocket = new WebSocket(
-      `ws://127.0.0.1:${port}${streamPath}?token=${token}`,
-    );
+    const renameSocket = new WebSocket(await ticketedStreamUrl({}, true));
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('rename socket timed out')), 10_000);
       renameSocket.onmessage = (event) => {

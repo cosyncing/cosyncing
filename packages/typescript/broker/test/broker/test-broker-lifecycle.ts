@@ -91,6 +91,11 @@ import { decideCodexDaemonOwnership } from '../../../adapters/codex/src/index.ts
 import type { CodexDaemonStatus } from '../../src/installation/broker-lifecycle.ts';
 import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import {
+  isolatedBrokerFixtureEnvironment,
+  reserveLoopbackFixturePort,
+  waitForBrokerHealth,
+} from '../helpers/isolated-broker-fixture.ts';
+import {
   AGENT_SKILL_SHA256,
   AGENT_SKILL_SOURCE,
   agentSkillTargets,
@@ -919,6 +924,33 @@ try {
         && existsSync(install.committed ? install.state.migrations[0]!.backupPath : ''));
   }
 
+  // A running candidate reads schema 1 in memory; only an explicit confirmed repair persists schema 2.
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    atomicWriteOwnerOnly(join(m.home, 'config.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      broker: {
+        host: '127.0.0.1',
+        port: 7734,
+        machineLabel: 'repair-config-migration',
+        internalUrl: 'http://127.0.0.1:7734',
+        advertisedUrl: 'https://legacy.example.test',
+      },
+      update: { channel: 'stable' },
+    })}\n`, { mode: 0o600 });
+    const plan = await inspectRepair(baseOptions(m));
+    const repaired = await runRepair({ ...baseOptions(m), confirmed: true, allowLegacyIntegrations: false });
+    const config = JSON.parse(readFileSync(join(m.home, 'config.json'), 'utf8')) as any;
+    const install = inspectInstallState(m.home);
+    check('confirmed repair is the explicit persistence boundary for broker config v2',
+      plan.actions.some((action) => action.id === 'schema.migrate')
+        && repaired.exitCode === 0
+        && config.schemaVersion === 2
+        && config.broker.advertisedUrl === undefined
+        && install.committed
+        && install.state.migrations.some((item) => item.id === 'broker-config-v1-to-v2'));
+  }
+
   // Legacy connectivity state is relinquished without invoking or changing its external route.
   {
     const m = machine({ binaryHash: true }); cleanup.push(m.root);
@@ -937,6 +969,13 @@ try {
       serviceChoice: 'foreground',
       tailscaleServeRequested: true,
     })}\n`, { mode: 0o600 });
+    writeSetupState(readSetupState(m.home), m.home);
+    writeInstallState(inspection.state, m.home);
+    const genericInstallWrite = inspectInstallState(m.home);
+    check('generic state writers preserve legacy connectivity evidence until an explicit migration',
+      readSetupState(m.home).tailscaleServeRequested === true
+        && genericInstallWrite.committed
+        && genericInstallWrite.state.resources.some((item) => item.id === LEGACY_TAILSCALE_RESOURCE_ID));
     const repaired = await runRepair({ ...baseOptions(m), confirmed: true, allowLegacyIntegrations: false });
     const after = inspectInstallState(m.home);
     check('repair relinquishes legacy connectivity records without provider effects',
@@ -945,6 +984,7 @@ try {
         && !('tailscaleServeRequested' in readSetupState(m.home))
         && after.committed
         && !after.state.resources.some((item) => item.id === LEGACY_TAILSCALE_RESOURCE_ID)
+        && after.state.legacyConnectivityMigration?.preservedTargets.includes(legacyTarget) === true
         && m.tailscale.calls.length === 0);
   }
 
@@ -1964,6 +2004,74 @@ try {
     check('failed candidate health restores the previous binary and service',
       rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
+  }
+  {
+    // A frozen schema-1 reader represents the released base service. The
+    // candidate is the current runtime in a separate process. If candidate
+    // startup persists schema 2, rollback restores the old executable but the
+    // frozen reader refuses its configuration and the transaction cannot
+    // become healthy.
+    const fixture = upgradeMachine();
+    const candidatePortLease = await reserveLoopbackFixturePort();
+    const candidatePort = candidatePortLease.port;
+    atomicWriteOwnerOnly(join(fixture.m.home, 'config.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      broker: {
+        host: '127.0.0.1',
+        port: candidatePort,
+        machineLabel: 'cross-version-rollback',
+        internalUrl: `http://127.0.0.1:${candidatePort}`,
+        advertisedUrl: 'https://legacy.tailnet.ts.net',
+      },
+      update: { channel: 'stable' },
+    }, null, 2)}\n`, { mode: 0o600 });
+    let legacyServiceHealthy = false;
+    const service: UpgradeServiceController = {
+      async inspect() { return { active: true }; },
+      async stop() {},
+      async start() {
+        if (readFileSync(fixture.m.binary, 'utf8') !== 'old-binary-v1') return;
+        const frozen = JSON.parse(readFileSync(join(fixture.m.home, 'config.json'), 'utf8')) as any;
+        if (frozen.schemaVersion !== 1) throw new Error('released base rejects non-v1 config');
+        legacyServiceHealthy = true;
+      },
+    };
+    const rolledBack = await runUpgrade({
+      ...upgradeOptions({ ...fixture, service, active: () => true, failStart() {} }),
+      service,
+      verifyBrokerVersion: async () => {
+        await candidatePortLease.release();
+        const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
+          cwd: process.cwd(),
+          env: isolatedBrokerFixtureEnvironment(fixture.m.home, { overrides: {
+            COSYNCING_HOME: fixture.m.home,
+            COSYNCING_TOKEN_FILE: '',
+            PORT: String(candidatePort),
+            HOST: '127.0.0.1',
+            COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
+            COSYNCING_CODEX_SYNC_SERVER: '0',
+            COSYNCING_CODEX_APP_SERVER_SOCK: '',
+            COSYNCING_CODEX_REMOTE_ADDR: '',
+          } }),
+          stdout: 'ignore',
+          stderr: 'ignore',
+        });
+        try {
+          await waitForBrokerHealth(child, `http://127.0.0.1:${candidatePort}/api/health`);
+        } finally {
+          if (child.exitCode == null) child.kill();
+          await child.exited;
+        }
+        return false;
+      },
+    });
+    const after = JSON.parse(readFileSync(join(fixture.m.home, 'config.json'), 'utf8')) as any;
+    check('cross-version health failure restores a schema-1 base service without candidate config mutation',
+      rolledBack.detailCode === 'upgrade-rolled-back'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+        && after.schemaVersion === 1
+        && legacyServiceHealthy,
+      `${rolledBack.detailCode}/schema=${String(after.schemaVersion)}/healthy=${legacyServiceHealthy}`);
   }
   {
     const fixture = upgradeMachine();

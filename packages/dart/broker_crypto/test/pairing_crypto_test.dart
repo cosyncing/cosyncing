@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:broker_crypto/broker_crypto.dart';
 import 'package:test/test.dart';
@@ -67,6 +68,25 @@ void main() {
           brokerUrl == null ? isNull : Uri.parse(brokerUrl),
         );
         expect(payload.canAccept, isTrue);
+      }
+    });
+
+    test('rejects the shared invalid transport/version matrix', () {
+      final fixtureFile = File(
+        '../../typescript/crypto/test-vectors/pairing-invalid.json',
+      );
+      final fixture =
+          jsonDecode(fixtureFile.readAsStringSync()) as Map<String, dynamic>;
+      for (final entry in fixture['cases'] as List<dynamic>) {
+        final item = entry as Map<String, dynamic>;
+        final encoded = base64UrlNoPadding(
+          utf8.encode(jsonEncode(item['payload'])),
+        );
+        expect(
+          () => QrPairingPayload.parse('cosyncing://pair?payload=$encoded'),
+          throwsA(isA<PairingCryptoException>()),
+          reason: item['name'] as String,
+        );
       }
     });
   });

@@ -73,6 +73,7 @@ async function startBroker(fixtureRoot: string, port: number): Promise<BrokerPro
         HOST: '127.0.0.1',
         COSYNCING_CACHE_DIR: join(fixtureRoot, 'artifact-cache'),
         COSYNCING_WEB_DIR: WEB_BUILD,
+        COSYNCING_FS_REMOTE_ENABLED: '1',
         COSYNCING_PI_SESSIONS_ROOT: '',
         PI_CODING_AGENT_SESSION_DIR: '',
       },
@@ -377,7 +378,10 @@ try {
   const browserErrors: string[] = [];
   page.on('pageerror', (error) => browserErrors.push(error.message));
   page.on('console', (message) => {
-    if (message.type() === 'error') browserErrors.push(message.text());
+    if (message.type() === 'error') {
+      const location = message.location().url;
+      browserErrors.push(location ? `${message.text()} (${location})` : message.text());
+    }
   });
 
   await openRosterSession(page, brokerA.origin, 'Artifact owner', ownerId);

@@ -30,6 +30,7 @@ import {
   captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
+  settledProcessOutput,
   startHealthyFixtureBrokerOnPort,
 } from '../helpers/isolated-broker-fixture.ts';
 
@@ -563,6 +564,8 @@ try {
   check('bridge wire end-to-end', false, 'threw: ' + String(err));
 } finally {
   broker.kill();
+  await broker.exited.catch(() => undefined);
+  await settledProcessOutput(brokerOutput);
 }
 
 // ── 7. Pi live bridge ask_user tool ───────────────────────────────────────────

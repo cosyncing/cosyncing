@@ -65,9 +65,11 @@ try {
     const badParamBody = await badParam.json().catch(() => ({}));
     check('execute rejects client-supplied outputPath (400 BAD_PARAM)', badParam.status === 400 && (badParamBody as any).code === 'BAD_PARAM', `status=${badParam.status} body=${JSON.stringify(badParamBody)}`);
 
-    // Capability advertisement: /api/agents (open GET) exposes canTranscriptExport for the agents whose
-    // adapter implements the export hook (opencode + pi), computed from hook presence — never a name branch.
-    const agents = (await (await fetch(`${base}/api/agents`)).json()) as any[];
+    // Capability advertisement is data-bearing and authenticated. It exposes
+    // canTranscriptExport for adapters implementing the hook, never by name.
+    const agents = (await (await fetch(`${base}/api/agents`, {
+      headers: { 'x-cosyncing-token': TOKEN },
+    })).json()) as any[];
     const byId = new Map(agents.map((a) => [a.id, a]));
     check('opencode advertises canTranscriptExport', byId.get('opencode')?.canTranscriptExport === true, JSON.stringify(byId.get('opencode')));
     check('pi advertises canTranscriptExport', byId.get('pi')?.canTranscriptExport === true, JSON.stringify(byId.get('pi')));

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseQrPairingPayload } from '@cosyncing/crypto';
@@ -34,7 +34,16 @@ try {
   assert.throws(() => registry.createOffer({ brokerUrl: 'https://example.test/path' }), (error: unknown) =>
     error instanceof PairingHttpError && error.code === 'PAIRING_INVALID_INPUT');
 
-  console.log('PASS provider-neutral pairing URL and QR contracts');
+  const invalid = JSON.parse(readFileSync(join(
+    import.meta.dir,
+    '../../../crypto/test-vectors/pairing-invalid.json',
+  ), 'utf8')) as { cases: Array<{ name: string; payload: unknown }> };
+  for (const fixture of invalid.cases) {
+    const qr = `cosyncing://pair?payload=${Buffer.from(JSON.stringify(fixture.payload)).toString('base64url')}`;
+    assert.throws(() => parseQrPairingPayload(qr), Error, fixture.name);
+  }
+
+  console.log('PASS provider-neutral pairing URL and shared invalid-fixture contracts');
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

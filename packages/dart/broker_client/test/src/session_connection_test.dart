@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -89,6 +90,123 @@ void main() {
           );
         },
       );
+
+      test(
+        'exchanges header credential for a one-use WebSocket ticket',
+        () async {
+          final dio = Dio();
+          RequestOptions? ticketRequest;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/health')) {
+                  handler.resolve(
+                    Response<Map<String, dynamic>>(
+                      requestOptions: options,
+                      statusCode: 200,
+                      data: {
+                        'ok': true,
+                        'contract': {'revision': 16},
+                      },
+                    ),
+                  );
+                  return;
+                }
+                ticketRequest = options;
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 201,
+                    data: {
+                      'ok': true,
+                      'wsAuthTicket': 'short-lived-ticket',
+                      'expiresAt': '2026-08-22T00:00:30.000Z',
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          String? ticketedUrl;
+          final ticketed = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'long-lived-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'session-ticket',
+            dio: dio,
+            adapterFactory: (url) {
+              ticketedUrl = url;
+              return FakeWebSocketAdapter();
+            },
+          );
+          addTearDown(ticketed.dispose);
+
+          await ticketed.connect();
+
+          expect(
+            ticketRequest?.uri.toString(),
+            'https://broker.example.com/api/ws-auth-tickets',
+          );
+          expect(
+            ticketRequest?.headers['x-cosyncing-token'],
+            'long-lived-secret',
+          );
+          final parsed = Uri.parse(ticketedUrl!);
+          expect(parsed.queryParameters, {
+            'wsAuthTicket': 'short-lived-ticket',
+          });
+          expect(ticketedUrl, isNot(contains('long-lived-secret')));
+        },
+      );
+
+      test('uses the legacy query only for a pre-ticket broker', () async {
+        final dio = Dio();
+        var ticketRequests = 0;
+        dio.interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.path.endsWith('/api/ws-auth-tickets')) {
+                ticketRequests += 1;
+              }
+              handler.resolve(
+                Response<Map<String, dynamic>>(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: {
+                    'ok': true,
+                    'contract': {'revision': 15},
+                  },
+                ),
+              );
+            },
+          ),
+        );
+        String? legacyUrl;
+        final legacy = SessionConnection(
+          resolver: EndpointResolver(
+            baseUrl: 'https://old-broker.example.com',
+            token: 'rollout-only-secret',
+          ),
+          tool: 'codex',
+          sessionId: 'legacy-session',
+          dio: dio,
+          adapterFactory: (url) {
+            legacyUrl = url;
+            return FakeWebSocketAdapter();
+          },
+        );
+        addTearDown(legacy.dispose);
+
+        await legacy.connect();
+
+        expect(ticketRequests, 0);
+        expect(
+          Uri.parse(legacyUrl!).queryParameters['token'],
+          'rollout-only-secret',
+        );
+      });
 
       test('requests configured artifactMode on stream URL', () async {
         streamUrl = null;

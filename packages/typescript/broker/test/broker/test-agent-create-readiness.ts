@@ -147,7 +147,9 @@ Bun.serve({ hostname, port, fetch(request) {
     pi: badPi,
   });
   try {
-    const agents = await (await fetch(`${managed.base}/api/agents`)).json() as any[];
+    const agents = await (await fetch(`${managed.base}/api/agents`, {
+      headers: createHeaders(),
+    })).json() as any[];
     assert.equal(agents.find((agent) => agent.id === 'opencode')?.canCreateSession, false);
     assert.equal(agents.find((agent) => agent.id === 'pi')?.canCreateSession, false,
       'live broker readiness must not advertise Pi under Node 22.14');
@@ -229,7 +231,9 @@ await Bun.sleep(60_000);
     pi: fakePiWithNode('22.19.0', 'good-pi'),
   });
   try {
-    const agents = await (await fetch(`${externalBroker.base}/api/agents`)).json() as any[];
+    const agents = await (await fetch(`${externalBroker.base}/api/agents`, {
+      headers: createHeaders(),
+    })).json() as any[];
     assert.equal(agents.find((agent) => agent.id === 'opencode')?.canCreateSession, true);
     assert.equal(agents.find((agent) => agent.id === 'pi')?.canCreateSession, true);
     const response = await fetch(`${externalBroker.base}/api/sessions/opencode`, {

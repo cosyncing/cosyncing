@@ -1,14 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Broker auth model (default-deny on mutations) — deterministic, no real agents.
+ * Broker auth model (default-deny on data-bearing APIs) — deterministic, no real agents.
  *
  * When COSYNCING_TOKEN is set (required for any non-loopback bind), EVERY mutating route (POST/PATCH/DELETE)
- * must require the token — so a newly-added control route is gated by construction — while ordinary read-only
- * GETs (roster, health) stay open. Sensitive GETs that expose workspace files or drive a stream are explicit
- * exceptions and must be tokened. The in-session Pi extension / Claude hook / OpenCode send_file tool and the
- * app all carry `x-cosyncing-token`. With NO token (the loopback baseline) every route is open and behavior is
- * unchanged. This guards the 2026-06-24 review fix (send_file / restart / codex-sync / createSession / rename
- * were ungated despite a configured token).
+ * must require the token. Only minimal health, pairing acceptance, and signed artifacts stay public. WebSocket
+ * upgrades use a short-lived ticket issued over authenticated HTTP; long-lived query credentials are refused.
  *
  *   bun run packages/typescript/broker/test/broker/test-broker-auth.ts
  */
@@ -16,6 +12,8 @@ export {};
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect, createServer, type Socket } from 'node:net';
+import { WsAuthTicketRegistry } from '../../src/security/ws-auth-tickets.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`); };
@@ -36,6 +34,7 @@ async function spawnBroker(
       COSYNCING_MACHINE: 'auth-test',
       COSYNCING_DEV_MODE: '1', // source-only Claude hook contract; packaged builds expose no hook routes
       COSYNCING_HOME: home,
+      COSYNCING_TOKEN_FILE: '',
       COSYNCING_RESTART_DRY_RUN: '1', // never actually relaunch during the test
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1', // don't spawn a managed opencode serve
       COSYNCING_CODEX_SYNC_SERVER: '0', // never inherit a developer daemon/socket
@@ -58,10 +57,71 @@ const status = async (base: string, path: string, init?: RequestInit): Promise<n
   try { return (await fetch(`${base}${path}`, init)).status; } catch { return -1; }
 };
 
+async function loopbackForwarder(targetPort: number): Promise<{ base: string; close: () => Promise<void> }> {
+  const sockets = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = connect({ host: '127.0.0.1', port: targetPort });
+    sockets.add(client);
+    sockets.add(upstream);
+    client.pipe(upstream);
+    upstream.pipe(client);
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+    client.on('close', () => sockets.delete(client));
+    upstream.on('close', () => sockets.delete(upstream));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('forwarder did not obtain a port');
+  return {
+    base: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    },
+  };
+}
+
+async function wsTicket(base: string, token: string, tool: string, sessionId: string, params: Record<string, string>) {
+  const response = await fetch(`${base}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: JSON.stringify({ tool, sessionId, params }),
+  });
+  const body = await response.json().catch(() => ({})) as any;
+  return { status: response.status, ticket: String(body.wsAuthTicket ?? '') };
+}
+
 const TOKEN = 'auth-test-secret';
 const PI_CREDENTIAL = 'pi-route-only-credential-0123456789abcdefghijklmno';
 const withTok: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN }, body: '{}' };
 const noTok = (method = 'POST'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: method === 'DELETE' ? undefined : '{}' });
+
+{
+  let now = 1_000;
+  const tickets = new WsAuthTicketRegistry({ now: () => now, ttlMs: 10 });
+  const binding = {
+    tool: 'codex',
+    sessionId: 'session-a',
+    params: { mode: 'resume' },
+    identity: 'fixture',
+    uploadIdentity: 'fixture',
+    credentialAuthenticated: true,
+  };
+  const wrongRoute = tickets.issue(binding).wsAuthTicket;
+  check('WebSocket ticket is bound to one tool and session',
+    tickets.consume(wrongRoute, 'codex', 'session-b') === undefined
+      && tickets.consume(wrongRoute, 'codex', 'session-a') === undefined);
+  const expired = tickets.issue(binding).wsAuthTicket;
+  now += 11;
+  check('WebSocket ticket expires before upgrade',
+    tickets.consume(expired, 'codex', 'session-a') === undefined);
+}
 
 // Mutating routes that MUST be gated when a token is set (one representative per class the review flagged).
 const MUTATING: [string, RequestInit][] = [
@@ -114,9 +174,47 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
 try {
   check('tokened broker is up', tokened.up, tokened.base);
 
-  // Read-only GETs stay OPEN without a token.
-  check('GET /api/health open without token', (await status(tokened.base, '/api/health')) === 200);
-  check('GET /api/sessions open without token', (await status(tokened.base, '/api/sessions')) === 200);
+  // Only minimal liveness stays open without a token.
+  const publicHealthResponse = await fetch(`${tokened.base}/api/health`);
+  const publicHealth = await publicHealthResponse.json() as any;
+  check('GET /api/health is open and minimal without token',
+    publicHealthResponse.status === 200
+      && publicHealth.ok === true
+      && publicHealth.machine === undefined
+      && publicHealth.contract === undefined);
+  const privateHealth = await fetch(`${tokened.base}/api/health`, {
+    headers: { 'x-cosyncing-token': TOKEN },
+  }).then((response) => response.json() as Promise<any>);
+  check('authenticated health includes setup and compatibility identity',
+    privateHealth.machine === 'auth-test' && typeof privateHealth.contract?.revision === 'number');
+  check('GET /api/sessions requires a token', (await status(tokened.base, '/api/sessions')) === 401);
+  check('GET /api/sessions accepts a token', (await status(tokened.base, '/api/sessions', {
+    headers: { 'x-cosyncing-token': TOKEN },
+  })) === 200);
+
+  const proxy = await loopbackForwarder(7796);
+  try {
+    check('proxy path keeps unauthenticated roster private', (await status(proxy.base, '/api/sessions')) === 401);
+    check('proxy path accepts an authenticated roster request', (await status(proxy.base, '/api/sessions', {
+      headers: { 'x-cosyncing-token': TOKEN, 'x-forwarded-for': '127.0.0.1' },
+    })) === 200);
+    check('proxy loopback TCP source remains T2 for filesystem access', (await status(
+      proxy.base,
+      '/api/sessions/codex/missing/fs',
+      { headers: { 'x-cosyncing-token': TOKEN, forwarded: 'for=127.0.0.1' } },
+    )) === 403);
+    check('proxy loopback TCP source remains T2 for R2 actions', (await status(
+      proxy.base,
+      '/api/sessions/opencode/missing/export/preflight',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN, 'x-forwarded-for': '127.0.0.1' },
+        body: '{}',
+      },
+    )) === 403);
+  } finally {
+    await proxy.close();
+  }
 
   // Every mutating route is 401 WITHOUT the token.
   for (const [p, init] of MUTATING) {
@@ -132,17 +230,20 @@ try {
   // WITH the token, a mutating route is NOT 401 (codex/sync dry-run → 200; proves the token unlocks it).
   const okSync = await status(tokened.base, '/api/agents/codex/sync', { ...withTok, body: JSON.stringify({ enabled: false }) });
   check('POST /api/agents/codex/sync with token is accepted (not 401)', okSync !== 401 && okSync !== -1, `status=${okSync}`);
-  // …and via the ?token= query param too (the path the WS stream uses).
+  // Long-lived query credentials are deliberately not accepted.
   const okQuery = await status(tokened.base, `/api/agents/codex/sync?token=${TOKEN}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
-  check('mutating route accepts ?token= query param', okQuery !== 401 && okQuery !== -1, `status=${okQuery}`);
+  check('mutating route rejects ?token= query param', okQuery === 401, `status=${okQuery}`);
 
   const unauthResume = await fetch(`${tokened.base}/api/sessions/codex/missing/stream?mode=resume`);
   const unauthResumeBody = await unauthResume.json().catch(() => ({})) as any;
   check('unauthenticated direct resume is rejected with stable code',
     unauthResume.status === 401 && unauthResumeBody.code === 'RESUME_AUTH_REQUIRED',
     `status=${unauthResume.status} code=${String(unauthResumeBody.code)}`);
-  const authResume = await status(tokened.base, `/api/sessions/codex/missing/stream?mode=resume&token=${TOKEN}`, { method: 'GET' });
+  const resumeTicket = await wsTicket(tokened.base, TOKEN, 'codex', 'missing', { mode: 'resume' });
+  const authResume = await status(tokened.base, `/api/sessions/codex/missing/stream?wsAuthTicket=${resumeTicket.ticket}`, { method: 'GET' });
   check('authenticated direct resume reaches the websocket upgrade boundary', authResume === 426, `status=${authResume}`);
+  const replayedResume = await status(tokened.base, `/api/sessions/codex/missing/stream?wsAuthTicket=${resumeTicket.ticket}`, { method: 'GET' });
+  check('WebSocket authorization ticket is single-use', replayedResume === 401, `status=${replayedResume}`);
 
   const piHeaders = { 'content-type': 'application/json', 'x-cosyncing-integration-token': PI_CREDENTIAL };
   const hello = await fetch(`${tokened.base}/pi/bridge/hello`, {

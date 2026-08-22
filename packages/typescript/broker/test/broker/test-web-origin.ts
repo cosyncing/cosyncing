@@ -103,9 +103,10 @@ try {
   // trailing slash is what the shell's relative asset URLs and the worker scope resolve against.
   const red = await fetch(`${built.base}/cosy`, { redirect: 'manual' });
   check('GET /cosy canonicalizes to /cosy/', (red.status === 301 || red.status === 302) && red.headers.get('location') === '/cosy/', `status=${red.status} location=${red.headers.get('location')}`);
-  // Setup prints `<base>/cosy`, and a `?token=` dropped on that one hop would look like a broken sign-in.
-  const redQuery = await fetch(`${built.base}/cosy?token=abc`, { redirect: 'manual' });
-  check('GET /cosy?token=abc keeps the query across the canonicalization', redQuery.headers.get('location') === '/cosy/?token=abc', `location=${redQuery.headers.get('location')}`);
+  const redQuery = await fetch(`${built.base}/cosy?view=recent&token=abc&peerToken=def`, { redirect: 'manual' });
+  check('GET /cosy strips retired credential queries but keeps ordinary state',
+    redQuery.headers.get('location') === '/cosy/?view=recent',
+    `location=${redQuery.headers.get('location')}`);
   // Only the bare path redirects, and its Location is built from the literal mount plus the query — so no
   // request can make it protocol-relative (`//host`) or point it off-origin. A path that merely looks
   // hostile is served by the mount instead, which is the same guarantee by a different route.

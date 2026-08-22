@@ -74,10 +74,10 @@ check('published build/schema metadata carries the exact current contract identi
     && PUBLISHED_BROKER_CONTRACT.surfaceHash === BROKER_CONTRACT.surfaceHash
     && PUBLISHED_BROKER_CONTRACT.minimumClientRevision === BROKER_CONTRACT.minimumClientRevision);
 check('equal revisions are compatible', equal.status === 'compatible' && !equal.readOnly);
-check('one overlap revision behind nudges the client without disabling control', clientBehind.status === 'client-behind' && !clientBehind.readOnly);
+check('revision-15 client fails closed after the ticket-only stream boundary',
+  clientBehind.status === 'hard-incompatible' && clientBehind.readOnly);
 // The literal is a deliberate tripwire, not a duplicate of the constant: every
-// revision bump must land here and re-argue that the new revision is additive
-// before the "previous-revision client stays writable" claim is renewed.
+// revision bump must land here and re-argue its compatibility boundary.
 // Revision 13 added only additive owner, authority, capability, attach-reason,
 // and refusal fields, which a released revision-12 client can ignore.
 //
@@ -111,32 +111,26 @@ check('one overlap revision behind nudges the client without disabling control',
 // emits; it exists so a FUTURE mode degrades one field to read-only instead of
 // aborting a session decode, which is the lesson revision 14 paid for.
 //
-// Each absent field also reproduces the prior behavior exactly: absent
-// `handoffAvailable` still offers handoff, absent `takeoverAvailable` still
-// falls back to `supported && observing`, absent `takeoverMode` still means
-// `resume`. So a pre-15 broker and a post-15 client agree with no negotiation.
-//
-// The revision carries one more additive thing that is not a DTO field: the
-// optional `readOnly=1` stream-query parameter, by which a client declares that
-// this socket must not be granted mutation authority. It is additive in the
-// same ordinary sense — no route is added, and a broker that does not know the
-// parameter ignores an unrecognized query key — and it is unreachable in the
-// mismatched direction rather than merely tolerated: an older client never
-// sends it, and an older broker never receives it, because a revision-15 client
-// sends it only on meeting an attach mode that no pre-15 broker can emit. It
-// therefore cannot change what any existing pairing does.
-check('an installed previous-revision client remains writable against the additive current broker',
-  BROKER_CONTRACT.revision === 15
-    && clientBehind.status === 'client-behind'
-    && !clientBehind.readOnly);
-check('one-revision overlap remains writable despite the older surface hash',
-  clientBehind.status === 'client-behind' && !clientBehind.readOnly);
+// Revision 16 is intentionally breaking at the authentication boundary. A
+// protected stream now requires a header-issued, one-use ticket and rejects the
+// long-lived query credential used by revision 15. Client releases therefore
+// ship first and retain a narrowly gated revision-15 broker fallback; once this
+// broker ships, its minimum-client floor makes any stale client visibly
+// read-only instead of letting attach fail later with an unexplained 401.
+check('the current broker declares the intentional revision-16 client floor',
+  BROKER_CONTRACT.revision === 16
+    && BROKER_CONTRACT.minimumClientRevision === 16
+    && clientBehind.status === 'hard-incompatible'
+    && clientBehind.readOnly);
+check('the overlap window never overrides the explicit security floor',
+  clientBehind.status === 'hard-incompatible' && clientBehind.readOnly);
 check('one overlap revision ahead nudges the broker without disabling control', brokerBehind.status === 'broker-behind' && !brokerBehind.readOnly);
 check('a revision outside the one-version overlap window fails closed',
   beyondOverlap.status === 'hard-incompatible' && beyondOverlap.readOnly);
 check('a client requiring a newer broker degrades to read-only', hardMinimum.status === 'hard-incompatible' && hardMinimum.readOnly);
 check('same revision with a different public surface fails closed', hardHash.status === 'hard-incompatible' && hardHash.readOnly);
-check('pre-handshake clients remain supported during the overlap window', legacy.status === 'unknown' && !legacy.readOnly);
+check('pre-handshake negotiation remains unknown; stream auth enforces the ticket boundary separately',
+  legacy.status === 'unknown' && !legacy.readOnly);
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const keyId = 'update-contract-fixture';
@@ -296,9 +290,19 @@ try {
 }
 
 async function firstWsFrame(sessionId: string, query: string): Promise<any> {
+  const ticketResponse = await fetch(`${base}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: JSON.stringify({
+      tool: 'pi',
+      sessionId,
+      params: Object.fromEntries(new URLSearchParams(query)),
+    }),
+  });
+  const ticketBody = await ticketResponse.json() as any;
   return new Promise((resolve, reject) => {
     let settled = false;
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/sessions/pi/${encodeURIComponent(sessionId)}/stream?token=${token}&${query}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/sessions/pi/${encodeURIComponent(sessionId)}/stream?wsAuthTicket=${encodeURIComponent(String(ticketBody.wsAuthTicket ?? ''))}`);
     const timer = setTimeout(() => { ws.close(); reject(new Error('websocket hello timeout')); }, 12_000);
     ws.onmessage = (event) => {
       clearTimeout(timer);
@@ -328,7 +332,9 @@ try {
   // Reaching here means the readiness wait returned. It throws otherwise,
   // after killing the broker, so there is no longer a flag to consult.
   check('update-contract fixture broker starts', true);
-  const health = await (await fetch(`${base}/api/health`)).json() as any;
+  const health = await (await fetch(`${base}/api/health`, {
+    headers: { 'x-cosyncing-token': token },
+  })).json() as any;
   // The commit rides alongside the version because the version alone cannot identify a build: every build
   // in a release cycle shares one semver, so setup's post-commit check — which must tell a just-installed
   // build from the previous one still holding the port — has nothing else to bind to.
@@ -378,7 +384,7 @@ try {
   // re-pinning a literal on every contract bump.
   const previousRevisionHello = await firstWsFrame(piHello.id,
     `contractRevision=${BROKER_CONTRACT.revision - 1}&minimumBrokerRevision=2`
-    + '&contractSurfaceHash=fnv1a32%3Aeab8e93f&clientVersion=0.9.8',
+    + '&contractSurfaceHash=fnv1a32%3A095f3c3c&clientVersion=0.9.8',
   );
   const hardHello = await firstWsFrame(piHello.id,
     `contractRevision=${BROKER_CONTRACT.revision + 1}&minimumBrokerRevision=${BROKER_CONTRACT.revision + 1}&clientVersion=2.0.0`,
@@ -387,10 +393,10 @@ try {
   check('WebSocket hello advertises broker identity and equal compatibility',
     hello.kind === 'hello' && hello.broker?.version === BUILD_INFO.version
       && hello.compatibility?.status === 'compatible');
-  check('an installed previous-revision WebSocket client stays writable',
+  check('a previous-revision WebSocket client is explicitly read-only at the ticket floor',
     previousRevisionHello.kind === 'hello'
-      && previousRevisionHello.compatibility?.status === 'client-behind'
-      && previousRevisionHello.compatibility?.readOnly === false);
+      && previousRevisionHello.compatibility?.status === 'hard-incompatible'
+      && previousRevisionHello.compatibility?.readOnly === true);
   check('hard WebSocket mismatch explicitly degrades to read-only',
     hardHello.kind === 'hello' && hardHello.compatibility?.status === 'hard-incompatible'
       && hardHello.compatibility?.readOnly === true);
@@ -398,7 +404,12 @@ try {
     legacyHello.kind === 'hello' && legacyHello.compatibility?.status === 'unknown'
       && legacyHello.compatibility?.readOnly === false);
 
-  const badContract = await fetch(`${base}/api/sessions/missing/missing/stream?token=${token}&contractRevision=wat`);
+  const badContractTicket = await fetch(`${base}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
+    body: JSON.stringify({ tool: 'missing', sessionId: 'missing', params: { contractRevision: 'wat' } }),
+  }).then((response) => response.json() as Promise<any>);
+  const badContract = await fetch(`${base}/api/sessions/missing/missing/stream?wsAuthTicket=${encodeURIComponent(String(badContractTicket.wsAuthTicket ?? ''))}`);
   check('malformed client contract metadata is rejected before WebSocket upgrade', badContract.status === 400);
 
   const unauthGet = await fetch(`${base}/api/broker/update`);
