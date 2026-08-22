@@ -20,7 +20,6 @@ import { readFileSync } from 'node:fs';
 import type { CodexRuntimeUpdatePolicy } from '@cosyncing/protocol';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { atomicWriteJsonOwnerOnly } from '../security/secure-files.ts';
-import { withoutLegacyConnectivityIntent } from './legacy-connectivity-migration.ts';
 
 export const SETUP_STATE_SCHEMA_VERSION = 1 as const;
 
@@ -179,7 +178,7 @@ export function writeSetupState(next: SetupState, home = setupStateHome()): void
   // additive fields survive because callers merge from readSetupState() before reaching this boundary.
   atomicWriteJsonOwnerOnly(
     setupStatePath(home),
-    withoutLegacyConnectivityIntent({ ...next, schemaVersion: SETUP_STATE_SCHEMA_VERSION }),
+    { ...next, schemaVersion: SETUP_STATE_SCHEMA_VERSION },
   );
 }
 

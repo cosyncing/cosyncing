@@ -92,6 +92,9 @@ export interface ArtifactStoreOptions {
   sessionReplayLimit?: number;
   /** Test/embedding override. Always clamped to the production hard ceiling. */
   maxIndexBytes?: number;
+  /** URL-derived namespaces written by older brokers and adopted once into
+   * the current durable installation identity. Existing signed URLs expire. */
+  legacyBrokerSources?: string[];
 }
 
 interface ArtifactIndex {
@@ -365,11 +368,30 @@ export class ArtifactStore {
         .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt || b.createdAt - a.createdAt)
         .slice(0, this.maxRecords)
         .reverse();
-    for (const r of retained) {
-      this.records.set(r.key, r);
+    const legacySources = new Set((options.legacyBrokerSources ?? []).map(normalizeBrokerSource));
+    let migratedLegacySource = false;
+    for (const loadedRecord of retained) {
+      const loadedSource = loadedRecord.brokerSource == null
+        ? undefined
+        : normalizeBrokerSource(loadedRecord.brokerSource);
+      const r = loadedSource && legacySources.has(loadedSource)
+        ? {
+            ...loadedRecord,
+            brokerSource: this.brokerSource,
+            key: recordKey(
+              this.brokerSource,
+              loadedRecord.tool,
+              loadedRecord.sessionId,
+              loadedRecord.artifactKey,
+            ),
+          }
+        : loadedRecord;
+      if (r !== loadedRecord) migratedLegacySource = true;
+      const existing = this.records.get(r.key);
+      if (!existing || existing.lastAccessedAt <= r.lastAccessedAt) this.records.set(r.key, r);
       this.lastRecency = Math.max(this.lastRecency, r.createdAt, r.lastAccessedAt);
     }
-    if (retained.length !== loaded.length) this.persist('sweep');
+    if (retained.length !== loaded.length || migratedLegacySource) this.persist('sweep');
   }
 
   toReference(session: ArtifactSession, message: AgentMessage, brokerUrl?: string): AgentMessage {

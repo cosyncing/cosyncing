@@ -803,7 +803,14 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     }
 
     const schemaProblems = inspectDurableSchemas(durableStateLayout({ stateRoot: dependencies.home, cacheRoot: dependencies.cacheRoot }))
-      .filter((store) => store.status !== 'ok' && store.status !== 'missing');
+      .filter((store) => store.status !== 'ok'
+        && store.status !== 'missing'
+        // Config v1 remains an intentionally supported runtime input. An upgrade must not require
+        // persisting v2 before switching binaries, because the previous service needs v1 intact if
+        // candidate health fails and rollback restores it.
+        && !(store.id === 'config'
+          && store.status === 'unsupported-version'
+          && store.version === 1));
     if (schemaProblems.length > 0) {
       return result('blocked', 1, 'upgrade-schema-repair-required', 'Repair or migrate durable state before changing binary versions.', fromVersion, recovered);
     }

@@ -313,15 +313,56 @@ class PairingController extends Notifier<PairingControllerState> {
         exchangePublicKey: exchange.publicKey,
       );
 
+      final pairingId = payload.pairingId;
+      final brokerPeerToken = accepted.broker.peerToken?.trim() ?? '';
+      if (pairingId == null ||
+          pairingId.isEmpty ||
+          accepted.broker.peerId != payload.brokerId ||
+          brokerPeerToken.isEmpty) {
+        throw const crypto.PairingCryptoException(
+          'Pairing acceptance is not bound to the scanned broker.',
+        );
+      }
+
+      final wrappedDataKey = crypto.WrappedDataKey(
+        version: accepted.wrappedDataKey.version,
+        algorithm: accepted.wrappedDataKey.algorithm,
+        ephemeralPublicKey: accepted.wrappedDataKey.ephemeralPublicKey,
+        nonce: accepted.wrappedDataKey.nonce,
+        ciphertext: accepted.wrappedDataKey.ciphertext,
+        tag: accepted.wrappedDataKey.tag,
+      );
+      if (payload.version == 3) {
+        if (accepted.broker.identityPublicKey != payload.publicKey ||
+            accepted.brokerProof.version != 1 ||
+            accepted.brokerProof.algorithm != 'Ed25519') {
+          throw const crypto.PairingCryptoException(
+            'Pairing acceptance identity does not match the scanned broker.',
+          );
+        }
+        final proofValid = await crypto.PairingCrypto.verifyIdentitySignature(
+          publicKey: payload.publicKey,
+          message: crypto.PairingCrypto.pairingAcceptanceProofBytes(
+            pairingId: pairingId,
+            clientPeerId: localPeerId,
+            clientIdentityPublicKey: identity.publicKey,
+            clientExchangePublicKey: exchange.publicKey,
+            brokerPeerId: accepted.broker.peerId,
+            brokerPeerToken: brokerPeerToken,
+            brokerIdentityPublicKey: accepted.broker.identityPublicKey,
+            wrappedDataKey: wrappedDataKey,
+          ),
+          signature: accepted.brokerProof.signature,
+        );
+        if (!proofValid) {
+          throw const crypto.PairingCryptoException(
+            'Pairing acceptance signature is invalid.',
+          );
+        }
+      }
+
       final unwrappedDataKey = await crypto.PairingCrypto.unwrapDataKey(
-        crypto.WrappedDataKey(
-          version: accepted.wrappedDataKey.version,
-          algorithm: accepted.wrappedDataKey.algorithm,
-          ephemeralPublicKey: accepted.wrappedDataKey.ephemeralPublicKey,
-          nonce: accepted.wrappedDataKey.nonce,
-          ciphertext: accepted.wrappedDataKey.ciphertext,
-          tag: accepted.wrappedDataKey.tag,
-        ),
+        wrappedDataKey,
         recipientPrivateKey: exchange.privateKey,
       );
 
@@ -329,12 +370,6 @@ class PairingController extends Notifier<PairingControllerState> {
         brokerId: payload.brokerId,
         localPeerId: localPeerId,
       );
-      final brokerPeerToken = accepted.broker.peerToken?.trim() ?? '';
-      if (brokerPeerToken.isEmpty) {
-        throw const FormatException(
-          'Pairing accept response did not include a broker peer token.',
-        );
-      }
       final now = DateTime.now();
       final credentials = TransportPairingCredentials(
         id: credentialsId,

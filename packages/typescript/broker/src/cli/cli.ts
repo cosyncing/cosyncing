@@ -199,7 +199,7 @@ Commands:
   upgrade  Verify, stage, switch, health-check, and roll back a signed release (alias: update)
   uninstall Remove only receipt/hash/marker-owned resources; preserve data by default
   version  Print immutable build metadata
-  doctor   Diagnose package, agents, state, service, and network without changing the machine
+  doctor   Diagnose the package, agents, state, service, and local broker without changing the machine
   help     Show this help
 
 The ${PRODUCT_IDENTITY.aliasBinary} command is an installed alias for ${PRODUCT_IDENTITY.primaryBinary}.

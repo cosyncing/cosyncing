@@ -6,6 +6,7 @@ import {
   createQrPairingPayload,
   generateDataKey,
   loadOrCreateLocalKeyStore,
+  signBytes,
   wrapDataKeyForPeer,
   type DataKey,
   type QrBrokerDescriptor,
@@ -38,6 +39,12 @@ export interface BrokerTransportPeerMaterial {
   identityPublicKey: string;
   brokerPeerId: string;
   dataKey: DataKey;
+}
+
+export interface PairingAcceptanceProof {
+  version: 1;
+  algorithm: 'Ed25519';
+  signature: string;
 }
 
 interface PairingOffer {
@@ -129,7 +136,9 @@ export class TransportPairingRegistry {
       version: 3,
       brokerId: brokerPeerId,
       pairingId,
-      publicKey: keys.exchange.publicKey,
+      // V3 commits the broker identity key. The accept response must prove
+      // possession before a client stores the returned endpoint or secret.
+      publicKey: keys.identity.publicKey,
       transport: { kind: 'broker-url', ...(brokerUrl ? { url: brokerUrl } : {}) },
     });
     this.offers.set(pairingId, {
@@ -174,6 +183,7 @@ export class TransportPairingRegistry {
     peer: { peerId: string; label?: string; identityPublicKey: string };
     broker: { peerId: string; peerToken: string; identityPublicKey: string };
     wrappedDataKey: WrappedDataKey;
+    brokerProof: PairingAcceptanceProof;
   } {
     this.assertPairingAcceptAllowed(pairingId);
     const offer = this.offers.get(pairingId);
@@ -208,6 +218,7 @@ export class TransportPairingRegistry {
     }
     const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
     const dataKey = generateDataKey();
+    const wrappedDataKey = wrapDataKeyForPeer(dataKey, exchangePublicKey);
     const peer: AcceptedTransportPeer = {
       peerId,
       ...(offer.label ? { label: offer.label } : {}),
@@ -217,25 +228,37 @@ export class TransportPairingRegistry {
       brokerPeerTokenHash: tokenHash(offer.brokerPeerToken),
       brokerIdentityPublicKey: keys.identity.publicKey,
       dataKey: serializeDataKey(dataKey),
-      wrappedDataKey: wrapDataKeyForPeer(dataKey, exchangePublicKey),
+      wrappedDataKey,
       acceptedAt: new Date(this.now()).toISOString(),
     };
     this.peers.set(peerId, peer);
     offer.acceptedPeerId = peerId;
     this.pairingAcceptFailures.delete(pairingId);
     this.save();
+    const broker = {
+      peerId: peer.brokerPeerId,
+      peerToken: offer.brokerPeerToken,
+      identityPublicKey: peer.brokerIdentityPublicKey,
+    };
+    const proofBytes = pairingAcceptanceProofBytes({
+      pairingId,
+      client: { peerId, identityPublicKey, exchangePublicKey },
+      broker,
+      wrappedDataKey,
+    });
     return {
       peer: {
         peerId,
         ...(peer.label ? { label: peer.label } : {}),
         identityPublicKey,
       },
-      broker: {
-        peerId: peer.brokerPeerId,
-        peerToken: offer.brokerPeerToken,
-        identityPublicKey: peer.brokerIdentityPublicKey,
+      broker,
+      wrappedDataKey,
+      brokerProof: {
+        version: 1,
+        algorithm: 'Ed25519',
+        signature: signBytes(keys.identity.privateKey, proofBytes),
       },
-      wrappedDataKey: peer.wrappedDataKey,
     };
   }
 
@@ -350,6 +373,36 @@ export class TransportPairingRegistry {
     if (direct) return direct;
     return [...this.peers.values()].find((peer) => peer.brokerPeerId === peerId);
   }
+}
+
+export function pairingAcceptanceProofBytes(input: {
+  pairingId: string;
+  client: { peerId: string; identityPublicKey: string; exchangePublicKey: string };
+  broker: { peerId: string; peerToken: string; identityPublicKey: string };
+  wrappedDataKey: WrappedDataKey;
+}): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    pairingId: input.pairingId,
+    client: {
+      peerId: input.client.peerId,
+      identityPublicKey: input.client.identityPublicKey,
+      exchangePublicKey: input.client.exchangePublicKey,
+    },
+    broker: {
+      peerId: input.broker.peerId,
+      peerToken: input.broker.peerToken,
+      identityPublicKey: input.broker.identityPublicKey,
+    },
+    wrappedDataKey: {
+      version: input.wrappedDataKey.version,
+      algorithm: input.wrappedDataKey.algorithm,
+      ephemeralPublicKey: input.wrappedDataKey.ephemeralPublicKey,
+      nonce: input.wrappedDataKey.nonce,
+      ciphertext: input.wrappedDataKey.ciphertext,
+      tag: input.wrappedDataKey.tag,
+    },
+  }));
 }
 
 export function tokenHash(token: string): string {

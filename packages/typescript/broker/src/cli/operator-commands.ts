@@ -198,7 +198,7 @@ async function verifyLocalBroker(
   dependencies: OperatorCommandDependencies,
   access: LocalBrokerAccess,
 ): Promise<void> {
-  assertBrokerHealth(await request(dependencies, access, '/api/health', {}, false), access);
+  assertBrokerHealth(await request(dependencies, access, '/api/health'), access);
 }
 
 function pairingPayload(qr: string, pairingId: string, brokerUrl: string | undefined): QrPairingPayloadV3 {
@@ -457,7 +457,12 @@ export async function runPairCommand(
         pairingId: offer.pairingId,
         qr: offer.qr,
         expiresAt: offer.expiresAt,
-        ...(brokerUrl ? { brokerUrl } : {}),
+        ...(brokerUrl ? {
+          brokerUrl,
+          // Compatibility alias for schemaVersion 1 consumers. Remove only
+          // after the machine-readable output advances to schemaVersion 2.
+          advertisedUrl: brokerUrl,
+        } : {}),
         tokenScope: 'full-broker-api-v1',
       }, null, 2)}\n`);
       return { exitCode: 0, detailCode: 'pairing-created' };

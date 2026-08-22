@@ -296,9 +296,9 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
 ///
 /// A profile credential may be either the broker-wide owner token or a
 /// revocable QR-paired device token. The secure-storage key selects the wire
-/// header/query scheme; secret values never enter Drift. Loopback does not
-/// bypass a configured credential because production brokers may enforce auth
-/// on every interface, including localhost.
+/// header scheme; secret values never enter Drift or current-broker request
+/// URLs. Loopback does not bypass a configured credential because production
+/// brokers may enforce auth on every interface, including localhost.
 Future<BrokerClient> createBrokerClientForProfile(
   Ref ref,
   BrokerProfile profile,

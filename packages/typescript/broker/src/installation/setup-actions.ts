@@ -132,6 +132,7 @@ export interface SetupActionInputs {
     systemdLingeringRequested: boolean;
   };
   removeResourceIds?: readonly string[];
+  legacyConnectivityMigration?: { preservedTargets: readonly string[] };
   now?: () => Date;
 }
 
@@ -663,6 +664,14 @@ export function createInstallCommitAction(inputs: SetupActionInputs): SetupCommi
           serviceChoice: inputs.installMetadata.serviceChoice,
           systemdLingeringRequested: inputs.installMetadata.systemdLingeringRequested,
         },
+        ...(inputs.legacyConnectivityMigration
+          ? {
+              legacyConnectivityMigration: {
+                migratedAt: committedAt,
+                preservedTargets: [...inputs.legacyConnectivityMigration.preservedTargets],
+              },
+            }
+          : {}),
       }, inputs.home);
     },
     verify: () => {

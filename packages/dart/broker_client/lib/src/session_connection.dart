@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'package:broker_client/src/endpoint_resolver.dart';
 import 'package:broker_client/src/websocket_adapter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:dio/dio.dart';
 
 /// Connection state for a [SessionConnection].
 enum SessionConnectionState {
@@ -56,6 +57,7 @@ class SessionConnection {
     SessionOwnerRevision? ownerRevision,
     int initialHistory = _defaultInitialHistory,
     WebSocketAdapter Function(String url)? adapterFactory,
+    Dio? dio,
   }) : _resolver = resolver,
        _tool = tool,
        _sessionId = sessionId,
@@ -65,7 +67,9 @@ class SessionConnection {
        _readOnly = readOnly,
        _ownerRevision = ownerRevision,
        _initialHistory = initialHistory,
-       _adapterFactory = adapterFactory ?? WebSocketAdapter.new;
+       _adapterFactory = adapterFactory ?? WebSocketAdapter.new,
+       _dio = dio ?? Dio(),
+       _ownsDio = dio == null;
 
   static const int _defaultInitialHistory = 100;
 
@@ -75,6 +79,10 @@ class SessionConnection {
   final String _artifactMode;
   final WebSocketAdapter Function(String url) _adapterFactory;
   final int _initialHistory;
+  final Dio _dio;
+  final bool _ownsDio;
+  bool _legacyCredentialQueryRequired = false;
+  bool _wsTicketCapabilityChecked = false;
 
   /// Control mode for the attach (`resume` to Drive, `live` to join an
   /// existing live owner, null to Observe). Mutated by [reattach] and applied
@@ -229,17 +237,7 @@ class SessionConnection {
     _setState(SessionConnectionState.connecting);
 
     try {
-      final url = _resolver.streamEndpoint(
-        _tool,
-        _sessionId,
-        mode: _mode,
-        reason: _reason,
-        readOnly: _readOnly,
-        ownerRevision: _ownerRevision,
-        ticket: _cursor,
-        initialHistory: _initialHistory,
-        artifactMode: _artifactMode,
-      );
+      final url = await _streamUrl();
       _adapter = _adapterFactory(url);
       await _adapter!.connect();
 
@@ -532,12 +530,64 @@ class SessionConnection {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await _closeAdapter();
+    if (_ownsDio) _dio.close();
     _setState(SessionConnectionState.closed);
     await _stateController.close();
     await _eventController.close();
   }
 
   // --- Internal ---
+
+  Future<String> _streamUrl() async {
+    final params = _resolver.streamAttachParameters(
+      mode: _mode,
+      reason: _reason,
+      readOnly: _readOnly,
+      ownerRevision: _ownerRevision,
+      ticket: _cursor,
+      initialHistory: _initialHistory,
+      artifactMode: _artifactMode,
+    );
+    String? wsAuthTicket;
+    if (_resolver.hasCredential && !_wsTicketCapabilityChecked) {
+      final health = await _dio.get<Map<String, dynamic>>(
+        _resolver.healthEndpoint,
+        options: Options(headers: _resolver.authHeaders),
+      );
+      final contract = health.data?['contract'];
+      final revision = contract is Map<String, dynamic>
+          ? contract['revision']
+          : null;
+      _legacyCredentialQueryRequired = revision is int && revision < 16;
+      _wsTicketCapabilityChecked = true;
+    }
+    if (_resolver.hasCredential && !_legacyCredentialQueryRequired) {
+      final response = await _dio.post<Map<String, dynamic>>(
+        _resolver.wsAuthTicketEndpoint,
+        data: {'tool': _tool, 'sessionId': _sessionId, 'params': params},
+        options: Options(headers: _resolver.jsonHeaders),
+      );
+      wsAuthTicket = response.data?['wsAuthTicket'] as String?;
+      if (wsAuthTicket == null || wsAuthTicket.isEmpty) {
+        throw const FormatException(
+          'Broker did not return a WebSocket authorization ticket.',
+        );
+      }
+    }
+    return _resolver.streamEndpoint(
+      _tool,
+      _sessionId,
+      mode: _mode,
+      reason: _reason,
+      readOnly: _readOnly,
+      ownerRevision: _ownerRevision,
+      ticket: _cursor,
+      initialHistory: _initialHistory,
+      artifactMode: _artifactMode,
+      wsAuthTicket: wsAuthTicket,
+      legacyCredentialQuery: _legacyCredentialQueryRequired,
+    );
+  }
 
   void _setState(SessionConnectionState s) {
     _state = s;
@@ -718,17 +768,7 @@ class SessionConnection {
       final reconnectGen = ++_generation;
 
       try {
-        final url = _resolver.streamEndpoint(
-          _tool,
-          _sessionId,
-          mode: _mode,
-          reason: _reason,
-          readOnly: _readOnly,
-          ownerRevision: _ownerRevision,
-          ticket: _cursor,
-          initialHistory: _initialHistory,
-          artifactMode: _artifactMode,
-        );
+        final url = await _streamUrl();
         _adapter = _adapterFactory(url);
         await _adapter!.connect();
 

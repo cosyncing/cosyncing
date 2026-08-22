@@ -218,7 +218,7 @@ class QrPairingPayload {
   /// Broker identity.
   final String brokerId;
 
-  /// Broker public X25519 key.
+  /// Broker identity public key committed by the QR payload.
   final String publicKey;
 
   /// Transport descriptor.
@@ -343,6 +343,78 @@ abstract final class PairingCrypto {
       ),
       privateKey: base64UrlNoPadding(_wrapDer(_x25519Pkcs8Prefix, data.bytes)),
     );
+  }
+
+  /// Canonical acceptance transcript shared with the TypeScript broker.
+  static Uint8List pairingAcceptanceProofBytes({
+    required String pairingId,
+    required String clientPeerId,
+    required String clientIdentityPublicKey,
+    required String clientExchangePublicKey,
+    required String brokerPeerId,
+    required String brokerPeerToken,
+    required String brokerIdentityPublicKey,
+    required WrappedDataKey wrappedDataKey,
+  }) {
+    return Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'version': 1,
+          'pairingId': pairingId,
+          'client': {
+            'peerId': clientPeerId,
+            'identityPublicKey': clientIdentityPublicKey,
+            'exchangePublicKey': clientExchangePublicKey,
+          },
+          'broker': {
+            'peerId': brokerPeerId,
+            'peerToken': brokerPeerToken,
+            'identityPublicKey': brokerIdentityPublicKey,
+          },
+          'wrappedDataKey': {
+            'version': wrappedDataKey.version,
+            'algorithm': wrappedDataKey.algorithm,
+            'ephemeralPublicKey': wrappedDataKey.ephemeralPublicKey,
+            'nonce': wrappedDataKey.nonce,
+            'ciphertext': wrappedDataKey.ciphertext,
+            'tag': wrappedDataKey.tag,
+          },
+        }),
+      ),
+    );
+  }
+
+  /// Verifies an Ed25519 broker identity signature.
+  static Future<bool> verifyIdentitySignature({
+    required String publicKey,
+    required List<int> message,
+    required String signature,
+  }) async {
+    try {
+      return await _ed25519.verify(
+        message,
+        signature: Signature(
+          base64UrlDecodeNoPadding(signature),
+          publicKey: SimplePublicKey(
+            _unwrapDer(publicKey, _ed25519SpkiPrefix),
+            type: KeyPairType.ed25519,
+          ),
+        ),
+      );
+    } on Object {
+      return false;
+    }
+  }
+
+  /// Signs a canonical pairing transcript with an Ed25519 identity key.
+  static Future<String> signIdentityMessage({
+    required String privateKey,
+    required List<int> message,
+  }) async {
+    final seed = _unwrapDer(privateKey, _ed25519Pkcs8Prefix);
+    final keyPair = await _ed25519.newKeyPairFromSeed(seed);
+    final signature = await _ed25519.sign(message, keyPair: keyPair);
+    return base64UrlNoPadding(signature.bytes);
   }
 
   /// Wraps a 32-byte data key for a peer.

@@ -38,12 +38,10 @@ const SESSION_WINDOW_KEY = 'cosyncing.sessionWindow';
 const TOKDASH_URL_KEY = 'cosyncing.tokdashUrl';
 const BROKER_TOKEN_KEY = 'cosyncing.brokerToken';
 // Optional broker shared secret — only needed when the broker is exposed beyond loopback (COSYNCING_TOKEN set).
-// Bootstrap from a `?token=` on first load (then persist), and send it on the WS stream plus gated control
-// fetches. Loopback default has no token, so these are no-ops. See main.ts authed()/non-loopback guard.
+// It is entered through the unlock form and sent only in request headers. Loopback default has no token, so
+// these are no-ops. See runtime.ts authed()/non-loopback guard.
 function brokerToken() {
   try {
-    const fromUrl = new URL(location.href).searchParams.get('token');
-    if (fromUrl) localStorage.setItem(BROKER_TOKEN_KEY, fromUrl);
     return localStorage.getItem(BROKER_TOKEN_KEY) || '';
   } catch { return ''; }
 }
@@ -2419,8 +2417,28 @@ async function attach(s, mode = null) {
   if (mode) params.set('mode', mode);
   params.set('artifactMode', 'reference');
   if (currentHistoryCursor) params.set('since', currentHistoryCursor);
-  { const t = brokerToken(); if (t) params.set('token', t); } // auth the stream when the broker requires a token
-  const qs = params.toString();
+  let streamParams = params;
+  const credential = brokerToken();
+  if (credential) {
+    const ticketResponse = await fetch('/api/ws-auth-tickets', {
+      method: 'POST',
+      headers: { ...tokenHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        tool: s.tool,
+        sessionId: s.id,
+        params: Object.fromEntries(params.entries()),
+      }),
+    });
+    const ticketBody = await ticketResponse.json().catch(() => ({}));
+    if (!ticketResponse.ok || !ticketBody.wsAuthTicket) {
+      if (attachToken === attachSeq && sameSession(current, s) && document.getElementById('sessionLoading')) {
+        thread.innerHTML = '<div class="empty">Could not authorize this session. Unlock the broker and retry.</div>';
+      }
+      return;
+    }
+    streamParams = new URLSearchParams({ wsAuthTicket: ticketBody.wsAuthTicket });
+  }
+  const qs = streamParams.toString();
   const url = `${proto}://${location.host}/api/sessions/${encodeURIComponent(s.tool)}/${encodeURIComponent(s.id)}/stream${qs ? '?' + qs : ''}`;
   const conn = new WebSocket(url);
   ws = conn;
@@ -6051,8 +6069,7 @@ async function loadAgents() {
 //
 // Probe one gated endpoint on boot; if the broker wants a credential we don't have, ask for it here. This is
 // deliberately not a `?token=` URL flow: secrets in URLs leak into browser history, access logs and Referer
-// headers, and can't be revoked per-viewer. brokerToken() still accepts a URL token for first-run handoff,
-// which is a one-time bootstrap rather than the standing access path.
+// headers, and can't be revoked per-viewer. The unlock form is the only browser credential entry path.
 async function probeBrokerAuth() {
   try {
     const res = await fetch('/api/broker/health', { headers: { ...tokenHeader() } });

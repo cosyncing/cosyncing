@@ -10,7 +10,7 @@ enum BrokerCredentialKind {
   sharedToken,
 
   /// A revocable paired-device token sent as
-  /// `x-cosyncing-peer-token` / `peerToken`.
+  /// `x-cosyncing-peer-token`.
   peerToken,
 }
 

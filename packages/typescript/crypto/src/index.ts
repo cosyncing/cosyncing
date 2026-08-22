@@ -78,11 +78,13 @@ export interface QrPairingPayload {
 
 export interface QrPairingPayloadV1 extends QrPairingPayload {
   version: 1;
+  transport: Exclude<PairingTransport, { kind: 'broker-url' }>;
 }
 
 export interface QrPairingPayloadV2 extends QrPairingPayload {
   version: 2;
   pairingId: string;
+  transport: Exclude<PairingTransport, { kind: 'broker-url' }>;
 }
 
 export interface QrPairingPayloadV3 extends QrPairingPayload {
@@ -205,7 +207,17 @@ export function createQrPairingPayload(payload: QrPairingPayloadInput): string {
         } satisfies QrPairingPayloadV3;
       })()
     : version === 2
-      ? { ...payload, version: 2, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV2
+      ? (() => {
+          if (payload.transport.kind === 'broker-url') {
+            throw new Error('broker-url pairing transport requires version 3');
+          }
+          return {
+            ...payload,
+            version: 2,
+            pairingId: hasPairingId ? String(payload.pairingId) : '',
+            transport: payload.transport,
+          } satisfies QrPairingPayloadV2;
+        })()
       : { ...payload, version: 1 } as QrPairingPayloadV1;
   validatePairingPayload(normalized);
   return `cosyncing://pair?payload=${encodeURIComponent(b64(Buffer.from(JSON.stringify(normalized), 'utf8')))}`;
@@ -262,7 +274,7 @@ function validatePairingPayload(payload: QrPairingPayload): void {
 function validatePairingPayloadV1(payload: QrPairingPayloadV1): void {
   if (!payload.brokerId) throw new Error('pairing payload brokerId is required');
   if (!payload.publicKey) throw new Error('pairing payload publicKey is required');
-  validatePairingTransport(payload.transport);
+  validateLegacyPairingTransport(payload.transport);
   validateQrBrokerDescriptor(payload.broker);
 }
 
@@ -270,7 +282,7 @@ function validatePairingPayloadV2(payload: QrPairingPayloadV2): void {
   if (!payload.brokerId) throw new Error('pairing payload brokerId is required');
   if (!payload.publicKey) throw new Error('pairing payload publicKey is required');
   if (!payload.pairingId) throw new Error('pairing payload pairingId is required');
-  validatePairingTransport(payload.transport);
+  validateLegacyPairingTransport(payload.transport);
   validateQrBrokerDescriptor(payload.broker);
 }
 
@@ -311,6 +323,15 @@ function validatePairingTransport(transport: PairingTransport): void {
     return;
   }
   throw new Error('unsupported pairing transport');
+}
+
+function validateLegacyPairingTransport(
+  transport: Exclude<PairingTransport, { kind: 'broker-url' }>,
+): void {
+  if ((transport as PairingTransport).kind === 'broker-url') {
+    throw new Error('broker-url pairing transport requires version 3');
+  }
+  validatePairingTransport(transport);
 }
 
 function b64(bytes: Uint8Array | Buffer): string {

@@ -78,6 +78,14 @@
       "minimumClientRevision": 0,
       "clientMinimumBrokerRevision": 2,
       "change": "SessionDriveControl gains handoffAvailable, takeoverAvailable and takeoverMode so control availability is declared as data instead of inferred, plus an unknown AttachMode fallback so an unrecognized mode degrades to read-only rather than aborting a session decode."
+    },
+    {
+      "revision": 16,
+      "surfaceHash": "fnv1a32:eff55ab5",
+      "minimumClientRevision": 16,
+      "clientMinimumBrokerRevision": 2,
+      "change": "Authenticated clients exchange header credentials for single-use WebSocket authorization tickets through /api/ws-auth-tickets; long-lived query credentials are no longer accepted.",
+      "compatibilityChange": "The broker requires revision 16 clients because revision 15 cannot acquire WebSocket authorization tickets. Release and promote the revision 16 client before publishing this broker."
     }
   ]
 }

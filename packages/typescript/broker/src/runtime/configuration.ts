@@ -60,7 +60,15 @@ export type BrokerConfigProblem =
   | 'migration-required';
 
 export type BrokerConfigInspection =
-  | { status: 'ok'; path: string; config: BrokerConfig; migratedFrom?: 1; previousHost?: string }
+  | {
+      status: 'ok';
+      path: string;
+      config: BrokerConfig;
+      migratedFrom?: 1;
+      previousHost?: string;
+      previousInternalUrl?: string;
+      previousAdvertisedUrl?: string;
+    }
   | { status: 'missing'; path: string; problem: 'missing' }
   | {
       status: 'error';
@@ -262,16 +270,20 @@ function fileProblem(inspection: SecureFileInspection): BrokerConfigInspection {
 function migrateLegacyBrokerConfigValue(value: Record<string, unknown>): {
   config: BrokerConfig;
   previousHost: string;
+  previousInternalUrl: string;
+  previousAdvertisedUrl?: string;
 } {
   if (!plainRecord(value.broker)) throw new BrokerConfigurationError('broker');
   const previousHost = requireString(value.broker.host, 'host', 255);
   if (/\s|\//.test(previousHost)) throw new BrokerConfigurationError('host');
-  normalizeBaseUrl(value.broker.internalUrl, 'internal-url', true);
-  if (value.broker.advertisedUrl != null) {
-    normalizeBaseUrl(value.broker.advertisedUrl, 'advertised-url', false);
-  }
+  const previousInternalUrl = normalizeBaseUrl(value.broker.internalUrl, 'internal-url', true);
+  const previousAdvertisedUrl = value.broker.advertisedUrl == null
+    ? undefined
+    : normalizeBaseUrl(value.broker.advertisedUrl, 'advertised-url', false);
   return {
     previousHost,
+    previousInternalUrl,
+    ...(previousAdvertisedUrl ? { previousAdvertisedUrl } : {}),
     config: validateBrokerConfig({
       ...value,
       schemaVersion: BROKER_CONFIG_SCHEMA_VERSION,
@@ -310,6 +322,10 @@ export function inspectBrokerConfig(home = setupStateHome()): BrokerConfigInspec
         config: migrated.config,
         migratedFrom: 1,
         previousHost: migrated.previousHost,
+        previousInternalUrl: migrated.previousInternalUrl,
+        ...(migrated.previousAdvertisedUrl
+          ? { previousAdvertisedUrl: migrated.previousAdvertisedUrl }
+          : {}),
       };
     }
     return { status: 'ok', path, config: validateBrokerConfig(parsed) };

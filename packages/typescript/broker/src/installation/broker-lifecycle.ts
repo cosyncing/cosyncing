@@ -30,7 +30,7 @@ import {
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
-import { inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
+import { brokerConfigPath, inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
 import {
   brokerTokenPath,
   ensureInstallationCredentials,
@@ -133,6 +133,7 @@ import {
   LEGACY_TAILSCALE_RESOURCE_ID,
   hasLegacyConnectivityIntent,
   relinquishLegacyConnectivityReceipts,
+  withoutLegacyConnectivityIntent,
 } from './legacy-connectivity-migration.ts';
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
@@ -412,9 +413,10 @@ async function endpointIdentity(
   context: SetupDiagnosisContext,
   url: string | undefined,
   machine: string | undefined,
+  headers?: Readonly<Record<string, string>>,
 ): Promise<'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch'> {
   if (!url || !machine) return 'unconfigured';
-  const response = await context.fetchJson(new URL('/api/health', url).toString());
+  const response = await context.fetchJson(new URL('/api/health', url).toString(), headers);
   if (response.status !== 'ok') return 'unreachable';
   const body = response.json && typeof response.json === 'object' && !Array.isArray(response.json)
     ? response.json as Record<string, unknown>
@@ -437,6 +439,7 @@ async function awaitEndpointIdentity(options: {
   context: SetupDiagnosisContext;
   url: string | undefined;
   machine: string | undefined;
+  headers?: Readonly<Record<string, string>>;
   attempts?: number;
   delayMs?: number;
   timeoutMs?: number;
@@ -444,11 +447,11 @@ async function awaitEndpointIdentity(options: {
   const attempts = Math.max(1, options.attempts ?? 30);
   const delayMs = Math.max(1, options.delayMs ?? 250);
   const deadline = Date.now() + Math.max(1, options.timeoutMs ?? SERVICE_TRANSITION_TIMEOUT_MS);
-  let identity = await endpointIdentity(options.context, options.url, options.machine);
+  let identity = await endpointIdentity(options.context, options.url, options.machine, options.headers);
   for (let index = 1; index < attempts && identity !== 'ready'; index += 1) {
     if (identity === 'unconfigured' || Date.now() >= deadline) return identity;
     await Bun.sleep(delayMs);
-    identity = await endpointIdentity(options.context, options.url, options.machine);
+    identity = await endpointIdentity(options.context, options.url, options.machine, options.headers);
   }
   return identity;
 }
@@ -522,8 +525,17 @@ async function authenticatedJson(
 export async function collectLifecycleStatus(options: LifecycleBaseOptions): Promise<LifecycleStatusReport> {
   const env = await environment(options);
   const serviceStatus = env.provider ? await env.provider.inspect() : undefined;
+  const brokerToken = inspectBrokerToken(brokerTokenPath(env.home));
+  const healthHeaders = brokerToken.status === 'ok'
+    ? { [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerToken.path) }
+    : undefined;
   const [internal, agentsRaw, sessionsRaw, updatesRaw] = await Promise.all([
-    endpointIdentity(env.context, env.config?.broker.internalUrl, env.config?.broker.machineLabel),
+    endpointIdentity(
+      env.context,
+      env.config?.broker.internalUrl,
+      env.config?.broker.machineLabel,
+      healthHeaders,
+    ),
     authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH),
     // The only endpoint here whose response size follows the operator's data rather than the
     // protocol, and so the only one that gets the larger allowance.
@@ -1089,7 +1101,7 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
     nextState = env.install.state;
     for (const action of plan.actions) {
       if (action.id === 'schema.migrate') {
-        snapshots.push(snapshot(setupStatePath(env.home)));
+        snapshots.push(snapshot(setupStatePath(env.home)), snapshot(brokerConfigPath(env.home)));
         const migrationPlan = planDurableStateMigrations(durableStateLayout({ stateRoot: env.home, cacheRoot: env.cacheRoot }));
         const migrated = applyDurableStateMigrationsWithLockHeld({
           plan: migrationPlan,
@@ -1222,9 +1234,16 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
         }
       } else if (action.id === 'legacy-connectivity.relinquish') {
         snapshots.push(snapshot(setupStatePath(env.home)));
-        writeSetupState(env.setupState, env.home);
+        writeSetupState(withoutLegacyConnectivityIntent(env.setupState), env.home);
         const relinquished = relinquishLegacyConnectivityReceipts(nextState.resources);
-        nextState = { ...nextState, resources: relinquished.resources };
+        nextState = {
+          ...nextState,
+          resources: relinquished.resources,
+          legacyConnectivityMigration: {
+            migratedAt: (options.now?.() ?? new Date()).toISOString(),
+            preservedTargets: relinquished.migration.preservedTargets,
+          },
+        };
       } else if (action.id === 'receipt.binary-hash') {
         const binary = resource(nextState, 'broker-binary');
         if (!binary || !existsSync(binary.target)) throw new Error('broker-binary-missing');
@@ -1248,10 +1267,15 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
       throw new Error('pi-integration-repair-verify-failed');
     }
     if (env.provider) {
+      const brokerToken = inspectBrokerToken(brokerTokenPath(env.home));
+      if (brokerToken.status !== 'ok') throw new Error('broker-health-credential-unavailable');
       const health = await awaitEndpointIdentity({
         context: env.context,
         url: env.config.broker.internalUrl,
         machine: env.config.broker.machineLabel,
+        headers: {
+          [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerToken.path),
+        },
         ...(options.serviceHealthAttempts !== undefined ? { attempts: options.serviceHealthAttempts } : {}),
       });
       if (health !== 'ready') throw new Error('broker-health-repair-verify-failed');

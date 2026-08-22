@@ -9,6 +9,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { acquireInstallationLock } from '../installation/installation-lock.ts';
+import { migrateBrokerConfigV1 } from '../runtime/configuration.ts';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
@@ -89,10 +90,10 @@ export interface DurableMigrationPlan {
   schemaVersion: 1;
   requiresConfirmation: true;
   steps: Array<{
-    id: 'setup-state-v0-to-v1';
-    store: 'setup';
-    fromVersion: 0;
-    toVersion: 1;
+    id: 'setup-state-v0-to-v1' | 'broker-config-v1-to-v2';
+    store: 'setup' | 'config';
+    fromVersion: 0 | 1;
+    toVersion: 1 | 2;
   }>;
   blockers: Array<{ store: DurableSchemaSpec['id']; detailCode: string }>;
 }
@@ -241,6 +242,10 @@ export function planDurableStateMigrations(layout = durableStateLayout()): Durab
   for (const inspection of inspectDurableSchemas(layout)) {
     if (inspection.status === 'migration-required' && inspection.id === 'setup') {
       steps.push({ id: 'setup-state-v0-to-v1', store: 'setup', fromVersion: 0, toVersion: 1 });
+    } else if (inspection.status === 'unsupported-version'
+      && inspection.id === 'config'
+      && inspection.version === 1) {
+      steps.push({ id: 'broker-config-v1-to-v2', store: 'config', fromVersion: 1, toVersion: 2 });
     } else if (inspection.status !== 'ok' && inspection.status !== 'missing') {
       blockers.push({ store: inspection.id, detailCode: inspection.detailCode });
     }
@@ -293,10 +298,16 @@ export function applyDurableStateMigrationsWithLockHeld(options: {
   });
   const applied: string[] = [];
   for (const step of options.plan.steps) {
-    if (step.id !== 'setup-state-v0-to-v1') throw new Error('unsupported durable-state migration step');
-    const raw = JSON.parse(readFileSync(layout.setup, 'utf8')) as unknown;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('setup state is malformed');
-    atomicWriteJsonOwnerOnly(layout.setup, { ...(raw as Record<string, unknown>), schemaVersion: 1 });
+    if (step.id === 'setup-state-v0-to-v1') {
+      const raw = JSON.parse(readFileSync(layout.setup, 'utf8')) as unknown;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('setup state is malformed');
+      atomicWriteJsonOwnerOnly(layout.setup, { ...(raw as Record<string, unknown>), schemaVersion: 1 });
+    } else if (step.id === 'broker-config-v1-to-v2') {
+      const migrated = migrateBrokerConfigV1(layout.stateRoot);
+      if (!migrated.migrated) throw new Error('broker config migration precondition changed');
+    } else {
+      throw new Error('unsupported durable-state migration step');
+    }
     applied.push(step.id);
   }
   return { applied, backupPath: backup.path };

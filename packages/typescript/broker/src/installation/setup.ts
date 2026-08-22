@@ -15,6 +15,7 @@ import {
   inspectBrokerToken,
   inspectPiIntegration,
   piIntegrationPath,
+  readBrokerToken,
   readPiIntegration,
 } from '../security/credentials.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
@@ -577,14 +578,18 @@ async function portStatus(options: {
   context: SetupDiagnosisContext;
   config: BrokerConfig;
   installed: boolean;
+  healthHeaders?: Readonly<Record<string, string>>;
 }): Promise<SetupInspection['portStatus']> {
   const probe = await options.context.probeTcp('127.0.0.1', options.config.broker.port);
   if (probe === 'closed') return 'free';
   if (probe !== 'open') return 'unknown';
   const health = await options.context.fetchJson(
     new URL('/api/health', options.config.broker.internalUrl).toString(),
+    options.healthHeaders,
   );
-  return options.installed && health.status === 'ok' && (health.json as any)?.ok === true
+  return options.installed && health.status === 'ok'
+      && (health.json as any)?.ok === true
+      && (health.json as any)?.product === PRODUCT_IDENTITY.productName
     ? 'owned-running'
     : 'conflict';
 }
@@ -698,6 +703,13 @@ export async function inspectSetupEnvironment(options: {
     context: options.context,
     config: targetConfig,
     installed: installState.committed,
+    ...(brokerCredential.status === 'ok'
+      ? {
+          healthHeaders: {
+            [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerCredential.path),
+          },
+        }
+      : {}),
   });
   const issues: SetupBlockingIssue[] = [...doctorBlockers(
     doctor,
@@ -847,7 +859,10 @@ function desiredState(options: {
   choices: SetupChoices;
   acknowledgedAt: string;
 }): SetupState {
-  const current = options.inspection.setupState;
+  const {
+    [LEGACY_TAILSCALE_SETUP_FIELD]: _legacyConnectivityIntent,
+    ...current
+  } = options.inspection.setupState;
   const currentAgents = current.agents && typeof current.agents === 'object' && !Array.isArray(current.agents)
     ? current.agents
     : {};
@@ -1453,6 +1468,18 @@ function actionInputs(options: {
       systemdLingeringRequested: options.plan.choices.enableLingering,
     },
     removeResourceIds,
+    ...(hasLegacyConnectivityIntent(options.inspection.setupState)
+      || removeResourceIds.includes(LEGACY_TAILSCALE_RESOURCE_ID)
+      ? {
+          legacyConnectivityMigration: {
+            preservedTargets: options.inspection.installState.committed
+              ? options.inspection.installState.state.resources
+                .filter((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)
+                .map((resource) => resource.target)
+              : [],
+          },
+        }
+      : {}),
     now: options.now,
   };
 }
@@ -2124,10 +2151,17 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       verifyAll: () => verifySetup({ plan: lockedPlan, inspection, context }),
       ...(systemdProvider && durableServiceChoice(lockedPlan.choices) ? {
         verifyCommitted: async () => {
+          const brokerCredential = inspectBrokerToken(brokerTokenPath(home));
+          if (brokerCredential.status !== 'ok') {
+            return { ok: false, detail: 'the installed broker credential is unavailable' };
+          }
           const serviceReady = await startAndVerifySystemdService({
             provider: systemdProvider,
             context,
             internalUrl: lockedPlan.targetConfig.broker.internalUrl,
+            healthHeaders: {
+              [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerCredential.path),
+            },
             // The unit execs the home copy this transaction just wrote, so the responder must report THIS
             // artifact. Without that binding a surviving previous-build process answers `ok: true` on the
             // same port and setup reports a verified install of a binary nothing is running. The whole
