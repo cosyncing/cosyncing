@@ -19,7 +19,9 @@ import {
   CANDIDATE_CREDENTIAL_FIELD_LABEL,
   candidateBrokerEnvironment,
   brokerIdentityMatchesCandidate,
+  isHeaderAuthenticatedTicketRequest,
   isAddressInUse,
+  isTicketedSessionWebSocket,
   runCandidateBrokerAttempts,
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
@@ -27,6 +29,59 @@ import {
 
 assert.equal(CANDIDATE_CREDENTIAL_FIELD_LABEL, 'Server token');
 console.log('PASS  publication verifier targets the current server token field');
+
+const candidateStreamPath = '/api/sessions/pi/session-1/stream';
+assert.equal(
+  isTicketedSessionWebSocket(
+    `wss://broker.example.com${candidateStreamPath}?wsAuthTicket=one-use`,
+    candidateStreamPath,
+  ),
+  true,
+);
+for (const unsafeUrl of [
+  `wss://broker.example.com${candidateStreamPath}?token=master`,
+  `wss://broker.example.com${candidateStreamPath}?peerToken=device`,
+  `wss://broker.example.com${candidateStreamPath}?wsAuthTicket=one-use&clientVersion=1.2.3`,
+]) {
+  assert.equal(isTicketedSessionWebSocket(unsafeUrl, candidateStreamPath), false);
+}
+console.log('PASS  publication verifier requires ticket-only WebSocket URLs');
+
+const ticketRequestEvent = {
+  method: 'Network.requestWillBeSent',
+  params: {
+    request: {
+      method: 'POST',
+      url: 'https://broker.example.com/api/ws-auth-tickets',
+      headers: { 'X-Cosyncing-Token': 'master-secret' },
+    },
+  },
+};
+assert.equal(
+  isHeaderAuthenticatedTicketRequest(
+    ticketRequestEvent,
+    'https://broker.example.com',
+    'master-secret',
+  ),
+  true,
+);
+assert.equal(
+  isHeaderAuthenticatedTicketRequest(
+    {
+      ...ticketRequestEvent,
+      params: {
+        request: {
+          ...ticketRequestEvent.params.request,
+          url: 'https://broker.example.com/api/ws-auth-tickets?token=master-secret',
+        },
+      },
+    },
+    'https://broker.example.com',
+    'master-secret',
+  ),
+  false,
+);
+console.log('PASS  publication verifier observes header-authenticated ticket exchange');
 
 const webIdentity = {
   version: '1.2.3',
@@ -134,6 +189,10 @@ console.log('PASS  review mode rejects a mixed clean/dirty candidate pair');
   assert.ok(probeStart >= 0 && probeEnd > probeStart);
   assert.match(probeSource, /await withCandidateParityBrowser\(/);
   assert.doesNotMatch(probeSource, /Bun\.spawn/);
+  assert.match(
+    verifierSource,
+    /fetch\(`\$\{base\}\/api\/health`, \{\s*headers: \{ 'x-cosyncing-token': token \}/,
+  );
   const startupSource = readFileSync(
     new URL('../../release/candidate-browser-startup.ts', import.meta.url),
     'utf8',
@@ -273,21 +332,36 @@ async function expectFailure(
   await assert.rejects(operation, pattern);
 }
 
-const originalWebDirectory = process.env.COSYNCING_WEB_DIR;
+const isolatedEnvironmentKeys = [
+  'COSYNCING_WEB_DIR',
+  'COSYNCING_TOKEN_FILE',
+  'COSYNCING_PI_INTEGRATION_FILE',
+  'COSYNCING_TOKEN',
+  'COSYNCING_PI_INTEGRATION_TOKEN',
+] as const;
+const originalEnvironment = new Map(
+  isolatedEnvironmentKeys.map((key) => [key, process.env[key]]),
+);
 try {
   process.env.COSYNCING_WEB_DIR = '/ambient/wrong-build';
+  process.env.COSYNCING_TOKEN_FILE = '/ambient/broker-token';
+  process.env.COSYNCING_PI_INTEGRATION_FILE = '/ambient/pi-integration';
+  process.env.COSYNCING_TOKEN = 'ambient-token';
+  process.env.COSYNCING_PI_INTEGRATION_TOKEN = 'ambient-pi-token';
   const env = candidateBrokerEnvironment({
     home: '/candidate/home',
     hostHome: '/candidate/host-home',
     webDirectory: '/release/sidecar/app',
   });
   assert.equal(env.COSYNCING_WEB_DIR, '/release/sidecar/app');
-  console.log('PASS  release sidecar web directory overwrites the runner environment');
+  for (const key of isolatedEnvironmentKeys.slice(1)) {
+    assert.equal(env[key], '', `${key} escaped into the candidate fixture`);
+  }
+  console.log('PASS  release candidate isolates sidecar and credential environment');
 } finally {
-  if (originalWebDirectory === undefined) {
-    delete process.env.COSYNCING_WEB_DIR;
-  } else {
-    process.env.COSYNCING_WEB_DIR = originalWebDirectory;
+  for (const [key, value] of originalEnvironment) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
 }
 

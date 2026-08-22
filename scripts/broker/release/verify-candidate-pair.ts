@@ -301,6 +301,50 @@ export function isAddressInUse(output: string): boolean {
     .test(output);
 }
 
+/** The candidate browser may put only the short-lived ticket in its socket URL. */
+export function isTicketedSessionWebSocket(
+  rawUrl: string,
+  expectedPath: string,
+): boolean {
+  try {
+    const url = new URL(rawUrl);
+    const ticket = url.searchParams.get('wsAuthTicket')?.trim() ?? '';
+    return url.pathname === expectedPath
+      && ticket.length > 0
+      && !url.searchParams.has('token')
+      && !url.searchParams.has('peerToken')
+      && [...url.searchParams.keys()].every((key) => key === 'wsAuthTicket');
+  } catch {
+    return false;
+  }
+}
+
+/** Prove that the long-lived credential travelled in the ticket request header, never its URL. */
+export function isHeaderAuthenticatedTicketRequest(
+  event: any,
+  expectedBase: string,
+  token: string,
+): boolean {
+  if (event?.method !== 'Network.requestWillBeSent'
+      || event.params?.request?.method !== 'POST') return false;
+  try {
+    const url = new URL(String(event.params.request.url));
+    const expected = new URL('/api/ws-auth-tickets', expectedBase);
+    if (url.origin !== expected.origin || url.pathname !== expected.pathname
+        || url.searchParams.has('token') || url.searchParams.has('peerToken')) {
+      return false;
+    }
+    const headers = Object.entries(event.params.request.headers ?? {})
+      .reduce<Record<string, string>>((normalized, [name, value]) => {
+        normalized[name.toLowerCase()] = String(value);
+        return normalized;
+      }, {});
+    return headers['x-cosyncing-token'] === token;
+  } catch {
+    return false;
+  }
+}
+
 export function candidateBrokerEnvironment(options: {
   home: string;
   hostHome: string;
@@ -310,6 +354,10 @@ export function candidateBrokerEnvironment(options: {
     ...process.env,
     HOME: options.hostHome,
     COSYNCING_HOME: options.home,
+    COSYNCING_TOKEN_FILE: '',
+    COSYNCING_PI_INTEGRATION_FILE: '',
+    COSYNCING_TOKEN: '',
+    COSYNCING_PI_INTEGRATION_TOKEN: '',
     COSYNCING_CACHE_DIR: join(options.home, 'cache'),
     COSYNCING_WEB_DIR: options.webDirectory,
     COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
@@ -324,7 +372,6 @@ async function probeBuiltClient(options: {
   browserHome: string;
   token: string;
   sessionId: string;
-  identity: any;
   brokerContract: any;
 }): Promise<void> {
   await withCandidateParityBrowser({
@@ -566,13 +613,7 @@ async function probeBuiltClient(options: {
     const connected = await waitFor(() => {
       appSocket = events.find((event) => {
         if (event.method !== 'Network.webSocketCreated') return false;
-        try {
-          const url = new URL(event.params.url);
-          return url.pathname === encodedSession
-            && url.searchParams.get('token') === options.token;
-        } catch {
-          return false;
-        }
+        return isTicketedSessionWebSocket(event.params.url, encodedSession);
       });
       return !!appSocket;
     });
@@ -595,10 +636,10 @@ async function probeBuiltClient(options: {
             const url = new URL(event.params.url);
             return {
               path: url.pathname,
-              hasToken: url.searchParams.has('token'),
+              queryKeys: [...url.searchParams.keys()],
             };
           } catch {
-            return { path: '<invalid>', hasToken: false };
+            return { path: '<invalid>', queryKeys: [] };
           }
         });
       throw new Error(
@@ -608,16 +649,18 @@ async function probeBuiltClient(options: {
         })}`,
       );
     }
-    const appUrl = new URL(appSocket.params.url);
-    const query = appUrl.searchParams;
-    if (query.get('contractRevision')
-          !== String(options.identity.contract.revision)
-        || query.get('minimumBrokerRevision')
-          !== String(options.identity.contract.clientMinimumBrokerRevision)
-        || query.get('contractSurfaceHash')
-          !== options.identity.contract.surfaceHash
-        || query.get('clientVersion') !== options.identity.version) {
-      throw new Error('built app emitted incorrect contract negotiation metadata');
+    const socketEventIndex = events.indexOf(appSocket);
+    const ticketRequest = events
+      .slice(0, socketEventIndex)
+      .find((event) => isHeaderAuthenticatedTicketRequest(
+        event,
+        options.base,
+        options.token,
+      ));
+    if (!ticketRequest) {
+      throw new Error(
+        'built app did not exchange its header credential for the WebSocket ticket',
+      );
     }
     let hello: any;
     const helloReceived = await waitFor(() => {
@@ -806,7 +849,9 @@ export async function verifyCandidatePair(
         for (let probe = 0; probe < 120 && !ready; probe += 1) {
           if (broker.exitCode !== null) break;
           try {
-            const response = await fetch(`${base}/api/health`);
+            const response = await fetch(`${base}/api/health`, {
+              headers: { 'x-cosyncing-token': token },
+            });
             if (response.ok) {
               const candidateHealth = await response.json() as any;
               if (candidateHealth.version === args.version
@@ -876,7 +921,6 @@ export async function verifyCandidatePair(
           browserHome: join(home, 'browser-profile'),
           token,
           sessionId: pi.id,
-          identity,
           brokerContract: webBrokerContract,
         });
         return 'complete';
