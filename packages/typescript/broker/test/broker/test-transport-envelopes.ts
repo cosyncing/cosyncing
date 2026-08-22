@@ -13,7 +13,7 @@ import {
   type IdentityKeyPair,
   type WrappedDataKey,
 } from '../../../crypto/src/index.ts';
-import { TailscaleDirectTransport } from '../../../transport/src/index.ts';
+import { BrokerHttpTransport } from '../../../transport/src/index.ts';
 import { openTransportEnvelope, sealTransportEnvelope } from '../../../transport-wire/src/index.ts';
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
@@ -55,7 +55,7 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
     assert.equal(missingPeerToken.status, 403);
 
     const key = generateDataKey();
-    const transport = new TailscaleDirectTransport({
+    const transport = new BrokerHttpTransport({
       baseUrl,
       peerId: 'broker',
       peerToken,
@@ -200,12 +200,13 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     const created = await fetch(`${baseUrl}/api/transport/pairings`, {
       method: 'POST',
       headers: { 'x-cosyncing-token': token, ...contentType },
-      body: JSON.stringify({ clientLabel: 'Test phone' }),
+      body: JSON.stringify({ clientLabel: 'Test phone', brokerUrl: baseUrl }),
     });
     assert.equal(created.status, 201);
     const offer = await created.json() as any;
     const parsed = parseQrPairingPayload(offer.qr);
-    assert.equal(parsed.version, 2);
+    assert.equal(parsed.version, 3);
+    assert.deepEqual(parsed.transport, { kind: 'broker-url', url: baseUrl });
     assert.equal((parsed as any).pairingId, offer.pairingId);
     assert.equal(typeof offer.pairingId, 'string');
     assert.equal(typeof offer.qr, 'string');
@@ -635,7 +636,7 @@ await test('pairing accept failure limiter is memory-bounded under unique-id spa
   const { TransportPairingRegistry, PairingHttpError } = await import('../../src/transport/transport-pairing.ts');
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-limiter-'));
   const fixedNow = 1_000_000;
-  const registry = new TransportPairingRegistry({ brokerUrl: 'http://127.0.0.1:1', home, now: () => fixedNow });
+  const registry = new TransportPairingRegistry({ home, now: () => fixedNow });
   const bogusInput = { peerId: 'p', peerToken: 't', identityPublicKey: 'i', exchangePublicKey: 'e' };
 
   for (let i = 0; i < 2500; i++) {

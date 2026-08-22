@@ -23,7 +23,7 @@ import {
   unwrapDataKey,
   wrapDataKeyForPeer,
 } from '../../../packages/typescript/crypto/src/index.ts';
-import { TailscaleDirectTransport, type TransportEnvelope } from '../../../packages/typescript/transport/src/index.ts';
+import { BrokerHttpTransport, type TransportEnvelope } from '../../../packages/typescript/transport/src/index.ts';
 import {
   parseCipherEnvelope,
   sealTransportEnvelope,
@@ -104,14 +104,14 @@ try {
   });
   check('paired peers trust only exchanged Ed25519 public identities', phonePeer.trustedSenders.broker === brokerKeys.identity.publicKey && brokerPeer.trustedSenders.phone === phoneKeys.identity.publicKey);
 
-  const phoneTransport = new TailscaleDirectTransport({
+  const phoneTransport = new BrokerHttpTransport({
     baseUrl,
     peerId: phonePeer.peerId,
     peerToken: phonePeer.peerToken,
     pollMs: 1,
     headers: { 'x-cosyncing-token': token },
   });
-  const brokerTransport = new TailscaleDirectTransport({
+  const brokerTransport = new BrokerHttpTransport({
     baseUrl,
     peerId: brokerPeer.peerId,
     peerToken: brokerPeer.peerToken,
@@ -195,7 +195,7 @@ function checkThrows(name: string, fn: () => unknown, pattern: RegExp): void {
   }
 }
 
-async function firstEnvelope(transport: TailscaleDirectTransport): Promise<TransportEnvelope> {
+async function firstEnvelope(transport: BrokerHttpTransport): Promise<TransportEnvelope> {
   const ac = new AbortController();
   for await (const envelope of transport.receive(ac.signal)) {
     ac.abort();

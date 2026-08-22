@@ -456,12 +456,12 @@ try {
       const pairing = await fetch(`${base}/api/transport/pairings`, {
         method: 'POST',
         headers: { ...sharedHeader, 'content-type': 'application/json' },
-        body: JSON.stringify({ clientLabel: 'state-security-fixture' }),
+        body: JSON.stringify({ clientLabel: 'state-security-fixture', brokerUrl: advertised }),
       });
       const offer = await pairing.json() as any;
       const qr = parseQrPairingPayload(offer.qr);
-      check('remote pairing QR uses the configured advertised HTTPS URL, never loopback',
-        pairing.status === 201 && qr.transport.kind === 'tailscale-direct' &&
+      check('remote pairing QR uses the one-time requested HTTPS URL, never loopback',
+        pairing.status === 201 && qr.transport.kind === 'broker-url' &&
           qr.transport.url === advertised && !offer.qr.includes(credentials.brokerToken));
 
       const processArgs = Bun.spawnSync(['ps', '-o', 'args=', '-p', String(child.pid)]).stdout.toString();

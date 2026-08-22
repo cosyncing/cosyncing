@@ -7,7 +7,7 @@ import type { SetupDiagnosisContext, SetupHttpProbe } from '../../../adapter-api
 import {
   createQrPairingPayload,
   parseQrPairingPayload,
-  type QrPairingPayloadV2,
+  type QrPairingPayloadV3,
 } from '../../../crypto/src/index.ts';
 import { BROKER_CONTRACT } from '../../../protocol/src/index.ts';
 import { runCli } from '../../src/cli/cli.ts';
@@ -32,6 +32,10 @@ import {
   terminalQrWidth,
 } from '../../src/cli/terminal-qr.ts';
 import { TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
+import {
+  normalizePairingBrokerUrl,
+  pairingBrokerUrlUsesUnprotectedHttp,
+} from '../../src/transport/pairing-url.ts';
 import { writeSetupState } from '../../src/installation/setup-state.ts';
 import { buildSetupPlan, type SetupInspection } from '../../src/installation/setup.ts';
 import type { ServiceCommandRunner } from '../../src/installation/service-manager.ts';
@@ -460,6 +464,27 @@ const healthyStatus = {
   Self: { DNSName: 'devbox.tailnet.ts.net.' },
 };
 
+{
+  check('pairing Broker URLs normalize to an origin without a reachability probe',
+    normalizePairingBrokerUrl('https://cosy.example.com/') === 'https://cosy.example.com'
+      && normalizePairingBrokerUrl('http://100.64.0.1:7734') === 'http://100.64.0.1:7734'
+      && normalizePairingBrokerUrl(undefined) === undefined
+      && pairingBrokerUrlUsesUnprotectedHttp('http://cosy.example.com')
+      && !pairingBrokerUrlUsesUnprotectedHttp('http://127.0.0.1:7734'));
+  for (const invalid of [
+    'ftp://cosy.example.com',
+    'https://user:secret@cosy.example.com',
+    'https://cosy.example.com/path',
+    'https://cosy.example.com?query=1',
+    'https://cosy.example.com#fragment',
+    'https://cosy.example.com\n',
+  ]) {
+    let rejected = false;
+    try { normalizePairingBrokerUrl(invalid); } catch { rejected = true; }
+    check(`pairing Broker URL rejects ${JSON.stringify(invalid)}`, rejected);
+  }
+}
+
 // The pairing QR is read by a phone camera pointed at a terminal, so geometry and contrast are the
 // contract — but so is the byte count, because the byte count is what decides the geometry. Everything here
 // runs on a payload from the PRODUCTION offer machinery: a real X25519 key off the on-disk key store, real
@@ -476,15 +501,14 @@ const healthyStatus = {
   // QR version of headroom this check must not be handed.
   const advertisedUrl = `https://devbox-${'a'.repeat(20)}.tailnet.ts.net`;
   const qrRegistry = new TransportPairingRegistry({
-    brokerUrl: advertisedUrl,
     // Configured exactly as runtime.ts configures it, so this pins what the offer does with the descriptor
     // rather than assuming it.
     broker: { version: BUILD_INFO.version, contract: { ...BROKER_CONTRACT } },
     home: qrHome,
   });
-  const offer = qrRegistry.createOffer();
+  const offer = qrRegistry.createOffer({ brokerUrl: advertisedUrl });
   const payload = offer.qr;
-  const parsedOffer = parseQrPairingPayload(payload) as QrPairingPayloadV2;
+  const parsedOffer = parseQrPairingPayload(payload) as QrPairingPayloadV3;
   const rendered = await renderTerminalPairingQr(payload);
   const colored = renderTerminalQr(payload, { color: true });
   const mono = renderTerminalQr(payload, { color: false });
@@ -504,8 +528,8 @@ const healthyStatus = {
   // A wrapped QR is not a degraded QR, it is not a QR. The number is pinned exactly, not just bounded: the
   // payload is deterministic in length (fixed-width ids, a 44-byte SPKI key, one URL), so a change that
   // re-inflates it moves this by a whole QR version rather than sliding quietly under 80.
-  check('the production-shaped symbol is 77 columns and fits an 80-column terminal',
-    width === 77 && width <= 80, `width=${width} payload=${payload.length}`);
+  check('the production-shaped symbol is 73 columns and fits an 80-column terminal',
+    width === 73 && width <= 80, `width=${width} payload=${payload.length}`);
   check('terminalQrWidth answers without rendering, and agrees with what was rendered',
     terminalQrWidth(payload) === width, `predicted=${terminalQrWidth(payload)} rendered=${width}`);
   // The descriptor duplicates what /api/health, the accept response, and the WS hello all carry, and the
@@ -517,12 +541,18 @@ const healthyStatus = {
       && offer.broker?.contract.surfaceHash === BROKER_CONTRACT.surfaceHash,
     `qrBroker=${JSON.stringify(parsedOffer.broker)}`);
   check('the QR still carries every field the client parses',
-    parsedOffer.version === 2
+    parsedOffer.version === 3
       && parsedOffer.pairingId === offer.pairingId
       && parsedOffer.brokerId === offer.brokerPeerId
       && parsedOffer.publicKey.length === 59
-      && parsedOffer.transport.kind === 'tailscale-direct'
+      && parsedOffer.transport.kind === 'broker-url'
       && parsedOffer.transport.url === advertisedUrl);
+  const urlFreeOffer = parseQrPairingPayload(qrRegistry.createOffer().qr) as QrPairingPayloadV3;
+  check('a URL-free offer carries authentication material without a target URL',
+    urlFreeOffer.version === 3
+      && urlFreeOffer.transport.kind === 'broker-url'
+      && urlFreeOffer.transport.url === undefined
+      && !JSON.stringify(urlFreeOffer).includes(advertisedUrl));
   // Compaction bought headroom, not immunity: the advertised URL is the operator's, and a long enough one
   // still crosses 80. Pin where that happens so the fallback below is a measured floor, not a guess.
   //
@@ -548,13 +578,13 @@ const healthyStatus = {
         + ` live=${parsedOffer.brokerId.length}/${parsedOffer.pairingId.length}`
         + `/${parsedOffer.publicKey.length}`);
     const overflowing = createQrPairingPayload({
-      version: 2,
+      version: 3,
       brokerId,
       pairingId,
       publicKey,
-      transport: { kind: 'tailscale-direct', url: `https://${'h'.repeat(75)}.ts.net` },
+      transport: { kind: 'broker-url', url: `https://${'h'.repeat(81)}.ts.net` },
     });
-    check('a 90-character advertised URL is the first that outgrows 80 columns',
+    check('a 96-character Broker URL is the first fixed fixture that outgrows 80 columns',
       terminalQrWidth(overflowing) === 81, `width=${terminalQrWidth(overflowing)}`);
   }
   rmSync(qrHome, { recursive: true, force: true });
@@ -803,11 +833,11 @@ try {
   const home = prepareHome(root);
   const pairingId = 'pair_public_fixture';
   const qr = createQrPairingPayload({
-    version: 2,
+    version: 3,
     brokerId: 'broker_public_fixture',
     pairingId,
     publicKey: 'broker-public-key',
-    transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+    transport: { kind: 'broker-url', url: 'https://devbox.tailnet.ts.net' },
   });
 
   // Pairing preflights both endpoints before creating any state, renders public-only QR, then waits.
@@ -819,6 +849,7 @@ try {
     const result = await runPairCommand({
       json: false,
       wait: true,
+      brokerUrl: 'https://devbox.tailnet.ts.net',
       clientLabel: 'Test phone',
       home,
       invocation: 'cosy',
@@ -850,14 +881,13 @@ try {
       now: () => Date.parse('2026-07-17T00:00:00.000Z'),
     });
     const postIndex = calls.findIndex((call) => call.method === 'POST');
-    check('pair verifies local and advertised broker identity before creating an offer',
-      result.exitCode === 0 && postIndex === 2
+    check('pair verifies only the local broker identity before creating an offer',
+      result.exitCode === 0 && postIndex === 1
         && calls[0]?.url === 'http://127.0.0.1:7734/api/health'
-        && calls[1]?.url === 'https://devbox.tailnet.ts.net/api/health'
-        && calls.slice(0, 2).every((call) => !call.authenticated)
+        && calls[0]?.authenticated === false
         && calls[postIndex]?.authenticated === true,
       JSON.stringify(calls));
-    check('terminal pair renders QR v2, expiry, full-access warning, and accepted device without a peer token',
+    check('terminal pair renders QR v3, expiry, full-access warning, and accepted device without a peer token',
       out.text().includes(`QR(${qr})`)
         && out.text().includes('one-use')
         && out.text().includes('full broker API access')
@@ -867,8 +897,8 @@ try {
     const printedPairingLink = out.text().split('\n').find((line) => line.startsWith('Pairing link: '));
     const parsedPrintedPayload = printedPairingLink == null
       ? undefined
-      : parseQrPairingPayload(printedPairingLink.slice('Pairing link: '.length)) as QrPairingPayloadV2;
-    check('the selectable pairing link exactly matches the QR payload and keeps the advertised Tailscale origin',
+      : parseQrPairingPayload(printedPairingLink.slice('Pairing link: '.length)) as QrPairingPayloadV3;
+    check('the selectable pairing link exactly matches the QR payload and keeps the supplied Broker URL',
       renderedPayload === qr
         && printedPairingLink === `Pairing link: ${qr}`
         && parsedPrintedPayload != null
@@ -888,113 +918,22 @@ try {
       out.text());
   }
 
-  // ── pair on a host whose MagicDNS will not resolve ──
-  // Drives the real command: the advertised NAME refuses to connect, the node's own address answers, and
-  // the offer must still be created exactly once with the HOSTNAME in the QR — a paired phone has to reach
-  // this broker by name from wherever it is, so an address literal there would be a broken credential.
-  {
-    const runPairOverBrokenDns = async (
-      directJson: unknown,
-    ): Promise<{
-      exitCode: number;
-      posts: number;
-      advertisedNameAttempts: number;
-      transportUrl?: string;
-      contactedAddresses: string[];
-    }> => {
-      const out = writer();
-      const err = writer();
-      let posts = 0;
-      let advertisedNameAttempts = 0;
-      let transportUrl: string | undefined;
-      const contactedAddresses: string[] = [];
-      const result = await runPairCommand({
-        json: false,
-        wait: false,
-        home,
-        invocation: 'cosy',
-        interactive: false,
-        stdout: out.output,
-        stderr: err.output,
-      }, {
-        renderQr: async (payload) => {
-          transportUrl = (parseQrPairingPayload(payload) as QrPairingPayloadV2).transport.url;
-          return `QR(${payload})`;
-        },
-        fetch: async (input, init) => {
-          const url = String(input);
-          // Exactly what a failed MagicDNS lookup does to fetch: it throws, and `request` maps that to
-          // the unreachable kind that alone earns the address retry.
-          if (url.startsWith('https://devbox.tailnet.ts.net')) {
-            advertisedNameAttempts += 1;
-            throw new TypeError('getaddrinfo ENOTFOUND devbox.tailnet.ts.net');
-          }
-          if (url.endsWith('/api/health')) return jsonResponse({ ok: true, product: 'cosyncing', machine: 'devbox' });
-          if (url.endsWith('/api/transport/pairings') && (init?.method ?? 'GET') === 'POST') {
-            posts += 1;
-            return jsonResponse({
-              ok: true,
-              pairingId,
-              qr,
-              brokerPeerId: 'broker_public_fixture',
-              expiresAt: '2026-07-17T00:05:00.000Z',
-            }, 201);
-          }
-          return jsonResponse({ error: 'unexpected' }, 500);
-        },
-        now: () => Date.parse('2026-07-17T00:00:00.000Z'),
-        // A context, NOT a list of addresses: pair must run the real `tailscale status --json` resolution,
-        // so severing that wiring fails this test instead of silently passing on injected literals.
-        diagnosisContext: {
-          ...fakeContext({ executable: '/usr/bin/tailscale' }),
-          async runReadOnly(path: string, args: readonly string[]) {
-            if (path === '/usr/bin/tailscale' && args[0] === 'status') {
-              return { status: 'ok', exitCode: 0, stderr: '', stdout: JSON.stringify({
-                BackendState: 'Running',
-                Self: { DNSName: 'devbox.tailnet.ts.net.', TailscaleIPs: ['100.64.0.1', 'fd7a:115c:a1e0::1'] },
-              }) };
-            }
-            return { status: 'nonzero', exitCode: 1, stdout: '', stderr: 'unexpected' };
-          },
-        },
-        advertisedDirectProbe: async ({ address }) => {
-          contactedAddresses.push(address);
-          return { status: 'ok', statusCode: 200, json: directJson };
-        },
-      });
-      return { exitCode: result.exitCode, posts, advertisedNameAttempts, transportUrl, contactedAddresses };
-    };
-
-    const paired = await runPairOverBrokenDns({ ok: true, product: 'cosyncing', machine: 'devbox' });
-    check('pair creates exactly one offer when the advertised name resolves only through this node address',
-      paired.exitCode === 0 && paired.posts === 1 && paired.advertisedNameAttempts >= 1
-        && paired.contactedAddresses[0] === '100.64.0.1',
-      JSON.stringify(paired));
-    check('the QR still carries the advertised hostname, never the address literal it was verified through',
-      paired.transportUrl === 'https://devbox.tailnet.ts.net',
-      String(paired.transportUrl));
-
-    const foreign = await runPairOverBrokenDns({ ok: true, product: 'cosyncing', machine: 'another-machine' });
-    check('pair refuses to create an offer when the address answers as a different machine',
-      foreign.exitCode !== 0 && foreign.posts === 0,
-      JSON.stringify(foreign));
-  }
-
   // A plain single-offer `pair` (no --wait) still ends with the same browser-client credential pointer.
   {
     const out = writer();
     const err = writer();
     const singlePairingId = 'pair_single_fixture';
     const singleQr = createQrPairingPayload({
-      version: 2,
+      version: 3,
       brokerId: 'broker_public_fixture',
       pairingId: singlePairingId,
       publicKey: 'broker-public-key',
-      transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+      transport: { kind: 'broker-url', url: 'https://devbox.tailnet.ts.net' },
     });
     const result = await runPairCommand({
       json: false,
       wait: false,
+      brokerUrl: 'https://devbox.tailnet.ts.net',
       home,
       invocation: 'cosy',
       stdout: out.output,
@@ -1036,16 +975,17 @@ try {
     const err = writer();
     const narrowPairingId = 'pair_narrow_fixture';
     const narrowQr = createQrPairingPayload({
-      version: 2,
+      version: 3,
       brokerId: 'broker_public_fixture',
       pairingId: narrowPairingId,
       publicKey: 'broker-public-key',
-      transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+      transport: { kind: 'broker-url', url: 'https://devbox.tailnet.ts.net' },
     });
     const narrowWidth = terminalQrWidth(narrowQr);
     const result = await runPairCommand({
       json: false,
       wait: false,
+      brokerUrl: 'https://devbox.tailnet.ts.net',
       home,
       invocation: 'cosy',
       stdout: out.output,
@@ -1086,15 +1026,16 @@ try {
     const err = writer();
     const zhPairingId = 'pair_zh_fixture';
     const zhQr = createQrPairingPayload({
-      version: 2,
+      version: 3,
       brokerId: 'broker_public_fixture',
       pairingId: zhPairingId,
       publicKey: 'broker-public-key',
-      transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+      transport: { kind: 'broker-url', url: 'https://devbox.tailnet.ts.net' },
     });
     const result = await runPairCommand({
       json: false,
       wait: false,
+      brokerUrl: 'https://devbox.tailnet.ts.net',
       home: zhHome,
       invocation: 'cosy',
       stdout: out.output,
@@ -1142,11 +1083,11 @@ try {
             ok: true,
             pairingId: offerId,
             qr: createQrPairingPayload({
-              version: 2,
+              version: 3,
               brokerId: 'broker_public_fixture',
               pairingId: offerId,
               publicKey: 'broker-public-key',
-              transport: { kind: 'tailscale-direct', url: 'https://devbox.tailnet.ts.net' },
+              transport: { kind: 'broker-url', url: 'https://devbox.tailnet.ts.net' },
             }),
             brokerPeerId: 'broker_public_fixture',
             expiresAt: '2026-07-17T00:05:00.000Z',
@@ -1173,6 +1114,7 @@ try {
       const result = await runPairCommand({
         json: false,
         wait: true,
+        brokerUrl: 'https://devbox.tailnet.ts.net',
         clientLabel: 'Test phone',
         home,
         invocation: 'cosy',
@@ -1219,6 +1161,7 @@ try {
       const result = await runPairCommand({
         json: false,
         wait: true,
+        brokerUrl: 'https://devbox.tailnet.ts.net',
         home,
         invocation: 'cosy',
         interactive: true,
@@ -1252,6 +1195,7 @@ try {
       const result = await runPairCommand({
         json: true,
         wait: true,
+        brokerUrl: 'https://devbox.tailnet.ts.net',
         home,
         invocation: 'cosy',
         interactive: true,
@@ -1291,6 +1235,7 @@ try {
       const result = await runPairCommand({
         json: true,
         wait: false,
+        brokerUrl: 'https://devbox.tailnet.ts.net',
         home,
         invocation: 'cosy',
         interactive: true,
@@ -1302,13 +1247,13 @@ try {
       check('pair --json without --wait still emits one created-offer document and never prompts',
         result.exitCode === 0 && result.detailCode === 'pairing-created' && prompted === 0
           && parsed?.pairingId === 'pair_loop_1' && typeof parsed.qr === 'string'
-          && parsed.advertisedUrl === 'https://devbox.tailnet.ts.net',
+          && parsed.brokerUrl === 'https://devbox.tailnet.ts.net',
         out.text());
       const createdTokenPath = brokerTokenPath(home);
       const createdActualToken = readBrokerToken(createdTokenPath);
       check('pair --json (no --wait) keeps the created document shape exact and never carries the browser-client token',
         parsed !== undefined
-          && Object.keys(parsed).sort().join(',') === 'advertisedUrl,expiresAt,pairingId,qr,schemaVersion,tokenScope'
+          && Object.keys(parsed).sort().join(',') === 'brokerUrl,expiresAt,pairingId,qr,schemaVersion,tokenScope'
           && !out.text().includes(createdActualToken)
           && !out.text().includes(createdTokenPath)
           && !/Token file|Read it: cat|browser|per-device/i.test(out.text()),
@@ -1412,7 +1357,14 @@ try {
     let setupOptions: any;
     const out = writer();
     const err = writer();
-    const pairExit = await runCli(['pair', '--label', 'Phone', '--wait'], {
+    const pairExit = await runCli([
+      'pair',
+      '--broker-url',
+      'https://cosy.example.com',
+      '--label',
+      'Phone',
+      '--wait',
+    ], {
       invocation: 'cosy',
       stdout: out.output,
       stderr: err.output,
@@ -1437,6 +1389,7 @@ try {
     });
     check('CLI parses explicit Tailscale setup, pair, and revoke without a shared-token argument surface',
       pairExit === 0 && revokeExit === 0 && setupExit === 0
+        && pairOptions.brokerUrl === 'https://cosy.example.com'
         && pairOptions.clientLabel === 'Phone' && pairOptions.wait === true && pairOptions.invocation === 'cosy'
         && revokeOptions.peerId === 'phone-1' && revokeOptions.yes === true && revokeOptions.json === true
         && setupOptions.enableTailscaleServe === true

@@ -64,6 +64,7 @@ export interface CliDependencies {
   runPair?: (options: {
     json: boolean;
     wait: boolean;
+    brokerUrl?: string;
     clientLabel?: string;
     invocation: string;
     stdout: CliWriter;
@@ -172,7 +173,7 @@ function help(command: string, packaged: boolean): string {
 Usage:
   ${brokerUsage}
   ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--enable-tailscale-serve] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
-  ${command} pair [--label <device>] [--wait] [--json]
+  ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
   ${command} devices list [--json]
   ${command} devices revoke <id> [--yes] [--json]
   ${command} status [--json]
@@ -314,6 +315,7 @@ async function defaultRunSetup(options: {
 async function defaultRunPair(options: {
   json: boolean;
   wait: boolean;
+  brokerUrl?: string;
   clientLabel?: string;
   invocation: string;
   stdout: CliWriter;
@@ -733,11 +735,22 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
   if (requested === 'pair') {
     let json = false;
     let wait = false;
+    let brokerUrl: string | undefined;
     let clientLabel: string | undefined;
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index]!;
       if (arg === '--json' && !json) { json = true; continue; }
       if (arg === '--wait' && !wait) { wait = true; continue; }
+      if (arg === '--broker-url' && brokerUrl === undefined) {
+        const value = args[index + 1]?.trim();
+        if (!value || value.startsWith('--')) {
+          stderr.write(`${command} pair: --broker-url requires an HTTP or HTTPS URL\n`);
+          return 2;
+        }
+        brokerUrl = value;
+        index += 1;
+        continue;
+      }
       if (arg === '--label' && clientLabel === undefined) {
         const value = args[index + 1]?.trim();
         if (!value || value.startsWith('--') || value.length > 128 || /[\0\r\n]/.test(value)) {
@@ -754,6 +767,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const pair = await (dependencies.runPair ?? defaultRunPair)({
       json,
       wait,
+      ...(brokerUrl ? { brokerUrl } : {}),
       ...(clientLabel ? { clientLabel } : {}),
       invocation: command,
       stdout,

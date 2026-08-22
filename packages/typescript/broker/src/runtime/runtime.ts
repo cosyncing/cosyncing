@@ -730,7 +730,6 @@ const BROKER_DESCRIPTOR = Object.freeze({
 });
 const brokerUpdateChecker = new BrokerUpdateChecker({ buildInfo: BUILD_INFO });
 const transportPairings = new TransportPairingRegistry({
-  brokerUrl: ADVERTISED_BROKER_URL ?? BROKER_URL,
   broker: BROKER_DESCRIPTOR,
   ttlMs: TRANSPORT_PAIRING_TTL_MS,
 });
@@ -3971,9 +3970,17 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/transport/pairings' && req.method === 'POST') {
-      const body = await req.json().catch(() => ({})) as any;
-      const offer = transportPairings.createOffer({ clientLabel: typeof body?.clientLabel === 'string' ? body.clientLabel.trim() : undefined });
-      return json({ ok: true, ...offer }, 201);
+      try {
+        const body = await req.json().catch(() => ({})) as any;
+        const offer = transportPairings.createOffer({
+          clientLabel: typeof body?.clientLabel === 'string' ? body.clientLabel.trim() : undefined,
+          brokerUrl: body?.brokerUrl,
+        });
+        return json({ ok: true, ...offer }, 201);
+      } catch (err) {
+        if (err instanceof PairingHttpError) return json({ error: err.message, code: err.code }, err.status);
+        throw err;
+      }
     }
 
     const pairingStatus = path.match(/^\/api\/transport\/pairings\/([^/]+)$/);
