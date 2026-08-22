@@ -27,11 +27,9 @@ export interface BrokerConfig {
     port: number;
     machineLabel: string;
     /** Derived at runtime and never persisted. */
-    readonly host: typeof BROKER_LISTEN_HOST;
+    host: typeof BROKER_LISTEN_HOST;
     /** Derived at runtime and never persisted. */
-    readonly internalUrl: string;
-    /** Removed persisted field retained temporarily for source compatibility. Always undefined in v2. */
-    readonly advertisedUrl?: undefined;
+    internalUrl: string;
     [key: string]: unknown;
   };
   paths?: {
@@ -85,7 +83,6 @@ export interface EffectiveBrokerConfiguration {
     port: 'default' | 'config' | 'environment';
     machineLabel: 'default' | 'config' | 'environment';
     internalUrl: 'derived';
-    advertisedUrl: 'unset';
     flutterWebRoot: 'unset' | 'config' | 'environment';
     updateChannel: 'default' | 'config' | 'environment';
   };
@@ -115,23 +112,20 @@ function loopbackHost(host: string): boolean {
 }
 
 function withDerivedBrokerFields<T extends { port: number }>(broker: T): T & {
-  readonly host: typeof BROKER_LISTEN_HOST;
-  readonly internalUrl: string;
-  readonly advertisedUrl?: undefined;
+  host: typeof BROKER_LISTEN_HOST;
+  internalUrl: string;
 } {
   const result = { ...broker } as T & {
-    readonly host: typeof BROKER_LISTEN_HOST;
-    readonly internalUrl: string;
-    readonly advertisedUrl?: undefined;
+    host: typeof BROKER_LISTEN_HOST;
+    internalUrl: string;
   };
   Object.defineProperties(result, {
     host: { value: BROKER_LISTEN_HOST, enumerable: true, writable: true },
     internalUrl: { value: brokerInternalUrl(broker.port), enumerable: true, writable: true },
-    advertisedUrl: { value: undefined, enumerable: true, writable: true },
     toJSON: {
       enumerable: false,
       value(this: Record<string, unknown>) {
-        const { host: _host, internalUrl: _internalUrl, advertisedUrl: _advertisedUrl, ...persisted } = this;
+        const { host: _host, internalUrl: _internalUrl, ...persisted } = this;
         return persisted;
       },
     },
@@ -419,7 +413,6 @@ export function resolveBrokerConfiguration(options: {
       port: overrides.includes('PORT') ? 'environment' : hasStored ? 'config' : 'default',
       machineLabel: overrides.includes('COSYNCING_MACHINE') ? 'environment' : hasStored ? 'config' : 'default',
       internalUrl: 'derived',
-      advertisedUrl: 'unset',
       flutterWebRoot: overrides.includes('COSYNCING_WEB_DIR') ? 'environment' : flutterWebRoot ? 'config' : 'unset',
       updateChannel: overrides.includes('COSYNCING_UPDATE_CHANNEL') ? 'environment' : hasStored ? 'config' : 'default',
     },

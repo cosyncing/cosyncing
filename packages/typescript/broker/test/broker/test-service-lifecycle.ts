@@ -57,17 +57,37 @@ import {
 import { readSetupState } from '../../src/installation/setup-state.ts';
 import type { SetupLanguage } from '../../src/installation/setup-i18n.ts';
 import {
-  type AdvertisedEndpointPollingClock,
-  type TailscaleServeInspection,
-  type TailscaleServeRouteProvider,
-} from '../../src/installation/tailscale-serve.ts';
-import {
   readSetupFailureDiagnostic,
   readSetupTransactionJournal,
   setupFailureDiagnosticPath,
   type SetupTransactionContext,
 } from '../../src/installation/setup-transaction.ts';
 import { createSystemdSetupAction } from '../../src/installation/service-manager.ts';
+
+interface TailscaleServeInspection {
+  schemaVersion: 1;
+  topology: string;
+  backend: string;
+  executablePath?: string;
+  dnsName?: string;
+  advertisedUrl?: string;
+  httpsCapability: string;
+  route: 'missing' | 'desired';
+  routeTarget?: string;
+  desiredTarget: string;
+  detailCode: string;
+  summary: string;
+}
+interface TailscaleServeRouteProvider {
+  inspect(): Promise<TailscaleServeInspection>;
+  registerPrivateHttpsRoot(): Promise<void>;
+  removePrivateHttpsRoot(): Promise<void>;
+}
+interface AdvertisedEndpointPollingClock {
+  now(): number;
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -512,7 +532,7 @@ function setupOptions(options: {
   healthAttempts?: number;
   tailscale?: FakeTailscaleProvider;
   advertisedHealth?: () => Awaited<ReturnType<SetupDiagnosisContext['fetchJson']>>;
-  advertisedEndpointVerification?: NonNullable<Parameters<typeof runSetup>[0]['advertisedEndpointVerification']>;
+  advertisedEndpointVerification?: unknown;
   /** Override the build the healthy broker answers as; defaults to the build this fixture installs. */
   healthBuild?: Readonly<Omit<BuildInfo, 'schemaVersions' | 'contract'>>;
 }) {
@@ -545,9 +565,6 @@ function setupOptions(options: {
     systemdProviderFactory: options.provider ? () => options.provider! : undefined,
     ...(options.tailscale ? { tailscaleProviderFactory: () => options.tailscale! } : {}),
     serviceHealthAttempts: options.healthAttempts ?? 2,
-    ...(options.advertisedEndpointVerification
-      ? { advertisedEndpointVerification: options.advertisedEndpointVerification }
-      : {}),
   } satisfies Parameters<typeof runSetup>[0];
 }
 
@@ -1702,7 +1719,7 @@ try {
         && install.committed
         && install.state.resources.some((resource) => resource.id === 'service-systemd'));
     check('choosing the systemd service enables lingering with it, without a separate prompt',
-      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,tailscale,quota,plan,confirm,complete'
+      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete'
         && provider.events.includes('enable-linger')
         && provider.lingering === 'enabled',
       presenter.calls.join(','));
@@ -2203,138 +2220,6 @@ try {
       `${crashLoop.active} after ${provider.samples} samples`);
   }
 
-  // A first macOS Serve route may be correct before MagicDNS/certificate propagation lets the advertised
-  // HTTPS request through. Setup must wait for that endpoint, while retaining the ordinary transaction
-  // rollback if it never becomes this machine's broker.
-  {
-    const machine = join(root, 'launchd-tailscale-delayed');
-    const provider = new FakeLaunchdProvider(machine);
-    const tailscale = new FakeTailscaleProvider();
-    const clock = new ImmediatePollingClock();
-    let advertisedProbes = 0;
-    const installed = await runSetup(setupOptions({
-      root: machine,
-      provider,
-      tailscale,
-      presenter: new ServicePresenter({ service: 'launchd', tailscale: true }),
-      platform: 'darwin',
-      buildInfo: { ...BUILD_INFO, packaged: true, target: 'darwin-arm64' },
-      advertisedHealth: () => {
-        advertisedProbes += 1;
-        return advertisedProbes < 3
-          ? { status: 'unreachable' }
-          : {
-              status: 'ok',
-              statusCode: 200,
-              json: {
-                ok: true,
-                product: 'cosyncing',
-                machine: defaultBrokerConfig().broker.machineLabel,
-              },
-            };
-      },
-      advertisedEndpointVerification: { timeoutMs: 2_500, intervalMs: 500, clock },
-    }));
-    const install = inspectInstallState(join(machine, '.cosyncing'));
-    check('macOS first-run setup waits for delayed advertised-endpoint readiness and then commits',
-      installed.status === 'complete' && advertisedProbes === 3
-        && install.committed && provider.active === 'active' && tailscale.route === 'desired'
-        && tailscale.events.join(',') === 'register',
-      `${installed.status} probes=${advertisedProbes} service=${provider.active} route=${tailscale.route}`);
-    check('delayed advertised success leaves no polling timer behind',
-      clock.schedules === 2 && clock.cancellations === 2 && clock.pending.size === 0,
-      `scheduled=${clock.schedules} cancelled=${clock.cancellations} pending=${clock.pending.size}`);
-  }
-
-  // ── setup commits on a host whose MagicDNS will not resolve ──
-  // The advertised NAME never answers. Addresses come from the fixture's real `tailscale status --json`
-  // (NOT injected), so removing setup's fallback wiring makes this fail. Identity is still mandatory.
-  {
-    const commitVia = async (label: string, machineLabel: string) => {
-      const machine = join(root, label);
-      const provider = new FakeLaunchdProvider(machine);
-      const tailscale = new FakeTailscaleProvider();
-      const clock = new ImmediatePollingClock();
-      const contacted: string[] = [];
-      const result = await runSetup(setupOptions({
-        root: machine,
-        provider,
-        tailscale,
-        presenter: new ServicePresenter({ service: 'launchd', tailscale: true }),
-        platform: 'darwin',
-        buildInfo: { ...BUILD_INFO, packaged: true, target: 'darwin-arm64' },
-        advertisedHealth: () => ({ status: 'unreachable' }),
-        advertisedEndpointVerification: {
-          timeoutMs: 2_500,
-          intervalMs: 500,
-          clock,
-          directProbe: async ({ address, hostname }) => {
-            contacted.push(`${address}|${hostname}`);
-            return { status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: machineLabel } };
-          },
-        },
-      }));
-      return { result, tailscale, provider, contacted, home: join(machine, '.cosyncing') };
-    };
-
-    const committed = await commitVia(
-      'launchd-tailscale-broken-dns',
-      defaultBrokerConfig().broker.machineLabel,
-    );
-    check('setup commits by verifying the advertised route through addresses from tailscale status --json',
-      committed.result.status === 'complete'
-        && inspectInstallState(committed.home).committed
-        && committed.tailscale.route === 'desired'
-        && committed.tailscale.events.join(',') === 'register'
-        && committed.contacted[0] === '100.64.0.1|devbox.tailnet.ts.net',
-      `${committed.result.status} contacted=${committed.contacted.join(',')} route=${committed.tailscale.route}`);
-
-    const foreign = await commitVia('launchd-tailscale-foreign-identity', 'another-machine');
-    check('setup rolls the route back when the address answers as a different machine',
-      foreign.result.status === 'failed'
-        && foreign.result.failure?.code === 'verify-post-commit'
-        && foreign.result.failure.rollback === 'complete'
-        && foreign.tailscale.events.join(',') === 'register,remove'
-        && foreign.tailscale.route === 'missing'
-        && !inspectInstallState(foreign.home).committed,
-      `${foreign.result.status}:${foreign.result.failure?.rollback} route=${foreign.tailscale.route}`);
-  }
-
-  {
-    const machine = join(root, 'launchd-tailscale-unreachable');
-    const home = join(machine, '.cosyncing');
-    const provider = new FakeLaunchdProvider(machine);
-    const tailscale = new FakeTailscaleProvider();
-    const clock = new ImmediatePollingClock();
-    let advertisedProbes = 0;
-    const failed = await runSetup(setupOptions({
-      root: machine,
-      provider,
-      tailscale,
-      presenter: new ServicePresenter({ service: 'launchd', tailscale: true }),
-      platform: 'darwin',
-      buildInfo: { ...BUILD_INFO, packaged: true, target: 'darwin-arm64' },
-      advertisedHealth: () => { advertisedProbes += 1; return { status: 'unreachable' }; },
-      advertisedEndpointVerification: { timeoutMs: 1_001, intervalMs: 500, clock },
-    }));
-    check('a permanently unreachable advertised endpoint expires and rolls back the complete macOS setup',
-      failed.status === 'failed' && failed.exitCode === 3
-        && failed.failure?.code === 'verify-post-commit' && failed.failure.rollback === 'complete'
-        && advertisedProbes === 3 && tailscale.events.join(',') === 'register,remove'
-        && tailscale.route === 'missing'
-        && provider.active === 'inactive' && provider.enabled === 'disabled'
-        && !existsSync(provider.definitionPath) && !existsSync(provider.environmentPath)
-        && !inspectInstallState(home).committed && !existsSync(join(home, 'config.json'))
-        && !readSetupTransactionJournal(home),
-      `${failed.status}:${failed.failure?.rollback} probes=${advertisedProbes} `
-        + `service=${provider.active}/${provider.enabled} route=${tailscale.route}`);
-    check('advertised deadline rollback leaves no service process or polling timer behind',
-      provider.events.includes('uninstall')
-        && clock.schedules === 3 && clock.cancellations === 3 && clock.pending.size === 0,
-      `events=${provider.events.join(',')} scheduled=${clock.schedules} `
-        + `cancelled=${clock.cancellations} pending=${clock.pending.size}`);
-  }
-
   // A darwin setup commits the launchd provider, receipts it as `service-launchd`, and never prompts for
   // lingering; switching back to foreground drops the receipt again.
   {
@@ -2357,7 +2242,7 @@ try {
         && !install.state.resources.some((resource) => resource.id === 'service-systemd'),
       `${installed.status}: ${installed.summary}`);
     check('darwin setup never prompts for lingering and claims no boot persistence',
-      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,tailscale,quota,plan,confirm,complete'
+      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete'
         && !provider.events.includes('enable-linger'),
       presenter.calls.join(','));
 

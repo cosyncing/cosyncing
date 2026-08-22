@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import type { CodexRuntimeUpdatePolicy } from '@cosyncing/protocol';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { atomicWriteJsonOwnerOnly } from '../security/secure-files.ts';
+import { withoutLegacyConnectivityIntent } from './legacy-connectivity-migration.ts';
 
 export const SETUP_STATE_SCHEMA_VERSION = 1 as const;
 
@@ -103,8 +104,6 @@ export interface SetupState {
   serviceChoice?: 'foreground' | 'systemd' | 'launchd';
   /** Separate BPC6 consent; true records intent, while the install receipt proves whether cosyncing enabled it. */
   systemdLingeringRequested?: boolean;
-  /** BPC5 records intent independently; BPC7 owns the confirmed Tailscale Serve mutation. */
-  tailscaleServeRequested?: boolean;
   /** One consent controls the package-owned cosyncing agent skill installed in both native discovery roots. */
   agentSkillRequested?: boolean;
   /** Consent to route terminal `opencode` to the shared serve via the shell shim (R1 script + R2 rc blocks). */
@@ -178,7 +177,10 @@ export function readSetupState(home = setupStateHome()): SetupState {
 export function writeSetupState(next: SetupState, home = setupStateHome()): void {
   // Atomic owner-only write: a crash or concurrent writer must never leave a truncated file, and unknown
   // additive fields survive because callers merge from readSetupState() before reaching this boundary.
-  atomicWriteJsonOwnerOnly(setupStatePath(home), { ...next, schemaVersion: SETUP_STATE_SCHEMA_VERSION });
+  atomicWriteJsonOwnerOnly(
+    setupStatePath(home),
+    withoutLegacyConnectivityIntent({ ...next, schemaVersion: SETUP_STATE_SCHEMA_VERSION }),
+  );
 }
 
 /**

@@ -89,13 +89,7 @@ import {
 } from '../../src/installation/setup-state.ts';
 import { decideCodexDaemonOwnership } from '../../../adapters/codex/src/index.ts';
 import type { CodexDaemonStatus } from '../../src/installation/broker-lifecycle.ts';
-import {
-  TAILSCALE_SERVE_OWNERSHIP_MARKER,
-  TAILSCALE_SERVE_RESOURCE_ID,
-  tailscaleRouteReceiptTarget,
-  type TailscaleServeInspection,
-  type TailscaleServeRouteProvider,
-} from '../../src/installation/tailscale-serve.ts';
+import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import {
   AGENT_SKILL_SHA256,
   AGENT_SKILL_SOURCE,
@@ -153,6 +147,30 @@ const BUILD = Object.freeze({
 interface NetworkState {
   route: 'missing' | 'desired' | 'conflict' | 'funnel-conflict';
   available: boolean;
+}
+
+interface TailscaleServeInspection {
+  schemaVersion: 1;
+  topology: string;
+  backend: string;
+  executablePath?: string;
+  dnsName?: string;
+  advertisedUrl?: string;
+  httpsCapability: string;
+  route: 'missing' | 'desired' | 'conflict' | 'funnel-conflict' | 'unavailable';
+  desiredTarget: string;
+  detailCode: string;
+  summary: string;
+}
+interface TailscaleServeRouteProvider {
+  inspect(): Promise<TailscaleServeInspection>;
+  registerPrivateHttpsRoot(): Promise<void>;
+  removePrivateHttpsRoot(): Promise<void>;
+}
+const TAILSCALE_SERVE_RESOURCE_ID = LEGACY_TAILSCALE_RESOURCE_ID;
+const TAILSCALE_SERVE_OWNERSHIP_MARKER = 'cosyncing-tailscale-serve-v1';
+function tailscaleRouteReceiptTarget(value: { advertisedUrl?: string; desiredTarget: string }): string {
+  return `${value.advertisedUrl}/ -> ${value.desiredTarget}`;
 }
 
 function tailscaleInspection(network: NetworkState, config: BrokerConfig): TailscaleServeInspection {
@@ -324,7 +342,6 @@ function machine(options: {
   ensureOwnerOnlyDirectory(cache);
   const config = defaultBrokerConfig();
   config.broker.machineLabel = 'fixture-machine';
-  config.broker.advertisedUrl = 'https://fixture.tailnet.ts.net';
   writeBrokerConfig(config, home);
   ensureInstallationCredentials({ home, internalUrl: config.broker.internalUrl });
   writeSetupState({
@@ -389,55 +406,6 @@ try {
     const m = machine({ service: true, binaryHash: true }); cleanup.push(m.root);
     await m.service.installDefinition();
     await m.service.start();
-    // ── status on a host whose MagicDNS will not resolve ──
-    // Drives collectLifecycleStatus itself: the advertised NAME never connects, `tailscale status --json`
-    // supplies this node's addresses, and the endpoint must still report ready — but only for THIS broker.
-    {
-      const ADDRESSES = ['100.64.0.1', 'fd7a:115c:a1e0::1'];
-      const brokenDns = {
-        ...m.context,
-        resolveExecutable(command: string) {
-          if (command === 'tailscale') return '/usr/bin/tailscale';
-          return m.context.resolveExecutable(command);
-        },
-        async runReadOnly(path: string, args: readonly string[]) {
-          if (path === '/usr/bin/tailscale' && args[0] === 'status') {
-            return { status: 'ok' as const, exitCode: 0, stderr: '', stdout: JSON.stringify({
-              BackendState: 'Running',
-              Self: { DNSName: 'fixture.tailnet.ts.net.', TailscaleIPs: ADDRESSES },
-            }) };
-          }
-          return m.context.runReadOnly(path, args);
-        },
-        async fetchJson(url: string, headers?: Readonly<Record<string, string>>, timeoutMs?: number) {
-          if (url.startsWith('https://fixture.tailnet.ts.net')) return { status: 'unreachable' as const };
-          return m.context.fetchJson(url, headers, timeoutMs);
-        },
-      };
-      const contacted: string[] = [];
-      const statusVia = async (machine: string) => collectLifecycleStatus({
-        ...baseOptions(m),
-        context: brokenDns,
-        advertisedDirectProbe: async ({ address }) => {
-          contacted.push(address);
-          return { status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine } };
-        },
-      });
-      const readyViaAddress = await statusVia('fixture-machine');
-      check('status reports the advertised endpoint ready through this node address when MagicDNS fails',
-        readyViaAddress.endpoints.advertised === 'ready' && contacted[0] === ADDRESSES[0],
-        `${readyViaAddress.endpoints.advertised} contacted=${contacted.join(',')}`);
-      const foreign = await statusVia('another-machine');
-      check('status reports identity-mismatch when the address answers as a different machine',
-        foreign.endpoints.advertised === 'identity-mismatch',
-        foreign.endpoints.advertised);
-      // Loopback must never be given the fallback: it needs no name resolution and an address retry there
-      // would be probing something the internal URL never pointed at.
-      check('the internal loopback endpoint is unaffected by the advertised fallback',
-        readyViaAddress.endpoints.internal === 'ready',
-        readyViaAddress.endpoints.internal);
-    }
-
     const status = await collectLifecycleStatus(baseOptions(m));
     const serialized = JSON.stringify(status);
     check('status summarizes service/endpoints/agents/sessions/updates without credentials',
@@ -663,7 +631,8 @@ try {
       chineseStatus.includes('cosyncing 1.0.0：就绪')
         && chineseStatus.includes('安装：已提交')
         && chineseStatus.includes('服务：systemd / 运行中 / 已启用')
-        && chineseStatus.includes('内部端点：就绪')
+        && chineseStatus.includes('Broker 监听：http://127.0.0.1:7734 / 仅限回环 / 就绪')
+        && chineseStatus.includes('连接：由操作者在 cosyncing 外部管理')
         && chineseStatus.includes('已注册智能体：Codex [无法创建会话；同步已启用]')
         && chineseStatus.includes('OpenCode [可创建会话]')
         && chineseStatus.includes('Pi [无法创建会话]')
@@ -686,39 +655,13 @@ try {
       disabled: '已禁用',
       unknown: '未知',
       unreachable: '无法访问',
-      'identity-mismatch': '身份不匹配',
-      missing: '缺失',
-      running: '运行中',
-      stopped: '已停止',
-      'logged-out': '未登录',
-      'daemon-unavailable': 'daemon 不可用',
-      desired: '符合预期',
-      conflict: '冲突',
-      'funnel-conflict': 'Funnel 冲突',
-      unavailable: '不可用',
-      malformed: '格式错误',
-      'native-linux': '原生 Linux',
-      'native-macos': '原生 macOS',
-      'inside-wsl': 'WSL 内部',
-      'windows-host-only': '仅 Windows 主机',
     } satisfies Readonly<Record<CliStatusValue, string>>;
     const statusMatrixKeys = Object.keys(expectedZhStatusValues) as CliStatusValue[];
-    const macStatus = renderLifecycleStatus({
-      ...status,
-      network: { ...status.network, topology: 'native-macos' },
-    }, 'zh-Hans');
-    const wslStatus = renderLifecycleStatus({
-      ...status,
-      network: { ...status.network, topology: 'inside-wsl' },
-    }, 'zh-Hans');
-    check('Chinese lifecycle status exhaustively maps every service, endpoint, Tailscale topology, backend, and route enum',
+    check('Chinese lifecycle status exhaustively maps service and listener status values',
       statusMatrixKeys.length === Object.keys(ZH_STATUS_VALUES).length
         && statusMatrixKeys.every((value) => ZH_STATUS_VALUES[value] === expectedZhStatusValues[value]
           && localizeCliStatusValue(value, 'zh-Hans') === expectedZhStatusValues[value]
-          && localizeCliStatusValue(value, 'en') === value)
-        && macStatus.includes('Tailscale：原生 macOS /')
-        && wslStatus.includes('Tailscale：WSL 内部 /'),
-      `${macStatus.split('\n').find((line) => line.startsWith('Tailscale'))} | ${wslStatus.split('\n').find((line) => line.startsWith('Tailscale'))}`);
+          && localizeCliStatusValue(value, 'en') === value));
     const stopped = await runServiceCommand('stop', baseOptions(m));
     const started = await runServiceCommand('start', baseOptions(m));
     const restarted = await runServiceCommand('restart', baseOptions(m));
@@ -976,27 +919,33 @@ try {
         && existsSync(install.committed ? install.state.migrations[0]!.backupPath : ''));
   }
 
-  // Service drift and a missing requested private route reconcile together and gain receipts.
+  // Legacy connectivity state is relinquished without invoking or changing its external route.
   {
-    const m = machine({ service: true, tailscale: true, binaryHash: true }); cleanup.push(m.root);
-    m.network.route = 'missing';
-    atomicWriteOwnerOnly(m.service.definitionPath, 'manual drift\n');
-    atomicWriteOwnerOnly(m.service.environmentPath, 'manual drift\n');
-    m.service.enabled = true;
-    m.service.active = false;
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
     const inspection = inspectInstallState(m.home);
     if (!inspection.committed) throw new Error('fixture install missing');
-    inspection.state.resources.push(
-      { id: 'service-systemd', kind: 'service', target: m.service.definitionPath, ownership: { proof: 'package-hash', installedSha256: hash(m.service.expectedDefinition()) } },
-      { id: 'service-environment', kind: 'environment-file', target: m.service.environmentPath, ownership: { proof: 'package-hash', installedSha256: hash(m.service.expectedEnvironment()) } },
-    );
-    writeInstallState(inspection.state, m.home);
+    const legacyTarget = 'https://fixture.tailnet.ts.net/ -> http://127.0.0.1:7734';
+    inspection.state.resources.push({
+      id: LEGACY_TAILSCALE_RESOURCE_ID,
+      kind: 'other',
+      target: legacyTarget,
+      ownership: { proof: 'receipt', marker: TAILSCALE_SERVE_OWNERSHIP_MARKER },
+    });
+    atomicWriteOwnerOnly(join(m.home, 'install-state.json'), `${JSON.stringify(inspection.state)}\n`, { mode: 0o600 });
+    atomicWriteOwnerOnly(join(m.home, 'setup-state.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      serviceChoice: 'foreground',
+      tailscaleServeRequested: true,
+    })}\n`, { mode: 0o600 });
     const repaired = await runRepair({ ...baseOptions(m), confirmed: true, allowLegacyIntegrations: false });
     const after = inspectInstallState(m.home);
-    check('repair reconciles owned service drift, starts it, and restores the requested private route',
-      repaired.exitCode === 0 && (await m.service.inspect()).definition === 'current' && m.service.active
-        && String(m.network.route) === 'desired' && after.committed
-        && after.state.resources.some((item) => item.id === TAILSCALE_SERVE_RESOURCE_ID));
+    check('repair relinquishes legacy connectivity records without provider effects',
+      repaired.exitCode === 0
+        && repaired.actions?.includes('legacy-connectivity.relinquish') === true
+        && !('tailscaleServeRequested' in readSetupState(m.home))
+        && after.committed
+        && !after.state.resources.some((item) => item.id === LEGACY_TAILSCALE_RESOURCE_ID)
+        && m.tailscale.calls.length === 0);
   }
 
   // A drifted environment file on an ACTIVE service must converge in one run.
@@ -1159,16 +1108,23 @@ try {
       { id: OPENCODE_SHIM_RC_RESOURCE_IDS.bash, kind: 'shell-init-block', target: bashrc, ownership: { proof: 'receipt', marker: OPENCODE_SHIM_BLOCK_BEGIN } },
       { id: OPENCODE_SHIM_RC_RESOURCE_IDS.zsh, kind: 'shell-init-block', target: zshrc, ownership: { proof: 'receipt', marker: OPENCODE_SHIM_BLOCK_BEGIN } },
     );
-    writeInstallState(inspection.state, m.home);
+    atomicWriteOwnerOnly(join(m.home, 'install-state.json'), `${JSON.stringify(inspection.state)}\n`, { mode: 0o600 });
+    atomicWriteOwnerOnly(join(m.home, 'setup-state.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      serviceChoice: 'systemd',
+      tailscaleServeRequested: true,
+    })}\n`, { mode: 0o600 });
     atomicWriteOwnerOnly(join(m.cache, 'keep-artifact'), 'keep');
     const uninstalled = await runUninstall({
       ...baseOptions(m), confirmed: true, allowLegacyIntegrations: true,
       purgeData: false, purgeConfirmed: false,
     });
     const claude = JSON.parse(readFileSync(m.claudeSettings, 'utf8'));
-    check('uninstall removes exact owned service/route/Pi/binaries and marker hooks only',
+    check('uninstall removes exact owned resources while preserving external connectivity',
       uninstalled.exitCode === 0 && !existsSync(m.binary) && !existsSync(piPath)
-        && !existsSync(m.service.definitionPath) && m.network.route === 'missing'
+        && !existsSync(m.service.definitionPath) && m.network.route === 'desired'
+        && uninstalled.preservedExternalConnectivity?.includes(tailscaleRouteReceiptTarget(liveTail)) === true
+        && m.tailscale.calls.length === 0
         && !JSON.stringify(claude).includes('cosyncing-hook') && JSON.stringify(claude).includes('keep-me'));
     check('uninstall removes the owned opencode shim script and excises each rc block, preserving unrelated rc content',
       !existsSync(shimPath)

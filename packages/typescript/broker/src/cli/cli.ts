@@ -55,7 +55,6 @@ export interface CliDependencies {
     yes: boolean;
     acceptManagedRuntimeOwnership: boolean;
     enableSystemdLingering: boolean;
-    enableTailscaleServe: boolean;
     installAgentSkill: boolean;
     opencodeShimSignal: OpencodeShimSignal;
     replaceLegacyPiBridge: boolean;
@@ -172,7 +171,7 @@ function help(command: string, packaged: boolean): string {
 
 Usage:
   ${brokerUsage}
-  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--enable-tailscale-serve] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
+  ${command} setup [--yes --accept-managed-runtime-ownership [--enable-systemd-lingering] [--no-install-agent-skill] [--replace-legacy-pi-bridge] [--upgrade-legacy-agent-skill]]
   ${command} pair [--broker-url <client-reachable-url>] [--label <device>] [--wait] [--json]
   ${command} devices list [--json]
   ${command} devices revoke <id> [--yes] [--json]
@@ -282,7 +281,6 @@ async function defaultRunSetup(options: {
   yes: boolean;
   acceptManagedRuntimeOwnership: boolean;
   enableSystemdLingering: boolean;
-  enableTailscaleServe: boolean;
   installAgentSkill: boolean;
   opencodeShimSignal: OpencodeShimSignal;
   replaceLegacyPiBridge: boolean;
@@ -298,7 +296,6 @@ async function defaultRunSetup(options: {
     ? presenters.createNonInteractiveSetupPresenter(options.stdout, {
         acceptManagedRuntimeOwnership: options.acceptManagedRuntimeOwnership,
         enableSystemdLingering: options.enableSystemdLingering,
-        enableTailscaleServe: options.enableTailscaleServe,
         installAgentSkill: options.installAgentSkill,
         opencodeShim: options.opencodeShimSignal,
         replaceLegacyPiBridge: options.replaceLegacyPiBridge,
@@ -655,7 +652,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       '--yes',
       '--accept-managed-runtime-ownership',
       '--enable-systemd-lingering',
-      '--enable-tailscale-serve',
       '--no-install-agent-skill',
       '--install-opencode-shim',
       '--no-install-opencode-shim',
@@ -671,7 +667,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
     const yes = args.includes('--yes');
     const acceptManagedRuntimeOwnership = args.includes('--accept-managed-runtime-ownership');
     const enableSystemdLingering = args.includes('--enable-systemd-lingering');
-    const enableTailscaleServe = args.includes('--enable-tailscale-serve');
     const installAgentSkill = !args.includes('--no-install-agent-skill');
     const replaceLegacyPiBridge = args.includes('--replace-legacy-pi-bridge');
     const upgradeLegacyAgentSkill = args.includes('--upgrade-legacy-agent-skill');
@@ -684,7 +679,7 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
         : 'unset';
     // Non-interactive negative flags require --yes; the bare positive opt-in (--install-opencode-shim) does not
     // — it only informs the non-interactive presenter and is inert in the interactive (clack) path.
-    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering || enableTailscaleServe
+    if (!yes && (acceptManagedRuntimeOwnership || enableSystemdLingering
       || !installAgentSkill || opencodeShimSignal === 'off' || replaceLegacyPiBridge || upgradeLegacyAgentSkill)) {
       stderr.write(`${command}: non-interactive setup flags require --yes\n`);
       return 2;
@@ -707,7 +702,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             yes,
             acceptManagedRuntimeOwnership,
             enableSystemdLingering,
-            enableTailscaleServe,
             installAgentSkill,
             opencodeShimSignal,
             replaceLegacyPiBridge,
@@ -717,7 +711,6 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
             yes,
             acceptManagedRuntimeOwnership,
             enableSystemdLingering,
-            enableTailscaleServe,
             installAgentSkill,
             opencodeShimSignal,
             replaceLegacyPiBridge,

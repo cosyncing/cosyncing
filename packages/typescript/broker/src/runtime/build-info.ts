@@ -29,7 +29,7 @@ export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
   setupState: 1,
   installState: 1,
   durableStores: Object.freeze({
-    config: 1,
+    config: 2,
     setup: 1,
     install: 1,
     schedules: 1,

@@ -195,7 +195,15 @@ export function createQrPairingPayload(payload: QrPairingPayloadInput): string {
   const explicitVersion = payload.version;
   const version = explicitVersion ?? (hasPairingId ? 2 : 1);
   const normalized = version === 3
-    ? { ...payload, version: 3, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV3
+    ? (() => {
+        if (payload.transport.kind !== 'broker-url') throw new Error('pairing payload v3 requires broker-url transport');
+        return {
+          ...payload,
+          version: 3,
+          pairingId: hasPairingId ? String(payload.pairingId) : '',
+          transport: payload.transport,
+        } satisfies QrPairingPayloadV3;
+      })()
     : version === 2
       ? { ...payload, version: 2, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV2
       : { ...payload, version: 1 } as QrPairingPayloadV1;

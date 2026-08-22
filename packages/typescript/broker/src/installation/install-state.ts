@@ -5,8 +5,10 @@ import { setupStateHome } from './setup-state.ts';
 import { atomicWriteJsonOwnerOnly, inspectOwnerOnlyFile } from '../security/secure-files.ts';
 import { AGENT_SKILL_RESOURCE_IDS } from './agent-skill.ts';
 import { OPENCODE_SHIM_RC_RESOURCE_IDS, OPENCODE_SHIM_RESOURCE_ID } from '@cosyncing/adapter-opencode';
-
-export const TAILSCALE_SERVE_RESOURCE_ID = 'tailscale-serve-https-root';
+import {
+  LEGACY_TAILSCALE_RESOURCE_ID,
+  relinquishLegacyConnectivityReceipts,
+} from './legacy-connectivity-migration.ts';
 
 /** Every receipt id emitted by setup and handled by uninstall. */
 export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
@@ -18,7 +20,7 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'service-environment',
   'service-systemd-linger',
   'pi-bridge',
-  TAILSCALE_SERVE_RESOURCE_ID,
+  LEGACY_TAILSCALE_RESOURCE_ID,
   ...Object.values(AGENT_SKILL_RESOURCE_IDS),
   OPENCODE_SHIM_RESOURCE_ID,
   ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
@@ -169,5 +171,6 @@ export function inspectInstallState(home = setupStateHome()): InstallStateInspec
 export function writeInstallState(state: CommittedInstallState, home = setupStateHome()): void {
   const normalized = normalizeCommittedInstallState(state);
   if (!normalized) throw new Error('refusing to write invalid install state');
-  atomicWriteJsonOwnerOnly(installStatePath(home), normalized);
+  const relinquished = relinquishLegacyConnectivityReceipts(normalized.resources);
+  atomicWriteJsonOwnerOnly(installStatePath(home), { ...normalized, resources: relinquished.resources });
 }

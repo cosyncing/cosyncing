@@ -130,7 +130,6 @@ export interface SetupActionInputs {
     aliasPath?: string;
     serviceChoice: 'foreground' | 'systemd' | 'launchd';
     systemdLingeringRequested: boolean;
-    tailscaleServeRequested: boolean;
   };
   removeResourceIds?: readonly string[];
   now?: () => Date;
@@ -398,7 +397,6 @@ function desiredSetupStateMatches(actual: SetupState, desired: SetupState): bool
     && actual.managedRuntimeAcknowledgedAt === desired.managedRuntimeAcknowledgedAt
     && actual.serviceChoice === desired.serviceChoice
     && actual.systemdLingeringRequested === desired.systemdLingeringRequested
-    && actual.tailscaleServeRequested === desired.tailscaleServeRequested
     && actual.agentSkillRequested === desired.agentSkillRequested
     && actual.opencodeShimRequested === desired.opencodeShimRequested
     && actual.quotaWarningsEnabled === desired.quotaWarningsEnabled;
@@ -664,7 +662,6 @@ export function createInstallCommitAction(inputs: SetupActionInputs): SetupCommi
           version: inputs.installMetadata.version,
           serviceChoice: inputs.installMetadata.serviceChoice,
           systemdLingeringRequested: inputs.installMetadata.systemdLingeringRequested,
-          tailscaleServeRequested: inputs.installMetadata.tailscaleServeRequested,
         },
       }, inputs.home);
     },

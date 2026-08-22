@@ -13,7 +13,7 @@
  * is a deliberate copy change, not a translation side effect.
  *
  * Chinese copy is written as Chinese, not transliterated English. Terms that name a thing on the machine —
- * systemd, launchd, Tailscale, Serve, Codex, OpenCode, Claude, Pi, Tokdash, token — stay untranslated,
+ * systemd, launchd, Codex, OpenCode, Claude, Pi, Tokdash, token — stay untranslated,
  * because those are what the operator will type and what they will search for.
  */
 import type { SetupAgentSummary, SetupServiceChoice, TokdashProvisionCapability } from './setup.ts';
@@ -33,7 +33,7 @@ export type SetupLanguage = 'en' | 'zh-Hans';
  * Paths, unit names, URLs, versions, and command names are interpolated verbatim in every language.
  */
 export type SetupMutationStep =
-  | { kind: 'config'; configPath: string; internalUrl: string; advertisedUrl?: string }
+  | { kind: 'config'; configPath: string; internalUrl: string }
   | { kind: 'credentials' }
   | { kind: 'setup-state'; service: SetupServiceChoice }
   | { kind: 'pi-bridge'; path: string; replaceLegacy?: boolean }
@@ -44,9 +44,6 @@ export type SetupMutationStep =
   | { kind: 'opencode-shim' }
   | { kind: 'service-install'; definitionPath: string }
   | { kind: 'service-remove'; provider: SetupServiceChoice; product: string }
-  | { kind: 'tailscale-register'; advertisedUrl: string; target: string }
-  | { kind: 'tailscale-reuse' }
-  | { kind: 'tailscale-remove'; advertisedUrl: string }
   | { kind: 'binary-install'; version: string; path: string }
   | { kind: 'commit-receipts'; installStatePath: string };
 
@@ -105,9 +102,8 @@ export interface SetupMessages {
   runtimeUnavailableReason: (parts: { installedVersion?: string; minimumVersion?: string; remediation: string }) => string;
   codexStandaloneWarning: (command: string) => string;
   networkTitle: string;
-  networkAuthenticated: (advertisedUrl: string) => string;
-  networkServeAvailable: (advertisedUrl: string) => string;
   networkLoopback: (summary: string) => string;
+  legacyConnectivityPreserved: (targets: readonly string[]) => string;
   blocker: (parts: { summary: string; remediation: string }) => string;
   managedRuntimeTitle: string;
   managedRuntimeBody: (product: string) => string;
@@ -122,9 +118,6 @@ export interface SetupMessages {
   serviceDurableLabel: (provider: SetupServiceChoice) => string;
   serviceDurableHint: (parts: { provider: SetupServiceChoice; available: boolean }) => string;
   launchdSessionNote: string;
-  tailscaleUnavailableNote: string;
-  /** Takes the real per-host app URL, because "a private Serve route" answers nothing an operator can picture. */
-  tailscaleConfirm: (appUrl: string) => string;
   /**
    * Takes the branch provisioning will actually take, because the second half of this note is a promise
    * about commands that will run. It read only `pipxAvailable` before, which got both ends wrong: a host
@@ -160,19 +153,13 @@ export interface SetupMessages {
   /** Printed instead of an "open it" line when setup could not prove a broker is answering. */
   outroStartBroker: (binary: string) => string;
   outroOpenHere: (url: string) => string;
-  outroOpenTailnet: (url: string) => string;
   outroOpenHereAfterStart: (url: string) => string;
-  outroOpenTailnetAfterStart: (url: string) => string;
   /** Native-client endpoint proved by setup; unlike the browser URL, it has no app path. */
   outroLocalServerAddress: (url: string) => string;
-  /** Tailnet native-client endpoint proved by setup; absent unless Serve registration succeeded. */
-  outroTailnetServerAddress: (url: string) => string;
   outroPairInstead: (binary: string) => string;
   /** The same four lines for a build with no Flutter bundle: `/cosy` there is the pairing-guidance page. */
   outroPairPageHere: (url: string) => string;
-  outroPairPageTailnet: (url: string) => string;
   outroPairPageHereAfterStart: (url: string) => string;
-  outroPairPageTailnetAfterStart: (url: string) => string;
   outroLoopbackOnly: string;
   outroShortCommand: (alias: string, commands: readonly string[]) => string;
   outroTokenRead: (path: string) => string;
@@ -218,10 +205,11 @@ const en: SetupMessages = {
       + `Run \`${command}\`; its installer detects npm-managed Codex and offers to remove it. `
       + 'Then open a new terminal and rerun `cosy setup`.',
   networkTitle: 'Network and authentication',
-  networkAuthenticated: (advertisedUrl) => `${advertisedUrl} (authenticated private endpoint)`,
-  networkServeAvailable: (advertisedUrl) =>
-    `Loopback-only now; ${advertisedUrl} is available for confirmed private Serve setup.`,
-  networkLoopback: (summary) => `Loopback-only; ${summary}`,
+  networkLoopback: () => 'Loopback-only. External connectivity is managed by the operator.',
+  legacyConnectivityPreserved: (targets) =>
+    `Legacy external connectivity was left unchanged and is now operator-owned${targets.length ? `: ${targets.join(', ')}` : '.'} `
+      + 'For future setup, see docs/connectivity/tailscale-serve.md and '
+      + 'docs/connectivity/migrating-from-managed-tailscale.md.',
   blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
   managedRuntimeTitle: 'Required managed-runtime acknowledgement',
   managedRuntimeBody: (product) =>
@@ -250,11 +238,6 @@ const en: SetupMessages = {
       : 'Unavailable on this host; foreground remains supported.',
   launchdSessionNote: 'The launchd agent runs from GUI login to logout. cosyncing does not install a system-wide '
     + 'LaunchDaemon, so the broker does not run before you sign in or after you sign out.',
-  tailscaleUnavailableNote: 'Tailscale Serve is unavailable or not logged in; setup will remain loopback-only.',
-  // Name the URL this actually produces. "A private Tailscale Serve route" is the mechanism, not the result,
-  // and an operator cannot consent to a benefit they have to infer. The host is already known at prompt time.
-  tailscaleConfirm: (appUrl) =>
-    `Register a private Tailscale Serve route so the app opens at ${appUrl} from any device on your tailnet?`,
   // Every case, truthfully. A Tokdash that is already running is reused and never touched; below that, the
   // note names the commands that will actually run, which is not the same list on every host.
   quotaNote: (baseUrl, capability) => `Quota comes from Tokdash at ${baseUrl} (override with COSYNCING_TOKDASH_URL). `
@@ -297,14 +280,13 @@ const en: SetupMessages = {
   planStep: (step) => {
     switch (step.kind) {
       case 'config':
-        return `Write owner-only ${step.configPath} with internal ${step.internalUrl}`
-          + `${step.advertisedUrl ? ` and private advertised ${step.advertisedUrl}` : ''}.`;
+        return `Write owner-only ${step.configPath} with internal ${step.internalUrl}.`;
       case 'credentials':
         return 'Create owner-only broker and Pi-scoped credentials without printing or placing them in '
           + 'process arguments.';
       case 'setup-state':
         return `Record managed-runtime acknowledgement, ${step.service} service choice, separate lingering `
-          + 'consent, independent Tailscale intent, and quota consent.';
+          + 'consent, and quota consent.';
       case 'pi-bridge':
         return step.replaceLegacy
           ? `Transactionally replace the exact known legacy bridge at ${step.path}; rollback restores the previous bytes.`
@@ -329,14 +311,6 @@ const en: SetupMessages = {
       case 'service-remove':
         return `Stop and remove only the receipt-owned ${step.provider} service; remove its lingering policy `
           + `only when ${step.product} enabled it.`;
-      case 'tailscale-register':
-        return `Register ${step.advertisedUrl}/ to proxy ${step.target}; Funnel is never invoked.`;
-      case 'tailscale-reuse':
-        return 'Reuse the matching pre-existing private Serve route without claiming ownership; uninstall '
-          + 'will preserve it.';
-      case 'tailscale-remove':
-        return `Remove only the receipt-owned ${step.advertisedUrl}/ route and preserve every foreign Serve `
-          + 'handler.';
       case 'binary-install':
         return `Copy the running ${step.version} executable to owner-only ${step.path} and record its `
           + 'measured ownership receipt; the acquisition artifact (for example an npm package) is left '
@@ -375,17 +349,12 @@ const en: SetupMessages = {
   outroStateDirectory: (path) => `State directory: ${path}`,
   outroStartBroker: (binary) => `Nothing is listening yet. Start the broker: \`${binary} broker\`.`,
   outroOpenHere: (url) => `Local web app: ${url}`,
-  outroOpenTailnet: (url) => `Tailnet web app: ${url}`,
   outroOpenHereAfterStart: (url) => `Local web app: ${url}`,
-  outroOpenTailnetAfterStart: (url) => `Tailnet web app: ${url}`,
   outroLocalServerAddress: (url) => `Local server address: ${url}`,
-  outroTailnetServerAddress: (url) => `Tailnet server address: ${url}`,
   outroPairInstead: (binary) => `Run \`${binary} pair\` and scan the QR to pair a client.`,
   outroPairPageHere: (url) => `The same steps in a browser: ${url}`,
-  outroPairPageTailnet: (url) => `Or from your tailnet: ${url}`,
   outroPairPageHereAfterStart: (url) => `Then the same steps in a browser: ${url}`,
-  outroPairPageTailnetAfterStart: (url) => `Or, once it is running, from your tailnet: ${url}`,
-  outroLoopbackOnly: 'Loopback only: no Tailscale Serve route is registered.',
+  outroLoopbackOnly: 'Loopback only. External connectivity is managed by the operator.',
   outroShortCommand: (alias, commands) =>
     `Short command: \`${alias}\` is an alias for \`cosyncing\`, for example ${commands.map((value) => `\`${value}\``).join(', ')}.`,
   outroTokenRead: (path) => `Read authentication token file: cat ${path}`,
@@ -437,10 +406,11 @@ const zhHans: SetupMessages = {
     `警告：App 创建会话仍可使用；由 broker 托管的 daemon 和终端同步需要官方独立版 Codex。请执行 \`${command}\`；`
       + '官方安装器会检测 npm 版 Codex，并询问是否移除。安装完成后，请打开新终端并重新运行 `cosy setup`。',
   networkTitle: '网络与认证',
-  networkAuthenticated: (advertisedUrl) => `${advertisedUrl}（需认证的私有地址）`,
-  networkServeAvailable: (advertisedUrl) =>
-    `目前仅限本机访问；确认后可通过 Tailscale Serve 启用 ${advertisedUrl}。`,
-  networkLoopback: (summary) => `仅限本机访问；${summary}`,
+  networkLoopback: () => '仅限回环访问。外部连接由操作者自行管理。',
+  legacyConnectivityPreserved: (targets) =>
+    `旧版外部连接保持不变，现由操作者管理${targets.length ? `：${targets.join('、')}` : '。'} `
+      + '后续配置请参阅 docs/connectivity/tailscale-serve.md 和 '
+      + 'docs/connectivity/migrating-from-managed-tailscale.md。',
   blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
   managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
   managedRuntimeBody: (product) =>
@@ -465,9 +435,6 @@ const zhHans: SetupMessages = {
       : '此主机不支持；前台运行始终可用。',
   launchdSessionNote: 'launchd 代理从图形界面登录起运行到注销为止。cosyncing 不会安装系统级 LaunchDaemon，'
     + '所以登录前和注销后 broker 都不会运行。',
-  tailscaleUnavailableNote: 'Tailscale Serve 不可用或尚未登录，本次安装将仅限本机访问。',
-  tailscaleConfirm: (appUrl) =>
-    `注册一条私有的 Tailscale Serve 路由，让 tailnet 内的任何设备都能通过 ${appUrl} 打开 App？`,
   quotaNote: (baseUrl, capability) => `配额数据来自 ${baseUrl} 上的 Tokdash（可用 COSYNCING_TOKDASH_URL 覆盖）。`
     + '如果那里已经有 Tokdash 在运行，就直接复用，不会做任何改动；'
     + {
@@ -502,13 +469,11 @@ const zhHans: SetupMessages = {
   planStep: (step) => {
     switch (step.kind) {
       case 'config':
-        return `写入仅本人可读的 ${step.configPath}，内部地址为 ${step.internalUrl}`
-          + `${step.advertisedUrl ? `，对外私有地址为 ${step.advertisedUrl}` : ''}。`;
+        return `写入仅本人可读的 ${step.configPath}，内部地址为 ${step.internalUrl}。`;
       case 'credentials':
         return '生成仅本人可读的 broker 凭据和 Pi 专用凭据；不会打印出来，也不会出现在进程参数里。';
       case 'setup-state':
-        return `记录托管运行时的确认结果、${step.service} 运行方式、单独的 lingering 授权、`
-          + '独立的 Tailscale 意向，以及配额跟踪的选择。';
+        return `记录托管运行时的确认结果、${step.service} 运行方式、单独的 lingering 授权，以及配额跟踪的选择。`;
       case 'pi-bridge':
         return step.replaceLegacy
           ? `以事务方式替换 ${step.path} 中内容完全匹配的已知旧版 bridge；回滚时会恢复原始字节。`
@@ -529,12 +494,6 @@ const zhHans: SetupMessages = {
       case 'service-remove':
         return `只停止并删除凭证证明属于我们的 ${step.provider} 服务；`
           + `lingering 策略仅在当初由 ${step.product} 启用时才会一并取消。`;
-      case 'tailscale-register':
-        return `注册 ${step.advertisedUrl}/ 反向代理到 ${step.target}；全程不会启用 Funnel。`;
-      case 'tailscale-reuse':
-        return '直接复用已经存在的同名私有 Serve 路由，不声明归属；卸载时会原样保留它。';
-      case 'tailscale-remove':
-        return `只删除凭证证明属于我们的 ${step.advertisedUrl}/ 路由，其他 Serve 处理器全部保留。`;
       case 'binary-install':
         return `把正在运行的 ${step.version} 可执行文件复制到仅本人可读的 ${step.path}，`
           + '并记录其校验过的归属凭证；获取来源（例如 npm 包）不会被改动。';
@@ -568,17 +527,12 @@ const zhHans: SetupMessages = {
   outroStateDirectory: (path) => `数据目录：${path}`,
   outroStartBroker: (binary) => `broker 还没有在运行，先启动它：\`${binary} broker\`。`,
   outroOpenHere: (url) => `本机 Web 应用：${url}`,
-  outroOpenTailnet: (url) => `Tailnet Web 应用：${url}`,
   outroOpenHereAfterStart: (url) => `本机 Web 应用：${url}`,
-  outroOpenTailnetAfterStart: (url) => `Tailnet Web 应用：${url}`,
   outroLocalServerAddress: (url) => `本机服务器地址：${url}`,
-  outroTailnetServerAddress: (url) => `Tailnet 服务器地址：${url}`,
   outroPairInstead: (binary) => `执行 \`${binary} pair\` 并扫描二维码，即可配对一台客户端。`,
   outroPairPageHere: (url) => `浏览器里也有同样的步骤：${url}`,
-  outroPairPageTailnet: (url) => `或在 tailnet 内打开：${url}`,
   outroPairPageHereAfterStart: (url) => `启动后，浏览器里也有同样的步骤：${url}`,
-  outroPairPageTailnetAfterStart: (url) => `启动后，也可以在 tailnet 内打开：${url}`,
-  outroLoopbackOnly: '仅限本机访问：没有注册 Tailscale Serve 路由。',
+  outroLoopbackOnly: '仅限回环访问。外部连接由操作者自行管理。',
   outroShortCommand: (alias, commands) =>
     `快捷命令：\`${alias}\` 是 \`cosyncing\` 的别名，例如 ${commands.map((value) => `\`${value}\``).join('、')}。`,
   outroTokenRead: (path) => `查看认证令牌文件：cat ${path}`,

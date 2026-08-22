@@ -121,6 +121,7 @@ import {
   clearTokdashCompletion,
   clearTokdashOwnership,
   readSetupState,
+  writeSetupState,
   readTokdashOwnership,
   setCodexDaemonOwnership,
   setTokdashOwnership,
@@ -129,21 +130,10 @@ import {
   type CodexDaemonSocketFingerprint,
 } from './setup-state.ts';
 import {
-  inspectTailscaleServe,
-  tailscaleRouteReceiptTarget,
-  TAILSCALE_SERVE_OWNERSHIP_MARKER,
-  TAILSCALE_SERVE_RESOURCE_ID,
-  TailscaleServeProvider,
-  probeAdvertisedEndpointOnce,
-  resolveTailscaleFallbackAddresses,
-  type AdvertisedEndpointDirectProbe,
-  type TailscaleServeInspection,
-  type TailscaleBackendState,
-  type TailscaleServeProviderOptions,
-  type TailscaleServeRouteState,
-  type TailscaleServeRouteProvider,
-  type TailscaleTopology,
-} from './tailscale-serve.ts';
+  LEGACY_TAILSCALE_RESOURCE_ID,
+  hasLegacyConnectivityIntent,
+  relinquishLegacyConnectivityReceipts,
+} from './legacy-connectivity-migration.ts';
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 
@@ -156,10 +146,7 @@ export interface LifecycleBaseOptions {
   /** The external runtime that executes it, for distributions that have one. Absent for a native build. */
   runtimePath?: string;
   context?: SetupDiagnosisContext;
-  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
-  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
   systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
-  tailscaleProviderFactory?: (options: TailscaleServeProviderOptions) => TailscaleServeRouteProvider;
   runner?: ServiceCommandRunner;
   piAgentDir?: string;
   claudeSettingsPath?: string;
@@ -189,7 +176,7 @@ export interface CodexDaemonStatus {
 }
 
 export interface LifecycleStatusReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   product: typeof PRODUCT_IDENTITY.productName;
   version: string;
   ok: boolean;
@@ -202,16 +189,14 @@ export interface LifecycleStatusReport {
     definition: string;
     environment: string;
   };
-  endpoints: {
-    internal: 'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch';
-    advertised: 'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch';
+  listener: {
+    host: '127.0.0.1';
+    port: number;
+    url: string;
+    scope: 'loopback';
+    ready: boolean;
   };
-  network: {
-    topology: TailscaleTopology;
-    backend: TailscaleBackendState;
-    route: TailscaleServeRouteState;
-    owned: boolean;
-  };
+  connectivity: { managedExternally: true };
   agents: Array<{
     id: string;
     displayName?: string;
@@ -239,6 +224,7 @@ export interface LifecycleCommandResult {
   summary: string;
   actions?: string[];
   remaining?: string[];
+  preservedExternalConnectivity?: string[];
 }
 
 export interface RepairPlan {
@@ -290,8 +276,6 @@ interface LifecycleEnvironment {
   setupState: ReturnType<typeof readSetupState>;
   install: ReturnType<typeof inspectInstallState>;
   provider?: DurableServiceProvider;
-  tailscale: TailscaleServeInspection;
-  tailscaleProvider?: TailscaleServeRouteProvider;
   piAgentDir: string;
   claudeSettingsPath: string;
   agentSkills: AgentSkillInspection[];
@@ -375,16 +359,6 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
   const provider = isDurableServiceChoice(setupState.serviceChoice)
     ? createLifecycleSystemdProvider({ ...options, home, context })
     : undefined;
-  const internalUrl = config?.broker.internalUrl ?? 'http://127.0.0.1:7734';
-  const tailscale = await inspectTailscaleServe({ context, internalUrl });
-  let tailscaleProvider: TailscaleServeRouteProvider | undefined;
-  if (tailscale.executablePath) {
-    tailscaleProvider = (options.tailscaleProviderFactory ?? ((providerOptions) => new TailscaleServeProvider(providerOptions)))({
-      context,
-      internalUrl,
-      executablePath: tailscale.executablePath,
-    });
-  }
   return {
     home,
     cacheRoot: cacheRoot(options, context),
@@ -393,8 +367,6 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
     setupState,
     install,
     provider,
-    tailscale,
-    tailscaleProvider,
     piAgentDir: options.piAgentDir ?? context.env.PI_CODING_AGENT_DIR?.trim() ?? join(context.homeDir, '.pi', 'agent'),
     claudeSettingsPath: options.claudeSettingsPath ?? join(
       context.env.CLAUDE_CONFIG_DIR?.trim() ?? join(context.homeDir, '.claude'),
@@ -436,30 +408,13 @@ function agentSkillOwnedStale(
     && receipt.ownership.installedSha256 === target.actualSha256;
 }
 
-function matchingTailscaleReceipt(env: LifecycleEnvironment): boolean {
-  if (!env.install.committed || !env.tailscale.advertisedUrl) return false;
-  const receipt = resource(env.install.state, TAILSCALE_SERVE_RESOURCE_ID);
-  return !!receipt && receipt.kind === 'other' && receipt.ownership.proof === 'receipt'
-    && receipt.ownership.marker === TAILSCALE_SERVE_OWNERSHIP_MARKER
-    && receipt.target === tailscaleRouteReceiptTarget(env.tailscale);
-}
-
 async function endpointIdentity(
   context: SetupDiagnosisContext,
   url: string | undefined,
   machine: string | undefined,
-  /** This node's own Tailscale addresses — supplied only for the ADVERTISED endpoint, whose hostname is
-   *  the one that can fail to resolve. Loopback needs no fallback and must never get one. */
-  fallbackAddresses: readonly string[] = [],
-  directProbe?: AdvertisedEndpointDirectProbe,
 ): Promise<'ready' | 'unreachable' | 'unconfigured' | 'identity-mismatch'> {
   if (!url || !machine) return 'unconfigured';
-  const response = await probeAdvertisedEndpointOnce({
-    context,
-    advertisedUrl: url,
-    fallbackAddresses,
-    ...(directProbe ? { directProbe } : {}),
-  });
+  const response = await context.fetchJson(new URL('/api/health', url).toString());
   if (response.status !== 'ok') return 'unreachable';
   const body = response.json && typeof response.json === 'object' && !Array.isArray(response.json)
     ? response.json as Record<string, unknown>
@@ -567,15 +522,8 @@ async function authenticatedJson(
 export async function collectLifecycleStatus(options: LifecycleBaseOptions): Promise<LifecycleStatusReport> {
   const env = await environment(options);
   const serviceStatus = env.provider ? await env.provider.inspect() : undefined;
-  const [internal, advertised, agentsRaw, sessionsRaw, updatesRaw] = await Promise.all([
+  const [internal, agentsRaw, sessionsRaw, updatesRaw] = await Promise.all([
     endpointIdentity(env.context, env.config?.broker.internalUrl, env.config?.broker.machineLabel),
-    (async () => endpointIdentity(
-      env.context,
-      env.config?.broker.advertisedUrl,
-      env.config?.broker.machineLabel,
-      env.config?.broker.advertisedUrl ? await resolveTailscaleFallbackAddresses(env.context) : [],
-      options.advertisedDirectProbe,
-    ))(),
     authenticatedJson(env, INTERNAL_AGENT_ROSTER_PATH),
     // The only endpoint here whose response size follows the operator's data rather than the
     // protocol, and so the only one that gets the larger allowance.
@@ -631,10 +579,8 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
   if (!env.config) detailCodes.push('broker-config-invalid');
   if (isDurableServiceChoice(env.setupState.serviceChoice) && serviceStatus?.active !== 'active') detailCodes.push(`service-${serviceStatus?.active ?? 'unknown'}`);
   if (internal !== 'ready') detailCodes.push(`internal-endpoint-${internal}`);
-  if (env.config?.broker.advertisedUrl && advertised !== 'ready') detailCodes.push(`advertised-endpoint-${advertised}`);
-  if (env.setupState.tailscaleServeRequested && env.tailscale.route !== 'desired') detailCodes.push(`tailscale-route-${env.tailscale.route}`);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     product: PRODUCT_IDENTITY.productName,
     version: options.buildInfo.version,
     ok: detailCodes.length === 0,
@@ -650,13 +596,14 @@ export async function collectLifecycleStatus(options: LifecycleBaseOptions): Pro
       definition: serviceStatus?.definition ?? 'missing',
       environment: serviceStatus?.environment ?? 'missing',
     },
-    endpoints: { internal, advertised },
-    network: {
-      topology: env.tailscale.topology,
-      backend: env.tailscale.backend,
-      route: env.tailscale.route,
-      owned: matchingTailscaleReceipt(env),
+    listener: {
+      host: '127.0.0.1',
+      port: env.config?.broker.port ?? 7734,
+      url: env.config?.broker.internalUrl ?? 'http://127.0.0.1:7734',
+      scope: 'loopback',
+      ready: internal === 'ready',
     },
+    connectivity: { managedExternally: true },
     agents,
     sessions,
     updates,
@@ -669,7 +616,7 @@ function commandResult(
   exitCode: LifecycleCommandResult['exitCode'],
   detailCode: string,
   summary: string,
-  extra: Pick<LifecycleCommandResult, 'actions' | 'remaining'> = {},
+  extra: Pick<LifecycleCommandResult, 'actions' | 'remaining' | 'preservedExternalConnectivity'> = {},
 ): LifecycleCommandResult {
   return { schemaVersion: 1, status, exitCode, detailCode, summary, ...extra };
 }
@@ -1059,15 +1006,15 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
     if (status.active !== 'active') actions.push({ id: 'service.start', summary: `Start and verify the configured ${env.provider.id} service.`, legacy: false });
   }
 
-  const tailscaleOwned = matchingTailscaleReceipt(env);
-  if (env.setupState.tailscaleServeRequested === true) {
-    if (env.tailscale.route === 'missing') actions.push({ id: 'tailscale.register', summary: 'Restore the requested private HTTPS root route.', legacy: false });
-    else if (env.tailscale.route !== 'desired') blockers.push({ detailCode: `tailscale-route-${env.tailscale.route}`, summary: 'A conflicting or unsafe Serve route is preserved.' });
-    else if (env.install.committed && resource(env.install.state, TAILSCALE_SERVE_RESOURCE_ID) && !tailscaleOwned) {
-      blockers.push({ detailCode: 'tailscale-receipt-drift', summary: 'The live private route no longer matches its ownership receipt.' });
-    }
-  } else if (tailscaleOwned && env.tailscale.route === 'desired') {
-    actions.push({ id: 'tailscale.remove', summary: 'Remove the receipt-owned route no longer declared by setup state.', legacy: false });
+  const legacyReceipt = env.install.committed
+    ? resource(env.install.state, LEGACY_TAILSCALE_RESOURCE_ID)
+    : undefined;
+  if (hasLegacyConnectivityIntent(env.setupState) || legacyReceipt) {
+    actions.push({
+      id: 'legacy-connectivity.relinquish',
+      summary: 'Leave the recorded external route unchanged and transfer its ownership to the operator.',
+      legacy: false,
+    });
   }
   const binaryReceipt = env.install.committed ? resource(env.install.state, 'broker-binary') : undefined;
   // The receipt names the installed home copy, not whatever binary is running this command, so repair and
@@ -1273,25 +1220,11 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
           rollback.push(() => env.provider!.stop());
           await env.provider.start();
         }
-      } else if (action.id === 'tailscale.register') {
-        if (!env.tailscaleProvider) throw new Error('tailscale-provider-missing');
-        const before = await env.tailscaleProvider.inspect();
-        if (before.route !== 'missing') throw new Error('tailscale-route-precondition-changed');
-        rollback.push(() => env.tailscaleProvider!.removePrivateHttpsRoot());
-        await env.tailscaleProvider.registerPrivateHttpsRoot();
-        const after = await env.tailscaleProvider.inspect();
-        if (after.route !== 'desired') throw new Error('tailscale-route-verify-failed');
-        nextState = mergeResources(nextState, [{
-          id: TAILSCALE_SERVE_RESOURCE_ID,
-          kind: 'other',
-          target: tailscaleRouteReceiptTarget(after),
-          ownership: { proof: 'receipt', marker: TAILSCALE_SERVE_OWNERSHIP_MARKER },
-        }]);
-      } else if (action.id === 'tailscale.remove') {
-        if (!env.tailscaleProvider) throw new Error('tailscale-provider-missing');
-        rollback.push(() => env.tailscaleProvider!.registerPrivateHttpsRoot());
-        await env.tailscaleProvider.removePrivateHttpsRoot();
-        nextState = { ...nextState, resources: nextState.resources.filter((item) => item.id !== TAILSCALE_SERVE_RESOURCE_ID) };
+      } else if (action.id === 'legacy-connectivity.relinquish') {
+        snapshots.push(snapshot(setupStatePath(env.home)));
+        writeSetupState(env.setupState, env.home);
+        const relinquished = relinquishLegacyConnectivityReceipts(nextState.resources);
+        nextState = { ...nextState, resources: relinquished.resources };
       } else if (action.id === 'receipt.binary-hash') {
         const binary = resource(nextState, 'broker-binary');
         if (!binary || !existsSync(binary.target)) throw new Error('broker-binary-missing');
@@ -1446,8 +1379,16 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
     if (exactPackageFiles) actions.push({ id: 'service.remove', target: env.provider.definitionPath, legacy: false });
     else if (status.definition !== 'missing' || status.environment !== 'missing') warnings.push({ detailCode: 'service-modified-preserved', summary: 'Modified or unreceipted service files will be preserved.' });
   }
-  if (matchingTailscaleReceipt(env) && env.tailscale.route === 'desired') actions.push({ id: 'tailscale.remove', target: tailscaleRouteReceiptTarget(env.tailscale), legacy: false });
-  else if (env.install.committed && resource(env.install.state, TAILSCALE_SERVE_RESOURCE_ID)) warnings.push({ detailCode: 'tailscale-route-drift-preserved', summary: 'The receipt route drifted and will be preserved.' });
+  const legacyReceipt = env.install.committed
+    ? resource(env.install.state, LEGACY_TAILSCALE_RESOURCE_ID)
+    : undefined;
+  if (legacyReceipt || hasLegacyConnectivityIntent(env.setupState)) {
+    actions.push({
+      id: 'legacy-connectivity.preserve',
+      target: legacyReceipt?.target ?? 'previously configured external route',
+      legacy: false,
+    });
+  }
   const pi = inspectPiBridgeOwnership(env.install, env.piAgentDir);
   if (pi.status === 'owned-current' || pi.status === 'owned-stale') {
     actions.push({
@@ -1781,12 +1722,9 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           const linger = resource(env.install.committed ? env.install.state : undefined, 'service-systemd-linger');
           if (linger && (await env.provider!.inspect()).lingering === 'enabled') await env.provider!.disableLingering();
           retainedResources = retainedResources.filter((item) => !SERVICE_RESOURCE_IDS.includes(item.id));
-        } else if (action.id === 'tailscale.remove') {
-          if (!env.tailscaleProvider) throw new Error('tailscale-provider-missing');
-          const current = await env.tailscaleProvider.inspect();
-          if (current.route !== 'desired' || tailscaleRouteReceiptTarget(current) !== action.target) throw new Error('tailscale-route-drift');
-          await env.tailscaleProvider.removePrivateHttpsRoot();
-          retainedResources = retainedResources.filter((item) => item.id !== TAILSCALE_SERVE_RESOURCE_ID);
+        } else if (action.id === 'legacy-connectivity.preserve') {
+          writeSetupState(env.setupState, env.home);
+          retainedResources = relinquishLegacyConnectivityReceipts(retainedResources).resources;
         } else if (action.id === 'pi-bridge.remove' || action.id === 'pi-bridge.remove-legacy') {
           const inspection = inspectPiBridgeOwnership(inspectInstallState(env.home), env.piAgentDir);
           const allowed = action.id.endsWith('legacy')
@@ -1997,9 +1935,6 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           retainedResources = retainedResources.filter((item) => !SERVICE_RESOURCE_IDS.includes(item.id));
         }
       }
-      if (env.tailscale.route === 'missing' || (env.tailscaleProvider && (await env.tailscaleProvider.inspect()).route === 'missing')) {
-        retainedResources = retainedResources.filter((item) => item.id !== TAILSCALE_SERVE_RESOURCE_ID);
-      }
       if (retainedResources.length > 0) {
         for (const item of retainedResources) {
           const code = `resource-${item.id}-remaining`;
@@ -2031,13 +1966,19 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
     // plan used still holds — a source or tarball install has no preserved package and gets no npm hint.
     const acquisitionPackagePreserved = completed.includes('binary.remove.broker-binary')
       && plan.advisories.some((item) => item.detailCode === 'acquisition-package-preserved');
+    const preservedExternalConnectivity = plan.actions
+      .filter((action) => action.id === 'legacy-connectivity.preserve')
+      .map((action) => action.target);
     return commandResult('complete', 0, 'uninstall-complete', (options.purgeData
       ? 'Owned integrations and both confirmed durable roots were removed.'
       : 'Owned integrations were removed; durable state and artifact cache were preserved.')
       + (acquisitionPackagePreserved
         ? ` The \`${PRODUCT_IDENTITY.primaryBinary}\` command stays on PATH from the package it was installed `
           + `from; remove that separately (for example \`npm uninstall -g ${PRODUCT_IDENTITY.productName}\`).`
-        : ''), { actions: completed });
+        : ''), {
+      actions: completed,
+      ...(preservedExternalConnectivity.length > 0 ? { preservedExternalConnectivity } : {}),
+    });
   } finally {
     lock.release();
   }
@@ -2052,9 +1993,8 @@ export function renderLifecycleStatus(
     text.headline(report),
     text.installation(report),
     text.service(report),
-    text.internalEndpoint(report),
-    text.advertisedEndpoint(report),
-    text.tailscale(report),
+    text.listener(report),
+    text.connectivity(report),
     text.agents(report),
     text.sessions(report),
     text.updates(report),

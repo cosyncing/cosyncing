@@ -65,7 +65,7 @@
     "test:broker-doctor-real": "bun run scripts/broker/tests/host/test-doctor-real.ts",
     "test:broker-setup": "bun run packages/typescript/broker/test/broker/test-transactional-setup.ts",
     "test:broker-service": "bun run packages/typescript/broker/test/broker/test-service-lifecycle.ts",
-    "test:broker-pairing": "bun run packages/typescript/broker/test/broker/test-tailscale-pairing.ts",
+    "test:broker-pairing": "bun run packages/typescript/broker/test/broker/test-pairing.ts",
     "test:broker-lifecycle": "bun run packages/typescript/broker/test/broker/test-broker-lifecycle.ts",
     "test:broker-opencode-shim-symmetry": "bun run packages/typescript/broker/test/broker/test-opencode-shim-symmetry.ts",
     "test:broker-opencode-shim-runtime": "bun run packages/typescript/broker/test/broker/test-opencode-shim-runtime.ts",
