@@ -30,6 +30,24 @@ requires the exact tag plus typed `PROMOTE` confirmation. It verifies the same
 five remote assets and promotes them stable without rebuilding or replacing
 anything.
 
+## Pairing protocol rollout order
+
+Pairing payload version 3 is a client-first change because broker and client
+releases use separate channels. Before publishing an npm broker that emits v3:
+
+1. publish and physically accept the matching client release;
+2. promote that client release stable;
+3. confirm every supported client download includes the v3 parser; and
+4. only then publish the npm broker release.
+
+Do not reverse these steps. A v1/v2 client cannot parse a v3 pairing offer.
+The updated client remains able to pair with v1/v2 brokers during the rollout.
+While connected to a revision-15 broker, that client also retains the old
+WebSocket query credential path. It selects the fallback only after an
+authenticated health response identifies revision 15; current brokers always
+use one-use tickets. The revision-16 broker raises its minimum client revision
+to 16 and rejects long-lived query credentials.
+
 ## Protected configuration
 
 The `client-release-candidate` environment holds:

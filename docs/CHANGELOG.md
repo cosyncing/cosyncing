@@ -25,6 +25,24 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   by cosyncing.
 - Upgrades preserve legacy Tailscale Serve routes while relinquishing their old
   setup intent and install receipts.
+- Client releases containing the version 3 pairing parser must be promoted
+  before the npm broker release begins emitting version 3 offers.
+
+### Fixed
+
+- Proxied HTTP and WebSocket clients no longer inherit same-machine filesystem
+  or transcript-export privileges from the proxy's loopback TCP connection.
+- Session rosters and other data-bearing API reads now require a broker or
+  paired-device credential; public health remains minimal.
+- WebSocket URLs contain a short-lived, one-use authorization ticket instead
+  of a broker or paired-device credential when connected to a current broker;
+  the client retains a revision-gated fallback during the client-first rollout.
+- Candidate startup no longer persists configuration schema 2 during an
+  upgrade, so a failed upgrade can restore a schema-1 broker safely.
+- Artifact persistence uses a durable installation identity rather than a
+  public URL, and adopts records written under the legacy advertised URL.
+- Version 3 pairing acceptance proves ownership of the identity key committed
+  in the QR before the client stores the endpoint or credential.
 
 ## 0.4.1 — 2026-08-21
 

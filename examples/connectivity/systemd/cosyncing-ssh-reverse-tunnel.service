@@ -5,9 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Replace USER, VPS_HOST, paths, and ports. Use a restricted SSH key.
-User=USER
-ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i %h/.ssh/cosyncing-tunnel -R 127.0.0.1:17734:127.0.0.1:7734 USER@VPS_HOST
+# Replace VPS_USER, VPS_HOST, paths, and ports. Use a restricted SSH key.
+ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -i %h/.ssh/cosyncing-tunnel -R 127.0.0.1:17734:127.0.0.1:7734 VPS_USER@VPS_HOST
 Restart=on-failure
 RestartSec=10
 
