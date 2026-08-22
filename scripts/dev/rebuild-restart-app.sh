@@ -244,10 +244,8 @@ start_review_broker() {
   # override, then set only the explicit review values below.
   setsid env \
     -u PORT \
-    -u HOST \
     -u COSYNCING_TOKEN \
     -u COSYNCING_BROKER \
-    -u COSYNCING_ADVERTISED_BROKER \
     -u COSYNCING_WEB_DIR \
     -u COSYNCING_CODEX_REMOTE_ADDR \
     -u COSYNCING_CODEX_APP_SERVER_SOCK \

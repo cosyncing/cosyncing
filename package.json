@@ -173,7 +173,6 @@
     "capabilities:claude-check": "bun run scripts/broker/capabilities/check.ts --agent claude --mode fixture",
     "capabilities:tool-branches": "bun run scripts/broker/capabilities/check-no-tool-branches.ts --write-output output/capabilities/tool-branches",
     "test:capabilities": "bun run packages/typescript/broker/test/capabilities/test-capabilities.ts",
-    "serve:tailscale": "bash scripts/broker/tailscale-serve.sh",
     "trace:real-agent-p0": "bash scripts/broker/tests_traces/run-real-agent-p0.sh",
     "trace:opencode-reconnect": "COSYNCING_OPENCODE_RECONNECT_TRACE=1 bun run scripts/broker/tests_traces/opencode-reconnect-trace.ts"
   },

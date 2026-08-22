@@ -83,8 +83,9 @@ Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode �
 
 ## 前置要求
 
-受支持的跨设备使用需要服务器与客户端设备安装 [Tailscale](https://tailscale.com/)，服务器还需要
-[Bun](https://bun.sh) 1.3.8 或更高版本来运行 cosyncing，并需要 Node.js/npm 来安装和更新。
+服务器需要 [Bun](https://bun.sh) 1.3.8 或更高版本来运行 cosyncing，并需要 Node.js/npm 来安装和
+更新。Broker 默认只允许本机访问。跨设备使用需要由操作者单独配置代理、隧道、VPN、Mesh 网络或
+其他[连接方式](docs/connectivity/README.md)（英文）。
 强烈建议安装
 [Tokdash](https://github.com/JingbiaoMei/tokdash)，用于配额跟踪与预警。
 
@@ -130,7 +131,9 @@ cosy setup
 
 `cosy update` 会报告这条由包管理器负责的更新路径；它不会代替用户运行 npm，也不会修改全局包。
 
-`cosy pair` 打印一张五分钟内有效、一次性的配对二维码。用客户端扫码即可授权该设备；
+`cosy pair --broker-url https://cosy.example.com` 会把客户端可访问的源地址放进一张五分钟内有效、
+一次性的配对二维码；该地址不会被持久化或探测。如果客户端已经知道 Broker 地址，可以省略此参数，
+只生成认证信息。连接方式见[连接指南](docs/connectivity/README.md)（英文）。用客户端扫码即可授权该设备；
 `cosy devices list` 列出已配对设备，`cosy devices revoke <id>` 撤销指定设备。
 
 setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇总安装、服务、智能体与会话的状态。
@@ -179,14 +182,15 @@ iOS 客户端将在后续通过 TestFlight 发布。
 </p>
 
 本版本不支持原生 Windows 与 Intel 芯片 Mac 作为 Broker 宿主机。Windows 上请在 WSL 内运行
-Broker——WSL 属于受支持的 Linux 宿主机；Tailscale 也要装在 WSL 内，因为 Windows 侧的
-Tailscale 无法代理 WSL 的回环地址。
+Broker——WSL 属于受支持的 Linux 宿主机。转发 Broker 回环地址的连接软件必须运行在能够访问 WSL
+Broker 的环境中；具体要求见各连接方式的指南。
 
 ## 隐私与安全
 
 Broker 由你运行，跑在你自己的机器和账号下。Broker 状态存储在那台机器上；会话内容只会通过
 你选择的网络发送给已认证的客户端。cosyncing 不在连接路径中运营托管服务，也不含分析或广告
-遥测。可选功能只会联系其明确说明的服务，例如 Tailscale Serve 与本机 Tokdash 配额数据。通过 npm
+遥测。可选功能只会联系其明确说明的服务，例如本机 Tokdash 配额数据。cosyncing 不配置或联系连接
+服务提供方；代理、隧道、VPN 与 Mesh 网络均由操作者管理。通过 npm
 安装的 Broker 不会静默替换自身：npm 负责更新软件包，更新后由 `cosy setup` 协调托管服务。
 
 安全漏洞请通过 GitHub 私密漏洞报告提交，流程见 [SECURITY.md](SECURITY.md)。

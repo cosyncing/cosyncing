@@ -1,28 +1,12 @@
 # Installation prerequisites
 
-cosyncing's supported cross-device setup uses Tailscale for private network
-reachability, Bun to run the broker, and npm to install and update the package.
-Tokdash is an optional but strongly recommended quota integration.
+cosyncing requires Bun to run the broker and npm to install and update the
+package. Tokdash is an optional but strongly recommended quota integration.
+No VPN, proxy, tunnel, or mesh product is required for local operation.
 
-## Required: Tailscale
-
-Install Tailscale and sign in to the same tailnet on the broker host and every
-client device that should reach it. A loopback-only broker can be useful for
-local diagnosis, but it is not the supported cross-device setup.
-
-On mainstream Linux distributions:
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-tailscale status
-```
-
-On macOS, install the recommended
-[standalone Tailscale app](https://tailscale.com/download/mac), approve its
-network extension, and sign in. On Windows with WSL, install Tailscale inside
-WSL as well as on any Windows client; Windows-host Tailscale cannot publish a
-WSL loopback service.
+The broker listens only on `127.0.0.1`. Cross-device access is an independent
+deployment choice; compare the [connectivity methods](../connectivity/README.md)
+after completing the local installation.
 
 ## Required on the broker host: Bun
 
@@ -125,3 +109,6 @@ cosy doctor
 cosy status
 cosy pair
 ```
+
+To pair across an operator-owned connectivity layer, pass its client-reachable
+origin once: `cosy pair --broker-url https://cosy.example.com`.

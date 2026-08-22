@@ -13,6 +13,7 @@
 
 - [Changelog](CHANGELOG.md)
 - [Monorepo architecture](architecture/monorepo.md)
+- [Connectivity boundary](architecture/connectivity-boundary.md)
 - [Client UI architecture](architecture/client-ui.md)
 - [Attention feed architecture](architecture/attention.md)
 - [Contract synchronization](protocol/contract-sync.md)
@@ -35,3 +36,15 @@
 - [Third-party license inventory](legal/third-party-licenses.md)
 
 These files are public product and contributor documentation.
+
+## Connectivity
+
+- [Method chooser](connectivity/README.md)
+- [Security model](connectivity/security.md)
+- [Tailscale Serve](connectivity/tailscale-serve.md)
+- [Reverse proxies](connectivity/reverse-proxy.md)
+- [VPS deployment](connectivity/vps-deployment.md)
+- [SSH reverse tunnels](connectivity/ssh-reverse-tunnel.md)
+- [WireGuard and EasyTier](connectivity/wireguard-easytier.md)
+- [Cloudflare Tunnel and FRP](connectivity/cloudflare-tunnel-frp.md)
+- [Legacy Tailscale migration](connectivity/migrating-from-managed-tailscale.md)

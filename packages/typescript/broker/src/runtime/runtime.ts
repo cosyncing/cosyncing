@@ -5,7 +5,7 @@
  * - Serves the web client.
  *
  * Run: `bun run packages/typescript/broker/src/runtime/runtime.ts`  (or `bun run broker`)
- * Env: PORT (7734), HOST (127.0.0.1), COSYNCING_MACHINE, OPENCODE_URL.
+ * Source-development env: PORT (7734), COSYNCING_MACHINE, OPENCODE_URL.
  */
 import os from 'node:os';
 import { closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
@@ -368,8 +368,8 @@ if (configMigration.migrated && configMigration.previousHost !== BROKER_LISTEN_H
 }
 const EFFECTIVE_CONFIGURATION = resolveBrokerConfiguration({ packaged: BUILD_INFO.packaged });
 const PORT = EFFECTIVE_CONFIGURATION.config.broker.port;
-const HOST = BROKER_LISTEN_HOST;
-if (EFFECTIVE_CONFIGURATION.config.broker.host !== HOST) throw new Error('broker-listener-host-invariant');
+const LISTEN_HOST = BROKER_LISTEN_HOST;
+if (EFFECTIVE_CONFIGURATION.config.broker.host !== LISTEN_HOST) throw new Error('broker-listener-host-invariant');
 const MACHINE = EFFECTIVE_CONFIGURATION.config.broker.machineLabel;
 const BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.internalUrl;
 const RUNTIME_CREDENTIALS = resolveRuntimeCredentials({
@@ -3753,7 +3753,7 @@ assertR2ActionsSafe();
 
 server = Bun.serve<WsData>({
   port: PORT,
-  hostname: HOST,
+  hostname: LISTEN_HOST,
   idleTimeout: 240,
   async fetch(req, srv) {
     const url = new URL(req.url);

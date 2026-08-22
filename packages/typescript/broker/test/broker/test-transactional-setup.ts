@@ -29,6 +29,7 @@ import {
   planDurableStateMigrations,
 } from '../../src/security/durable-state.ts';
 import { inspectInstallState, writeInstallState } from '../../src/installation/install-state.ts';
+import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import { acquireInstallationLock } from '../../src/installation/installation-lock.ts';
 import {
   atomicWriteOwnerOnly,
@@ -150,11 +151,10 @@ class ScriptedPresenter implements SetupPresenter {
   lastBlockers?: SetupBlockingIssue[];
 
   constructor(readonly options: {
-    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'tailscale' | 'quota' | 'confirm';
+    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'quota' | 'confirm';
     managed?: boolean;
     service?: SetupServiceChoice;
     lingering?: boolean;
-    tailscale?: boolean;
     quota?: boolean;
     apply?: boolean;
     skill?: boolean;
@@ -197,10 +197,6 @@ class ScriptedPresenter implements SetupPresenter {
   async chooseService(): Promise<SetupPromptResult<SetupServiceChoice>> {
     this.calls.push('service');
     return this.options.cancelAt === 'service' ? SETUP_PROMPT_CANCELLED : this.options.service ?? 'foreground';
-  }
-  async confirmTailscale(): Promise<SetupPromptResult<boolean>> {
-    this.calls.push('tailscale');
-    return this.options.cancelAt === 'tailscale' ? SETUP_PROMPT_CANCELLED : this.options.tailscale ?? false;
   }
   async confirmQuotaWarnings(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('quota');
@@ -375,6 +371,39 @@ try {
       !JSON.stringify(setup).toLowerCase().includes('systemd')
         && presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete',
       presenter.calls.join(','));
+  }
+
+  // A prior managed-connectivity receipt is relinquished as state only. Setup reports the retained target
+  // and never adds a provider prompt or command to the transaction.
+  {
+    const machine = join(root, 'legacy-connectivity-migration');
+    const home = join(machine, '.cosyncing');
+    await zeroAgentSetup(machine, new ScriptedPresenter());
+    const state = readSetupState(home);
+    writeFileSync(join(home, 'setup-state.json'), `${JSON.stringify({ ...state, tailscaleServeRequested: true }, null, 2)}\n`, { mode: 0o600 });
+    const install = inspectInstallState(home);
+    if (!install.committed) throw new Error('legacy connectivity fixture install missing');
+    const target = 'https://legacy.example.test/ -> http://127.0.0.1:7734';
+    writeFileSync(join(home, 'install-state.json'), `${JSON.stringify({
+      ...install.state,
+      resources: [...install.state.resources, {
+        id: LEGACY_TAILSCALE_RESOURCE_ID,
+        kind: 'other',
+        target,
+        ownership: { proof: 'receipt' },
+      }],
+    }, null, 2)}\n`, { mode: 0o600 });
+    const presenter = new ScriptedPresenter();
+    const migrated = await zeroAgentSetup(machine, presenter);
+    const after = inspectInstallState(home);
+    check('setup relinquishes legacy connectivity without a provider prompt or command',
+      migrated.status === 'complete'
+        && migrated.legacyConnectivityMigration?.preservedTargets.includes(target) === true
+        && !('tailscaleServeRequested' in readSetupState(home))
+        && after.committed
+        && !after.state.resources.some((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)
+        && !presenter.calls.some((call) => /tailscale/i.test(call)),
+      `${presenter.calls.join(',')}:${JSON.stringify(migrated.legacyConnectivityMigration)}`);
   }
 
   // Planner purity and the first real zero-agent transaction.
@@ -2751,12 +2780,6 @@ try {
       systemdDefinitionPath: definitionPath,
       systemdEnvironmentPath: environmentPath,
       systemdPersistenceTarget: 'systemd-user-linger:fixture',
-      tailscaleAvailable: false,
-      tailscale: {
-        schemaVersion: 1, topology: 'absent', backend: 'missing', route: 'unavailable',
-        desiredTarget: config.broker.internalUrl,
-        detailCode: 'tailscale-missing', summary: 'absent fixture',
-      },
       webAppAvailable: false,
       agents: [],
       doctor: {
@@ -2986,7 +3009,7 @@ try {
     };
 
     const servicePresenter = (): ScriptedPresenter => new ScriptedPresenter({
-      service: 'systemd', skill: false, opencodeShim: false, tailscale: false, quota: false,
+      service: 'systemd', skill: false, opencodeShim: false, quota: false,
     });
 
     // ---- The literal ask: install V1, start it, replace it with V2, rerun setup, prove the RUNNING

@@ -64,31 +64,6 @@ import {
 } from '../../src/installation/setup-transaction.ts';
 import { createSystemdSetupAction } from '../../src/installation/service-manager.ts';
 
-interface TailscaleServeInspection {
-  schemaVersion: 1;
-  topology: string;
-  backend: string;
-  executablePath?: string;
-  dnsName?: string;
-  advertisedUrl?: string;
-  httpsCapability: string;
-  route: 'missing' | 'desired';
-  routeTarget?: string;
-  desiredTarget: string;
-  detailCode: string;
-  summary: string;
-}
-interface TailscaleServeRouteProvider {
-  inspect(): Promise<TailscaleServeInspection>;
-  registerPrivateHttpsRoot(): Promise<void>;
-  removePrivateHttpsRoot(): Promise<void>;
-}
-interface AdvertisedEndpointPollingClock {
-  now(): number;
-  schedule(callback: () => void, delayMs: number): unknown;
-  cancel(handle: unknown): void;
-}
-
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
 function check(name: string, ok: boolean, detail?: string): void {
@@ -107,7 +82,6 @@ class ServicePresenter implements SetupPresenter {
     service?: SetupServiceChoice;
     cancelService?: boolean;
     quota?: boolean;
-    tailscale?: boolean;
   } = {}) {}
 
   async chooseLanguage(): Promise<SetupLanguage> { this.calls.push('language'); return 'en'; }
@@ -121,7 +95,6 @@ class ServicePresenter implements SetupPresenter {
     if (this.choices.cancelService) return SETUP_PROMPT_CANCELLED;
     return this.choices.service ?? 'systemd';
   }
-  async confirmTailscale(): Promise<boolean> { this.calls.push('tailscale'); return this.choices.tailscale ?? false; }
   async confirmQuotaWarnings(): Promise<boolean> { this.calls.push('quota'); return this.choices.quota ?? false; }
   showPlan(_plan: Readonly<SetupPlan>, _inspection: Readonly<SetupInspection>): void { this.calls.push('plan'); }
   async confirmApply(): Promise<boolean> { this.calls.push('confirm'); return true; }
@@ -287,58 +260,6 @@ class AgentPathLaunchdProvider extends FakeLaunchdProvider {
   }
 }
 
-class FakeTailscaleProvider implements TailscaleServeRouteProvider {
-  route: 'missing' | 'desired' = 'missing';
-  readonly events: string[] = [];
-  readonly advertisedUrl = 'https://devbox.tailnet.ts.net';
-  readonly desiredTarget = defaultBrokerConfig().broker.internalUrl;
-
-  async inspect(): Promise<TailscaleServeInspection> {
-    return {
-      schemaVersion: 1,
-      topology: 'native-macos',
-      backend: 'running',
-      executablePath: '/usr/bin/tailscale',
-      dnsName: 'devbox.tailnet.ts.net',
-      advertisedUrl: this.advertisedUrl,
-      httpsCapability: 'ready',
-      route: this.route,
-      ...(this.route === 'desired' ? { routeTarget: this.desiredTarget } : {}),
-      desiredTarget: this.desiredTarget,
-      detailCode: this.route === 'desired' ? 'tailscale-serve-route-ready' : 'tailscale-serve-route-missing',
-      summary: `${this.route} fixture`,
-    };
-  }
-  async registerPrivateHttpsRoot(): Promise<void> { this.events.push('register'); this.route = 'desired'; }
-  async removePrivateHttpsRoot(): Promise<void> { this.events.push('remove'); this.route = 'missing'; }
-}
-
-/** Deterministic timer ownership for setup's advertised-endpoint deadline. */
-class ImmediatePollingClock implements AdvertisedEndpointPollingClock {
-  timeMs = 0;
-  schedules = 0;
-  cancellations = 0;
-  private nextHandle = 0;
-  readonly pending = new Set<number>();
-
-  now(): number { return this.timeMs; }
-  schedule(callback: () => void, delayMs: number): number {
-    const handle = ++this.nextHandle;
-    this.schedules += 1;
-    this.pending.add(handle);
-    queueMicrotask(() => {
-      if (!this.pending.delete(handle)) return;
-      this.timeMs += delayMs;
-      callback();
-    });
-    return handle;
-  }
-  cancel(handle: unknown): void {
-    this.cancellations += 1;
-    this.pending.delete(handle as number);
-  }
-}
-
 /**
  * launchd's RunAtLoad spawn is ASYNCHRONOUS: `bootstrap` returns while the job is still `spawn scheduled`,
  * and a `launchctl kill` aimed at it finds no process while the queued spawn intent survives. That is the
@@ -372,8 +293,6 @@ class SpawningLaunchdProvider extends FakeLaunchdProvider {
 function contextFor(options: {
   root: string;
   provider?: FakeServiceProvider;
-  tailscale?: FakeTailscaleProvider;
-  advertisedHealth?: () => Awaited<ReturnType<SetupDiagnosisContext['fetchJson']>>;
   systemd?: boolean;
   wsl?: boolean;
   platform?: string;
@@ -398,39 +317,8 @@ function contextFor(options: {
       buildFingerprint: buildFingerprint(build),
     };
   };
-  const tailscaleReadOnly = (args: readonly string[]) => {
-    if (args[0] === 'status') {
-      return {
-        status: 'ok' as const,
-        exitCode: 0,
-        // A real node reports its own addresses here; setup reads them for the DNS-independent
-        // verification fallback, so the fixture has to carry them for that path to be exercised.
-        stdout: JSON.stringify({
-          BackendState: 'Running',
-          Self: { DNSName: 'devbox.tailnet.ts.net.', TailscaleIPs: ['100.64.0.1', 'fd7a:115c:a1e0::1'] },
-        }),
-        stderr: '',
-      };
-    }
-    const desiredTarget = options.tailscale?.desiredTarget ?? defaultBrokerConfig().broker.internalUrl;
-    const configured = options.tailscale?.route === 'desired';
-    return {
-      status: 'ok' as const,
-      exitCode: 0,
-      stdout: JSON.stringify(configured ? {
-        TCP: { '443': { HTTPS: true } },
-        Web: {
-          'devbox.tailnet.ts.net:443': { Handlers: { '/': { Proxy: desiredTarget } } },
-        },
-      } : {}),
-      stderr: '',
-    };
-  };
   const fetchHealth = async (url: string) => {
     const parsed = new URL(url);
-    if (parsed.hostname === 'devbox.tailnet.ts.net') {
-      return options.advertisedHealth?.() ?? { status: 'unreachable' as const };
-    }
     if (parsed.pathname === '/api/health' && options.provider?.active === 'active' && options.provider.healthOk) {
       return { status: 'ok' as const, statusCode: 200, json: healthBody() };
     }
@@ -450,11 +338,9 @@ function contextFor(options: {
         if (command in (options.agentExecutables ?? {})) {
           return options.agentExecutables?.[command as keyof NonNullable<typeof options.agentExecutables>];
         }
-        if (options.tailscale && command === 'tailscale') return '/usr/bin/tailscale';
         return darwin.resolveExecutable(command);
       },
       async runReadOnly(executable, args) {
-        if (options.tailscale && executable === '/usr/bin/tailscale') return tailscaleReadOnly(args);
         // Only the launchd domain probe answers; every other read-only probe stays unavailable.
         if (executable.endsWith('launchctl') && args[0] === 'print') {
           return { status: 'ok', exitCode: 0, stdout: 'gui/501 = {\n\tstate = running\n}\n', stderr: '' };
@@ -491,13 +377,11 @@ function contextFor(options: {
       if (command in (options.agentExecutables ?? {})) {
         return options.agentExecutables?.[command as keyof NonNullable<typeof options.agentExecutables>];
       }
-      if (options.tailscale && command === 'tailscale') return '/usr/bin/tailscale';
       if (systemd && command === 'systemctl') return '/usr/bin/systemctl';
       if (systemd && command === 'loginctl') return '/usr/bin/loginctl';
       return undefined;
     },
     async runReadOnly(executable, args) {
-      if (options.tailscale && executable === '/usr/bin/tailscale') return tailscaleReadOnly(args);
       if (executable.endsWith('systemctl') && args.includes('is-system-running')) {
         return { status: 'ok', exitCode: 0, stdout: 'running\n', stderr: '' };
       }
@@ -530,9 +414,6 @@ function setupOptions(options: {
   wsl?: boolean;
   platform?: string;
   healthAttempts?: number;
-  tailscale?: FakeTailscaleProvider;
-  advertisedHealth?: () => Awaited<ReturnType<SetupDiagnosisContext['fetchJson']>>;
-  advertisedEndpointVerification?: unknown;
   /** Override the build the healthy broker answers as; defaults to the build this fixture installs. */
   healthBuild?: Readonly<Omit<BuildInfo, 'schemaVersions' | 'contract'>>;
 }) {
@@ -543,8 +424,6 @@ function setupOptions(options: {
     systemd: options.systemd,
     wsl: options.wsl,
     healthBuild: options.healthBuild ?? buildInfo,
-    ...(options.tailscale ? { tailscale: options.tailscale } : {}),
-    ...(options.advertisedHealth ? { advertisedHealth: options.advertisedHealth } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
   });
   const executablePath = join(options.root, 'bin', 'cosyncing');
@@ -563,7 +442,6 @@ function setupOptions(options: {
     presenter: options.presenter,
     now,
     systemdProviderFactory: options.provider ? () => options.provider! : undefined,
-    ...(options.tailscale ? { tailscaleProviderFactory: () => options.tailscale! } : {}),
     serviceHealthAttempts: options.healthAttempts ?? 2,
   } satisfies Parameters<typeof runSetup>[0];
 }

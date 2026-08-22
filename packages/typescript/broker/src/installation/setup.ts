@@ -1402,6 +1402,12 @@ function actionInputs(options: {
 }): SetupActionInputs {
   const removeResourceIds: string[] = [];
   const removeAgentSkillResourceIds: string[] = [];
+  if (options.inspection.installState.committed
+      && options.inspection.installState.state.resources.some(
+        (resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID,
+      )) {
+    removeResourceIds.push(LEGACY_TAILSCALE_RESOURCE_ID);
+  }
   if (options.plan.choices.service === 'foreground'
       && options.plan.actions.some((action) => action.id === 'service.systemd')) {
     removeResourceIds.push(...SERVICE_RESOURCE_IDS);

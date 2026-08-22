@@ -1,0 +1,8 @@
+# Replace the site address. Caddy owns TLS and this public listener.
+cosy.example.com {
+	reverse_proxy 127.0.0.1:7734 {
+		stream_close_delay 5m
+	}
+}
+
+# Teardown: remove this site block, validate the config, and reload Caddy.

@@ -11,6 +11,21 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Pairing offers accept an optional, one-time client-reachable broker URL and
+  emit provider-neutral version 3 payloads while clients retain legacy QR support.
+- Connectivity guides and copyable operator-owned proxy and tunnel examples are
+  available under `docs/connectivity/` and `examples/connectivity/`.
+
+### Changed
+
+- The broker now has a strict loopback-only listener and configuration schema 2;
+  remote connectivity is no longer configured, diagnosed, repaired, or removed
+  by cosyncing.
+- Upgrades preserve legacy Tailscale Serve routes while relinquishing their old
+  setup intent and install receipts.
+
 ## 0.4.1 — 2026-08-21
 
 ### Added
