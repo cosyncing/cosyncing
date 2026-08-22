@@ -40,12 +40,14 @@ class TransportQrPayload {
   final String transportKind;
 
   /// Transport URL.
-  final Uri transportUrl;
+  final Uri? transportUrl;
 
-  /// One-time pairing id for v2 payloads.
+  /// One-time pairing id for v2 and v3 payloads.
   final String? pairingId;
 
   /// Whether this QR can be accepted without the legacy token path.
   bool get canAccept =>
-      version == 2 && pairingId != null && pairingId!.isNotEmpty;
+      (version == 2 || version == 3) &&
+      pairingId != null &&
+      pairingId!.isNotEmpty;
 }

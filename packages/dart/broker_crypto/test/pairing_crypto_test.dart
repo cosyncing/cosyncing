@@ -42,6 +42,33 @@ void main() {
       expect(payload.pairingId, isNull);
       expect(payload.canAccept, isFalse);
     });
+
+    test('parses provider-neutral v3 with and without a Broker URL', () {
+      for (final brokerUrl in <String?>[
+        'https://cosy.example.com',
+        null,
+      ]) {
+        final payloadJson = jsonEncode({
+          'version': 3,
+          'brokerId': 'broker-test',
+          'pairingId': 'pair_abc',
+          'publicKey': 'broker-public',
+          'transport': {
+            'kind': 'broker-url',
+            if (brokerUrl != null) 'url': brokerUrl,
+          },
+        });
+        final uri =
+            'cosyncing://pair?payload=${base64UrlNoPadding(utf8.encode(payloadJson))}';
+
+        final payload = QrPairingPayload.parse(uri);
+
+        expect(payload.version, 3);
+        expect(payload.transport.kind, 'broker-url');
+        expect(payload.transport.url, brokerUrl == null ? isNull : Uri.parse(brokerUrl));
+        expect(payload.canAccept, isTrue);
+      }
+    });
   });
 
   group('pairing keys', () {

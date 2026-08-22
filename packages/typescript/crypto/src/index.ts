@@ -55,6 +55,7 @@ export interface WrappedDataKey {
 
 export type PairingTransport =
   | { kind: 'tailscale-direct'; url: string }
+  | { kind: 'broker-url'; url?: string }
   | { kind: 'relay'; url: string; mailbox: string };
 
 export interface QrBrokerDescriptor {
@@ -67,7 +68,7 @@ export interface QrBrokerDescriptor {
 }
 
 export interface QrPairingPayload {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   brokerId: string;
   publicKey: string;
   transport: PairingTransport;
@@ -84,9 +85,16 @@ export interface QrPairingPayloadV2 extends QrPairingPayload {
   pairingId: string;
 }
 
+export interface QrPairingPayloadV3 extends QrPairingPayload {
+  version: 3;
+  pairingId: string;
+  transport: Extract<PairingTransport, { kind: 'broker-url' }>;
+}
+
 type QrPairingPayloadInput =
   | (Omit<QrPairingPayloadV1, 'version'> & { version?: 1 })
-  | (Omit<QrPairingPayloadV2, 'version'> & { version?: 2 });
+  | (Omit<QrPairingPayloadV2, 'version'> & { version?: 2 })
+  | (Omit<QrPairingPayloadV3, 'version'> & { version: 3 });
 
 const WRAP_INFO = new TextEncoder().encode('cosyncing-datakey-wrap-v1');
 const WRAP_AAD = new TextEncoder().encode('cosyncing-datakey');
@@ -186,9 +194,11 @@ export function createQrPairingPayload(payload: QrPairingPayloadInput): string {
   const hasPairingId = 'pairingId' in payload;
   const explicitVersion = payload.version;
   const version = explicitVersion ?? (hasPairingId ? 2 : 1);
-  const normalized = version === 2
-    ? { ...payload, version: 2, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV2
-    : { ...payload, version: 1 } as QrPairingPayloadV1;
+  const normalized = version === 3
+    ? { ...payload, version: 3, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV3
+    : version === 2
+      ? { ...payload, version: 2, pairingId: hasPairingId ? String(payload.pairingId) : '' } satisfies QrPairingPayloadV2
+      : { ...payload, version: 1 } as QrPairingPayloadV1;
   validatePairingPayload(normalized);
   return `cosyncing://pair?payload=${encodeURIComponent(b64(Buffer.from(JSON.stringify(normalized), 'utf8')))}`;
 }
@@ -235,6 +245,9 @@ function validatePairingPayload(payload: QrPairingPayload): void {
   if (payload.version === 2) {
     return validatePairingPayloadV2(payload as QrPairingPayloadV2);
   }
+  if (payload.version === 3) {
+    return validatePairingPayloadV3(payload as QrPairingPayloadV3);
+  }
   throw new Error('unsupported pairing payload version');
 }
 
@@ -249,6 +262,15 @@ function validatePairingPayloadV2(payload: QrPairingPayloadV2): void {
   if (!payload.brokerId) throw new Error('pairing payload brokerId is required');
   if (!payload.publicKey) throw new Error('pairing payload publicKey is required');
   if (!payload.pairingId) throw new Error('pairing payload pairingId is required');
+  validatePairingTransport(payload.transport);
+  validateQrBrokerDescriptor(payload.broker);
+}
+
+function validatePairingPayloadV3(payload: QrPairingPayloadV3): void {
+  if (!payload.brokerId) throw new Error('pairing payload brokerId is required');
+  if (!payload.publicKey) throw new Error('pairing payload publicKey is required');
+  if (!payload.pairingId) throw new Error('pairing payload pairingId is required');
+  if (payload.transport.kind !== 'broker-url') throw new Error('version 3 pairing transport must be broker-url');
   validatePairingTransport(payload.transport);
   validateQrBrokerDescriptor(payload.broker);
 }
@@ -270,6 +292,10 @@ function validateQrBrokerDescriptor(broker: QrBrokerDescriptor | undefined): voi
 function validatePairingTransport(transport: PairingTransport): void {
   if (transport.kind === 'tailscale-direct') {
     if (!transport.url) throw new Error('tailscale-direct pairing URL is required');
+    return;
+  }
+  if (transport.kind === 'broker-url') {
+    if (transport.url != null && !transport.url) throw new Error('broker-url pairing URL is invalid');
     return;
   }
   if (transport.kind === 'relay') {

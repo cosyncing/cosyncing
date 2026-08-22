@@ -10,6 +10,7 @@ abstract interface class TransportPairingAcceptService {
   /// Accepts [payload] with locally generated peer material.
   Future<TransportPairingAcceptResponse> accept(
     TransportQrPayload payload, {
+    required Uri brokerUrl,
     required String peerId,
     required String peerToken,
     required String identityPublicKey,
@@ -23,6 +24,7 @@ final class BrokerTransportPairingAcceptService
   @override
   Future<TransportPairingAcceptResponse> accept(
     TransportQrPayload payload, {
+    required Uri brokerUrl,
     required String peerId,
     required String peerToken,
     required String identityPublicKey,
@@ -32,7 +34,7 @@ final class BrokerTransportPairingAcceptService
     if (pairingId == null || pairingId.isEmpty) {
       throw const FormatException('QR payload is missing pairingId');
     }
-    final client = BrokerClient(baseUrl: payload.transportUrl.toString());
+    final client = BrokerClient(baseUrl: brokerUrl.toString());
     try {
       return await client.acceptTransportPairing(
         pairingId,

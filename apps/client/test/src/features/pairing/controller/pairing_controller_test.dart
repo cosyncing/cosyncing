@@ -349,6 +349,68 @@ void main() {
     );
 
     test(
+      'accepts URL-free QR v3 with a separately supplied Broker URL',
+      () async {
+        final qr = _transportQr(
+          version: 3,
+          pairingId: 'pair_v3',
+          transportKind: 'broker-url',
+          transportUrl: null,
+        );
+
+        await container
+            .read(pairingControllerProvider.notifier)
+            .importPayload(
+              qr,
+              brokerUrl: 'https://cosy.example.com',
+            );
+
+        expect(
+          container.read(pairingControllerProvider).notice,
+          PairingNotice.devicePaired,
+        );
+        expect(
+          transportAcceptService.lastBrokerUrl,
+          Uri.parse('https://cosy.example.com'),
+        );
+        expect(
+          transportStore.last?.brokerUrl,
+          Uri.parse('https://cosy.example.com'),
+        );
+      },
+    );
+
+    test('requires a Broker URL only when QR v3 omits it', () async {
+      final qr = _transportQr(
+        version: 3,
+        pairingId: 'pair_v3',
+        transportKind: 'broker-url',
+        transportUrl: null,
+      );
+
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(qr);
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.brokerUrlRequired,
+      );
+      expect(transportAcceptService.calls, 0);
+
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(
+            qr,
+            brokerUrl: 'not a url',
+          );
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.brokerUrlInvalid,
+      );
+      expect(transportAcceptService.calls, 0);
+    });
+
+    test(
       'restores the previous peer token when profile adoption fails',
       () async {
         const profileId = 'http://broker:7734';
@@ -520,12 +582,17 @@ void main() {
 String _transportQr({
   required int version,
   String? pairingId,
+  String transportKind = 'tailscale-direct',
+  String? transportUrl = 'http://broker:7734',
 }) {
   final payload = <String, Object?>{
     'version': version,
     'brokerId': 'broker-test',
     'publicKey': 'broker-public',
-    'transport': {'kind': 'tailscale-direct', 'url': 'http://broker:7734'},
+    'transport': {
+      'kind': transportKind,
+      if (transportUrl != null) 'url': transportUrl,
+    },
     if (pairingId != null) 'pairingId': pairingId,
   };
   return 'cosyncing://pair?payload=${crypto.base64UrlNoPadding(utf8.encode(jsonEncode(payload)))}';
@@ -637,10 +704,12 @@ class _FakeTransportPairingAcceptService
   int calls = 0;
   String? lastPairingId;
   String? lastPeerId;
+  Uri? lastBrokerUrl;
 
   @override
   Future<TransportPairingAcceptResponse> accept(
     TransportQrPayload payload, {
+    required Uri brokerUrl,
     required String peerId,
     required String peerToken,
     required String identityPublicKey,
@@ -649,6 +718,7 @@ class _FakeTransportPairingAcceptService
     calls += 1;
     lastPairingId = payload.pairingId;
     lastPeerId = peerId;
+    lastBrokerUrl = brokerUrl;
     final failure = this.failure;
     if (failure != null) {
       Error.throwWithStackTrace(failure, StackTrace.current);
