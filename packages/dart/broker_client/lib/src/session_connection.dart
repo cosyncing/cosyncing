@@ -253,6 +253,7 @@ class SessionConnection {
       // ignore: avoid_catches_without_on_clauses
     } catch (e) {
       if (gen != _generation) return;
+      _invalidateWebSocketAuthCapabilityAfterConnectFailure();
       _onDisconnect(gen);
     }
   }
@@ -549,17 +550,9 @@ class SessionConnection {
       artifactMode: _artifactMode,
     );
     String? wsAuthTicket;
-    if (_resolver.hasCredential && !_wsTicketCapabilityChecked) {
-      final health = await _dio.get<Map<String, dynamic>>(
-        _resolver.healthEndpoint,
-        options: Options(headers: _resolver.authHeaders),
-      );
-      final contract = health.data?['contract'];
-      final revision = contract is Map<String, dynamic>
-          ? contract['revision']
-          : null;
-      _legacyCredentialQueryRequired = revision is int && revision < 16;
-      _wsTicketCapabilityChecked = true;
+    if (_resolver.hasCredential &&
+        (!_wsTicketCapabilityChecked || _legacyCredentialQueryRequired)) {
+      await _probeWebSocketAuthCapability();
     }
     if (_resolver.hasCredential && !_legacyCredentialQueryRequired) {
       final response = await _dio.post<Map<String, dynamic>>(
@@ -587,6 +580,24 @@ class SessionConnection {
       wsAuthTicket: wsAuthTicket,
       legacyCredentialQuery: _legacyCredentialQueryRequired,
     );
+  }
+
+  Future<void> _probeWebSocketAuthCapability() async {
+    final health = await _dio.get<Map<String, dynamic>>(
+      _resolver.healthEndpoint,
+      options: Options(headers: _resolver.authHeaders),
+    );
+    final contract = health.data?['contract'];
+    final revision = contract is Map<String, dynamic>
+        ? contract['revision']
+        : null;
+    _legacyCredentialQueryRequired = revision is int && revision < 16;
+    _wsTicketCapabilityChecked = true;
+  }
+
+  void _invalidateWebSocketAuthCapabilityAfterConnectFailure() {
+    if (!_resolver.hasCredential) return;
+    _wsTicketCapabilityChecked = false;
   }
 
   void _setState(SessionConnectionState s) {
@@ -785,6 +796,7 @@ class SessionConnection {
         // ignore: avoid_catches_without_on_clauses
       } catch (e) {
         if (reconnectGen != _generation) return;
+        _invalidateWebSocketAuthCapabilityAfterConnectFailure();
         _backoffMultiplier = (_backoffMultiplier * 2).clamp(
           1,
           _maxBackoff.inSeconds,

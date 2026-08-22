@@ -37,6 +37,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - WebSocket URLs contain a short-lived, one-use authorization ticket instead
   of a broker or paired-device credential when connected to a current broker;
   the client retains a revision-gated fallback during the client-first rollout.
+- A client connected to a revision-15 broker now re-probes authentication on
+  reconnect, so it can cross a live revision-16 upgrade without an app restart.
 - Candidate startup no longer persists configuration schema 2 during an
   upgrade, so a failed upgrade can restore a schema-1 broker safely.
 - Artifact persistence uses a durable installation identity rather than a
