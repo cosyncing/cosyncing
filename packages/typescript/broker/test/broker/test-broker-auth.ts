@@ -195,6 +195,43 @@ try {
   check('GET /api/sessions accepts a token', (await status(tokened.base, '/api/sessions', {
     headers: { 'x-cosyncing-token': TOKEN },
   })) === 200);
+  const unauthenticatedOptionsSessions = await fetch(`${tokened.base}/api/sessions`, { method: 'OPTIONS' });
+  check('OPTIONS /api/sessions cannot bypass roster authentication',
+    unauthenticatedOptionsSessions.status === 401 && !(await unauthenticatedOptionsSessions.text()).includes('sessions'));
+  const unauthenticatedOptionsAgents = await fetch(`${tokened.base}/api/agents`, { method: 'OPTIONS' });
+  check('OPTIONS /api/agents cannot bypass agent-roster authentication',
+    unauthenticatedOptionsAgents.status === 401 && !(await unauthenticatedOptionsAgents.text()).includes('capabilities'));
+  const authenticatedOptionsSessions = await fetch(`${tokened.base}/api/sessions`, {
+    method: 'OPTIONS',
+    headers: { 'x-cosyncing-token': TOKEN },
+  });
+  check('authenticated OPTIONS /api/sessions does not execute the GET handler',
+    authenticatedOptionsSessions.status === 404 && !(await authenticatedOptionsSessions.text()).includes('sessions'));
+
+  const malformedPublicPairing = await fetch(`${tokened.base}/api/transport/pairings/%E0%A4%A/accept`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  const malformedPublicPairingBody = await malformedPublicPairing.text();
+  check('malformed public pairing path returns a controlled JSON error',
+    malformedPublicPairing.status === 400
+      && malformedPublicPairing.headers.get('content-type')?.includes('application/json') === true
+      && malformedPublicPairingBody.includes('PAIRING_INVALID_INPUT')
+      && !malformedPublicPairingBody.includes('URIError'),
+    `status=${malformedPublicPairing.status}`);
+
+  const malformedAuthenticatedPath = await fetch(`${tokened.base}/api/transport/peers/%E0%A4%A`, {
+    method: 'DELETE',
+    headers: { 'x-cosyncing-token': TOKEN },
+  });
+  const malformedAuthenticatedBody = await malformedAuthenticatedPath.text();
+  check('unexpected route errors use a content-free production response',
+    malformedAuthenticatedPath.status === 500
+      && malformedAuthenticatedPath.headers.get('content-type') === 'text/plain; charset=utf-8'
+      && malformedAuthenticatedBody === 'internal server error'
+      && !malformedAuthenticatedBody.includes('URIError'),
+    `status=${malformedAuthenticatedPath.status}`);
 
   const proxy = await loopbackForwarder(7796);
   try {

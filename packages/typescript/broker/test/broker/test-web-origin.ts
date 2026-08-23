@@ -126,6 +126,9 @@ try {
   const idx = await fetch(`${built.base}/cosy/`);
   const idxBody = await idx.text();
   check('GET /cosy/ serves index.html', idx.status === 200 && idxBody.includes('flutter-web-fake-index'), `status=${idx.status}`);
+  check('GET /cosy/ shell cannot be embedded by another site',
+    idx.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && idx.headers.get('x-frame-options') === 'DENY');
 
   // /cosy/x.wasm -> application/wasm (Bun infers the MIME; no manual table).
   const wasm = await fetch(`${built.base}/cosy/x.wasm`);
@@ -141,6 +144,9 @@ try {
   const nav = await fetch(`${built.base}/cosy/deep/nested/route`);
   const navBody = await nav.text();
   check('SPA fallback: /cosy/deep/nested/route -> index.html', nav.status === 200 && navBody.includes('flutter-web-fake-index'), `status=${nav.status}`);
+  check('SPA fallback shell retains anti-framing headers',
+    nav.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && nav.headers.get('x-frame-options') === 'DENY');
   const deepLink = await fetch(`${built.base}/cosy/sessions/123`);
   check('deep link /cosy/sessions/123 loads the shell rather than 404ing', deepLink.status === 200 && (await deepLink.text()).includes('flutter-web-fake-index'), `status=${deepLink.status}`);
 

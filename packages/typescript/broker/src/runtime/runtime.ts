@@ -140,6 +140,7 @@ import './managed-runtime-state.ts';
 import { RuntimeUpdateCoordinator } from '../updates/runtime-update.ts';
 import { createCodexRuntimeUpdateProvider, createOpencodeRuntimeUpdateProvider } from '../updates/runtime-update-providers.ts';
 import {
+  assertPairingId,
   PAIRING_ACCEPT_MAX_BYTES,
   PairingHttpError,
   tokenHash,
@@ -3728,6 +3729,13 @@ function applyCoi(headers: Headers): Headers {
   return headers;
 }
 
+/** The authenticated web shell must never be embedded by an unrelated origin. */
+function applyFlutterShellSecurity(headers: Headers): Headers {
+  headers.set('content-security-policy', "frame-ancestors 'none'");
+  headers.set('x-frame-options', 'DENY');
+  return headers;
+}
+
 /** Flutter shell files that must never be cached, because each carries build identity rather than
  *  content-addressed payload. See the rationale where these are applied in {@link serveFlutter}. */
 const FLUTTER_UNCACHED_SHELL_FILES: ReadonlySet<string> = new Set([
@@ -3780,6 +3788,7 @@ async function serveFlutter(rawRel: string): Promise<Response> {
     // each load and re-fetches the app itself, so main.dart.js does NOT need `no-store` here and is not
     // re-downloaded on every page load.
     if (FLUTTER_UNCACHED_SHELL_FILES.has(rel)) headers.set('cache-control', 'no-store');
+    if (rel === 'index.html') applyFlutterShellSecurity(headers);
     return new Response(file, { headers: applyCoi(headers) });
   }
   // SPA fallback: a missing NAVIGATION (no file extension, e.g. a deep-linked `sessions/123` refresh)
@@ -3789,6 +3798,7 @@ async function serveFlutter(rawRel: string): Promise<Response> {
   const headers = new Headers();
   if (index.type) headers.set('content-type', index.type);
   headers.set('cache-control', 'no-store');
+  applyFlutterShellSecurity(headers);
   return new Response(index, { headers: applyCoi(headers) });
 }
 
@@ -3800,6 +3810,7 @@ server = Bun.serve<WsData>({
   port: PORT,
   hostname: LISTEN_HOST,
   idleTimeout: 240,
+  development: false,
   async fetch(req, srv) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -3823,8 +3834,7 @@ server = Bun.serve<WsData>({
     const isPublicApiRequest = (path === '/api/health' && (req.method === 'GET' || req.method === 'HEAD'))
       || isPairingAccept
       || isSignedArtifact
-      || isWsTicketUpgrade
-      || req.method === 'OPTIONS';
+      || isWsTicketUpgrade;
     const isApiRequest = path.startsWith('/api/');
     const isPiIntegrationRoute = path.startsWith('/pi/bridge/');
     const isResumeStream = url.searchParams.get('mode') === 'resume'
@@ -4064,7 +4074,10 @@ server = Bun.serve<WsData>({
     const acceptPairing = path.match(/^\/api\/transport\/pairings\/([^/]+)\/accept$/);
     if (acceptPairing && req.method === 'POST') {
       try {
-        const pairingId = decodeURIComponent(acceptPairing[1]!);
+        // Pairing IDs are canonical base64url and never need URI decoding. Validate the raw segment so
+        // malformed percent escapes remain a controlled public-boundary error instead of throwing URIError.
+        const pairingId = acceptPairing[1]!;
+        assertPairingId(pairingId);
         const accepted = transportPairings.accept(pairingId, await readPairingAcceptanceJson(req));
         attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: `device-paired:${accepted.peer.peerId}:${Date.now()}`,
@@ -5364,7 +5377,7 @@ server = Bun.serve<WsData>({
       }
     }
 
-    if (path === '/api/agents') {
+    if (path === '/api/agents' && req.method === 'GET') {
       // D16: /api/agents advertises ABILITY (capabilities); live per-session state rides `control`.
       // `syncEnabled` is the persisted per-agent enablement (AgentSyncEnablement) the Settings toggle
       // reflects — only Codex has an explicit enable today (OpenCode auto-serves, Pi probes its extension).
@@ -5488,7 +5501,7 @@ server = Bun.serve<WsData>({
       }
     }
 
-    if (path === '/api/sessions') {
+    if (path === '/api/sessions' && req.method === 'GET') {
       // Optional per-device time window (?window=7d|1m|2m|6m|all): a phone loading 1.5k+ sessions over
       // the tailnet was starving, so a device can ask for only recently-active sessions (non-idle always
       // kept — see filterSessionsByWindow). ETag → 304 skips the whole body when the roster is unchanged
@@ -5589,6 +5602,19 @@ server = Bun.serve<WsData>({
     // See docs/architecture/monorepo.md.
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
+  },
+  error() {
+    // Bun's default development response includes source context. Keep unexpected request failures
+    // content-free on the wire and in the ordinary log stream.
+    console.error(`${LOG_PREFIX} unhandled request error`);
+    return new Response('internal server error', {
+      status: 500,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      },
+    });
   },
   websocket: {
     ...HISTORY_WEBSOCKET_OPTIONS,
