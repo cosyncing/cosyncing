@@ -66,6 +66,7 @@ export type SetupSummaryCode =
   | 'failed-cleanup-remains';
 
 export const DEFAULT_SETUP_LANGUAGE: SetupLanguage = 'en';
+export const CONNECTIVITY_GUIDE_URL = 'https://github.com/cosyncing/cosyncing/tree/main/docs/connectivity';
 
 /** Offered in the language-selection step. Each label is written in its own language, never translated. */
 export const SETUP_LANGUAGE_OPTIONS: readonly { value: SetupLanguage; label: string }[] = Object.freeze([
@@ -205,7 +206,10 @@ const en: SetupMessages = {
       + `Run \`${command}\`; its installer detects npm-managed Codex and offers to remove it. `
       + 'Then open a new terminal and rerun `cosy setup`.',
   networkTitle: 'Network and authentication',
-  networkLoopback: () => 'Loopback-only. External connectivity is managed by the operator.',
+  networkLoopback: () =>
+    `Loopback-only. External connectivity is managed by the operator. See ${CONNECTIVITY_GUIDE_URL}, `
+      + 'or copy that URL to a coding agent and ask it to configure Tailscale Serve, EasyTier, or another '
+      + 'connectivity method after `cosyncing setup`.',
   legacyConnectivityPreserved: (targets) =>
     `Legacy external connectivity was left unchanged and is now operator-owned${targets.length ? `: ${targets.join(', ')}` : '.'} `
       + 'For future setup, see docs/connectivity/tailscale-serve.md and '
@@ -354,7 +358,9 @@ const en: SetupMessages = {
   outroPairInstead: (binary) => `Run \`${binary} pair\` and scan the QR to pair a client.`,
   outroPairPageHere: (url) => `The same steps in a browser: ${url}`,
   outroPairPageHereAfterStart: (url) => `Then the same steps in a browser: ${url}`,
-  outroLoopbackOnly: 'Loopback only. External connectivity is managed by the operator.',
+  outroLoopbackOnly:
+    `Loopback only. External connectivity is managed by the operator. See ${CONNECTIVITY_GUIDE_URL}, `
+      + 'or copy that URL to a coding agent and ask it to configure connectivity after `cosyncing setup`.',
   outroShortCommand: (alias, commands) =>
     `Short command: \`${alias}\` is an alias for \`cosyncing\`, for example ${commands.map((value) => `\`${value}\``).join(', ')}.`,
   outroTokenRead: (path) => `Read authentication token file: cat ${path}`,
@@ -406,7 +412,9 @@ const zhHans: SetupMessages = {
     `警告：App 创建会话仍可使用；由 broker 托管的 daemon 和终端同步需要官方独立版 Codex。请执行 \`${command}\`；`
       + '官方安装器会检测 npm 版 Codex，并询问是否移除。安装完成后，请打开新终端并重新运行 `cosy setup`。',
   networkTitle: '网络与认证',
-  networkLoopback: () => '仅限回环访问。外部连接由操作者自行管理。',
+  networkLoopback: () =>
+    `仅限回环访问。外部连接由操作者自行管理。参考 ${CONNECTIVITY_GUIDE_URL}，`
+      + '或将这个网址复制给编程助手，请它在 `cosyncing setup` 完成后帮你配置 Tailscale Serve、EasyTier 或其他连接方式。',
   legacyConnectivityPreserved: (targets) =>
     `旧版外部连接保持不变，现由操作者管理${targets.length ? `：${targets.join('、')}` : '。'} `
       + '后续配置请参阅 docs/connectivity/tailscale-serve.md 和 '
@@ -532,7 +540,9 @@ const zhHans: SetupMessages = {
   outroPairInstead: (binary) => `执行 \`${binary} pair\` 并扫描二维码，即可配对一台客户端。`,
   outroPairPageHere: (url) => `浏览器里也有同样的步骤：${url}`,
   outroPairPageHereAfterStart: (url) => `启动后，浏览器里也有同样的步骤：${url}`,
-  outroLoopbackOnly: '仅限回环访问。外部连接由操作者自行管理。',
+  outroLoopbackOnly:
+    `仅限回环访问。外部连接由操作者自行管理。参考 ${CONNECTIVITY_GUIDE_URL}，`
+      + '或将这个网址复制给编程助手，请它在 `cosyncing setup` 完成后帮你配置外部连接。',
   outroShortCommand: (alias, commands) =>
     `快捷命令：\`${alias}\` 是 \`cosyncing\` 的别名，例如 ${commands.map((value) => `\`${value}\``).join('、')}。`,
   outroTokenRead: (path) => `查看认证令牌文件：cat ${path}`,

@@ -89,6 +89,7 @@ import {
   TOKDASH_DEFAULT_BASE_URL,
 } from '../../src/installation/tokdash-quota.ts';
 import {
+  CONNECTIVITY_GUIDE_URL,
   normalizeSetupLanguage,
   setupMessages,
   type SetupLanguage,
@@ -2202,7 +2203,8 @@ try {
         captured.includes(`[access] State directory: ${home}`)
           && captured.includes(`[access] Local web app: ${loopbackUrl}/cosy`)
           && captured.includes(`[access] Local server address: ${loopbackUrl}`)
-          && captured.includes('[access] Loopback only. External connectivity is managed by the operator.')
+          && captured.includes(`[access] Loopback only. External connectivity is managed by the operator. See ${CONNECTIVITY_GUIDE_URL}`)
+          && captured.includes('ask it to configure connectivity after `cosyncing setup`')
           && captured.includes('[access] Short command: `cosy` is an alias for `cosyncing`, for example `cosy status`, `cosy doctor`, `cosy update`.')
           && captured.includes(`[credential] Read authentication token file: cat ${tokenPath}`)
           && !captured.includes('[credential] Authentication token file:')
@@ -2234,7 +2236,7 @@ try {
           // R10 deleted the "no browser client, so there is no app URL" line: it explained an absence the
           // operator never asked about. What remains has to be the actionable half, and only that.
           && !/no app URL|browser client/i.test(captured)
-          && captured.includes('[access] Loopback only. External connectivity is managed by the operator.'),
+          && captured.includes(`[access] Loopback only. External connectivity is managed by the operator. See ${CONNECTIVITY_GUIDE_URL}`),
         captured);
 
       let chineseNoWeb = '';
@@ -2248,7 +2250,8 @@ try {
       check('the Chinese no-web outro carries the loopback /cosy URL',
         chineseNoWeb.includes(`[access] 浏览器里也有同样的步骤：${loopbackUrl}/cosy`)
           && chineseNoWeb.includes(`[access] 本机服务器地址：${loopbackUrl}`)
-          && chineseNoWeb.includes('[access] 仅限回环访问。外部连接由操作者自行管理。')
+          && chineseNoWeb.includes(`[access] 仅限回环访问。外部连接由操作者自行管理。参考 ${CONNECTIVITY_GUIDE_URL}`)
+          && chineseNoWeb.includes('将这个网址复制给编程助手')
           && chineseNoWeb.includes('[access] 快捷命令：`cosy` 是 `cosyncing` 的别名，例如 `cosy status`、`cosy doctor`、`cosy update`。'),
         chineseNoWeb);
 

@@ -95,6 +95,11 @@ version-checked. See [supported-agent setup](docs/supported_agents/README.md) fo
 The server requires [Bun](https://bun.sh) 1.3.8 or newer to run cosyncing and Node.js/npm to install
 and update it. The broker is local-only by default. Cross-device use requires a proxy, tunnel, VPN,
 mesh network, or another [operator-owned connectivity method](docs/connectivity/README.md).
+For a simple private route, see [Tailscale Serve](docs/connectivity/tailscale-serve.md); for a
+self-managed overlay, see [WireGuard or EasyTier](docs/connectivity/wireguard-easytier.md). After
+`cosyncing setup`, you can also copy
+`https://github.com/cosyncing/cosyncing/tree/main/docs/connectivity` to a coding agent and ask it to
+configure your chosen method while keeping the broker bound to loopback.
 [Tokdash](https://github.com/JingbiaoMei/tokdash) is optional but strongly recommended for quota
 tracking and warnings.
 

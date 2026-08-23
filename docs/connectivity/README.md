@@ -27,6 +27,23 @@ client -> operator-owned connectivity -> http://127.0.0.1:7734
 | [Cloudflare Tunnel or FRP](cloudflare-tunnel-frp.md) | Outbound or self-hosted tunnel | Yes | Required | Tunnel client |
 | [LAN proxy](lan-access.md) | One trusted local network | No | Recommended | Proxy |
 
+For the shortest private setup, use Tailscale Serve if your devices already use
+Tailscale. Use WireGuard or EasyTier when you want to operate the overlay
+yourself; an overlay address still needs a forwarder to the loopback broker.
+
+After `cosyncing setup`, you may follow these guides yourself or give this URL
+to a coding agent and ask it to configure the method you chose:
+
+```text
+https://github.com/cosyncing/cosyncing/tree/main/docs/connectivity
+```
+
+For example: “Follow the cosyncing connectivity guide above and configure
+Tailscale Serve for this broker. Keep cosyncing bound to 127.0.0.1, show me the
+commands before changing the machine, and verify the route afterward.” Replace
+Tailscale Serve with EasyTier or another method when appropriate. The resulting
+route remains operator-owned even when an agent helps create it.
+
 Read the [security checklist](security.md) before exposing a broker and use
 [troubleshooting](troubleshooting.md) when the local broker works but a forwarded
 URL does not. Users upgrading from older managed Tailscale releases should read

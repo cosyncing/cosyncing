@@ -17,6 +17,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   emit provider-neutral version 3 payloads while clients retain legacy QR support.
 - Connectivity guides and copyable operator-owned proxy and tunnel examples are
   available under `docs/connectivity/` and `examples/connectivity/`.
+- Setup and the READMEs now link directly to the connectivity guides and suggest
+  a copyable agent-assisted handoff for Tailscale Serve, EasyTier, and other
+  operator-owned routes. The Tailscale guide documents `--bg` reboot behavior.
 
 ### Changed
 

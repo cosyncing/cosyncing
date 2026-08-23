@@ -17,5 +17,6 @@ fi
 echo "Creating an operator-owned Tailscale Serve route to 127.0.0.1:${port}."
 tailscale serve --bg "http://127.0.0.1:${port}"
 tailscale serve status
+echo "The --bg route resumes after reboot when tailscaled starts; verify with: tailscale serve status"
 echo "Pair with: cosy pair --broker-url <HTTPS-origin-shown-above>"
 echo "Teardown: tailscale serve --https=443 off"
