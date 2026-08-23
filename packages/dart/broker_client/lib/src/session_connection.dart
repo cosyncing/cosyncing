@@ -58,6 +58,7 @@ class SessionConnection {
     int initialHistory = _defaultInitialHistory,
     WebSocketAdapter Function(String url)? adapterFactory,
     Dio? dio,
+    Duration authRequestTimeout = const Duration(seconds: 10),
   }) : _resolver = resolver,
        _tool = tool,
        _sessionId = sessionId,
@@ -69,6 +70,7 @@ class SessionConnection {
        _initialHistory = initialHistory,
        _adapterFactory = adapterFactory ?? WebSocketAdapter.new,
        _dio = dio ?? Dio(),
+       _authRequestTimeout = authRequestTimeout,
        _ownsDio = dio == null;
 
   static const int _defaultInitialHistory = 100;
@@ -80,6 +82,7 @@ class SessionConnection {
   final WebSocketAdapter Function(String url) _adapterFactory;
   final int _initialHistory;
   final Dio _dio;
+  final Duration _authRequestTimeout;
   final bool _ownsDio;
   bool _legacyCredentialQueryRequired = false;
   bool _wsTicketCapabilityChecked = false;
@@ -561,11 +564,13 @@ class SessionConnection {
       await _probeWebSocketAuthCapability();
     }
     if (_resolver.hasCredential && !_legacyCredentialQueryRequired) {
-      final response = await _dio.post<Map<String, dynamic>>(
-        _resolver.wsAuthTicketEndpoint,
-        data: {'tool': _tool, 'sessionId': _sessionId, 'params': params},
-        options: Options(headers: _resolver.jsonHeaders),
-      );
+      final response = await _dio
+          .post<Map<String, dynamic>>(
+            _resolver.wsAuthTicketEndpoint,
+            data: {'tool': _tool, 'sessionId': _sessionId, 'params': params},
+            options: Options(headers: _resolver.jsonHeaders),
+          )
+          .timeout(_authRequestTimeout);
       wsAuthTicket = response.data?['wsAuthTicket'] as String?;
       if (wsAuthTicket == null || wsAuthTicket.isEmpty) {
         throw const FormatException(
@@ -589,22 +594,34 @@ class SessionConnection {
   }
 
   Future<void> _probeWebSocketAuthCapability() async {
-    final health = await _dio.get<Map<String, dynamic>>(
-      _resolver.healthEndpoint,
-      options: Options(headers: _resolver.authHeaders),
-    );
+    final health = await _dio
+        .get<Map<String, dynamic>>(
+          _resolver.healthEndpoint,
+          options: Options(headers: _resolver.authHeaders),
+        )
+        .timeout(_authRequestTimeout);
     final contract = health.data?['contract'];
     final revision = contract is Map<String, dynamic>
         ? contract['revision']
         : null;
     if (revision is! int) {
-      throw const FormatException(
-        'Broker health did not include a contract revision.',
+      throw const BrokerException(
+        statusCode: 401,
+        message:
+            'Broker credential was rejected or authenticated health is '
+            'unavailable.',
+        error: BrokerError(
+          error:
+              'Authenticated broker health did not include a contract '
+              'identity.',
+          code: 'AUTH_REQUIRED',
+        ),
       );
     }
-    if (revision < 15) {
+    if (revision < cosyncingClientMinimumBrokerRevision) {
       throw UnsupportedError(
-        'Broker contract revision $revision is outside the supported overlap.',
+        'Broker contract revision $revision is older than client minimum '
+        '$cosyncingClientMinimumBrokerRevision.',
       );
     }
     _legacyCredentialQueryRequired = revision == 15;

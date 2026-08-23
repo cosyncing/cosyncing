@@ -3,7 +3,7 @@
 const int cosyncingClientContractRevision = 16;
 
 /// Oldest broker contract this client can safely drive.
-const int cosyncingClientMinimumBrokerRevision = 2;
+const int cosyncingClientMinimumBrokerRevision = 15;
 
 /// Deterministic identity of the public surface used by this client.
 const String cosyncingClientContractSurfaceHash = 'fnv1a32:eff55ab5';

@@ -1601,14 +1601,14 @@ export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 16 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 
 /**
- * Oldest broker contract the generated first-party client identity will drive. Revision 2
- * introduced reason-tagged Drive arbitration and structured attach conflicts; a client built to
- * restore Drive through them cannot safely drive a revision-1 broker that silently ignores the
- * reason, so the new client fails closed there. Compatibility is deliberately asymmetric: older
- * clients remain accepted by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and the
- * overlap window above.
+ * Oldest broker contract the generated first-party client identity will drive. Revision 15 is the
+ * one-revision client-first overlap for revision 16: it still accepts query credentials while the
+ * updated client is staged. Older brokers are outside that overlap and must fail before a
+ * long-lived credential is placed in a WebSocket URL. Compatibility is deliberately asymmetric:
+ * older clients remain accepted by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and
+ * the overlap window above.
  */
-export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 2 as const;
+export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 15 as const;
 
 /**
  * The client revisions that survive an agent value they have never heard of.

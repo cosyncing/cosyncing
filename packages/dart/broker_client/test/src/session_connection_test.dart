@@ -161,6 +161,94 @@ void main() {
         },
       );
 
+      test(
+        'maps minimal health with a credential to an authentication error',
+        () async {
+          final dio = Dio();
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {'ok': true},
+                  ),
+                );
+              },
+            ),
+          );
+          final rejected = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'revoked-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'rejected-session',
+            dio: dio,
+            adapterFactory: (_) => FakeWebSocketAdapter(),
+          );
+          addTearDown(rejected.dispose);
+
+          await rejected.connect();
+
+          expect(
+            rejected.lastConnectionError,
+            isA<BrokerException>()
+                .having((error) => error.statusCode, 'statusCode', 401)
+                .having(
+                  (error) => error.error?.code,
+                  'code',
+                  'AUTH_REQUIRED',
+                ),
+          );
+          expect(rejected.state, SessionConnectionState.reconnecting);
+        },
+      );
+
+      test('bounds ticket acquisition when the broker is half-open', () async {
+        final dio = Dio();
+        dio.interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.path.endsWith('/api/health')) {
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {
+                      'ok': true,
+                      'contract': {'revision': 16},
+                    },
+                  ),
+                );
+              }
+              // Deliberately leave the ticket request unresolved.
+            },
+          ),
+        );
+        final bounded = SessionConnection(
+          resolver: EndpointResolver(
+            baseUrl: 'https://half-open.example.com',
+            token: 'credential',
+          ),
+          tool: 'codex',
+          sessionId: 'bounded-session',
+          dio: dio,
+          authRequestTimeout: const Duration(milliseconds: 20),
+          adapterFactory: (_) => FakeWebSocketAdapter(),
+        );
+        addTearDown(() async {
+          await bounded.dispose();
+          dio.close(force: true);
+        });
+
+        await bounded.connect();
+
+        expect(bounded.lastConnectionError, isA<TimeoutException>());
+        expect(bounded.state, SessionConnectionState.reconnecting);
+      });
+
       test('uses the legacy query only for a pre-ticket broker', () async {
         final dio = Dio();
         var ticketRequests = 0;

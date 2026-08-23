@@ -83,9 +83,9 @@
       "revision": 16,
       "surfaceHash": "fnv1a32:eff55ab5",
       "minimumClientRevision": 16,
-      "clientMinimumBrokerRevision": 2,
+      "clientMinimumBrokerRevision": 15,
       "change": "Authenticated clients exchange header credentials for single-use WebSocket authorization tickets through /api/ws-auth-tickets; long-lived query credentials are no longer accepted.",
-      "compatibilityChange": "The broker requires revision 16 clients because revision 15 cannot acquire WebSocket authorization tickets. Release and promote the revision 16 client before publishing this broker."
+      "compatibilityChange": "The broker requires revision 16 clients because revision 15 cannot acquire WebSocket authorization tickets. The revision 16 client supports the revision 15 query-credential broker only for the client-first rollout, and refuses older brokers before placing a long-lived credential in a URL."
     }
   ]
 }

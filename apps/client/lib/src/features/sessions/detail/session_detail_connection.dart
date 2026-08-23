@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
@@ -32,6 +34,9 @@ abstract interface class SessionDetailConnection {
 
   /// Connection status changes.
   Stream<SessionDetailConnectionStatus> get stateStream;
+
+  /// Sanitized transport-setup failure suitable for the session error surface.
+  String? get lastConnectionErrorMessage;
 
   /// Typed wire events from the broker.
   Stream<WireEvent> get events;
@@ -226,6 +231,17 @@ class BrokerSessionDetailConnection
   @override
   Stream<SessionDetailConnectionStatus> get stateStream =>
       _inner.stateStream.map(_mapState);
+
+  @override
+  String? get lastConnectionErrorMessage {
+    final error = _inner.lastConnectionError;
+    if (error is BrokerException) return error.message;
+    if (error is UnsupportedError) return error.message?.toString();
+    if (error is TimeoutException) {
+      return 'The broker authentication request timed out.';
+    }
+    return null;
+  }
 
   @override
   Stream<WireEvent> get events => _inner.events;
