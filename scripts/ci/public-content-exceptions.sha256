@@ -1,9 +1,9 @@
 # Exact reviewed files containing synthetic paths/credentials or policy terms.
 a1ccfb43a52a05c68250ea7958f0f37e6c2c446f6c4fedb4e1da5c7e07cb69b3  packages/typescript/adapters/claude/test/test-claude-activity.ts
 cf0f80af4ad10e57cee937d52087a8004fd4f0a3147794a4e3223e89004cbb76  packages/typescript/adapters/claude/test/test-claude-control.ts
-9d550c4e58b893921d272f0252c2c3e00fc5908e49e4573850ecd7cd9eab5a2e  packages/typescript/broker/test/security-r2/test-r2-export.ts
+434a821515795f290683c4b00660119f3e161d2944445a0b1a01b45784dfe993  packages/typescript/broker/test/security-r2/test-r2-export.ts
 328f8ddbe80fd5ccce9cdf37e89d64f24ef8cf80321c7a2ab84032fb48f755ee  packages/typescript/broker/test/security-r2/test-r2-redactor.ts
-a00a7532d383ac8f27a6bbeb67a8699f2c0592efc7033b8124896bb5d1fa9738  packages/typescript/broker/test/broker/test-state-security.ts
+1eae13b84ea1e78ae80d4d9ba07e1e38c531be385b890fa235629945345eae65  packages/typescript/broker/test/broker/test-state-security.ts
 cca092e49a586c622d989ebdd4f822715247c1b8fcd94e1a75f78668fef9796b  packages/typescript/broker/test/crypto/test-crypto.ts
 989cd46fbebdac33003244a4292499ade9bfc9816b143b92957e53e228d88f81  packages/typescript/adapters/opencode/test/test-opencode-tui-presence.ts
 e08ab441daa17f4a66829d980aef1dcca924cc1c7d7d607122869ad1462cbfec  apps/client/test/src/features/sessions/artifacts/session_artifact_transfer_test.dart
