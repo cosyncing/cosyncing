@@ -193,6 +193,11 @@ console.log('PASS  review mode rejects a mixed clean/dirty candidate pair');
     verifierSource,
     /fetch\(`\$\{base\}\/api\/health`, \{\s*headers: \{ 'x-cosyncing-token': token \}/,
   );
+  assert.match(probeSource, /lastSessionNavigation/);
+  assert.match(
+    probeSource,
+    /await send\('Page\.navigate', \{ url: sessionDeepLink \}\)/,
+  );
   const startupSource = readFileSync(
     new URL('../../release/candidate-browser-startup.ts', import.meta.url),
     'utf8',

@@ -602,20 +602,31 @@ async function probeBuiltClient(options: {
     if (!authenticatedAppReady) {
       throw new Error('built app did not repaint after committing its credential');
     }
-    await send('Page.navigate', {
-      url: `${options.base}/cosy/#${sessionPath.substring('/cosy'.length)}`,
-    });
+    const sessionDeepLink = `${options.base}/cosy/#${
+      sessionPath.substring('/cosy'.length)
+    }`;
+    await send('Page.navigate', { url: sessionDeepLink });
 
     const encodedSession = `/api/sessions/pi/${
       encodeURIComponent(options.sessionId)
     }/stream`;
     let appSocket: any;
-    const connected = await waitFor(() => {
+    let lastSessionNavigation = Date.now();
+    const connected = await waitFor(async () => {
       appSocket = events.find((event) => {
         if (event.method !== 'Network.webSocketCreated') return false;
         return isTicketedSessionWebSocket(event.params.url, encodedSession);
       });
-      return !!appSocket;
+      if (appSocket) return true;
+      // A slower browser can finish the credential/profile refresh after the
+      // first deep-link navigation and let its route guard settle back on the
+      // roster. Reassert the same authenticated deep link until the socket is
+      // observed; the existing deadline remains the hard bound.
+      if (Date.now() - lastSessionNavigation >= 1_000) {
+        lastSessionNavigation = Date.now();
+        await send('Page.navigate', { url: sessionDeepLink });
+      }
+      return false;
     });
     if (!connected) {
       const diagnostics = await evaluate(`(() => ({
