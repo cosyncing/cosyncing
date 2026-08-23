@@ -538,6 +538,31 @@ try {
   check('9f failed candidate rollback retains the old URL-keyed artifact record',
     rollbackResponse.status === 200 && await rollbackResponse.text() === 'survives identity migration');
 
+  const dedupeRoot = join(root, 'legacy-stable-replay-dedupe');
+  const dedupeSession = { tool: 'pi', id: 'dedupe-session' };
+  const dedupeLegacy = new ArtifactStore(legacySource, dedupeRoot);
+  dedupeLegacy.putBytes(
+    dedupeSession,
+    { type: 'file-artifact', artifactKey: 'same-key', name: 'legacy.txt', path: 'legacy.txt', mimeType: 'text/plain' },
+    Buffer.from('legacy'),
+    'text/plain',
+    undefined,
+    { sessionQualified: true },
+  );
+  const dedupeStable = new ArtifactStore(stableSource, dedupeRoot, { legacyBrokerSources: [legacySource] });
+  dedupeStable.putBytes(
+    dedupeSession,
+    { type: 'file-artifact', artifactKey: 'same-key', name: 'stable.txt', path: 'stable.txt', mimeType: 'text/plain' },
+    Buffer.from('stable'),
+    'text/plain',
+    undefined,
+    { sessionQualified: true },
+  );
+  const dedupedReplay = dedupeStable.sessionQualifiedArtifacts(dedupeSession);
+  check('9g stable-instance replay supersedes the legacy alias for the same artifact key',
+    dedupedReplay.length === 1 && dedupedReplay[0]?.name === 'stable.txt',
+    dedupedReplay.map((artifact) => artifact.name).join(','));
+
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.
   const oversizedRoot = join(root, 'oversized-index');

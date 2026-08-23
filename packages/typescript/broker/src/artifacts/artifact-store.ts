@@ -590,7 +590,7 @@ export class ArtifactStore {
     brokerUrl?: string,
   ): Array<AgentMessage & { type: 'file-artifact' }> {
     const now = Date.now();
-    const matching = [...this.records.values()]
+    const eligible = [...this.records.values()]
       .filter((record) =>
         record.tool === session.tool &&
         record.sessionId === session.id &&
@@ -598,7 +598,19 @@ export class ArtifactStore {
         record.qualifiedSource === 'managed-connection-v1' &&
         existsSync(record.filePath) &&
         (!record.expiresAt || now <= record.expiresAt)
-      )
+      );
+    const byArtifactKey = new Map<string, ArtifactRecord>();
+    for (const record of eligible) {
+      const current = byArtifactKey.get(record.artifactKey);
+      if (!current
+          || (current.brokerSource !== this.brokerSource && record.brokerSource === this.brokerSource)
+          || (current.brokerSource !== this.brokerSource
+            && record.brokerSource !== this.brokerSource
+            && record.createdAt > current.createdAt)) {
+        byArtifactKey.set(record.artifactKey, record);
+      }
+    }
+    const matching = [...byArtifactKey.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-this.replayLimit);
     return matching
