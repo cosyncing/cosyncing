@@ -15,8 +15,15 @@ for (let index = 0; index < 4; index++) {
 }
 assert.equal(tracker.recordFailure(), `auth-failures:${now}`);
 
-for (let index = 0; index < 5; index++) tracker.recordFailure();
+now += 59_999;
+for (let index = 0; index < 100_000; index++) tracker.recordFailure();
 assert.equal(tracker.recordFailure(), undefined, 'cooldown suppresses attacker-triggered storms');
+
+now += 2;
+for (let index = 0; index < 4; index++) {
+  assert.equal(tracker.recordFailure(), undefined, 'cooldown traffic does not prime the next incident');
+}
+assert.equal(tracker.recordFailure(), `auth-failures:${now}`);
 
 now += 60_001;
 for (let index = 0; index < 4; index++) {
