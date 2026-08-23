@@ -307,6 +307,8 @@ export function serveWebHandoff(decorate?: (headers: Headers) => Headers): Respo
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    'content-security-policy': "frame-ancestors 'none'",
+    'x-frame-options': 'DENY',
   });
   return new Response(WEB_HANDOFF_DOCUMENT, {
     headers: decorate ? decorate(headers) : headers,

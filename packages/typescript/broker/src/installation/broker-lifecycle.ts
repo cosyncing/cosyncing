@@ -28,7 +28,7 @@ import {
   PI_BRIDGE_LEGACY_MARKER,
 } from '@cosyncing/adapter-pi';
 import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
-import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
+import { artifactCacheRoot, resolveArtifactCacheRoot } from '../artifacts/artifact-store.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
 import { brokerConfigPath, inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
 import {
@@ -312,9 +312,8 @@ function pathWithin(root: string, target: string): boolean {
 }
 
 function cacheRoot(options: LifecycleBaseOptions, context: SetupDiagnosisContext): string {
-  return options.cacheRoot
-    ?? context.env.COSYNCING_CACHE_DIR?.trim()
-    ?? artifactCacheRoot();
+  const configured = options.cacheRoot ?? context.env.COSYNCING_CACHE_DIR?.trim();
+  return configured ? resolveArtifactCacheRoot(configured) : artifactCacheRoot();
 }
 
 export function createLifecycleSystemdProvider(options: LifecycleBaseOptions): DurableServiceProvider {

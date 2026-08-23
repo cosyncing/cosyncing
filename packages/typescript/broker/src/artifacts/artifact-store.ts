@@ -315,9 +315,7 @@ function parseDataUrl(url: string): { mimeType: string; bytes: Buffer } | null {
   };
 }
 
-export function artifactCacheRoot(): string {
-  const override = process.env.COSYNCING_CACHE_DIR?.trim();
-  const configured = override || join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+export function resolveArtifactCacheRoot(configured: string): string {
   if (!isAbsolute(configured) || configured.includes('\0')) {
     throw new Error('COSYNCING_CACHE_DIR must be an absolute path');
   }
@@ -335,6 +333,13 @@ export function artifactCacheRoot(): string {
     cursor = parent;
   }
   return join(realpathSync(cursor), ...missing);
+}
+
+export function artifactCacheRoot(): string {
+  const override = process.env.COSYNCING_CACHE_DIR?.trim();
+  return resolveArtifactCacheRoot(
+    override || join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+  );
 }
 
 export class ArtifactStore {

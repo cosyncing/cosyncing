@@ -118,6 +118,11 @@ try {
   // Following it must actually reach the app, not just produce a well-formed Location header.
   const followed = await fetch(`${built.base}/cosy`);
   check('following /cosy serves the app index', followed.status === 200 && (await followed.text()).includes('flutter-web-fake-index'), `status=${followed.status}`);
+  const handoff = await fetch(`${built.base}/cosy-handoff`);
+  check('GET /cosy-handoff cannot be embedded by another site',
+    handoff.status === 200
+      && handoff.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && handoff.headers.get('x-frame-options') === 'DENY');
   // A prefix that merely starts with the mount is not the mount.
   const near = await fetch(`${built.base}/cosything`, { redirect: 'manual' });
   check('GET /cosything is not treated as the mount', near.status === 404, `status=${near.status}`);

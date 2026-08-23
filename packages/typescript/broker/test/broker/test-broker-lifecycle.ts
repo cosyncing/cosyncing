@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -23,6 +24,7 @@ import type {
 } from '../../../adapter-api/src/index.ts';
 import {
   collectLifecycleStatus,
+  createLifecycleSystemdProvider,
   inspectRepair,
   inspectUninstall,
   readServiceLogs,
@@ -407,6 +409,34 @@ function installAgentSkills(m: Machine): ReturnType<typeof agentSkillTargets> {
 
 const cleanup: string[] = [];
 try {
+  {
+    const relocationRoot = mkdtempSync(join(tmpdir(), 'cosyncing-lifecycle-cache-'));
+    cleanup.push(relocationRoot);
+    const physicalParent = join(relocationRoot, 'physical');
+    const linkedParent = join(relocationRoot, 'linked');
+    const configuredCache = join(linkedParent, 'cache');
+    mkdirSync(join(physicalParent, 'cache'), { recursive: true });
+    symlinkSync(physicalParent, linkedParent);
+    const m = machine(); cleanup.push(m.root);
+    let providerCacheRoot = '';
+    createLifecycleSystemdProvider({
+      home: m.home,
+      buildInfo: BUILD,
+      executablePath: m.binary,
+      context: {
+        ...m.context,
+        env: { ...m.context.env, COSYNCING_CACHE_DIR: configuredCache },
+      },
+      systemdProviderFactory: (options) => {
+        providerCacheRoot = options.cacheRoot;
+        return m.service;
+      },
+    });
+    check('lifecycle service reconciliation canonicalizes a symlink-relocated cache root',
+      providerCacheRoot === join(realpathSync(physicalParent), 'cache'),
+      providerCacheRoot);
+  }
+
   // Read-only status plus service lifecycle and redacted logs.
   {
     const m = machine({ service: true, binaryHash: true }); cleanup.push(m.root);

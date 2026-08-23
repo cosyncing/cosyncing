@@ -5610,10 +5610,14 @@ server = Bun.serve<WsData>({
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
   },
-  error() {
+  error(error) {
     // Bun's default development response includes source context. Keep unexpected request failures
     // content-free on the wire and in the ordinary log stream.
-    console.error(`${LOG_PREFIX} unhandled request error`);
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`${LOG_PREFIX} unhandled request error: ${detail}`);
+    if (!BUILD_INFO.packaged && error instanceof Error && error.stack) {
+      console.error(error.stack);
+    }
     return new Response('internal server error', {
       status: 500,
       headers: {

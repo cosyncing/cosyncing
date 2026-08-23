@@ -5,6 +5,7 @@ import { inspectPiBridgeAsset } from '@cosyncing/adapter-pi';
 import type { SetupCheck, SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import type { DistributionKind } from '../runtime/application-identity.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
+import { resolveArtifactCacheRoot } from '../artifacts/artifact-store.ts';
 import {
   defaultBrokerConfig,
   inspectBrokerConfig,
@@ -684,8 +685,10 @@ export async function inspectSetupEnvironment(options: {
       return { id, resourceId, path, state };
     }),
   };
-  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
-    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  const cacheRoot = resolveArtifactCacheRoot(
+    options.context.env.COSYNCING_CACHE_DIR?.trim()
+      || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+  );
   const durableAssessment = assessDurableStateForSetup(durableStateLayout({
     stateRoot: options.home,
     cacheRoot,
@@ -1512,8 +1515,10 @@ async function verifySetup(options: {
       && !skillStatus.every((target) => target.status === 'owned')) {
     return false;
   }
-  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
-    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  const cacheRoot = resolveArtifactCacheRoot(
+    options.context.env.COSYNCING_CACHE_DIR?.trim()
+      || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+  );
   if (inspectDurableSchemas(durableStateLayout({
     stateRoot: options.inspection.stateHome,
     cacheRoot,
@@ -1762,8 +1767,10 @@ function createSystemdProviderForSetup(options: {
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
   factory?: (options: SystemdProviderOptions) => DurableServiceProvider;
 }): DurableServiceProvider {
-  const cacheRoot = options.context.env.COSYNCING_CACHE_DIR?.trim()
-    || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  const cacheRoot = resolveArtifactCacheRoot(
+    options.context.env.COSYNCING_CACHE_DIR?.trim()
+      || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+  );
   return (options.factory ?? createDurableServiceProvider)({
     context: options.context,
     homeDir: options.context.homeDir,
