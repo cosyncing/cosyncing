@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect, createServer, type Socket } from 'node:net';
 import { WsAuthTicketRegistry } from '../../src/security/ws-auth-tickets.ts';
+import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`); };
@@ -439,6 +440,32 @@ try {
   await tokened.broker.exited.catch(() => null);
   rmSync(tokened.home, { recursive: true, force: true });
   delete process.env.COSYNCING_PI_INTEGRATION_FILE;
+}
+
+const featureEnabled = await spawnBroker(7798, { COSYNCING_TOKEN: TOKEN }, (home) => {
+  writeBrokerConfig({
+    ...defaultBrokerConfig(),
+    features: {
+      httpWorkspaceBrowsing: true,
+      httpTranscriptExport: true,
+    },
+  }, home);
+});
+try {
+  check('locally configured workspace browsing is reachable through authenticated HTTP',
+    (await status(featureEnabled.base, '/api/sessions/codex/missing/fs', {
+      headers: { 'x-cosyncing-token': TOKEN },
+    })) === 404);
+  check('locally configured transcript export passes the HTTP feature gate',
+    (await status(featureEnabled.base, '/api/sessions/opencode/missing/export/preflight', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN },
+      body: '{}',
+    })) === 404);
+} finally {
+  featureEnabled.broker.kill();
+  await featureEnabled.broker.exited.catch(() => null);
+  rmSync(featureEnabled.home, { recursive: true, force: true });
 }
 
 // Loopback baseline: NO token → every route open (a mutation is not 401).

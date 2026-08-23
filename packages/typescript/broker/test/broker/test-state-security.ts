@@ -199,8 +199,25 @@ try {
       packaged.config.broker.port === 7734 && packaged.config.broker.host === '127.0.0.1' &&
         packaged.config.broker.internalUrl === 'http://127.0.0.1:7734' && packaged.environmentOverrides.length === 0);
 
+    const featureConfig = validateBrokerConfig({
+      ...fixtureConfig(),
+      features: {
+        httpWorkspaceBrowsing: true,
+        httpTranscriptExport: true,
+        futureFeature: 'preserved',
+      },
+    });
+    check('schema v2 accepts local HTTP feature enablement for packaged brokers',
+      featureConfig.features?.httpWorkspaceBrowsing === true
+        && featureConfig.features?.httpTranscriptExport === true
+        && featureConfig.features?.futureFeature === 'preserved');
+
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, port: 0 } }));
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), update: { channel: 'surprise' } }));
+    assert.throws(() => validateBrokerConfig({
+      ...fixtureConfig(),
+      features: { httpWorkspaceBrowsing: 'yes' },
+    }));
     const reserved = validateBrokerConfig({
       ...fixtureConfig(),
       broker: {

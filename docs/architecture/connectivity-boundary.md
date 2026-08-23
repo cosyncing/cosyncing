@@ -55,6 +55,12 @@ credential scope, broker identity, pairing identity, or trust level. Every
 sensitive HTTP route and WebSocket path enforces cosyncing authentication even
 when a proxy terminates TLS or applies its own access policy.
 
+The broker treats every HTTP and WebSocket request as remote, even when the TCP
+peer is loopback. Same-machine authority requires a future non-forwardable IPC
+capability; neither a direct browser request nor a proxy connection supplies
+one. Features that expose workspace files or transcript exports therefore need
+explicit local configuration before any authenticated HTTP client can use them.
+
 Public exposure requires HTTPS/WSS. The proxy must preserve WebSocket upgrades,
 enforce suitable request-size and timeout limits, and avoid logging credentials
 or sensitive request bodies.

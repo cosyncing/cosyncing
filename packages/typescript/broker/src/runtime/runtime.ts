@@ -95,7 +95,7 @@ import {
   type AuthorizedArtifactInteraction,
 } from '../artifacts/artifact-store.ts';
 import { buildDiffRefMessage, INLINE_DIFF_CAP } from '../sessions/diff-reference.ts';
-import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2MaxBytes, reserveR2RateSlot } from '../security/r2-policy.ts';
+import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2EnabledActions, r2MaxBytes, reserveR2RateSlot } from '../security/r2-policy.ts';
 import { runTranscriptExport } from '../security/r2-export.ts';
 import {
   backwardHistoryCursor,
@@ -375,6 +375,17 @@ const LISTEN_HOST = BROKER_LISTEN_HOST;
 if (EFFECTIVE_CONFIGURATION.config.broker.host !== LISTEN_HOST) throw new Error('broker-listener-host-invariant');
 const MACHINE = EFFECTIVE_CONFIGURATION.config.broker.machineLabel;
 const BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.internalUrl;
+const HTTP_WORKSPACE_BROWSING_ENABLED =
+  EFFECTIVE_CONFIGURATION.config.features?.httpWorkspaceBrowsing === true
+  || (!BUILD_INFO.packaged && /^(1|true|yes|on)$/i.test(
+    process.env.COSYNCING_FS_REMOTE_ENABLED?.trim() || '',
+  ));
+const HTTP_R2_ENABLED_ACTIONS = new Set([
+  ...(EFFECTIVE_CONFIGURATION.config.features?.httpTranscriptExport === true
+    ? ['transcriptExport']
+    : []),
+  ...(!BUILD_INFO.packaged ? r2EnabledActions() : []),
+]);
 const BROKER_INSTANCE = loadOrCreateBrokerInstance();
 const ARTIFACT_BROKER_SOURCE = `broker-instance:${BROKER_INSTANCE.instanceId}`;
 const LEGACY_ARTIFACT_BROKER_SOURCES = CONFIG_INSPECTION.status === 'ok'
@@ -3157,17 +3168,13 @@ function parseFsReadLimit(raw: string | null): number {
   return parsed;
 }
 
-function remoteFsEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(process.env.COSYNCING_FS_REMOTE_ENABLED?.trim() || '');
-}
-
 function fsTrustGate(): Response | undefined {
   // A reverse proxy connects from loopback, so a TCP peer address cannot prove that the end user is local.
   // HTTP clients are always T2 until a non-forwardable local IPC capability exists.
-  if (remoteFilesystemAllowed(undefined, remoteFsEnabled())) return undefined;
+  if (remoteFilesystemAllowed(undefined, HTTP_WORKSPACE_BROWSING_ENABLED)) return undefined;
   return json({
     ok: false,
-    error: 'workspace file browsing is disabled for non-loopback clients; enable locally via COSYNCING_FS_REMOTE_ENABLED=1',
+    error: 'workspace file browsing is disabled for HTTP clients; enable features.httpWorkspaceBrowsing in local broker configuration',
     code: 'FS_REMOTE_DISABLED',
   }, 403);
 }
@@ -4650,7 +4657,7 @@ server = Bun.serve<WsData>({
         return json({ error: 'transcript export is not available for this agent' }, 501);
       }
       const tier = 'T2' as const;
-      const avail = r2ActionAvailable(action, tier);
+      const avail = r2ActionAvailable(action, tier, HTTP_R2_ENABLED_ACTIONS);
       if (!avail.allowed) return json({ error: avail.reason, code: 'R2_DISABLED' }, 403);
       const base = await discoverSession(tool, id);
       if (!base) return json({ error: 'session not found' }, 404);
@@ -4692,7 +4699,7 @@ server = Bun.serve<WsData>({
         return json({ error: 'transcript export is not available for this agent' }, 501);
       }
       const tier = 'T2' as const;
-      const avail = r2ActionAvailable(action, tier);
+      const avail = r2ActionAvailable(action, tier, HTTP_R2_ENABLED_ACTIONS);
       if (!avail.allowed) return json({ error: avail.reason, code: 'R2_DISABLED' }, 403);
       const body: any = await req.json().catch(() => ({}));
       // Reject any client-supplied path key or unexpected parameter (rule 6): the adapter owns the

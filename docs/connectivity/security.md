@@ -11,6 +11,25 @@ The proxy or tunnel carries traffic; cosyncing authentication remains the
 application security boundary. TLS, a private overlay, or proxy authentication
 does not replace broker-token or paired-device authentication.
 
+Every HTTP and WebSocket client is treated as remote, including a browser on
+the broker host. A loopback TCP source can be a proxy and is never evidence of
+same-machine trust. Authenticated workspace browsing and transcript export are
+therefore disabled by default for all HTTP clients. To enable either feature,
+add the corresponding local-only flags to `~/.cosyncing/config.json`, preserving
+the existing fields, then run `cosy restart`:
+
+```json
+{
+  "features": {
+    "httpWorkspaceBrowsing": true,
+    "httpTranscriptExport": true
+  }
+}
+```
+
+These flags grant the feature to authenticated HTTP clients; they do not make
+proxy source addresses trusted. Enable only the features the deployment needs.
+
 Before exposing the broker:
 
 - Expose only the proxy or tunnel. Keep cosyncing on `127.0.0.1:7734`; never

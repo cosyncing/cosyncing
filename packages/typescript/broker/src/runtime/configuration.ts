@@ -44,6 +44,13 @@ export interface BrokerConfig {
     artifactCacheMaxBytes?: number;
     [key: string]: unknown;
   };
+  features?: {
+    /** Allow authenticated HTTP clients to browse bounded workspace files. */
+    httpWorkspaceBrowsing?: boolean;
+    /** Allow authenticated HTTP clients to request confirmed transcript exports. */
+    httpTranscriptExport?: boolean;
+    [key: string]: unknown;
+  };
   update: {
     channel: UpdateChannel;
     [key: string]: unknown;
@@ -242,6 +249,22 @@ export function validateBrokerConfig(value: unknown): BrokerConfig {
     }
   }
 
+  let features: BrokerConfig['features'];
+  if (value.features != null) {
+    if (!plainRecord(value.features)) throw new BrokerConfigurationError('features');
+    features = { ...value.features };
+    for (const [field, code] of [
+      ['httpWorkspaceBrowsing', 'http-workspace-browsing'],
+      ['httpTranscriptExport', 'http-transcript-export'],
+    ] as const) {
+      const candidate = value.features[field];
+      if (candidate != null && typeof candidate !== 'boolean') {
+        throw new BrokerConfigurationError(code);
+      }
+      if (candidate != null) features[field] = candidate;
+    }
+  }
+
   return {
     ...value,
     schemaVersion: BROKER_CONFIG_SCHEMA_VERSION,
@@ -254,6 +277,7 @@ export function validateBrokerConfig(value: unknown): BrokerConfig {
     }),
     ...(paths ? { paths } : {}),
     ...(limits ? { limits } : {}),
+    ...(features ? { features } : {}),
     update: { ...value.update, channel },
   } as BrokerConfig;
 }

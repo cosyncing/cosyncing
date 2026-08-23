@@ -30,11 +30,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Machine-roster peers running contract revision 16 require an explicit
   broker-token or paired peer-token credential. `cosy doctor` warns about
   URL-only `COSYNCING_MACHINE_PEERS` entries before the peer upgrade.
+- The revision-16 client declares revision 15 as its minimum broker contract,
+  matching the single-revision compatibility overlap it actually implements.
 
 ### Fixed
 
-- Proxied HTTP and WebSocket clients no longer inherit same-machine filesystem
-  or transcript-export privileges from the proxy's loopback TCP connection.
+- All HTTP and WebSocket clients are treated as remote, so neither a direct
+  browser nor a proxy inherits same-machine privileges from loopback. Packaged
+  installs can explicitly enable authenticated workspace browsing and
+  transcript export through schema-2 `features` configuration.
 - Session rosters and other data-bearing API reads now require a broker or
   paired-device credential; public health remains minimal.
 - WebSocket URLs contain a short-lived, one-use authorization ticket instead
@@ -42,6 +46,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   the client retains a revision-gated fallback during the client-first rollout.
 - A client connected to a revision-15 broker now re-probes authentication on
   reconnect, so it can cross a live revision-16 upgrade without an app restart.
+- Stale revision-15 clients can still load the roster from a revision-16 broker,
+  but cannot open sessions until updated because query credentials are retired.
 - Candidate startup no longer persists configuration schema 2 during an
   upgrade, so a failed upgrade can restore a schema-1 broker safely.
 - Artifact persistence uses a durable installation identity rather than a
