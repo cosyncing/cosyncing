@@ -1101,7 +1101,11 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
     nextState = env.install.state;
     for (const action of plan.actions) {
       if (action.id === 'schema.migrate') {
-        snapshots.push(snapshot(setupStatePath(env.home)), snapshot(brokerConfigPath(env.home)));
+        snapshots.push(
+          snapshot(setupStatePath(env.home)),
+          snapshot(brokerConfigPath(env.home)),
+          snapshot(join(env.home, 'broker-instance.json')),
+        );
         const migrationPlan = planDurableStateMigrations(durableStateLayout({ stateRoot: env.home, cacheRoot: env.cacheRoot }));
         const migrated = applyDurableStateMigrationsWithLockHeld({
           plan: migrationPlan,

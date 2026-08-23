@@ -10,6 +10,7 @@ import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { acquireInstallationLock } from '../installation/installation-lock.ts';
 import { migrateBrokerConfigV1 } from '../runtime/configuration.ts';
+import { inspectBrokerInstance } from '../runtime/broker-instance.ts';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
@@ -22,6 +23,7 @@ export interface DurableStateLayout {
   stateRoot: string;
   cacheRoot: string;
   config: string;
+  brokerInstance: string;
   setup: string;
   install: string;
   schedules: string;
@@ -37,7 +39,7 @@ export interface DurableStateLayout {
 }
 
 export interface DurableSchemaSpec {
-  id: 'config' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'artifacts';
+  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'artifacts';
   root: 'state' | 'cache';
   relativePath: string;
   versionField: 'schemaVersion' | 'version';
@@ -47,6 +49,7 @@ export interface DurableSchemaSpec {
 
 export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.freeze([
   { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 2, sensitive: false },
+  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 1, sensitive: true },
   { id: 'setup', root: 'state', relativePath: 'setup-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'install', root: 'state', relativePath: 'install-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 1, sensitive: true },
@@ -105,6 +108,7 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
     stateRoot,
     cacheRoot,
     config: join(stateRoot, 'config.json'),
+    brokerInstance: join(stateRoot, 'broker-instance.json'),
     setup: join(stateRoot, 'setup-state.json'),
     install: join(stateRoot, 'install-state.json'),
     schedules: join(stateRoot, 'schedules.json'),
@@ -122,6 +126,20 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
 
 export function inspectDurableSchemas(layout = durableStateLayout()): DurableStoreInspection[] {
   return DURABLE_SCHEMA_REGISTRY.map((spec) => {
+    if (spec.id === 'broker-instance') {
+      const inspection = inspectBrokerInstance(layout.stateRoot);
+      if (inspection.status === 'missing') {
+        return { id: spec.id, status: 'missing', detailCode: inspection.detailCode };
+      }
+      if (inspection.status === 'ok') {
+        return { id: spec.id, status: 'ok', version: inspection.state.version, detailCode: inspection.detailCode };
+      }
+      return {
+        id: spec.id,
+        status: inspection.status === 'unsafe' ? 'unsafe' : 'malformed',
+        detailCode: inspection.detailCode,
+      };
+    }
     const root = spec.root === 'state' ? layout.stateRoot : layout.cacheRoot;
     const path = join(root, spec.relativePath);
     const file = inspectOwnerOnlyFile(path);
@@ -174,9 +192,13 @@ export function inspectDurableStatePermissionRepair(
   if (!spec || !spec.sensitive) return 'blocked';
   const file = inspectOwnerOnlyFile(repair.path);
   if (file.status === 'ok') {
+    if (spec.id === 'broker-instance') {
+      return inspectBrokerInstance(dirname(repair.path)).status === 'ok' ? 'current' : 'blocked';
+    }
     return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'current' : 'blocked';
   }
   if (file.status !== 'unsafe' || file.problem !== 'unsafe-mode') return 'blocked';
+  if (spec.id === 'broker-instance') return 'blocked';
   return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'tightenable' : 'blocked';
 }
 
@@ -378,6 +400,7 @@ export function backupDurableStores(options: {
   const entries: DurableBackupManifest['entries'] = [];
   const sources = [
     { path: layout.config, label: 'state/config.json', destination: join(path, 'state', 'config.json') },
+    { path: layout.brokerInstance, label: 'state/broker-instance.json', destination: join(path, 'state', 'broker-instance.json') },
     { path: layout.setup, label: 'state/setup-state.json', destination: join(path, 'state', 'setup-state.json') },
     { path: layout.install, label: 'state/install-state.json', destination: join(path, 'state', 'install-state.json') },
     { path: layout.schedules, label: 'state/schedules.json', destination: join(path, 'state', 'schedules.json') },

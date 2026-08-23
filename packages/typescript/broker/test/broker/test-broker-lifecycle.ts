@@ -44,6 +44,7 @@ const BOOT = 'boot-aaaa';
 import { cliMessages } from '../../src/cli/cli-i18n.ts';
 import { PRODUCT_IDENTITY } from '../../../adapter-api/src/index.ts';
 import { BUILD_INFO, buildFingerprint } from '../../src/runtime/build-info.ts';
+import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import { runCli } from '../../src/cli/cli.ts';
 import {
@@ -2025,6 +2026,15 @@ try {
       },
       update: { channel: 'stable' },
     }, null, 2)}\n`, { mode: 0o600 });
+    const legacyArtifactSource = 'https://legacy.tailnet.ts.net';
+    const legacyArtifactSession = { tool: 'codex', id: 'cross-version-artifact' };
+    const legacyArtifactStore = new ArtifactStore(legacyArtifactSource, fixture.m.cache);
+    const legacyArtifact = legacyArtifactStore.putBytes(
+      legacyArtifactSession,
+      { type: 'file-artifact', path: 'rollback.txt', name: 'rollback.txt', mimeType: 'text/plain' },
+      Buffer.from('old broker can still read this'),
+    ) as Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>;
+    const legacyArtifactUrl = new URL(String(legacyArtifact.fetchUrl), legacyArtifactSource);
     let legacyServiceHealthy = false;
     const service: UpgradeServiceController = {
       async inspect() { return { active: true }; },
@@ -2045,6 +2055,7 @@ try {
           cwd: process.cwd(),
           env: isolatedBrokerFixtureEnvironment(fixture.m.home, { overrides: {
             COSYNCING_HOME: fixture.m.home,
+            COSYNCING_CACHE_DIR: fixture.m.cache,
             COSYNCING_TOKEN_FILE: '',
             PORT: String(candidatePort),
             HOST: '127.0.0.1',
@@ -2066,12 +2077,22 @@ try {
       },
     });
     const after = JSON.parse(readFileSync(join(fixture.m.home, 'config.json'), 'utf8')) as any;
-    check('cross-version health failure restores a schema-1 base service without candidate config mutation',
+    const rolledBackArtifactStore = new ArtifactStore(legacyArtifactSource, fixture.m.cache);
+    const rolledBackArtifact = rolledBackArtifactStore.serve(
+      legacyArtifactSession.tool,
+      legacyArtifactSession.id,
+      String(legacyArtifact.artifactKey),
+      legacyArtifactUrl.searchParams.get('expires'),
+      legacyArtifactUrl.searchParams.get('sig'),
+    );
+    check('cross-version health failure restores schema-1 config and legacy artifact access',
       rolledBack.detailCode === 'upgrade-rolled-back'
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
         && after.schemaVersion === 1
-        && legacyServiceHealthy,
-      `${rolledBack.detailCode}/schema=${String(after.schemaVersion)}/healthy=${legacyServiceHealthy}`);
+        && legacyServiceHealthy
+        && rolledBackArtifact.status === 200
+        && await rolledBackArtifact.text() === 'old broker can still read this',
+      `${rolledBack.detailCode}/schema=${String(after.schemaVersion)}/healthy=${legacyServiceHealthy}/artifact=${rolledBackArtifact.status}`);
   }
   {
     const fixture = upgradeMachine();

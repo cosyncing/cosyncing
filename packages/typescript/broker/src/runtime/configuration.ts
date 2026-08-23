@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { setupStateHome } from '../installation/setup-state.ts';
+import { recordLegacyArtifactBrokerSources } from './broker-instance.ts';
 import {
   atomicWriteJsonOwnerOnly,
   atomicWriteOwnerOnly,
@@ -354,6 +355,10 @@ export function migrateBrokerConfigV1(home = setupStateHome()): {
     `config-v1-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomBytes(6).toString('hex')}.json`,
   );
   atomicWriteOwnerOnly(backupPath, readOwnerOnlyText(inspection.path), { mode: 0o600 });
+  recordLegacyArtifactBrokerSources(
+    [inspection.previousAdvertisedUrl, inspection.previousInternalUrl],
+    home,
+  );
   writeBrokerConfig(inspection.config, home);
   return {
     migrated: true,

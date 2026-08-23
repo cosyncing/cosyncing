@@ -45,6 +45,7 @@ import {
   translateDoctorTextToChinese,
 } from '../../src/cli/cli-i18n.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
+import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import {
@@ -648,6 +649,7 @@ try {
   mkdirSync(stateHome, { recursive: true, mode: 0o700 });
   const configured = defaultBrokerConfig();
   writeBrokerConfig(configured, stateHome);
+  loadOrCreateBrokerInstanceId(stateHome);
   const credentials = ensureInstallationCredentials({
     home: stateHome,
     internalUrl: configured.broker.internalUrl,
@@ -784,7 +786,8 @@ try {
   check('full configured doctor is green and covers service, the local broker, health, and runtime updates',
     report.ok &&
       ['service.systemd-user', 'network.internal-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
-        'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness']
+        'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness',
+        'state.schema.broker-instance']
         .every((id) => report.sections.flatMap((section) => section.checks).some((item) => item.id === id && item.status === 'pass')),
     JSON.stringify(report.summary));
   check('full doctor preserves the filesystem byte-for-byte and invokes read-only probes only',

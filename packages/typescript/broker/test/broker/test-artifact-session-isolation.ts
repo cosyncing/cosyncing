@@ -486,8 +486,8 @@ try {
     historyOwnerConn.subscribers === 0 && historyPeerConn.subscribers === 0 && historyOwnerConn.closed && historyPeerConn.closed);
 
   // Base releases keyed the durable index and signatures to the advertised
-  // URL. A new installation identity adopts those records once, while old
-  // URL-derived signatures intentionally expire.
+  // URL. Revision 16 reads those records through the stable identity without
+  // deleting the old key, so a failed candidate can still roll back.
   const legacyArtifactRoot = join(root, 'legacy-advertised-artifacts');
   const legacySource = 'https://legacy.tailnet.ts.net';
   const stableSource = 'broker-instance:broker_fixture_stable_identity_1234567890';
@@ -527,6 +527,16 @@ try {
   check('9d legacy advertised-URL artifact index is adopted by the stable installation identity',
     migratedResponse.status === 200 && await migratedResponse.text() === 'survives identity migration');
   check('9e legacy URL-derived artifact signatures explicitly expire after migration', oldSignatureResponse.status === 403);
+  const rolledBackStore = new ArtifactStore(legacySource, legacyArtifactRoot);
+  const rollbackResponse = rolledBackStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(legacyReference.artifactKey),
+    legacyUrl.searchParams.get('expires'),
+    legacyUrl.searchParams.get('sig'),
+  );
+  check('9f failed candidate rollback retains the old URL-keyed artifact record',
+    rollbackResponse.status === 200 && await rollbackResponse.text() === 'survives identity migration');
 
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.

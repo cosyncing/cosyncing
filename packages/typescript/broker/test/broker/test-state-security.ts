@@ -71,6 +71,11 @@ import {
 } from '../../src/security/secure-files.ts';
 import { writeSetupState } from '../../src/installation/setup-state.ts';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/bridge-asset.ts';
+import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
+import {
+  inspectBrokerInstance,
+  loadOrCreateBrokerInstanceId,
+} from '../../src/runtime/broker-instance.ts';
 
 const ROOT = join(import.meta.dir, '../../../../..');
 const CLEAN_ENV = verificationEnvironment();
@@ -207,6 +212,14 @@ try {
         && legacyInspection.config.broker.port === 8844
         && legacyInspection.config.broker.nestedExtension === 'keep-me'
         && (legacyInspection.config.ownerExtension as any)?.preserved === true);
+    const legacyArtifactRoot = join(root, 'legacy-config-artifacts');
+    const legacyArtifactStore = new ArtifactStore('https://legacy.example.com', legacyArtifactRoot);
+    const legacyArtifactSession = { tool: 'codex', id: 'before-setup' };
+    const legacyArtifact = legacyArtifactStore.putBytes(
+      legacyArtifactSession,
+      { type: 'file-artifact', path: 'before-setup.txt', name: 'before-setup.txt', mimeType: 'text/plain' },
+      Buffer.from('available after setup'),
+    ) as Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>;
     const migration = migrateBrokerConfigV1(legacyHome);
     const migrated = JSON.parse(readFileSync(join(legacyHome, 'config.json'), 'utf8')) as any;
     check('v1 migration backs up and transactionally writes schema v2',
@@ -214,6 +227,32 @@ try {
         && migrated.schemaVersion === 2 && migrated.broker.port === 8844
         && migrated.broker.host === undefined && migrated.broker.internalUrl === undefined
         && migrated.broker.advertisedUrl === undefined);
+    const instance = inspectBrokerInstance(legacyHome);
+    const stableArtifactStore = instance.status === 'ok'
+      ? new ArtifactStore(`broker-instance:${instance.state.instanceId}`, legacyArtifactRoot, {
+          legacyBrokerSources: instance.state.legacyArtifactBrokerSources,
+        })
+      : undefined;
+    const stableReference = stableArtifactStore?.toReference(legacyArtifactSession, legacyArtifact) as
+      | Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>
+      | undefined;
+    const stableUrl = stableReference?.fetchUrl
+      ? new URL(stableReference.fetchUrl, 'http://127.0.0.1:8844')
+      : undefined;
+    const stableResponse = stableArtifactStore && stableUrl
+      ? stableArtifactStore.serve(
+          legacyArtifactSession.tool,
+          legacyArtifactSession.id,
+          String(stableReference?.artifactKey),
+          stableUrl.searchParams.get('expires'),
+          stableUrl.searchParams.get('sig'),
+        )
+      : undefined;
+    check('config v1 migration preserves legacy artifact sources before removing their URLs',
+      instance.status === 'ok'
+        && instance.state.legacyArtifactBrokerSources?.includes('https://legacy.example.com/')
+        && stableResponse?.status === 200
+        && await stableResponse.text() === 'available after setup');
 
     writeFileSync(join(home, 'config.json'), '{bad json', { mode: 0o600 });
     check('malformed config is visible instead of silently defaulting', inspectBrokerConfig(home).status === 'error');
@@ -339,6 +378,7 @@ try {
     const cacheRoot = join(root, 'cache-layout');
     const layout = durableStateLayout({ stateRoot, cacheRoot });
     writeBrokerConfig(fixtureConfig() as any, stateRoot);
+    loadOrCreateBrokerInstanceId(stateRoot);
     writeSetupState({ preserved: { future: true }, agents: { codex: false } }, stateRoot);
     writeInstallState(committedInstallState('2026-07-17T00:00:00.000Z'), stateRoot);
     atomicWriteOwnerOnly(layout.schedules, `${JSON.stringify({ version: 1, schedules: [{ id: 's1', text: 'FULL PRIVATE PROMPT' }] })}\n`);
@@ -350,8 +390,16 @@ try {
     atomicWriteOwnerOnly(layout.artifactUrlSecret, 'artifact-secret');
 
     const schema = inspectDurableSchemas(layout);
-    check('all seven durable JSON stores have explicit current schema records',
-      DURABLE_SCHEMA_REGISTRY.length === 7 && schema.every((item) => item.status === 'ok'));
+    check('all eight durable JSON stores have explicit current schema records',
+      DURABLE_SCHEMA_REGISTRY.length === 8 && schema.every((item) => item.status === 'ok'));
+    const validBrokerInstance = readFileSync(layout.brokerInstance, 'utf8');
+    atomicWriteOwnerOnly(layout.brokerInstance, '{"version":1,"instanceId":"invalid"}\n');
+    const malformedInstance = inspectDurableSchemas(layout)
+      .find((inspection) => inspection.id === 'broker-instance');
+    check('durable inspection gives malformed broker identity a dedicated doctor code',
+      malformedInstance?.status === 'malformed'
+        && malformedInstance.detailCode === 'broker-instance-malformed');
+    atomicWriteOwnerOnly(layout.brokerInstance, validBrokerInstance);
     check('install state carries ownership and migration journals from its first committed record',
       inspectInstallState(stateRoot).committed &&
         Array.isArray((inspectInstallState(stateRoot) as any).state.resources) &&
@@ -378,6 +426,7 @@ try {
     const scheduleCopy = join(backup.path, 'state', 'schedules.json');
     check('migration backup includes private schedules, peers, keys, attention, and artifact cache',
       readFileSync(scheduleCopy, 'utf8').includes('FULL PRIVATE PROMPT') &&
+        existsSync(join(backup.path, 'state', 'broker-instance.json')) &&
         existsSync(join(backup.path, 'state', 'transport-peers.json')) &&
         existsSync(join(backup.path, 'state', 'transport-keys', 'broker.json')) &&
         existsSync(join(backup.path, 'cache', 'artifacts', 'blobs', 'aa', 'blob')) &&

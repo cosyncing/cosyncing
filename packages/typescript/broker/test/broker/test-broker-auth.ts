@@ -181,12 +181,16 @@ try {
     publicHealthResponse.status === 200
       && publicHealth.ok === true
       && publicHealth.machine === undefined
-      && publicHealth.contract === undefined);
-  const privateHealth = await fetch(`${tokened.base}/api/health`, {
+      && publicHealth.contract === undefined
+      && publicHealthResponse.headers.get('cache-control') === 'private, no-store');
+  const privateHealthResponse = await fetch(`${tokened.base}/api/health`, {
     headers: { 'x-cosyncing-token': TOKEN },
-  }).then((response) => response.json() as Promise<any>);
+  });
+  const privateHealth = await privateHealthResponse.json() as any;
   check('authenticated health includes setup and compatibility identity',
-    privateHealth.machine === 'auth-test' && typeof privateHealth.contract?.revision === 'number');
+    privateHealth.machine === 'auth-test'
+      && typeof privateHealth.contract?.revision === 'number'
+      && privateHealthResponse.headers.get('cache-control') === 'private, no-store');
   check('GET /api/sessions requires a token', (await status(tokened.base, '/api/sessions')) === 401);
   check('GET /api/sessions accepts a token', (await status(tokened.base, '/api/sessions', {
     headers: { 'x-cosyncing-token': TOKEN },

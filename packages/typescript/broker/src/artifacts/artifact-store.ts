@@ -92,8 +92,8 @@ export interface ArtifactStoreOptions {
   sessionReplayLimit?: number;
   /** Test/embedding override. Always clamped to the production hard ceiling. */
   maxIndexBytes?: number;
-  /** URL-derived namespaces written by older brokers and adopted once into
-   * the current durable installation identity. Existing signed URLs expire. */
+  /** URL-derived namespaces written by older brokers and retained readably
+   * through the supported old-binary rollback window. Existing signed URLs expire. */
   legacyBrokerSources?: string[];
 }
 
@@ -328,6 +328,7 @@ export class ArtifactStore {
   private readonly maxIndexBytes: number;
   private readonly secret: Buffer;
   private readonly brokerSource: string;
+  private readonly legacyBrokerSources: ReadonlySet<string>;
   readonly replayLimit: number;
   private readonly records = new Map<string, ArtifactRecord>();
   /** Strictly increasing LRU clock. Wall-clock milliseconds alone can collide,
@@ -341,6 +342,11 @@ export class ArtifactStore {
     this.indexFile = join(root, 'artifacts', 'index.json');
     this.secretFile = join(root, 'artifact-url-secret');
     this.brokerSource = normalizeBrokerSource(brokerUrl);
+    this.legacyBrokerSources = new Set(
+      (options.legacyBrokerSources ?? [])
+        .map(normalizeBrokerSource)
+        .filter((source) => source !== this.brokerSource),
+    );
     this.maxBytes = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MAX_BYTES);
     this.maxAgeMs = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_AGE_DAYS, DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
     this.maxRecords = boundedPositiveInteger(
@@ -368,30 +374,17 @@ export class ArtifactStore {
         .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt || b.createdAt - a.createdAt)
         .slice(0, this.maxRecords)
         .reverse();
-    const legacySources = new Set((options.legacyBrokerSources ?? []).map(normalizeBrokerSource));
-    let migratedLegacySource = false;
     for (const loadedRecord of retained) {
-      const loadedSource = loadedRecord.brokerSource == null
-        ? undefined
-        : normalizeBrokerSource(loadedRecord.brokerSource);
-      const r = loadedSource && legacySources.has(loadedSource)
-        ? {
-            ...loadedRecord,
-            brokerSource: this.brokerSource,
-            key: recordKey(
-              this.brokerSource,
-              loadedRecord.tool,
-              loadedRecord.sessionId,
-              loadedRecord.artifactKey,
-            ),
-          }
-        : loadedRecord;
-      if (r !== loadedRecord) migratedLegacySource = true;
-      const existing = this.records.get(r.key);
-      if (!existing || existing.lastAccessedAt <= r.lastAccessedAt) this.records.set(r.key, r);
-      this.lastRecency = Math.max(this.lastRecency, r.createdAt, r.lastAccessedAt);
+      const existing = this.records.get(loadedRecord.key);
+      if (!existing || existing.lastAccessedAt <= loadedRecord.lastAccessedAt) {
+        this.records.set(loadedRecord.key, loadedRecord);
+      }
+      this.lastRecency = Math.max(this.lastRecency, loadedRecord.createdAt, loadedRecord.lastAccessedAt);
     }
-    if (retained.length !== loaded.length || migratedLegacySource) this.persist('sweep');
+    // Legacy records deliberately keep their URL-derived keys on disk. The new
+    // broker resolves them through the durable compatibility source list, while
+    // a rolled-back old broker can still resolve the exact same records.
+    if (retained.length !== loaded.length) this.persist('sweep');
   }
 
   toReference(session: ArtifactSession, message: AgentMessage, brokerUrl?: string): AgentMessage {
@@ -601,7 +594,7 @@ export class ArtifactStore {
       .filter((record) =>
         record.tool === session.tool &&
         record.sessionId === session.id &&
-        record.brokerSource === this.brokerSource &&
+        this.ownsSource(record.brokerSource) &&
         record.qualifiedSource === 'managed-connection-v1' &&
         existsSync(record.filePath) &&
         (!record.expiresAt || now <= record.expiresAt)
@@ -705,7 +698,7 @@ export class ArtifactStore {
       for (const [key, rec] of [...this.records.entries()]) {
         if (
           rec.deliveryClass !== 'export-attachment' ||
-          (rec.brokerSource && rec.brokerSource !== this.brokerSource)
+          !this.ownsSource(rec.brokerSource)
         ) continue;
         this.records.delete(key);
         removed.push(rec);
@@ -778,7 +771,7 @@ export class ArtifactStore {
       let count = 0;
       for (const [key, rec] of [...this.records.entries()]) {
         if (
-          rec.brokerSource !== this.brokerSource ||
+          !this.ownsSource(rec.brokerSource) ||
           rec.tool !== tool ||
           rec.sessionId !== sessionId
         ) continue;
@@ -877,8 +870,19 @@ export class ArtifactStore {
   }
 
   private lookupRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
-    const record = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
-    return record?.brokerSource === this.brokerSource ? record : undefined;
+    const current = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
+    if (current && this.ownsSource(current.brokerSource)) return current;
+    for (const source of this.legacyBrokerSources) {
+      const legacy = this.records.get(recordKey(source, tool, sessionId, artifactKey));
+      if (legacy && normalizeBrokerSource(legacy.brokerSource ?? '') === source) return legacy;
+    }
+    return undefined;
+  }
+
+  private ownsSource(source: string | undefined): boolean {
+    if (!source) return false;
+    const normalized = normalizeBrokerSource(source);
+    return normalized === this.brokerSource || this.legacyBrokerSources.has(normalized);
   }
 
   private loadSecret(): Buffer {

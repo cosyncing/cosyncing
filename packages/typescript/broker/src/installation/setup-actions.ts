@@ -16,6 +16,7 @@ import {
 } from '@cosyncing/adapter-pi';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import { inspectBrokerConfig, writeBrokerConfig } from '../runtime/configuration.ts';
+import { recordLegacyArtifactBrokerSources } from '../runtime/broker-instance.ts';
 import {
   brokerTokenPath,
   ensureInstallationCredentials,
@@ -363,10 +364,24 @@ function sameConfig(left: BrokerConfig, right: BrokerConfig): boolean {
 }
 
 export function createConfigurationSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
+  const instancePath = join(inputs.home, 'broker-instance.json');
   return {
     id: 'config.ensure',
-    prepare: (context) => snapshotSetupFiles(context, 'config.ensure', [join(inputs.home, 'config.json')]),
-    apply: () => { writeBrokerConfig(inputs.config, inputs.home); },
+    prepare: (context) => snapshotSetupFiles(
+      context,
+      'config.ensure',
+      [join(inputs.home, 'config.json'), instancePath],
+    ),
+    apply: () => {
+      const existing = inspectBrokerConfig(inputs.home);
+      if (existing.status === 'ok' && existing.migratedFrom === 1) {
+        recordLegacyArtifactBrokerSources(
+          [existing.previousAdvertisedUrl, existing.previousInternalUrl],
+          inputs.home,
+        );
+      }
+      writeBrokerConfig(inputs.config, inputs.home);
+    },
     verify: () => {
       const inspection = inspectBrokerConfig(inputs.home);
       return inspection.status === 'ok' && sameConfig(inspection.config, inputs.config);

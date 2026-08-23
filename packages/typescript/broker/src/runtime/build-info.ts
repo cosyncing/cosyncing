@@ -30,6 +30,7 @@ export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
   installState: 1,
   durableStores: Object.freeze({
     config: 2,
+    'broker-instance': 1,
     setup: 1,
     install: 1,
     schedules: 1,

@@ -204,7 +204,7 @@ import {
   inspectBrokerConfig,
   resolveBrokerConfiguration,
 } from './configuration.ts';
-import { loadOrCreateBrokerInstanceId } from './broker-instance.ts';
+import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
 import { WsAuthTicketRegistry, type WsAuthTicketBinding } from '../security/ws-auth-tickets.ts';
 import { inspectDurableCorruptionEvidence, inspectDurableSchemas } from '../security/durable-state.ts';
@@ -369,11 +369,16 @@ const LISTEN_HOST = BROKER_LISTEN_HOST;
 if (EFFECTIVE_CONFIGURATION.config.broker.host !== LISTEN_HOST) throw new Error('broker-listener-host-invariant');
 const MACHINE = EFFECTIVE_CONFIGURATION.config.broker.machineLabel;
 const BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.internalUrl;
-const ARTIFACT_BROKER_SOURCE = `broker-instance:${loadOrCreateBrokerInstanceId()}`;
+const BROKER_INSTANCE = loadOrCreateBrokerInstance();
+const ARTIFACT_BROKER_SOURCE = `broker-instance:${BROKER_INSTANCE.instanceId}`;
 const LEGACY_ARTIFACT_BROKER_SOURCES = CONFIG_INSPECTION.status === 'ok'
-  ? [CONFIG_INSPECTION.previousAdvertisedUrl, CONFIG_INSPECTION.previousInternalUrl]
+  ? [
+      ...(BROKER_INSTANCE.legacyArtifactBrokerSources ?? []),
+      CONFIG_INSPECTION.previousAdvertisedUrl,
+      CONFIG_INSPECTION.previousInternalUrl,
+    ]
     .filter((value): value is string => !!value)
-  : [];
+  : [...(BROKER_INSTANCE.legacyArtifactBrokerSources ?? [])];
 const RUNTIME_CREDENTIALS = resolveRuntimeCredentials({
   packaged: BUILD_INFO.packaged,
   internalUrl: BROKER_URL,
@@ -434,7 +439,7 @@ function authed(req: Request, _url: URL, path: string): boolean {
  * supplied. The D12 Drive boundary requires this for direct `mode=resume`. */
 function credentialAuthenticated(req: Request, _url: URL): boolean {
   const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
-  if (TOKEN && sharedToken === TOKEN) return true;
+  if (safeCredentialEqual(TOKEN, sharedToken)) return true;
   const peerTokens = [req.headers.get('x-cosyncing-peer-token')?.trim() || ''].filter(Boolean);
   return peerTokens.some((peerToken) => transportPairings.verifyAnyPeerToken(peerToken) === 'ok');
 }
@@ -448,7 +453,7 @@ function credentialAuthenticated(req: Request, _url: URL): boolean {
  */
 function requestCredentialIdentity(req: Request, _url: URL): string {
   const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
-  return TOKEN && sharedToken === TOKEN
+  return safeCredentialEqual(TOKEN, sharedToken)
     ? `shared:${tokenHash(sharedToken)}`
     : (() => {
       const peerToken = [req.headers.get('x-cosyncing-peer-token')?.trim() || '']
@@ -3116,7 +3121,13 @@ function planActionPrompt(input: PlanActionInput): string {
 }
 
 const json = (data: unknown, status = 200): Response =>
-  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+  new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'private, no-store',
+    },
+  });
 
 /** Static-file response, gzipped when the client accepts it and the file is a compressible text type
  *  above ~1 KB (app.js ~220 KB → ~60 KB). Otherwise streamed as-is. Compressible responses always carry
