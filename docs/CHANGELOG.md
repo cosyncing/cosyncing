@@ -52,6 +52,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Public pairing acceptance now rejects oversized or malformed bodies, weak
   credentials, invalid key algorithms, unsafe device IDs, and endpoint-ID
   collisions without consuming the one-use offer.
+- API method routing no longer lets unauthenticated `OPTIONS` requests execute
+  roster handlers, and unexpected request failures return content-free responses.
+- Artifact URL signing now rejects weak or unsafe secret state, explicit file
+  delivery rejects symlinked workspace paths, and the web shell cannot be framed.
 
 ## 0.4.1 — 2026-08-21
 
