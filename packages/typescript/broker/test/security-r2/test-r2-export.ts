@@ -90,7 +90,7 @@ async function run(backend: AgentBackend, session = { tool: 'fake', id: 's1', cw
   check('redaction summary present, no secret content', typeof art?.redactionSummary === 'string' && !/sk-proj/.test(art!.redactionSummary!), art?.redactionSummary);
   check('native temp root cleaned after success', !existsSync(fb.lastTempDir()!), fb.lastTempDir());
 
-  const u = new URL(art!.fetchUrl!);
+  const u = new URL(art!.fetchUrl!, 'http://127.0.0.1');
   const served = store.serve('fake', 's1', art!.artifactKey!, u.searchParams.get('expires'), u.searchParams.get('sig'));
   check('served export status 200', served.status === 200, String(served.status));
   check('served as attachment', (served.headers.get('content-disposition') || '').startsWith('attachment;'), served.headers.get('content-disposition') || '');
@@ -116,7 +116,7 @@ async function run(backend: AgentBackend, session = { tool: 'fake', id: 's1', cw
   const { store, result } = await run(fb.backend, { tool: 'fake', id: 's1', cwd: '/home/tester/proj', title: 'x"><img src=x onerror=alert(1)>' });
   check('XSS html export still succeeds as attachment', result.ok, JSON.stringify(result));
   const art = result.artifact as AgentMessage & { type: 'file-artifact' };
-  const u = new URL(art.fetchUrl!);
+  const u = new URL(art.fetchUrl!, 'http://127.0.0.1');
   const served = store.serve('fake', 's1', art.artifactKey!, u.searchParams.get('expires'), u.searchParams.get('sig'));
   const cd = served.headers.get('content-disposition') || '';
   const fname = cd.match(/filename="([^"]*)"/)?.[1] ?? '';

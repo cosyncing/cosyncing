@@ -35,7 +35,12 @@ import {
   serviceExecutablePath,
 } from '../../src/installation/install-state.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
-import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
+import {
+  brokerTokenPath,
+  ensureInstallationCredentials,
+  inspectBrokerToken,
+  readBrokerToken,
+} from '../../src/security/credentials.ts';
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import {
   embeddedRuntimeAsset,
@@ -614,6 +619,11 @@ try {
 
   const installFixture = packageFixture(join(packageRoot, 'install-fixture'));
   await withPackagedBroker(runtimeBinary, runtimeDirectory, installFixture, async (base) => {
+    const brokerToken = inspectBrokerToken(brokerTokenPath(installFixture.stateHome));
+    if (brokerToken.status !== 'ok') throw new Error('packaged fixture broker token unavailable');
+    const authHeaders = {
+      [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerToken.path),
+    };
     const indexResponse = await fetch(`${base}/poc-ui/`, { redirect: 'manual' });
     const appResponse = await fetch(`${base}/poc-ui/app.js`, { redirect: 'manual' });
     const [indexHtml, appJs] = await Promise.all([indexResponse.text(), appResponse.text()]);
@@ -625,7 +635,7 @@ try {
         !indexHtml.includes('<h1>cosyncing</h1>') && !appJs.includes('function initSettingsMenu'),
       `index=${indexResponse.status} app=${appResponse.status}`);
 
-    const roster = await fetch(`${base}/api/sessions`);
+    const roster = await fetch(`${base}/api/sessions`, { headers: authHeaders });
     check('packaged broker discovers the isolated Pi fixture',
       roster.ok && (await roster.text()).includes('pi'));
     await delay(100);
@@ -744,7 +754,13 @@ try {
   const userBridge = '// user-owned extension — preserve me\n';
   const preserveFixture = packageFixture(join(packageRoot, 'preserve-fixture'), userBridge);
   await withPackagedBroker(runtimeBinary, runtimeDirectory, preserveFixture, async (base) => {
-    const roster = await fetch(`${base}/api/sessions`);
+    const brokerToken = inspectBrokerToken(brokerTokenPath(preserveFixture.stateHome));
+    if (brokerToken.status !== 'ok') throw new Error('packaged fixture broker token unavailable');
+    const roster = await fetch(`${base}/api/sessions`, {
+      headers: {
+        [PRODUCT_IDENTITY.tokenHeader]: readBrokerToken(brokerToken.path),
+      },
+    });
     await roster.arrayBuffer();
     await delay(100);
     check('packaged auto-install preserves an unrelated Pi extension',

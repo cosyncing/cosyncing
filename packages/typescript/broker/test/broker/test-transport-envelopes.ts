@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -9,12 +10,14 @@ import {
   generateX25519KeyPair,
   parseQrPairingPayload,
   unwrapDataKey,
+  verifySignature,
   type DataKey,
   type IdentityKeyPair,
   type WrappedDataKey,
 } from '../../../crypto/src/index.ts';
-import { TailscaleDirectTransport } from '../../../transport/src/index.ts';
+import { BrokerHttpTransport } from '../../../transport/src/index.ts';
 import { openTransportEnvelope, sealTransportEnvelope } from '../../../transport-wire/src/index.ts';
+import { pairingAcceptanceProofBytes } from '../../src/transport/transport-pairing.ts';
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
@@ -28,6 +31,10 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 
 let failed = 0;
 
+function strongPeerToken(seed: string): string {
+  return createHash('sha256').update(seed).digest('base64url');
+}
+
 await test('broker carries authenticated opaque encrypted transport envelopes', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-opaque-'));
   const port = await freePort();
@@ -40,6 +47,8 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
       PORT: String(port),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: token,
+      COSYNCING_TOKEN_FILE: '',
+      COSYNCING_PI_INTEGRATION_FILE: '',
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
       COSYNCING_HOME: home,
     },
@@ -55,7 +64,7 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
     assert.equal(missingPeerToken.status, 403);
 
     const key = generateDataKey();
-    const transport = new TailscaleDirectTransport({
+    const transport = new BrokerHttpTransport({
       baseUrl,
       peerId: 'broker',
       peerToken,
@@ -106,6 +115,8 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
       PORT: String(port),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: token,
+      COSYNCING_TOKEN_FILE: '',
+      COSYNCING_PI_INTEGRATION_FILE: '',
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
       COSYNCING_HOME: home,
       COSYNCING_TRANSPORT_MAX_BYTES: '16',
@@ -186,6 +197,8 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
       PORT: String(port),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: token,
+      COSYNCING_TOKEN_FILE: '',
+      COSYNCING_PI_INTEGRATION_FILE: '',
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
       COSYNCING_HOME: home,
     },
@@ -200,12 +213,13 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     const created = await fetch(`${baseUrl}/api/transport/pairings`, {
       method: 'POST',
       headers: { 'x-cosyncing-token': token, ...contentType },
-      body: JSON.stringify({ clientLabel: 'Test phone' }),
+      body: JSON.stringify({ clientLabel: 'Test phone', brokerUrl: baseUrl }),
     });
     assert.equal(created.status, 201);
     const offer = await created.json() as any;
     const parsed = parseQrPairingPayload(offer.qr);
-    assert.equal(parsed.version, 2);
+    assert.equal(parsed.version, 3);
+    assert.deepEqual(parsed.transport, { kind: 'broker-url', url: baseUrl });
     assert.equal((parsed as any).pairingId, offer.pairingId);
     assert.equal(typeof offer.pairingId, 'string');
     assert.equal(typeof offer.qr, 'string');
@@ -222,7 +236,7 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
 
     const phoneIdentity = generateIdentityKeyPair();
     const phoneExchange = generateX25519KeyPair();
-    const peerToken = 'phone-token-1';
+    const peerToken = strongPeerToken('phone-token-1');
     const acceptedBody = JSON.stringify({
       peerId: 'phone-1',
       peerToken,
@@ -276,24 +290,24 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     assert.equal(replay.status, 409);
     assert.match((await replay.json() as any).error, /review connected devices/);
 
-    const wrong = await fetch(`${baseUrl}/api/transport/pairings/not-real/accept`, {
+    const wrong = await fetch(`${baseUrl}/api/transport/pairings/pair_not_real_12345678901/accept`, {
       method: 'POST',
       headers: contentType,
       body: JSON.stringify({
         peerId: 'phone-2',
-        peerToken: 'phone-token-2',
+        peerToken: strongPeerToken('phone-token-2'),
         identityPublicKey: phoneIdentity.publicKey,
         exchangePublicKey: phoneExchange.publicKey,
       }),
     });
     assert.equal(wrong.status, 404);
     for (let attempt = 1; attempt <= 11; attempt++) {
-      const limited = await fetch(`${baseUrl}/api/transport/pairings/not-found-rate-limit/accept`, {
+      const limited = await fetch(`${baseUrl}/api/transport/pairings/pair_not_found_rate_limit/accept`, {
         method: 'POST',
         headers: contentType,
         body: JSON.stringify({
           peerId: 'phone-limit',
-          peerToken: 'phone-limit',
+          peerToken: strongPeerToken('phone-limit'),
           identityPublicKey: phoneIdentity.publicKey,
           exchangePublicKey: phoneExchange.publicKey,
         }),
@@ -331,12 +345,14 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     });
     assert.equal(sessionControlWithoutToken.status, 401);
 
-    const peersWithBrokerPeerToken = await fetch(`${baseUrl}/api/transport/peers?peerToken=${encodeURIComponent(paired.broker.peerToken)}`);
+    const peersWithBrokerPeerToken = await fetch(`${baseUrl}/api/transport/peers`, {
+      headers: { 'x-cosyncing-peer-token': paired.broker.peerToken },
+    });
     assert.equal(peersWithBrokerPeerToken.status, 200, 'broker-issued peer token should authenticate REST routes');
 
     const peerMailboxRoute = await fetch(`${baseUrl}/api/transport/envelopes?peer=phone-1`, {
       method: 'GET',
-      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': 'phone-token-1' },
+      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': peerToken },
     });
     assert.equal(peerMailboxRoute.status, 200, 'shared token plus receiver mailbox token should read mailbox');
     assert.deepEqual((await peerMailboxRoute.json()).envelopes, []);
@@ -344,10 +360,16 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     const streamNoToken = await fetch(`${baseUrl}/api/sessions/opencode/missing/stream`);
     assert.equal(streamNoToken.status, 401);
 
-    const streamWithPeerToken = await fetch(`${baseUrl}/api/sessions/opencode/missing/stream?peerToken=${encodeURIComponent(paired.broker.peerToken)}`);
+    const streamTicketResponse = await fetch(`${baseUrl}/api/ws-auth-tickets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-cosyncing-peer-token': paired.broker.peerToken },
+      body: JSON.stringify({ tool: 'opencode', sessionId: 'missing', params: {} }),
+    });
+    const streamTicket = await streamTicketResponse.json() as any;
+    const streamWithPeerToken = await fetch(`${baseUrl}/api/sessions/opencode/missing/stream?wsAuthTicket=${encodeURIComponent(streamTicket.wsAuthTicket)}`);
     assert.equal(streamWithPeerToken.status, 426, 'broker-issued peer token should authenticate stream route');
 
-    const acceptedMailboxPost = await fetch(`${baseUrl}/api/transport/envelopes?peerToken=${encodeURIComponent(paired.broker.peerToken)}`, {
+    const acceptedMailboxPost = await fetch(`${baseUrl}/api/transport/envelopes`, {
       method: 'POST',
       headers: {
         'content-type': 'application/octet-stream',
@@ -355,13 +377,14 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
         'x-cosyncing-channel': 'session-control',
         'x-cosyncing-to': paired.broker.peerId,
         'x-cosyncing-to-token': paired.broker.peerToken,
+        'x-cosyncing-peer-token': paired.broker.peerToken,
       },
       body: new TextEncoder().encode('peer-auth'),
     });
     assert.equal(acceptedMailboxPost.status, 202, 'acceptedMailboxPost');
 
-    const mailboxByPeer = await fetch(`${baseUrl}/api/transport/envelopes?peer=${paired.peer.peerId}&peerToken=${encodeURIComponent(paired.broker.peerToken)}`, {
-      headers: { 'x-cosyncing-peer-token': 'phone-token-1' },
+    const mailboxByPeer = await fetch(`${baseUrl}/api/transport/envelopes?peer=${paired.peer.peerId}`, {
+      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': peerToken },
     });
     assert.equal(mailboxByPeer.status, 200, 'broker-issued peer token plus receiver mailbox token should read queued peer mailbox');
 
@@ -407,12 +430,14 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
       && event.title === 'Device access revoked'
       && event.severity === 'action-required'),
     'peer revocation is a high-priority security alert');
-    const rejectedAfterRevoke = await fetch(`${baseUrl}/api/transport/envelopes?peer=${paired.peer.peerId}&peerToken=${encodeURIComponent(paired.broker.peerToken)}`, {
-      headers: { 'x-cosyncing-peer-token': 'phone-token-1' },
+    const rejectedAfterRevoke = await fetch(`${baseUrl}/api/transport/envelopes?peer=${paired.peer.peerId}`, {
+      headers: { 'x-cosyncing-peer-token': paired.broker.peerToken },
     });
     assert.equal(rejectedAfterRevoke.status, 401);
 
-    const revokedStream = await fetch(`${baseUrl}/api/sessions/opencode/missing/stream?peerToken=${encodeURIComponent(paired.broker.peerToken)}`);
+    const revokedStream = await fetch(`${baseUrl}/api/sessions/opencode/missing/stream`, {
+      headers: { 'x-cosyncing-peer-token': paired.broker.peerToken },
+    });
     assert.equal(revokedStream.status, 401);
 
     const tokenlessAccept = await fetch(`${baseUrl}/api/transport/pairings/${offer.pairingId}/accept`, {
@@ -472,6 +497,96 @@ await test('broker pairing accept route rejects expired tokenless QR offers', as
   }
 });
 
+await test('public pairing acceptance rejects unsafe identities and bounds unknown offers', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-adversarial-'));
+  const port = await freePort();
+  const token = `pairing-adversarial-${Date.now()}`;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const broker = startBroker(port, token, { COSYNCING_HOME: home });
+  try {
+    await waitHealth(baseUrl);
+    const auth = { 'x-cosyncing-token': token, 'content-type': 'application/json' };
+    const created = await fetch(`${baseUrl}/api/transport/pairings`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ clientLabel: 'Adversarial phone' }),
+    });
+    const offer = await created.json() as any;
+    const secondCreated = await fetch(`${baseUrl}/api/transport/pairings`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ clientLabel: 'Other endpoint' }),
+    });
+    const otherOffer = await secondCreated.json() as any;
+    const identity = generateIdentityKeyPair();
+    const exchange = generateX25519KeyPair();
+    const baseInput = {
+      peerId: 'client-adversarial',
+      peerToken: strongPeerToken('adversarial'),
+      identityPublicKey: identity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+    };
+    const cases: unknown[] = [
+      { ...baseInput, peerId: 'client\nnewline' },
+      { ...baseInput, peerId: 'client\u001b]52;c;payload\u0007' },
+      { ...baseInput, peerId: offer.brokerPeerId },
+      { ...baseInput, peerId: otherOffer.brokerPeerId },
+      { ...baseInput, peerToken: 'x' },
+      { ...baseInput, identityPublicKey: exchange.publicKey },
+      { ...baseInput, exchangePublicKey: identity.publicKey },
+      { ...baseInput, peerId: 42 },
+      { ...baseInput, extra: true },
+    ];
+    for (const input of cases) {
+      const response = await fetch(`${baseUrl}/api/transport/pairings/${offer.pairingId}/accept`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+      });
+      assert.equal(response.status, 400);
+      const status = await fetch(`${baseUrl}/api/transport/pairings/${offer.pairingId}`, {
+        headers: { 'x-cosyncing-token': token },
+      });
+      assert.equal((await status.json() as any).state, 'pending');
+      const peers = await fetch(`${baseUrl}/api/transport/peers`, { headers: { 'x-cosyncing-token': token } });
+      assert.deepEqual((await peers.json() as any).peers, []);
+    }
+
+    const oversized = await fetch(`${baseUrl}/api/transport/pairings/pair_unknown_1234567890/accept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...baseInput, padding: 'x'.repeat(17 * 1024) }),
+    });
+    assert.equal(oversized.status, 413);
+
+    const accepted = await fetch(`${baseUrl}/api/transport/pairings/${offer.pairingId}/accept`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(baseInput),
+    });
+    assert.equal(accepted.status, 200, 'invalid attempts must not consume the offer');
+  } finally {
+    broker.kill();
+    await broker.exited.catch(() => undefined);
+  }
+});
+
+await test('attention persistence failure does not turn a committed pairing into an HTTP failure', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-attention-failure-'));
+  const port = await freePort();
+  const token = `pairing-attention-failure-${Date.now()}`;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const broker = startBroker(port, token, { COSYNCING_HOME: home });
+  try {
+    await waitHealth(baseUrl);
+    const attentionPath = join(home, 'attention-events.json');
+    rmSync(attentionPath, { recursive: true, force: true });
+    mkdirSync(attentionPath);
+    const paired = await pairPhone(baseUrl, token, {
+      peerId: 'client-attention-failure',
+      peerToken: 'attention-failure',
+    });
+    assert.equal(paired.accepted.peer.peerId, 'client-attention-failure');
+    const peers = await fetch(`${baseUrl}/api/transport/peers`, { headers: { 'x-cosyncing-token': token } });
+    assert.deepEqual((await peers.json() as any).peers.map((peer: any) => peer.peerId), ['client-attention-failure']);
+  } finally {
+    broker.kill();
+    await broker.exited.catch(() => undefined);
+  }
+});
+
 await test('broker pairing persistence, revoke cleanup, and re-pair isolation survive restart', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-persist-'));
   const port = await freePort();
@@ -522,7 +637,7 @@ await test('broker pairing persistence, revoke cleanup, and re-pair isolation su
     });
     assert.equal(revoke.status, 200);
     const rejectedOldToken = await fetch(`${baseUrl}/api/transport/envelopes?peer=phone-repair`, {
-      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': 'phone-token-old' },
+      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': first.material.peerToken },
     });
     assert.equal(rejectedOldToken.status, 403);
 
@@ -533,7 +648,7 @@ await test('broker pairing persistence, revoke cleanup, and re-pair isolation su
     });
     assert.equal(second.accepted.peer.peerId, 'phone-repair');
     const newMailbox = await fetch(`${baseUrl}/api/transport/envelopes?peer=phone-repair`, {
-      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': 'phone-token-new' },
+      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': second.material.peerToken },
     });
     assert.deepEqual((await newMailbox.json() as any).envelopes, [], 'revocation must purge old queued envelopes before a peer id can be re-paired');
   } finally {
@@ -635,21 +750,21 @@ await test('pairing accept failure limiter is memory-bounded under unique-id spa
   const { TransportPairingRegistry, PairingHttpError } = await import('../../src/transport/transport-pairing.ts');
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-limiter-'));
   const fixedNow = 1_000_000;
-  const registry = new TransportPairingRegistry({ brokerUrl: 'http://127.0.0.1:1', home, now: () => fixedNow });
+  const registry = new TransportPairingRegistry({ home, now: () => fixedNow });
   const bogusInput = { peerId: 'p', peerToken: 't', identityPublicKey: 'i', exchangePublicKey: 'e' };
 
   for (let i = 0; i < 2500; i++) {
-    assert.throws(() => registry.accept(`bogus-${i}`, bogusInput), PairingHttpError);
+    assert.throws(() => registry.accept(`pair_${String(i).padStart(20, 'a')}`, bogusInput), PairingHttpError);
   }
   const buckets = (registry as any).pairingAcceptFailures as Map<string, unknown>;
   assert(buckets.size <= 1000, `failure buckets must stay bounded, got ${buckets.size}`);
 
   // Per-id limiting still works after eviction pressure: 10 failures → 11th is 429.
   for (let i = 0; i < 10; i++) {
-    assert.throws(() => registry.accept('repeat-offender', bogusInput), PairingHttpError);
+    assert.throws(() => registry.accept('pair_repeat_offender_1234', bogusInput), PairingHttpError);
   }
   try {
-    registry.accept('repeat-offender', bogusInput);
+    registry.accept('pair_repeat_offender_1234', bogusInput);
     assert.fail('11th failed attempt should be rate-limited');
   } catch (err) {
     assert.equal((err as InstanceType<typeof PairingHttpError>).code, 'PAIRING_RATE_LIMITED');
@@ -698,6 +813,8 @@ function startBroker(port: number, token: string, env: Record<string, string> = 
       PORT: String(port),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: token,
+      COSYNCING_TOKEN_FILE: '',
+      COSYNCING_PI_INTEGRATION_FILE: '',
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
     },
     stdout: 'ignore',
@@ -711,6 +828,7 @@ async function pairPhone(baseUrl: string, token: string, input: { peerId: string
   dataKey: DataKey;
 }> {
   const auth = { 'x-cosyncing-token': token, 'content-type': 'application/json' };
+  const peerToken = strongPeerToken(input.peerToken);
   const created = await fetch(`${baseUrl}/api/transport/pairings`, {
     method: 'POST',
     headers: auth,
@@ -725,17 +843,35 @@ async function pairPhone(baseUrl: string, token: string, input: { peerId: string
     headers: auth,
     body: JSON.stringify({
       peerId: input.peerId,
-      peerToken: input.peerToken,
+      peerToken,
       identityPublicKey: identity.publicKey,
       exchangePublicKey: exchange.publicKey,
     }),
   });
   assert.equal(acceptedRes.status, 200);
   const accepted = await acceptedRes.json() as any;
+  const qr = parseQrPairingPayload(offer.qr);
+  assert.equal(accepted.broker.peerId, qr.brokerId);
+  assert.equal(accepted.broker.identityPublicKey, qr.publicKey);
+  assert.equal(accepted.brokerProof?.algorithm, 'Ed25519');
+  assert(verifySignature(
+    qr.publicKey,
+    pairingAcceptanceProofBytes({
+      pairingId: offer.pairingId,
+      client: {
+        peerId: input.peerId,
+        identityPublicKey: identity.publicKey,
+        exchangePublicKey: exchange.publicKey,
+      },
+      broker: accepted.broker,
+      wrappedDataKey: accepted.wrappedDataKey,
+    }),
+    accepted.brokerProof.signature,
+  ));
   return {
     material: {
       peerId: input.peerId,
-      peerToken: input.peerToken,
+        peerToken,
       identity,
       identityPublicKey: identity.publicKey,
       exchangePublicKey: exchange.publicKey,

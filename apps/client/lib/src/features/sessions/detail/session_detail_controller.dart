@@ -1481,6 +1481,10 @@ class SessionDetailController
         unawaited(_restoreLocalDraftForConnection());
         _scheduleLocalMaintenance();
       }
+      final connectionError =
+          status == SessionDetailConnectionStatus.reconnecting
+          ? connection.lastConnectionErrorMessage
+          : null;
       state = state.copyWith(
         connectionStatus: status,
         interruptPhase: status == SessionDetailConnectionStatus.connected
@@ -1500,7 +1504,8 @@ class SessionDetailController
                 state.driveRestorePhase == SessionDriveRestorePhase.restoring
             ? SessionDriveRestorePhase.idle
             : state.driveRestorePhase,
-        clearError: true,
+        error: connectionError,
+        clearError: connectionError == null,
         clearSessionInfo: status != SessionDetailConnectionStatus.connected,
         clearTransientRetryStatus: true,
       );

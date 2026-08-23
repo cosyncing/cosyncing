@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:broker_crypto/broker_crypto.dart';
 import 'package:test/test.dart';
@@ -41,6 +42,52 @@ void main() {
       expect(payload.version, 1);
       expect(payload.pairingId, isNull);
       expect(payload.canAccept, isFalse);
+    });
+
+    test('parses provider-neutral v3 with and without a Broker URL', () {
+      for (final brokerUrl in <String?>['https://cosy.example.com', null]) {
+        final payloadJson = jsonEncode({
+          'version': 3,
+          'brokerId': 'broker-test',
+          'pairingId': 'pair_abc',
+          'publicKey': 'broker-public',
+          'transport': {
+            'kind': 'broker-url',
+            if (brokerUrl != null) 'url': brokerUrl,
+          },
+        });
+        final uri =
+            'cosyncing://pair?payload=${base64UrlNoPadding(utf8.encode(payloadJson))}';
+
+        final payload = QrPairingPayload.parse(uri);
+
+        expect(payload.version, 3);
+        expect(payload.transport.kind, 'broker-url');
+        expect(
+          payload.transport.url,
+          brokerUrl == null ? isNull : Uri.parse(brokerUrl),
+        );
+        expect(payload.canAccept, isTrue);
+      }
+    });
+
+    test('rejects the shared invalid transport/version matrix', () {
+      final fixtureFile = File(
+        '../../typescript/crypto/test-vectors/pairing-invalid.json',
+      );
+      final fixture =
+          jsonDecode(fixtureFile.readAsStringSync()) as Map<String, dynamic>;
+      for (final entry in fixture['cases'] as List<dynamic>) {
+        final item = entry as Map<String, dynamic>;
+        final encoded = base64UrlNoPadding(
+          utf8.encode(jsonEncode(item['payload'])),
+        );
+        expect(
+          () => QrPairingPayload.parse('cosyncing://pair?payload=$encoded'),
+          throwsA(isA<PairingCryptoException>()),
+          reason: item['name'] as String,
+        );
+      }
     });
   });
 

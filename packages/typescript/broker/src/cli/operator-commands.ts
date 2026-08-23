@@ -1,11 +1,10 @@
-import { parseQrPairingPayload, type QrPairingPayloadV2 } from '@cosyncing/crypto';
+import { parseQrPairingPayload, type QrPairingPayloadV3 } from '@cosyncing/crypto';
 import { inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
 import {
   brokerTokenPath,
   inspectBrokerToken,
   readBrokerToken,
 } from '../security/credentials.ts';
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { createSetupDiagnosisContext } from '../installation/diagnosis-context.ts';
 import { inspectInstallState } from '../installation/install-state.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
@@ -17,12 +16,12 @@ import {
   terminalQrWidth,
 } from './terminal-qr.ts';
 import { SYSTEMD_SERVICE_NAME } from '../installation/service-manager.ts';
-import {
-  probeAdvertisedEndpointOnce,
-  resolveTailscaleFallbackAddresses,
-  type AdvertisedEndpointDirectProbe,
-} from '../installation/tailscale-serve.ts';
 import { APP_PATH } from '../transport/http-contracts.ts';
+import {
+  normalizePairingBrokerUrl,
+  PairingBrokerUrlError,
+  pairingBrokerUrlUsesUnprotectedHttp,
+} from '../transport/pairing-url.ts';
 
 const RESPONSE_LIMIT = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 4_000;
@@ -39,6 +38,7 @@ export interface OperatorCommandResult {
 export interface PairCommandOptions {
   json: boolean;
   wait: boolean;
+  brokerUrl?: string;
   clientLabel?: string;
   home?: string;
   invocation: string;
@@ -79,12 +79,6 @@ export interface OperatorCommandDependencies {
   columns?: () => number | undefined;
   confirmRevoke?: (peerId: string) => Promise<boolean>;
   confirmAnother?: (paired: number) => Promise<boolean>;
-  /** Seams for the advertised endpoint's DNS-independent retry; production resolves all of this itself.
-   *  Prefer supplying `diagnosisContext` over `advertisedFallbackAddresses`: the context still runs the
-   *  real `tailscale status --json` resolution, so a test built on it fails if that wiring is removed. */
-  diagnosisContext?: SetupDiagnosisContext;
-  advertisedFallbackAddresses?: readonly string[];
-  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }
 
 interface LocalBrokerAccess {
@@ -103,7 +97,7 @@ class OperatorCommandError extends Error {
   constructor(
     readonly detailCode: string,
     message: string,
-    readonly kind: 'configuration' | 'unreachable' | 'response' = 'response',
+    readonly kind: 'configuration' | 'input' | 'unreachable' | 'response' = 'response',
   ) {
     super(message);
     this.name = 'OperatorCommandError';
@@ -189,15 +183,13 @@ async function request(
   return { status: response.status, ok: response.ok, json: await boundedJson(response) };
 }
 
-function assertBrokerHealth(result: ApiResult, access: LocalBrokerAccess, advertised: boolean): void {
+function assertBrokerHealth(result: ApiResult, access: LocalBrokerAccess): void {
   const body = object(result.json);
   if (!result.ok || body?.ok !== true || body.product !== PRODUCT_IDENTITY.productName
       || body.machine !== access.config.broker.machineLabel) {
     throw new OperatorCommandError(
-      advertised ? 'advertised-broker-identity-mismatch' : 'local-broker-identity-mismatch',
-      advertised
-        ? 'The advertised endpoint did not return the expected cosyncing broker identity.'
-        : 'The local endpoint is occupied by an unexpected or incompatible service.',
+      'local-broker-identity-mismatch',
+      'The local endpoint is occupied by an unexpected or incompatible service.',
     );
   }
 }
@@ -206,80 +198,29 @@ async function verifyLocalBroker(
   dependencies: OperatorCommandDependencies,
   access: LocalBrokerAccess,
 ): Promise<void> {
-  assertBrokerHealth(await request(dependencies, access, '/api/health', {}, false), access, false);
+  assertBrokerHealth(await request(dependencies, access, '/api/health'), access);
 }
 
-async function verifyAdvertisedBroker(
-  dependencies: OperatorCommandDependencies,
-  access: LocalBrokerAccess,
-): Promise<void> {
-  const advertised = access.config.broker.advertisedUrl;
-  if (!advertised || !advertised.startsWith('https://')) {
-    throw new OperatorCommandError(
-      'advertised-url-not-configured',
-      'No private HTTPS advertised broker URL is configured.',
-      'configuration',
-    );
-  }
-  let unreachable: OperatorCommandError;
-  try {
-    assertBrokerHealth(
-      await request(dependencies, access, '/api/health', {}, false, advertised),
-      access,
-      true,
-    );
-    return;
-  } catch (error) {
-    // Only a transport failure earns the retry. An identity mismatch means the endpoint answered and
-    // answered wrongly, which no amount of re-routing fixes and which must stay a refusal.
-    if (!(error instanceof OperatorCommandError) || error.kind !== 'unreachable') throw error;
-    unreachable = error;
-  }
-
-  // The advertised NAME did not connect. Ask this node's own Tailscale addresses the same question, still
-  // presenting and validating the advertised hostname, so pairing works on a host whose MagicDNS does not
-  // resolve. Only the health check moves: the QR still carries the hostname, never an address literal,
-  // because the paired device has to reach this broker by name from wherever it is.
-  const context = dependencies.diagnosisContext ?? createSetupDiagnosisContext();
-  const addresses = dependencies.advertisedFallbackAddresses
-    ?? await resolveTailscaleFallbackAddresses(context);
-  if (addresses.length === 0) throw unreachable;
-  const probe = await probeAdvertisedEndpointOnce({
-    // The name is already known to be unreachable; this context short-circuits re-asking it so the retry
-    // spends its whole budget on the addresses.
-    context: { ...context, fetchJson: async () => ({ status: 'unreachable' }) },
-    advertisedUrl: advertised,
-    fallbackAddresses: addresses,
-    ...(dependencies.advertisedDirectProbe ? { directProbe: dependencies.advertisedDirectProbe } : {}),
-  });
-  if (probe.status === 'unreachable') throw unreachable;
-  assertBrokerHealth(
-    { ok: probe.status === 'ok', status: probe.statusCode ?? 0, json: probe.json },
-    access,
-    true,
-  );
-}
-
-function pairingPayload(qr: string, pairingId: string, advertisedUrl: string): QrPairingPayloadV2 {
+function pairingPayload(qr: string, pairingId: string, brokerUrl: string | undefined): QrPairingPayloadV3 {
   const payload = parseQrPairingPayload(qr);
-  if (payload.version !== 2) throw new OperatorCommandError('pairing-payload-version', 'The broker returned a non-v2 pairing QR.');
-  const v2 = payload as QrPairingPayloadV2;
-  const rootKeys = Object.keys(v2).sort().join(',');
-  const transportKeys = Object.keys(v2.transport as unknown as Record<string, unknown>).sort().join(',');
+  if (payload.version !== 3) throw new OperatorCommandError('pairing-payload-version', 'The broker returned a non-v3 pairing QR.');
+  const v3 = payload as QrPairingPayloadV3;
+  const rootKeys = Object.keys(v3).sort().join(',');
+  const transportKeys = Object.keys(v3.transport as unknown as Record<string, unknown>).sort().join(',');
   const rootShapeSupported = rootKeys === 'brokerId,pairingId,publicKey,transport,version'
     || rootKeys === 'broker,brokerId,pairingId,publicKey,transport,version';
   if (!rootShapeSupported
-      || transportKeys !== 'kind,url'
-      || v2.transport.kind !== 'tailscale-direct'
-      || v2.transport.url !== advertisedUrl
-      || v2.pairingId !== pairingId
-      || /token|private/i.test(JSON.stringify(v2))) {
+      || transportKeys !== (brokerUrl ? 'kind,url' : 'kind')
+      || v3.transport.kind !== 'broker-url'
+      || v3.transport.url !== brokerUrl
+      || v3.pairingId !== pairingId
+      || /token|private/i.test(JSON.stringify(v3))) {
     throw new OperatorCommandError(
       'pairing-payload-invalid',
       'The broker returned a pairing QR with unexpected or private fields.',
     );
   }
-  return v2;
+  return v3;
 }
 
 async function stoppedGuidance(home: string, invocation: string): Promise<string> {
@@ -313,6 +254,8 @@ async function reportFailure(
   let guidance = '';
   if (failure.kind === 'configuration') {
     guidance = `Run: ${options.invocation} setup`;
+  } else if (failure.kind === 'input') {
+    guidance = `Example: ${options.invocation} pair --broker-url https://cosy.example.com`;
   } else if (failure.kind === 'unreachable') {
     guidance = await stoppedGuidance(options.home, options.invocation);
   } else {
@@ -331,9 +274,9 @@ export async function renderTerminalPairingQr(payload: string): Promise<string> 
 /**
  * Whether the symbol for `payload` fits, and the two numbers to say so with.
  *
- * The payload carries the operator's advertised MagicDNS URL, so its length — and with it the symbol size —
- * is not ours to fix. Dropping the redundant broker descriptor from the QR keeps every realistic tailnet URL
- * at 73–77 columns, but a long enough one still crosses 80. When it does, the terminal wraps the symbol into
+ * A payload may carry the operator's client-reachable Broker URL, so its length can make the symbol wider
+ * than the terminal. Dropping the redundant broker descriptor keeps common URLs within 80 columns, but a
+ * long enough one still crosses that limit. When it does, the terminal wraps the symbol into
  * something that reads as a QR to the operator and scans as nothing at all, and the operator has no way to
  * tell. Say it instead, and hand over the link the QR would have carried.
  */
@@ -360,6 +303,12 @@ interface PairingOffer {
 interface PairedDevice {
   peerId: string;
   label?: string;
+}
+
+/** Human terminal output must remain inert even when legacy durable state predates input validation. */
+export function terminalSafeText(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 /**
@@ -392,11 +341,14 @@ async function createPairingOffer(
   dependencies: OperatorCommandDependencies,
   access: LocalBrokerAccess,
   clientLabel: string | undefined,
-  advertisedUrl: string,
+  brokerUrl: string | undefined,
 ): Promise<PairingOffer> {
   const created = await request(dependencies, access, '/api/transport/pairings', {
     method: 'POST',
-    body: JSON.stringify({ ...(clientLabel ? { clientLabel } : {}) }),
+    body: JSON.stringify({
+      ...(clientLabel ? { clientLabel } : {}),
+      ...(brokerUrl ? { brokerUrl } : {}),
+    }),
   });
   const body = object(created.json);
   if (!created.ok || created.status !== 201 || body?.ok !== true
@@ -407,7 +359,7 @@ async function createPairingOffer(
       typeof body?.error === 'string' ? body.error : 'The broker did not create a valid pairing offer.',
     );
   }
-  pairingPayload(body.qr, body.pairingId, advertisedUrl);
+  pairingPayload(body.qr, body.pairingId, brokerUrl);
   const expiration = Date.parse(body.expiresAt);
   if (!Number.isFinite(expiration)) throw new OperatorCommandError('pairing-expiry-invalid', 'The broker returned an invalid pairing expiry.');
   return { pairingId: body.pairingId, qr: body.qr, expiresAt: body.expiresAt, expiration };
@@ -456,18 +408,39 @@ export async function runPairCommand(
   const writeSummary = (): void => {
     options.stdout.write(`Paired ${paired.length} device${paired.length === 1 ? '' : 's'} this session:\n`);
     for (const device of paired) {
-      options.stdout.write(`- ${device.peerId}${device.label ? ` (${device.label})` : ''}\n`);
+      options.stdout.write(`- ${terminalSafeText(device.peerId)}${device.label ? ` (${terminalSafeText(device.label)})` : ''}\n`);
     }
     options.stdout.write(`Review them with: ${options.invocation} devices list\n`);
   };
   try {
     const access = localAccess(home);
+    let brokerUrl: string | undefined;
+    try {
+      brokerUrl = normalizePairingBrokerUrl(options.brokerUrl);
+    } catch (error) {
+      throw new OperatorCommandError(
+        'pairing-broker-url-invalid',
+        error instanceof PairingBrokerUrlError ? error.message : 'The Broker URL is invalid.',
+        'input',
+      );
+    }
+    if (options.json && !brokerUrl) {
+      throw new OperatorCommandError(
+        'pairing-broker-url-required',
+        '--json requires --broker-url so schemaVersion 1 retains brokerUrl and advertisedUrl.',
+        'input',
+      );
+    }
     const pairingLinkLabel = readSetupState(home).language === 'zh-Hans'
       ? '配对链接'
       : 'Pairing link';
     await verifyLocalBroker(dependencies, access);
-    await verifyAdvertisedBroker(dependencies, access);
-    const advertisedUrl = access.config.broker.advertisedUrl!;
+    if (brokerUrl && pairingBrokerUrlUsesUnprotectedHttp(brokerUrl)) {
+      options.stderr.write(
+        'Warning: this Broker URL uses HTTP. cosyncing cannot determine whether the surrounding network '
+          + 'protects the connection. Use HTTPS for public internet exposure.\n',
+      );
+    }
     const presentOffer = async (offer: PairingOffer): Promise<void> => {
       const fit = pairingQrFit(offer.qr, dependencies);
       if (fit.fits) {
@@ -489,7 +462,7 @@ export async function runPairCommand(
       );
       options.stdout.write('Warning: a paired device receives a revocable credential with full broker API access in v1.\n');
     };
-    let offer = await createPairingOffer(dependencies, access, options.clientLabel, advertisedUrl);
+    let offer = await createPairingOffer(dependencies, access, options.clientLabel, brokerUrl);
 
     if (options.json && !options.wait) {
       options.stdout.write(`${JSON.stringify({
@@ -497,7 +470,12 @@ export async function runPairCommand(
         pairingId: offer.pairingId,
         qr: offer.qr,
         expiresAt: offer.expiresAt,
-        advertisedUrl,
+        ...(brokerUrl ? {
+          brokerUrl,
+          // Compatibility alias for schemaVersion 1 consumers. Remove only
+          // after the machine-readable output advances to schemaVersion 2.
+          advertisedUrl: brokerUrl,
+        } : {}),
         tokenScope: 'full-broker-api-v1',
       }, null, 2)}\n`);
       return { exitCode: 0, detailCode: 'pairing-created' };
@@ -523,11 +501,13 @@ export async function runPairCommand(
             state: 'accepted',
             peerId,
             expiresAt: offer.expiresAt,
+            brokerUrl,
+            advertisedUrl: brokerUrl,
             tokenScope: 'full-broker-api-v1',
           }, null, 2)}\n`);
           return { exitCode: 0, detailCode: 'pairing-accepted' };
         }
-        options.stdout.write(`Paired device ${peerId}. Review it with: ${options.invocation} devices list\n`);
+        options.stdout.write(`Paired device ${terminalSafeText(peerId)}. Review it with: ${options.invocation} devices list\n`);
         if (!interactive) {
           if (!options.json) writeTokenGuidance(options, home);
           return { exitCode: 0, detailCode: 'pairing-accepted' };
@@ -535,7 +515,7 @@ export async function runPairCommand(
         const another = await (dependencies.confirmAnother ?? defaultConfirmAnother)(paired.length);
         if (!another) break;
         // One QR pairs exactly one device, so pairing another needs a fresh offer.
-        offer = await createPairingOffer(dependencies, access, options.clientLabel, advertisedUrl);
+        offer = await createPairingOffer(dependencies, access, options.clientLabel, brokerUrl);
         await presentOffer(offer);
       }
     } catch (error) {
@@ -598,7 +578,7 @@ export async function runDevicesListCommand(
     } else {
       options.stdout.write('Paired devices (v1 credentials have full broker API access):\n');
       for (const peer of peers) {
-        options.stdout.write(`- ${peer.peerId}${peer.label ? ` (${peer.label})` : ''}${peer.acceptedAt ? ` — paired ${peer.acceptedAt}` : ''}\n`);
+        options.stdout.write(`- ${terminalSafeText(peer.peerId)}${peer.label ? ` (${terminalSafeText(peer.label)})` : ''}${peer.acceptedAt ? ` — paired ${terminalSafeText(peer.acceptedAt)}` : ''}\n`);
       }
     }
     return { exitCode: 0, detailCode: 'peer-list-complete' };
@@ -610,7 +590,7 @@ export async function runDevicesListCommand(
 async function defaultConfirmRevoke(peerId: string): Promise<boolean> {
   const prompts = await import('@clack/prompts');
   const answer = await prompts.confirm({
-    message: `Revoke full broker access for ${peerId}?`,
+    message: `Revoke full broker access for ${terminalSafeText(peerId)}?`,
     initialValue: false,
   });
   return !prompts.isCancel(answer) && answer === true;

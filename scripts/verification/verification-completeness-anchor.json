@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "8477cd0f580e3bc289bbec2885ecf83a7bf2d596",
+  "acceptedBase": "938aaafc4c0bd2bc4adabb547458372a557b8782",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -66,6 +66,7 @@
     "broker.opencode-retry-detail",
     "broker.opencode-shim-runtime",
     "broker.opencode-shim-symmetry",
+    "broker.pairing",
     "broker.pi-bridge-reload",
     "broker.pi-runtime-readiness",
     "broker.pi-tool-result",
@@ -79,7 +80,6 @@
     "broker.state-security",
     "broker.surface",
     "broker.sync-degraded",
-    "broker.tailscale-pairing",
     "broker.tool-semantics",
     "broker.transactional-setup",
     "broker.typecheck",
@@ -121,7 +121,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:8e7f8eaee287ab915dfc97ca43cf0ecad28aaf684ff6edd0815213c872c8def0"
+      "fingerprint": "sha256:82344da086eff89c89cb18061090e5b2892435b6664ebe971c44faca8e3edc73"
     },
     {
       "id": "capabilities",
@@ -510,6 +510,10 @@
       "fingerprint": "sha256:f907a7d330e050f00a56490c40b7d6988e6642226e863447303de6ecc3021751"
     },
     {
+      "id": "pairing",
+      "fingerprint": "sha256:48dbbcf4f89a8b9945199bef2929b49cf9eae01e1e7a2ec7ad39ae6121bb9655"
+    },
+    {
       "id": "pi-bridge-reload",
       "fingerprint": "sha256:642a3c58d6bfae5b8ebd3557caf71f2d0fbfa96cad26c51d39389df88c6e4fd1"
     },
@@ -568,10 +572,6 @@
     {
       "id": "systemd-fixtures",
       "fingerprint": "sha256:b281c83e4adb752b1f911557b4f41155e541d1a7e5947694ddc21b75d476aec2"
-    },
-    {
-      "id": "tailscale-pairing",
-      "fingerprint": "sha256:5ed804581d32f523030e35b19d0e1b7de90a4aa2450c7016d05885a00b56ccd0"
     },
     {
       "id": "tool-semantics",

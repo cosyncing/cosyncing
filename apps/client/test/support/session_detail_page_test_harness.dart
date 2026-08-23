@@ -1440,6 +1440,9 @@ class ScriptedSessionDetailConnection implements SessionDetailConnection {
       _stateController.stream;
 
   @override
+  String? get lastConnectionErrorMessage => null;
+
+  @override
   Stream<WireEvent> get events => _eventController.stream;
 
   @override

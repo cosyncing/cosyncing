@@ -38,6 +38,7 @@ import { ensureInstallationCredentials } from '../../src/security/credentials.ts
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import { detectBrokerServiceBoundary } from '../../src/runtime/service-boundary.ts';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
+import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import {
   codexTuiReadinessCheck,
   type DoctorReport,
@@ -141,6 +142,25 @@ process.env.COSYNCING_HOME = pureCliHome;
   check('version --json publishes the distribution kind alongside the derived packaged flag',
     parsed.distribution === 'source' && parsed.packaged === false
       && packagedVersion.distribution === 'native' && packagedVersion.packaged === true);
+
+  let pairCalls = 0;
+  const urlFreeJsonPair = await callCli(['pair', '--json'], {
+    runPair: async () => { pairCalls += 1; return { exitCode: 0, detailCode: 'pairing-created' }; },
+  });
+  const compatibleJsonPair = await callCli(
+    ['pair', '--json', '--broker-url', 'https://broker.example.com'],
+    {
+      runPair: async (options) => {
+        if (options.json && options.brokerUrl === 'https://broker.example.com') pairCalls += 1;
+        return { exitCode: 0, detailCode: 'pairing-created' };
+      },
+    },
+  );
+  check('pair --json requires the URL fields promised by schemaVersion 1',
+    urlFreeJsonPair.code === 2
+      && urlFreeJsonPair.stderr.includes('--json requires --broker-url')
+      && compatibleJsonPair.code === 0
+      && pairCalls === 1);
 
   let setupCalls = 0;
   const missingOwnershipAck = await callCli(['setup', '--yes'], {
@@ -519,6 +539,8 @@ async function exerciseForeground(
       COSYNCING_CODEX_SYNC_SERVER: '0',
       COSYNCING_RESTART_DRY_RUN: '1',
       COSYNCING_TOKDASH_URL: 'http://127.0.0.1:1',
+      COSYNCING_TOKEN_FILE: join(home, 'secrets', 'broker-token'),
+      COSYNCING_PI_INTEGRATION_FILE: join(home, 'secrets', 'pi-integration.json'),
       HOST: '127.0.0.1',
       PORT: String(port),
     },
@@ -561,6 +583,8 @@ async function exerciseManagedRestart(binary: string, home: string): Promise<voi
       COSYNCING_CODEX_SYNC_SERVER: '0',
       COSYNCING_SERVICE_PROVIDER: 'systemd',
       COSYNCING_TOKDASH_URL: 'http://127.0.0.1:1',
+      COSYNCING_TOKEN_FILE: join(home, 'secrets', 'broker-token'),
+      COSYNCING_PI_INTEGRATION_FILE: join(home, 'secrets', 'pi-integration.json'),
       HOST: '127.0.0.1',
       PORT: String(port),
     },
@@ -667,7 +691,10 @@ try {
   const exportPath = join(exportTemp, 'review.json');
   writeFileSync(exportPath, '{"redacted":true}\n');
   const exitPort = await freePort();
-  const seededStore = new ArtifactStore(`http://127.0.0.1:${exitPort}`, exitCache);
+  const seededStore = new ArtifactStore(
+    `broker-instance:${loadOrCreateBrokerInstanceId(exitHome)}`,
+    exitCache,
+  );
   seededStore.putExportAttachment(
     { tool: 'fixture', id: 'exit-backstop' },
     { name: 'review', format: 'json', retentionMs: 60_000 },
@@ -689,6 +716,8 @@ try {
     COSYNCING_CLAUDE_HOOKS: '0',
     COSYNCING_CODEX_SYNC_SERVER: '0',
     COSYNCING_TOKDASH_URL: 'http://127.0.0.1:1',
+    COSYNCING_TOKEN_FILE: '',
+    COSYNCING_PI_INTEGRATION_FILE: '',
     HOST: '127.0.0.1',
     PORT: String(exitPort),
   });

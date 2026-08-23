@@ -47,6 +47,24 @@ const HIDDEN_ID = '019ed333-0000-7000-8000-000000000002';
 const NOT_LOADED_ID = '019ed333-0000-7000-8000-000000000003';
 const TRACE_TOKEN = 'codex-true-sync-trace-token';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const traceAuthHeaders = { 'x-cosyncing-token': TRACE_TOKEN };
+
+async function traceStreamUrl(
+  sessionId: string,
+  params: Record<string, string> = {},
+): Promise<string> {
+  const response = await fetch(`${BROKER}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { ...traceAuthHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ tool: 'codex', sessionId, params }),
+  });
+  const body = await response.json().catch(() => ({})) as any;
+  if (response.status !== 201 || typeof body.wsAuthTicket !== 'string') {
+    throw new Error(`WebSocket ticket issuance failed (${response.status})`);
+  }
+  return `${WSBASE}/api/sessions/codex/${encodeURIComponent(sessionId)}`
+    + `/stream?wsAuthTicket=${encodeURIComponent(body.wsAuthTicket)}`;
+}
 
 interface Assertion {
   name: string;
@@ -109,7 +127,7 @@ async function main(): Promise<void> {
     drainBrokerOutput(broker);
     if (!(await waitHealth())) throw new Error(`broker did not start at ${BROKER}`);
 
-    const sessionsResp = await fetch(`${BROKER}/api/sessions`);
+    const sessionsResp = await fetch(`${BROKER}/api/sessions`, { headers: traceAuthHeaders });
     const sessionsBody = await sessionsResp.json();
     const sessions = Array.isArray(sessionsBody) ? sessionsBody : sessionsBody.sessions ?? [];
     const visible = sessions.find((s: any) => s.tool === 'codex' && s.nativeId === THREAD_ID);
@@ -126,7 +144,7 @@ async function main(): Promise<void> {
     check('crafted live attach is rejected for non-loaded Codex thread', /not loaded in the managed app-server daemon/.test(craftedLiveError ?? ''), craftedLiveError ?? '');
 
     const frames: any[] = [];
-    const ws = new WebSocket(`${WSBASE}/api/sessions/codex/${encodeURIComponent(visible.id)}/stream?token=${encodeURIComponent(TRACE_TOKEN)}`);
+    const ws = new WebSocket(await traceStreamUrl(visible.id));
     ws.onmessage = (e) => {
       try {
         const frame = JSON.parse(String(e.data));
@@ -210,7 +228,7 @@ async function main(): Promise<void> {
     const orphanResolved = await waitFrame(frames, (f) => frames.indexOf(f) >= markOrphan && f.kind === 'message' && f.message?.type === 'permission-resolved' && f.message.requestId === orphanPerm?.message?.requestId, 5000);
     check('turn end settles an unanswered approval card as external', orphanResolved?.message?.decision === 'external', JSON.stringify(orphanResolved?.message ?? null));
     const replayFrames: any[] = [];
-    const replayWs = new WebSocket(`${WSBASE}/api/sessions/codex/${encodeURIComponent(visible.id)}/stream?token=${encodeURIComponent(TRACE_TOKEN)}`);
+    const replayWs = new WebSocket(await traceStreamUrl(visible.id));
     replayWs.onmessage = (e) => {
       try {
         const frame = JSON.parse(String(e.data));
@@ -245,7 +263,7 @@ async function main(): Promise<void> {
     // ── issues-part3 #37: cold-loading a thread must restore the rollout's approval policy instead
     // of silently resetting to the daemon config default ("always back to ask permission"). ──
     const coldFrames: any[] = [];
-    const coldWs = new WebSocket(`${WSBASE}/api/sessions/codex/${encodeURIComponent(notLoaded.id)}/stream?mode=resume&token=${encodeURIComponent(TRACE_TOKEN)}`);
+    const coldWs = new WebSocket(await traceStreamUrl(notLoaded.id, { mode: 'resume' }));
     coldWs.onmessage = (e) => {
       try {
         const frame = JSON.parse(String(e.data));
@@ -291,7 +309,7 @@ async function main(): Promise<void> {
     check('closing app during daemon-live turn does not interrupt terminal turn', interrupts.length === 0, `${interrupts.length} interrupts`);
 
     const degradeFrames: any[] = [];
-    const degradeWs = new WebSocket(`${WSBASE}/api/sessions/codex/${encodeURIComponent(visible.id)}/stream?token=${encodeURIComponent(TRACE_TOKEN)}`);
+    const degradeWs = new WebSocket(await traceStreamUrl(visible.id));
     degradeWs.onmessage = (e) => {
       try {
         const frame = JSON.parse(String(e.data));
@@ -437,7 +455,7 @@ async function waitHealth(): Promise<boolean> {
 
 async function attachError(sessionId: string, mode: string): Promise<string | undefined> {
   const frames: any[] = [];
-  const ws = new WebSocket(`${WSBASE}/api/sessions/codex/${encodeURIComponent(sessionId)}/stream?mode=${encodeURIComponent(mode)}&token=${encodeURIComponent(TRACE_TOKEN)}`);
+  const ws = new WebSocket(await traceStreamUrl(sessionId, { mode }));
   ws.onmessage = (e) => {
     try {
       const frame = JSON.parse(String(e.data));

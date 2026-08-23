@@ -1290,6 +1290,9 @@ class _NeverConnectsSessionDetailConnection implements SessionDetailConnection {
   Stream<SessionDetailConnectionStatus> get stateStream => const Stream.empty();
 
   @override
+  String? get lastConnectionErrorMessage => null;
+
+  @override
   Future<void> close({bool reconnect = false}) async {}
 
   bool requiredReadOnly = false;

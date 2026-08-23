@@ -5,8 +5,9 @@ import { setupStateHome } from './setup-state.ts';
 import { atomicWriteJsonOwnerOnly, inspectOwnerOnlyFile } from '../security/secure-files.ts';
 import { AGENT_SKILL_RESOURCE_IDS } from './agent-skill.ts';
 import { OPENCODE_SHIM_RC_RESOURCE_IDS, OPENCODE_SHIM_RESOURCE_ID } from '@cosyncing/adapter-opencode';
-
-export const TAILSCALE_SERVE_RESOURCE_ID = 'tailscale-serve-https-root';
+import {
+  LEGACY_TAILSCALE_RESOURCE_ID,
+} from './legacy-connectivity-migration.ts';
 
 /** Every receipt id emitted by setup and handled by uninstall. */
 export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
@@ -18,7 +19,7 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'service-environment',
   'service-systemd-linger',
   'pi-bridge',
-  TAILSCALE_SERVE_RESOURCE_ID,
+  LEGACY_TAILSCALE_RESOURCE_ID,
   ...Object.values(AGENT_SKILL_RESOURCE_IDS),
   OPENCODE_SHIM_RESOURCE_ID,
   ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
@@ -64,6 +65,12 @@ export interface CommittedInstallState {
   };
   resources: InstalledResourceRecord[];
   migrations: InstallMigrationRecord[];
+  /** Explicit record that legacy connectivity ownership was relinquished while
+   * the external route targets were left untouched. */
+  legacyConnectivityMigration?: {
+    migratedAt: string;
+    preservedTargets: string[];
+  };
   /** Forward-compatible installer metadata survives later read/write cycles. */
   [key: string]: unknown;
 }

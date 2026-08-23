@@ -858,6 +858,9 @@ class _HeldSessionDetailConnection implements SessionDetailConnection {
   Stream<SessionDetailConnectionStatus> get stateStream => _states.stream;
 
   @override
+  String? get lastConnectionErrorMessage => null;
+
+  @override
   Future<void> connect() async {}
 
   @override

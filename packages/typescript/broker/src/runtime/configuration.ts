@@ -1,26 +1,36 @@
+import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { setupStateHome } from '../installation/setup-state.ts';
+import { recordLegacyArtifactBrokerSources } from './broker-instance.ts';
 import {
   atomicWriteJsonOwnerOnly,
+  atomicWriteOwnerOnly,
+  ensureOwnerOnlyDirectory,
   inspectOwnerOnlyFile,
   readOwnerOnlyText,
   type SecureFileInspection,
 } from '../security/secure-files.ts';
 
-export const BROKER_CONFIG_SCHEMA_VERSION = 1 as const;
+export const BROKER_CONFIG_SCHEMA_VERSION = 2 as const;
 export const BROKER_CONFIG_FILENAME = 'config.json';
+export const BROKER_LISTEN_HOST = '127.0.0.1' as const;
+
+export function brokerInternalUrl(port: number): string {
+  return `http://${BROKER_LISTEN_HOST}:${port}`;
+}
 
 export type UpdateChannel = 'stable' | 'beta' | 'nightly';
 
 export interface BrokerConfig {
   schemaVersion: typeof BROKER_CONFIG_SCHEMA_VERSION;
   broker: {
-    host: string;
     port: number;
     machineLabel: string;
+    /** Derived at runtime and never persisted. */
+    host: typeof BROKER_LISTEN_HOST;
+    /** Derived at runtime and never persisted. */
     internalUrl: string;
-    advertisedUrl?: string;
     [key: string]: unknown;
   };
   paths?: {
@@ -32,6 +42,13 @@ export interface BrokerConfig {
     filesystemReadMaxBytes?: number;
     uploadMaxBytes?: number;
     artifactCacheMaxBytes?: number;
+    [key: string]: unknown;
+  };
+  features?: {
+    /** Allow authenticated HTTP clients to browse bounded workspace files. */
+    httpWorkspaceBrowsing?: boolean;
+    /** Allow authenticated HTTP clients to request confirmed transcript exports. */
+    httpTranscriptExport?: boolean;
     [key: string]: unknown;
   };
   update: {
@@ -51,7 +68,15 @@ export type BrokerConfigProblem =
   | 'migration-required';
 
 export type BrokerConfigInspection =
-  | { status: 'ok'; path: string; config: BrokerConfig }
+  | {
+      status: 'ok';
+      path: string;
+      config: BrokerConfig;
+      migratedFrom?: 1;
+      previousHost?: string;
+      previousInternalUrl?: string;
+      previousAdvertisedUrl?: string;
+    }
   | { status: 'missing'; path: string; problem: 'missing' }
   | {
       status: 'error';
@@ -70,11 +95,10 @@ export class BrokerConfigurationError extends Error {
 export interface EffectiveBrokerConfiguration {
   config: BrokerConfig;
   source: {
-    host: 'default' | 'config' | 'environment';
+    host: 'derived';
     port: 'default' | 'config' | 'environment';
     machineLabel: 'default' | 'config' | 'environment';
-    internalUrl: 'default' | 'config' | 'legacy-environment';
-    advertisedUrl: 'unset' | 'config' | 'environment';
+    internalUrl: 'derived';
     flutterWebRoot: 'unset' | 'config' | 'environment';
     updateChannel: 'default' | 'config' | 'environment';
   };
@@ -89,7 +113,7 @@ export interface RepoEraConfigurationPlan {
     legacySharedToken: boolean;
   };
   actions: Array<
-    | { kind: 'write-config'; internalUrl: string }
+    | { kind: 'write-config'; port: number }
     | { kind: 'generate-new-broker-token'; reason: 'legacy-token-is-treated-as-leaked' }
   >;
 }
@@ -103,25 +127,35 @@ function loopbackHost(host: string): boolean {
   return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.');
 }
 
-function urlHost(host: string): string {
-  const normalized = host.replace(/^\[|\]$/g, '');
-  return normalized.includes(':') ? `[${normalized}]` : normalized;
-}
-
-function internalUrlFor(host: string, port: number): string {
-  const internalHost = host === '0.0.0.0' || host === '::' || host === '[::]' ? '127.0.0.1' : host;
-  return `http://${urlHost(internalHost)}:${port}`;
+function withDerivedBrokerFields<T extends { port: number }>(broker: T): T & {
+  host: typeof BROKER_LISTEN_HOST;
+  internalUrl: string;
+} {
+  const result = { ...broker } as T & {
+    host: typeof BROKER_LISTEN_HOST;
+    internalUrl: string;
+  };
+  Object.defineProperties(result, {
+    host: { value: BROKER_LISTEN_HOST, enumerable: true, writable: true },
+    internalUrl: { value: brokerInternalUrl(broker.port), enumerable: true, writable: true },
+    toJSON: {
+      enumerable: false,
+      value(this: Record<string, unknown>) {
+        const { host: _host, internalUrl: _internalUrl, ...persisted } = this;
+        return persisted;
+      },
+    },
+  });
+  return result;
 }
 
 export function defaultBrokerConfig(): BrokerConfig {
   return {
     schemaVersion: BROKER_CONFIG_SCHEMA_VERSION,
-    broker: {
-      host: '127.0.0.1',
+    broker: withDerivedBrokerFields({
       port: 7734,
       machineLabel: hostname(),
-      internalUrl: 'http://127.0.0.1:7734',
-    },
+    }),
     update: { channel: 'stable' },
   };
 }
@@ -180,14 +214,8 @@ export function validateBrokerConfig(value: unknown): BrokerConfig {
   if (!plainRecord(value.broker)) throw new BrokerConfigurationError('broker');
   if (!plainRecord(value.update)) throw new BrokerConfigurationError('update');
 
-  const host = requireString(value.broker.host, 'host', 255);
-  if (/\s|\//.test(host)) throw new BrokerConfigurationError('host');
   const port = requirePort(value.broker.port);
   const machineLabel = requireString(value.broker.machineLabel, 'machine-label', 128);
-  const internalUrl = normalizeBaseUrl(value.broker.internalUrl, 'internal-url', true);
-  const advertisedUrl = value.broker.advertisedUrl == null
-    ? undefined
-    : normalizeBaseUrl(value.broker.advertisedUrl, 'advertised-url', false);
 
   const channel = value.update.channel;
   if (channel !== 'stable' && channel !== 'beta' && channel !== 'nightly') {
@@ -221,19 +249,35 @@ export function validateBrokerConfig(value: unknown): BrokerConfig {
     }
   }
 
+  let features: BrokerConfig['features'];
+  if (value.features != null) {
+    if (!plainRecord(value.features)) throw new BrokerConfigurationError('features');
+    features = { ...value.features };
+    for (const [field, code] of [
+      ['httpWorkspaceBrowsing', 'http-workspace-browsing'],
+      ['httpTranscriptExport', 'http-transcript-export'],
+    ] as const) {
+      const candidate = value.features[field];
+      if (candidate != null && typeof candidate !== 'boolean') {
+        throw new BrokerConfigurationError(code);
+      }
+      if (candidate != null) features[field] = candidate;
+    }
+  }
+
   return {
     ...value,
     schemaVersion: BROKER_CONFIG_SCHEMA_VERSION,
-    broker: {
-      ...value.broker,
-      host,
+    broker: withDerivedBrokerFields({
+      ...Object.fromEntries(
+        Object.entries(value.broker).filter(([key]) => !['host', 'internalUrl', 'advertisedUrl'].includes(key)),
+      ),
       port,
       machineLabel,
-      internalUrl,
-      ...(advertisedUrl ? { advertisedUrl } : { advertisedUrl: undefined }),
-    },
+    }),
     ...(paths ? { paths } : {}),
     ...(limits ? { limits } : {}),
+    ...(features ? { features } : {}),
     update: { ...value.update, channel },
   } as BrokerConfig;
 }
@@ -245,6 +289,33 @@ function fileProblem(inspection: SecureFileInspection): BrokerConfigInspection {
     path: inspection.path,
     problem: inspection.status === 'unsafe' ? 'unsafe-file' : 'unreadable',
     detailCode: inspection.status === 'unsafe' ? `config-${inspection.problem ?? 'unsafe'}` : 'config-unreadable',
+  };
+}
+
+function migrateLegacyBrokerConfigValue(value: Record<string, unknown>): {
+  config: BrokerConfig;
+  previousHost: string;
+  previousInternalUrl: string;
+  previousAdvertisedUrl?: string;
+} {
+  if (!plainRecord(value.broker)) throw new BrokerConfigurationError('broker');
+  const previousHost = requireString(value.broker.host, 'host', 255);
+  if (/\s|\//.test(previousHost)) throw new BrokerConfigurationError('host');
+  const previousInternalUrl = normalizeBaseUrl(value.broker.internalUrl, 'internal-url', true);
+  const previousAdvertisedUrl = value.broker.advertisedUrl == null
+    ? undefined
+    : normalizeBaseUrl(value.broker.advertisedUrl, 'advertised-url', false);
+  return {
+    previousHost,
+    previousInternalUrl,
+    ...(previousAdvertisedUrl ? { previousAdvertisedUrl } : {}),
+    config: validateBrokerConfig({
+      ...value,
+      schemaVersion: BROKER_CONFIG_SCHEMA_VERSION,
+      broker: Object.fromEntries(
+        Object.entries(value.broker).filter(([key]) => !['host', 'internalUrl', 'advertisedUrl'].includes(key)),
+      ),
+    }),
   };
 }
 
@@ -264,10 +335,24 @@ export function inspectBrokerConfig(home = setupStateHome()): BrokerConfigInspec
   if (plainRecord(parsed) && parsed.schemaVersion == null) {
     return { status: 'error', path, problem: 'migration-required', detailCode: 'config-unversioned' };
   }
-  if (plainRecord(parsed) && parsed.schemaVersion !== BROKER_CONFIG_SCHEMA_VERSION) {
+  if (plainRecord(parsed) && parsed.schemaVersion !== 1 && parsed.schemaVersion !== BROKER_CONFIG_SCHEMA_VERSION) {
     return { status: 'error', path, problem: 'unsupported-schema', detailCode: 'config-schema-version' };
   }
   try {
+    if (plainRecord(parsed) && parsed.schemaVersion === 1) {
+      const migrated = migrateLegacyBrokerConfigValue(parsed);
+      return {
+        status: 'ok',
+        path,
+        config: migrated.config,
+        migratedFrom: 1,
+        previousHost: migrated.previousHost,
+        previousInternalUrl: migrated.previousInternalUrl,
+        ...(migrated.previousAdvertisedUrl
+          ? { previousAdvertisedUrl: migrated.previousAdvertisedUrl }
+          : {}),
+      };
+    }
     return { status: 'ok', path, config: validateBrokerConfig(parsed) };
   } catch (error) {
     return {
@@ -277,6 +362,33 @@ export function inspectBrokerConfig(home = setupStateHome()): BrokerConfigInspec
       detailCode: error instanceof BrokerConfigurationError ? `config-${error.detailCode}` : 'config-invalid',
     };
   }
+}
+
+/** Back up and transactionally replace a valid v1 file. Read-only callers use inspectBrokerConfig instead. */
+export function migrateBrokerConfigV1(home = setupStateHome()): {
+  migrated: boolean;
+  previousHost?: string;
+  backupPath?: string;
+} {
+  const inspection = inspectBrokerConfig(home);
+  if (inspection.status !== 'ok' || inspection.migratedFrom !== 1) return { migrated: false };
+  const backupDirectory = join(home, 'backups');
+  ensureOwnerOnlyDirectory(backupDirectory);
+  const backupPath = join(
+    backupDirectory,
+    `config-v1-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomBytes(6).toString('hex')}.json`,
+  );
+  atomicWriteOwnerOnly(backupPath, readOwnerOnlyText(inspection.path), { mode: 0o600 });
+  recordLegacyArtifactBrokerSources(
+    [inspection.previousAdvertisedUrl, inspection.previousInternalUrl],
+    home,
+  );
+  writeBrokerConfig(inspection.config, home);
+  return {
+    migrated: true,
+    previousHost: inspection.previousHost,
+    backupPath,
+  };
 }
 
 export function writeBrokerConfig(config: BrokerConfig, home = setupStateHome()): BrokerConfig {
@@ -309,18 +421,11 @@ export function resolveBrokerConfiguration(options: {
   const allowEnv = !options.packaged;
   const overrides: string[] = [];
 
-  let host = stored.broker.host;
   let port = stored.broker.port;
   let machineLabel = stored.broker.machineLabel;
-  let internalUrl = stored.broker.internalUrl;
-  let advertisedUrl = stored.broker.advertisedUrl;
   let flutterWebRoot = stored.paths?.flutterWebRoot;
   let updateChannel = stored.update.channel;
 
-  if (allowEnv && env.HOST?.trim()) {
-    host = env.HOST.trim();
-    overrides.push('HOST');
-  }
   if (allowEnv && env.PORT?.trim()) {
     port = envInteger(env, 'PORT')!;
     overrides.push('PORT');
@@ -328,16 +433,6 @@ export function resolveBrokerConfiguration(options: {
   if (allowEnv && env.COSYNCING_MACHINE?.trim()) {
     machineLabel = env.COSYNCING_MACHINE.trim();
     overrides.push('COSYNCING_MACHINE');
-  }
-  if (allowEnv && env.COSYNCING_BROKER?.trim()) {
-    internalUrl = env.COSYNCING_BROKER.trim();
-    overrides.push('COSYNCING_BROKER');
-  } else if (allowEnv && (overrides.includes('HOST') || overrides.includes('PORT'))) {
-    internalUrl = internalUrlFor(host, port);
-  }
-  if (allowEnv && env.COSYNCING_ADVERTISED_BROKER?.trim()) {
-    advertisedUrl = env.COSYNCING_ADVERTISED_BROKER.trim();
-    overrides.push('COSYNCING_ADVERTISED_BROKER');
   }
   // D17 keeps the adjacent bundle default but permits one explicit bundle override in source and package.
   if (env.COSYNCING_WEB_DIR?.trim()) {
@@ -351,7 +446,7 @@ export function resolveBrokerConfiguration(options: {
 
   const candidate = validateBrokerConfig({
     ...stored,
-    broker: { ...stored.broker, host, port, machineLabel, internalUrl, advertisedUrl },
+    broker: { ...stored.broker, port, machineLabel },
     ...(flutterWebRoot ? { paths: { ...stored.paths, flutterWebRoot } } : {}),
     update: { ...stored.update, channel: updateChannel },
   });
@@ -359,11 +454,10 @@ export function resolveBrokerConfiguration(options: {
   return {
     config: candidate,
     source: {
-      host: overrides.includes('HOST') ? 'environment' : hasStored ? 'config' : 'default',
+      host: 'derived',
       port: overrides.includes('PORT') ? 'environment' : hasStored ? 'config' : 'default',
       machineLabel: overrides.includes('COSYNCING_MACHINE') ? 'environment' : hasStored ? 'config' : 'default',
-      internalUrl: overrides.includes('COSYNCING_BROKER') ? 'legacy-environment' : hasStored ? 'config' : 'default',
-      advertisedUrl: overrides.includes('COSYNCING_ADVERTISED_BROKER') ? 'environment' : advertisedUrl ? 'config' : 'unset',
+      internalUrl: 'derived',
       flutterWebRoot: overrides.includes('COSYNCING_WEB_DIR') ? 'environment' : flutterWebRoot ? 'config' : 'unset',
       updateChannel: overrides.includes('COSYNCING_UPDATE_CHANNEL') ? 'environment' : hasStored ? 'config' : 'default',
     },
@@ -380,7 +474,8 @@ export function planRepoEraConfigurationMigration(
   if (!legacyBroker && !legacyTokenPresent) return undefined;
   const actions: RepoEraConfigurationPlan['actions'] = [];
   if (legacyBroker) {
-    actions.push({ kind: 'write-config', internalUrl: normalizeBaseUrl(legacyBroker, 'legacy-broker-url', true) });
+    const parsed = new URL(normalizeBaseUrl(legacyBroker, 'legacy-broker-url', true));
+    actions.push({ kind: 'write-config', port: parsed.port ? Number(parsed.port) : 7734 });
   }
   if (legacyTokenPresent) {
     actions.push({ kind: 'generate-new-broker-token', reason: 'legacy-token-is-treated-as-leaked' });

@@ -60,15 +60,20 @@ class PairingForm extends ConsumerStatefulWidget {
 class _PairingFormState extends ConsumerState<PairingForm>
     with WebHandoffHold<PairingForm> {
   final _payloadController = TextEditingController();
+  final _brokerUrlController = TextEditingController();
 
   // A pairing payload is pasted or scanned once and held nowhere else until it
   // is imported; losing it to a web-update handoff means scanning again (N3b).
   @override
-  List<TextEditingController> get webHandoffControllers => [_payloadController];
+  List<TextEditingController> get webHandoffControllers => [
+    _payloadController,
+    _brokerUrlController,
+  ];
 
   @override
   void dispose() {
     _payloadController.dispose();
+    _brokerUrlController.dispose();
     super.dispose();
   }
 
@@ -78,9 +83,15 @@ class _PairingFormState extends ConsumerState<PairingForm>
   }
 
   Future<void> _importRawPayload(String rawPayload) async {
+    final enteredBrokerUrl = _brokerUrlController.text;
+    final brokerUrl = enteredBrokerUrl.trim().isNotEmpty
+        ? enteredBrokerUrl
+        : kIsWeb
+        ? Uri.base.origin
+        : null;
     await ref
         .read(pairingControllerProvider.notifier)
-        .importPayload(rawPayload);
+        .importPayload(rawPayload, brokerUrl: brokerUrl);
     if (!mounted) return;
     final notice = ref.read(pairingControllerProvider).notice;
     final succeeded =
@@ -90,6 +101,9 @@ class _PairingFormState extends ConsumerState<PairingForm>
       // populated controller both leaks the payload and indefinitely blocks a
       // web-update handoff because the Connection route stays mounted.
       _payloadController.clear();
+      if (_brokerUrlController.text == enteredBrokerUrl) {
+        _brokerUrlController.clear();
+      }
     }
   }
 
@@ -132,6 +146,20 @@ class _PairingFormState extends ConsumerState<PairingForm>
             alignLabelWithHint: true,
           ),
           keyboardType: TextInputType.text,
+        ),
+        const SizedBox(height: 12),
+        TextFormField(
+          controller: _brokerUrlController,
+          key: const Key('pairing-broker-url-field'),
+          enabled: !state.isBusy,
+          decoration: InputDecoration(
+            labelText: l10n.pairingBrokerUrlLabel,
+            border: const OutlineInputBorder(),
+            hintText: l10n.pairingBrokerUrlHint,
+            helperText: l10n.pairingBrokerUrlHelp,
+          ),
+          keyboardType: TextInputType.url,
+          autocorrect: false,
         ),
         const SizedBox(height: 12),
         Row(
@@ -292,6 +320,8 @@ String _pairingNoticeText(AppLocalizations l10n, PairingNotice notice) {
     PairingNotice.emptyInput => l10n.pairingEmptyError,
     PairingNotice.invalidInput => l10n.pairingInvalidError,
     PairingNotice.invalidQr => l10n.pairingQrInvalidError,
+    PairingNotice.brokerUrlRequired => l10n.pairingBrokerUrlRequiredError,
+    PairingNotice.brokerUrlInvalid => l10n.pairingBrokerUrlInvalidError,
     PairingNotice.oldQr => l10n.pairingQrOldError,
     PairingNotice.tokenSaveFailed => l10n.pairingSaveTokenError,
     PairingNotice.profileSaveFailed => l10n.pairingSaveProfileError,

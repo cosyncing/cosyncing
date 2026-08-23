@@ -295,10 +295,15 @@ class EndpointResolver {
   String transportPairingAcceptEndpoint(String pairingId) =>
       '$baseUrl/api/transport/pairings/${Uri.encodeComponent(pairingId)}/accept';
 
+  /// Exchanges a header credential for one short-lived WebSocket ticket.
+  String get wsAuthTicketEndpoint => '$baseUrl/api/ws-auth-tickets';
+
   /// WebSocket stream endpoint.
   ///
   /// Returns a `ws://` or `wss://` URL for the session stream.
-  /// Supports optional query parameters for auth and attach behavior.
+  /// Attach behavior is carried directly only for the tokenless development
+  /// baseline. Credentialed clients pass [wsAuthTicket], which becomes the
+  /// only query parameter.
   ///
   /// See `docs/protocol/contract-sync.md`.
   String streamEndpoint(
@@ -316,19 +321,62 @@ class EndpointResolver {
     int contractRevision = cosyncingClientContractRevision,
     int minimumBrokerRevision = cosyncingClientMinimumBrokerRevision,
     String contractSurfaceHash = cosyncingClientContractSurfaceHash,
+    String? wsAuthTicket,
+    bool legacyCredentialQuery = false,
   }) {
     final wsBase = _toWebSocketUrl(baseUrl);
     final path =
         '$wsBase/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/stream';
+    if (wsAuthTicket != null && wsAuthTicket.isNotEmpty) {
+      return _appendQuery(path, {'wsAuthTicket': wsAuthTicket});
+    }
+    final params = streamAttachParameters(
+      mode: mode,
+      reason: reason,
+      readOnly: readOnly,
+      ownerRevision: ownerRevision,
+      since: since,
+      ticket: ticket,
+      initialHistory: initialHistory,
+      artifactMode: artifactMode,
+      clientVersion: clientVersion,
+      contractRevision: contractRevision,
+      minimumBrokerRevision: minimumBrokerRevision,
+      contractSurfaceHash: contractSurfaceHash,
+    );
+    // Client-first rollout compatibility only. Current brokers reject these
+    // parameters; this branch is used after an old broker returns 404 for the
+    // ticket endpoint and can be removed after that broker is unsupported.
+    if (legacyCredentialQuery) {
+      if (peerToken != null && peerToken!.isNotEmpty) {
+        params['peerToken'] = peerToken!;
+      } else if (token != null && token!.isNotEmpty) {
+        params['token'] = token!;
+      }
+      if (clientProfileId != null) {
+        params['clientProfileId'] = clientProfileId!;
+        params['clientProfileIncarnation'] = clientProfileIncarnation!;
+      }
+    }
+    return _appendQuery(path, params);
+  }
+
+  /// Exact attach parameters bound into a one-use WebSocket authorization.
+  Map<String, String> streamAttachParameters({
+    String? mode,
+    String? reason,
+    bool readOnly = false,
+    SessionOwnerRevision? ownerRevision,
+    String? since,
+    String? ticket,
+    int? initialHistory,
+    String? artifactMode,
+    String clientVersion = cosyncingClientVersion,
+    int contractRevision = cosyncingClientContractRevision,
+    int minimumBrokerRevision = cosyncingClientMinimumBrokerRevision,
+    String contractSurfaceHash = cosyncingClientContractSurfaceHash,
+  }) {
     final params = <String, String>{};
-    if (token != null && token!.isNotEmpty) params['token'] = token!;
-    if (peerToken != null && peerToken!.isNotEmpty) {
-      params['peerToken'] = peerToken!;
-    }
-    if (clientProfileId != null) {
-      params['clientProfileId'] = clientProfileId!;
-      params['clientProfileIncarnation'] = clientProfileIncarnation!;
-    }
     if (mode != null) params['mode'] = mode;
     // Asks the broker to enforce a read-only socket. Sent when this client
     // cannot reason about the session's attach mode, so omitting `mode` is not
@@ -361,14 +409,7 @@ class EndpointResolver {
     params['contractRevision'] = '$contractRevision';
     params['minimumBrokerRevision'] = '$minimumBrokerRevision';
     params['contractSurfaceHash'] = contractSurfaceHash;
-    if (params.isEmpty) return path;
-    final query = params.entries
-        .map(
-          (e) =>
-              '${Uri.encodeComponent(e.key)}=${Uri.encodeComponent(e.value)}',
-        )
-        .join('&');
-    return '$path?$query';
+    return params;
   }
 
   /// Converts an HTTP(S) base URL to WS(S).
@@ -397,18 +438,10 @@ class EndpointResolver {
     return sourceHeaders;
   }
 
-  /// Returns auth query parameters.
-  ///
-  /// Adds the query parameter for the configured auth credential.
-  Map<String, String> get authQueryParams {
-    if (peerToken != null && peerToken!.isNotEmpty) {
-      return {'peerToken': peerToken!};
-    }
-    if (token != null && token!.isNotEmpty) {
-      return {'token': token!};
-    }
-    return const {};
-  }
+  /// Whether this resolver carries a long-lived header credential.
+  bool get hasCredential =>
+      (peerToken != null && peerToken!.isNotEmpty) ||
+      (token != null && token!.isNotEmpty);
 
   /// Returns headers for a JSON request.
   Map<String, String> get jsonHeaders => {

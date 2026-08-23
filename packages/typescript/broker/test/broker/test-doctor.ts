@@ -45,6 +45,7 @@ import {
   translateDoctorTextToChinese,
 } from '../../src/cli/cli-i18n.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
+import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
 import {
@@ -52,6 +53,7 @@ import {
   collectDoctorReport,
   diagnoseAgents,
   doctorColorEnabled,
+  machinePeerCredentialCheck,
   renderDoctorReport,
   type DoctorReport,
 } from '../../src/installation/doctor.ts';
@@ -646,14 +648,9 @@ try {
   const userHome = dirname(stateHome);
   const cacheHome = join(userHome, '.cache', 'cosyncing');
   mkdirSync(stateHome, { recursive: true, mode: 0o700 });
-  const configured = {
-    ...defaultBrokerConfig(),
-    broker: {
-      ...defaultBrokerConfig().broker,
-      advertisedUrl: 'https://fixture.tailnet.ts.net',
-    },
-  };
+  const configured = defaultBrokerConfig();
   writeBrokerConfig(configured, stateHome);
+  loadOrCreateBrokerInstanceId(stateHome);
   const credentials = ensureInstallationCredentials({
     home: stateHome,
     internalUrl: configured.broker.internalUrl,
@@ -739,6 +736,30 @@ try {
     },
   });
 
+  const tokenlessPeerCheck = machinePeerCredentialCheck({
+    ...aggregateContext,
+    env: {
+      ...aggregateContext.env,
+      COSYNCING_MACHINE_PEERS: JSON.stringify([{ id: 'peer-b', url: 'https://peer-b.example.test' }]),
+    },
+  });
+  const credentialedPeerCheck = machinePeerCredentialCheck({
+    ...aggregateContext,
+    env: {
+      ...aggregateContext.env,
+      COSYNCING_MACHINE_PEERS: JSON.stringify([{
+        id: 'peer-b',
+        url: 'https://peer-b.example.test',
+        credential: { kind: 'peer-token', value: 'private-peer-credential' },
+      }]),
+    },
+  });
+  check('doctor warns before a tokenless machine peer crosses the revision-16 authentication boundary',
+    tokenlessPeerCheck.status === 'warn'
+      && tokenlessPeerCheck.detailCode === 'machine-peer-authentication-required'
+      && credentialedPeerCheck.status === 'pass'
+      && !JSON.stringify([tokenlessPeerCheck, credentialedPeerCheck]).includes('private-peer-credential'));
+
   function treeSnapshot(root: string): string {
     const rows: string[] = [];
     const walk = (path: string): void => {
@@ -787,11 +808,11 @@ try {
   }));
   const after = treeSnapshot(userHome);
   const reportJson = JSON.stringify(report);
-  check('full configured doctor is green and covers service, Tailscale, endpoints, health, and runtime updates',
+  check('full configured doctor is green and covers service, the local broker, health, and runtime updates',
     report.ok &&
-      ['service.systemd-user', 'network.tailscale', 'network.tailscale-serve', 'network.internal-endpoint',
-        'network.advertised-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
-        'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness']
+      ['service.systemd-user', 'network.internal-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
+        'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness',
+        'state.schema.broker-instance']
         .every((id) => report.sections.flatMap((section) => section.checks).some((item) => item.id === id && item.status === 'pass')),
     JSON.stringify(report.summary));
   check('full doctor preserves the filesystem byte-for-byte and invokes read-only probes only',
@@ -800,83 +821,6 @@ try {
   check('stable doctor JSON contains no broker or Pi credential material',
     !reportJson.includes(credentials.brokerToken) && !reportJson.includes(credentials.piIntegration.credential) &&
       !reportJson.includes('fixture.tailnet.ts.net'));
-
-  // ── Advertised endpoint: broken MagicDNS, and identity that must not be assumed ──
-  // These drive the WHOLE doctor path, not the shared primitive: a host where the advertised NAME does not
-  // resolve, whose `tailscale status --json` supplies the addresses, reported through network.advertised-endpoint.
-  {
-    const TAILNET = 'https://fixture.tailnet.ts.net';
-    const ADDRESSES = ['100.64.0.1', 'fd7a:115c:a1e0::1'];
-    const brokenDnsContext = (): SetupDiagnosisContext => ({
-      ...aggregateContext,
-      resolveExecutable(command) {
-        if (command === 'tailscale') return '/usr/bin/tailscale';
-        return aggregateContext.resolveExecutable(command);
-      },
-      async runReadOnly(path, args) {
-        if (path === '/usr/bin/tailscale' && args[0] === 'status') {
-          return { status: 'ok', exitCode: 0, stderr: '', stdout: JSON.stringify({
-            BackendState: 'Running',
-            Self: { DNSName: 'fixture.tailnet.ts.net.', TailscaleIPs: ADDRESSES },
-          }) };
-        }
-        return aggregateContext.runReadOnly(path, args);
-      },
-      // The advertised NAME never resolves on this host; everything else answers as before.
-      // `maxBytes` is forwarded like every other argument, so a wrapper never silently narrows a
-      // ceiling its caller asked for.
-      async fetchJson(url, headers, timeoutMs, maxBytes) {
-        if (url.startsWith(TAILNET)) return { status: 'unreachable' };
-        return aggregateContext.fetchJson(url, headers, timeoutMs, maxBytes);
-      },
-    });
-    const doctorWith = async (
-      probe: (options: { address: string }) => { status: string; statusCode?: number; json?: unknown },
-    ) => collectDoctorReport({
-      buildInfo: BUILD_INFO,
-      context: brokenDnsContext(),
-      assetReport: inspectRuntimeAssets(),
-      adapters: cleanAdapters,
-      stateHome,
-      advertisedDirectProbe: async (options) => probe(options) as never,
-    });
-    const advertisedCheck = (report: Awaited<ReturnType<typeof collectDoctorReport>>): SetupCheck | undefined =>
-      report.sections.flatMap((section) => section.checks)
-        .find((item) => item.id === 'network.advertised-endpoint');
-
-    const seen: string[] = [];
-    const healthy = advertisedCheck(await doctorWith(({ address }) => {
-      seen.push(address);
-      return { status: 'ok', statusCode: 200, json: {
-        ok: true, product: 'cosyncing', machine: configured.broker.machineLabel,
-      } };
-    }));
-    check('doctor verifies the advertised endpoint through this node address when MagicDNS cannot resolve',
-      healthy?.status === 'pass' && healthy.detailCode === 'advertised-endpoint-reachable'
-        && seen[0] === ADDRESSES[0],
-      `${healthy?.status}/${healthy?.detailCode} addresses=${seen.join(',')}`);
-
-    // A route into somebody else's broker answers 200 too. Reachability is not identity.
-    const foreign = advertisedCheck(await doctorWith(() => ({
-      status: 'ok', statusCode: 200, json: { ok: true, product: 'cosyncing', machine: 'another-machine' },
-    })));
-    check('doctor rejects an advertised endpoint answering as a different machine',
-      foreign?.status === 'fail' && foreign.detailCode === 'advertised-endpoint-identity-mismatch',
-      `${foreign?.status}/${foreign?.detailCode}`);
-
-    const foreignProduct = advertisedCheck(await doctorWith(() => ({
-      status: 'ok', statusCode: 200, json: { ok: true, product: 'another-product', machine: configured.broker.machineLabel },
-    })));
-    check('doctor rejects an advertised endpoint answering as a different product',
-      foreignProduct?.status === 'fail' && foreignProduct.detailCode === 'advertised-endpoint-identity-mismatch',
-      `${foreignProduct?.status}/${foreignProduct?.detailCode}`);
-
-    // Unreachable and answered-wrongly are different failures with different remedies.
-    const dead = advertisedCheck(await doctorWith(() => ({ status: 'unreachable' })));
-    check('doctor still reports a genuinely unreachable advertised endpoint as unreachable',
-      dead?.status === 'fail' && dead.detailCode === 'advertised-endpoint-unreachable',
-      `${dead?.status}/${dead?.detailCode}`);
-  }
 
   const serviceBlindContext: SetupDiagnosisContext = {
     ...aggregateContext,
@@ -993,9 +937,9 @@ try {
     },
   }));
   const wslChecks = wslReport.sections.flatMap((section) => section.checks);
-  check('WSL doctor distinguishes foreground fallback and Windows-host-only Tailscale',
-    wslChecks.some((item) => item.detailCode === 'wsl-foreground-only' && item.status === 'warn') &&
-      wslChecks.some((item) => item.detailCode === 'wsl-windows-host-tailscale-only' && item.status === 'warn'));
+  check('WSL doctor reports the local runtime without inspecting VPN software',
+    wslChecks.some((item) => item.detailCode === 'wsl-foreground-only' && item.status === 'warn')
+      && !wslChecks.some((item) => item.id.includes('tailscale') || item.id.includes('advertised')));
 
   // macOS honesty: doctor must not call a supported host "not a v1 host", must not report a missing
   // systemd/systemctl, and must not send the operator to journalctl or a lingering policy that has no

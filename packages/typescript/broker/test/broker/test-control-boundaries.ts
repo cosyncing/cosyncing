@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /** Broker control, credential, Observe, and durable-state boundary acceptance. */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -27,6 +28,7 @@ import {
 } from '../../../crypto/src/index.ts';
 import {
   captureProcessOutput,
+  fixtureWsUrl,
   isolatedBrokerFixtureEnvironment,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
@@ -200,6 +202,17 @@ await run('opening Observe leaves the workspace byte-for-byte unchanged', async 
     writeFileSync(join(workspace, 'result.txt'), 'explicit output');
     assert.equal(managed.surfaceExplicit('result.txt').ok, true);
     assert(frames.some((message) => message.type === 'file-artifact' && message.name === 'result.txt'));
+
+    const outside = mkdtempSync(join(tmpdir(), 'cosyncing-control-outside-'));
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'outside workspace');
+      symlinkSync(outside, join(workspace, 'link-out'));
+      assert.equal(managed.surfaceExplicit('link-out/secret.txt').ok, false,
+        'send_file must reject an intermediate symlink even when the lexical path stays inside cwd');
+      assert(!frames.some((message) => message.type === 'file-artifact' && message.name === 'secret.txt'));
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
     managed.removeClient(client);
     await managed.dispose();
   } finally {
@@ -301,7 +314,14 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
       method: 'POST', headers: integrationHeaders,
     })).status, 401);
 
-    const shared = await openSocket(`${wsBase}${streamPath}&token=${encodeURIComponent(credentials.brokerToken)}`);
+    const shared = await openSocket(await fixtureWsUrl(
+      base,
+      wsBase,
+      sharedHeaders,
+      'pi',
+      sessionId,
+      { mode: 'resume' },
+    ));
     sharedSocket = shared.socket;
     const commandPollAbort = new AbortController();
     const commandPoll = fetch(
@@ -357,7 +377,7 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         peerId: 'control-boundary-phone',
-        peerToken: 'phone-mailbox-token',
+        peerToken: createHash('sha256').update('phone-mailbox-token').digest('base64url'),
         identityPublicKey: identity.publicKey,
         exchangePublicKey: exchange.publicKey,
       }),
@@ -365,9 +385,17 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
     assert.equal(acceptedResponse.status, 200);
     const accepted = await acceptedResponse.json() as any;
     const brokerPeerToken = String(accepted.broker.peerToken);
-    assert.equal((await fetch(`${base}/api/machines?peerToken=${encodeURIComponent(brokerPeerToken)}`)).status, 200,
+    const peerHeaders = { 'x-cosyncing-peer-token': brokerPeerToken };
+    assert.equal((await fetch(`${base}/api/machines`, { headers: peerHeaders })).status, 200,
       'a v1 peer token intentionally has full broker access');
-    const peer = await openSocket(`${wsBase}${streamPath}&peerToken=${encodeURIComponent(brokerPeerToken)}`);
+    const peer = await openSocket(await fixtureWsUrl(
+      base,
+      wsBase,
+      peerHeaders,
+      'pi',
+      sessionId,
+      { mode: 'resume' },
+    ));
     peerSocket = peer.socket;
 
     const healthResponse = await fetch(`${base}/api/broker/health`, { headers: sharedHeaders });

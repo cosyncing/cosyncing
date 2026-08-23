@@ -12,11 +12,13 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect, createServer, type Server as TcpServer } from 'node:net';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
 import { ManagedConn } from '../../src/sessions/hub.ts';
 import type {
@@ -61,14 +63,45 @@ interface BrokerProcess {
   origin: string;
 }
 
-async function startBroker(fixtureRoot: string, port: number): Promise<BrokerProcess> {
+interface LoopbackForwarder {
+  origin: string;
+  server: TcpServer;
+}
+
+async function startLoopbackForwarder(targetPort: number): Promise<LoopbackForwarder> {
+  const server = createServer((client) => {
+    const upstream = connect({ host: '127.0.0.1', port: targetPort });
+    client.pipe(upstream);
+    upstream.pipe(client);
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('forwarder did not obtain a TCP port');
+  return { server, origin: `http://127.0.0.1:${address.port}` };
+}
+
+async function stopLoopbackForwarder(forwarder: LoopbackForwarder | undefined): Promise<void> {
+  if (!forwarder) return;
+  await new Promise<void>((resolve) => forwarder.server.close(() => resolve()));
+}
+
+async function startBroker(
+  fixtureRoot: string,
+  port: number,
+  cacheRoot = join(fixtureRoot, 'artifact-cache'),
+): Promise<BrokerProcess> {
   const origin = `http://127.0.0.1:${port}`;
   const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
     env: isolatedBrokerFixtureEnvironment(fixtureRoot, {
       overrides: {
         PORT: String(port),
         HOST: '127.0.0.1',
-        COSYNCING_CACHE_DIR: join(fixtureRoot, 'artifact-cache'),
+        COSYNCING_CACHE_DIR: cacheRoot,
         COSYNCING_ARTIFACT_CACHE_MAX_RECORDS: '5',
         COSYNCING_ARTIFACT_SESSION_REPLAY_LIMIT: '3',
         COSYNCING_PI_SESSIONS_ROOT: '',
@@ -97,10 +130,15 @@ async function stopBroker(process: BrokerProcess | undefined): Promise<void> {
   await settledProcessOutput(process.output);
 }
 
-async function post(origin: string, path: string, body: unknown): Promise<Response> {
+async function post(
+  origin: string,
+  path: string,
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
   return fetch(`${origin}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...extraHeaders },
     body: JSON.stringify(body),
   });
 }
@@ -115,8 +153,13 @@ async function hello(origin: string, sessionFile: string, cwd: string): Promise<
   return String((await response.json() as { id?: unknown }).id ?? '');
 }
 
-async function sendFile(origin: string, id: string, path: string): Promise<Response> {
-  return post(origin, '/pi/bridge/send-file', { id, path });
+async function sendFile(
+  origin: string,
+  id: string,
+  path: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
+  return post(origin, '/pi/bridge/send-file', { id, path }, extraHeaders);
 }
 
 interface Phone {
@@ -170,7 +213,7 @@ const artifactNamed = (name: string) => (frame: any): boolean =>
   frame?.kind === 'message' && frame.message?.type === 'file-artifact' && frame.message?.name === name;
 
 function urlForSession(message: Artifact, sessionId: string, origin?: string): string {
-  const url = new URL(String(message.fetchUrl));
+  const url = new URL(String(message.fetchUrl), origin ?? 'http://broker.test');
   if (origin) {
     const target = new URL(origin);
     url.protocol = target.protocol;
@@ -217,11 +260,16 @@ function fakeConnection(tool: string, id: string, cwd: string): FakeConnection {
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-artifact-session-isolation-'));
 const fixtureA = join(root, 'broker-a');
 const fixtureB = join(root, 'broker-b');
+const relocatedCacheParent = join(root, 'relocated-cache');
+const symlinkedCacheParent = join(root, 'cache-link');
+const cacheRootA = join(symlinkedCacheParent, 'broker-a-cache');
 const cwd = join(root, 'workspace');
 const outbox = join(cwd, '.cosyncing', 'outbox');
 const sessionFileA = join(root, 'pi-session-a.jsonl');
 const sessionFileB = join(root, 'pi-session-b.jsonl');
 mkdirSync(outbox, { recursive: true });
+mkdirSync(relocatedCacheParent, { recursive: true });
+symlinkSync(relocatedCacheParent, symlinkedCacheParent);
 writeFileSync(sessionFileA, `${JSON.stringify({ type: 'session', id: 'same-native-a', cwd })}\n`);
 writeFileSync(sessionFileB, `${JSON.stringify({ type: 'session', id: 'same-native-b', cwd })}\n`);
 // This is the reproduction condition. It remains in place for the lifetime of
@@ -234,15 +282,21 @@ const portA = leaseA.port;
 const portB = leaseB.port;
 let brokerA: BrokerProcess | undefined;
 let brokerB: BrokerProcess | undefined;
+let forwarderA: LoopbackForwarder | undefined;
+let clientAOrigin = '';
 const phones = new Set<Phone>();
 
 try {
   await leaseA.release();
-  brokerA = await startBroker(fixtureA, portA);
-  const idA = await hello(brokerA.origin, sessionFileA, cwd);
-  const idB = await hello(brokerA.origin, sessionFileB, cwd);
-  const owner = await attach(brokerA.origin, idA);
-  const peer = await attach(brokerA.origin, idB);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
+  check('0 broker accepts a cache root below a symlinked parent without process-local fallback',
+    !brokerA.output.read().includes('artifact cache unavailable'));
+  forwarderA = await startLoopbackForwarder(portA);
+  clientAOrigin = forwarderA.origin;
+  const idA = await hello(clientAOrigin, sessionFileA, cwd);
+  const idB = await hello(clientAOrigin, sessionFileB, cwd);
+  const owner = await attach(clientAOrigin, idA);
+  const peer = await attach(clientAOrigin, idB);
   phones.add(owner);
   phones.add(peer);
   await Promise.all([
@@ -255,25 +309,31 @@ try {
 
   const report = join(cwd, 'report.txt');
   writeFileSync(report, 'version one');
-  const sentFirst = await sendFile(brokerA.origin, idA, report);
+  const sentFirst = await sendFile(clientAOrigin, idA, report, {
+    forwarded: 'host=forged.example;proto=https',
+    'x-forwarded-host': 'forged.example',
+    'x-forwarded-proto': 'https',
+  });
   const firstFrame = await owner.waitFrame(artifactNamed('report.txt'));
   await sleep(100);
   check('2 exact Pi send-file HTTP route accepts the owner file', sentFirst.status === 200, `status=${sentFirst.status}`);
   check('2a owner WebSocket receives exactly one artifact', artifactFrames(owner).length === 1, `count=${artifactFrames(owner).length}`);
   check('2b simultaneous peer WebSocket receives no artifact', artifactFrames(peer).length === 0, `count=${artifactFrames(peer).length}`);
   const first = firstFrame?.message as Artifact | undefined;
-  const exactResponse = first?.fetchUrl ? await fetch(first.fetchUrl) : undefined;
+  check('2c artifact reference remains relative behind a forwarder with spoofed forwarded headers',
+    first?.fetchUrl?.startsWith('/') === true, String(first?.fetchUrl));
+  const exactResponse = first?.fetchUrl ? await fetch(new URL(first.fetchUrl, clientAOrigin)) : undefined;
   const exactBytes = exactResponse ? await exactResponse.text() : '';
-  check('2c signed HTTP reference returns exact owner bytes', exactResponse?.status === 200 && exactBytes === 'version one', `status=${exactResponse?.status ?? 0}`);
-  const wrongSessionResponse = first ? await fetch(urlForSession(first, idB)) : undefined;
-  check('2d another session cannot download the owner reference', wrongSessionResponse?.status === 403, `status=${wrongSessionResponse?.status ?? 0}`);
+  check('2d signed HTTP reference returns exact owner bytes through the forwarder', exactResponse?.status === 200 && exactBytes === 'version one', `status=${exactResponse?.status ?? 0}`);
+  const wrongSessionResponse = first ? await fetch(urlForSession(first, idB, clientAOrigin)) : undefined;
+  check('2e another session cannot download the owner reference', wrongSessionResponse?.status === 403, `status=${wrongSessionResponse?.status ?? 0}`);
 
   owner.close();
   peer.close();
   phones.delete(owner);
   phones.delete(peer);
-  const reattachedOwner = await attach(brokerA.origin, idA);
-  const reattachedPeer = await attach(brokerA.origin, idB);
+  const reattachedOwner = await attach(clientAOrigin, idA);
+  const reattachedPeer = await attach(clientAOrigin, idB);
   phones.add(reattachedOwner);
   phones.add(reattachedPeer);
   await Promise.all([
@@ -289,31 +349,33 @@ try {
   phones.delete(reattachedPeer);
   await stopBroker(brokerA);
   brokerA = undefined;
-  brokerA = await startBroker(fixtureA, portA);
-  const restartedIdA = await hello(brokerA.origin, sessionFileA, cwd);
-  const restartedIdB = await hello(brokerA.origin, sessionFileB, cwd);
-  const restartedOwner = await attach(brokerA.origin, restartedIdA);
-  const restartedPeer = await attach(brokerA.origin, restartedIdB);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
+  const restartedIdA = await hello(clientAOrigin, sessionFileA, cwd);
+  const restartedIdB = await hello(clientAOrigin, sessionFileB, cwd);
+  const restartedOwner = await attach(clientAOrigin, restartedIdA);
+  const restartedPeer = await attach(clientAOrigin, restartedIdB);
   phones.add(restartedOwner);
   phones.add(restartedPeer);
   await Promise.all([
     restartedOwner.waitFrame((frame) => frame?.kind === 'history'),
     restartedPeer.waitFrame((frame) => frame?.kind === 'history'),
   ]);
-  const oldReferenceAfterRestart = first?.fetchUrl ? await fetch(first.fetchUrl) : undefined;
+  const oldReferenceAfterRestart = first?.fetchUrl
+    ? await fetch(new URL(first.fetchUrl, clientAOrigin))
+    : undefined;
   check('4 process restart hydrates the owner artifact over WebSocket', artifactFrames(restartedOwner).length === 1);
   check('4a process restart does not cross-attribute it to the peer', artifactFrames(restartedPeer).length === 0);
   check('4b the durable signed reference still returns exact bytes after restart',
     oldReferenceAfterRestart?.status === 200 && await oldReferenceAfterRestart.text() === 'version one');
 
   writeFileSync(report, 'version two');
-  const sentSecond = await sendFile(brokerA.origin, restartedIdA, report);
+  const sentSecond = await sendFile(clientAOrigin, restartedIdA, report);
   await restartedOwner.waitFrame((frame) =>
     artifactNamed('report.txt')(frame) && frame.message?.artifactKey !== first?.artifactKey
   );
   const versions = artifactFrames(restartedOwner).filter((message) => message.name === 'report.txt');
   const versionBodies = await Promise.all(versions.map(async (message) =>
-    message.fetchUrl ? (await fetch(message.fetchUrl)).text() : ''
+    message.fetchUrl ? (await fetch(new URL(message.fetchUrl, clientAOrigin))).text() : ''
   ));
   check('5 rewritten path is accepted through the exact owner route', sentSecond.status === 200);
   check('5a owner retains two immutable versions at the same path',
@@ -339,11 +401,11 @@ try {
   const symlink = join(cwd, 'linked.txt');
   writeFileSync(outside, 'outside');
   symlinkSync(outside, symlink);
-  const escaped = await sendFile(brokerA.origin, restartedIdA, outside);
-  const linked = await sendFile(brokerA.origin, restartedIdA, symlink);
+  const escaped = await sendFile(clientAOrigin, restartedIdA, outside);
+  const linked = await sendFile(clientAOrigin, restartedIdA, symlink);
   const large = join(cwd, 'large.bin');
   writeFileSync(large, Buffer.alloc(5_000_001, 0x61));
-  const largeSent = await sendFile(brokerA.origin, restartedIdA, large);
+  const largeSent = await sendFile(clientAOrigin, restartedIdA, large);
   const largeFrame = await restartedOwner.waitFrame(artifactNamed('large.bin'));
   check('7 path escape remains rejected by the production route', escaped.status === 400);
   check('7a symlink remains rejected by the production route', linked.status === 400);
@@ -358,11 +420,11 @@ try {
     const path = join(cwd, name);
     overflowNames.push(name);
     writeFileSync(path, index % 2 === 0 ? '' : `${index}`);
-    const response = await sendFile(brokerA.origin, restartedIdA, path);
+    const response = await sendFile(clientAOrigin, restartedIdA, path);
     check(`8.${index} tiny artifact ${index} is accepted`, response.status === 200);
     await sleep(2);
   }
-  const indexFile = join(fixtureA, 'artifact-cache', 'artifacts', 'index.json');
+  const indexFile = join(relocatedCacheParent, 'broker-a-cache', 'artifacts', 'index.json');
   const persisted = JSON.parse(readFileSync(indexFile, 'utf8')) as { records?: unknown[] };
   check('8a persisted artifact index is deterministically record-bounded', persisted.records?.length === 5, `count=${persisted.records?.length ?? 0}`);
 
@@ -370,7 +432,7 @@ try {
   restartedPeer.close();
   phones.delete(restartedOwner);
   phones.delete(restartedPeer);
-  const boundedReattach = await attach(brokerA.origin, restartedIdA);
+  const boundedReattach = await attach(clientAOrigin, restartedIdA);
   phones.add(boundedReattach);
   await boundedReattach.waitFrame((frame) => frame?.kind === 'history');
   const boundedNames = artifactFrames(boundedReattach).map((message) => String(message.name));
@@ -382,11 +444,11 @@ try {
   phones.delete(boundedReattach);
   await stopBroker(brokerA);
   brokerA = undefined;
-  brokerA = await startBroker(fixtureA, portA);
-  await hello(brokerA.origin, sessionFileA, cwd);
-  await hello(brokerA.origin, sessionFileB, cwd);
-  const boundedRestartOwner = await attach(brokerA.origin, restartedIdA);
-  const boundedRestartPeer = await attach(brokerA.origin, restartedIdB);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
+  await hello(clientAOrigin, sessionFileA, cwd);
+  await hello(clientAOrigin, sessionFileB, cwd);
+  const boundedRestartOwner = await attach(clientAOrigin, restartedIdA);
+  const boundedRestartPeer = await attach(clientAOrigin, restartedIdB);
   phones.add(boundedRestartOwner);
   phones.add(boundedRestartPeer);
   await Promise.all([
@@ -434,6 +496,127 @@ try {
   await historyPeer.dispose();
   check('9c disposal removes native subscriptions and closes connections',
     historyOwnerConn.subscribers === 0 && historyPeerConn.subscribers === 0 && historyOwnerConn.closed && historyPeerConn.closed);
+
+  // Base releases keyed the durable index and signatures to the advertised
+  // URL. Revision 16 reads those records through the stable identity without
+  // deleting the old key, so a failed candidate can still roll back.
+  const legacyArtifactRoot = join(root, 'legacy-advertised-artifacts');
+  const legacySource = 'https://legacy.tailnet.ts.net';
+  const stableSource = 'broker-instance:broker_fixture_stable_identity_1234567890';
+  const legacySession = { tool: 'pi', id: 'legacy-session' };
+  const legacyStore = new ArtifactStore(legacySource, legacyArtifactRoot);
+  const legacyReference = legacyStore.putBytes(
+    legacySession,
+    {
+      type: 'file-artifact',
+      name: 'before-upgrade.txt',
+      path: 'before-upgrade.txt',
+      mimeType: 'text/plain',
+    },
+    Buffer.from('survives identity migration'),
+    'text/plain',
+  ) as Artifact;
+  const legacyUrl = new URL(String(legacyReference.fetchUrl), legacySource);
+  const migratedStore = new ArtifactStore(stableSource, legacyArtifactRoot, {
+    legacyBrokerSources: [legacySource],
+  });
+  const migratedReference = migratedStore.toReference(legacySession, legacyReference) as Artifact;
+  const migratedUrl = new URL(String(migratedReference.fetchUrl), 'http://127.0.0.1:7734');
+  const oldSignatureResponse = migratedStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(legacyReference.artifactKey),
+    legacyUrl.searchParams.get('expires'),
+    legacyUrl.searchParams.get('sig'),
+  );
+  const migratedResponse = migratedStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(migratedReference.artifactKey),
+    migratedUrl.searchParams.get('expires'),
+    migratedUrl.searchParams.get('sig'),
+  );
+  check('9d legacy advertised-URL artifact index is adopted by the stable installation identity',
+    migratedResponse.status === 200 && await migratedResponse.text() === 'survives identity migration');
+  check('9e legacy URL-derived artifact signatures explicitly expire after migration', oldSignatureResponse.status === 403);
+  const rolledBackStore = new ArtifactStore(legacySource, legacyArtifactRoot);
+  const rollbackResponse = rolledBackStore.serve(
+    legacySession.tool,
+    legacySession.id,
+    String(legacyReference.artifactKey),
+    legacyUrl.searchParams.get('expires'),
+    legacyUrl.searchParams.get('sig'),
+  );
+  check('9f failed candidate rollback retains the old URL-keyed artifact record',
+    rollbackResponse.status === 200 && await rollbackResponse.text() === 'survives identity migration');
+
+  const dedupeRoot = join(root, 'legacy-stable-replay-dedupe');
+  const dedupeSession = { tool: 'pi', id: 'dedupe-session' };
+  const dedupeLegacy = new ArtifactStore(legacySource, dedupeRoot);
+  dedupeLegacy.putBytes(
+    dedupeSession,
+    { type: 'file-artifact', artifactKey: 'same-key', name: 'legacy.txt', path: 'legacy.txt', mimeType: 'text/plain' },
+    Buffer.from('legacy'),
+    'text/plain',
+    undefined,
+    { sessionQualified: true },
+  );
+  const dedupeStable = new ArtifactStore(stableSource, dedupeRoot, { legacyBrokerSources: [legacySource] });
+  dedupeStable.putBytes(
+    dedupeSession,
+    { type: 'file-artifact', artifactKey: 'same-key', name: 'stable.txt', path: 'stable.txt', mimeType: 'text/plain' },
+    Buffer.from('stable'),
+    'text/plain',
+    undefined,
+    { sessionQualified: true },
+  );
+  const dedupedReplay = dedupeStable.sessionQualifiedArtifacts(dedupeSession);
+  check('9g stable-instance replay supersedes the legacy alias for the same artifact key',
+    dedupedReplay.length === 1 && dedupedReplay[0]?.name === 'stable.txt',
+    dedupedReplay.map((artifact) => artifact.name).join(','));
+
+  const secretRecoveryRoot = join(root, 'artifact-secret-recovery');
+  mkdirSync(secretRecoveryRoot, { recursive: true });
+  const secretPath = join(secretRecoveryRoot, 'artifact-url-secret');
+  writeFileSync(secretPath, '', { mode: 0o644 });
+  new ArtifactStore('http://secret-recovery.test', secretRecoveryRoot);
+  const recoveredSecret = Buffer.from(readFileSync(secretPath, 'utf8').trim(), 'base64');
+  check('9h empty artifact URL secret is replaced with at least 256 random bits', recoveredSecret.length >= 32);
+  check('9i recovered artifact URL secret is owner-only',
+    process.platform === 'win32' || (statSync(secretPath).mode & 0o777) === 0o600,
+    `mode=${(statSync(secretPath).mode & 0o777).toString(8)}`);
+
+  const bridgeRoot = join(root, 'bridge-replacement-metacharacters');
+  const bridgeStore = new ArtifactStore('http://bridge-replacement.test', bridgeRoot);
+  const bridgeArtifactKey = "bridge-$&-$`-$'-$$";
+  const bridgeHtml = '<html><body><p>before-marker</p></body><p>after-marker</p></html>';
+  const bridgeReference = bridgeStore.putBytes(
+    { tool: 'pi', id: 'bridge-session' },
+    {
+      type: 'file-artifact',
+      artifactKey: bridgeArtifactKey,
+      name: 'bridge.html',
+      path: 'bridge.html',
+      mimeType: 'text/html',
+    },
+    Buffer.from(bridgeHtml),
+    'text/html',
+  ) as Artifact;
+  const bridgeUrl = new URL(String(bridgeReference.fetchUrl), 'http://bridge-replacement.test');
+  const bridgeResponse = bridgeStore.serve(
+    'pi',
+    'bridge-session',
+    bridgeArtifactKey,
+    bridgeUrl.searchParams.get('expires'),
+    bridgeUrl.searchParams.get('sig'),
+  );
+  const injectedBridgeHtml = await bridgeResponse.text();
+  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+  check('9j artifact bridge keeps replacement metacharacters literal without duplicating HTML',
+    bridgeResponse.status === 200
+      && injectedBridgeHtml.includes(`const artifactKey = ${JSON.stringify(bridgeArtifactKey)};`)
+      && occurrences(injectedBridgeHtml, 'before-marker') === 1
+      && occurrences(injectedBridgeHtml, 'after-marker') === 1);
 
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.
@@ -596,7 +779,7 @@ try {
     check('13 frozen-clock pressure retains the acknowledged reverse-sorted key',
       collisionJson.records?.length === 1 && collisionJson.records[0]?.artifactKey === 'a',
       (collisionJson.records ?? []).map((record) => record.artifactKey).join(','));
-    const acceptedUrl = new URL(String(accepted.fetchUrl));
+    const acceptedUrl = new URL(String(accepted.fetchUrl), 'http://broker.test');
     const immediate = collisionStore.serve(
       'pi',
       'owner',
@@ -713,6 +896,7 @@ try {
   for (const phone of phones) phone.close();
   await stopBroker(brokerA);
   await stopBroker(brokerB);
+  await stopLoopbackForwarder(forwarderA);
   await leaseA.release().catch(() => undefined);
   await leaseB.release().catch(() => undefined);
   rmSync(root, { recursive: true, force: true });

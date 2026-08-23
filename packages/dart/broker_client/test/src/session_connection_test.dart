@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:dio/dio.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -87,6 +88,425 @@ void main() {
             Uri.parse(streamUrl!).queryParameters['artifactMode'],
             'reference',
           );
+        },
+      );
+
+      test(
+        'exchanges header credential for a one-use WebSocket ticket',
+        () async {
+          final dio = Dio();
+          RequestOptions? ticketRequest;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/health')) {
+                  handler.resolve(
+                    Response<Map<String, dynamic>>(
+                      requestOptions: options,
+                      statusCode: 200,
+                      data: {
+                        'ok': true,
+                        'contract': {'revision': 16},
+                      },
+                    ),
+                  );
+                  return;
+                }
+                ticketRequest = options;
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 201,
+                    data: {
+                      'ok': true,
+                      'wsAuthTicket': 'short-lived-ticket',
+                      'expiresAt': '2026-08-22T00:00:30.000Z',
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          String? ticketedUrl;
+          final ticketed = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'long-lived-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'session-ticket',
+            dio: dio,
+            adapterFactory: (url) {
+              ticketedUrl = url;
+              return FakeWebSocketAdapter();
+            },
+          );
+          addTearDown(ticketed.dispose);
+
+          await ticketed.connect();
+
+          expect(
+            ticketRequest?.uri.toString(),
+            'https://broker.example.com/api/ws-auth-tickets',
+          );
+          expect(
+            ticketRequest?.headers['x-cosyncing-token'],
+            'long-lived-secret',
+          );
+          final parsed = Uri.parse(ticketedUrl!);
+          expect(parsed.queryParameters, {
+            'wsAuthTicket': 'short-lived-ticket',
+          });
+          expect(ticketedUrl, isNot(contains('long-lived-secret')));
+        },
+      );
+
+      test(
+        'maps minimal health with a credential to an authentication error',
+        () async {
+          final dio = Dio();
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {'ok': true},
+                  ),
+                );
+              },
+            ),
+          );
+          final rejected = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'revoked-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'rejected-session',
+            dio: dio,
+            adapterFactory: (_) => FakeWebSocketAdapter(),
+          );
+          addTearDown(rejected.dispose);
+
+          await rejected.connect();
+
+          expect(
+            rejected.lastConnectionError,
+            isA<BrokerException>()
+                .having((error) => error.statusCode, 'statusCode', 401)
+                .having(
+                  (error) => error.error?.code,
+                  'code',
+                  'AUTH_REQUIRED',
+                ),
+          );
+          expect(rejected.state, SessionConnectionState.reconnecting);
+        },
+      );
+
+      test('bounds ticket acquisition when the broker is half-open', () async {
+        final dio = Dio();
+        dio.interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.path.endsWith('/api/health')) {
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {
+                      'ok': true,
+                      'contract': {'revision': 16},
+                    },
+                  ),
+                );
+              }
+              // Deliberately leave the ticket request unresolved.
+            },
+          ),
+        );
+        final bounded = SessionConnection(
+          resolver: EndpointResolver(
+            baseUrl: 'https://half-open.example.com',
+            token: 'credential',
+          ),
+          tool: 'codex',
+          sessionId: 'bounded-session',
+          dio: dio,
+          authRequestTimeout: const Duration(milliseconds: 20),
+          adapterFactory: (_) => FakeWebSocketAdapter(),
+        );
+        addTearDown(() async {
+          await bounded.dispose();
+          dio.close(force: true);
+        });
+
+        await bounded.connect();
+
+        expect(bounded.lastConnectionError, isA<TimeoutException>());
+        expect(bounded.state, SessionConnectionState.reconnecting);
+      });
+
+      test('uses the legacy query only for a pre-ticket broker', () async {
+        final dio = Dio();
+        var ticketRequests = 0;
+        dio.interceptors.add(
+          InterceptorsWrapper(
+            onRequest: (options, handler) {
+              if (options.path.endsWith('/api/ws-auth-tickets')) {
+                ticketRequests += 1;
+              }
+              handler.resolve(
+                Response<Map<String, dynamic>>(
+                  requestOptions: options,
+                  statusCode: 200,
+                  data: {
+                    'ok': true,
+                    'contract': {'revision': 15},
+                  },
+                ),
+              );
+            },
+          ),
+        );
+        String? legacyUrl;
+        final legacy = SessionConnection(
+          resolver: EndpointResolver(
+            baseUrl: 'https://old-broker.example.com',
+            token: 'rollout-only-secret',
+          ),
+          tool: 'codex',
+          sessionId: 'legacy-session',
+          dio: dio,
+          adapterFactory: (url) {
+            legacyUrl = url;
+            return FakeWebSocketAdapter();
+          },
+        );
+        addTearDown(legacy.dispose);
+
+        await legacy.connect();
+
+        expect(ticketRequests, 0);
+        expect(
+          Uri.parse(legacyUrl!).queryParameters['token'],
+          'rollout-only-secret',
+        );
+      });
+
+      test(
+        'refuses revision 14 without putting a credential in a URL',
+        () async {
+          final dio = Dio();
+          var ticketRequests = 0;
+          var socketUrls = 0;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/ws-auth-tickets')) {
+                  ticketRequests += 1;
+                }
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {
+                      'ok': true,
+                      'contract': {'revision': 14},
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          final unsupported = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://unsupported-broker.example.com',
+              token: 'must-not-enter-a-url',
+            ),
+            tool: 'codex',
+            sessionId: 'unsupported-session',
+            dio: dio,
+            adapterFactory: (url) {
+              socketUrls += 1;
+              return FakeWebSocketAdapter();
+            },
+          );
+          addTearDown(unsupported.dispose);
+
+          await unsupported.connect();
+
+          expect(ticketRequests, 0);
+          expect(socketUrls, 0);
+          expect(unsupported.lastConnectionError, isA<UnsupportedError>());
+          expect(unsupported.state, SessionConnectionState.reconnecting);
+        },
+      );
+
+      test(
+        'automatic reconnect crosses revision 15 to ticket authentication',
+        () async {
+          final dio = Dio();
+          var brokerRevision = 15;
+          var healthRequests = 0;
+          var ticketRequests = 0;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/health')) {
+                  healthRequests += 1;
+                  handler.resolve(
+                    Response<Map<String, dynamic>>(
+                      requestOptions: options,
+                      statusCode: 200,
+                      data: {
+                        'ok': true,
+                        'contract': {'revision': brokerRevision},
+                      },
+                    ),
+                  );
+                  return;
+                }
+                ticketRequests += 1;
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 201,
+                    data: {
+                      'ok': true,
+                      'wsAuthTicket': 'ticket-after-upgrade',
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          final adapters = <FakeWebSocketAdapter>[];
+          final streamUrls = <String>[];
+          final upgrading = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'rollout-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'upgrade-session',
+            dio: dio,
+            adapterFactory: (url) {
+              streamUrls.add(url);
+              final next = FakeWebSocketAdapter();
+              adapters.add(next);
+              return next;
+            },
+          );
+          addTearDown(upgrading.dispose);
+
+          await upgrading.connect();
+          expect(
+            Uri.parse(streamUrls.single).queryParameters['token'],
+            'rollout-secret',
+          );
+          expect(ticketRequests, 0);
+
+          brokerRevision = 16;
+          adapters.single.simulateDisconnect();
+          await Future<void>.delayed(const Duration(milliseconds: 1200));
+          await flush();
+
+          expect(healthRequests, 2);
+          expect(ticketRequests, 1);
+          final upgradedQuery = Uri.parse(streamUrls.last).queryParameters;
+          expect(upgradedQuery, {'wsAuthTicket': 'ticket-after-upgrade'});
+          expect(streamUrls.last, isNot(contains('rollout-secret')));
+          expect(upgrading.state, SessionConnectionState.connected);
+        },
+      );
+
+      test(
+        'failed ticket reconnect re-probes a revision 15 rollback',
+        () async {
+          final dio = Dio();
+          var brokerRevision = 16;
+          var healthRequests = 0;
+          var ticketRequests = 0;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/health')) {
+                  healthRequests += 1;
+                  handler.resolve(
+                    Response<Map<String, dynamic>>(
+                      requestOptions: options,
+                      statusCode: 200,
+                      data: {
+                        'ok': true,
+                        'contract': {'revision': brokerRevision},
+                      },
+                    ),
+                  );
+                  return;
+                }
+                ticketRequests += 1;
+                if (brokerRevision < 16) {
+                  handler.reject(
+                    DioException(
+                      requestOptions: options,
+                      response: Response<void>(
+                        requestOptions: options,
+                        statusCode: 404,
+                      ),
+                      type: DioExceptionType.badResponse,
+                    ),
+                  );
+                  return;
+                }
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 201,
+                    data: {'wsAuthTicket': 'ticket-before-rollback'},
+                  ),
+                );
+              },
+            ),
+          );
+          final adapters = <FakeWebSocketAdapter>[];
+          final streamUrls = <String>[];
+          final rollingBack = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://broker.example.com',
+              token: 'rollback-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'rollback-session',
+            dio: dio,
+            adapterFactory: (url) {
+              streamUrls.add(url);
+              final next = FakeWebSocketAdapter();
+              adapters.add(next);
+              return next;
+            },
+          );
+          addTearDown(rollingBack.dispose);
+
+          await rollingBack.connect();
+          expect(Uri.parse(streamUrls.single).queryParameters, {
+            'wsAuthTicket': 'ticket-before-rollback',
+          });
+
+          brokerRevision = 15;
+          adapters.single.simulateDisconnect();
+          await Future<void>.delayed(const Duration(milliseconds: 3400));
+          await flush();
+
+          expect(healthRequests, 2);
+          expect(ticketRequests, 2);
+          expect(
+            Uri.parse(streamUrls.last).queryParameters['token'],
+            'rollback-secret',
+          );
+          expect(rollingBack.state, SessionConnectionState.connected);
         },
       );
 

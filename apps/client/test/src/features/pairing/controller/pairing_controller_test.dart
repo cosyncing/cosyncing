@@ -25,11 +25,13 @@ void main() {
   late _InMemoryTransportPairingStore transportStore;
   late ProviderContainer container;
 
-  setUp(() {
+  setUp(() async {
     credentialStore = _SpyCredentialStore();
     repository = _InMemoryBrokerProfileRepository();
     activeStore = _InMemoryActiveBrokerProfileStore();
-    transportAcceptService = _FakeTransportPairingAcceptService();
+    transportAcceptService = _FakeTransportPairingAcceptService(
+      await crypto.PairingCrypto.generateIdentityKeyPair(),
+    );
     transportStore = _InMemoryTransportPairingStore();
 
     container = ProviderContainer(
@@ -339,7 +341,7 @@ void main() {
         expect(transportStore.last?.localPeerToken, isNotEmpty);
         expect(transportStore.last?.identityPrivateKey, isNotEmpty);
         expect(transportStore.last?.exchangePrivateKey, isNotEmpty);
-        expect(transportStore.last?.brokerPeerId, 'broker-peer');
+        expect(transportStore.last?.brokerPeerId, 'broker-test');
         expect(transportStore.last?.brokerPeerToken, 'broker-peer-token');
         expect(
           crypto.base64UrlDecodeNoPadding(transportStore.last!.dataKey),
@@ -347,6 +349,135 @@ void main() {
         );
       },
     );
+
+    test(
+      'accepts URL-free QR v3 with a separately supplied Broker URL',
+      () async {
+        final qr = _transportQr(
+          version: 3,
+          pairingId: 'pair_v3',
+          transportKind: 'broker-url',
+          transportUrl: null,
+          publicKey: transportAcceptService.brokerIdentity.publicKey,
+        );
+
+        await container
+            .read(pairingControllerProvider.notifier)
+            .importPayload(
+              qr,
+              brokerUrl: 'https://cosy.example.com',
+            );
+
+        expect(
+          container.read(pairingControllerProvider).notice,
+          PairingNotice.devicePaired,
+        );
+        expect(
+          transportAcceptService.lastBrokerUrl,
+          Uri.parse('https://cosy.example.com'),
+        );
+        expect(
+          transportStore.last?.brokerUrl,
+          Uri.parse('https://cosy.example.com'),
+        );
+      },
+    );
+
+    test(
+      'rejects an endpoint whose broker peer does not match the QR',
+      () async {
+        transportAcceptService.brokerPeerIdOverride = 'different-broker';
+        await container
+            .read(pairingControllerProvider.notifier)
+            .importPayload(
+              _transportQr(version: 2, pairingId: 'pair_wrong_peer'),
+            );
+        expect(
+          container.read(pairingControllerProvider).notice,
+          PairingNotice.unlockFailed,
+        );
+        expect(transportStore.writes, 0);
+      },
+    );
+
+    test(
+      'rejects a v3 endpoint whose identity key does not match the QR',
+      () async {
+        final differentIdentity =
+            await crypto.PairingCrypto.generateIdentityKeyPair();
+        transportAcceptService.brokerIdentityOverride =
+            differentIdentity.publicKey;
+        await container
+            .read(pairingControllerProvider.notifier)
+            .importPayload(
+              _transportQr(
+                version: 3,
+                pairingId: 'pair_wrong_key',
+                transportKind: 'broker-url',
+                transportUrl: 'https://cosy.example.com',
+                publicKey: transportAcceptService.brokerIdentity.publicKey,
+              ),
+            );
+        expect(
+          container.read(pairingControllerProvider).notice,
+          PairingNotice.unlockFailed,
+        );
+        expect(transportStore.writes, 0);
+      },
+    );
+
+    test('rejects a forged v3 pairing acceptance signature', () async {
+      transportAcceptService.signatureOverride = crypto.base64UrlNoPadding(
+        List<int>.filled(64, 0),
+      );
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(
+            _transportQr(
+              version: 3,
+              pairingId: 'pair_forged',
+              transportKind: 'broker-url',
+              transportUrl: 'https://cosy.example.com',
+              publicKey: transportAcceptService.brokerIdentity.publicKey,
+            ),
+          );
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.unlockFailed,
+      );
+      expect(transportStore.writes, 0);
+    });
+
+    test('requires a Broker URL only when QR v3 omits it', () async {
+      final qr = _transportQr(
+        version: 3,
+        pairingId: 'pair_v3',
+        transportKind: 'broker-url',
+        transportUrl: null,
+        publicKey: transportAcceptService.brokerIdentity.publicKey,
+      );
+
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(qr);
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.brokerUrlRequired,
+      );
+      expect(transportAcceptService.calls, 0);
+
+      await container
+          .read(pairingControllerProvider.notifier)
+          .importPayload(
+            qr,
+            brokerUrl: 'not a url',
+          );
+      expect(
+        container.read(pairingControllerProvider).notice,
+        PairingNotice.brokerUrlInvalid,
+      );
+      expect(transportAcceptService.calls, 0);
+    });
 
     test(
       'restores the previous peer token when profile adoption fails',
@@ -520,12 +651,18 @@ void main() {
 String _transportQr({
   required int version,
   String? pairingId,
+  String transportKind = 'tailscale-direct',
+  String? transportUrl = 'http://broker:7734',
+  String publicKey = 'broker-public',
 }) {
   final payload = <String, Object?>{
     'version': version,
     'brokerId': 'broker-test',
-    'publicKey': 'broker-public',
-    'transport': {'kind': 'tailscale-direct', 'url': 'http://broker:7734'},
+    'publicKey': publicKey,
+    'transport': {
+      'kind': transportKind,
+      if (transportUrl != null) 'url': transportUrl,
+    },
     if (pairingId != null) 'pairingId': pairingId,
   };
   return 'cosyncing://pair?payload=${crypto.base64UrlNoPadding(utf8.encode(jsonEncode(payload)))}';
@@ -632,15 +769,23 @@ class _InMemoryActiveBrokerProfileStore implements ActiveBrokerProfileStore {
 
 class _FakeTransportPairingAcceptService
     implements TransportPairingAcceptService {
+  _FakeTransportPairingAcceptService(this.brokerIdentity);
+
+  final crypto.IdentityKeyPair brokerIdentity;
   final List<int> dataKey = List<int>.generate(32, (index) => index + 1);
   Object? failure;
   int calls = 0;
   String? lastPairingId;
   String? lastPeerId;
+  Uri? lastBrokerUrl;
+  String? brokerPeerIdOverride;
+  String? brokerIdentityOverride;
+  String? signatureOverride;
 
   @override
   Future<TransportPairingAcceptResponse> accept(
     TransportQrPayload payload, {
+    required Uri brokerUrl,
     required String peerId,
     required String peerToken,
     required String identityPublicKey,
@@ -649,6 +794,7 @@ class _FakeTransportPairingAcceptService
     calls += 1;
     lastPairingId = payload.pairingId;
     lastPeerId = peerId;
+    lastBrokerUrl = brokerUrl;
     final failure = this.failure;
     if (failure != null) {
       Error.throwWithStackTrace(failure, StackTrace.current);
@@ -658,24 +804,46 @@ class _FakeTransportPairingAcceptService
       dataKey: dataKey,
       recipientPublicKey: exchangePublicKey,
     );
+    final responseWrapped = TransportWrappedDataKey(
+      version: wrapped.version,
+      algorithm: wrapped.algorithm,
+      ephemeralPublicKey: wrapped.ephemeralPublicKey,
+      nonce: wrapped.nonce,
+      ciphertext: wrapped.ciphertext,
+      tag: wrapped.tag,
+    );
+    final broker = TransportPairingPeer(
+      peerId: brokerPeerIdOverride ?? payload.brokerId,
+      peerToken: 'broker-peer-token',
+      identityPublicKey: brokerIdentityOverride ?? brokerIdentity.publicKey,
+    );
+    final proofMessage = crypto.PairingCrypto.pairingAcceptanceProofBytes(
+      pairingId: payload.pairingId!,
+      clientPeerId: peerId,
+      clientIdentityPublicKey: identityPublicKey,
+      clientExchangePublicKey: exchangePublicKey,
+      brokerPeerId: broker.peerId,
+      brokerPeerToken: broker.peerToken!,
+      brokerIdentityPublicKey: broker.identityPublicKey,
+      wrappedDataKey: wrapped,
+    );
     return TransportPairingAcceptResponse(
       peer: TransportPairingPeer(
         peerId: peerId,
         label: 'Phone',
         identityPublicKey: identityPublicKey,
       ),
-      broker: const TransportPairingPeer(
-        peerId: 'broker-peer',
-        peerToken: 'broker-peer-token',
-        identityPublicKey: 'broker-identity-public',
-      ),
-      wrappedDataKey: TransportWrappedDataKey(
-        version: wrapped.version,
-        algorithm: wrapped.algorithm,
-        ephemeralPublicKey: wrapped.ephemeralPublicKey,
-        nonce: wrapped.nonce,
-        ciphertext: wrapped.ciphertext,
-        tag: wrapped.tag,
+      broker: broker,
+      wrappedDataKey: responseWrapped,
+      brokerProof: TransportPairingProof(
+        version: 1,
+        algorithm: 'Ed25519',
+        signature:
+            signatureOverride ??
+            await crypto.PairingCrypto.signIdentityMessage(
+              privateKey: brokerIdentity.privateKey,
+              message: proofMessage,
+            ),
       ),
     );
   }

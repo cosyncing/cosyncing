@@ -185,6 +185,48 @@ export function atomicWriteJsonOwnerOnly(target: string, value: unknown): void {
   atomicWriteOwnerOnly(target, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+/** Create a durable owner-only file without ever replacing an existing winner. */
+export function createOwnerOnlyFileExclusive(
+  target: string,
+  content: string | Uint8Array,
+  mode = 0o600,
+): 'created' | 'exists' {
+  assertNoSymlinkComponents(target, false);
+  const parent = dirname(target);
+  ensureOwnerOnlyDirectory(parent);
+  let fd: number | undefined;
+  let created = false;
+  try {
+    try {
+      fd = openSync(target, 'wx', mode);
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+      throw error;
+    }
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    try {
+      const dirFd = openSync(parent, 'r');
+      try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+    } catch {
+      // Directory fsync is not portable. The exclusively created file itself is still durable.
+    }
+    return 'created';
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the original failure */ }
+      fd = undefined;
+    }
+    if (created) {
+      try { rmSync(target, { force: true }); } catch { /* best-effort cleanup of our incomplete file */ }
+    }
+    throw error;
+  }
+}
+
 /** Test/support helper that returns a sanitized mode without exposing file contents. */
 export function ownerOnlyMode(target: string): number {
   return statSync(target).mode & 0o777;

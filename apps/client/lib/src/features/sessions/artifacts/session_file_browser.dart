@@ -524,8 +524,9 @@ String userMessageForSessionFileError(BrokerException exception) {
     'FS_DOWNLOAD_TOO_LARGE' =>
       'The file is larger than the server download limit.',
     'FS_REMOTE_DISABLED' =>
-      'Remote file browsing is disabled. Set COSYNCING_FS_REMOTE_ENABLED=1 '
-          'on the server host.',
+      'Workspace file browsing is disabled for HTTP clients. Enable '
+          'features.httpWorkspaceBrowsing in the broker configuration and '
+          'restart the broker.',
     _ => userFacingMessage(
       exception,
       lead: "Couldn't access this file.",

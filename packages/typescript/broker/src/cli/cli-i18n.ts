@@ -6,11 +6,6 @@ import type {
   UninstallPlan,
 } from '../installation/broker-lifecycle.ts';
 import type { DurableServiceStatus } from '../installation/service-manager.ts';
-import type {
-  TailscaleBackendState,
-  TailscaleServeRouteState,
-  TailscaleTopology,
-} from '../installation/tailscale-serve.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { readSetupState, setupStateHome } from '../installation/setup-state.ts';
 import {
@@ -38,9 +33,8 @@ export interface CliMessages {
     headline: (report: LifecycleStatusReport) => string;
     installation: (report: LifecycleStatusReport) => string;
     service: (report: LifecycleStatusReport) => string;
-    internalEndpoint: (report: LifecycleStatusReport) => string;
-    advertisedEndpoint: (report: LifecycleStatusReport) => string;
-    tailscale: (report: LifecycleStatusReport) => string;
+    listener: (report: LifecycleStatusReport) => string;
+    connectivity: (report: LifecycleStatusReport) => string;
     agents: (report: LifecycleStatusReport) => string;
     sessions: (report: LifecycleStatusReport) => string;
     updates: (report: LifecycleStatusReport) => string;
@@ -68,10 +62,8 @@ export type CliStatusValue =
   | LifecycleStatusReport['service']['mode']
   | DurableServiceStatus['active']
   | DurableServiceStatus['enabled']
-  | LifecycleStatusReport['endpoints']['internal']
-  | TailscaleTopology
-  | TailscaleBackendState
-  | TailscaleServeRouteState;
+  | 'ready'
+  | 'unreachable';
 
 /** Invalid, absent, older, or newer persisted choices all degrade to English. */
 export function persistedCliLanguage(home?: string): SetupLanguage {
@@ -126,6 +118,12 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Remove stale development overrides before validating packaged behavior.': '验证发行包行为前，请移除过期的开发环境变量。',
   'Effective broker configuration is invalid.': 'Broker 的实际配置无效。',
   'Repair configuration before starting the broker.': '启动 broker 前请先修复配置。',
+  'No machine peers are configured.': '未配置机器对等端。',
+  'Every machine peer has an explicit credential.': '每个机器对等端都配置了显式凭据。',
+  'One or more machine peers have no credential and will stop aggregating after that peer upgrades to contract revision 16.': '一个或多个机器对等端没有凭据；该对等端升级到协议修订版 16 后将停止聚合。',
+  'Add a broker-token or revocable peer-token credential to each COSYNCING_MACHINE_PEERS entry.': '请为每个 COSYNCING_MACHINE_PEERS 条目添加 broker-token 或可撤销的 peer-token 凭据。',
+  'COSYNCING_MACHINE_PEERS is invalid.': 'COSYNCING_MACHINE_PEERS 无效。',
+  'Repair COSYNCING_MACHINE_PEERS before starting or upgrading the broker.': '启动或升级 broker 前，请修复 COSYNCING_MACHINE_PEERS。',
   'WSL is supported through the declared Linux subset.': '通过已声明的 Linux 子集支持 WSL。',
   'Linux is a supported v1 broker host.': 'Linux 是 v1 支持的 broker 主机。',
   'macOS on Apple Silicon is a supported broker host.': 'Apple Silicon macOS 是受支持的 broker 主机。',
@@ -163,11 +161,6 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Systemd user lingering is enabled for boot and post-logout persistence.': '已启用 systemd 用户 lingering，可在开机及注销后保持运行。',
   'Systemd user lingering was requested but is not enabled.': '已请求 systemd 用户 lingering，但尚未启用。',
   'Reconcile the separately consented lingering policy.': '请修复单独确认过的 lingering 策略。',
-  'Tailscale is running and authenticated with a MagicDNS HTTPS hostname.': 'Tailscale 正在运行且已认证，并提供 MagicDNS HTTPS 主机名。',
-  'The receipt-owned private HTTPS root route targets this broker.': '收据证明归属的私有 HTTPS 根路由指向此 broker。',
-  'A matching private HTTPS root route is available and remains foreign-owned.': '存在匹配的私有 HTTPS 根路由，其归属仍为外部。',
-  'Inspect the existing Serve configuration; cosyncing preserves foreign routes and never converts Funnel.': '请检查现有 Serve 配置；cosyncing 会保留外部路由，且绝不会转换 Funnel。',
-  'Confirm and register the private HTTPS route.': '请确认并注册私有 HTTPS 路由。',
   'The installed broker internal endpoint is not healthy.': '已安装 broker 的内部端点状态异常。',
   'The broker internal endpoint is not running yet.': 'Broker 内部端点尚未运行。',
   'Reconcile and start the broker service.': '修复并启动 broker 服务。',
@@ -183,14 +176,6 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Managed runtime update status is unavailable.': '托管运行时更新状态不可用。',
   'Retry managed runtime diagnosis.': '请重试托管运行时诊断。',
   'Stop that host yourself if you no longer want it running; cosyncing will not stop a process it cannot prove it started.': '如果不再需要该主机，请自行停止它；cosyncing 不会停止无法证明是由它自己启动的进程。',
-  'No private advertised endpoint is configured; the broker remains loopback-only.': '未配置私有公开端点；broker 仍仅限本机访问。',
-  'Configure Tailscale Serve only if private remote access is wanted.': '仅在需要私有远程访问时配置 Tailscale Serve。',
-  'The advertised private endpoint is reachable.': '私有公开端点可访问。',
-  'The advertised private endpoint is reachable and answers as this broker.': '私有公开端点可访问，且响应身份就是本 broker。',
-  'The configured advertised endpoint is unreachable.': '无法访问已配置的公开端点。',
-  'The advertised endpoint answered, but not as this cosyncing broker.': '公开端点有响应，但其身份并非本 cosyncing broker。',
-  'Repair the private Serve route or advertised URL.': '请修复私有 Serve 路由或公开 URL。',
-  'Another service or broker answers the advertised route; reconcile it before relying on it.': '当前占用该公开路由的是其他服务或 broker；请先处理该冲突再依赖它。',
   'Update cosyncing to a build with complete adapter diagnosis.': '请将 cosyncing 更新到包含完整适配器诊断的版本。',
   'Retry diagnosis after checking the agent installation.': '检查智能体安装后，请重试诊断。',
   'Repair or reinstall the packaged runtime assets.': '请修复或重新安装发行包运行时资源。',
@@ -302,24 +287,6 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Restore the receipt-owned packaged skill.': '请恢复收据证明归属的发行包 skill。',
   'Address the reported cause, then rerun setup.': '请处理报告的原因，然后重新运行 setup。',
   'Cleanup from that run remains; rerun setup, which rolls the remainder back before replanning.': '上次运行仍有清理项；请重新运行 setup，它会先回滚剩余改动再重新规划。',
-  'Tailscale is not installed in the broker host environment.': 'Broker 主机环境中未安装 Tailscale。',
-  'Windows-host Tailscale cannot Serve a broker bound to WSL loopback.': 'Windows 主机上的 Tailscale 无法为绑定到 WSL 回环地址的 broker 提供 Serve。',
-  'Install and run Tailscale inside WSL; Windows-host Tailscale cannot Serve WSL loopback.': '请在 WSL 内安装并运行 Tailscale；Windows 主机上的 Tailscale 无法为 WSL 回环地址提供 Serve。',
-  'Start or log in to Tailscale explicitly; cosyncing never runs `tailscale up` and never enables Funnel.': '请明确启动或登录 Tailscale；cosyncing 绝不会运行 `tailscale up`，也绝不会启用 Funnel。',
-  'The Tailscale CLI is installed, but its local daemon is not reachable.': 'Tailscale CLI 已安装，但无法访问其本地 daemon。',
-  'Tailscale returned malformed status JSON.': 'Tailscale 返回了格式错误的状态 JSON。',
-  'Tailscale requires an explicit login before private Serve can be configured.': '配置私有 Serve 前，需要明确登录 Tailscale。',
-  'Tailscale is not in the running state.': 'Tailscale 未处于运行状态。',
-  'Tailscale is running, but no MagicDNS HTTPS hostname is available.': 'Tailscale 正在运行，但没有可用的 MagicDNS HTTPS 主机名。',
-  'Tailscale Serve is ready but has no root HTTPS route for cosyncing.': 'Tailscale Serve 已就绪，但没有供 cosyncing 使用的 HTTPS 根路由。',
-  'Tailscale Serve configuration could not be inspected safely.': '无法安全检查 Tailscale Serve 配置。',
-  'Tailscale Serve returned malformed configuration JSON.': 'Tailscale Serve 返回了格式错误的配置 JSON。',
-  'The private HTTPS root route already targets this broker.': '私有 HTTPS 根路由已指向此 broker。',
-  'No private HTTPS root route targets this broker yet.': '尚无私有 HTTPS 根路由指向此 broker。',
-  'The HTTPS root is currently public through Funnel and will not be changed.': 'HTTPS 根路由当前通过 Funnel 公开，不会被更改。',
-  'An existing HTTPS root route conflicts with the broker target and will be preserved.': '现有 HTTPS 根路由与 broker 目标冲突，将予以保留。',
-  'The broker remains loopback-only.': 'Broker 仍仅限本机访问。',
-  'Loopback-only operation remains supported.': '仍支持仅限本机运行。',
 });
 
 function replaceMatch(source: string, pattern: RegExp, replacement: (...parts: string[]) => string): string | undefined {
@@ -392,9 +359,6 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^The (.*) cosyncing skill is modified, unsafe, or lacks matching ownership evidence\.$/, (target) => `${target} cosyncing skill 已被修改、不安全或缺少匹配的归属证据。`)
     ?? replaceMatch(source, /^The last setup run failed while applying ([^:]+): (.*)$/, (action, detail) => `上次 setup 在应用 ${action} 时失败：${detail}`)
     ?? replaceMatch(source, /^The last setup run failed while in the ([^ ]+) stage: (.*)$/, (stage, detail) => `上次 setup 在 ${stage} 阶段失败：${detail}`)
-    ?? replaceMatch(source, /^(.*) The broker remains loopback-only\.$/, (summary) => `${translateDoctorTextToChinese(summary) ?? 'Tailscale 状态异常。'} Broker 仍仅限本机访问。`)
-    ?? replaceMatch(source, /^The requested private Serve route is not ready: (.*)$/, (summary) => `所请求的私有 Serve 路由尚未就绪：${translateDoctorTextToChinese(summary) ?? 'Tailscale 状态异常。'}`)
-    ?? replaceMatch(source, /^(.*) Loopback-only operation remains supported\.$/, (summary) => `${translateDoctorTextToChinese(summary) ?? 'Tailscale 状态异常。'} 仍支持仅限本机运行。`)
     ?? replaceMatch(source, /^(.*) does not provide setup diagnosis\.$/, (name) => `${name} 未提供 setup 诊断。`)
     ?? replaceMatch(source, /^(.*) diagnosis failed safely\.$/, (name) => `${name} 诊断已安全失败。`)
     ?? replaceMatch(source, /^(.*) is registered in the running broker and can create sessions\.$/, (name) => `${name} 已在运行中的 broker 注册，并且可以创建会话。`)
@@ -426,9 +390,8 @@ const en: CliMessages = {
     headline: (report) => `${PRODUCT_IDENTITY.productName} ${report.version}: ${report.ok ? 'ready' : 'attention required'}`,
     installation: (report) => `Installation: ${report.installation.committed ? 'committed' : report.installation.detailCode}`,
     service: (report) => `Service: ${report.service.mode} / ${report.service.active} / ${report.service.enabled}`,
-    internalEndpoint: (report) => `Internal endpoint: ${report.endpoints.internal}`,
-    advertisedEndpoint: (report) => `Advertised endpoint: ${report.endpoints.advertised}`,
-    tailscale: (report) => `Tailscale: ${report.network.topology} / ${report.network.backend} / ${report.network.route}${report.network.owned ? ' (owned)' : ''}`,
+    listener: (report) => `Broker listener: ${report.listener.url} / loopback only / ${report.listener.ready ? 'ready' : 'unreachable'}`,
+    connectivity: () => 'Connectivity: managed externally by the operator',
     agents: (report) => `Agents (registered): ${report.agents.length ? report.agents.map((agent) => {
       const readiness = agent.canCreateSession === true
         ? 'create ready'
@@ -483,21 +446,6 @@ export const ZH_STATUS_VALUES = Object.freeze({
   disabled: '已禁用',
   unknown: '未知',
   unreachable: '无法访问',
-  'identity-mismatch': '身份不匹配',
-  missing: '缺失',
-  running: '运行中',
-  stopped: '已停止',
-  'logged-out': '未登录',
-  'daemon-unavailable': 'daemon 不可用',
-  desired: '符合预期',
-  conflict: '冲突',
-  'funnel-conflict': 'Funnel 冲突',
-  unavailable: '不可用',
-  malformed: '格式错误',
-  'native-linux': '原生 Linux',
-  'native-macos': '原生 macOS',
-  'inside-wsl': 'WSL 内部',
-  'windows-host-only': '仅 Windows 主机',
 } satisfies Readonly<Record<CliStatusValue, string>>);
 
 export function localizeCliStatusValue(value: CliStatusValue, language: SetupLanguage): string {
@@ -569,9 +517,8 @@ const zhHans: CliMessages = {
     headline: (report) => `${PRODUCT_IDENTITY.productName} ${report.version}：${report.ok ? '就绪' : '需要处理'}`,
     installation: (report) => `安装：${report.installation.committed ? '已提交' : report.installation.detailCode}`,
     service: (report) => `服务：${localizeCliStatusValue(report.service.mode, 'zh-Hans')} / ${localizeCliStatusValue(report.service.active, 'zh-Hans')} / ${localizeCliStatusValue(report.service.enabled, 'zh-Hans')}`,
-    internalEndpoint: (report) => `内部端点：${localizeCliStatusValue(report.endpoints.internal, 'zh-Hans')}`,
-    advertisedEndpoint: (report) => `公开端点：${localizeCliStatusValue(report.endpoints.advertised, 'zh-Hans')}`,
-    tailscale: (report) => `Tailscale：${localizeCliStatusValue(report.network.topology, 'zh-Hans')} / ${localizeCliStatusValue(report.network.backend, 'zh-Hans')} / ${localizeCliStatusValue(report.network.route, 'zh-Hans')}${report.network.owned ? '（自有）' : ''}`,
+    listener: (report) => `Broker 监听：${report.listener.url} / 仅限回环 / ${report.listener.ready ? '就绪' : '无法连接'}`,
+    connectivity: () => '连接：由操作者在 cosyncing 外部管理',
     agents: (report) => `已注册智能体：${report.agents.length ? report.agents.map((agent) => {
       const readiness = agent.canCreateSession === true
         ? '可创建会话'

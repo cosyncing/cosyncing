@@ -11,6 +11,60 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Pairing offers accept an optional, one-time client-reachable broker URL and
+  emit provider-neutral version 3 payloads while clients retain legacy QR support.
+- Connectivity guides and copyable operator-owned proxy and tunnel examples are
+  available under `docs/connectivity/` and `examples/connectivity/`.
+
+### Changed
+
+- The broker now has a strict loopback-only listener and configuration schema 2;
+  remote connectivity is no longer configured, diagnosed, repaired, or removed
+  by cosyncing.
+- Upgrades preserve legacy Tailscale Serve routes while relinquishing their old
+  setup intent and install receipts.
+- Client releases containing the version 3 pairing parser must be promoted
+  before the npm broker release begins emitting version 3 offers.
+- Machine-roster peers running contract revision 16 require an explicit
+  broker-token or paired peer-token credential. `cosy doctor` warns about
+  URL-only `COSYNCING_MACHINE_PEERS` entries before the peer upgrade.
+- The revision-16 client declares revision 15 as its minimum broker contract,
+  matching the single-revision compatibility overlap it actually implements.
+
+### Fixed
+
+- All HTTP and WebSocket clients are treated as remote, so neither a direct
+  browser nor a proxy inherits same-machine privileges from loopback. Packaged
+  installs can explicitly enable authenticated workspace browsing and
+  transcript export through schema-2 `features` configuration.
+- Session rosters and other data-bearing API reads now require a broker or
+  paired-device credential; public health remains minimal.
+- WebSocket URLs contain a short-lived, one-use authorization ticket instead
+  of a broker or paired-device credential when connected to a current broker;
+  the client retains a revision-gated fallback during the client-first rollout.
+- A client connected to a revision-15 broker now re-probes authentication on
+  reconnect, so it can cross a live revision-16 upgrade without an app restart.
+- Stale revision-15 clients can still load the roster from a revision-16 broker,
+  but cannot open sessions until updated because query credentials are retired.
+- Candidate startup no longer persists configuration schema 2 during an
+  upgrade, so a failed upgrade can restore a schema-1 broker safely.
+- Artifact persistence uses a durable installation identity rather than a
+  public URL. It retains and resolves legacy advertised-URL records without
+  deleting the keys required by an old-binary rollback.
+- Version 3 pairing acceptance proves ownership of the identity key committed
+  in the QR before the client stores the endpoint or credential.
+- Public pairing acceptance now rejects oversized or malformed bodies, weak
+  credentials, invalid key algorithms, unsafe device IDs, and endpoint-ID
+  collisions without consuming the one-use offer.
+- API method routing no longer lets unauthenticated `OPTIONS` requests execute
+  roster handlers, and unexpected request failures return content-free responses.
+- Artifact URL signing now rejects weak or unsafe secret state, explicit file
+  delivery rejects symlinked workspace paths, and the web shell cannot be framed.
+- Artifact caches relocated through a symlinked parent remain durable across
+  broker restarts; proactive artifact surfacing intentionally rejects symlinked workspace paths.
+
 ## 0.4.1 — 2026-08-21
 
 ### Added

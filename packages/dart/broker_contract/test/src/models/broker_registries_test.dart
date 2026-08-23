@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(53));
+      expect(brokerRoutes, hasLength(54));
     });
 
     test('contains the fs and upload routes', () {
@@ -46,14 +46,16 @@ void main() {
           '/api/session-roster-deltas',
           '/api/tokdash/quota',
           '/api/tokdash/quota-preference',
+          '/api/ws-auth-tickets',
         ]),
       );
     });
   });
 
   group('brokerErrorCodes', () {
-    test('has 102 entries', () {
-      expect(brokerErrorCodes, hasLength(102));
+    test('has 103 entries', () {
+      expect(brokerErrorCodes, hasLength(103));
+      expect(brokerErrorCodes, contains('AUTH_REQUIRED'));
     });
 
     test('includes temporary session creation unavailability', () {

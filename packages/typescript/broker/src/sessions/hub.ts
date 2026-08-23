@@ -32,6 +32,7 @@ import {
   DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT,
   type ArtifactStore,
 } from '../artifacts/artifact-store.ts';
+import { validateResolvedWorkspacePath } from '../artifacts/fs-browse.ts';
 import type { SharedDraftStore } from './draft-store.ts';
 import { planSemanticFromMessage } from './client-message-policy.ts';
 import { capHistoryMessages } from './history-delta.ts';
@@ -621,6 +622,7 @@ export class ManagedConn {
     const abs = resolve(this.cwd, p); // p is usually absolute; resolve tolerates relative too
     if (!isWithin(this.cwd, abs)) return; // never surface a write that escaped the workspace
     try {
+      validateResolvedWorkspacePath(this.cwd, abs);
       const st = lstatSync(abs);
       if (st.isSymbolicLink() || !st.isFile()) return;
       // The exact session's native write result is the ownership proof. The
@@ -638,6 +640,7 @@ export class ManagedConn {
     const abs = resolve(this.cwd, rawPath);
     if (!isWithin(this.cwd, abs)) return { ok: false, detail: 'path is outside the workspace' };
     try {
+      validateResolvedWorkspacePath(this.cwd, abs);
       const st = lstatSync(abs);
       if (st.isSymbolicLink() || !st.isFile()) return { ok: false, detail: 'not a regular file' };
       if (!this.emitArtifact(abs, basename(abs), st.size, { proactive: true })) {
@@ -661,6 +664,7 @@ export class ManagedConn {
       const abs = resolve(baseDir, clean);
       if (!this.cwd || !isWithin(this.cwd, abs)) return null;
       try {
+        validateResolvedWorkspacePath(this.cwd, abs);
         const st = lstatSync(abs);
         if (st.isSymbolicLink() || !st.isFile() || st.size > 5_000_000) return null;
         return `data:${mimeFromName(abs)};base64,${readFileSync(abs).toString('base64')}`;

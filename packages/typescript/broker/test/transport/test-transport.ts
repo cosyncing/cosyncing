@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import {
+  BrokerHttpTransport,
   MemoryRelay,
-  TailscaleDirectTransport,
   textEnvelope,
 } from '../../../transport/src/index.ts';
 
@@ -35,9 +35,9 @@ await test('relay transport carries opaque envelopes in order', async () => {
   assert.deepEqual([...received[1].bytes], [0, 1, 255]);
 });
 
-await test('tailscale direct transport posts raw envelope bytes with metadata headers', async () => {
+await test('Broker HTTP transport posts raw envelope bytes with metadata headers', async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
-  const transport = new TailscaleDirectTransport({
+  const transport = new BrokerHttpTransport({
     baseUrl: 'http://cosyncing.test',
     fetch: async (url, init) => {
       calls.push({ url: String(url), init: init ?? {} });
@@ -56,9 +56,9 @@ await test('tailscale direct transport posts raw envelope bytes with metadata he
   assert.deepEqual([...new Uint8Array(calls[0]?.init.body as ArrayBuffer)], [7, 8, 9]);
 });
 
-await test('tailscale direct transport receives broker mailbox envelopes', async () => {
+await test('Broker HTTP transport receives broker mailbox envelopes', async () => {
   let calls = 0;
-  const transport = new TailscaleDirectTransport({
+  const transport = new BrokerHttpTransport({
     baseUrl: 'http://cosyncing.test',
     peerId: 'phone',
     peerToken: 'phone-token',

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Strict schema/validator for evidence collected on real hosts and a real same-tailnet client. */
+/** Strict schema/validator for evidence collected on real hosts and a real remote client. */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -40,21 +40,21 @@ export interface EvidenceExpectations {
 export const HOST_REQUIREMENTS = Object.freeze({
   'linux-x64': [
     'artifact.install', 'doctor.before-after', 'setup.mutation-review', 'service.reboot-recovery',
-    'tailscale.private-serve', 'client.pair', 'broker.roster', 'broker.observe', 'broker.take-over',
+    'connectivity.external-forward', 'client.pair', 'broker.roster', 'broker.observe', 'broker.take-over',
     'broker.file-exchange', 'release.upgrade', 'release.unhealthy-rollback', 'uninstall.machine-diff',
   ],
   'linux-arm64': [
     'artifact.install', 'doctor.before-after', 'setup.mutation-review', 'service.reboot-recovery',
-    'tailscale.private-serve', 'client.pair', 'broker.roster', 'broker.observe', 'broker.take-over',
+    'connectivity.external-forward', 'client.pair', 'broker.roster', 'broker.observe', 'broker.take-over',
     'broker.file-exchange', 'release.upgrade', 'release.unhealthy-rollback', 'uninstall.machine-diff',
   ],
   'wsl-systemd': [
     'artifact.install', 'doctor.before-after', 'setup.mutation-review', 'service.terminate-recovery',
-    'wsl.tailscale-topology', 'wsl.supported-network-operation', 'broker.operation', 'uninstall.machine-diff',
+    'wsl.connectivity-topology', 'wsl.supported-network-operation', 'broker.operation', 'uninstall.machine-diff',
   ],
   'wsl-foreground': [
     'artifact.install', 'doctor.before-after', 'setup.mutation-review', 'foreground.restart',
-    'wsl.tailscale-topology', 'wsl.supported-network-operation', 'broker.operation', 'uninstall.machine-diff',
+    'wsl.connectivity-topology', 'wsl.supported-network-operation', 'broker.operation', 'uninstall.machine-diff',
   ],
 } as const);
 
@@ -76,7 +76,7 @@ export const AGENT_REQUIREMENTS = Object.freeze({
 } as const);
 
 export const CLIENT_REQUIREMENTS = Object.freeze([
-  'same-tailnet.scan-accept',
+  'remote-origin.scan-accept',
   'peer-token.reconnect',
   'peer-token.revoke',
   'encrypted-control',

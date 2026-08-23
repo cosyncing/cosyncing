@@ -2062,6 +2062,9 @@ class _BlockingHistoryPageConnection
       connection.stateStream;
 
   @override
+  String? get lastConnectionErrorMessage => null;
+
+  @override
   Stream<WireEvent> get events => connection.events;
 
   @override

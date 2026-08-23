@@ -304,10 +304,16 @@ export class AuthFailureAttentionTracker {
 
   recordFailure(): string | undefined {
     const now = this.now();
+    if (this.lastIncidentAt !== undefined && now - this.lastIncidentAt < this.cooldownMs) {
+      // A cooldown suppresses the whole incident, not just its notification. Retaining attacker-driven
+      // timestamps here makes every request filter an unbounded array and primes an immediate incident at
+      // cooldown expiry. Discard them instead; a new incident requires a new bounded threshold crossing.
+      this.failures = [];
+      return undefined;
+    }
     this.failures = this.failures.filter((at) => now - at <= this.windowMs);
     this.failures.push(now);
     if (this.failures.length < this.threshold) return undefined;
-    if (this.lastIncidentAt !== undefined && now - this.lastIncidentAt < this.cooldownMs) return undefined;
     this.lastIncidentAt = now;
     this.failures = [];
     return `auth-failures:${now}`;

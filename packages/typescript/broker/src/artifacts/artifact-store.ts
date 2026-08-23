@@ -18,6 +18,11 @@ import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AgentMessage } from '@cosyncing/protocol';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import {
+  atomicWriteOwnerOnly,
+  inspectOwnerOnlyFile,
+  readOwnerOnlyText,
+} from '../security/secure-files.ts';
 import { ClientMessagePolicyError } from '../sessions/client-message-policy.ts';
 
 export interface ArtifactSession {
@@ -92,6 +97,9 @@ export interface ArtifactStoreOptions {
   sessionReplayLimit?: number;
   /** Test/embedding override. Always clamped to the production hard ceiling. */
   maxIndexBytes?: number;
+  /** URL-derived namespaces written by older brokers and retained readably
+   * through the supported old-binary rollback window. Existing signed URLs expire. */
+  legacyBrokerSources?: string[];
 }
 
 interface ArtifactIndex {
@@ -199,7 +207,7 @@ function injectCosyncingBridge(html: string, artifactKey: string, nonce: string)
   }, true);
 })();
 </script>`;
-  return /<\/body\s*>/i.test(html) ? html.replace(/<\/body\s*>/i, `${script}</body>`) : `${html}${script}`;
+  return /<\/body\s*>/i.test(html) ? html.replace(/<\/body\s*>/i, () => `${script}</body>`) : `${html}${script}`;
 }
 
 function plainRecord(value: unknown): value is Record<string, unknown> {
@@ -307,11 +315,31 @@ function parseDataUrl(url: string): { mimeType: string; bytes: Buffer } | null {
   };
 }
 
+export function resolveArtifactCacheRoot(configured: string): string {
+  if (!isAbsolute(configured) || configured.includes('\0')) {
+    throw new Error('COSYNCING_CACHE_DIR must be an absolute path');
+  }
+
+  // Cache roots are routinely relocated through an owner-chosen symlink such as
+  // `~/.cache -> /mnt/large/.cache`. Canonicalize the deepest existing ancestor and append any
+  // first-run tail that does not exist yet. Secure-file inspection still lstats the canonical root,
+  // every component created below it, and the secret leaf itself.
+  const missing: string[] = [];
+  let cursor = resolve(configured);
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    missing.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return join(realpathSync(cursor), ...missing);
+}
+
 export function artifactCacheRoot(): string {
   const override = process.env.COSYNCING_CACHE_DIR?.trim();
-  if (!override) return join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
-  if (!isAbsolute(override) || override.includes('\0')) throw new Error('COSYNCING_CACHE_DIR must be an absolute path');
-  return resolve(override);
+  return resolveArtifactCacheRoot(
+    override || join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+  );
 }
 
 export class ArtifactStore {
@@ -325,6 +353,7 @@ export class ArtifactStore {
   private readonly maxIndexBytes: number;
   private readonly secret: Buffer;
   private readonly brokerSource: string;
+  private readonly legacyBrokerSources: ReadonlySet<string>;
   readonly replayLimit: number;
   private readonly records = new Map<string, ArtifactRecord>();
   /** Strictly increasing LRU clock. Wall-clock milliseconds alone can collide,
@@ -338,6 +367,11 @@ export class ArtifactStore {
     this.indexFile = join(root, 'artifacts', 'index.json');
     this.secretFile = join(root, 'artifact-url-secret');
     this.brokerSource = normalizeBrokerSource(brokerUrl);
+    this.legacyBrokerSources = new Set(
+      (options.legacyBrokerSources ?? [])
+        .map(normalizeBrokerSource)
+        .filter((source) => source !== this.brokerSource),
+    );
     this.maxBytes = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES, DEFAULT_MAX_BYTES);
     this.maxAgeMs = positiveNumber(process.env.COSYNCING_ARTIFACT_CACHE_MAX_AGE_DAYS, DEFAULT_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
     this.maxRecords = boundedPositiveInteger(
@@ -365,10 +399,16 @@ export class ArtifactStore {
         .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt || b.createdAt - a.createdAt)
         .slice(0, this.maxRecords)
         .reverse();
-    for (const r of retained) {
-      this.records.set(r.key, r);
-      this.lastRecency = Math.max(this.lastRecency, r.createdAt, r.lastAccessedAt);
+    for (const loadedRecord of retained) {
+      const existing = this.records.get(loadedRecord.key);
+      if (!existing || existing.lastAccessedAt <= loadedRecord.lastAccessedAt) {
+        this.records.set(loadedRecord.key, loadedRecord);
+      }
+      this.lastRecency = Math.max(this.lastRecency, loadedRecord.createdAt, loadedRecord.lastAccessedAt);
     }
+    // Legacy records deliberately keep their URL-derived keys on disk. The new
+    // broker resolves them through the durable compatibility source list, while
+    // a rolled-back old broker can still resolve the exact same records.
     if (retained.length !== loaded.length) this.persist('sweep');
   }
 
@@ -575,15 +615,27 @@ export class ArtifactStore {
     brokerUrl?: string,
   ): Array<AgentMessage & { type: 'file-artifact' }> {
     const now = Date.now();
-    const matching = [...this.records.values()]
+    const eligible = [...this.records.values()]
       .filter((record) =>
         record.tool === session.tool &&
         record.sessionId === session.id &&
-        record.brokerSource === this.brokerSource &&
+        this.ownsSource(record.brokerSource) &&
         record.qualifiedSource === 'managed-connection-v1' &&
         existsSync(record.filePath) &&
         (!record.expiresAt || now <= record.expiresAt)
-      )
+      );
+    const byArtifactKey = new Map<string, ArtifactRecord>();
+    for (const record of eligible) {
+      const current = byArtifactKey.get(record.artifactKey);
+      if (!current
+          || (current.brokerSource !== this.brokerSource && record.brokerSource === this.brokerSource)
+          || (current.brokerSource !== this.brokerSource
+            && record.brokerSource !== this.brokerSource
+            && record.createdAt > current.createdAt)) {
+        byArtifactKey.set(record.artifactKey, record);
+      }
+    }
+    const matching = [...byArtifactKey.values()]
       .sort((a, b) => a.createdAt - b.createdAt)
       .slice(-this.replayLimit);
     return matching
@@ -683,7 +735,7 @@ export class ArtifactStore {
       for (const [key, rec] of [...this.records.entries()]) {
         if (
           rec.deliveryClass !== 'export-attachment' ||
-          (rec.brokerSource && rec.brokerSource !== this.brokerSource)
+          !this.ownsSource(rec.brokerSource)
         ) continue;
         this.records.delete(key);
         removed.push(rec);
@@ -756,7 +808,7 @@ export class ArtifactStore {
       let count = 0;
       for (const [key, rec] of [...this.records.entries()]) {
         if (
-          rec.brokerSource !== this.brokerSource ||
+          !this.ownsSource(rec.brokerSource) ||
           rec.tool !== tool ||
           rec.sessionId !== sessionId
         ) continue;
@@ -811,16 +863,12 @@ export class ArtifactStore {
     };
   }
 
-  private signedUrl(tool: string, sessionId: string, artifactKey: string, brokerUrl = this.brokerUrl, ttlMs = SIGNATURE_TTL_MS): string {
+  private signedUrl(tool: string, sessionId: string, artifactKey: string, _brokerUrl = this.brokerUrl, ttlMs = SIGNATURE_TTL_MS): string {
     const expires = Date.now() + ttlMs;
     const sig = this.sign(tool, sessionId, artifactKey, expires);
-    const url = new URL(
-      `/api/sessions/${safePart(tool)}/${safePart(sessionId)}/artifact/${safePart(artifactKey)}`,
-      brokerUrl,
-    );
-    url.searchParams.set('expires', String(expires));
-    url.searchParams.set('sig', sig);
-    return url.toString();
+    const path = `/api/sessions/${safePart(tool)}/${safePart(sessionId)}/artifact/${safePart(artifactKey)}`;
+    const query = new URLSearchParams({ expires: String(expires), sig });
+    return `${path}?${query}`;
   }
 
   private sign(tool: string, sessionId: string, artifactKey: string, expires: number): string {
@@ -859,19 +907,43 @@ export class ArtifactStore {
   }
 
   private lookupRecord(tool: string, sessionId: string, artifactKey: string): ArtifactRecord | undefined {
-    const record = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
-    return record?.brokerSource === this.brokerSource ? record : undefined;
+    const current = this.records.get(recordKey(this.brokerSource, tool, sessionId, artifactKey));
+    if (current && this.ownsSource(current.brokerSource)) return current;
+    for (const source of this.legacyBrokerSources) {
+      const legacy = this.records.get(recordKey(source, tool, sessionId, artifactKey));
+      if (legacy && normalizeBrokerSource(legacy.brokerSource ?? '') === source) return legacy;
+    }
+    return undefined;
+  }
+
+  private ownsSource(source: string | undefined): boolean {
+    if (!source) return false;
+    const normalized = normalizeBrokerSource(source);
+    return normalized === this.brokerSource || this.legacyBrokerSources.has(normalized);
   }
 
   private loadSecret(): Buffer {
-    try {
-      return Buffer.from(readFileSync(this.secretFile, 'utf8').trim(), 'base64');
-    } catch {
-      const secret = randomBytes(32);
-      mkdirSync(dirname(this.secretFile), { recursive: true });
-      writeFileSync(this.secretFile, secret.toString('base64'), { mode: 0o600 });
-      return secret;
+    const inspection = inspectOwnerOnlyFile(this.secretFile);
+    if (inspection.status === 'ok') {
+      const encoded = readOwnerOnlyText(this.secretFile).trim();
+      // Buffer.from(base64) is deliberately permissive and accepts empty or truncated input. Require a
+      // canonical encoding and at least 256 bits before this value can become an HMAC key.
+      if (/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+        const secret = Buffer.from(encoded, 'base64');
+        if (secret.length >= 32 && secret.toString('base64') === encoded) return secret;
+      }
+    } else if (
+      inspection.status !== 'missing'
+      && !(inspection.status === 'unsafe' && inspection.problem === 'unsafe-mode')
+    ) {
+      throw new Error(`artifact URL secret is unsafe (${inspection.problem ?? inspection.status})`);
     }
+
+    const secret = randomBytes(32);
+    atomicWriteOwnerOnly(this.secretFile, secret.toString('base64'), { mode: 0o600 });
+    const committed = inspectOwnerOnlyFile(this.secretFile);
+    if (committed.status !== 'ok') throw new Error('artifact URL secret could not be committed safely');
+    return secret;
   }
 
   private loadIndex(): ArtifactIndex {

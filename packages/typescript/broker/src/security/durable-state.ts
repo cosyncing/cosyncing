@@ -9,6 +9,8 @@ import { basename, dirname, join, relative } from 'node:path';
 import { artifactCacheRoot } from '../artifacts/artifact-store.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 import { acquireInstallationLock } from '../installation/installation-lock.ts';
+import { migrateBrokerConfigV1 } from '../runtime/configuration.ts';
+import { inspectBrokerInstance } from '../runtime/broker-instance.ts';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
@@ -21,6 +23,7 @@ export interface DurableStateLayout {
   stateRoot: string;
   cacheRoot: string;
   config: string;
+  brokerInstance: string;
   setup: string;
   install: string;
   schedules: string;
@@ -36,16 +39,17 @@ export interface DurableStateLayout {
 }
 
 export interface DurableSchemaSpec {
-  id: 'config' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'artifacts';
+  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'artifacts';
   root: 'state' | 'cache';
   relativePath: string;
   versionField: 'schemaVersion' | 'version';
-  currentVersion: 1;
+  currentVersion: 1 | 2;
   sensitive: boolean;
 }
 
 export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.freeze([
-  { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
+  { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 2, sensitive: false },
+  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 1, sensitive: true },
   { id: 'setup', root: 'state', relativePath: 'setup-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'install', root: 'state', relativePath: 'install-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 1, sensitive: true },
@@ -89,10 +93,10 @@ export interface DurableMigrationPlan {
   schemaVersion: 1;
   requiresConfirmation: true;
   steps: Array<{
-    id: 'setup-state-v0-to-v1';
-    store: 'setup';
-    fromVersion: 0;
-    toVersion: 1;
+    id: 'setup-state-v0-to-v1' | 'broker-config-v1-to-v2';
+    store: 'setup' | 'config';
+    fromVersion: 0 | 1;
+    toVersion: 1 | 2;
   }>;
   blockers: Array<{ store: DurableSchemaSpec['id']; detailCode: string }>;
 }
@@ -104,6 +108,7 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
     stateRoot,
     cacheRoot,
     config: join(stateRoot, 'config.json'),
+    brokerInstance: join(stateRoot, 'broker-instance.json'),
     setup: join(stateRoot, 'setup-state.json'),
     install: join(stateRoot, 'install-state.json'),
     schedules: join(stateRoot, 'schedules.json'),
@@ -121,6 +126,20 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
 
 export function inspectDurableSchemas(layout = durableStateLayout()): DurableStoreInspection[] {
   return DURABLE_SCHEMA_REGISTRY.map((spec) => {
+    if (spec.id === 'broker-instance') {
+      const inspection = inspectBrokerInstance(layout.stateRoot);
+      if (inspection.status === 'missing') {
+        return { id: spec.id, status: 'missing', detailCode: inspection.detailCode };
+      }
+      if (inspection.status === 'ok') {
+        return { id: spec.id, status: 'ok', version: inspection.state.version, detailCode: inspection.detailCode };
+      }
+      return {
+        id: spec.id,
+        status: inspection.status === 'unsafe' ? 'unsafe' : 'malformed',
+        detailCode: inspection.detailCode,
+      };
+    }
     const root = spec.root === 'state' ? layout.stateRoot : layout.cacheRoot;
     const path = join(root, spec.relativePath);
     const file = inspectOwnerOnlyFile(path);
@@ -173,9 +192,13 @@ export function inspectDurableStatePermissionRepair(
   if (!spec || !spec.sensitive) return 'blocked';
   const file = inspectOwnerOnlyFile(repair.path);
   if (file.status === 'ok') {
+    if (spec.id === 'broker-instance') {
+      return inspectBrokerInstance(dirname(repair.path)).status === 'ok' ? 'current' : 'blocked';
+    }
     return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'current' : 'blocked';
   }
   if (file.status !== 'unsafe' || file.problem !== 'unsafe-mode') return 'blocked';
+  if (spec.id === 'broker-instance') return 'blocked';
   return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'tightenable' : 'blocked';
 }
 
@@ -241,6 +264,10 @@ export function planDurableStateMigrations(layout = durableStateLayout()): Durab
   for (const inspection of inspectDurableSchemas(layout)) {
     if (inspection.status === 'migration-required' && inspection.id === 'setup') {
       steps.push({ id: 'setup-state-v0-to-v1', store: 'setup', fromVersion: 0, toVersion: 1 });
+    } else if (inspection.status === 'unsupported-version'
+      && inspection.id === 'config'
+      && inspection.version === 1) {
+      steps.push({ id: 'broker-config-v1-to-v2', store: 'config', fromVersion: 1, toVersion: 2 });
     } else if (inspection.status !== 'ok' && inspection.status !== 'missing') {
       blockers.push({ store: inspection.id, detailCode: inspection.detailCode });
     }
@@ -293,10 +320,16 @@ export function applyDurableStateMigrationsWithLockHeld(options: {
   });
   const applied: string[] = [];
   for (const step of options.plan.steps) {
-    if (step.id !== 'setup-state-v0-to-v1') throw new Error('unsupported durable-state migration step');
-    const raw = JSON.parse(readFileSync(layout.setup, 'utf8')) as unknown;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('setup state is malformed');
-    atomicWriteJsonOwnerOnly(layout.setup, { ...(raw as Record<string, unknown>), schemaVersion: 1 });
+    if (step.id === 'setup-state-v0-to-v1') {
+      const raw = JSON.parse(readFileSync(layout.setup, 'utf8')) as unknown;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('setup state is malformed');
+      atomicWriteJsonOwnerOnly(layout.setup, { ...(raw as Record<string, unknown>), schemaVersion: 1 });
+    } else if (step.id === 'broker-config-v1-to-v2') {
+      const migrated = migrateBrokerConfigV1(layout.stateRoot);
+      if (!migrated.migrated) throw new Error('broker config migration precondition changed');
+    } else {
+      throw new Error('unsupported durable-state migration step');
+    }
     applied.push(step.id);
   }
   return { applied, backupPath: backup.path };
@@ -367,6 +400,7 @@ export function backupDurableStores(options: {
   const entries: DurableBackupManifest['entries'] = [];
   const sources = [
     { path: layout.config, label: 'state/config.json', destination: join(path, 'state', 'config.json') },
+    { path: layout.brokerInstance, label: 'state/broker-instance.json', destination: join(path, 'state', 'broker-instance.json') },
     { path: layout.setup, label: 'state/setup-state.json', destination: join(path, 'state', 'setup-state.json') },
     { path: layout.install, label: 'state/install-state.json', destination: join(path, 'state', 'install-state.json') },
     { path: layout.schedules, label: 'state/schedules.json', destination: join(path, 'state', 'schedules.json') },

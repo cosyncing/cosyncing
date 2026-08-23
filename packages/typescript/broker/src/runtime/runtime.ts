@@ -5,7 +5,7 @@
  * - Serves the web client.
  *
  * Run: `bun run packages/typescript/broker/src/runtime/runtime.ts`  (or `bun run broker`)
- * Env: PORT (7734), HOST (127.0.0.1), COSYNCING_MACHINE, OPENCODE_URL.
+ * Source-development env: PORT (7734), COSYNCING_MACHINE, OPENCODE_URL.
  */
 import os from 'node:os';
 import { closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
@@ -95,7 +95,7 @@ import {
   type AuthorizedArtifactInteraction,
 } from '../artifacts/artifact-store.ts';
 import { buildDiffRefMessage, INLINE_DIFF_CAP } from '../sessions/diff-reference.ts';
-import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2MaxBytes, reserveR2RateSlot, trustTierForAddress } from '../security/r2-policy.ts';
+import { assertR2ActionsSafe, consumeConfirmNonce, deriveSessionRevision, getR2Action, issueConfirmNonce, r2ActionAvailable, r2EnabledActions, r2MaxBytes, reserveR2RateSlot } from '../security/r2-policy.ts';
 import { runTranscriptExport } from '../security/r2-export.ts';
 import {
   backwardHistoryCursor,
@@ -139,7 +139,13 @@ import {
 import './managed-runtime-state.ts';
 import { RuntimeUpdateCoordinator } from '../updates/runtime-update.ts';
 import { createCodexRuntimeUpdateProvider, createOpencodeRuntimeUpdateProvider } from '../updates/runtime-update-providers.ts';
-import { PairingHttpError, tokenHash, TransportPairingRegistry } from '../transport/transport-pairing.ts';
+import {
+  assertPairingId,
+  PAIRING_ACCEPT_MAX_BYTES,
+  PairingHttpError,
+  tokenHash,
+  TransportPairingRegistry,
+} from '../transport/transport-pairing.ts';
 import { MemoryReplayCache, openTransportEnvelope } from '@cosyncing/transport-wire';
 import type { TransportEnvelope } from '@cosyncing/transport';
 import {
@@ -199,8 +205,14 @@ import {
   type BrokerServiceBoundary,
 } from './service-boundary.ts';
 import { resolveFlutterWebRoot } from './runtime-assets.ts';
-import { resolveBrokerConfiguration } from './configuration.ts';
+import {
+  BROKER_LISTEN_HOST,
+  inspectBrokerConfig,
+  resolveBrokerConfiguration,
+} from './configuration.ts';
+import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
+import { WsAuthTicketRegistry, type WsAuthTicketBinding } from '../security/ws-auth-tickets.ts';
 import { inspectDurableCorruptionEvidence, inspectDurableSchemas } from '../security/durable-state.ts';
 import { remoteFilesystemAllowed } from '../sessions/client-message-policy.ts';
 import {
@@ -356,12 +368,34 @@ let shuttingDown = false;
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 const SERVICE_BOUNDARY = detectBrokerServiceBoundary();
 
+const CONFIG_INSPECTION = inspectBrokerConfig();
 const EFFECTIVE_CONFIGURATION = resolveBrokerConfiguration({ packaged: BUILD_INFO.packaged });
 const PORT = EFFECTIVE_CONFIGURATION.config.broker.port;
-const HOST = EFFECTIVE_CONFIGURATION.config.broker.host;
+const LISTEN_HOST = BROKER_LISTEN_HOST;
+if (EFFECTIVE_CONFIGURATION.config.broker.host !== LISTEN_HOST) throw new Error('broker-listener-host-invariant');
 const MACHINE = EFFECTIVE_CONFIGURATION.config.broker.machineLabel;
 const BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.internalUrl;
-const ADVERTISED_BROKER_URL = EFFECTIVE_CONFIGURATION.config.broker.advertisedUrl;
+const HTTP_WORKSPACE_BROWSING_ENABLED =
+  EFFECTIVE_CONFIGURATION.config.features?.httpWorkspaceBrowsing === true
+  || (!BUILD_INFO.packaged && /^(1|true|yes|on)$/i.test(
+    process.env.COSYNCING_FS_REMOTE_ENABLED?.trim() || '',
+  ));
+const HTTP_R2_ENABLED_ACTIONS = new Set([
+  ...(EFFECTIVE_CONFIGURATION.config.features?.httpTranscriptExport === true
+    ? ['transcriptExport']
+    : []),
+  ...(!BUILD_INFO.packaged ? r2EnabledActions() : []),
+]);
+const BROKER_INSTANCE = loadOrCreateBrokerInstance();
+const ARTIFACT_BROKER_SOURCE = `broker-instance:${BROKER_INSTANCE.instanceId}`;
+const LEGACY_ARTIFACT_BROKER_SOURCES = CONFIG_INSPECTION.status === 'ok'
+  ? [
+      ...(BROKER_INSTANCE.legacyArtifactBrokerSources ?? []),
+      CONFIG_INSPECTION.previousAdvertisedUrl,
+      CONFIG_INSPECTION.previousInternalUrl,
+    ]
+    .filter((value): value is string => !!value)
+  : [...(BROKER_INSTANCE.legacyArtifactBrokerSources ?? [])];
 const RUNTIME_CREDENTIALS = resolveRuntimeCredentials({
   packaged: BUILD_INFO.packaged,
   internalUrl: BROKER_URL,
@@ -398,25 +432,17 @@ const CLAUDE_HOOKS_DEV_ENABLED = !BUILD_INFO.packaged && process.env.COSYNCING_D
 // opt in via CORP/CORS — notably a CDN-hosted CanvasKit (the default `flutter build web`). Only enable it with
 // a self-contained build: `flutter build web --base-href /cosy/ --no-web-resources-cdn`. Toggle: COSYNCING_WEB_COI=1.
 const WEB_COI = /^(1|true|yes|on)$/i.test(process.env.COSYNCING_WEB_COI?.trim() || '');
-// The installed shared secret is REQUIRED on EVERY mutating request (POST/PATCH/DELETE) plus the
-// session WS stream, the Pi-bridge legs (incl. the GET command long-poll), the Claude hook legs, and the
-// hooks install-status — i.e. default-deny on anything that can run/approve/spawn/mutate; read-only GETs
-// (roster, health, usage, agents, artifact serving) stay open. Every legitimate client carries it: the app
-// appends it to the WS URL and adds `x-cosyncing-token` to its control fetches; the Pi extension, the Claude
-// source-only hook, and the OpenCode send_file tool read the legacy environment override. The token can approve
-// destructive tool calls, so an unauthenticated broker MUST NOT be exposed beyond loopback — see the
-// non-loopback bind guard below. (Review findings 2026-06-23 + 2026-06-24: HIGH/no-auth, then default-deny.)
-const HOST_IS_LOOPBACK = HOST === '127.0.0.1' || HOST.startsWith('127.') || HOST === '::1' || HOST === 'localhost';
-/** True when the request may touch a control path: no token configured → L0 loopback baseline; else the
- *  request must carry the secret as `x-cosyncing-token` or `?token=`. The Pi integration credential is accepted
+// The installed shared secret is required on every data-bearing `/api/*` route. The deliberately public
+// surface is limited to minimal health, one-use pairing acceptance, and signed artifact downloads. Static
+// `/cosy/*` assets are outside `/api/*`. Every legitimate client carries the credential in a header; request
+// URLs are never credential carriers because reverse proxies routinely log them.
+/** True when the request may touch a protected path: no token configured → source-only loopback baseline;
+ *  otherwise the request must carry the secret as `x-cosyncing-token`. The Pi integration credential is accepted
  *  only on `/pi/bridge/*` and never becomes a general broker credential. */
-function authed(req: Request, url: URL, path: string): boolean {
+function authed(req: Request, _url: URL, path: string): boolean {
   if (!TOKEN) return true;
-  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || url.searchParams.get('token')?.trim() || '';
-  const peerTokens = [
-    req.headers.get('x-cosyncing-peer-token')?.trim() || '',
-    url.searchParams.get('peerToken')?.trim() || '',
-  ].filter(Boolean);
+  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
+  const peerTokens = [req.headers.get('x-cosyncing-peer-token')?.trim() || ''].filter(Boolean);
   if (safeCredentialEqual(TOKEN, sharedToken)
       || peerTokens.some((peerToken) => transportPairings.verifyAnyPeerToken(peerToken) === 'ok')) {
     return true;
@@ -428,13 +454,10 @@ function authed(req: Request, url: URL, path: string): boolean {
 
 /** Unlike the loopback-compatible `authed`, this proves that an actual shared/peer credential was
  * supplied. The D12 Drive boundary requires this for direct `mode=resume`. */
-function credentialAuthenticated(req: Request, url: URL): boolean {
-  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || url.searchParams.get('token')?.trim() || '';
-  if (TOKEN && sharedToken === TOKEN) return true;
-  const peerTokens = [
-    req.headers.get('x-cosyncing-peer-token')?.trim() || '',
-    url.searchParams.get('peerToken')?.trim() || '',
-  ].filter(Boolean);
+function credentialAuthenticated(req: Request, _url: URL): boolean {
+  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
+  if (safeCredentialEqual(TOKEN, sharedToken)) return true;
+  const peerTokens = [req.headers.get('x-cosyncing-peer-token')?.trim() || ''].filter(Boolean);
   return peerTokens.some((peerToken) => transportPairings.verifyAnyPeerToken(peerToken) === 'ok');
 }
 
@@ -445,27 +468,21 @@ function credentialAuthenticated(req: Request, url: URL): boolean {
  * changing this value would make an ACK-lost outbox replay dispatch twice
  * across an upgrade.
  */
-function requestCredentialIdentity(req: Request, url: URL): string {
-  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || url.searchParams.get('token')?.trim() || '';
-  return TOKEN && sharedToken === TOKEN
+function requestCredentialIdentity(req: Request, _url: URL): string {
+  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
+  return safeCredentialEqual(TOKEN, sharedToken)
     ? `shared:${tokenHash(sharedToken)}`
     : (() => {
-      const peerToken = [
-        req.headers.get('x-cosyncing-peer-token')?.trim() || '',
-        url.searchParams.get('peerToken')?.trim() || '',
-      ].find((candidate) => candidate && transportPairings.verifyAnyPeerToken(candidate) === 'ok');
+      const peerToken = [req.headers.get('x-cosyncing-peer-token')?.trim() || '']
+        .find((candidate) => candidate && transportPairings.verifyAnyPeerToken(candidate) === 'ok');
       return peerToken ? `peer-token:${tokenHash(peerToken)}` : 'loopback-local';
     })();
 }
 
 /** Credential plus exact client-profile incarnation for staged uploads. */
 function requestUploadIdentity(req: Request, url: URL): string {
-  const profileId = req.headers.get('x-cosyncing-client-profile')?.trim()
-    || url.searchParams.get('clientProfileId')?.trim()
-    || '';
-  const incarnation = req.headers.get('x-cosyncing-client-incarnation')?.trim()
-    || url.searchParams.get('clientProfileIncarnation')?.trim()
-    || '';
+  const profileId = req.headers.get('x-cosyncing-client-profile')?.trim() || '';
+  const incarnation = req.headers.get('x-cosyncing-client-incarnation')?.trim() || '';
   return scopedUploadIdentity(
     requestCredentialIdentity(req, url),
     profileId || undefined,
@@ -662,14 +679,16 @@ latestBrokerHealth = brokerHealth.snapshot();
 let artifactFallbackRoot: string | undefined;
 let artifactStore: ArtifactStore;
 try {
-  artifactStore = new ArtifactStore(ADVERTISED_BROKER_URL ?? BROKER_URL, artifactCacheRoot(), {
+  artifactStore = new ArtifactStore(ARTIFACT_BROKER_SOURCE, artifactCacheRoot(), {
+    legacyBrokerSources: LEGACY_ARTIFACT_BROKER_SOURCES,
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
   });
 } catch (error) {
   brokerHealth.recordStoreWrite('artifact-store', false);
   console.error(`${LOG_PREFIX} artifact cache unavailable; using a process-local fallback: ${error instanceof Error ? error.message : String(error)}`);
   artifactFallbackRoot = mkdtempSync(join(os.tmpdir(), 'cosyncing-artifacts-fallback-'));
-  artifactStore = new ArtifactStore(ADVERTISED_BROKER_URL ?? BROKER_URL, artifactFallbackRoot, {
+  artifactStore = new ArtifactStore(ARTIFACT_BROKER_SOURCE, artifactFallbackRoot, {
+    legacyBrokerSources: LEGACY_ARTIFACT_BROKER_SOURCES,
     onPersistenceResult: (result) => { brokerHealth.recordStoreWrite('artifact-store', result.ok); },
   });
 }
@@ -730,10 +749,10 @@ const BROKER_DESCRIPTOR = Object.freeze({
 });
 const brokerUpdateChecker = new BrokerUpdateChecker({ buildInfo: BUILD_INFO });
 const transportPairings = new TransportPairingRegistry({
-  brokerUrl: ADVERTISED_BROKER_URL ?? BROKER_URL,
   broker: BROKER_DESCRIPTOR,
   ttlMs: TRANSPORT_PAIRING_TTL_MS,
 });
+const wsAuthTickets = new WsAuthTicketRegistry();
 const protocolJournal = new ProtocolJournal({
   onWarning: (message) => console.warn(`${LOG_PREFIX} ${message}`),
 });
@@ -1614,7 +1633,6 @@ async function discoverLocalSessions(
 }
 
 async function discoverMachineRosters(
-  localBaseUrl: string,
   visibility: RosterVisibility,
 ): Promise<AggregatedMachines> {
   const generatedAt = Date.now();
@@ -1624,7 +1642,7 @@ async function discoverMachineRosters(
   // current client (see `fetchPeerMachineRoster`), so what arrives is everything
   // this broker can decode, and this narrows it to what the CALLER can.
   const local = localMachineRoster(
-    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), localBaseUrl, generatedAt,
+    MACHINE, visibleSessions(await discoverLocalSessions(), visibility), undefined, generatedAt,
   );
   const peers = (await Promise.all(MACHINE_PEER_CONFIG.peers.map((peer) => fetchPeerMachineRoster(peer))))
     .map((peer) => ({
@@ -1752,8 +1770,6 @@ interface WsData {
   historyLimit?: number;
   /** New clients request artifact refs; old clients omit it and receive inline adapter artifacts. */
   artifactMode?: 'inline' | 'reference';
-  /** Origin visible to this browser, used for absolute lazy-artifact URLs on phone/Tailscale clients. */
-  publicBrokerUrl?: string;
   /** Credential-scoped, non-secret durable journal namespace. */
   identity: string;
   /** Credential/profile/incarnation-scoped staged-upload namespace. */
@@ -2336,13 +2352,6 @@ function handleProtocolReceipt(ws: ServerWebSocket<WsData>, msg: any): void {
   });
 }
 
-function publicBrokerUrl(req: Request, url: URL): string {
-  if (ADVERTISED_BROKER_URL) return ADVERTISED_BROKER_URL;
-  const host = req.headers.get('x-forwarded-host') || req.headers.get('host') || url.host;
-  const proto = req.headers.get('x-forwarded-proto') || url.protocol.replace(':', '') || 'http';
-  return `${proto}://${host}`;
-}
-
 function healthWithSecurityState(): Record<string, unknown> {
   const inspections = inspectDurableSchemas();
   const recoveredCorruption = inspectDurableCorruptionEvidence();
@@ -2636,7 +2645,6 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     ws.data.id,
     ws.data.artifactMode,
     page.messages,
-    ws.data.publicBrokerUrl,
   );
   send({
     kind: 'history-page',
@@ -3130,7 +3138,13 @@ function planActionPrompt(input: PlanActionInput): string {
 }
 
 const json = (data: unknown, status = 200): Response =>
-  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+  new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'private, no-store',
+    },
+  });
 
 /** Static-file response, gzipped when the client accepts it and the file is a compressible text type
  *  above ~1 KB (app.js ~220 KB → ~60 KB). Otherwise streamed as-is. Compressible responses always carry
@@ -3154,15 +3168,13 @@ function parseFsReadLimit(raw: string | null): number {
   return parsed;
 }
 
-function remoteFsEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(process.env.COSYNCING_FS_REMOTE_ENABLED?.trim() || '');
-}
-
-function fsTrustGate(req: Request, srv: Server<WsData>): Response | undefined {
-  if (remoteFilesystemAllowed(srv.requestIP(req)?.address, remoteFsEnabled())) return undefined;
+function fsTrustGate(): Response | undefined {
+  // A reverse proxy connects from loopback, so a TCP peer address cannot prove that the end user is local.
+  // HTTP clients are always T2 until a non-forwardable local IPC capability exists.
+  if (remoteFilesystemAllowed(undefined, HTTP_WORKSPACE_BROWSING_ENABLED)) return undefined;
   return json({
     ok: false,
-    error: 'workspace file browsing is disabled for non-loopback clients; enable locally via COSYNCING_FS_REMOTE_ENABLED=1',
+    error: 'workspace file browsing is disabled for HTTP clients; enable features.httpWorkspaceBrowsing in local broker configuration',
     code: 'FS_REMOTE_DISABLED',
   }, 403);
 }
@@ -3320,6 +3332,44 @@ async function readTransportRequestBytes(req: Request): Promise<Uint8Array> {
     offset += chunk.byteLength;
   }
   return out;
+}
+
+async function readPairingAcceptanceJson(req: Request): Promise<unknown> {
+  const contentLength = req.headers.get('content-length');
+  if (contentLength && Number(contentLength) > PAIRING_ACCEPT_MAX_BYTES) {
+    throw new PairingHttpError(413, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is too large');
+  }
+  if (!req.body) throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is required');
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > PAIRING_ACCEPT_MAX_BYTES) {
+      try { await reader.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new PairingHttpError(413, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is too large');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance body must be valid JSON');
+  }
+}
+
+function attentionWriteBestEffort(operation: Promise<unknown>, label: string): void {
+  void operation.catch((error) => {
+    console.warn(`${LOG_PREFIX} ${label} attention write failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 async function readUploadChunkBytes(req: Request): Promise<Uint8Array> {
@@ -3686,6 +3736,13 @@ function applyCoi(headers: Headers): Headers {
   return headers;
 }
 
+/** The authenticated web shell must never be embedded by an unrelated origin. */
+function applyFlutterShellSecurity(headers: Headers): Headers {
+  headers.set('content-security-policy', "frame-ancestors 'none'");
+  headers.set('x-frame-options', 'DENY');
+  return headers;
+}
+
 /** Flutter shell files that must never be cached, because each carries build identity rather than
  *  content-addressed payload. See the rationale where these are applied in {@link serveFlutter}. */
 const FLUTTER_UNCACHED_SHELL_FILES: ReadonlySet<string> = new Set([
@@ -3738,6 +3795,7 @@ async function serveFlutter(rawRel: string): Promise<Response> {
     // each load and re-fetches the app itself, so main.dart.js does NOT need `no-store` here and is not
     // re-downloaded on every page load.
     if (FLUTTER_UNCACHED_SHELL_FILES.has(rel)) headers.set('cache-control', 'no-store');
+    if (rel === 'index.html') applyFlutterShellSecurity(headers);
     return new Response(file, { headers: applyCoi(headers) });
   }
   // SPA fallback: a missing NAVIGATION (no file extension, e.g. a deep-linked `sessions/123` refresh)
@@ -3747,16 +3805,8 @@ async function serveFlutter(rawRel: string): Promise<Response> {
   const headers = new Headers();
   if (index.type) headers.set('content-type', index.type);
   headers.set('cache-control', 'no-store');
+  applyFlutterShellSecurity(headers);
   return new Response(index, { headers: applyCoi(headers) });
-}
-
-// Refuse to expose an unauthenticated broker beyond loopback. Packaged setup provisions the shared secret
-// file; source development may still supply the legacy environment override for fixtures.
-if (!HOST_IS_LOOPBACK && !TOKEN) {
-  throw new Error(
-    `refusing to bind non-loopback HOST=${HOST} without an installed broker credential — ` +
-      `run '${PRODUCT_IDENTITY.primaryBinary} setup' or '${PRODUCT_IDENTITY.primaryBinary} repair'.`,
-  );
 }
 
 // Fail-closed at boot on an unsafe R2 registry: a session-mutating action bound to the weak
@@ -3765,8 +3815,9 @@ assertR2ActionsSafe();
 
 server = Bun.serve<WsData>({
   port: PORT,
-  hostname: HOST,
+  hostname: LISTEN_HOST,
   idleTimeout: 240,
+  development: false,
   async fetch(req, srv) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -3777,50 +3828,35 @@ server = Bun.serve<WsData>({
       return new Response('Not found', { status: 404 });
     }
 
-    // Auth model (no-op when no token is configured = the loopback baseline; a non-loopback bind REQUIRES a
-    // token, see the bind guard below). DEFAULT-DENY: every MUTATING request (POST/PATCH/DELETE) needs the
-    // token, so a newly-added control route is gated by construction rather than by remembering to allowlist
-    // it — this is what closes the send_file / restart / codex-sync / createSession / rename gaps the review
-    // caught. Plus the explicitly-listed paths that are GETs but still sensitive: the WS stream (a GET upgrade
-    // that carries prompts/answers), the Pi-bridge legs (incl. the GET command long-poll that drives the
-    // agent), the Claude hook legs, and the Claude hooks install-status. Most read-only GETs (roster,
-    // public liveness, usage, agents, artifact serving) stay open; sensitive detail such as broker health
-    // and attention history is explicitly gated below. Every legitimate client — the app (x-cosyncing-token on its
-    // control fetches), the Pi extension, the Claude hook, the OpenCode send_file tool — carries the token.
-    const mutating = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
+    // Default-deny the data-bearing API. Reverse proxies make loopback the normal TCP source for remote
+    // clients, so neither the peer address nor a forwarded header is authorization evidence. The only public
+    // API routes are minimal health, one-use pairing acceptance, and an artifact URL whose own signature is
+    // verified by ArtifactStore. Source-only tokenless runs retain their loopback development baseline.
     const isPairingAccept = /^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path) && req.method === 'POST';
+    const isSignedArtifact = /^\/api\/sessions\/[^/]+\/[^/]+\/artifact\/[^/]+$/.test(path)
+      && (req.method === 'GET' || req.method === 'HEAD');
+    const isWsTicketUpgrade = /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path)
+      && req.method === 'GET'
+      && !!url.searchParams.get('wsAuthTicket');
+    const isPublicApiRequest = (path === '/api/health' && (req.method === 'GET' || req.method === 'HEAD'))
+      || isPairingAccept
+      || isSignedArtifact
+      || isWsTicketUpgrade;
+    const isApiRequest = path.startsWith('/api/');
     const isPiIntegrationRoute = path.startsWith('/pi/bridge/');
     const isResumeStream = url.searchParams.get('mode') === 'resume'
       && /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path);
     if (
       !authed(req, url, path) &&
       (
-        (mutating && !isPairingAccept) ||
-        path.startsWith('/api/machines') ||
-        path === '/api/attention-events' ||
-        path.startsWith('/api/schedules') || // scheduled sends carry full prompt texts
-        path === '/api/broker/health' ||
-        path === '/api/broker/update' ||
-        path === '/api/tokdash/quota' ||
-        path === '/api/tokdash/quota-preference' ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/uploads$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+\/complete$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/fs$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/fs\/read$/.test(path) ||
-        /^\/api\/sessions\/[^/]+\/[^/]+\/fs\/download$/.test(path) ||
-        path === '/api/push/wake-tokens' ||
-        /^\/api\/push\/wake-tokens\/[^/]+$/.test(path) ||
-        (path.startsWith('/api/transport/') && !isPairingAccept) ||
+        (isApiRequest && !isPublicApiRequest) ||
         path.startsWith('/claude/hook/') ||
-        path === '/api/claude/hooks' ||
         path.startsWith('/pi/bridge/')
       )
     ) {
       const incidentKey = authFailureAttention.recordFailure();
       if (incidentKey) {
-        await attentionService.upsertEvent({
+        attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: incidentKey,
           kind: 'security-alert',
           state: 'resolved',
@@ -3830,7 +3866,7 @@ server = Bun.serve<WsData>({
           action: { kind: 'open-attention-inbox' },
           presentationRevision: 1,
           presentationStage: 'immediate',
-        });
+        }), 'authentication-failure');
       }
       return isResumeStream
         ? json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive resume' }, 401)
@@ -3839,17 +3875,68 @@ server = Bun.serve<WsData>({
         : new Response('unauthorized', { status: 401 });
     }
 
+    if (path === '/api/ws-auth-tickets' && req.method === 'POST') {
+      if (!credentialAuthenticated(req, url)) {
+        return json({ ok: false, code: 'AUTH_REQUIRED', error: 'authenticated credential required' }, 401);
+      }
+      const body = await req.json().catch(() => undefined) as any;
+      const tool = typeof body?.tool === 'string' ? body.tool.trim() : '';
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+      const rawParams = body?.params;
+      const allowedParams = new Set([
+        'mode', 'reason', 'readOnly', 'ownerEpoch', 'ownerSeq', 'since', 'ticket',
+        'initialHistory', 'artifactMode', 'clientVersion', 'contractRevision',
+        'minimumBrokerRevision', 'contractSurfaceHash',
+      ]);
+      if (!tool || !sessionId || tool.length > 1_000 || sessionId.length > 1_000
+        || rawParams == null || typeof rawParams !== 'object' || Array.isArray(rawParams)) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'tool, sessionId, and params are required' }, 400);
+      }
+      const params: Record<string, string> = {};
+      for (const [key, value] of Object.entries(rawParams as Record<string, unknown>)) {
+        if (!allowedParams.has(key) || typeof value !== 'string' || value.length > 4_096) {
+          return json({ ok: false, code: 'BAD_PARAM', error: `invalid WebSocket ticket parameter: ${key}` }, 400);
+        }
+        params[key] = value;
+      }
+      return json({
+        ok: true,
+        ...wsAuthTickets.issue({
+          tool,
+          sessionId,
+          params,
+          identity: requestCredentialIdentity(req, url),
+          uploadIdentity: requestUploadIdentity(req, url),
+          credentialAuthenticated: true,
+        }),
+      }, 201);
+    }
+
     const ws = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/stream$/);
     if (ws) {
-      const requestedMode = url.searchParams.get('mode') ?? undefined; // e.g. ?mode=resume → drivable attach
-      if (requestedMode === 'resume' && !credentialAuthenticated(req, url)) {
+      const tool = decodeURIComponent(ws[1]!);
+      const id = decodeURIComponent(ws[2]!);
+      const wsAuthTicket = url.searchParams.get('wsAuthTicket') ?? '';
+      const ticketBinding: WsAuthTicketBinding | undefined = wsAuthTicket
+        ? wsAuthTickets.consume(wsAuthTicket, tool, id)
+        : undefined;
+      if (TOKEN && !ticketBinding) {
+        return json({ ok: false, code: 'AUTH_REQUIRED', error: 'valid WebSocket authorization ticket required' }, 401);
+      }
+      const attachParams = ticketBinding
+        ? new URLSearchParams(ticketBinding.params)
+        : url.searchParams;
+      const attachCredentialAuthenticated = ticketBinding?.credentialAuthenticated
+        ?? credentialAuthenticated(req, url);
+      const requestedMode = attachParams.get('mode') ?? undefined; // e.g. mode=resume → drivable attach
+      if (requestedMode === 'resume' && !attachCredentialAuthenticated) {
         return json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive resume' }, 401);
       }
-      const clientContract = parseWsClientContract(url.searchParams);
+      const clientContract = parseWsClientContract(attachParams);
       if (clientContract.error) {
         return json({ ok: false, code: 'BAD_PARAM', error: clientContract.error }, 400);
       }
-      const requestedReason = url.searchParams.get('reason') ?? undefined;
+      const requestedReason = attachParams.get('reason') ?? undefined;
       if (requestedReason !== undefined
         && !(DRIVE_ATTACH_REASONS as readonly string[]).includes(requestedReason)) {
         return json({ ok: false, code: 'BAD_PARAM', error: `unknown attach reason: ${requestedReason}` }, 400);
@@ -3881,11 +3968,11 @@ server = Bun.serve<WsData>({
       // client on this same revision would then evaluate as hard-incompatible
       // and be forced read-only. Renaming a 401 is not worth that.
       if (requestedReason !== undefined && requestedMode === 'live'
-        && !credentialAuthenticated(req, url)) {
+        && !attachCredentialAuthenticated) {
         return json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive takeover' }, 401);
       }
-      const ownerEpoch = url.searchParams.get('ownerEpoch')?.trim() || undefined;
-      const ownerSeqRaw = url.searchParams.get('ownerSeq');
+      const ownerEpoch = attachParams.get('ownerEpoch')?.trim() || undefined;
+      const ownerSeqRaw = attachParams.get('ownerSeq');
       let expectedOwnerRevision: SessionOwnerRevision | undefined;
       if (requestedReason === 'join-existing') {
         const ownerSeq = ownerSeqRaw == null ? Number.NaN : Number(ownerSeqRaw);
@@ -3919,7 +4006,7 @@ server = Bun.serve<WsData>({
       // the contract is fine, it is this attach that renounces authority. That
       // also carries the posture to the client in the hello it already reads,
       // so it stops offering Take over and a live composer.
-      const readOnlyRequested = url.searchParams.get('readOnly') === '1';
+      const readOnlyRequested = attachParams.get('readOnly') === '1';
       const compatibility: BrokerClientCompatibility = readOnlyRequested && !negotiated.readOnly
         ? {
           ...negotiated,
@@ -3934,13 +4021,13 @@ server = Bun.serve<WsData>({
       const reason = mode === 'resume' || mode === 'live'
         ? (requestedReason as DriveAttachReason | undefined)
         : undefined;
-      const artifactMode = url.searchParams.get('artifactMode') === 'reference' ? 'reference' : 'inline';
-      const since = url.searchParams.get('ticket') || url.searchParams.get('since') || undefined;
-      const historyLimit = parseInitialHistoryLimit(url.searchParams);
+      const artifactMode = attachParams.get('artifactMode') === 'reference' ? 'reference' : 'inline';
+      const since = attachParams.get('ticket') || attachParams.get('since') || undefined;
+      const historyLimit = parseInitialHistoryLimit(attachParams);
       const ok = srv.upgrade(req, {
         data: {
-          tool: decodeURIComponent(ws[1]!),
-          id: decodeURIComponent(ws[2]!),
+          tool,
+          id,
           mode,
           readOnlyRequested,
           ...(reason ? { reason } : {}),
@@ -3948,11 +4035,10 @@ server = Bun.serve<WsData>({
           since,
           historyLimit,
           artifactMode,
-          publicBrokerUrl: publicBrokerUrl(req, url),
-          identity: requestCredentialIdentity(req, url),
-          uploadIdentity: requestUploadIdentity(req, url),
+          identity: ticketBinding?.identity ?? requestCredentialIdentity(req, url),
+          uploadIdentity: ticketBinding?.uploadIdentity ?? requestUploadIdentity(req, url),
           compatibility,
-          credentialAuthenticated: credentialAuthenticated(req, url),
+          credentialAuthenticated: attachCredentialAuthenticated,
           ...(clientContract.clientVersion ? { clientVersion: clientContract.clientVersion } : {}),
         },
       });
@@ -3971,9 +4057,17 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/transport/pairings' && req.method === 'POST') {
-      const body = await req.json().catch(() => ({})) as any;
-      const offer = transportPairings.createOffer({ clientLabel: typeof body?.clientLabel === 'string' ? body.clientLabel.trim() : undefined });
-      return json({ ok: true, ...offer }, 201);
+      try {
+        const body = await req.json().catch(() => ({})) as any;
+        const offer = transportPairings.createOffer({
+          clientLabel: typeof body?.clientLabel === 'string' ? body.clientLabel.trim() : undefined,
+          brokerUrl: body?.brokerUrl,
+        });
+        return json({ ok: true, ...offer }, 201);
+      } catch (err) {
+        if (err instanceof PairingHttpError) return json({ error: err.message, code: err.code }, err.status);
+        throw err;
+      }
     }
 
     const pairingStatus = path.match(/^\/api\/transport\/pairings\/([^/]+)$/);
@@ -3987,14 +4081,12 @@ server = Bun.serve<WsData>({
     const acceptPairing = path.match(/^\/api\/transport\/pairings\/([^/]+)\/accept$/);
     if (acceptPairing && req.method === 'POST') {
       try {
-        const body = await req.json().catch(() => ({})) as any;
-        const accepted = transportPairings.accept(decodeURIComponent(acceptPairing[1]!), {
-          peerId: String(body?.peerId ?? ''),
-          peerToken: String(body?.peerToken ?? ''),
-          identityPublicKey: String(body?.identityPublicKey ?? ''),
-          exchangePublicKey: String(body?.exchangePublicKey ?? ''),
-        });
-        await attentionService.upsertEvent({
+        // Pairing IDs are canonical base64url and never need URI decoding. Validate the raw segment so
+        // malformed percent escapes remain a controlled public-boundary error instead of throwing URIError.
+        const pairingId = acceptPairing[1]!;
+        assertPairingId(pairingId);
+        const accepted = transportPairings.accept(pairingId, await readPairingAcceptanceJson(req));
+        attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: `device-paired:${accepted.peer.peerId}:${Date.now()}`,
           kind: 'device-paired',
           state: 'resolved',
@@ -4004,7 +4096,7 @@ server = Bun.serve<WsData>({
           action: { kind: 'open-attention-inbox' },
           presentationRevision: 1,
           presentationStage: 'immediate',
-        });
+        }), 'device-paired');
         return json({ ok: true, ...accepted, brokerDescriptor: BROKER_DESCRIPTOR });
       } catch (err) {
         if (err instanceof PairingHttpError) return json({ error: err.message, code: err.code }, err.status);
@@ -4221,7 +4313,7 @@ server = Bun.serve<WsData>({
 
     const fsList = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/fs$/);
     if (fsList && req.method === 'GET') {
-      const trustDenied = fsTrustGate(req, srv);
+      const trustDenied = fsTrustGate();
       if (trustDenied) return trustDenied;
       const tool = decodeURIComponent(fsList[1]!);
       const id = decodeURIComponent(fsList[2]!);
@@ -4243,7 +4335,7 @@ server = Bun.serve<WsData>({
 
     const fsRead = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/fs\/read$/);
     if (fsRead && req.method === 'GET') {
-      const trustDenied = fsTrustGate(req, srv);
+      const trustDenied = fsTrustGate();
       if (trustDenied) return trustDenied;
       const tool = decodeURIComponent(fsRead[1]!);
       const id = decodeURIComponent(fsRead[2]!);
@@ -4267,7 +4359,7 @@ server = Bun.serve<WsData>({
 
     const fsDownload = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/fs\/download$/);
     if (fsDownload && req.method === 'GET') {
-      const trustDenied = fsTrustGate(req, srv);
+      const trustDenied = fsTrustGate();
       if (trustDenied) return trustDenied;
       const tool = decodeURIComponent(fsDownload[1]!);
       const id = decodeURIComponent(fsDownload[2]!);
@@ -4564,8 +4656,8 @@ server = Bun.serve<WsData>({
       if (!action || typeof backend.exportTranscript !== 'function' || !backend.transcriptExportFormat) {
         return json({ error: 'transcript export is not available for this agent' }, 501);
       }
-      const tier = trustTierForAddress(srv.requestIP(req)?.address);
-      const avail = r2ActionAvailable(action, tier);
+      const tier = 'T2' as const;
+      const avail = r2ActionAvailable(action, tier, HTTP_R2_ENABLED_ACTIONS);
       if (!avail.allowed) return json({ error: avail.reason, code: 'R2_DISABLED' }, 403);
       const base = await discoverSession(tool, id);
       if (!base) return json({ error: 'session not found' }, 404);
@@ -4606,8 +4698,8 @@ server = Bun.serve<WsData>({
       if (!action || typeof backend.exportTranscript !== 'function' || !backend.transcriptExportFormat) {
         return json({ error: 'transcript export is not available for this agent' }, 501);
       }
-      const tier = trustTierForAddress(srv.requestIP(req)?.address);
-      const avail = r2ActionAvailable(action, tier);
+      const tier = 'T2' as const;
+      const avail = r2ActionAvailable(action, tier, HTTP_R2_ENABLED_ACTIONS);
       if (!avail.allowed) return json({ error: avail.reason, code: 'R2_DISABLED' }, 403);
       const body: any = await req.json().catch(() => ({}));
       // Reject any client-supplied path key or unexpected parameter (rule 6): the adapter owns the
@@ -4636,7 +4728,6 @@ server = Bun.serve<WsData>({
         action,
         session: { tool, id, cwd: base.cwd, title: base.title },
         artifactStore,
-        brokerUrl: publicBrokerUrl(req, url),
       });
       if (!result.ok) return json({ error: result.error, code: result.code }, result.status);
       return json({ ok: true, artifact: result.artifact });
@@ -5242,10 +5333,14 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/health') {
-      return json({
+      const publicHealth = {
         ok: true,
         product: PRODUCT_IDENTITY.productName,
         version: BUILD_INFO.version,
+      };
+      if (TOKEN && !credentialAuthenticated(req, url)) return json(publicHealth);
+      return json({
+        ...publicHealth,
         commit: BUILD_INFO.commit,
         // Version and commit are for humans; neither identifies an ARTIFACT. A release cycle shares one
         // semver, and two binaries built from one commit still differ across dirty/clean, target, packaged,
@@ -5289,7 +5384,7 @@ server = Bun.serve<WsData>({
       }
     }
 
-    if (path === '/api/agents') {
+    if (path === '/api/agents' && req.method === 'GET') {
       // D16: /api/agents advertises ABILITY (capabilities); live per-session state rides `control`.
       // `syncEnabled` is the persisted per-agent enablement (AgentSyncEnablement) the Settings toggle
       // reflects — only Codex has an explicit enable today (OpenCode auto-serves, Pi probes its extension).
@@ -5332,7 +5427,6 @@ server = Bun.serve<WsData>({
       }
       const resolution = resolveMachineSession(
         await discoverMachineRosters(
-          publicBrokerUrl(req, url),
           rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
         ),
         { machineId, tool, sessionId },
@@ -5351,7 +5445,6 @@ server = Bun.serve<WsData>({
       return json({
         ok: true,
         ...(await discoverMachineRosters(
-          publicBrokerUrl(req, url),
           rosterVisibility(registry.list(), parseAgentRosterClientRevision(url.searchParams)),
         )),
       });
@@ -5415,7 +5508,7 @@ server = Bun.serve<WsData>({
       }
     }
 
-    if (path === '/api/sessions') {
+    if (path === '/api/sessions' && req.method === 'GET') {
       // Optional per-device time window (?window=7d|1m|2m|6m|all): a phone loading 1.5k+ sessions over
       // the tailnet was starving, so a device can ask for only recently-active sessions (non-idle always
       // kept — see filterSessionsByWindow). ETag → 304 skips the whole body when the roster is unchanged
@@ -5489,10 +5582,17 @@ server = Bun.serve<WsData>({
     // The one mount of the Flutter web build (R16). `/cosy` is what setup prints, what the tailnet Serve
     // route advertises, and what stays in the address bar — so it IS the mount rather than an alias
     // redirecting onto one. The bare form canonicalizes to the trailing-slash form so the shell's relative
-    // asset URLs resolve under /cosy/; the query rides along because a printed `?token=` that silently
-    // vanished on that redirect would look like a broken sign-in.
+    // asset URLs resolve under /cosy/. Ordinary query state survives, but retired credential parameters are
+    // stripped so an old bookmarked URL cannot keep a long-lived secret in browser/proxy logs.
     if (path === APP_PATH) {
-      return new Response(null, { status: 301, headers: { location: `${APP_MOUNT_PATH}${url.search}` } });
+      const redirectParams = new URLSearchParams(url.searchParams);
+      redirectParams.delete('token');
+      redirectParams.delete('peerToken');
+      const query = redirectParams.toString();
+      return new Response(null, {
+        status: 301,
+        headers: { location: `${APP_MOUNT_PATH}${query ? `?${query}` : ''}` },
+      });
     }
     if (path.startsWith(APP_MOUNT_PATH)) return serveFlutter(path.slice(APP_MOUNT_PATH.length));
 
@@ -5510,6 +5610,23 @@ server = Bun.serve<WsData>({
     if (path === '/') return new Response(null, { status: 302, headers: { location: APP_MOUNT_PATH } });
     return new Response('Not found', { status: 404 });
   },
+  error(error) {
+    // Bun's default development response includes source context. Keep unexpected request failures
+    // content-free on the wire and in the ordinary log stream.
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`${LOG_PREFIX} unhandled request error: ${detail}`);
+    if (!BUILD_INFO.packaged && error instanceof Error && error.stack) {
+      console.error(error.stack);
+    }
+    return new Response('internal server error', {
+      status: 500,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      },
+    });
+  },
   websocket: {
     ...HISTORY_WEBSOCKET_OPTIONS,
     // Long sessions legitimately carry full inline artifacts in the initial broker -> app history
@@ -5519,7 +5636,7 @@ server = Bun.serve<WsData>({
     // partial record. Compression is opportunistic; image/base64-heavy histories may not shrink much.
     // Target design: docs/architecture/client-ui.md
     async open(ws) {
-      const { tool, id, reason, expectedOwnerRevision, since, artifactMode, publicBrokerUrl } = ws.data;
+      const { tool, id, reason, expectedOwnerRevision, since, artifactMode } = ws.data;
       const sessionOptionsAbort = new AbortController();
       ws.data.sessionOptionsAbort = sessionOptionsAbort;
       let mode = ws.data.mode;
@@ -5528,9 +5645,9 @@ server = Bun.serve<WsData>({
         try {
           const prepared =
             ev.kind === 'message'
-              ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message, publicBrokerUrl) }
+              ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message) }
               : ev.kind === 'history'
-                ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages, publicBrokerUrl) }
+                ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages) }
                 : ev.kind === 'session' && ws.data.mc
                   ? hub.sessionDetailFrame(
                     ws.data.mc,
@@ -6018,6 +6135,13 @@ server = Bun.serve<WsData>({
 
 console.log(`${LOG_PREFIX} broker on http://${server.hostname}:${server.port}  (machine: ${MACHINE})`);
 console.log(`${LOG_PREFIX} adapters: ${registry.list().map((b) => b.id).join(', ')}`);
+if (!TOKEN) {
+  console.warn(
+    `${LOG_PREFIX} SECURITY WARNING: this source-development broker has no application credential; `
+    + 'protected HTTP and WebSocket routes are open. Keep it on loopback only and do not expose it through '
+    + 'a proxy, tunnel, VPN, mesh, or port forward.',
+  );
+}
 
 // D20: bring up a broker-owned `opencode serve` so OpenCode is sync-by-default. Best-effort and
 // non-fatal — skips cleanly when a serve is already running, the binary is absent, the URL is remote,

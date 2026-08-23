@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "v1-broker-url",
+      "payload": {
+        "version": 1,
+        "brokerId": "broker-test",
+        "publicKey": "broker-public",
+        "transport": { "kind": "broker-url", "url": "https://example.test" }
+      }
+    },
+    {
+      "name": "v2-broker-url",
+      "payload": {
+        "version": 2,
+        "brokerId": "broker-test",
+        "pairingId": "pair-test",
+        "publicKey": "broker-public",
+        "transport": { "kind": "broker-url", "url": "https://example.test" }
+      }
+    },
+    {
+      "name": "v3-tailscale-direct",
+      "payload": {
+        "version": 3,
+        "brokerId": "broker-test",
+        "pairingId": "pair-test",
+        "publicKey": "broker-public",
+        "transport": { "kind": "tailscale-direct", "url": "https://example.test" }
+      }
+    },
+    {
+      "name": "v3-relay",
+      "payload": {
+        "version": 3,
+        "brokerId": "broker-test",
+        "pairingId": "pair-test",
+        "publicKey": "broker-public",
+        "transport": { "kind": "relay", "url": "https://example.test", "mailbox": "mailbox" }
+      }
+    }
+  ]
+}

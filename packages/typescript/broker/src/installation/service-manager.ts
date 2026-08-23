@@ -1329,6 +1329,7 @@ export async function startAndVerifySystemdService(options: {
   provider: DurableServiceProvider;
   context: SetupDiagnosisContext;
   internalUrl: string;
+  healthHeaders?: Readonly<Record<string, string>>;
   expectedBuild: Readonly<Omit<BuildInfo, 'schemaVersions' | 'contract'>>;
   attempts?: number;
 }): Promise<ServiceStartVerification> {
@@ -1341,7 +1342,10 @@ export async function startAndVerifySystemdService(options: {
   for (let index = 0; index < attempts; index += 1) {
     const [status, health] = await Promise.all([
       options.provider.inspect(),
-      options.context.fetchJson(new URL('/api/health', options.internalUrl).toString()),
+      options.context.fetchJson(
+        new URL('/api/health', options.internalUrl).toString(),
+        options.healthHeaders,
+      ),
     ]);
     const body = health.status === 'ok' && health.json && typeof health.json === 'object' && !Array.isArray(health.json)
       ? health.json as Record<string, unknown>

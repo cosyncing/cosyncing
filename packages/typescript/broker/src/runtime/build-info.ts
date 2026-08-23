@@ -25,11 +25,12 @@ export const BUILD_INFO_SCHEMA_VERSION = 2 as const;
 /** Public compatibility versions stamped into every packaged binary and release provenance. */
 export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
   buildInfo: BUILD_INFO_SCHEMA_VERSION,
-  brokerConfig: 1,
+  brokerConfig: 2,
   setupState: 1,
   installState: 1,
   durableStores: Object.freeze({
-    config: 1,
+    config: 2,
+    'broker-instance': 1,
     setup: 1,
     install: 1,
     schedules: 1,
@@ -41,7 +42,7 @@ export const PUBLISHED_SCHEMA_VERSIONS = Object.freeze({
   upgradeJournal: 1,
   // Kept equal to core's BROKER_CONTRACT_REVISION by BPC10/BPC13 acceptance. Importing the large
   // runtime contract here would make a read-only CLI import create Bun's transpilation cache.
-  brokerContract: 15,
+  brokerContract: 16,
 } as const);
 
 export type PublishedSchemaVersions = typeof PUBLISHED_SCHEMA_VERSIONS;

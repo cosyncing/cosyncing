@@ -29,6 +29,7 @@ import {
   planDurableStateMigrations,
 } from '../../src/security/durable-state.ts';
 import { inspectInstallState, writeInstallState } from '../../src/installation/install-state.ts';
+import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import { acquireInstallationLock } from '../../src/installation/installation-lock.ts';
 import {
   atomicWriteOwnerOnly,
@@ -150,11 +151,10 @@ class ScriptedPresenter implements SetupPresenter {
   lastBlockers?: SetupBlockingIssue[];
 
   constructor(readonly options: {
-    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'tailscale' | 'quota' | 'confirm';
+    cancelAt?: 'ack' | 'legacyPi' | 'skill' | 'legacySkill' | 'opencodeShim' | 'service' | 'quota' | 'confirm';
     managed?: boolean;
     service?: SetupServiceChoice;
     lingering?: boolean;
-    tailscale?: boolean;
     quota?: boolean;
     apply?: boolean;
     skill?: boolean;
@@ -197,10 +197,6 @@ class ScriptedPresenter implements SetupPresenter {
   async chooseService(): Promise<SetupPromptResult<SetupServiceChoice>> {
     this.calls.push('service');
     return this.options.cancelAt === 'service' ? SETUP_PROMPT_CANCELLED : this.options.service ?? 'foreground';
-  }
-  async confirmTailscale(): Promise<SetupPromptResult<boolean>> {
-    this.calls.push('tailscale');
-    return this.options.cancelAt === 'tailscale' ? SETUP_PROMPT_CANCELLED : this.options.tailscale ?? false;
   }
   async confirmQuotaWarnings(): Promise<SetupPromptResult<boolean>> {
     this.calls.push('quota');
@@ -312,7 +308,6 @@ async function crashChild(home: string, marker: string): Promise<never> {
       executablePath: import.meta.path,
       serviceChoice: 'foreground',
       systemdLingeringRequested: false,
-      tailscaleServeRequested: false,
     },
     now,
   };
@@ -374,8 +369,42 @@ try {
       `${setup.status}: ${setup.summary} ${JSON.stringify(setup.issueCodes ?? [])}`);
     check('darwin setup never blocks on, or explains itself with, systemd wording',
       !JSON.stringify(setup).toLowerCase().includes('systemd')
-        && presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,tailscale,quota,plan,confirm,complete',
+        && presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete',
       presenter.calls.join(','));
+  }
+
+  // A prior managed-connectivity receipt is relinquished as state only. Setup reports the retained target
+  // and never adds a provider prompt or command to the transaction.
+  {
+    const machine = join(root, 'legacy-connectivity-migration');
+    const home = join(machine, '.cosyncing');
+    await zeroAgentSetup(machine, new ScriptedPresenter());
+    const state = readSetupState(home);
+    writeFileSync(join(home, 'setup-state.json'), `${JSON.stringify({ ...state, tailscaleServeRequested: true }, null, 2)}\n`, { mode: 0o600 });
+    const install = inspectInstallState(home);
+    if (!install.committed) throw new Error('legacy connectivity fixture install missing');
+    const target = 'https://legacy.example.test/ -> http://127.0.0.1:7734';
+    writeFileSync(join(home, 'install-state.json'), `${JSON.stringify({
+      ...install.state,
+      resources: [...install.state.resources, {
+        id: LEGACY_TAILSCALE_RESOURCE_ID,
+        kind: 'other',
+        target,
+        ownership: { proof: 'receipt' },
+      }],
+    }, null, 2)}\n`, { mode: 0o600 });
+    const presenter = new ScriptedPresenter();
+    const migrated = await zeroAgentSetup(machine, presenter);
+    const after = inspectInstallState(home);
+    check('setup relinquishes legacy connectivity without a provider prompt or command',
+      migrated.status === 'complete'
+        && migrated.legacyConnectivityMigration?.preservedTargets.includes(target) === true
+        && !('tailscaleServeRequested' in readSetupState(home))
+        && after.committed
+        && !after.state.resources.some((resource) => resource.id === LEGACY_TAILSCALE_RESOURCE_ID)
+        && after.state.legacyConnectivityMigration?.preservedTargets.includes(target) === true
+        && !presenter.calls.some((call) => /tailscale/i.test(call)),
+      `${presenter.calls.join(',')}:${JSON.stringify(migrated.legacyConnectivityMigration)}`);
   }
 
   // Planner purity and the first real zero-agent transaction.
@@ -393,7 +422,7 @@ try {
       setup.status === 'complete' && setup.exitCode === 0 && setup.summary.includes('No supported coding agents') && install.committed,
       `${setup.status}: ${setup.summary}`);
     check('required managed acknowledgement precedes every optional choice and mutation confirmation',
-      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,tailscale,quota,plan,confirm,complete',
+      presenter.calls.join(',') === 'language,intro,ack,skill,opencode-shim,service,quota,plan,confirm,complete',
       presenter.calls.join(','));
     check('setup creates separate valid owner-only credentials',
       inspectBrokerToken(join(home, 'secrets', 'broker-token')).status === 'ok'
@@ -401,7 +430,7 @@ try {
         && (statSync(join(home, 'secrets', 'broker-token')).mode & 0o777) === 0o600);
     check('setup state has no per-agent mode picker and keeps independent consent fields',
       state.agents?.codex === false && state.quotaWarningsEnabled === true
-        && state.serviceChoice === 'foreground' && state.tailscaleServeRequested === false
+        && state.serviceChoice === 'foreground' && !('tailscaleServeRequested' in state)
         && state.agentSkillRequested === true
         && !Object.keys(state).some((key) => /mode|claude|hook/i.test(key)));
     const skillTargets = agentSkillTargets(contextFor(machine));
@@ -449,7 +478,7 @@ try {
     });
     const plan = buildSetupPlan({
       inspection,
-      choices: { language: 'en', service: 'foreground', enableLingering: false, tailscaleServe: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
+      choices: { language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
       now,
     });
     const skillChecks = inspection.doctor.sections.flatMap((section) => section.checks)
@@ -1350,7 +1379,7 @@ try {
         && presenter.calls.join(',') === 'language,intro,ack,failed',
       presenter.calls.join(','));
   }
-  for (const stage of ['ack', 'skill', 'opencodeShim', 'service', 'tailscale', 'quota', 'confirm'] as const) {
+  for (const stage of ['ack', 'skill', 'opencodeShim', 'service', 'quota', 'confirm'] as const) {
     const machine = join(root, `cancel-${stage}`);
     const presenter = new ScriptedPresenter({ cancelAt: stage });
     const cancelled = await zeroAgentSetup(machine, presenter);
@@ -1417,7 +1446,7 @@ try {
 
     const upgradePlan = buildSetupPlan({
       inspection,
-      choices: { language: 'en', service: 'foreground', enableLingering: false, tailscaleServe: false, quotaWarnings: false, installAgentSkill: true, installOpencodeShim: true },
+      choices: { language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: false, installAgentSkill: true, installOpencodeShim: true },
       now,
     });
     const reconcile = upgradePlan.actions.find((action) => action.id === 'agent-skill.reconcile');
@@ -2062,7 +2091,6 @@ try {
     const tokenPath = brokerTokenPath(home);
     const actualToken = readBrokerToken(tokenPath);
     const loopbackUrl = inspection.targetConfig.broker.internalUrl;
-    const tailscaleUrl = 'https://devbox.tailnet.ts.net';
     const resultWith = (access: SetupAccessReport): SetupCommandResult => ({
       schemaVersion: 1,
       status: 'complete',
@@ -2074,7 +2102,7 @@ try {
       access,
       recoveredInterruptedTransaction: false,
     });
-    const successResult = resultWith({ stateHome: home, loopbackUrl, tailscaleUrl, webApp: true, brokerListening: true });
+    const successResult = resultWith({ stateHome: home, loopbackUrl, webApp: true, brokerListening: true });
 
     // The applied plan is the only source of the outro's endpoints. A LAN address would be the lie that
     // matters most here — the broker binds config.broker.host, which setup only ever writes as 127.0.0.1 —
@@ -2082,7 +2110,6 @@ try {
     check('setup reports the state directory and only the endpoints the plan produced',
       setup.access.stateHome === home
         && setup.access.loopbackUrl === loopbackUrl
-        && setup.access.tailscaleUrl === undefined
         && setup.access.webApp === inspection.webAppAvailable,
       JSON.stringify(setup.access));
 
@@ -2100,7 +2127,6 @@ try {
         createNonInteractiveSetupPresenter({ write: (text) => { captured += text; } }, {
           acceptManagedRuntimeOwnership: true,
           enableSystemdLingering: false,
-          enableTailscaleServe: false,
           installAgentSkill: true,
           opencodeShim: 'unset',
           language,
@@ -2139,8 +2165,7 @@ try {
         captured.includes(`[access] State directory: ${home}`)
           && captured.includes(`[access] Local web app: ${loopbackUrl}/cosy`)
           && captured.includes(`[access] Local server address: ${loopbackUrl}`)
-          && captured.includes(`[access] Tailnet web app: ${tailscaleUrl}/cosy`)
-          && captured.includes(`[access] Tailnet server address: ${tailscaleUrl}`)
+          && captured.includes('[access] Loopback only. External connectivity is managed by the operator.')
           && captured.includes('[access] Short command: `cosy` is an alias for `cosyncing`, for example `cosy status`, `cosy doctor`, `cosy update`.')
           && captured.includes(`[credential] Read authentication token file: cat ${tokenPath}`)
           && !captured.includes('[credential] Authentication token file:')
@@ -2172,34 +2197,21 @@ try {
           // R10 deleted the "no browser client, so there is no app URL" line: it explained an absence the
           // operator never asked about. What remains has to be the actionable half, and only that.
           && !/no app URL|browser client/i.test(captured)
-          && captured.includes('[access] Loopback only: no Tailscale Serve route is registered.')
-          && !captured.includes(tailscaleUrl),
+          && captured.includes('[access] Loopback only. External connectivity is managed by the operator.'),
         captured);
-
-      let withTailnet = '';
-      await createNonInteractiveSetupPresenter({ write: (text) => { withTailnet += text; } })
-        .complete(resultWith({ stateHome: home, loopbackUrl, tailscaleUrl, webApp: false, brokerListening: true }));
-      // The line the physical audit flagged: it used to print a bare `https://<host>` with no path.
-      check('the no-web tailnet line carries the /cosy path, not a bare host',
-        withTailnet.includes(`[access] Or from your tailnet: ${tailscaleUrl}/cosy`)
-          && withTailnet.includes(`[access] Tailnet server address: ${tailscaleUrl}`)
-          && !/tailnet: https:\/\/[^\s]*\.ts\.net$/m.test(withTailnet),
-        withTailnet);
 
       let chineseNoWeb = '';
       createNonInteractiveSetupPresenter({ write: (text) => { chineseNoWeb += text; } }, {
         acceptManagedRuntimeOwnership: true,
         enableSystemdLingering: false,
-        enableTailscaleServe: false,
         installAgentSkill: true,
         opencodeShim: 'unset',
         language: 'zh-Hans',
-      }).complete(resultWith({ stateHome: home, loopbackUrl, tailscaleUrl, webApp: false, brokerListening: true }));
-      check('the Chinese no-web outro carries the same two /cosy URLs',
+      }).complete(resultWith({ stateHome: home, loopbackUrl, webApp: false, brokerListening: true }));
+      check('the Chinese no-web outro carries the loopback /cosy URL',
         chineseNoWeb.includes(`[access] 浏览器里也有同样的步骤：${loopbackUrl}/cosy`)
-          && chineseNoWeb.includes(`[access] 或在 tailnet 内打开：${tailscaleUrl}/cosy`)
           && chineseNoWeb.includes(`[access] 本机服务器地址：${loopbackUrl}`)
-          && chineseNoWeb.includes(`[access] Tailnet 服务器地址：${tailscaleUrl}`)
+          && chineseNoWeb.includes('[access] 仅限回环访问。外部连接由操作者自行管理。')
           && chineseNoWeb.includes('[access] 快捷命令：`cosy` 是 `cosyncing` 的别名，例如 `cosy status`、`cosy doctor`、`cosy update`。'),
         chineseNoWeb);
 
@@ -2207,11 +2219,10 @@ try {
       // behind the command that starts a broker.
       let noListener = '';
       createNonInteractiveSetupPresenter({ write: (text) => { noListener += text; } })
-        .complete(resultWith({ stateHome: home, loopbackUrl, tailscaleUrl, webApp: false, brokerListening: false }));
+        .complete(resultWith({ stateHome: home, loopbackUrl, webApp: false, brokerListening: false }));
       check('a no-web foreground outro still says to start the broker before opening the URL',
         noListener.includes('[access] Nothing is listening yet. Start the broker: `cosyncing broker`.')
           && noListener.includes(`[access] Then the same steps in a browser: ${loopbackUrl}/cosy`)
-          && noListener.includes(`[access] Or, once it is running, from your tailnet: ${tailscaleUrl}/cosy`)
           && !noListener.includes(`[access] The same steps in a browser: ${loopbackUrl}/cosy`),
         noListener);
     }
@@ -2240,10 +2251,9 @@ try {
         .replace(/\x1b\[[0-9;]*m/g, '')
         .replace(/[\u2500-\u257f\u25a0-\u25ff\s]/g, '');
       const plain = squash(captured);
-      check('interactive outro shows the state directory, both app URLs, and one token-file instruction, never the value',
+      check('interactive outro shows the state directory, local app URL, and one token-file instruction, never the value',
         plain.includes(squash(`State directory: ${home}`))
           && plain.includes(squash(`${loopbackUrl}/cosy`))
-          && plain.includes(squash(`${tailscaleUrl}/cosy`))
           && plain.includes(squash(`Read authentication token file: cat ${tokenPath}`))
           && !plain.includes(squash('Authentication token file:'))
           && !plain.includes(squash('Read it:'))
@@ -2291,7 +2301,6 @@ try {
     // kind from being added in English and rendering the English string in the Chinese wizard.
     const everyStep: SetupMutationStep[] = [
       { kind: 'config', configPath: '/h/config.json', internalUrl: 'http://127.0.0.1:8765' },
-      { kind: 'config', configPath: '/h/config.json', internalUrl: 'http://127.0.0.1:8765', advertisedUrl: 'https://d.ts.net' },
       { kind: 'credentials' },
       { kind: 'setup-state', service: 'systemd' },
       { kind: 'pi-bridge', path: '/h/.pi/x.ts' },
@@ -2303,9 +2312,6 @@ try {
       { kind: 'opencode-shim' },
       { kind: 'service-install', definitionPath: '/h/.config/systemd/user/cosyncing.service' },
       { kind: 'service-remove', provider: 'systemd', product: 'cosyncing' },
-      { kind: 'tailscale-register', advertisedUrl: 'https://d.ts.net', target: 'http://127.0.0.1:8765' },
-      { kind: 'tailscale-reuse' },
-      { kind: 'tailscale-remove', advertisedUrl: 'https://d.ts.net' },
       { kind: 'binary-install', version: '0.1.0', path: '/h/bin/cosyncing' },
       { kind: 'commit-receipts', installStatePath: '/h/install-state.json' },
     ];
@@ -2331,10 +2337,6 @@ try {
         && english.planEmpty === 'No filesystem or service mutation is required.'
         && english.agentSkillConfirm === 'Install the cosyncing agent skill so agents with a supported session-bound tool can deliver files to the app?'
         && english.quotaConfirm === 'Enable local token and usage quota tracking via Tokdash?'
-        // The Serve prompt names the URL the route produces, with the host interpolated from the inspection.
-        && english.tailscaleConfirm('https://devbox.tailnet.ts.net/cosy')
-          === 'Register a private Tailscale Serve route so the app opens at https://devbox.tailnet.ts.net/cosy '
-            + 'from any device on your tailnet?'
         && english.installationTitle === 'Installation'
         && english.networkTitle === 'Network and authentication'
         && english.agentPreflightTitle === 'Agent preflight'
@@ -2345,8 +2347,6 @@ try {
     check('Chinese copy keeps the terms an operator has to type',
       chinese.serviceDurableLabel('systemd').includes('systemd')
         && chinese.serviceDurableLabel('launchd').includes('launchd')
-        && chinese.tailscaleConfirm('https://devbox.tailnet.ts.net/cosy')
-          .includes('Tailscale Serve 路由，让 tailnet 内的任何设备都能通过 https://devbox.tailnet.ts.net/cosy')
         && chinese.quotaConfirm.includes('Tokdash')
         // R10 reversed the R8 copy. Both catalogs must cover BOTH cases truthfully: reuse an instance that
         // is already running, or install one. Neither may still claim cosyncing installs nothing.
@@ -2379,7 +2379,7 @@ try {
       });
       const plan = buildSetupPlan({
         inspection,
-        choices: { language: 'zh-Hans', service: 'foreground', enableLingering: false, tailscaleServe: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
+        choices: { language: 'zh-Hans', service: 'foreground', enableLingering: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
         now,
       });
       const clack = createClackSetupPresenter();
@@ -2430,10 +2430,7 @@ try {
         .replace(/`[^`]*`/g, ' ')
         .replace(/https?:\/\/\S+/g, ' ')
         .replace(/\/\S+/g, ' ')
-        // Doctor and Tailscale own their diagnostic summaries and quote them verbatim into the network
-        // panel; that is a standing decision, not a gap this test should hide, so it is removed by exact
-        // value rather than by a pattern that could swallow wizard copy too.
-        .replace(inspection.tailscale.summary, ' ');
+        ;
       const englishSentences = scanned.match(/[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){2,}/g) ?? [];
       check('the Chinese wizard renders no English sentences in its own copy',
         captured.includes('发现一次中断的安装事务')
@@ -2511,7 +2508,6 @@ try {
       createNonInteractiveSetupPresenter({ write: () => {} }, {
         acceptManagedRuntimeOwnership: true,
         enableSystemdLingering: false,
-        enableTailscaleServe: false,
         installAgentSkill: true,
         opencodeShim,
       });
@@ -2530,26 +2526,20 @@ try {
   }
 
   // Committed-setup early-return honors non-interactive choices: re-running an already-committed install with
-  // --install-opencode-shim or --enable-tailscale-serve must NOT short-circuit as 'already-configured' and drop
-  // the choice. Also unit-checks intendedChoices, the non-prompting resolver that drives it.
+  // --install-opencode-shim must not drop the choice.
   {
     const presenterFor = (
       opencodeShim: OpencodeShimSignal,
       installAgentSkill = true,
-      enableTailscaleServe = false,
     ): SetupPresenter =>
       createNonInteractiveSetupPresenter({ write: () => {} }, {
-        acceptManagedRuntimeOwnership: true, enableSystemdLingering: false, enableTailscaleServe,
+        acceptManagedRuntimeOwnership: true, enableSystemdLingering: false,
         installAgentSkill, opencodeShim,
       });
-    const shimInspection = (
-      requested: boolean | undefined,
-      tailscaleRequested: boolean | undefined = undefined,
-    ): SetupInspection => ({
+    const shimInspection = (requested: boolean | undefined): SetupInspection => ({
       setupState: {
         schemaVersion: 1,
         ...(requested === undefined ? {} : { opencodeShimRequested: requested }),
-        ...(tailscaleRequested === undefined ? {} : { tailscaleServeRequested: tailscaleRequested }),
       },
     } as unknown as SetupInspection);
 
@@ -2560,12 +2550,6 @@ try {
       presenterFor('off').intendedChoices?.(shimInspection(true))?.installOpencodeShim === false);
     check('intendedChoices honors --no-install-agent-skill',
       presenterFor('unset', false).intendedChoices?.(shimInspection(undefined))?.installAgentSkill === false);
-    check('intendedChoices carries --enable-tailscale-serve across the committed no-op boundary',
-      presenterFor('unset', true, true).intendedChoices?.(shimInspection(undefined))?.tailscaleServe === true);
-    check('intendedChoices keeps a fresh non-interactive install local-only when no Tailscale flag is present',
-      presenterFor('unset').intendedChoices?.(shimInspection(undefined))?.tailscaleServe === false);
-    check('intendedChoices preserves a stored Tailscale opt-in when the positive-only flag is omitted',
-      presenterFor('unset').intendedChoices?.(shimInspection(undefined, true))?.tailscaleServe === true);
 
     // End-to-end: commit WITHOUT the shim, then re-run WITH --install-opencode-shim.
     const machine = join(root, 'shim-flag-rerun');
@@ -2581,12 +2565,6 @@ try {
       readSetupState(join(machine, '.cosyncing')).opencodeShimRequested === true,
       JSON.stringify(readSetupState(join(machine, '.cosyncing'))));
 
-    // This fixture has no Tailscale installation, so enabling Serve cannot complete. It must nevertheless
-    // leave the no-op path and diagnose the missing prerequisite. This pins the production ordering that the
-    // Ubuntu physical pass exposed: explicit intent is folded before the committed-setup early return.
-    const tailscaleRerun = await runSetup(setupOptions(machine, presenterFor('on', true, true)));
-    check('shim-flag-rerun: --enable-tailscale-serve on a committed install is NOT dropped by the early-return',
-      tailscaleRerun.status !== 'already-configured', tailscaleRerun.status);
   }
 
   // Bootstrap copy (npm acquisition layout). `npm i -g cosyncing` leaves the compiled binary at
@@ -2687,7 +2665,7 @@ try {
           home: sourceHome,
           context: contextFor(sourceMachine),
         }),
-        choices: { language: 'en', service: 'foreground', enableLingering: false, tailscaleServe: false, quotaWarnings: false, installAgentSkill: true, installOpencodeShim: true },
+        choices: { language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: false, installAgentSkill: true, installOpencodeShim: true },
         now,
       });
       check('a source build neither copies a binary nor records a broker-binary receipt',
@@ -2723,7 +2701,6 @@ try {
       language: 'en' as const,
       service: 'systemd' as SetupServiceChoice,
       enableLingering: false,
-      tailscaleServe: false,
       quotaWarnings: false,
       installAgentSkill: false,
       installOpencodeShim: false,
@@ -2750,7 +2727,6 @@ try {
             version: BUILD_INFO.version,
             serviceChoice: 'systemd',
             systemdLingeringRequested: false,
-            tailscaleServeRequested: false,
           },
           resources: [
             { ...ownedFile('broker-binary', 'binary', homeBinary) },
@@ -2778,7 +2754,6 @@ try {
         managedRuntimeAcknowledgedAt: acknowledgedAt,
         serviceChoice: 'systemd',
         systemdLingeringRequested: false,
-        tailscaleServeRequested: false,
         agentSkillRequested: false,
         opencodeShimRequested: false,
         quotaWarningsEnabled: false,
@@ -2806,12 +2781,6 @@ try {
       systemdDefinitionPath: definitionPath,
       systemdEnvironmentPath: environmentPath,
       systemdPersistenceTarget: 'systemd-user-linger:fixture',
-      tailscaleAvailable: false,
-      tailscale: {
-        schemaVersion: 1, topology: 'absent', backend: 'missing', route: 'unavailable',
-        desiredTarget: config.broker.internalUrl,
-        detailCode: 'tailscale-missing', summary: 'absent fixture',
-      },
       webAppAvailable: false,
       agents: [],
       doctor: {
@@ -3041,7 +3010,7 @@ try {
     };
 
     const servicePresenter = (): ScriptedPresenter => new ScriptedPresenter({
-      service: 'systemd', skill: false, opencodeShim: false, tailscale: false, quota: false,
+      service: 'systemd', skill: false, opencodeShim: false, quota: false,
     });
 
     // ---- The literal ask: install V1, start it, replace it with V2, rerun setup, prove the RUNNING

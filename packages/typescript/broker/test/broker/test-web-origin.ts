@@ -103,9 +103,10 @@ try {
   // trailing slash is what the shell's relative asset URLs and the worker scope resolve against.
   const red = await fetch(`${built.base}/cosy`, { redirect: 'manual' });
   check('GET /cosy canonicalizes to /cosy/', (red.status === 301 || red.status === 302) && red.headers.get('location') === '/cosy/', `status=${red.status} location=${red.headers.get('location')}`);
-  // Setup prints `<base>/cosy`, and a `?token=` dropped on that one hop would look like a broken sign-in.
-  const redQuery = await fetch(`${built.base}/cosy?token=abc`, { redirect: 'manual' });
-  check('GET /cosy?token=abc keeps the query across the canonicalization', redQuery.headers.get('location') === '/cosy/?token=abc', `location=${redQuery.headers.get('location')}`);
+  const redQuery = await fetch(`${built.base}/cosy?view=recent&token=abc&peerToken=def`, { redirect: 'manual' });
+  check('GET /cosy strips retired credential queries but keeps ordinary state',
+    redQuery.headers.get('location') === '/cosy/?view=recent',
+    `location=${redQuery.headers.get('location')}`);
   // Only the bare path redirects, and its Location is built from the literal mount plus the query — so no
   // request can make it protocol-relative (`//host`) or point it off-origin. A path that merely looks
   // hostile is served by the mount instead, which is the same guarantee by a different route.
@@ -117,6 +118,11 @@ try {
   // Following it must actually reach the app, not just produce a well-formed Location header.
   const followed = await fetch(`${built.base}/cosy`);
   check('following /cosy serves the app index', followed.status === 200 && (await followed.text()).includes('flutter-web-fake-index'), `status=${followed.status}`);
+  const handoff = await fetch(`${built.base}/cosy-handoff`);
+  check('GET /cosy-handoff cannot be embedded by another site',
+    handoff.status === 200
+      && handoff.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && handoff.headers.get('x-frame-options') === 'DENY');
   // A prefix that merely starts with the mount is not the mount.
   const near = await fetch(`${built.base}/cosything`, { redirect: 'manual' });
   check('GET /cosything is not treated as the mount', near.status === 404, `status=${near.status}`);
@@ -125,6 +131,9 @@ try {
   const idx = await fetch(`${built.base}/cosy/`);
   const idxBody = await idx.text();
   check('GET /cosy/ serves index.html', idx.status === 200 && idxBody.includes('flutter-web-fake-index'), `status=${idx.status}`);
+  check('GET /cosy/ shell cannot be embedded by another site',
+    idx.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && idx.headers.get('x-frame-options') === 'DENY');
 
   // /cosy/x.wasm -> application/wasm (Bun infers the MIME; no manual table).
   const wasm = await fetch(`${built.base}/cosy/x.wasm`);
@@ -140,6 +149,9 @@ try {
   const nav = await fetch(`${built.base}/cosy/deep/nested/route`);
   const navBody = await nav.text();
   check('SPA fallback: /cosy/deep/nested/route -> index.html', nav.status === 200 && navBody.includes('flutter-web-fake-index'), `status=${nav.status}`);
+  check('SPA fallback shell retains anti-framing headers',
+    nav.headers.get('content-security-policy') === "frame-ancestors 'none'"
+      && nav.headers.get('x-frame-options') === 'DENY');
   const deepLink = await fetch(`${built.base}/cosy/sessions/123`);
   check('deep link /cosy/sessions/123 loads the shell rather than 404ing', deepLink.status === 200 && (await deepLink.text()).includes('flutter-web-fake-index'), `status=${deepLink.status}`);
 

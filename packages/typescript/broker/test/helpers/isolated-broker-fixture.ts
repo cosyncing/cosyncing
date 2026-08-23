@@ -734,3 +734,43 @@ export async function reserveLoopbackFixturePort(): Promise<{
     },
   };
 }
+
+/** Issue the one-use credential that a tokened fixture must put on a WebSocket URL. */
+export async function issueFixtureWsAuthTicket(
+  baseUrl: string,
+  credentialHeaders: Record<string, string>,
+  tool: string,
+  sessionId: string,
+  params: Record<string, string>,
+): Promise<string> {
+  const response = await fetch(`${baseUrl}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { ...credentialHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ tool, sessionId, params }),
+  });
+  const body = await response.json().catch(() => ({})) as { wsAuthTicket?: unknown; error?: unknown };
+  if (response.status !== 201 || typeof body.wsAuthTicket !== 'string' || !body.wsAuthTicket) {
+    throw new Error(`WebSocket ticket issuance failed (${response.status}): ${String(body.error ?? '')}`);
+  }
+  return body.wsAuthTicket;
+}
+
+/** Build a stream URL containing only the opaque, short-lived ticket. */
+export async function fixtureWsUrl(
+  baseUrl: string,
+  wsBaseUrl: string,
+  credentialHeaders: Record<string, string>,
+  tool: string,
+  sessionId: string,
+  params: Record<string, string>,
+): Promise<string> {
+  const ticket = await issueFixtureWsAuthTicket(
+    baseUrl,
+    credentialHeaders,
+    tool,
+    sessionId,
+    params,
+  );
+  return `${wsBaseUrl}/api/sessions/${encodeURIComponent(tool)}/${encodeURIComponent(sessionId)}`
+    + `/stream?wsAuthTicket=${encodeURIComponent(ticket)}`;
+}

@@ -5,8 +5,8 @@
  * `scripts/broker/capabilities/policies/r2-actions.ts` (single source of truth); this module adds the runtime
  * enforcement: trust-tier derivation, default-deny-for-non-loopback-unless-locally-enabled, the
  * confirmation nonce (bound to action/session/revision/format/redaction-mode/tier, ≤60s), and
- * conservative rate limits. Local enablement (`r2.enabledActions`) is read from the environment at
- * broker start and is NOT remotely togglable (rule 2 / do-not-build "no remote R2 toggle").
+ * conservative rate limits. Local enablement is read from durable broker configuration (or the
+ * source-development environment) and is NOT remotely togglable (rule 2 / do-not-build "no remote R2 toggle").
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { R2_ACTIONS, getR2Action } from '../../../../../scripts/broker/capabilities/policies/r2-actions.ts';
@@ -89,11 +89,15 @@ export interface R2Availability {
 }
 
 /** Default-deny gate for an R2 action at a given trust tier (rule 2). */
-export function r2ActionAvailable(action: R2ActionDescriptor, tier: TrustTier): R2Availability {
+export function r2ActionAvailable(
+  action: R2ActionDescriptor,
+  tier: TrustTier,
+  enabledActions = r2EnabledActions(),
+): R2Availability {
   if (!action.allowedTrustTiers.includes(tier)) return { allowed: false, reason: `trust tier ${tier} may not perform ${action.id}` };
   if (tier === 'T1') return { allowed: true }; // same-machine: confirm nonce still required at execute
-  if (action.requiresLocalEnablement && !r2EnabledActions().has(action.id)) {
-    return { allowed: false, reason: `${action.id} is disabled for non-loopback clients; enable locally via COSYNCING_R2_ENABLED_ACTIONS` };
+  if (action.requiresLocalEnablement && !enabledActions.has(action.id)) {
+    return { allowed: false, reason: `${action.id} is disabled for HTTP clients; enable it in local broker configuration` };
   }
   return { allowed: true };
 }

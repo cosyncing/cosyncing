@@ -17,7 +17,6 @@ import {
   type ApplicationIdentity,
 } from '../runtime/application-identity.ts';
 import {
-  defaultBrokerConfig,
   inspectBrokerConfig,
   resolveBrokerConfiguration,
   type BrokerConfigInspection,
@@ -63,16 +62,6 @@ import {
   type CodexTuiReadinessReport,
 } from '@cosyncing/adapter-codex/tui-presence';
 import { readSetupFailureDiagnostic, setupFailureDiagnosticPath } from './setup-transaction.ts';
-import {
-  advertisedProbeIsBroker,
-  inspectTailscaleServe,
-  probeAdvertisedEndpointOnce,
-  resolveTailscaleFallbackAddresses,
-  type AdvertisedEndpointDirectProbe,
-  tailscaleRouteReceiptTarget,
-  TAILSCALE_SERVE_OWNERSHIP_MARKER,
-  TAILSCALE_SERVE_RESOURCE_ID,
-} from './tailscale-serve.ts';
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
@@ -83,6 +72,7 @@ import {
   locateRecordedManagedHost,
 } from '../runtime/managed-host.ts';
 import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
+import { parseMachinePeers } from '../roster/machine-aggregation.ts';
 
 export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
 
@@ -132,8 +122,6 @@ export interface DoctorDependencies {
    * moved or vanished — states a test host running a source checkout can never reach on its own.
    */
   applicationIdentity?: Readonly<ApplicationIdentity>;
-  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
-  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }
 
 function remediation(command: string, message: string): SetupCheck['remediation'] {
@@ -480,6 +468,50 @@ function environmentPrecedenceCheck(options: {
       detailCode: 'effective-configuration-invalid',
       summary: error instanceof Error ? error.message : 'Effective broker configuration is invalid.',
       remediation: remediation('cosyncing repair', 'Repair configuration before starting the broker.'),
+    };
+  }
+}
+
+export function machinePeerCredentialCheck(context: SetupDiagnosisContext): SetupCheck {
+  const raw = context.env.COSYNCING_MACHINE_PEERS?.trim() ?? '';
+  if (!raw) {
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'skip',
+      detailCode: 'machine-peers-not-configured',
+      summary: 'No machine peers are configured.',
+    };
+  }
+  try {
+    const peers = parseMachinePeers(raw);
+    const tokenless = peers.filter((peer) => !peer.token && !peer.credential);
+    if (tokenless.length === 0) {
+      return {
+        id: 'state.machine-peer-credentials',
+        status: 'pass',
+        detailCode: 'machine-peer-credentials-configured',
+        summary: 'Every machine peer has an explicit credential.',
+        evidence: { peerCount: peers.length },
+      };
+    }
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'warn',
+      detailCode: 'machine-peer-authentication-required',
+      summary: 'One or more machine peers have no credential and will stop aggregating after that peer upgrades to contract revision 16.',
+      evidence: { peerCount: peers.length, tokenlessPeerCount: tokenless.length },
+      remediation: {
+        kind: 'manual',
+        message: 'Add a broker-token or revocable peer-token credential to each COSYNCING_MACHINE_PEERS entry.',
+      },
+    };
+  } catch {
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'fail',
+      detailCode: 'machine-peer-configuration-invalid',
+      summary: 'COSYNCING_MACHINE_PEERS is invalid.',
+      remediation: { kind: 'manual', message: 'Repair COSYNCING_MACHINE_PEERS before starting or upgrading the broker.' },
     };
   }
 }
@@ -1092,79 +1124,6 @@ async function installedBrokerServiceChecks(
   }];
 }
 
-async function networkChecks(
-  context: SetupDiagnosisContext,
-  home: string,
-  internalUrl: string,
-): Promise<SetupCheck[]> {
-  const tailscale = await inspectTailscaleServe({ context, internalUrl });
-  const evidence: Record<string, string | boolean | number> = {
-    topology: tailscale.topology,
-    backend: tailscale.backend,
-    route: tailscale.route,
-    hostnameAvailable: !!tailscale.dnsName,
-    ...(tailscale.executablePath ? { executable: context.displayPath(tailscale.executablePath) } : {}),
-  };
-  if (tailscale.backend !== 'running') {
-    return [{
-      id: 'network.tailscale',
-      status: tailscale.backend === 'malformed' ? 'fail' : 'warn',
-      detailCode: tailscale.detailCode,
-      summary: `${tailscale.summary} The broker remains loopback-only.`,
-      evidence,
-      remediation: { kind: 'manual', message: tailscale.topology === 'windows-host-only'
-        ? 'Install and run Tailscale inside WSL; Windows-host Tailscale cannot Serve WSL loopback.'
-        : 'Start or log in to Tailscale explicitly; cosyncing never runs `tailscale up` and never enables Funnel.' },
-    }];
-  }
-
-  const install = installedState(home);
-  const routeResource = install.committed
-    ? install.state.resources.find((resource) => resource.id === TAILSCALE_SERVE_RESOURCE_ID)
-    : undefined;
-  const owned = !!routeResource
-    && routeResource.kind === 'other'
-    && routeResource.ownership?.proof === 'receipt'
-    && routeResource.ownership.marker === TAILSCALE_SERVE_OWNERSHIP_MARKER
-    && !!tailscale.advertisedUrl
-    && routeResource.target === tailscaleRouteReceiptTarget(tailscale);
-  const requested = readSetupState(home).tailscaleServeRequested === true;
-  const routeReady = tailscale.route === 'desired';
-  const routeUnsafe = tailscale.route === 'malformed'
-    || tailscale.route === 'conflict'
-    || tailscale.route === 'funnel-conflict'
-    || tailscale.route === 'unavailable';
-  return [
-    {
-      id: 'network.tailscale',
-      status: 'pass',
-      detailCode: 'tailscale-running',
-      summary: 'Tailscale is running and authenticated with a MagicDNS HTTPS hostname.',
-      evidence,
-    },
-    {
-      id: 'network.tailscale-serve',
-      status: routeReady ? 'pass' : (requested || owned) && routeUnsafe ? 'fail' : 'warn',
-      detailCode: routeReady
-        ? owned ? 'tailscale-serve-owned-ready' : 'tailscale-serve-foreign-ready'
-        : (requested || owned) ? `tailscale-serve-drift-${tailscale.route}` : tailscale.detailCode,
-      summary: routeReady
-        ? owned
-          ? 'The receipt-owned private HTTPS root route targets this broker.'
-          : 'A matching private HTTPS root route is available and remains foreign-owned.'
-        : requested || owned
-          ? `The requested private Serve route is not ready: ${tailscale.summary}`
-          : `${tailscale.summary} Loopback-only operation remains supported.`,
-      evidence: { ...evidence, owned },
-      ...(!routeReady ? {
-        remediation: routeUnsafe
-          ? { kind: 'manual' as const, message: 'Inspect the existing Serve configuration; cosyncing preserves foreign routes and never converts Funnel.' }
-          : remediation('cosyncing setup', 'Confirm and register the private HTTPS route.'),
-      } : {}),
-    },
-  ];
-}
-
 function installedState(home: string): ReturnType<typeof inspectInstallState> {
   try { return inspectInstallState(home); } catch {
     return { committed: false, path: '', reason: 'unreadable' };
@@ -1177,8 +1136,6 @@ async function endpointAndRuntimeChecks(options: {
   brokerToken: ReturnType<typeof inspectBrokerToken>;
   home: string;
   agentPathCheck?: Readonly<SetupCheck>;
-  /** Test seam for the advertised endpoint's address fallback; production uses the real HTTPS probe. */
-  advertisedDirectProbe?: AdvertisedEndpointDirectProbe;
 }): Promise<{ network: SetupCheck[]; runtime: SetupCheck[]; agents: SetupCheck[] }> {
   if (options.config.status !== 'ok') return { network: [], runtime: [], agents: [] };
   const install = installedState(options.home);
@@ -1307,62 +1264,6 @@ async function endpointAndRuntimeChecks(options: {
     }
   }
 
-  const advertised = options.config.config.broker.advertisedUrl;
-  if (!advertised) {
-    network.push({
-      id: 'network.advertised-endpoint',
-      status: 'warn',
-      detailCode: 'advertised-endpoint-unset',
-      summary: 'No private advertised endpoint is configured; the broker remains loopback-only.',
-      remediation: remediation('cosyncing setup', 'Configure Tailscale Serve only if private remote access is wanted.'),
-    });
-  } else {
-    // Same DNS-independent primitive setup verifies with, as a single shot. A host whose MagicDNS does not
-    // resolve would otherwise be told its route is broken by the very surface meant to diagnose it.
-    const advertisedHealth = await probeAdvertisedEndpointOnce({
-      context: options.context,
-      advertisedUrl: advertised,
-      fallbackAddresses: await resolveTailscaleFallbackAddresses(options.context),
-      ...(options.advertisedDirectProbe ? { directProbe: options.advertisedDirectProbe } : {}),
-    });
-    // Reachability alone is not health. The advertised name is a route into whatever currently listens on
-    // it, so a stale broker, a different machine's Serve route, or an unrelated HTTPS service all answer
-    // 200 here. Status and pairing already require the full identity; doctor now agrees with them, and
-    // reports "answered as something else" separately from "did not answer at all" because the two have
-    // completely different causes and remedies.
-    const identityMatches = advertisedProbeIsBroker(
-      advertisedHealth,
-      options.config.config.broker.machineLabel,
-    );
-    network.push(identityMatches
-      ? {
-          id: 'network.advertised-endpoint',
-          status: 'pass',
-          detailCode: 'advertised-endpoint-reachable',
-          summary: 'The advertised private endpoint is reachable and answers as this broker.',
-          evidence: { endpoint: 'advertised-private-https' },
-        }
-      : advertisedHealth.status === 'unreachable'
-        ? {
-            id: 'network.advertised-endpoint',
-            status: 'fail',
-            detailCode: 'advertised-endpoint-unreachable',
-            summary: 'The configured advertised endpoint is unreachable.',
-            evidence: { endpoint: 'advertised-private-https' },
-            remediation: remediation('cosyncing repair', 'Repair the private Serve route or advertised URL.'),
-          }
-        : {
-            id: 'network.advertised-endpoint',
-            status: 'fail',
-            detailCode: 'advertised-endpoint-identity-mismatch',
-            summary: 'The advertised endpoint answered, but not as this cosyncing broker.',
-            evidence: { endpoint: 'advertised-private-https' },
-            remediation: remediation(
-              'cosyncing repair',
-              'Another service or broker answers the advertised route; reconcile it before relying on it.',
-            ),
-          });
-  }
   return { network, runtime, agents };
 }
 
@@ -1541,7 +1442,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   // the validated runtime's directory there, and the check below must reconstruct the same expectation.
   const identity = dependencies.applicationIdentity
     ?? currentApplicationIdentity(dependencies.buildInfo.distribution, `${import.meta.dir}/cli.ts`);
-  const [adapterDiagnoses, service, installedService, tailscale] = await Promise.all([
+  const [adapterDiagnoses, service, installedService] = await Promise.all([
     diagnoseAgents(dependencies.context, adapters, brokerManagedHostIdentities(
       // `home` is the STATE home — receipts and ownership records. The identity
       // an adapter resolves belongs to the USER home, which is the same one the
@@ -1554,11 +1455,6 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     )),
     serviceChecks(dependencies.context, host.wsl),
     installedBrokerServiceChecks(dependencies.context, home, identity.runtimePath),
-    networkChecks(
-      dependencies.context,
-      home,
-      config.status === 'ok' ? config.config.broker.internalUrl : defaultBrokerConfig().broker.internalUrl,
-    ),
   ]);
   const agents = reconcilePiBridgeDoctorDiagnosis(
     dependencies.context,
@@ -1571,7 +1467,6 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     brokerToken,
     home,
     agentPathCheck: installedService.find((candidate) => candidate.id === 'service.agent-executable-path'),
-    ...(dependencies.advertisedDirectProbe ? { advertisedDirectProbe: dependencies.advertisedDirectProbe } : {}),
   });
   const codexReadiness = codexTuiReadinessCheck(
     dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(dependencies.context),
@@ -1604,6 +1499,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         credentialCheck({ id: 'state.broker-token', label: 'Broker credential', inspection: brokerToken, context: dependencies.context }),
         credentialCheck({ id: 'state.pi-integration', label: 'Pi integration credential', inspection: piIntegration, context: dependencies.context }),
         environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context: dependencies.context }),
+        machinePeerCredentialCheck(dependencies.context),
         ...agentSkillChecks(home, dependencies.context),
         ...setupFailureChecks(home, dependencies.context),
         ...managedHostChecks(home),
@@ -1613,7 +1509,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     { id: 'agents', title: 'Coding agents', checks: [...agents.flatMap((agent) => agent.checks), ...endpoints.agents, codexReadiness] },
     { id: 'host', title: 'Host', checks: host.checks },
     { id: 'service', title: 'Service manager', checks: [...service, ...installedService] },
-    { id: 'network', title: 'Network', checks: [...tailscale, ...endpoints.network] },
+    { id: 'network', title: 'Local broker', checks: endpoints.network },
     { id: 'runtime', title: 'Managed runtimes', checks: endpoints.runtime },
   ];
   const summary = summarize(sections);

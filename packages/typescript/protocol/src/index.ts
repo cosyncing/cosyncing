@@ -1307,6 +1307,7 @@ export const BROKER_ROUTES = [
   '/api/transport/pairings/{id}',
   '/api/transport/pairings/{id}/accept',
   '/api/transport/session-control',
+  '/api/ws-auth-tickets',
 ] as const;
 
 /** Agent-owned local integration routes. These are not client API routes and must not appear in a
@@ -1328,6 +1329,7 @@ export const BROKER_INTEGRATION_ROUTES = [
  * Stable broker error codes returned in API payloads.
  */
 export const BROKER_ERROR_CODES = [
+  'AUTH_REQUIRED',
   'BAD_PARAM',
   'ACK_UNKNOWN_TARGET',
   'ACK_CONFLICT',
@@ -1566,24 +1568,28 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * the revision-10, revision-14 or revision-15 additions: none adds a route,
  * frame kind, message type or error code, which is
  * exactly why the revision must: a structural DTO change is reviewable only if
- * it is numbered. All revision-5 through revision-15 additions are backward
+ * it is numbered. Revision 16 adds the authenticated WebSocket-ticket route.
+ * All revision-5 through revision-16 additions are backward
  * compatible for a tolerant decoder, so the client minimum does not move. Raise
  * the minimum only after every supported store client has crossed the
  * corresponding revision.
  */
-export const BROKER_CONTRACT_REVISION = 15 as const;
-export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 0 as const;
+export const BROKER_CONTRACT_REVISION = 16 as const;
+// Revision 16 removes long-lived WebSocket query credentials. The client-first
+// release sequence must complete before this broker ships; older clients cannot
+// authenticate a protected stream and therefore must fail closed as read-only.
+export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 16 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 
 /**
- * Oldest broker contract the generated first-party client identity will drive. Revision 2
- * introduced reason-tagged Drive arbitration and structured attach conflicts; a client built to
- * restore Drive through them cannot safely drive a revision-1 broker that silently ignores the
- * reason, so the new client fails closed there. Compatibility is deliberately asymmetric: older
- * clients remain accepted by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and the
- * overlap window above.
+ * Oldest broker contract the generated first-party client identity will drive. Revision 15 is the
+ * one-revision client-first overlap for revision 16: it still accepts query credentials while the
+ * updated client is staged. Older brokers are outside that overlap and must fail before a
+ * long-lived credential is placed in a WebSocket URL. Compatibility is deliberately asymmetric:
+ * older clients remain accepted by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and
+ * the overlap window above.
  */
-export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 2 as const;
+export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 15 as const;
 
 /**
  * The client revisions that survive an agent value they have never heard of.

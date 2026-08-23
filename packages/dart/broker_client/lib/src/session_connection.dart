@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'package:broker_client/src/endpoint_resolver.dart';
 import 'package:broker_client/src/websocket_adapter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:dio/dio.dart';
 
 /// Connection state for a [SessionConnection].
 enum SessionConnectionState {
@@ -56,6 +57,8 @@ class SessionConnection {
     SessionOwnerRevision? ownerRevision,
     int initialHistory = _defaultInitialHistory,
     WebSocketAdapter Function(String url)? adapterFactory,
+    Dio? dio,
+    Duration authRequestTimeout = const Duration(seconds: 10),
   }) : _resolver = resolver,
        _tool = tool,
        _sessionId = sessionId,
@@ -65,7 +68,10 @@ class SessionConnection {
        _readOnly = readOnly,
        _ownerRevision = ownerRevision,
        _initialHistory = initialHistory,
-       _adapterFactory = adapterFactory ?? WebSocketAdapter.new;
+       _adapterFactory = adapterFactory ?? WebSocketAdapter.new,
+       _dio = dio ?? Dio(),
+       _authRequestTimeout = authRequestTimeout,
+       _ownsDio = dio == null;
 
   static const int _defaultInitialHistory = 100;
 
@@ -75,6 +81,12 @@ class SessionConnection {
   final String _artifactMode;
   final WebSocketAdapter Function(String url) _adapterFactory;
   final int _initialHistory;
+  final Dio _dio;
+  final Duration _authRequestTimeout;
+  final bool _ownsDio;
+  bool _legacyCredentialQueryRequired = false;
+  bool _wsTicketCapabilityChecked = false;
+  Object? _lastConnectionError;
 
   /// Control mode for the attach (`resume` to Drive, `live` to join an
   /// existing live owner, null to Observe). Mutated by [reattach] and applied
@@ -209,6 +221,9 @@ class SessionConnection {
   /// Whether this connection must refuse mutating controls.
   bool get compatibilityReadOnly => _hello?.compatibility.readOnly ?? false;
 
+  /// Most recent transport setup failure, cleared after a successful connect.
+  Object? get lastConnectionError => _lastConnectionError;
+
   /// Opens the WebSocket connection and begins receiving frames.
   ///
   /// Subsequent calls while connecting/connected are no-ops.
@@ -229,21 +244,12 @@ class SessionConnection {
     _setState(SessionConnectionState.connecting);
 
     try {
-      final url = _resolver.streamEndpoint(
-        _tool,
-        _sessionId,
-        mode: _mode,
-        reason: _reason,
-        readOnly: _readOnly,
-        ownerRevision: _ownerRevision,
-        ticket: _cursor,
-        initialHistory: _initialHistory,
-        artifactMode: _artifactMode,
-      );
+      final url = await _streamUrl();
       _adapter = _adapterFactory(url);
       await _adapter!.connect();
 
       if (gen != _generation) return;
+      _lastConnectionError = null;
       _setState(SessionConnectionState.connected);
 
       _messageSub = _adapter!.messages.listen(
@@ -255,6 +261,8 @@ class SessionConnection {
       // ignore: avoid_catches_without_on_clauses
     } catch (e) {
       if (gen != _generation) return;
+      _lastConnectionError = e;
+      _invalidateWebSocketAuthCapabilityAfterConnectFailure();
       _onDisconnect(gen);
     }
   }
@@ -532,12 +540,98 @@ class SessionConnection {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await _closeAdapter();
+    if (_ownsDio) _dio.close();
     _setState(SessionConnectionState.closed);
     await _stateController.close();
     await _eventController.close();
   }
 
   // --- Internal ---
+
+  Future<String> _streamUrl() async {
+    final params = _resolver.streamAttachParameters(
+      mode: _mode,
+      reason: _reason,
+      readOnly: _readOnly,
+      ownerRevision: _ownerRevision,
+      ticket: _cursor,
+      initialHistory: _initialHistory,
+      artifactMode: _artifactMode,
+    );
+    String? wsAuthTicket;
+    if (_resolver.hasCredential &&
+        (!_wsTicketCapabilityChecked || _legacyCredentialQueryRequired)) {
+      await _probeWebSocketAuthCapability();
+    }
+    if (_resolver.hasCredential && !_legacyCredentialQueryRequired) {
+      final response = await _dio
+          .post<Map<String, dynamic>>(
+            _resolver.wsAuthTicketEndpoint,
+            data: {'tool': _tool, 'sessionId': _sessionId, 'params': params},
+            options: Options(headers: _resolver.jsonHeaders),
+          )
+          .timeout(_authRequestTimeout);
+      wsAuthTicket = response.data?['wsAuthTicket'] as String?;
+      if (wsAuthTicket == null || wsAuthTicket.isEmpty) {
+        throw const FormatException(
+          'Broker did not return a WebSocket authorization ticket.',
+        );
+      }
+    }
+    return _resolver.streamEndpoint(
+      _tool,
+      _sessionId,
+      mode: _mode,
+      reason: _reason,
+      readOnly: _readOnly,
+      ownerRevision: _ownerRevision,
+      ticket: _cursor,
+      initialHistory: _initialHistory,
+      artifactMode: _artifactMode,
+      wsAuthTicket: wsAuthTicket,
+      legacyCredentialQuery: _legacyCredentialQueryRequired,
+    );
+  }
+
+  Future<void> _probeWebSocketAuthCapability() async {
+    final health = await _dio
+        .get<Map<String, dynamic>>(
+          _resolver.healthEndpoint,
+          options: Options(headers: _resolver.authHeaders),
+        )
+        .timeout(_authRequestTimeout);
+    final contract = health.data?['contract'];
+    final revision = contract is Map<String, dynamic>
+        ? contract['revision']
+        : null;
+    if (revision is! int) {
+      throw const BrokerException(
+        statusCode: 401,
+        message:
+            'Broker credential was rejected or authenticated health is '
+            'unavailable.',
+        error: BrokerError(
+          error:
+              'Authenticated broker health did not include a contract '
+              'identity.',
+          code: 'AUTH_REQUIRED',
+        ),
+      );
+    }
+    if (revision < cosyncingClientMinimumBrokerRevision) {
+      throw UnsupportedError(
+        'Broker contract revision $revision is older than client minimum '
+        '$cosyncingClientMinimumBrokerRevision.',
+      );
+    }
+    _legacyCredentialQueryRequired = revision == 15;
+    _wsTicketCapabilityChecked = true;
+  }
+
+  void _invalidateWebSocketAuthCapabilityAfterConnectFailure() {
+    if (!_resolver.hasCredential) return;
+    _wsTicketCapabilityChecked = false;
+  }
 
   void _setState(SessionConnectionState s) {
     _state = s;
@@ -718,21 +812,12 @@ class SessionConnection {
       final reconnectGen = ++_generation;
 
       try {
-        final url = _resolver.streamEndpoint(
-          _tool,
-          _sessionId,
-          mode: _mode,
-          reason: _reason,
-          readOnly: _readOnly,
-          ownerRevision: _ownerRevision,
-          ticket: _cursor,
-          initialHistory: _initialHistory,
-          artifactMode: _artifactMode,
-        );
+        final url = await _streamUrl();
         _adapter = _adapterFactory(url);
         await _adapter!.connect();
 
         if (reconnectGen != _generation) return;
+        _lastConnectionError = null;
         _setState(SessionConnectionState.connected);
         _backoffMultiplier = 1;
 
@@ -745,6 +830,8 @@ class SessionConnection {
         // ignore: avoid_catches_without_on_clauses
       } catch (e) {
         if (reconnectGen != _generation) return;
+        _lastConnectionError = e;
+        _invalidateWebSocketAuthCapabilityAfterConnectFailure();
         _backoffMultiplier = (_backoffMultiplier * 2).clamp(
           1,
           _maxBackoff.inSeconds,

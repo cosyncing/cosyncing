@@ -114,6 +114,34 @@ class TransportWrappedDataKey {
   final String tag;
 }
 
+/// Broker proof that the answering endpoint owns the QR identity key.
+class TransportPairingProof {
+  /// Creates a broker acceptance proof.
+  const TransportPairingProof({
+    required this.version,
+    required this.algorithm,
+    required this.signature,
+  });
+
+  /// Parses broker JSON.
+  factory TransportPairingProof.fromJson(Map<String, dynamic> json) {
+    return TransportPairingProof(
+      version: json['version'] as int? ?? 0,
+      algorithm: json['algorithm'] as String? ?? '',
+      signature: json['signature'] as String? ?? '',
+    );
+  }
+
+  /// Proof format version.
+  final int version;
+
+  /// Signature algorithm.
+  final String algorithm;
+
+  /// Base64url Ed25519 signature.
+  final String signature;
+}
+
 /// Response body for accepting a one-time transport pairing.
 class TransportPairingAcceptResponse {
   /// Creates a pairing accept response.
@@ -121,6 +149,7 @@ class TransportPairingAcceptResponse {
     required this.peer,
     required this.broker,
     required this.wrappedDataKey,
+    required this.brokerProof,
   });
 
   /// Parses broker JSON, tolerating the wrapper `ok` key and additive fields.
@@ -136,6 +165,10 @@ class TransportPairingAcceptResponse {
         json['wrappedDataKey'] as Map<String, dynamic>? ??
             const <String, dynamic>{},
       ),
+      brokerProof: TransportPairingProof.fromJson(
+        json['brokerProof'] as Map<String, dynamic>? ??
+            const <String, dynamic>{},
+      ),
     );
   }
 
@@ -147,4 +180,7 @@ class TransportPairingAcceptResponse {
 
   /// DataKey wrapped to the client's exchange public key.
   final TransportWrappedDataKey wrappedDataKey;
+
+  /// Proof signed by the identity public key committed in the QR.
+  final TransportPairingProof brokerProof;
 }

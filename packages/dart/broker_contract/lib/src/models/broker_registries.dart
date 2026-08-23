@@ -70,6 +70,7 @@ const List<String> brokerRoutes = <String>[
   '/api/transport/pairings/{id}',
   '/api/transport/pairings/{id}/accept',
   '/api/transport/session-control',
+  '/api/ws-auth-tickets',
 ];
 
 /// Agent-owned local integration routes.
@@ -97,6 +98,7 @@ const List<String> brokerIntegrationRoutes = <String>[
 /// malformed (`ACK_INVALID`) from unknown-scope (`ACK_UNKNOWN_TARGET`)
 /// receipts. The registry currently holds 99 codes.
 const List<String> brokerErrorCodes = <String>[
+  'AUTH_REQUIRED',
   'BAD_PARAM',
   'ACK_UNKNOWN_TARGET',
   'ACK_CONFLICT',

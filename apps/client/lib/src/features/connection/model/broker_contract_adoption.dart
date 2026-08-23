@@ -122,6 +122,7 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
     BrokerContractAdoptionDisposition.deferred,
     'Encrypted session control follows envelope and scoped-token adoption.',
   ),
+  '/api/ws-auth-tickets': _adopted,
 };
 
 /// Declared Flutter-client disposition for every broker wire frame kind.

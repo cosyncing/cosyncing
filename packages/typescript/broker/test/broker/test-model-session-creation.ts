@@ -521,22 +521,11 @@ try {
     "scheduled retired selection is rejected without substitution",
   );
 
-  // The immediately previous revision must stay writable through the
-  // one-revision overlap window. Revision 15 adds three OPTIONAL fields to
-  // `SessionDriveControl` — `handoffAvailable`, `takeoverAvailable`,
-  // `takeoverMode` — and nothing a client SENDS changed, so a released
-  // revision-14 client's request body is unchanged.
-  // Unlike revision 14, this one is not breaking on the READ side either: it
-  // adds no enumerated wire VALUE, only optional keys that a strict decoder
-  // ignores, and every absent key reproduces the prior behavior exactly. The
-  // new `AttachMode.unknown` is a client-side fallback member no broker emits.
-  // test-update-contract.ts carries the full argument.
-  // Both numbers move together on every bump: the query names the revision
-  // immediately below the assertion just under it, and a stale query would
-  // silently test a client two revisions back, which the overlap window
-  // legitimately rejects.
+  // Revision 16 raises the WebSocket client floor, but this request body is
+  // unchanged and remains accepted through the REST compatibility window. The
+  // eventual stream hello is what declares the stale client read-only.
   const previousRevisionQuery =
-    "contractRevision=14&minimumBrokerRevision=2&" +
+    "contractRevision=15&minimumBrokerRevision=2&" +
     "contractSurfaceHash=fnv1a32%3A095f3c3c&clientVersion=0.9.9";
   const previousRevision = await request(
     running.base,
@@ -544,11 +533,11 @@ try {
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 15);
+  assert.equal(BROKER_CONTRACT.revision, 16);
   assert.equal(
     previousRevision.status,
     200,
-    "immediately previous request body remains writable",
+    "previous-revision REST request body remains writable",
   );
 
   console.log(

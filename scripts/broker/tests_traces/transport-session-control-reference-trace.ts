@@ -20,7 +20,7 @@ import {
   unwrapDataKey,
   type WrappedDataKey,
 } from '../../../packages/typescript/crypto/src/index.ts';
-import { TailscaleDirectTransport, type TransportEnvelope } from '../../../packages/typescript/transport/src/index.ts';
+import { BrokerHttpTransport, type TransportEnvelope } from '../../../packages/typescript/transport/src/index.ts';
 import { SecureTransportClient, securePeerFromPairing } from '../../../packages/typescript/transport-wire/src/index.ts';
 
 interface Assertion {
@@ -69,7 +69,7 @@ try {
 
   const phoneIdentity = generateIdentityKeyPair();
   const phoneExchange = generateX25519KeyPair();
-  const phonePeerToken = `phone-token-${short}`;
+  const phonePeerToken = randomBytes(32).toString('base64url');
   const acceptRes = await fetch(`${baseUrl}/api/transport/pairings/${encodeURIComponent(offer.pairingId)}/accept`, {
     method: 'POST',
     headers: { 'x-cosyncing-token': token, 'content-type': 'application/json' },
@@ -89,14 +89,14 @@ try {
   };
   check('phone unwraps broker-issued DataKey', dataKey.bytes.byteLength === generateDataKey().bytes.byteLength);
 
-  const phoneTransport = new TailscaleDirectTransport({
+  const phoneTransport = new BrokerHttpTransport({
     baseUrl,
     peerId: 'trace-phone',
     peerToken: phonePeerToken,
     pollMs: 1,
     headers: { 'x-cosyncing-token': token },
   });
-  const brokerTransport = new TailscaleDirectTransport({
+  const brokerTransport = new BrokerHttpTransport({
     baseUrl,
     peerId: accepted.broker.peerId,
     peerToken: accepted.broker.peerToken,
@@ -202,7 +202,7 @@ function checkThrows(name: string, fn: () => unknown, pattern: RegExp): void {
   }
 }
 
-async function collectEnvelopes(transport: TailscaleDirectTransport, count: number): Promise<TransportEnvelope[]> {
+async function collectEnvelopes(transport: BrokerHttpTransport, count: number): Promise<TransportEnvelope[]> {
   const ac = new AbortController();
   const out: TransportEnvelope[] = [];
   const timer = setTimeout(() => ac.abort(), 5000);

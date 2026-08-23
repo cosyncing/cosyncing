@@ -28,8 +28,11 @@ import {
 } from '../../../../../scripts/verification/supervised-process.ts';
 import {
   BROKER_CONFIG_SCHEMA_VERSION,
+  BROKER_LISTEN_HOST,
+  brokerInternalUrl,
   defaultBrokerConfig,
   inspectBrokerConfig,
+  migrateBrokerConfigV1,
   planRepoEraConfigurationMigration,
   resolveBrokerConfiguration,
   validateBrokerConfig,
@@ -68,6 +71,11 @@ import {
 } from '../../src/security/secure-files.ts';
 import { writeSetupState } from '../../src/installation/setup-state.ts';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/bridge-asset.ts';
+import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
+import {
+  inspectBrokerInstance,
+  loadOrCreateBrokerInstanceId,
+} from '../../src/runtime/broker-instance.ts';
 
 const ROOT = join(import.meta.dir, '../../../../..');
 const CLEAN_ENV = verificationEnvironment();
@@ -115,17 +123,50 @@ const waitHealth = (
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-state-security-'));
 try {
+  // First-start identity is a single durable winner even when several foreground/source processes race.
+  {
+    const home = join(root, 'broker-instance-race');
+    const workers = Array.from({ length: 12 }, () => Bun.spawn([
+      'bun',
+      'run',
+      'packages/typescript/broker/test/fixtures/create-broker-instance.ts',
+      home,
+    ], {
+      cwd: ROOT,
+      env: CLEAN_ENV,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }));
+    const outcomes = await Promise.all(workers.map(async (worker) => ({
+      exitCode: await worker.exited,
+      stdout: (await new Response(worker.stdout).text()).trim(),
+      stderr: (await new Response(worker.stderr).text()).trim(),
+    })));
+    const persisted = inspectBrokerInstance(home);
+    check('concurrent first starts all adopt one exclusively created broker instance identity',
+      outcomes.every((outcome) => outcome.exitCode === 0 && outcome.stdout === outcomes[0]?.stdout)
+        && persisted.status === 'ok'
+        && persisted.state.instanceId === outcomes[0]?.stdout,
+      outcomes.find((outcome) => outcome.exitCode !== 0)?.stderr);
+  }
+
   // Configuration schema, validation, additive preservation, and environment precedence.
   {
     const home = join(root, 'config-home');
     const written = writeBrokerConfig(fixtureConfig() as any, home);
     const inspected = inspectBrokerConfig(home);
-    check('config writes schema v1 through an owner-only atomic boundary',
+    check('config writes schema v2 through an owner-only atomic boundary',
       written.schemaVersion === BROKER_CONFIG_SCHEMA_VERSION && inspected.status === 'ok' &&
         ownerOnlyMode(join(home, 'config.json')) === 0o600 && ownerOnlyMode(home) === 0o700);
     check('unknown additive config fields survive validation and a read/write cycle',
       inspected.status === 'ok' && (inspected.config.ownerExtension as any)?.preserved === true &&
         inspected.config.broker.nestedExtension === 'keep-me');
+    const persisted = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as any;
+    check('persisted config omits every listener and advertised URL field',
+      persisted.schemaVersion === 2
+        && persisted.broker.host === undefined
+        && persisted.broker.internalUrl === undefined
+        && persisted.broker.advertisedUrl === undefined);
 
     const source = resolveBrokerConfiguration({
       packaged: false,
@@ -139,11 +180,15 @@ try {
         COSYNCING_UPDATE_CHANNEL: 'beta',
       },
     });
-    check('source runtime reports explicit environment precedence without raw environment output',
+    check('source runtime ignores removed listener variables and derives loopback from PORT',
       source.config.broker.port === 8844 && source.config.broker.machineLabel === 'fixture-machine' &&
         source.config.broker.internalUrl === 'http://127.0.0.1:8844' &&
-        source.config.broker.advertisedUrl === 'https://fixture.tailnet.example' &&
-        source.source.internalUrl === 'legacy-environment' && source.environmentOverrides.includes('COSYNCING_BROKER'));
+        source.config.broker.host === BROKER_LISTEN_HOST &&
+        source.config.broker.advertisedUrl === undefined &&
+        source.source.internalUrl === 'derived'
+        && !source.environmentOverrides.includes('HOST')
+        && !source.environmentOverrides.includes('COSYNCING_BROKER')
+        && !source.environmentOverrides.includes('COSYNCING_ADVERTISED_BROKER'));
 
     const packaged = resolveBrokerConfiguration({
       packaged: true,
@@ -154,11 +199,104 @@ try {
       packaged.config.broker.port === 7734 && packaged.config.broker.host === '127.0.0.1' &&
         packaged.config.broker.internalUrl === 'http://127.0.0.1:7734' && packaged.environmentOverrides.length === 0);
 
+    const featureConfig = validateBrokerConfig({
+      ...fixtureConfig(),
+      features: {
+        httpWorkspaceBrowsing: true,
+        httpTranscriptExport: true,
+        futureFeature: 'preserved',
+      },
+    });
+    check('schema v2 accepts local HTTP feature enablement for packaged brokers',
+      featureConfig.features?.httpWorkspaceBrowsing === true
+        && featureConfig.features?.httpTranscriptExport === true
+        && featureConfig.features?.futureFeature === 'preserved');
+
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, port: 0 } }));
-    assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, internalUrl: 'http://10.0.0.1:7734' } }));
-    assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, advertisedUrl: 'http://remote.example' } }));
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), update: { channel: 'surprise' } }));
-    check('invalid port, internal URL, advertised transport, and update channel fail closed', true);
+    assert.throws(() => validateBrokerConfig({
+      ...fixtureConfig(),
+      features: { httpWorkspaceBrowsing: 'yes' },
+    }));
+    const reserved = validateBrokerConfig({
+      ...fixtureConfig(),
+      broker: {
+        ...fixtureConfig().broker,
+        host: '0.0.0.0',
+        internalUrl: 'http://10.0.0.1:7734',
+        advertisedUrl: 'http://remote.example',
+      },
+    });
+    check('removed persisted fields cannot alter the loopback listener',
+      reserved.broker.host === BROKER_LISTEN_HOST
+        && reserved.broker.internalUrl === brokerInternalUrl(reserved.broker.port)
+        && reserved.broker.advertisedUrl === undefined);
+    check('invalid port and update channel still fail closed', true);
+
+    const legacyHome = join(root, 'legacy-config-home');
+    mkdirSync(legacyHome, { recursive: true, mode: 0o700 });
+    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({
+      schemaVersion: 1,
+      ownerExtension: { preserved: true },
+      broker: {
+        host: '0.0.0.0',
+        port: 8844,
+        machineLabel: 'legacy-machine',
+        internalUrl: 'http://127.0.0.1:8844',
+        advertisedUrl: 'https://legacy.example.com',
+        nestedExtension: 'keep-me',
+      },
+      update: { channel: 'beta' },
+    }), { mode: 0o600 });
+    const legacyInspection = inspectBrokerConfig(legacyHome);
+    check('v1 inspection derives loopback while preserving non-reserved fields',
+      legacyInspection.status === 'ok'
+        && legacyInspection.migratedFrom === 1
+        && legacyInspection.previousHost === '0.0.0.0'
+        && legacyInspection.config.broker.port === 8844
+        && legacyInspection.config.broker.nestedExtension === 'keep-me'
+        && (legacyInspection.config.ownerExtension as any)?.preserved === true);
+    const legacyArtifactRoot = join(root, 'legacy-config-artifacts');
+    const legacyArtifactStore = new ArtifactStore('https://legacy.example.com', legacyArtifactRoot);
+    const legacyArtifactSession = { tool: 'codex', id: 'before-setup' };
+    const legacyArtifact = legacyArtifactStore.putBytes(
+      legacyArtifactSession,
+      { type: 'file-artifact', path: 'before-setup.txt', name: 'before-setup.txt', mimeType: 'text/plain' },
+      Buffer.from('available after setup'),
+    ) as Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>;
+    const migration = migrateBrokerConfigV1(legacyHome);
+    const migrated = JSON.parse(readFileSync(join(legacyHome, 'config.json'), 'utf8')) as any;
+    check('v1 migration backs up and transactionally writes schema v2',
+      migration.migrated && migration.backupPath != null && existsSync(migration.backupPath)
+        && migrated.schemaVersion === 2 && migrated.broker.port === 8844
+        && migrated.broker.host === undefined && migrated.broker.internalUrl === undefined
+        && migrated.broker.advertisedUrl === undefined);
+    const instance = inspectBrokerInstance(legacyHome);
+    const stableArtifactStore = instance.status === 'ok'
+      ? new ArtifactStore(`broker-instance:${instance.state.instanceId}`, legacyArtifactRoot, {
+          legacyBrokerSources: instance.state.legacyArtifactBrokerSources,
+        })
+      : undefined;
+    const stableReference = stableArtifactStore?.toReference(legacyArtifactSession, legacyArtifact) as
+      | Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>
+      | undefined;
+    const stableUrl = stableReference?.fetchUrl
+      ? new URL(stableReference.fetchUrl, 'http://127.0.0.1:8844')
+      : undefined;
+    const stableResponse = stableArtifactStore && stableUrl
+      ? stableArtifactStore.serve(
+          legacyArtifactSession.tool,
+          legacyArtifactSession.id,
+          String(stableReference?.artifactKey),
+          stableUrl.searchParams.get('expires'),
+          stableUrl.searchParams.get('sig'),
+        )
+      : undefined;
+    check('config v1 migration preserves legacy artifact sources before removing their URLs',
+      instance.status === 'ok'
+        && instance.state.legacyArtifactBrokerSources?.includes('https://legacy.example.com/')
+        && stableResponse?.status === 200
+        && await stableResponse.text() === 'available after setup');
 
     writeFileSync(join(home, 'config.json'), '{bad json', { mode: 0o600 });
     check('malformed config is visible instead of silently defaulting', inspectBrokerConfig(home).status === 'error');
@@ -284,6 +422,7 @@ try {
     const cacheRoot = join(root, 'cache-layout');
     const layout = durableStateLayout({ stateRoot, cacheRoot });
     writeBrokerConfig(fixtureConfig() as any, stateRoot);
+    loadOrCreateBrokerInstanceId(stateRoot);
     writeSetupState({ preserved: { future: true }, agents: { codex: false } }, stateRoot);
     writeInstallState(committedInstallState('2026-07-17T00:00:00.000Z'), stateRoot);
     atomicWriteOwnerOnly(layout.schedules, `${JSON.stringify({ version: 1, schedules: [{ id: 's1', text: 'FULL PRIVATE PROMPT' }] })}\n`);
@@ -295,8 +434,16 @@ try {
     atomicWriteOwnerOnly(layout.artifactUrlSecret, 'artifact-secret');
 
     const schema = inspectDurableSchemas(layout);
-    check('all seven durable JSON stores have explicit current schema records',
-      DURABLE_SCHEMA_REGISTRY.length === 7 && schema.every((item) => item.status === 'ok'));
+    check('all eight durable JSON stores have explicit current schema records',
+      DURABLE_SCHEMA_REGISTRY.length === 8 && schema.every((item) => item.status === 'ok'));
+    const validBrokerInstance = readFileSync(layout.brokerInstance, 'utf8');
+    atomicWriteOwnerOnly(layout.brokerInstance, '{"version":1,"instanceId":"invalid"}\n');
+    const malformedInstance = inspectDurableSchemas(layout)
+      .find((inspection) => inspection.id === 'broker-instance');
+    check('durable inspection gives malformed broker identity a dedicated doctor code',
+      malformedInstance?.status === 'malformed'
+        && malformedInstance.detailCode === 'broker-instance-malformed');
+    atomicWriteOwnerOnly(layout.brokerInstance, validBrokerInstance);
     check('install state carries ownership and migration journals from its first committed record',
       inspectInstallState(stateRoot).committed &&
         Array.isArray((inspectInstallState(stateRoot) as any).state.resources) &&
@@ -323,6 +470,7 @@ try {
     const scheduleCopy = join(backup.path, 'state', 'schedules.json');
     check('migration backup includes private schedules, peers, keys, attention, and artifact cache',
       readFileSync(scheduleCopy, 'utf8').includes('FULL PRIVATE PROMPT') &&
+        existsSync(join(backup.path, 'state', 'broker-instance.json')) &&
         existsSync(join(backup.path, 'state', 'transport-peers.json')) &&
         existsSync(join(backup.path, 'state', 'transport-keys', 'broker.json')) &&
         existsSync(join(backup.path, 'cache', 'artifacts', 'blobs', 'aa', 'blob')) &&
@@ -456,12 +604,12 @@ try {
       const pairing = await fetch(`${base}/api/transport/pairings`, {
         method: 'POST',
         headers: { ...sharedHeader, 'content-type': 'application/json' },
-        body: JSON.stringify({ clientLabel: 'state-security-fixture' }),
+        body: JSON.stringify({ clientLabel: 'state-security-fixture', brokerUrl: advertised }),
       });
       const offer = await pairing.json() as any;
       const qr = parseQrPairingPayload(offer.qr);
-      check('remote pairing QR uses the configured advertised HTTPS URL, never loopback',
-        pairing.status === 201 && qr.transport.kind === 'tailscale-direct' &&
+      check('remote pairing QR uses the one-time requested HTTPS URL, never loopback',
+        pairing.status === 201 && qr.transport.kind === 'broker-url' &&
           qr.transport.url === advertised && !offer.qr.includes(credentials.brokerToken));
 
       const processArgs = Bun.spawnSync(['ps', '-o', 'args=', '-p', String(child.pid)]).stdout.toString();
