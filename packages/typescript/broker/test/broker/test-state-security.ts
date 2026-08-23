@@ -123,6 +123,33 @@ const waitHealth = (
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-state-security-'));
 try {
+  // First-start identity is a single durable winner even when several foreground/source processes race.
+  {
+    const home = join(root, 'broker-instance-race');
+    const workers = Array.from({ length: 12 }, () => Bun.spawn([
+      'bun',
+      'run',
+      'packages/typescript/broker/test/fixtures/create-broker-instance.ts',
+      home,
+    ], {
+      cwd: ROOT,
+      env: CLEAN_ENV,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }));
+    const outcomes = await Promise.all(workers.map(async (worker) => ({
+      exitCode: await worker.exited,
+      stdout: (await new Response(worker.stdout).text()).trim(),
+      stderr: (await new Response(worker.stderr).text()).trim(),
+    })));
+    const persisted = inspectBrokerInstance(home);
+    check('concurrent first starts all adopt one exclusively created broker instance identity',
+      outcomes.every((outcome) => outcome.exitCode === 0 && outcome.stdout === outcomes[0]?.stdout)
+        && persisted.status === 'ok'
+        && persisted.state.instanceId === outcomes[0]?.stdout,
+      outcomes.find((outcome) => outcome.exitCode !== 0)?.stderr);
+  }
+
   // Configuration schema, validation, additive preservation, and environment precedence.
   {
     const home = join(root, 'config-home');

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { setupStateHome } from '../installation/setup-state.ts';
 import {
   atomicWriteJsonOwnerOnly,
+  createOwnerOnlyFileExclusive,
   inspectOwnerOnlyFile,
   readOwnerOnlyText,
 } from '../security/secure-files.ts';
@@ -70,17 +71,29 @@ export function inspectBrokerInstance(home = setupStateHome()): BrokerInstanceIn
 }
 
 export function loadOrCreateBrokerInstance(home = setupStateHome()): BrokerInstanceFile {
-  const inspected = inspectBrokerInstance(home);
-  if (inspected.status === 'ok') return inspected.state;
-  if (inspected.status !== 'missing') {
-    throw new Error(inspected.status === 'malformed' ? 'broker-instance-invalid' : 'broker-instance-unsafe');
+  let contended = false;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const inspected = inspectBrokerInstance(home);
+    if (inspected.status === 'ok') return inspected.state;
+    if (inspected.status === 'unsafe') throw new Error('broker-instance-unsafe');
+    if (inspected.status === 'malformed' && !contended) throw new Error('broker-instance-invalid');
+    if (inspected.status === 'missing') {
+      const state: BrokerInstanceFile = {
+        version: 1,
+        instanceId: `broker_${randomBytes(32).toString('base64url')}`,
+      };
+      const outcome = createOwnerOnlyFileExclusive(
+        inspected.path,
+        `${JSON.stringify(state, null, 2)}\n`,
+      );
+      if (outcome === 'created') return state;
+      contended = true;
+    }
+    // O_EXCL exposes the winning inode before its write completes. Wait briefly only after proven
+    // contention; an already-malformed file still fails immediately above.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
   }
-  const state: BrokerInstanceFile = {
-    version: 1,
-    instanceId: `broker_${randomBytes(32).toString('base64url')}`,
-  };
-  atomicWriteJsonOwnerOnly(inspected.path, state);
-  return state;
+  throw new Error('broker-instance-create-timeout');
 }
 
 /** Durable installation identity, independent of URL, port, DNS, or proxy. */
