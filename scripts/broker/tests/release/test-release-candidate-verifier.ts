@@ -23,6 +23,7 @@ import {
   isAddressInUse,
   isTicketedSessionWebSocket,
   runCandidateBrokerAttempts,
+  ticketRequestContractMatches,
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
 } from '../../release/verify-candidate-pair.ts';
@@ -82,6 +83,52 @@ assert.equal(
   false,
 );
 console.log('PASS  publication verifier observes header-authenticated ticket exchange');
+
+const clientContract = {
+  clientVersion: '1.2.3',
+  contractRevision: 16,
+  minimumBrokerRevision: 15,
+  contractSurfaceHash: 'fnv1a32:1234abcd',
+};
+const ticketPostData = JSON.stringify({
+  tool: 'pi',
+  sessionId: 'session-1',
+  params: {
+    clientVersion: '1.2.3',
+    contractRevision: '16',
+    minimumBrokerRevision: '15',
+    contractSurfaceHash: 'fnv1a32:1234abcd',
+  },
+});
+assert.equal(
+  ticketRequestContractMatches(
+    ticketPostData,
+    clientContract,
+    'pi',
+    'session-1',
+  ),
+  true,
+);
+for (const [field, value] of [
+  ['clientVersion', '1.2.2'],
+  ['contractRevision', '15'],
+  ['minimumBrokerRevision', '2'],
+  ['contractSurfaceHash', 'fnv1a32:00000000'],
+] as const) {
+  const parsed = JSON.parse(ticketPostData);
+  parsed.params[field] = value;
+  assert.equal(
+    ticketRequestContractMatches(
+      JSON.stringify(parsed),
+      clientContract,
+      'pi',
+      'session-1',
+    ),
+    false,
+    `stale ${field} must fail the release verifier`,
+  );
+}
+console.log('PASS  publication verifier checks compiled ticket contract identity');
 
 const webIdentity = {
   version: '1.2.3',

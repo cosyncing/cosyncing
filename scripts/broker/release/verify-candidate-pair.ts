@@ -345,6 +345,37 @@ export function isHeaderAuthenticatedTicketRequest(
   }
 }
 
+export interface CandidateClientContractIdentity {
+  clientVersion: string;
+  contractRevision: number;
+  minimumBrokerRevision: number;
+  contractSurfaceHash: string;
+}
+
+/** Prove that the compiled client placed its stamped contract identity in the ticket request body. */
+export function ticketRequestContractMatches(
+  postData: unknown,
+  expected: CandidateClientContractIdentity,
+  tool: string,
+  sessionId: string,
+): boolean {
+  try {
+    const body = JSON.parse(String(postData));
+    const params = body?.params;
+    return body?.tool === tool
+      && body?.sessionId === sessionId
+      && params != null
+      && typeof params === 'object'
+      && !Array.isArray(params)
+      && params.clientVersion === expected.clientVersion
+      && params.contractRevision === String(expected.contractRevision)
+      && params.minimumBrokerRevision === String(expected.minimumBrokerRevision)
+      && params.contractSurfaceHash === expected.contractSurfaceHash;
+  } catch {
+    return false;
+  }
+}
+
 export function candidateBrokerEnvironment(options: {
   home: string;
   hostHome: string;
@@ -373,6 +404,7 @@ async function probeBuiltClient(options: {
   token: string;
   sessionId: string;
   brokerContract: any;
+  clientContract: CandidateClientContractIdentity;
 }): Promise<void> {
   await withCandidateParityBrowser({
     executable: chromeHeadlessShell(),
@@ -673,6 +705,19 @@ async function probeBuiltClient(options: {
         'built app did not exchange its header credential for the WebSocket ticket',
       );
     }
+    const ticketPostData = await send('Network.getRequestPostData', {
+      requestId: ticketRequest.params.requestId,
+    });
+    if (!ticketRequestContractMatches(
+      ticketPostData?.postData,
+      options.clientContract,
+      'pi',
+      options.sessionId,
+    )) {
+      throw new Error(
+        'compiled web client ticket request does not match its stamped contract identity',
+      );
+    }
     let hello: any;
     const helloReceived = await waitFor(() => {
       for (const event of events) {
@@ -933,6 +978,13 @@ export async function verifyCandidatePair(
           token,
           sessionId: pi.id,
           brokerContract: webBrokerContract,
+          clientContract: {
+            clientVersion: identity.version,
+            contractRevision: identity.contract.revision,
+            minimumBrokerRevision:
+              identity.contract.clientMinimumBrokerRevision,
+            contractSurfaceHash: identity.contract.surfaceHash,
+          },
         });
         return 'complete';
       },
