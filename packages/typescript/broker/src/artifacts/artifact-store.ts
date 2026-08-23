@@ -317,9 +317,24 @@ function parseDataUrl(url: string): { mimeType: string; bytes: Buffer } | null {
 
 export function artifactCacheRoot(): string {
   const override = process.env.COSYNCING_CACHE_DIR?.trim();
-  if (!override) return join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
-  if (!isAbsolute(override) || override.includes('\0')) throw new Error('COSYNCING_CACHE_DIR must be an absolute path');
-  return resolve(override);
+  const configured = override || join(homedir(), '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  if (!isAbsolute(configured) || configured.includes('\0')) {
+    throw new Error('COSYNCING_CACHE_DIR must be an absolute path');
+  }
+
+  // Cache roots are routinely relocated through an owner-chosen symlink such as
+  // `~/.cache -> /mnt/large/.cache`. Canonicalize the deepest existing ancestor and append any
+  // first-run tail that does not exist yet. Secure-file inspection still lstats the canonical root,
+  // every component created below it, and the secret leaf itself.
+  const missing: string[] = [];
+  let cursor = resolve(configured);
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    missing.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return join(realpathSync(cursor), ...missing);
 }
 
 export class ArtifactStore {

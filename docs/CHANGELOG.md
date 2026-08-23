@@ -56,6 +56,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   roster handlers, and unexpected request failures return content-free responses.
 - Artifact URL signing now rejects weak or unsafe secret state, explicit file
   delivery rejects symlinked workspace paths, and the web shell cannot be framed.
+- Artifact caches relocated through a symlinked parent remain durable across
+  broker restarts; proactive artifact surfacing intentionally rejects symlinked workspace paths.
 
 ## 0.4.1 — 2026-08-21
 

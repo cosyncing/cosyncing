@@ -90,14 +90,18 @@ async function stopLoopbackForwarder(forwarder: LoopbackForwarder | undefined): 
   await new Promise<void>((resolve) => forwarder.server.close(() => resolve()));
 }
 
-async function startBroker(fixtureRoot: string, port: number): Promise<BrokerProcess> {
+async function startBroker(
+  fixtureRoot: string,
+  port: number,
+  cacheRoot = join(fixtureRoot, 'artifact-cache'),
+): Promise<BrokerProcess> {
   const origin = `http://127.0.0.1:${port}`;
   const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
     env: isolatedBrokerFixtureEnvironment(fixtureRoot, {
       overrides: {
         PORT: String(port),
         HOST: '127.0.0.1',
-        COSYNCING_CACHE_DIR: join(fixtureRoot, 'artifact-cache'),
+        COSYNCING_CACHE_DIR: cacheRoot,
         COSYNCING_ARTIFACT_CACHE_MAX_RECORDS: '5',
         COSYNCING_ARTIFACT_SESSION_REPLAY_LIMIT: '3',
         COSYNCING_PI_SESSIONS_ROOT: '',
@@ -256,11 +260,16 @@ function fakeConnection(tool: string, id: string, cwd: string): FakeConnection {
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-artifact-session-isolation-'));
 const fixtureA = join(root, 'broker-a');
 const fixtureB = join(root, 'broker-b');
+const relocatedCacheParent = join(root, 'relocated-cache');
+const symlinkedCacheParent = join(root, 'cache-link');
+const cacheRootA = join(symlinkedCacheParent, 'broker-a-cache');
 const cwd = join(root, 'workspace');
 const outbox = join(cwd, '.cosyncing', 'outbox');
 const sessionFileA = join(root, 'pi-session-a.jsonl');
 const sessionFileB = join(root, 'pi-session-b.jsonl');
 mkdirSync(outbox, { recursive: true });
+mkdirSync(relocatedCacheParent, { recursive: true });
+symlinkSync(relocatedCacheParent, symlinkedCacheParent);
 writeFileSync(sessionFileA, `${JSON.stringify({ type: 'session', id: 'same-native-a', cwd })}\n`);
 writeFileSync(sessionFileB, `${JSON.stringify({ type: 'session', id: 'same-native-b', cwd })}\n`);
 // This is the reproduction condition. It remains in place for the lifetime of
@@ -279,7 +288,9 @@ const phones = new Set<Phone>();
 
 try {
   await leaseA.release();
-  brokerA = await startBroker(fixtureA, portA);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
+  check('0 broker accepts a cache root below a symlinked parent without process-local fallback',
+    !brokerA.output.read().includes('artifact cache unavailable'));
   forwarderA = await startLoopbackForwarder(portA);
   clientAOrigin = forwarderA.origin;
   const idA = await hello(clientAOrigin, sessionFileA, cwd);
@@ -338,7 +349,7 @@ try {
   phones.delete(reattachedPeer);
   await stopBroker(brokerA);
   brokerA = undefined;
-  brokerA = await startBroker(fixtureA, portA);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
   const restartedIdA = await hello(clientAOrigin, sessionFileA, cwd);
   const restartedIdB = await hello(clientAOrigin, sessionFileB, cwd);
   const restartedOwner = await attach(clientAOrigin, restartedIdA);
@@ -413,7 +424,7 @@ try {
     check(`8.${index} tiny artifact ${index} is accepted`, response.status === 200);
     await sleep(2);
   }
-  const indexFile = join(fixtureA, 'artifact-cache', 'artifacts', 'index.json');
+  const indexFile = join(relocatedCacheParent, 'broker-a-cache', 'artifacts', 'index.json');
   const persisted = JSON.parse(readFileSync(indexFile, 'utf8')) as { records?: unknown[] };
   check('8a persisted artifact index is deterministically record-bounded', persisted.records?.length === 5, `count=${persisted.records?.length ?? 0}`);
 
@@ -433,7 +444,7 @@ try {
   phones.delete(boundedReattach);
   await stopBroker(brokerA);
   brokerA = undefined;
-  brokerA = await startBroker(fixtureA, portA);
+  brokerA = await startBroker(fixtureA, portA, cacheRootA);
   await hello(clientAOrigin, sessionFileA, cwd);
   await hello(clientAOrigin, sessionFileB, cwd);
   const boundedRestartOwner = await attach(clientAOrigin, restartedIdA);
