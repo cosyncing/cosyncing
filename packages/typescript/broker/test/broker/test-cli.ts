@@ -143,6 +143,25 @@ process.env.COSYNCING_HOME = pureCliHome;
     parsed.distribution === 'source' && parsed.packaged === false
       && packagedVersion.distribution === 'native' && packagedVersion.packaged === true);
 
+  let pairCalls = 0;
+  const urlFreeJsonPair = await callCli(['pair', '--json'], {
+    runPair: async () => { pairCalls += 1; return { exitCode: 0, detailCode: 'pairing-created' }; },
+  });
+  const compatibleJsonPair = await callCli(
+    ['pair', '--json', '--broker-url', 'https://broker.example.com'],
+    {
+      runPair: async (options) => {
+        if (options.json && options.brokerUrl === 'https://broker.example.com') pairCalls += 1;
+        return { exitCode: 0, detailCode: 'pairing-created' };
+      },
+    },
+  );
+  check('pair --json requires the URL fields promised by schemaVersion 1',
+    urlFreeJsonPair.code === 2
+      && urlFreeJsonPair.stderr.includes('--json requires --broker-url')
+      && compatibleJsonPair.code === 0
+      && pairCalls === 1);
+
   let setupCalls = 0;
   const missingOwnershipAck = await callCli(['setup', '--yes'], {
     runSetup: async () => { setupCalls += 1; return { exitCode: 0 }; },

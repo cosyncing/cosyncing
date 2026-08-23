@@ -209,6 +209,55 @@ void main() {
       });
 
       test(
+        'refuses revision 14 without putting a credential in a URL',
+        () async {
+          final dio = Dio();
+          var ticketRequests = 0;
+          var socketUrls = 0;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/ws-auth-tickets')) {
+                  ticketRequests += 1;
+                }
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {
+                      'ok': true,
+                      'contract': {'revision': 14},
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          final unsupported = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://unsupported-broker.example.com',
+              token: 'must-not-enter-a-url',
+            ),
+            tool: 'codex',
+            sessionId: 'unsupported-session',
+            dio: dio,
+            adapterFactory: (url) {
+              socketUrls += 1;
+              return FakeWebSocketAdapter();
+            },
+          );
+          addTearDown(unsupported.dispose);
+
+          await unsupported.connect();
+
+          expect(ticketRequests, 0);
+          expect(socketUrls, 0);
+          expect(unsupported.lastConnectionError, isA<UnsupportedError>());
+          expect(unsupported.state, SessionConnectionState.reconnecting);
+        },
+      );
+
+      test(
         'automatic reconnect crosses revision 15 to ticket authentication',
         () async {
           final dio = Dio();

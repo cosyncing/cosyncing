@@ -418,6 +418,13 @@ export async function runPairCommand(
         'input',
       );
     }
+    if (options.json && !brokerUrl) {
+      throw new OperatorCommandError(
+        'pairing-broker-url-required',
+        '--json requires --broker-url so schemaVersion 1 retains brokerUrl and advertisedUrl.',
+        'input',
+      );
+    }
     const pairingLinkLabel = readSetupState(home).language === 'zh-Hans'
       ? '配对链接'
       : 'Pairing link';
@@ -488,6 +495,8 @@ export async function runPairCommand(
             state: 'accepted',
             peerId,
             expiresAt: offer.expiresAt,
+            brokerUrl,
+            advertisedUrl: brokerUrl,
             tokenScope: 'full-broker-api-v1',
           }, null, 2)}\n`);
           return { exitCode: 0, detailCode: 'pairing-accepted' };

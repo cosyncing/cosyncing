@@ -83,6 +83,7 @@ class SessionConnection {
   final bool _ownsDio;
   bool _legacyCredentialQueryRequired = false;
   bool _wsTicketCapabilityChecked = false;
+  Object? _lastConnectionError;
 
   /// Control mode for the attach (`resume` to Drive, `live` to join an
   /// existing live owner, null to Observe). Mutated by [reattach] and applied
@@ -217,6 +218,9 @@ class SessionConnection {
   /// Whether this connection must refuse mutating controls.
   bool get compatibilityReadOnly => _hello?.compatibility.readOnly ?? false;
 
+  /// Most recent transport setup failure, cleared after a successful connect.
+  Object? get lastConnectionError => _lastConnectionError;
+
   /// Opens the WebSocket connection and begins receiving frames.
   ///
   /// Subsequent calls while connecting/connected are no-ops.
@@ -242,6 +246,7 @@ class SessionConnection {
       await _adapter!.connect();
 
       if (gen != _generation) return;
+      _lastConnectionError = null;
       _setState(SessionConnectionState.connected);
 
       _messageSub = _adapter!.messages.listen(
@@ -253,6 +258,7 @@ class SessionConnection {
       // ignore: avoid_catches_without_on_clauses
     } catch (e) {
       if (gen != _generation) return;
+      _lastConnectionError = e;
       _invalidateWebSocketAuthCapabilityAfterConnectFailure();
       _onDisconnect(gen);
     }
@@ -591,7 +597,17 @@ class SessionConnection {
     final revision = contract is Map<String, dynamic>
         ? contract['revision']
         : null;
-    _legacyCredentialQueryRequired = revision is int && revision < 16;
+    if (revision is! int) {
+      throw const FormatException(
+        'Broker health did not include a contract revision.',
+      );
+    }
+    if (revision < 15) {
+      throw UnsupportedError(
+        'Broker contract revision $revision is outside the supported overlap.',
+      );
+    }
+    _legacyCredentialQueryRequired = revision == 15;
     _wsTicketCapabilityChecked = true;
   }
 
@@ -784,6 +800,7 @@ class SessionConnection {
         await _adapter!.connect();
 
         if (reconnectGen != _generation) return;
+        _lastConnectionError = null;
         _setState(SessionConnectionState.connected);
         _backoffMultiplier = 1;
 
@@ -796,6 +813,7 @@ class SessionConnection {
         // ignore: avoid_catches_without_on_clauses
       } catch (e) {
         if (reconnectGen != _generation) return;
+        _lastConnectionError = e;
         _invalidateWebSocketAuthCapabilityAfterConnectFailure();
         _backoffMultiplier = (_backoffMultiplier * 2).clamp(
           1,

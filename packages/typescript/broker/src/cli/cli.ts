@@ -757,6 +757,10 @@ export async function runCli(argv: string[], dependencies: CliDependencies = {})
       stderr.write(`${command} pair: unknown or duplicate option ${JSON.stringify(arg)}\n`);
       return 2;
     }
+    if (json && !brokerUrl) {
+      stderr.write(`${command} pair: --json requires --broker-url to preserve the schemaVersion 1 output contract\n`);
+      return 2;
+    }
     const pair = await (dependencies.runPair ?? defaultRunPair)({
       json,
       wait,
