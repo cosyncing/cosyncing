@@ -25,7 +25,6 @@ import { shippedAdapters } from './shipped-adapters.ts';
 import {
   assessDurableStateForSetup,
   durableStateLayout,
-  inspectDurableSchemas,
   type DurableStatePermissionRepair,
   type DurableStoreInspection,
 } from '../security/durable-state.ts';
@@ -1519,10 +1518,11 @@ async function verifySetup(options: {
     options.context.env.COSYNCING_CACHE_DIR?.trim()
       || join(options.context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
   );
-  if (inspectDurableSchemas(durableStateLayout({
+  const durableAssessment = assessDurableStateForSetup(durableStateLayout({
     stateRoot: options.inspection.stateHome,
     cacheRoot,
-  })).some((store) => store.status !== 'ok' && store.status !== 'missing')) {
+  }));
+  if (durableAssessment.blockers.length > 0 || durableAssessment.permissionRepairs.length > 0) {
     return false;
   }
   const port = await options.context.probeTcp('127.0.0.1', options.plan.targetConfig.broker.port);

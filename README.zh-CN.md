@@ -86,6 +86,10 @@ Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode �
 服务器需要 [Bun](https://bun.sh) 1.3.8 或更高版本来运行 cosyncing，并需要 Node.js/npm 来安装和
 更新。Broker 默认只允许本机访问。跨设备使用需要由操作者单独配置代理、隧道、VPN、Mesh 网络或
 其他[连接方式](docs/connectivity/README.md)（英文）。
+私有连接可先看 [Tailscale Serve](docs/connectivity/tailscale-serve.md)；自建 Mesh 可看
+[WireGuard 或 EasyTier](docs/connectivity/wireguard-easytier.md)。运行 `cosyncing setup` 后，也可以把
+`https://github.com/cosyncing/cosyncing/tree/main/docs/connectivity` 复制给编程助手，请它按指南配置你
+选择的连接方式，并保持 Broker 只监听回环地址。
 强烈建议安装
 [Tokdash](https://github.com/JingbiaoMei/tokdash)，用于配额跟踪与预警。
 

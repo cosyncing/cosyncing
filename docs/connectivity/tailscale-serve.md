@@ -16,6 +16,21 @@ bash examples/connectivity/tailscale-serve.sh 7734
 tailscale serve status
 ```
 
+The example uses `tailscale serve --bg`. Tailscale stores a background Serve
+configuration and resumes it after a device reboot or a `tailscale down` /
+`tailscale up` cycle. This works only when `tailscaled` itself starts again.
+cosyncing does not install, enable, or monitor that daemon.
+
+On WSL, both `tailscaled` and Tailscale Serve must run inside the same WSL
+distribution as the loopback broker. After restarting Windows or WSL, open that
+distribution and verify both layers before relying on remote access:
+
+```bash
+cosy status
+tailscale status
+tailscale serve status
+```
+
 Use the HTTPS URL printed by `tailscale serve status`:
 
 ```bash
