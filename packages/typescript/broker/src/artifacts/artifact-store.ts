@@ -18,6 +18,11 @@ import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AgentMessage } from '@cosyncing/protocol';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
+import {
+  atomicWriteOwnerOnly,
+  inspectOwnerOnlyFile,
+  readOwnerOnlyText,
+} from '../security/secure-files.ts';
 import { ClientMessagePolicyError } from '../sessions/client-message-policy.ts';
 
 export interface ArtifactSession {
@@ -202,7 +207,7 @@ function injectCosyncingBridge(html: string, artifactKey: string, nonce: string)
   }, true);
 })();
 </script>`;
-  return /<\/body\s*>/i.test(html) ? html.replace(/<\/body\s*>/i, `${script}</body>`) : `${html}${script}`;
+  return /<\/body\s*>/i.test(html) ? html.replace(/<\/body\s*>/i, () => `${script}</body>`) : `${html}${script}`;
 }
 
 function plainRecord(value: unknown): value is Record<string, unknown> {
@@ -898,14 +903,27 @@ export class ArtifactStore {
   }
 
   private loadSecret(): Buffer {
-    try {
-      return Buffer.from(readFileSync(this.secretFile, 'utf8').trim(), 'base64');
-    } catch {
-      const secret = randomBytes(32);
-      mkdirSync(dirname(this.secretFile), { recursive: true });
-      writeFileSync(this.secretFile, secret.toString('base64'), { mode: 0o600 });
-      return secret;
+    const inspection = inspectOwnerOnlyFile(this.secretFile);
+    if (inspection.status === 'ok') {
+      const encoded = readOwnerOnlyText(this.secretFile).trim();
+      // Buffer.from(base64) is deliberately permissive and accepts empty or truncated input. Require a
+      // canonical encoding and at least 256 bits before this value can become an HMAC key.
+      if (/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+        const secret = Buffer.from(encoded, 'base64');
+        if (secret.length >= 32 && secret.toString('base64') === encoded) return secret;
+      }
+    } else if (
+      inspection.status !== 'missing'
+      && !(inspection.status === 'unsafe' && inspection.problem === 'unsafe-mode')
+    ) {
+      throw new Error(`artifact URL secret is unsafe (${inspection.problem ?? inspection.status})`);
     }
+
+    const secret = randomBytes(32);
+    atomicWriteOwnerOnly(this.secretFile, secret.toString('base64'), { mode: 0o600 });
+    const committed = inspectOwnerOnlyFile(this.secretFile);
+    if (committed.status !== 'ok') throw new Error('artifact URL secret could not be committed safely');
+    return secret;
   }
 
   private loadIndex(): ArtifactIndex {

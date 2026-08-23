@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -562,6 +563,49 @@ try {
   check('9g stable-instance replay supersedes the legacy alias for the same artifact key',
     dedupedReplay.length === 1 && dedupedReplay[0]?.name === 'stable.txt',
     dedupedReplay.map((artifact) => artifact.name).join(','));
+
+  const secretRecoveryRoot = join(root, 'artifact-secret-recovery');
+  mkdirSync(secretRecoveryRoot, { recursive: true });
+  const secretPath = join(secretRecoveryRoot, 'artifact-url-secret');
+  writeFileSync(secretPath, '', { mode: 0o644 });
+  new ArtifactStore('http://secret-recovery.test', secretRecoveryRoot);
+  const recoveredSecret = Buffer.from(readFileSync(secretPath, 'utf8').trim(), 'base64');
+  check('9h empty artifact URL secret is replaced with at least 256 random bits', recoveredSecret.length >= 32);
+  check('9i recovered artifact URL secret is owner-only',
+    process.platform === 'win32' || (statSync(secretPath).mode & 0o777) === 0o600,
+    `mode=${(statSync(secretPath).mode & 0o777).toString(8)}`);
+
+  const bridgeRoot = join(root, 'bridge-replacement-metacharacters');
+  const bridgeStore = new ArtifactStore('http://bridge-replacement.test', bridgeRoot);
+  const bridgeArtifactKey = "bridge-$&-$`-$'-$$";
+  const bridgeHtml = '<html><body><p>before-marker</p></body><p>after-marker</p></html>';
+  const bridgeReference = bridgeStore.putBytes(
+    { tool: 'pi', id: 'bridge-session' },
+    {
+      type: 'file-artifact',
+      artifactKey: bridgeArtifactKey,
+      name: 'bridge.html',
+      path: 'bridge.html',
+      mimeType: 'text/html',
+    },
+    Buffer.from(bridgeHtml),
+    'text/html',
+  ) as Artifact;
+  const bridgeUrl = new URL(String(bridgeReference.fetchUrl), 'http://bridge-replacement.test');
+  const bridgeResponse = bridgeStore.serve(
+    'pi',
+    'bridge-session',
+    bridgeArtifactKey,
+    bridgeUrl.searchParams.get('expires'),
+    bridgeUrl.searchParams.get('sig'),
+  );
+  const injectedBridgeHtml = await bridgeResponse.text();
+  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+  check('9j artifact bridge keeps replacement metacharacters literal without duplicating HTML',
+    bridgeResponse.status === 200
+      && injectedBridgeHtml.includes(`const artifactKey = ${JSON.stringify(bridgeArtifactKey)};`)
+      && occurrences(injectedBridgeHtml, 'before-marker') === 1
+      && occurrences(injectedBridgeHtml, 'after-marker') === 1);
 
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.
