@@ -139,7 +139,12 @@ import {
 import './managed-runtime-state.ts';
 import { RuntimeUpdateCoordinator } from '../updates/runtime-update.ts';
 import { createCodexRuntimeUpdateProvider, createOpencodeRuntimeUpdateProvider } from '../updates/runtime-update-providers.ts';
-import { PairingHttpError, tokenHash, TransportPairingRegistry } from '../transport/transport-pairing.ts';
+import {
+  PAIRING_ACCEPT_MAX_BYTES,
+  PairingHttpError,
+  tokenHash,
+  TransportPairingRegistry,
+} from '../transport/transport-pairing.ts';
 import { MemoryReplayCache, openTransportEnvelope } from '@cosyncing/transport-wire';
 import type { TransportEnvelope } from '@cosyncing/transport';
 import {
@@ -3321,6 +3326,44 @@ async function readTransportRequestBytes(req: Request): Promise<Uint8Array> {
   return out;
 }
 
+async function readPairingAcceptanceJson(req: Request): Promise<unknown> {
+  const contentLength = req.headers.get('content-length');
+  if (contentLength && Number(contentLength) > PAIRING_ACCEPT_MAX_BYTES) {
+    throw new PairingHttpError(413, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is too large');
+  }
+  if (!req.body) throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is required');
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > PAIRING_ACCEPT_MAX_BYTES) {
+      try { await reader.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new PairingHttpError(413, 'PAIRING_INVALID_INPUT', 'pairing acceptance body is too large');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance body must be valid JSON');
+  }
+}
+
+function attentionWriteBestEffort(operation: Promise<unknown>, label: string): void {
+  void operation.catch((error) => {
+    console.warn(`${LOG_PREFIX} ${label} attention write failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 async function readUploadChunkBytes(req: Request): Promise<Uint8Array> {
   const contentLength = req.headers.get('content-length');
   if (contentLength && Number(contentLength) > UPLOAD_CHUNK_MAX_BYTES) {
@@ -3796,7 +3839,7 @@ server = Bun.serve<WsData>({
     ) {
       const incidentKey = authFailureAttention.recordFailure();
       if (incidentKey) {
-        await attentionService.upsertEvent({
+        attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: incidentKey,
           kind: 'security-alert',
           state: 'resolved',
@@ -3806,7 +3849,7 @@ server = Bun.serve<WsData>({
           action: { kind: 'open-attention-inbox' },
           presentationRevision: 1,
           presentationStage: 'immediate',
-        });
+        }), 'authentication-failure');
       }
       return isResumeStream
         ? json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive resume' }, 401)
@@ -4021,14 +4064,9 @@ server = Bun.serve<WsData>({
     const acceptPairing = path.match(/^\/api\/transport\/pairings\/([^/]+)\/accept$/);
     if (acceptPairing && req.method === 'POST') {
       try {
-        const body = await req.json().catch(() => ({})) as any;
-        const accepted = transportPairings.accept(decodeURIComponent(acceptPairing[1]!), {
-          peerId: String(body?.peerId ?? ''),
-          peerToken: String(body?.peerToken ?? ''),
-          identityPublicKey: String(body?.identityPublicKey ?? ''),
-          exchangePublicKey: String(body?.exchangePublicKey ?? ''),
-        });
-        await attentionService.upsertEvent({
+        const pairingId = decodeURIComponent(acceptPairing[1]!);
+        const accepted = transportPairings.accept(pairingId, await readPairingAcceptanceJson(req));
+        attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: `device-paired:${accepted.peer.peerId}:${Date.now()}`,
           kind: 'device-paired',
           state: 'resolved',
@@ -4038,7 +4076,7 @@ server = Bun.serve<WsData>({
           action: { kind: 'open-attention-inbox' },
           presentationRevision: 1,
           presentationStage: 'immediate',
-        });
+        }), 'device-paired');
         return json({ ok: true, ...accepted, brokerDescriptor: BROKER_DESCRIPTOR });
       } catch (err) {
         if (err instanceof PairingHttpError) return json({ error: err.message, code: err.code }, err.status);

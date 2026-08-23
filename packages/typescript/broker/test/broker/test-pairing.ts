@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseQrPairingPayload } from '@cosyncing/crypto';
+import { generateIdentityKeyPair, generateX25519KeyPair, parseQrPairingPayload } from '@cosyncing/crypto';
 import {
   pairingBrokerUrlUsesUnprotectedHttp,
   normalizePairingBrokerUrl,
   PairingBrokerUrlError,
 } from '../../src/transport/pairing-url.ts';
 import { PairingHttpError, TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
+import { terminalSafeText } from '../../src/cli/operator-commands.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-'));
 
@@ -43,7 +44,49 @@ try {
     assert.throws(() => parseQrPairingPayload(qr), Error, fixture.name);
   }
 
-  console.log('PASS provider-neutral pairing URL and shared invalid-fixture contracts');
+  const inert = terminalSafeText('legacy\npeer\u001b]52;c;payload\u0007');
+  assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(inert), false);
+  assert.match(inert, /\\u001b/);
+
+  const validInput = (suffix: string) => ({
+    peerId: `client-${suffix}`,
+    peerToken: Buffer.alloc(32, suffix.charCodeAt(0)).toString('base64url'),
+    identityPublicKey: generateIdentityKeyPair().publicKey,
+    exchangePublicKey: generateX25519KeyPair().publicKey,
+  });
+
+  if (process.platform !== 'win32') {
+    const writeHome = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-write-failure-'));
+    try {
+      const writeRegistry = new TransportPairingRegistry({ home: writeHome });
+      const offer = writeRegistry.createOffer();
+      chmodSync(writeHome, 0o500);
+      assert.throws(() => writeRegistry.accept(offer.pairingId, validInput('w')), Error);
+      assert.deepEqual(writeRegistry.listPeers(), []);
+      assert.equal(writeRegistry.getOfferStatus(offer.pairingId)?.state, 'pending');
+      chmodSync(writeHome, 0o700);
+      assert.equal(writeRegistry.accept(offer.pairingId, validInput('w')).peer.peerId, 'client-w');
+    } finally {
+      chmodSync(writeHome, 0o700);
+      rmSync(writeHome, { recursive: true, force: true });
+    }
+  }
+
+  const renameHome = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-rename-failure-'));
+  try {
+    const renameRegistry = new TransportPairingRegistry({ home: renameHome });
+    const offer = renameRegistry.createOffer();
+    mkdirSync(join(renameHome, 'transport-peers.json'));
+    assert.throws(() => renameRegistry.accept(offer.pairingId, validInput('r')), Error);
+    assert.deepEqual(renameRegistry.listPeers(), []);
+    assert.equal(renameRegistry.getOfferStatus(offer.pairingId)?.state, 'pending');
+    rmSync(join(renameHome, 'transport-peers.json'), { recursive: true });
+    assert.equal(renameRegistry.accept(offer.pairingId, validInput('r')).peer.peerId, 'client-r');
+  } finally {
+    rmSync(renameHome, { recursive: true, force: true });
+  }
+
+  console.log('PASS pairing URL, terminal safety, and failure-atomic persistence contracts');
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

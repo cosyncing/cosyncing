@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /** Broker control, credential, Observe, and durable-state boundary acceptance. */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -365,7 +366,7 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         peerId: 'control-boundary-phone',
-        peerToken: 'phone-mailbox-token',
+        peerToken: createHash('sha256').update('phone-mailbox-token').digest('base64url'),
         identityPublicKey: identity.publicKey,
         exchangePublicKey: exchange.publicKey,
       }),

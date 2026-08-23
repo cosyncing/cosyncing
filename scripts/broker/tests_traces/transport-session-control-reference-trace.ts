@@ -69,7 +69,7 @@ try {
 
   const phoneIdentity = generateIdentityKeyPair();
   const phoneExchange = generateX25519KeyPair();
-  const phonePeerToken = `phone-token-${short}`;
+  const phonePeerToken = randomBytes(32).toString('base64url');
   const acceptRes = await fetch(`${baseUrl}/api/transport/pairings/${encodeURIComponent(offer.pairingId)}/accept`, {
     method: 'POST',
     headers: { 'x-cosyncing-token': token, 'content-type': 'application/json' },

@@ -1,4 +1,4 @@
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, createPublicKey, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PairingErrorCode } from '@cosyncing/protocol';
@@ -75,6 +75,10 @@ export class PairingHttpError extends Error {
 }
 
 const PAIRING_ID_BYTES = 16;
+export const PAIRING_ACCEPT_MAX_BYTES = 16 * 1024;
+export const PAIRING_ID_PATTERN = /^pair_[A-Za-z0-9_-]{20,32}$/;
+export const CLIENT_PEER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+export const PEER_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 const PAIRING_ACCEPT_MAX_FAILURES = 10;
 const PAIRING_ACCEPT_FAILURE_WINDOW_MS = 60 * 1000;
 const PAIRING_ACCEPT_FAILURE_MAX_BUCKETS = 1000;
@@ -111,8 +115,8 @@ export class TransportPairingRegistry {
       if (offer.expiresAt <= this.now()) this.offers.delete(id);
     }
     const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
-    const pairingId = `pair_${randomBytes(PAIRING_ID_BYTES).toString('base64url')}`;
-    const brokerPeerId = `broker_${randomBytes(9).toString('base64url')}`;
+    const pairingId = this.uniquePairingId();
+    const brokerPeerId = this.uniqueBrokerPeerId();
     const brokerPeerToken = randomBytes(24).toString('base64url');
     const expiresAt = this.now() + (this.opts.ttlMs ?? 5 * 60 * 1000);
     // The broker descriptor stays OUT of the QR and in the response beside it. A QR is scanned off a
@@ -174,17 +178,13 @@ export class TransportPairingRegistry {
     return { state: 'pending', expiresAt };
   }
 
-  accept(pairingId: string, input: {
-    peerId: string;
-    peerToken: string;
-    identityPublicKey: string;
-    exchangePublicKey: string;
-  }): {
+  accept(pairingId: string, rawInput: unknown): {
     peer: { peerId: string; label?: string; identityPublicKey: string };
     broker: { peerId: string; peerToken: string; identityPublicKey: string };
     wrappedDataKey: WrappedDataKey;
     brokerProof: PairingAcceptanceProof;
   } {
+    assertPairingId(pairingId);
     this.assertPairingAcceptAllowed(pairingId);
     const offer = this.offers.get(pairingId);
     if (!offer) {
@@ -204,17 +204,18 @@ export class TransportPairingRegistry {
       this.recordPairingAcceptFailure(pairingId);
       throw new PairingHttpError(410, 'PAIRING_EXPIRED', 'pairing offer expired');
     }
-    const peerId = input.peerId.trim();
-    const peerToken = input.peerToken.trim();
-    const identityPublicKey = input.identityPublicKey.trim();
-    const exchangePublicKey = input.exchangePublicKey.trim();
-    if (!peerId || !peerToken || !identityPublicKey || !exchangePublicKey) {
+    let input: PairingAcceptanceInput;
+    try {
+      input = validatePairingAcceptanceInput(rawInput);
+    } catch (error) {
       this.recordPairingAcceptFailure(pairingId);
-      throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'peerId, peerToken, identityPublicKey, and exchangePublicKey are required');
+      if (error instanceof PairingHttpError) throw error;
+      throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance is invalid');
     }
-    if (this.peers.get(peerId)?.revokedAt == null && this.peers.has(peerId)) {
+    const { peerId, peerToken, identityPublicKey, exchangePublicKey } = input;
+    if (!this.clientPeerIdAvailable(peerId)) {
       this.recordPairingAcceptFailure(pairingId);
-      throw new PairingHttpError(409, 'PAIRING_ALREADY_ACCEPTED', 'peer is already paired');
+      throw new PairingHttpError(409, 'PAIRING_ALREADY_ACCEPTED', 'peer identity collides with an existing endpoint');
     }
     const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
     const dataKey = generateDataKey();
@@ -231,10 +232,14 @@ export class TransportPairingRegistry {
       wrappedDataKey,
       acceptedAt: new Date(this.now()).toISOString(),
     };
+    // Persist a candidate snapshot before publishing either in-memory mutation. A failed write or
+    // rename leaves the one-use offer pending and the peer registry unchanged.
+    const candidatePeers = new Map(this.peers);
+    candidatePeers.set(peerId, peer);
+    this.save(candidatePeers);
     this.peers.set(peerId, peer);
     offer.acceptedPeerId = peerId;
     this.pairingAcceptFailures.delete(pairingId);
-    this.save();
     const broker = {
       peerId: peer.brokerPeerId,
       peerToken: offer.brokerPeerToken,
@@ -321,11 +326,11 @@ export class TransportPairingRegistry {
     }
   }
 
-  private save(): void {
+  private save(peers: ReadonlyMap<string, AcceptedTransportPeer> = this.peers): void {
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
     // The store holds raw per-peer data keys — owner-only, matching cosyncing-keys.json.
-    writeFileSync(tmp, JSON.stringify({ version: 1, peers: [...this.peers.values()] } satisfies PairingStoreFile, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ version: 1, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n', { mode: 0o600 });
     renameSync(tmp, this.path);
   }
 
@@ -372,6 +377,90 @@ export class TransportPairingRegistry {
     const direct = this.peers.get(peerId);
     if (direct) return direct;
     return [...this.peers.values()].find((peer) => peer.brokerPeerId === peerId);
+  }
+
+  private endpointIdExists(peerId: string): boolean {
+    return this.peers.has(peerId)
+      || [...this.peers.values()].some((peer) => peer.brokerPeerId === peerId)
+      || [...this.offers.values()].some((offer) => offer.brokerPeerId === peerId);
+  }
+
+  private clientPeerIdAvailable(peerId: string): boolean {
+    const direct = this.peers.get(peerId);
+    if (direct && !direct.revokedAt) return false;
+    return ![...this.peers.values()].some((peer) => peer.brokerPeerId === peerId)
+      && ![...this.offers.values()].some((offer) => offer.brokerPeerId === peerId);
+  }
+
+  private uniquePairingId(): string {
+    for (;;) {
+      const candidate = `pair_${randomBytes(PAIRING_ID_BYTES).toString('base64url')}`;
+      if (!this.offers.has(candidate)) return candidate;
+    }
+  }
+
+  private uniqueBrokerPeerId(): string {
+    for (;;) {
+      const candidate = `broker_${randomBytes(18).toString('base64url')}`;
+      if (!this.endpointIdExists(candidate)) return candidate;
+    }
+  }
+}
+
+export interface PairingAcceptanceInput {
+  peerId: string;
+  peerToken: string;
+  identityPublicKey: string;
+  exchangePublicKey: string;
+}
+
+export function assertPairingId(pairingId: string): void {
+  if (!PAIRING_ID_PATTERN.test(pairingId)) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing id is invalid');
+  }
+}
+
+/** Canonical public-boundary validator. The HTTP route and direct registry callers share it. */
+export function validatePairingAcceptanceInput(raw: unknown): PairingAcceptanceInput {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance must be a JSON object');
+  }
+  const input = raw as Record<string, unknown>;
+  const expected = ['exchangePublicKey', 'identityPublicKey', 'peerId', 'peerToken'];
+  if (Object.keys(input).sort().join(',') !== expected.join(',')) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance fields are invalid');
+  }
+  if (expected.some((field) => typeof input[field] !== 'string')) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'pairing acceptance fields must be strings');
+  }
+  const peerId = input.peerId as string;
+  const peerToken = input.peerToken as string;
+  const identityPublicKey = input.identityPublicKey as string;
+  const exchangePublicKey = input.exchangePublicKey as string;
+  if (!CLIENT_PEER_ID_PATTERN.test(peerId) || peerId.startsWith('broker_')) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'peerId is invalid or reserved');
+  }
+  if (!PEER_TOKEN_PATTERN.test(peerToken)) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'peerToken must be a strong base64url credential');
+  }
+  if (!publicKeyHasType(identityPublicKey, 'ed25519')) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'identityPublicKey must be an Ed25519 public key');
+  }
+  if (!publicKeyHasType(exchangePublicKey, 'x25519')) {
+    throw new PairingHttpError(400, 'PAIRING_INVALID_INPUT', 'exchangePublicKey must be an X25519 public key');
+  }
+  return { peerId, peerToken, identityPublicKey, exchangePublicKey };
+}
+
+function publicKeyHasType(encoded: string, expected: 'ed25519' | 'x25519'): boolean {
+  if (!/^[A-Za-z0-9_-]{40,256}$/.test(encoded)) return false;
+  try {
+    const bytes = Buffer.from(encoded, 'base64url');
+    if (bytes.toString('base64url') !== encoded) return false;
+    const key = createPublicKey({ key: bytes, format: 'der', type: 'spki' });
+    return key.asymmetricKeyType === expected;
+  } catch {
+    return false;
   }
 }
 

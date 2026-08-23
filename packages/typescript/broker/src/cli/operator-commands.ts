@@ -305,6 +305,12 @@ interface PairedDevice {
   label?: string;
 }
 
+/** Human terminal output must remain inert even when legacy durable state predates input validation. */
+export function terminalSafeText(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 /**
  * Printed once at the end of a non-`--json` `pair` invocation. Pairing already handed over a per-device,
  * revocable credential; this tells the operator where the *other* credential lives — the shared broker
@@ -402,7 +408,7 @@ export async function runPairCommand(
   const writeSummary = (): void => {
     options.stdout.write(`Paired ${paired.length} device${paired.length === 1 ? '' : 's'} this session:\n`);
     for (const device of paired) {
-      options.stdout.write(`- ${device.peerId}${device.label ? ` (${device.label})` : ''}\n`);
+      options.stdout.write(`- ${terminalSafeText(device.peerId)}${device.label ? ` (${terminalSafeText(device.label)})` : ''}\n`);
     }
     options.stdout.write(`Review them with: ${options.invocation} devices list\n`);
   };
@@ -501,7 +507,7 @@ export async function runPairCommand(
           }, null, 2)}\n`);
           return { exitCode: 0, detailCode: 'pairing-accepted' };
         }
-        options.stdout.write(`Paired device ${peerId}. Review it with: ${options.invocation} devices list\n`);
+        options.stdout.write(`Paired device ${terminalSafeText(peerId)}. Review it with: ${options.invocation} devices list\n`);
         if (!interactive) {
           if (!options.json) writeTokenGuidance(options, home);
           return { exitCode: 0, detailCode: 'pairing-accepted' };
@@ -572,7 +578,7 @@ export async function runDevicesListCommand(
     } else {
       options.stdout.write('Paired devices (v1 credentials have full broker API access):\n');
       for (const peer of peers) {
-        options.stdout.write(`- ${peer.peerId}${peer.label ? ` (${peer.label})` : ''}${peer.acceptedAt ? ` — paired ${peer.acceptedAt}` : ''}\n`);
+        options.stdout.write(`- ${terminalSafeText(peer.peerId)}${peer.label ? ` (${terminalSafeText(peer.label)})` : ''}${peer.acceptedAt ? ` — paired ${terminalSafeText(peer.acceptedAt)}` : ''}\n`);
       }
     }
     return { exitCode: 0, detailCode: 'peer-list-complete' };
@@ -584,7 +590,7 @@ export async function runDevicesListCommand(
 async function defaultConfirmRevoke(peerId: string): Promise<boolean> {
   const prompts = await import('@clack/prompts');
   const answer = await prompts.confirm({
-    message: `Revoke full broker access for ${peerId}?`,
+    message: `Revoke full broker access for ${terminalSafeText(peerId)}?`,
     initialValue: false,
   });
   return !prompts.isCancel(answer) && answer === true;
