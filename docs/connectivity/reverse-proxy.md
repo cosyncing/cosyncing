@@ -1,5 +1,12 @@
 # Caddy and nginx reverse proxies
 
+> [!WARNING]
+> Public or untrusted-network exposure requires broker contract revision 16 or
+> later. Broker 0.4.1 and earlier do not enforce the authentication boundary
+> described here and must not be exposed publicly. Run `cosy version --json`
+> on the broker host and confirm that `contract.revision` is at least `16`
+> before creating any public route.
+
 Use a same-host reverse proxy when a domain should reach cosyncing over HTTPS:
 
 ```text

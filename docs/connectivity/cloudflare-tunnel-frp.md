@@ -1,5 +1,12 @@
 # Cloudflare Tunnel and FRP
 
+> [!WARNING]
+> Public or untrusted-network exposure requires broker contract revision 16 or
+> later. Broker 0.4.1 and earlier do not enforce the authentication boundary
+> described here and must not be exposed publicly. Run `cosy version --json`
+> on the broker host and confirm that `contract.revision` is at least `16`
+> before creating any public route.
+
 Both methods can make the broker internet-reachable. Keep cosyncing on loopback,
 require application authentication, and use a public HTTPS origin.
 

@@ -42,7 +42,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Candidate startup no longer persists configuration schema 2 during an
   upgrade, so a failed upgrade can restore a schema-1 broker safely.
 - Artifact persistence uses a durable installation identity rather than a
-  public URL, and adopts records written under the legacy advertised URL.
+  public URL. It retains and resolves legacy advertised-URL records without
+  deleting the keys required by an old-binary rollback.
 - Version 3 pairing acceptance proves ownership of the identity key committed
   in the QR before the client stores the endpoint or credential.
 

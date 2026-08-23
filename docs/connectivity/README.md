@@ -4,6 +4,13 @@ cosyncing runs its broker on `127.0.0.1:7734` and does not configure network
 access. Choose and operate a separate proxy, tunnel, VPN, mesh network, or
 forwarder when another device must connect.
 
+> [!WARNING]
+> Public or untrusted-network exposure requires broker contract revision 16 or
+> later. Broker 0.4.1 and earlier do not enforce the authentication boundary
+> described here and must not be exposed publicly. Run `cosy version --json`
+> on the broker host and confirm that `contract.revision` is at least `16`
+> before creating any public route.
+
 Every supported topology keeps this boundary:
 
 ```text
