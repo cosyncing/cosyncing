@@ -202,6 +202,17 @@ await run('opening Observe leaves the workspace byte-for-byte unchanged', async 
     writeFileSync(join(workspace, 'result.txt'), 'explicit output');
     assert.equal(managed.surfaceExplicit('result.txt').ok, true);
     assert(frames.some((message) => message.type === 'file-artifact' && message.name === 'result.txt'));
+
+    const outside = mkdtempSync(join(tmpdir(), 'cosyncing-control-outside-'));
+    try {
+      writeFileSync(join(outside, 'secret.txt'), 'outside workspace');
+      symlinkSync(outside, join(workspace, 'link-out'));
+      assert.equal(managed.surfaceExplicit('link-out/secret.txt').ok, false,
+        'send_file must reject an intermediate symlink even when the lexical path stays inside cwd');
+      assert(!frames.some((message) => message.type === 'file-artifact' && message.name === 'secret.txt'));
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
     managed.removeClient(client);
     await managed.dispose();
   } finally {

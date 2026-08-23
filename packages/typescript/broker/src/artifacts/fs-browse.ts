@@ -101,13 +101,11 @@ function toPosixPath(p: string): string {
   return p.split(sep).join('/');
 }
 
-function assertSafePath(baseDir: string, requestedPath: string | null | undefined): { abs: string; rel: string } {
+/** Validate an already resolved target against the workspace jail without following any symlink component. */
+export function validateResolvedWorkspacePath(baseDir: string, target: string): { abs: string; rel: string } {
   if (!baseDir) throw new FsBrowseError('NO_CWD', 'session has no workspace root');
-  const safe = normalizeRelPath(requestedPath);
-  if (isAbsolute(safe)) throw new FsBrowseError('PATH_ESCAPE', 'absolute paths are not allowed');
-
   const base = resolve(baseDir);
-  const abs = resolve(base, safe);
+  const abs = resolve(target);
   if (!isWithin(base, abs)) throw new FsBrowseError('PATH_ESCAPE', 'path escapes workspace root');
 
   const rel = relative(base, abs) || '.';
@@ -120,6 +118,13 @@ function assertSafePath(baseDir: string, requestedPath: string | null | undefine
     if (st.isSymbolicLink()) throw new FsBrowseError('PATH_SYMLINK', 'path crosses or ends at a symbolic link');
   }
   return { abs, rel: toPosixPath(rel) };
+}
+
+function assertSafePath(baseDir: string, requestedPath: string | null | undefined): { abs: string; rel: string } {
+  if (!baseDir) throw new FsBrowseError('NO_CWD', 'session has no workspace root');
+  const safe = normalizeRelPath(requestedPath);
+  if (isAbsolute(safe)) throw new FsBrowseError('PATH_ESCAPE', 'absolute paths are not allowed');
+  return validateResolvedWorkspacePath(baseDir, resolve(baseDir, safe));
 }
 
 function nodeInfo(abs: string, rel: string): FsNodeInfo {
