@@ -373,6 +373,43 @@ try {
       presenter.calls.join(','));
   }
 
+  // Setup must switch to the candidate while the released schema-1 config remains readable by both
+  // versions. Persisting schema 2 belongs to a later confirmed repair, after the rollback window closes.
+  {
+    const machine = join(root, 'config-v1-supported-during-setup');
+    const home = join(machine, '.cosyncing');
+    ensureOwnerOnlyDirectory(home);
+    atomicWriteOwnerOnly(join(home, 'config.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      broker: {
+        host: '127.0.0.1',
+        port: 7734,
+        machineLabel: 'config-v1-setup-fixture',
+        internalUrl: 'http://127.0.0.1:7734',
+        advertisedUrl: 'https://legacy.example.test',
+      },
+      update: { channel: 'stable' },
+    })}\n`, { mode: 0o600 });
+    const presenter = new ScriptedPresenter();
+    const setup = await zeroAgentSetup(machine, presenter);
+    const persisted = JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as any;
+    const migration = planDurableStateMigrations(durableStateLayout({
+      stateRoot: home,
+      cacheRoot: join(machine, '.cache', 'cosyncing'),
+    }));
+    check('setup accepts config v1 without persisting v2 before the broker switch',
+      setup.status === 'complete'
+        && setup.exitCode === 0
+        && inspectInstallState(home).committed
+        && persisted.schemaVersion === 1
+        && persisted.broker.advertisedUrl === 'https://legacy.example.test'
+        && !setup.actions.includes('config.ensure')
+        && migration.steps.some((step) => step.id === 'broker-config-v1-to-v2')
+        && !presenter.calls.includes('blockers'),
+      `${setup.status}:${setup.actions.join(',')}:${presenter.calls.join(',')}:`
+        + `${JSON.stringify(setup.failure ?? setup.issueCodes ?? setup.summary)}`);
+  }
+
   // A prior managed-connectivity receipt is relinquished as state only. Setup reports the retained target
   // and never adds a provider prompt or command to the transaction.
   {

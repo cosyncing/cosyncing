@@ -10,7 +10,11 @@ import type { BuildInfo } from '../runtime/build-info.ts';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import { inspectBrokerConfig } from '../runtime/configuration.ts';
 import { brokerTokenPath, inspectBrokerToken, readBrokerToken } from '../security/credentials.ts';
-import { inspectDurableSchemas, durableStateLayout } from '../security/durable-state.ts';
+import {
+  durableStateLayout,
+  inspectDurableSchemas,
+  isRuntimeCompatibleConfigV1,
+} from '../security/durable-state.ts';
 import {
   inspectInstallState,
   writeInstallState,
@@ -808,9 +812,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // Config v1 remains an intentionally supported runtime input. An upgrade must not require
         // persisting v2 before switching binaries, because the previous service needs v1 intact if
         // candidate health fails and rollback restores it.
-        && !(store.id === 'config'
-          && store.status === 'unsupported-version'
-          && store.version === 1));
+        && !isRuntimeCompatibleConfigV1(store));
     if (schemaProblems.length > 0) {
       return result('blocked', 1, 'upgrade-schema-repair-required', 'Repair or migrate durable state before changing binary versions.', fromVersion, recovered);
     }

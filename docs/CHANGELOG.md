@@ -35,6 +35,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Setup now accepts the supported schema-1 broker configuration during an npm
+  upgrade, leaving it unchanged until a later confirmed `cosy repair` performs
+  the backed-up schema-2 migration. Malformed and unknown schemas still block.
 - All HTTP and WebSocket clients are treated as remote, so neither a direct
   browser nor a proxy inherits same-machine privileges from loopback. Packaged
   installs can explicitly enable authenticated workspace browsing and

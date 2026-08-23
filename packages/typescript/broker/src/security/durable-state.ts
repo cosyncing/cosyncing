@@ -75,6 +75,15 @@ export interface DurableStateSetupAssessment {
   blockers: DurableStoreInspection[];
 }
 
+/** Config v1 is readable by both sides of the revision-15/revision-16 rollback window. */
+export function isRuntimeCompatibleConfigV1(
+  inspection: Readonly<DurableStoreInspection>,
+): boolean {
+  return inspection.id === 'config'
+    && inspection.status === 'migration-required'
+    && inspection.version === 1;
+}
+
 export interface DurableCorruptionEvidence {
   id: DurableSchemaSpec['id'];
   detailCode: string;
@@ -171,6 +180,14 @@ function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): Dur
     return { id: spec.id, status: 'malformed', detailCode: `${spec.id}-version-malformed` };
   }
   if (version !== spec.currentVersion) {
+    if (spec.id === 'config' && version === 1 && spec.currentVersion === 2) {
+      return {
+        id: spec.id,
+        status: 'migration-required',
+        version,
+        detailCode: 'config-v1-migration-required',
+      };
+    }
     return {
       id: spec.id,
       status: 'unsupported-version',
@@ -210,6 +227,10 @@ export function assessDurableStateForSetup(
   const blockers: DurableStoreInspection[] = [];
   for (const inspection of inspectDurableSchemas(layout)) {
     if (inspection.status === 'ok' || inspection.status === 'missing') continue;
+    // The current broker reads config v1 in memory. Setup must be able to switch and health-check the
+    // candidate while leaving that file untouched; only a later confirmed repair persists v2 with its
+    // two-root backup. Treat no other old or unknown schema as safe at this boundary.
+    if (isRuntimeCompatibleConfigV1(inspection)) continue;
     const spec = DURABLE_SCHEMA_REGISTRY.find((candidate) => candidate.id === inspection.id);
     if (!spec) {
       blockers.push(inspection);
@@ -264,9 +285,7 @@ export function planDurableStateMigrations(layout = durableStateLayout()): Durab
   for (const inspection of inspectDurableSchemas(layout)) {
     if (inspection.status === 'migration-required' && inspection.id === 'setup') {
       steps.push({ id: 'setup-state-v0-to-v1', store: 'setup', fromVersion: 0, toVersion: 1 });
-    } else if (inspection.status === 'unsupported-version'
-      && inspection.id === 'config'
-      && inspection.version === 1) {
+    } else if (isRuntimeCompatibleConfigV1(inspection)) {
       steps.push({ id: 'broker-config-v1-to-v2', store: 'config', fromVersion: 1, toVersion: 2 });
     } else if (inspection.status !== 'ok' && inspection.status !== 'missing') {
       blockers.push({ store: inspection.id, detailCode: inspection.detailCode });

@@ -498,6 +498,37 @@ try {
       piBridge.evidence?.requiresConfirmation === true && !!piBridge.remediation);
 
   {
+    const userHome = join(testRoot, 'config-v1-doctor');
+    const stateHome = join(userHome, '.cosyncing');
+    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    atomicWriteOwnerOnly(join(stateHome, 'config.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      broker: {
+        host: '127.0.0.1',
+        port: 7734,
+        machineLabel: 'config-v1-doctor',
+        internalUrl: 'http://127.0.0.1:7734',
+        advertisedUrl: 'https://legacy.example.test',
+      },
+      update: { channel: 'stable' },
+    })}\n`, { mode: 0o600 });
+    const report = observeDoctorReport(await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: fakeContext({ homeDir: userHome }),
+      assetReport: inspectRuntimeAssets(),
+      adapters: [],
+      stateHome,
+    }));
+    const configSchema = report.sections.flatMap((section) => section.checks)
+      .find((candidate) => candidate.id === 'state.schema.config');
+    check('doctor reports config v1 as a supported repair warning rather than corruption',
+      configSchema?.status === 'warn'
+        && configSchema.detailCode === 'config-v1-migration-required'
+        && JSON.stringify(configSchema.remediation).includes('cosyncing repair'),
+      JSON.stringify(configSchema));
+  }
+
+  {
     const userHome = join(testRoot, 'pi-owned-stale-doctor');
     const stateHome = join(userHome, '.cosyncing');
     const piAgentDir = join(userHome, '.pi', 'agent');

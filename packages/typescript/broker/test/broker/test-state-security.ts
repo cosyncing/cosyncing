@@ -48,6 +48,7 @@ import {
 } from '../../src/security/credentials.ts';
 import {
   applyDurableStateMigrations,
+  assessDurableStateForSetup,
   backupDurableStores,
   DURABLE_SCHEMA_REGISTRY,
   durableStateLayout,
@@ -256,6 +257,20 @@ try {
         && legacyInspection.config.broker.port === 8844
         && legacyInspection.config.broker.nestedExtension === 'keep-me'
         && (legacyInspection.config.ownerExtension as any)?.preserved === true);
+    const legacyLayout = durableStateLayout({
+      stateRoot: legacyHome,
+      cacheRoot: join(root, 'legacy-config-cache'),
+    });
+    const legacyDurableConfig = inspectDurableSchemas(legacyLayout)
+      .find((inspection) => inspection.id === 'config');
+    const legacySetupAssessment = assessDurableStateForSetup(legacyLayout);
+    const legacyMigrationPlan = planDurableStateMigrations(legacyLayout);
+    check('config v1 is a supported pending repair migration and does not block setup',
+      legacyDurableConfig?.status === 'migration-required'
+        && legacyDurableConfig.version === 1
+        && legacyDurableConfig.detailCode === 'config-v1-migration-required'
+        && !legacySetupAssessment.blockers.some((inspection) => inspection.id === 'config')
+        && legacyMigrationPlan.steps.some((step) => step.id === 'broker-config-v1-to-v2'));
     const legacyArtifactRoot = join(root, 'legacy-config-artifacts');
     const legacyArtifactStore = new ArtifactStore('https://legacy.example.com', legacyArtifactRoot);
     const legacyArtifactSession = { tool: 'codex', id: 'before-setup' };
