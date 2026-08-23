@@ -72,6 +72,7 @@ import {
   locateRecordedManagedHost,
 } from '../runtime/managed-host.ts';
 import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
+import { parseMachinePeers } from '../roster/machine-aggregation.ts';
 
 export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
 
@@ -467,6 +468,50 @@ function environmentPrecedenceCheck(options: {
       detailCode: 'effective-configuration-invalid',
       summary: error instanceof Error ? error.message : 'Effective broker configuration is invalid.',
       remediation: remediation('cosyncing repair', 'Repair configuration before starting the broker.'),
+    };
+  }
+}
+
+export function machinePeerCredentialCheck(context: SetupDiagnosisContext): SetupCheck {
+  const raw = context.env.COSYNCING_MACHINE_PEERS?.trim() ?? '';
+  if (!raw) {
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'skip',
+      detailCode: 'machine-peers-not-configured',
+      summary: 'No machine peers are configured.',
+    };
+  }
+  try {
+    const peers = parseMachinePeers(raw);
+    const tokenless = peers.filter((peer) => !peer.token && !peer.credential);
+    if (tokenless.length === 0) {
+      return {
+        id: 'state.machine-peer-credentials',
+        status: 'pass',
+        detailCode: 'machine-peer-credentials-configured',
+        summary: 'Every machine peer has an explicit credential.',
+        evidence: { peerCount: peers.length },
+      };
+    }
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'warn',
+      detailCode: 'machine-peer-authentication-required',
+      summary: 'One or more machine peers have no credential and will stop aggregating after that peer upgrades to contract revision 16.',
+      evidence: { peerCount: peers.length, tokenlessPeerCount: tokenless.length },
+      remediation: {
+        kind: 'manual',
+        message: 'Add a broker-token or revocable peer-token credential to each COSYNCING_MACHINE_PEERS entry.',
+      },
+    };
+  } catch {
+    return {
+      id: 'state.machine-peer-credentials',
+      status: 'fail',
+      detailCode: 'machine-peer-configuration-invalid',
+      summary: 'COSYNCING_MACHINE_PEERS is invalid.',
+      remediation: { kind: 'manual', message: 'Repair COSYNCING_MACHINE_PEERS before starting or upgrading the broker.' },
     };
   }
 }
@@ -1454,6 +1499,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         credentialCheck({ id: 'state.broker-token', label: 'Broker credential', inspection: brokerToken, context: dependencies.context }),
         credentialCheck({ id: 'state.pi-integration', label: 'Pi integration credential', inspection: piIntegration, context: dependencies.context }),
         environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context: dependencies.context }),
+        machinePeerCredentialCheck(dependencies.context),
         ...agentSkillChecks(home, dependencies.context),
         ...setupFailureChecks(home, dependencies.context),
         ...managedHostChecks(home),

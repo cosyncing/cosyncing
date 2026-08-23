@@ -15,8 +15,14 @@ export type { AggregatedMachines, MachinePeerErrorCode, MachineRoster } from '@c
 export interface MachinePeerConfig {
   id: string;
   url: string;
+  /** Deprecated compatibility shorthand for a broker owner token. */
   token?: string;
+  credential?: MachinePeerCredential;
 }
+
+export type MachinePeerCredential =
+  | { kind: 'broker-token'; value: string }
+  | { kind: 'peer-token'; value: string };
 
 export function parseMachinePeers(raw = process.env.COSYNCING_MACHINE_PEERS ?? ''): MachinePeerConfig[] {
   const text = raw.trim();
@@ -41,7 +47,9 @@ function parsePeerJson(text: string): MachinePeerConfig[] | undefined {
     if (!url) throw new Error('COSYNCING_MACHINE_PEERS entry.url is required');
     const id = typeof obj.id === 'string' && obj.id.trim() ? obj.id.trim() : peerIdFromUrl(url, index);
     const token = typeof obj.token === 'string' && obj.token ? obj.token : undefined;
-    return normalizePeer({ id, url, ...(token ? { token } : {}) });
+    const credential = parseMachinePeerCredential(obj.credential);
+    if (token && credential) throw new Error('COSYNCING_MACHINE_PEERS entry cannot contain both token and credential');
+    return normalizePeer({ id, url, ...(token ? { token } : {}), ...(credential ? { credential } : {}) });
   });
 }
 
@@ -65,7 +73,21 @@ function normalizePeer(peer: MachinePeerConfig): MachinePeerConfig {
     id: peer.id,
     url: peerFetchBase(url),
     ...(peer.token ? { token: peer.token } : {}),
+    ...(peer.credential ? { credential: peer.credential } : {}),
   };
+}
+
+function parseMachinePeerCredential(raw: unknown): MachinePeerCredential | undefined {
+  if (raw == null) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('COSYNCING_MACHINE_PEERS entry.credential must be an object');
+  }
+  const credential = raw as Record<string, unknown>;
+  if ((credential.kind !== 'broker-token' && credential.kind !== 'peer-token')
+      || typeof credential.value !== 'string' || !credential.value) {
+    throw new Error('COSYNCING_MACHINE_PEERS entry.credential must contain a supported kind and value');
+  }
+  return { kind: credential.kind, value: credential.value };
 }
 
 function peerIdFromUrl(url: string, index: number): string {
@@ -165,8 +187,12 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
     // so remote sessions for them could never appear in a machine roster.
     const res = await fetch(`${peer.url}/api/sessions?contractRevision=${BROKER_CONTRACT_REVISION}`, {
       signal: ac.signal,
-      headers: peer.token ? { [PRODUCT_IDENTITY.tokenHeader]: peer.token } : undefined,
+      headers: machinePeerCredentialHeaders(peer),
     });
+    if (res.status === 401) {
+      return degraded(peer, 'MACHINE_PEER_BAD_CONFIG',
+        'machine peer authentication required: add a broker-token or paired peer-token credential');
+    }
     if (!res.ok) {
       return degraded(peer, 'MACHINE_PEER_BAD_RESPONSE', `peer roster returned HTTP ${res.status}`);
     }
@@ -221,6 +247,14 @@ export async function fetchPeerMachineRoster(peer: MachinePeerConfig, opts: { ti
   } finally {
     clearTimeout(timer);
   }
+}
+
+function machinePeerCredentialHeaders(peer: MachinePeerConfig): Record<string, string> | undefined {
+  const credential = peer.credential ?? (peer.token ? { kind: 'broker-token' as const, value: peer.token } : undefined);
+  if (!credential) return undefined;
+  return credential.kind === 'peer-token'
+    ? { 'x-cosyncing-peer-token': credential.value }
+    : { [PRODUCT_IDENTITY.tokenHeader]: credential.value };
 }
 
 function degraded(peer: MachinePeerConfig, code: MachinePeerErrorCode, error: string): MachineRoster {

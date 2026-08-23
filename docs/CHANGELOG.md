@@ -27,6 +27,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   setup intent and install receipts.
 - Client releases containing the version 3 pairing parser must be promoted
   before the npm broker release begins emitting version 3 offers.
+- Machine-roster peers running contract revision 16 require an explicit
+  broker-token or paired peer-token credential. `cosy doctor` warns about
+  URL-only `COSYNCING_MACHINE_PEERS` entries before the peer upgrade.
 
 ### Fixed
 
@@ -46,6 +49,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   deleting the keys required by an old-binary rollback.
 - Version 3 pairing acceptance proves ownership of the identity key committed
   in the QR before the client stores the endpoint or credential.
+- Public pairing acceptance now rejects oversized or malformed bodies, weak
+  credentials, invalid key algorithms, unsafe device IDs, and endpoint-ID
+  collisions without consuming the one-use offer.
 
 ## 0.4.1 — 2026-08-21
 

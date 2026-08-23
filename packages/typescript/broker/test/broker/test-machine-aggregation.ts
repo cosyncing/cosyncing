@@ -5,11 +5,16 @@
  * and classifies slow/unreachable peers without adding remote control.
  */
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BROKER_CONTRACT_REVISION } from '@cosyncing/protocol';
 import {
   aggregatedMachines,
+  fetchPeerMachineRoster,
   localMachineRoster,
+  parseMachinePeers,
   resolveMachineSession,
 } from '../../src/roster/machine-aggregation.ts';
 
@@ -24,6 +29,40 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 }
 
 let failures = 0;
+
+await test('machine peer reports revision-16 authentication migration and recovers with a revocable credential', async () => {
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let revision = 15;
+  let sawPeerCredential = false;
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port,
+    fetch(req) {
+      if (new URL(req.url).pathname !== '/api/sessions') return new Response('not found', { status: 404 });
+      sawPeerCredential = req.headers.get('x-cosyncing-peer-token') === 'revocable-peer-token';
+      if (revision >= 16 && !sawPeerCredential) return new Response('unauthorized', { status: 401 });
+      return Response.json({ machine: 'peer-upgrade', generatedAt: Date.now(), sessions: [] });
+    },
+  });
+  try {
+    const tokenless = parseMachinePeers(JSON.stringify([{ id: 'peer-upgrade', url: baseUrl }]))[0]!;
+    assert.equal((await fetchPeerMachineRoster(tokenless)).status, 'ok');
+    revision = 16;
+    const protectedRoster = await fetchPeerMachineRoster(tokenless);
+    assert.equal(protectedRoster.code, 'MACHINE_PEER_BAD_CONFIG');
+    assert.match(protectedRoster.error ?? '', /authentication required.*credential/);
+    const credentialed = parseMachinePeers(JSON.stringify([{
+      id: 'peer-upgrade',
+      url: baseUrl,
+      credential: { kind: 'peer-token', value: 'revocable-peer-token' },
+    }]))[0]!;
+    assert.equal((await fetchPeerMachineRoster(credentialed)).status, 'ok');
+    assert.equal(sawPeerCredential, true);
+  } finally {
+    server.stop(true);
+  }
+});
 
 await test('composite identity makes cross-machine duplicates valid and same-owner duplicates ambiguous', () => {
   const session = { id: 'same', tool: 'opencode', title: 'same', status: 'idle', attachMode: 'observe' } as const;
@@ -86,6 +125,7 @@ async function waitHealthy(base: string): Promise<void> {
 
 await test('multi-machine roster is token-gated, merged, timeout-bounded, and token-redacted', async () => {
   const token = `w9-broker-${Date.now()}`;
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-machine-aggregation-'));
   const peerToken = `peer-token-${Date.now()}`;
   const brokerPort = await freePort();
   const peerPort = await freePort();
@@ -173,6 +213,9 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
       PORT: String(brokerPort),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: token,
+      COSYNCING_TOKEN_FILE: '',
+      COSYNCING_PI_INTEGRATION_FILE: '',
+      COSYNCING_HOME: home,
       COSYNCING_MACHINE: 'local-machine',
       COSYNCING_MACHINE_PEERS: JSON.stringify(peers),
       COSYNCING_MACHINE_PEER_TIMEOUT_MS: '150',
@@ -301,6 +344,7 @@ await test('multi-machine roster is token-gated, merged, timeout-bounded, and to
     slowPeer.stop(true);
     stalePeer.stop(true);
     legacyPeer.stop(true);
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

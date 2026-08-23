@@ -53,6 +53,7 @@ import {
   collectDoctorReport,
   diagnoseAgents,
   doctorColorEnabled,
+  machinePeerCredentialCheck,
   renderDoctorReport,
   type DoctorReport,
 } from '../../src/installation/doctor.ts';
@@ -734,6 +735,30 @@ try {
       return { status: 'ok', statusCode: 200, json: { ok: true } };
     },
   });
+
+  const tokenlessPeerCheck = machinePeerCredentialCheck({
+    ...aggregateContext,
+    env: {
+      ...aggregateContext.env,
+      COSYNCING_MACHINE_PEERS: JSON.stringify([{ id: 'peer-b', url: 'https://peer-b.example.test' }]),
+    },
+  });
+  const credentialedPeerCheck = machinePeerCredentialCheck({
+    ...aggregateContext,
+    env: {
+      ...aggregateContext.env,
+      COSYNCING_MACHINE_PEERS: JSON.stringify([{
+        id: 'peer-b',
+        url: 'https://peer-b.example.test',
+        credential: { kind: 'peer-token', value: 'private-peer-credential' },
+      }]),
+    },
+  });
+  check('doctor warns before a tokenless machine peer crosses the revision-16 authentication boundary',
+    tokenlessPeerCheck.status === 'warn'
+      && tokenlessPeerCheck.detailCode === 'machine-peer-authentication-required'
+      && credentialedPeerCheck.status === 'pass'
+      && !JSON.stringify([tokenlessPeerCheck, credentialedPeerCheck]).includes('private-peer-credential'));
 
   function treeSnapshot(root: string): string {
     const rows: string[] = [];

@@ -49,3 +49,32 @@ is in the permitted tailnet and the route targets broker loopback.
 
 Update or re-pair that client with the current operator-owned origin. Changing a
 connectivity layer does not rewrite existing client profiles.
+
+## Multi-machine roster authentication
+
+Broker contract revision 16 protects `/api/sessions`. A URL-only
+`COSYNCING_MACHINE_PEERS` entry can still read a revision-15 peer during the
+client-first rollout, but reports an explicit machine-peer authentication
+configuration error after that peer upgrades. Run `cosy doctor` before the
+broker upgrade to find tokenless entries.
+
+Use JSON configuration with an explicit credential. A revocable paired-device
+credential is preferred when one is available:
+
+```json
+[
+  {
+    "id": "workstation-b",
+    "url": "https://broker-b.example.com",
+    "credential": {
+      "kind": "peer-token",
+      "value": "PAIRED_PEER_TOKEN"
+    }
+  }
+]
+```
+
+For compatibility, `"token": "BROKER_OWNER_TOKEN"` remains a deprecated
+shorthand for `{"kind":"broker-token","value":"..."}`. Do not put either
+credential in the peer URL. Restart the local broker after updating
+`COSYNCING_MACHINE_PEERS`; aggregation recovers on its next roster fetch.
