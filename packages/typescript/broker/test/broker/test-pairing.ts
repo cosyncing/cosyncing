@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateIdentityKeyPair, generateX25519KeyPair, parseQrPairingPayload } from '@cosyncing/crypto';
@@ -96,6 +96,37 @@ try {
     assert.equal(renameRegistry.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
     const reloaded = new TransportPairingRegistry({ home: renameHome });
     assert.equal(reloaded.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
+
+    const repairOffer = reloaded.createOffer();
+    const repaired = reloaded.accept(repairOffer.pairingId, acceptedInput);
+    const repairedPrincipal = reloaded.authenticatePeerToken(repaired.broker.peerToken);
+    assert.equal(repairedPrincipal?.authGeneration, 3, 're-pairing a revoked id must advance, not reset, its generation');
+    assert.equal(reloaded.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
+
+    const peerStorePath = join(renameHome, 'transport-peers.json');
+    const stored = JSON.parse(readFileSync(peerStorePath, 'utf8')) as { peers: Array<Record<string, unknown>> };
+    stored.peers[0]!.roles = [];
+    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
+    const zeroRoleReload = new TransportPairingRegistry({ home: renameHome });
+    assert.deepEqual([...zeroRoleReload.authenticatePeerToken(repaired.broker.peerToken)!.roles], []);
+
+    delete stored.peers[0]!.roles;
+    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
+    const legacyRoleReload = new TransportPairingRegistry({ home: renameHome });
+    assert.deepEqual(
+      [...legacyRoleReload.authenticatePeerToken(repaired.broker.peerToken)!.roles].sort(),
+      ['drive', 'files', 'observe'],
+      'only a legacy missing role field receives migration defaults',
+    );
+
+    stored.peers[0]!.roles = ['invalid-role'];
+    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
+    const malformedRoleReload = new TransportPairingRegistry({ home: renameHome });
+    assert.equal(
+      malformedRoleReload.authenticatePeerToken(repaired.broker.peerToken),
+      undefined,
+      'malformed stored authorization state must fail closed',
+    );
   } finally {
     rmSync(renameHome, { recursive: true, force: true });
   }

@@ -1,5 +1,10 @@
 # LAN access
 
+If any device or segment on the LAN is untrusted, apply the public-exposure
+requirements in [Connectivity security](security.md): use contract revision 17
+or later, update revision-17-capable clients before the broker, and place an
+independent access-control layer in front of the broker.
+
 For a trusted LAN, run an independent reverse proxy bound to one intended LAN
 address and forward it to `127.0.0.1:7734`. Never expose the broker directly or
 bind it to `0.0.0.0`.

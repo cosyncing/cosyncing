@@ -1,11 +1,12 @@
 # SSH reverse tunnel through a VPS
 
 > [!WARNING]
-> Public or untrusted-network exposure requires broker contract revision 16 or
-> later. Broker 0.4.1 and earlier do not enforce the authentication boundary
-> described here and must not be exposed publicly. Run `cosy version --json`
-> on the broker host and confirm that `contract.revision` is at least `16`
-> before creating any public route.
+> Public or untrusted-network exposure requires broker contract revision 17 or
+> later. Revision 16 and earlier do not enforce the principal, revocation, and
+> artifact boundaries described here and must not be exposed publicly. Publish
+> or update a revision-17-capable client before promoting the revision-17
+> broker. Run `cosy version --json` on the broker host and confirm that
+> `contract.revision` is at least `17` before creating any public route.
 
 This topology keeps a workstation behind NAT while a VPS owns public HTTPS:
 

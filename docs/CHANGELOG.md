@@ -24,8 +24,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 ### Changed
 
 - Paired-device credentials now resolve to explicit principals with observe,
-  drive, and file roles. Device administration, broker/runtime changes,
-  restarts, and updates require the owner credential.
+  drive, and file roles. Every broker route has an exhaustive, default-deny
+  peer policy. Device administration, durable schedules, agent-only file
+  surfacing, broker/runtime changes, restarts, and updates require the owner
+  credential.
 - Artifact references expire after ten minutes, require the active principal
   they were issued to, and can be refreshed through an authenticated ticket
   endpoint. Only passive images and plain text remain inline; HTML, SVG, XML,
@@ -50,7 +52,15 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 - Peer revocation is persisted before it reaches memory, invalidates unused
   WebSocket tickets, closes active peer sockets, and clears peer upload,
-  mailbox, and replay state before reporting success.
+  push-registration, mailbox, and replay state before reporting success.
+- Artifact and referenced-diff downloads refresh an expired same-origin ticket
+  once while preserving authentication and byte ceilings; cross-origin legacy
+  references are never authenticated or refreshed.
+- Push registrations are scoped to their owner or exact peer generation, peer
+  IDs retain monotonic authentication generations across re-pairing, and
+  malformed or empty stored role sets fail closed.
+- Remote Tokdash reads use only the locally configured upstream and no longer
+  accept a caller-selected loopback URL.
 - Transport envelopes reject unknown recipients and enforce bounded field
   grammar, mailbox count, global and per-principal envelope counts, and byte
   budgets.

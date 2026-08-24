@@ -8,9 +8,9 @@ import 'package:cosyncing_client/src/features/connection/provider/connection_pro
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Thrown when an oversized-diff body can no longer be retrieved — the broker
-/// evicted the content-addressed blob, or the signed URL expired/was rejected
-/// (403/404/410). The UI shows an honest "no longer available" state (terminal,
-/// no retry: a stale signed URL is fixed by a fresh history frame).
+/// evicted the content-addressed blob, or an authenticated ticket refresh was
+/// rejected (403/404/410). The broker client performs one bounded same-origin
+/// refresh before this terminal state reaches the UI.
 class DiffBodyUnavailableException implements Exception {
   /// Creates a [DiffBodyUnavailableException].
   const DiffBodyUnavailableException();
@@ -129,8 +129,9 @@ class BrokerDiffBodyLoader implements DiffBodyLoader {
     } on ArtifactTooLargeException {
       throw const DiffBodyTooLargeException();
     } on BrokerException catch (e) {
-      // 403 = expired/invalid signed URL (broker returns 403, not 404, on
-      // signature expiry) → terminal-unavailable, same as an evicted blob.
+      // BrokerClient already performs one same-origin ticket refresh on an
+      // expired signature. A remaining 403 is an authorization or refresh
+      // failure and is terminal here, like an evicted blob.
       if (e.statusCode == 403 || e.statusCode == 404 || e.statusCode == 410) {
         throw const DiffBodyUnavailableException();
       }

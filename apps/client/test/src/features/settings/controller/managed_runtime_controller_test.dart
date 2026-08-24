@@ -384,6 +384,26 @@ void main() {
     expect(apiA.restartEverythingCalls, 1);
     expect(result.message, 'Recovery scheduled');
   });
+
+  test(
+    'peer capability omits owner reads and blocks owner mutations',
+    () async {
+      apiA.principalKind = 'peer';
+      final snapshot = await container.read(
+        managedRuntimeControllerProvider.future,
+      );
+      expect(snapshot.ownerOperationsAvailable, isFalse);
+      expect(snapshot.brokerUpdate, isNull);
+      expect(apiA.brokerUpdateReads, 0);
+      await expectLater(
+        container
+            .read(managedRuntimeControllerProvider.notifier)
+            .restartEverything(),
+        throwsA(isA<StateError>()),
+      );
+      expect(apiA.restartEverythingCalls, 0);
+    },
+  );
 }
 
 final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
@@ -410,6 +430,8 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   bool quotaThrows = false;
   int quotaReads = 0;
   int restartEverythingCalls = 0;
+  int brokerUpdateReads = 0;
+  String? principalKind;
   final List<String> policyWrites = [];
   final List<bool> quotaPreferenceWrites = [];
   final List<String> restartedAgents = [];
@@ -446,7 +468,11 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
 
   @override
   Future<BrokerHealthResponse> getHealth() async {
-    return const BrokerHealthResponse(status: 'healthy', checkedAt: 1);
+    return BrokerHealthResponse(
+      status: 'healthy',
+      checkedAt: 1,
+      principalKind: principalKind,
+    );
   }
 
   @override
@@ -454,16 +480,18 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
       const HealthResponse(ok: true, version: '1.0.0');
 
   @override
-  Future<BrokerUpdateResponse> getBrokerUpdate({bool refresh = false}) async =>
-      const BrokerUpdateResponse(
-        ok: true,
-        update: BrokerUpdateSnapshot(
-          status: 'current',
-          currentVersion: '1.0.0',
-          checkedAt: '2026-07-18T00:00:00Z',
-          detailCode: 'current',
-        ),
-      );
+  Future<BrokerUpdateResponse> getBrokerUpdate({bool refresh = false}) async {
+    brokerUpdateReads++;
+    return const BrokerUpdateResponse(
+      ok: true,
+      update: BrokerUpdateSnapshot(
+        status: 'current',
+        currentVersion: '1.0.0',
+        checkedAt: '2026-07-18T00:00:00Z',
+        detailCode: 'current',
+      ),
+    );
+  }
 
   @override
   Future<BrokerUpdateTriggerResponse> triggerBrokerUpdate() async =>

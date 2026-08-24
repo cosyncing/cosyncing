@@ -12,10 +12,13 @@ This continuity rule means existing clients should keep working during upgrade:
 - uninstall does not remove the route;
 - future route changes are your responsibility.
 
-Promote or update clients before upgrading the broker to contract revision 16.
-A stale revision-15 client can still load the authenticated session roster, but
-opening a session repeatedly reconnects because that client sends a retired
-query credential instead of requesting a WebSocket authorization ticket.
+Promote or update clients to a revision-17-capable release before upgrading the
+broker to contract revision 17. This client-first order is required because the
+revision-17 broker adds principal-scoped authorization and authenticated
+artifact delivery. During the earlier revision-16 transition, a stale
+revision-15 client could still load the authenticated session roster but would
+reconnect repeatedly because it sent a retired query credential instead of
+requesting a WebSocket authorization ticket.
 
 Inspect the retained route manually:
 

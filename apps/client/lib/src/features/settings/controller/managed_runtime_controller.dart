@@ -55,6 +55,9 @@ class ManagedRuntimeSettingsState {
   /// new machine's — showing A's runtime state while an action runs on B.
   final String? brokerScopeKey;
 
+  /// Whether this connection may invoke owner-only broker operations.
+  bool get ownerOperationsAvailable => health?.ownerOperationsAvailable ?? true;
+
   /// Returns a copy with an updated action message.
   ManagedRuntimeSettingsState withActionMessage(String? message) {
     return ManagedRuntimeSettingsState(
@@ -116,7 +119,7 @@ class ManagedRuntimeController
     if (!knownCodexUpdatePolicies.contains(value)) {
       throw ArgumentError.value(value, 'value', 'Unsupported update policy');
     }
-    final admission = await _requireApiContext();
+    final admission = await _requireOwnerApiContext();
     state = const AsyncValue.loading();
     final next = await AsyncValue.guard(() async {
       await admission.context.api.setPolicy(value);
@@ -128,7 +131,7 @@ class ManagedRuntimeController
 
   /// Changes the quota-warning opt-in without changing Tokdash consent.
   Future<void> setQuotaWarningsEnabled({required bool enabled}) async {
-    final admission = await _requireApiContext();
+    final admission = await _requireOwnerApiContext();
     state = const AsyncValue.loading();
     final next = await AsyncValue.guard(() async {
       await admission.context.api.setQuotaPreference(enabled: enabled);
@@ -140,7 +143,7 @@ class ManagedRuntimeController
 
   /// Restarts one runtime after the view obtains explicit confirmation.
   Future<void> restartRuntime(String agent) async {
-    final admission = await _requireApiContext();
+    final admission = await _requireOwnerApiContext();
     state = const AsyncValue.loading();
     final next = await AsyncValue.guard(() async {
       await admission.context.api.restartRuntime(agent);
@@ -152,7 +155,7 @@ class ManagedRuntimeController
 
   /// Restarts all managed components after explicit view confirmation.
   Future<BrokerRestartAllResponse> restartEverything() async {
-    final admission = await _requireApiContext();
+    final admission = await _requireOwnerApiContext();
     final result = await admission.context.api.restartAll();
     if (!_isCurrent(admission)) return result;
     final current = state.valueOrNull;
@@ -164,7 +167,7 @@ class ManagedRuntimeController
 
   /// Confirms and queues the signed stable broker update.
   Future<BrokerUpdateTriggerResponse> updateBroker() async {
-    final admission = await _requireApiContext();
+    final admission = await _requireOwnerApiContext();
     final result = await admission.context.api.triggerBrokerUpdate();
     if (!_isCurrent(admission)) return result;
     try {
@@ -187,19 +190,19 @@ class ManagedRuntimeController
     bool freshBrokerUpdate = false,
   }) async {
     final context = admission.context;
+    final health = await context.api.getHealth();
+    _ensureCurrent(admission);
     final updates = await context.api.getRuntimeUpdates(
       fresh: freshRuntimeProbe,
     );
     _ensureCurrent(admission);
     final policy = await context.api.getPolicy();
     _ensureCurrent(admission);
-    final health = await context.api.getHealth();
-    _ensureCurrent(admission);
     final productHealth = await context.api.getProductHealth();
     _ensureCurrent(admission);
-    final brokerUpdate = await context.api.getBrokerUpdate(
-      refresh: freshBrokerUpdate,
-    );
+    final brokerUpdate = health.ownerOperationsAvailable
+        ? await context.api.getBrokerUpdate(refresh: freshBrokerUpdate)
+        : null;
     _ensureCurrent(admission);
     final scopeKey = context.brokerScopeKey;
     if (scopeKey != null && productHealth.contract != null) {
@@ -219,7 +222,7 @@ class ManagedRuntimeController
       quotaWarningsEnabled: quotaPreference.enabled ?? false,
       health: health,
       productHealth: productHealth,
-      brokerUpdate: brokerUpdate.update,
+      brokerUpdate: brokerUpdate?.update,
       brokerScopeKey: context.brokerScopeKey,
     );
   }
@@ -254,6 +257,14 @@ class ManagedRuntimeController
       }
     }
 
+    return admission;
+  }
+
+  Future<_ManagedRuntimeAdmissionScope> _requireOwnerApiContext() async {
+    final admission = await _requireApiContext();
+    if (state.valueOrNull?.ownerOperationsAvailable == false) {
+      throw StateError('Owner credential required');
+    }
     return admission;
   }
 

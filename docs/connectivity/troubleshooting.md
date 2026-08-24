@@ -2,6 +2,10 @@
 
 Start at the boundary and move outward. Do not change the broker listener.
 
+For public or untrusted-network routes, first run `cosy version --json` on the
+broker host and require `contract.revision >= 17`. Update revision-17-capable
+clients before promoting the revision-17 broker.
+
 ## Local broker unavailable
 
 Run `cosy status` and `cosy doctor`, then test
@@ -52,7 +56,9 @@ connectivity layer does not rewrite existing client profiles.
 
 ## Multi-machine roster authentication
 
-Broker contract revision 16 protects `/api/sessions`. A URL-only
+Broker contract revision 16 first protected `/api/sessions`; revision 17 is the
+minimum for public exposure because it also scopes peers, revocation, and
+artifacts. A URL-only
 `COSYNCING_MACHINE_PEERS` entry can still read a revision-15 peer during the
 client-first rollout, but reports an explicit machine-peer authentication
 configuration error after that peer upgrades. Run `cosy doctor` before the

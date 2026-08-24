@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
@@ -12,12 +12,17 @@ import { setupStateHome } from '../installation/setup-state.ts';
 
 export interface WakeRegistration {
   deviceId: string;
+  owner: WakeRegistrationOwner;
   platform: WakePlatform;
   token: string;
   label?: string;
   createdAt: string;
   updatedAt: string;
 }
+
+export type WakeRegistrationOwner =
+  | { kind: 'owner' }
+  | { kind: 'peer'; peerId: string; authGeneration: number };
 
 export interface DeviceWakeCoalescerOptions<TTimer = ReturnType<typeof setTimeout>> {
   dispatch: (registration: WakeRegistration) => Promise<unknown> | unknown;
@@ -146,16 +151,18 @@ export class WakePushRegistry {
     this.load();
   }
 
-  register(input: WakeRegistrationInput): WakeRegistrationPublic {
+  register(input: WakeRegistrationInput, owner: WakeRegistrationOwner): WakeRegistrationPublic {
     const platform = normalizePlatform(input.platform);
     const token = String(input.token ?? '').trim();
     if (!token) throw new WakePushError('BAD_PARAM', 'push token is required');
     if (token.length > 4096) throw new WakePushError('BAD_PARAM', 'push token is too long');
-    const deviceId = normalizeDeviceId(input.deviceId) ?? `dev_${randomBytes(9).toString('base64url')}`;
+    const requestedDeviceId = normalizeDeviceId(input.deviceId);
+    const deviceId = registrationId(owner, requestedDeviceId);
     const now = new Date().toISOString();
     const prior = this.registrations.get(deviceId);
     const registration: WakeRegistration = {
       deviceId,
+      owner,
       platform,
       token,
       ...(input.label ? { label: String(input.label).trim().slice(0, 80) } : prior?.label ? { label: prior.label } : {}),
@@ -167,8 +174,11 @@ export class WakePushRegistry {
     return publicRegistration(registration);
   }
 
-  list(): WakeRegistrationPublic[] {
-    return [...this.registrations.values()].map(publicRegistration).sort((a, b) => a.deviceId.localeCompare(b.deviceId));
+  list(owner: WakeRegistrationOwner): WakeRegistrationPublic[] {
+    return [...this.registrations.values()]
+      .filter((registration) => owner.kind === 'owner' || registrationOwnerEquals(registration.owner, owner))
+      .map(publicRegistration)
+      .sort((a, b) => a.deviceId.localeCompare(b.deviceId));
   }
 
   /** Broker-internal delivery view. Never return this from an HTTP route or write it to logs. */
@@ -176,19 +186,44 @@ export class WakePushRegistry {
     return [...this.registrations.values()].map((registration) => ({ ...registration }));
   }
 
-  get(deviceId: string): WakeRegistration {
+  get(deviceId: string, owner: WakeRegistrationOwner): WakeRegistration {
+    const id = normalizeDeviceId(deviceId);
+    const registration = id ? this.registrations.get(id) : undefined;
+    if (!registration || (owner.kind !== 'owner' && !registrationOwnerEquals(registration.owner, owner))) {
+      throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    }
+    return registration;
+  }
+
+  /** Broker-internal lookup for attention delivery. */
+  getForDispatch(deviceId: string): WakeRegistration {
     const id = normalizeDeviceId(deviceId);
     const registration = id ? this.registrations.get(id) : undefined;
     if (!registration) throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
     return registration;
   }
 
-  revoke(deviceId: string): boolean {
+  revoke(deviceId: string, owner: WakeRegistrationOwner): boolean {
     const id = normalizeDeviceId(deviceId);
     if (!id) throw new WakePushError('BAD_PARAM', 'deviceId is required');
+    const registration = this.registrations.get(id);
+    if (!registration || (owner.kind !== 'owner' && !registrationOwnerEquals(registration.owner, owner))) {
+      return false;
+    }
     const deleted = this.registrations.delete(id);
     if (deleted) this.save();
     return deleted;
+  }
+
+  revokePeer(peerId: string): number {
+    let removed = 0;
+    for (const [deviceId, registration] of this.registrations) {
+      if (registration.owner.kind !== 'peer' || registration.owner.peerId !== peerId) continue;
+      this.registrations.delete(deviceId);
+      removed++;
+    }
+    if (removed) this.save();
+    return removed;
   }
 
   private load(): void {
@@ -288,6 +323,7 @@ function normalizeStored(raw: any): WakeRegistration | undefined {
     if (!deviceId || !token) return undefined;
     return {
       deviceId,
+      owner: normalizeStoredOwner(raw?.owner),
       platform,
       token,
       ...(raw.label ? { label: String(raw.label) } : {}),
@@ -297,4 +333,37 @@ function normalizeStored(raw: any): WakeRegistration | undefined {
   } catch {
     return undefined;
   }
+}
+
+function registrationId(owner: WakeRegistrationOwner, requestedDeviceId: string | undefined): string {
+  if (owner.kind === 'owner') return requestedDeviceId ?? `dev_${randomBytes(9).toString('base64url')}`;
+  const source = requestedDeviceId ?? `dev_${randomBytes(9).toString('base64url')}`;
+  const digest = createHash('sha256')
+    .update(`${owner.peerId}\0${owner.authGeneration}\0${source}`)
+    .digest('base64url')
+    .slice(0, 24);
+  return `peer_${digest}`;
+}
+
+function registrationOwnerEquals(a: WakeRegistrationOwner, b: WakeRegistrationOwner): boolean {
+  return a.kind === b.kind
+    && (a.kind === 'owner'
+      || (b.kind === 'peer' && a.peerId === b.peerId && a.authGeneration === b.authGeneration));
+}
+
+function normalizeStoredOwner(raw: unknown): WakeRegistrationOwner {
+  if (!raw || typeof raw !== 'object') return { kind: 'owner' };
+  const value = raw as Record<string, unknown>;
+  if (value.kind === 'owner') return { kind: 'owner' };
+  if (value.kind === 'peer'
+    && typeof value.peerId === 'string'
+    && Number.isSafeInteger(value.authGeneration)
+    && Number(value.authGeneration) > 0) {
+    return {
+      kind: 'peer',
+      peerId: value.peerId,
+      authGeneration: Number(value.authGeneration),
+    };
+  }
+  throw new Error('wake-registration-owner-invalid');
 }

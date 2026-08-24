@@ -239,6 +239,7 @@ export class TransportPairingRegistry {
     const keys = loadOrCreateLocalKeyStore(this.keyDir, 'broker');
     const dataKey = generateDataKey();
     const wrappedDataKey = wrapDataKeyForPeer(dataKey, exchangePublicKey);
+    const previousPeer = this.peers.get(peerId);
     const peer: AcceptedTransportPeer = {
       peerId,
       ...(offer.label ? { label: offer.label } : {}),
@@ -250,7 +251,7 @@ export class TransportPairingRegistry {
       dataKey: serializeDataKey(dataKey),
       wrappedDataKey,
       acceptedAt: new Date(this.now()).toISOString(),
-      authGeneration: 1,
+      authGeneration: previousPeer ? previousPeer.authGeneration + 1 : 1,
       roles: [...DEFAULT_PEER_ROLES],
     };
     // Persist a candidate snapshot before publishing either in-memory mutation. A failed write or
@@ -593,8 +594,11 @@ function normalizeStoredPeer(raw: any): AcceptedTransportPeer | undefined {
 }
 
 function normalizePeerRoles(raw: unknown): PeerRole[] {
-  if (!Array.isArray(raw)) return [...DEFAULT_PEER_ROLES];
+  if (raw === undefined) return [...DEFAULT_PEER_ROLES];
+  if (!Array.isArray(raw)) throw new Error('peer-roles-invalid');
   const allowed = new Set<PeerRole>(['observe', 'drive', 'files', 'admin']);
-  const roles = [...new Set(raw.filter((role): role is PeerRole => typeof role === 'string' && allowed.has(role as PeerRole)))];
-  return roles.length ? roles : [...DEFAULT_PEER_ROLES];
+  if (raw.some((role) => typeof role !== 'string' || !allowed.has(role as PeerRole))) {
+    throw new Error('peer-roles-invalid');
+  }
+  return [...new Set(raw as PeerRole[])];
 }

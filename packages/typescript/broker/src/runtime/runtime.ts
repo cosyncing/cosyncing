@@ -155,7 +155,13 @@ import {
   UploadError,
   UploadStaging,
 } from '../artifacts/upload-staging.ts';
-import { dispatchWakePush, WakePushError, WakePushRegistry } from '../transport/push-wake.ts';
+import {
+  dispatchWakePush,
+  type WakeRegistrationOwner,
+  WakePushError,
+  WakePushRegistry,
+} from '../transport/push-wake.ts';
+import { authorizeBrokerRoute } from '../security/route-authorization.ts';
 import {
   aggregatedMachines,
   fetchPeerMachineRoster,
@@ -171,7 +177,6 @@ import { BrokerHealthAttentionReconciler } from '../attention/broker-health-atte
 import { DeviceWakeCoalescer } from '../transport/push-wake.ts';
 import {
   fetchTokdashQuota,
-  normalizeTokdashQuotaBaseUrl,
   resolveTokdashEndpoint,
   tokdashRejectionReason,
   TokdashQuotaEvaluator,
@@ -485,6 +490,18 @@ function artifactAuthorization(principal: AuthenticatedPrincipal): ArtifactAutho
   return { principalId: `integration:${principal.integration}`, authGeneration: 0 };
 }
 
+function wakeRegistrationOwner(principal: AuthenticatedPrincipal): WakeRegistrationOwner | undefined {
+  if (principal.kind === 'owner') return { kind: 'owner' };
+  if (principal.kind === 'peer') {
+    return {
+      kind: 'peer',
+      peerId: principal.peerId,
+      authGeneration: principal.authGeneration,
+    };
+  }
+  return undefined;
+}
+
 function wsTicketPrincipal(principal: AuthenticatedPrincipal): WsAuthTicketPrincipal | undefined {
   if (principal.kind === 'integration') return undefined;
   return principal.kind === 'owner'
@@ -518,50 +535,15 @@ function peerLacksRole(principal: AuthenticatedPrincipal, role: PeerRole): boole
   return principal.kind === 'peer' && !principal.roles.has(role);
 }
 
-function ownerOnlyDenied(principal: AuthenticatedPrincipal): Response | undefined {
-  return principal.kind === 'owner'
-    ? undefined
-    : json({ ok: false, error: 'owner credential required' }, 403);
-}
-
 function requestAuthorizationDenied(
   principal: AuthenticatedPrincipal,
   path: string,
   method: string,
 ): Response | undefined {
-  const ownerOnly =
-    (path === '/api/transport/pairings' && method === 'POST')
-    || (/^\/api\/transport\/pairings\/[^/]+$/.test(path) && method === 'GET')
-    || (path === '/api/transport/peers' && method === 'GET')
-    || (/^\/api\/transport\/peers\/[^/]+$/.test(path) && method === 'DELETE')
-    || (path === '/api/broker/update')
-    || (path === '/api/broker/restart' && method === 'POST')
-    || (path === '/api/broker/restart-all' && method === 'POST')
-    || (path === '/api/agent-runtime-update-policy' && method === 'POST')
-    || (/^\/api\/agent-runtime-updates\/[^/]+\/restart$/.test(path) && method === 'POST')
-    || (path === '/api/agents/codex/sync' && method === 'POST')
-    || (path === '/api/tokdash/quota-preference' && method === 'POST')
-    || (path === '/api/claude/hooks' && method === 'POST');
-  if (ownerOnly) return ownerOnlyDenied(principal);
-
-  const files = /^\/api\/sessions\/[^/]+\/[^/]+\/(?:artifact|fs|uploads|export)(?:\/|$)/.test(path)
-    || path === '/api/tool/send_file';
-  if (files) return peerRoleDenied(principal, 'files');
-
-  const drive = ((path.startsWith('/api/sessions/') || path === '/api/sessions')
-      && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS')
-    || path.startsWith('/api/projects/')
-    || path === '/api/projects/rename'
-    || path.startsWith('/api/schedules')
-    || path === '/api/transport/session-control';
-  if (drive) return peerRoleDenied(principal, 'drive');
-
-  const observe = path === '/api/ws-auth-tickets'
-    || path === '/api/sessions'
-    || path.startsWith('/api/sessions/')
-    || path === '/api/agents'
-    || path.startsWith('/api/agents/');
-  return observe ? peerRoleDenied(principal, 'observe') : undefined;
+  const decision = authorizeBrokerRoute(principal, path, method);
+  return decision.allowed
+    ? undefined
+    : json({ ok: false, error: decision.error }, decision.status);
 }
 
 /** Stable durable-journal namespace.
@@ -660,6 +642,8 @@ const TRANSPORT_MAILBOX_BYTES_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_M
 const TRANSPORT_PRINCIPAL_ENVELOPE_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_PRINCIPAL_ENVELOPE_MAX', 1000));
 const TRANSPORT_PRINCIPAL_BYTES_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_PRINCIPAL_BYTES_MAX', 16 * 1024 * 1024));
 const TRANSPORT_PAIRING_TTL_MS = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_PAIRING_TTL_MS ?? 5 * 60 * 1000) || 5 * 60 * 1000);
+const WS_TICKET_JSON_MAX_BYTES = 64 * 1024;
+const ORDINARY_JSON_MAX_BYTES = 1024 * 1024;
 
 interface StoredTransportEnvelope {
   id: string;
@@ -997,7 +981,7 @@ brokerHealthAttention = new BrokerHealthAttentionReconciler({
 attentionScheduler = new AttentionReminderScheduler(attentionService.store, {
   listDeviceIds: () => wakePush.listForDispatch().map((registration) => registration.deviceId),
   dispatchReservation: async (delivery) => {
-    const registration = wakePush.get(delivery.deviceId);
+    const registration = wakePush.getForDispatch(delivery.deviceId);
     await wakeCoalescer.request(registration);
   },
   onError: (error) =>
@@ -3479,6 +3463,51 @@ class HttpStatusError extends Error {
   }
 }
 
+function jsonRequestBodyLimit(path: string, method: string): number | undefined {
+  if (method !== 'POST' && method !== 'PATCH' && method !== 'PUT') return undefined;
+  if (path === '/api/transport/envelopes' || path === '/api/transport/session-control') return undefined;
+  if (/^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+$/.test(path) && method === 'PATCH') return undefined;
+  if (/^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path)) return PAIRING_ACCEPT_MAX_BYTES;
+  if (path === '/api/ws-auth-tickets') return WS_TICKET_JSON_MAX_BYTES;
+  if (path.startsWith('/api/') || path.startsWith('/pi/bridge/') || path.startsWith('/claude/hook/')) {
+    return ORDINARY_JSON_MAX_BYTES;
+  }
+  return undefined;
+}
+
+async function withBoundedRequestBody(req: Request, maxBytes: number): Promise<Request> {
+  const contentLength = req.headers.get('content-length');
+  if (contentLength && Number(contentLength) > maxBytes) {
+    throw new HttpStatusError(413, `request body exceeds ${maxBytes} bytes`);
+  }
+  if (!req.body) return req;
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try { await reader.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new HttpStatusError(413, `request body exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: bytes,
+    signal: req.signal,
+  });
+}
+
 async function readTransportRequestBytes(req: Request): Promise<Uint8Array> {
   const contentLength = req.headers.get('content-length');
   if (contentLength && Number(contentLength) > TRANSPORT_MAX_BYTES) {
@@ -3588,10 +3617,14 @@ const TRANSPORT_ENDPOINT_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
 function transportEnvelopeFromRequest(
   req: Request,
   bytes: Uint8Array,
-  queuedBy: string,
+  principal: AuthenticatedPrincipal,
 ): StoredTransportEnvelope {
   const headers = transportForwardHeaders(req.headers);
-  const from = req.headers.get('x-cosyncing-from')?.trim() || undefined;
+  const requestedFrom = req.headers.get('x-cosyncing-from')?.trim() || undefined;
+  if (principal.kind === 'peer' && requestedFrom && requestedFrom !== principal.peerId) {
+    throw new HttpStatusError(403, 'peer envelope sender does not match authenticated peer');
+  }
+  const from = principal.kind === 'peer' ? principal.peerId : requestedFrom;
   const to = req.headers.get('x-cosyncing-to')?.trim() || undefined;
   const mailboxToken = req.headers.get('x-cosyncing-to-token')?.trim() || '';
   if (!mailboxToken) throw new HttpStatusError(403, 'recipient mailbox token is required');
@@ -3617,7 +3650,7 @@ function transportEnvelopeFromRequest(
     bytes,
     expiresAt: Date.now() + TRANSPORT_MAILBOX_TTL_MS,
     mailboxTokenHash: transportMailboxTokenHash(mailboxToken),
-    queuedBy,
+    queuedBy: artifactAuthorization(principal).principalId,
     ...(from ? { from } : {}),
     ...(to ? { to } : {}),
     ...(Object.keys(headers).length ? { headers } : {}),
@@ -3732,31 +3765,8 @@ function transportMailboxCapacityError(envelope: StoredTransportEnvelope): strin
   return undefined;
 }
 
-function normalizeTokdashUrl(input: unknown): string {
-  const raw = typeof input === 'string' && input.trim() ? input.trim() : TOKDASH_URL;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error('Invalid Tokdash URL');
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Tokdash URL must be http(s)');
-  const host = parsed.hostname.toLowerCase();
-  const local = host === 'localhost' || host === '::1' || host === '[::1]' || /^127\./.test(host);
-  if (!local) throw new Error('Tokdash URL must point at localhost for now');
-  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
-  parsed.search = '';
-  parsed.hash = '';
-  return parsed.toString().replace(/\/$/, '');
-}
-
-async function fetchTokdashUsage(baseInput: unknown): Promise<Response> {
-  let baseUrl: string;
-  try {
-    baseUrl = normalizeTokdashUrl(baseInput);
-  } catch (err) {
-    return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400);
-  }
+async function fetchTokdashUsage(): Promise<Response> {
+  const baseUrl = TOKDASH_URL;
   const checked: string[] = [];
   for (const path of TOKDASH_USAGE_PATHS) {
     const target = `${baseUrl}${path}`;
@@ -4115,6 +4125,18 @@ server = Bun.serve<WsData>({
       if (denied) return denied;
     }
 
+    const jsonBodyLimit = jsonRequestBodyLimit(path, req.method);
+    if (jsonBodyLimit !== undefined) {
+      try {
+        req = await withBoundedRequestBody(req, jsonBodyLimit);
+      } catch (error) {
+        if (error instanceof HttpStatusError) {
+          return json({ ok: false, code: 'BAD_PARAM', error: error.message }, error.status);
+        }
+        throw error;
+      }
+    }
+
     if (path === '/api/ws-auth-tickets' && req.method === 'POST') {
       if (!principal || !credentialAuthenticated(principal)) {
         return json({ ok: false, code: 'AUTH_REQUIRED', error: 'authenticated credential required' }, 401);
@@ -4406,6 +4428,11 @@ server = Bun.serve<WsData>({
     const revokeTransportPeer = path.match(/^\/api\/transport\/peers\/([^/]+)$/);
     if (revokeTransportPeer && req.method === 'DELETE') {
       const peerId = decodeURIComponent(revokeTransportPeer[1]!);
+      // Remove durable peer-owned wake registrations before committing the
+      // credential revocation. If this write fails, the peer remains active
+      // and the owner receives an error that can be retried; a committed
+      // revocation can therefore never leave a durable wake destination behind.
+      wakePush.revokePeer(peerId);
       const revocation = transportPairings.revokeWithState(peerId);
       if (revocation) {
         wsAuthTickets.invalidatePeer(revocation.peerId);
@@ -4418,7 +4445,8 @@ server = Bun.serve<WsData>({
         }
         for (const [mailboxId, mailbox] of transportMailboxes) {
           const retained = mailbox.filter((envelope) =>
-            !revokedEndpointIds.has(envelope.from ?? '')
+            envelope.queuedBy !== `peer:${revocation.peerId}`
+            && !revokedEndpointIds.has(envelope.from ?? '')
             && !revokedEndpointIds.has(envelope.to ?? ''));
           if (retained.length) transportMailboxes.set(mailboxId, retained);
           else transportMailboxes.delete(mailboxId);
@@ -4444,7 +4472,7 @@ server = Bun.serve<WsData>({
         envelope = transportEnvelopeFromRequest(
           req,
           await readTransportRequestBytes(req),
-          principal ? artifactAuthorization(principal).principalId : 'unauthenticated',
+          principal!,
         );
         if (!envelope.id || !envelope.channel || !envelope.from || !envelope.to) {
           throw new HttpStatusError(400, 'envelope id, channel, sender, and recipient are required');
@@ -4496,7 +4524,7 @@ server = Bun.serve<WsData>({
         envelope = transportEnvelopeFromRequest(
           req,
           bytes,
-          principal ? artifactAuthorization(principal).principalId : 'unauthenticated',
+          principal!,
         );
       } catch (err) {
         if (err instanceof HttpStatusError) return json({ error: err.message }, err.status);
@@ -4534,6 +4562,8 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/push/wake-tokens' && req.method === 'POST') {
+      const registrationOwner = principal ? wakeRegistrationOwner(principal) : undefined;
+      if (!registrationOwner) return json({ ok: false, error: 'broker principal required' }, 403);
       const body: any = await req.json().catch(() => ({}));
       try {
         const registration = wakePush.register({
@@ -4541,7 +4571,7 @@ server = Bun.serve<WsData>({
           platform: body?.platform,
           token: String(body?.token ?? ''),
           label: typeof body?.label === 'string' ? body.label : undefined,
-        });
+        }, registrationOwner);
         void attentionScheduler.tick().catch(() => {});
         return json({ ok: true, registration }, 201);
       } catch (err) {
@@ -4550,13 +4580,17 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/push/wake-tokens' && req.method === 'GET') {
-      return json({ ok: true, registrations: wakePush.list() });
+      const registrationOwner = principal ? wakeRegistrationOwner(principal) : undefined;
+      if (!registrationOwner) return json({ ok: false, error: 'broker principal required' }, 403);
+      return json({ ok: true, registrations: wakePush.list(registrationOwner) });
     }
 
     const revokeWakeToken = path.match(/^\/api\/push\/wake-tokens\/([^/]+)$/);
     if (revokeWakeToken && req.method === 'DELETE') {
       try {
-        const revoked = wakePush.revoke(decodeURIComponent(revokeWakeToken[1]!));
+        const registrationOwner = principal ? wakeRegistrationOwner(principal) : undefined;
+        if (!registrationOwner) return json({ ok: false, error: 'broker principal required' }, 403);
+        const revoked = wakePush.revoke(decodeURIComponent(revokeWakeToken[1]!), registrationOwner);
         return json({ ok: true, revoked });
       } catch (err) {
         return wakePushErrorResponse(err);
@@ -4566,7 +4600,7 @@ server = Bun.serve<WsData>({
     if (path === '/api/push/wake' && req.method === 'POST') {
       const body: any = await req.json().catch(() => ({}));
       try {
-        const registration = wakePush.get(String(body?.deviceId ?? ''));
+        const registration = wakePush.get(String(body?.deviceId ?? ''), { kind: 'owner' });
         const result = await dispatchWakePush(registration);
         return json(result, 202);
       } catch (err) {
@@ -4700,6 +4734,9 @@ server = Bun.serve<WsData>({
         'content-type': mimeType,
         'x-cosyncing-mime-type': mimeType,
         'content-disposition': `attachment; filename=\"${filename}\"`,
+        'cache-control': 'private, no-store',
+        'referrer-policy': 'no-referrer',
+        'cross-origin-resource-policy': 'same-origin',
         'x-content-type-options': 'nosniff',
       };
       let range;
@@ -5587,14 +5624,13 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/tokdash/usage' && req.method === 'GET') {
-      return fetchTokdashUsage(url.searchParams.get('base'));
+      return fetchTokdashUsage();
     }
 
     if (path === '/api/tokdash/quota' && req.method === 'GET') {
       try {
-        const baseUrl = normalizeTokdashQuotaBaseUrl(url.searchParams.get('base'), TOKDASH_URL);
-        const data = await fetchTokdashQuota(baseUrl);
-        return json({ ok: true, baseUrl, endpoint: '/api/quota', data });
+        const data = await fetchTokdashQuota(TOKDASH_URL);
+        return json({ ok: true, baseUrl: TOKDASH_URL, endpoint: '/api/quota', data });
       } catch (error) {
         return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 502);
       }
@@ -5615,7 +5651,14 @@ server = Bun.serve<WsData>({
     }
 
     if (path === '/api/broker/health' && req.method === 'GET') {
-      return json({ ok: true, machine: MACHINE, ...healthWithSecurityState() });
+      return json({
+        ok: true,
+        machine: MACHINE,
+        principal: principal?.kind === 'peer'
+          ? { kind: 'peer', roles: [...principal.roles].sort() }
+          : { kind: 'owner' },
+        ...healthWithSecurityState(),
+      });
     }
 
     if (path === '/api/broker/update' && req.method === 'GET') {

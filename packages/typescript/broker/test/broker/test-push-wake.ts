@@ -9,7 +9,7 @@ import { createServer } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatchWakePush } from '../../src/transport/push-wake.ts';
+import { dispatchWakePush, WakePushRegistry } from '../../src/transport/push-wake.ts';
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -49,6 +49,31 @@ async function run(name: string, fn: () => Promise<void> | void): Promise<void> 
 let failures = 0;
 const TOKEN = 'w7-push-token';
 
+await run('wake registrations are principal-scoped and peer revocation removes only that peer', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-registry-'));
+  try {
+    const registry = new WakePushRegistry(home);
+    const peerA = { kind: 'peer' as const, peerId: 'peer-a', authGeneration: 1 };
+    const peerB = { kind: 'peer' as const, peerId: 'peer-b', authGeneration: 1 };
+    const a = registry.register({ deviceId: 'phone', platform: 'apns', token: 'token-a' }, peerA);
+    const b = registry.register({ deviceId: 'phone', platform: 'fcm', token: 'token-b' }, peerB);
+    assert.notEqual(a.deviceId, b.deviceId, 'caller device ids must be namespaced under the principal');
+    assert.deepEqual(registry.list(peerA).map((entry) => entry.deviceId), [a.deviceId]);
+    assert.deepEqual(registry.list(peerB).map((entry) => entry.deviceId), [b.deviceId]);
+    assert.throws(() => registry.get(b.deviceId, peerA), /not found/i);
+    assert.equal(registry.revoke(b.deviceId, peerA), false);
+    assert.equal(registry.list({ kind: 'owner' }).length, 2);
+    assert.equal(registry.revokePeer('peer-a'), 1);
+    assert.deepEqual(registry.list({ kind: 'owner' }).map((entry) => entry.deviceId), [b.deviceId]);
+
+    const reloaded = new WakePushRegistry(home);
+    assert.deepEqual(reloaded.list(peerA), []);
+    assert.deepEqual(reloaded.list(peerB).map((entry) => entry.deviceId), [b.deviceId]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 await run('wake push webhook dispatch times out instead of hanging indefinitely', async () => {
   const webhookPort = await freePort();
   const webhook = Bun.serve({
@@ -65,6 +90,7 @@ await run('wake push webhook dispatch times out instead of hanging indefinitely'
     await assert.rejects(
       () => dispatchWakePush({
         deviceId: 'phone-timeout',
+        owner: { kind: 'owner' },
         platform: 'apns',
         token: 'timeout-token',
         createdAt: new Date().toISOString(),
@@ -86,6 +112,7 @@ await run('direct wake dispatch drops every caller-controlled reason', async () 
   try {
     await dispatchWakePush({
       deviceId: 'phone-private',
+      owner: { kind: 'owner' },
       platform: 'fcm',
       token: 'private-token',
       createdAt: new Date().toISOString(),
@@ -125,7 +152,9 @@ await run('wake-token registration is token-gated, redacted in list, and dispatc
       PORT: String(brokerPort),
       HOST: '127.0.0.1',
       COSYNCING_TOKEN: TOKEN,
+      COSYNCING_TOKEN_FILE: '',
       COSYNCING_HOME: home,
+      COSYNCING_PI_INTEGRATION_FILE: '',
       COSYNCING_WAKE_PUSH_WEBHOOK: `http://127.0.0.1:${webhookPort}/wake`,
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
     },

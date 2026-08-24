@@ -76,13 +76,6 @@ void main() {
       );
     });
 
-    test('tokdashQuotaEndpointFor encodes base query', () {
-      expect(
-        resolver.tokdashQuotaEndpointFor(base: 'http://127.0.0.1:55423'),
-        'http://127.0.0.1:7734/api/tokdash/quota?base=http%3A%2F%2F127.0.0.1%3A55423',
-      );
-    });
-
     test('tokdashQuotaPreferenceEndpoint returns correct path', () {
       expect(
         resolver.tokdashQuotaPreferenceEndpoint,

@@ -218,13 +218,6 @@ class EndpointResolver {
     return _appendQuery(agentRuntimeUpdatesEndpoint, params);
   }
 
-  /// Builds the Tokdash quota endpoint with an optional localhost base URL.
-  String tokdashQuotaEndpointFor({String? base}) {
-    final params = <String, String>{};
-    if (base != null) params['base'] = base;
-    return _appendQuery(tokdashQuotaEndpoint, params);
-  }
-
   /// Create session endpoint for a specific tool.
   String createSessionEndpoint(String tool) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}';

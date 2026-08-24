@@ -688,6 +688,60 @@ await test('broker pairing persistence, revoke cleanup, and re-pair isolation su
   }
 });
 
+await test('revocation purges peer-queued generic envelopes and peers cannot spoof senders', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-queued-by-'));
+  const port = await freePort();
+  const token = `queued-by-${Date.now()}`;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const broker = startBroker(port, token, { COSYNCING_HOME: home });
+  try {
+    await waitHealth(baseUrl);
+    const peerA = await pairPhone(baseUrl, token, { peerId: 'peer-a', peerToken: 'peer-a-mailbox' });
+    const peerB = await pairPhone(baseUrl, token, { peerId: 'peer-b', peerToken: 'peer-b-mailbox' });
+    const headers = {
+      'content-type': 'application/octet-stream',
+      'x-cosyncing-channel': 'generic',
+      'x-cosyncing-to': peerB.accepted.peer.peerId,
+      'x-cosyncing-to-token': peerB.material.peerToken,
+      'x-cosyncing-peer-token': peerA.accepted.broker.peerToken,
+    };
+    const omittedSender = await fetch(`${baseUrl}/api/transport/envelopes`, {
+      method: 'POST',
+      headers: { ...headers, 'x-cosyncing-envelope-id': 'queued-without-from' },
+      body: new TextEncoder().encode('queued'),
+    });
+    assert.equal(omittedSender.status, 202);
+    const spoofedSender = await fetch(`${baseUrl}/api/transport/envelopes`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'x-cosyncing-envelope-id': 'queued-spoofed-from',
+        'x-cosyncing-from': 'someone-else',
+      },
+      body: new TextEncoder().encode('spoofed'),
+    });
+    assert.equal(spoofedSender.status, 403);
+
+    const revoke = await fetch(`${baseUrl}/api/transport/peers/${peerA.accepted.peer.peerId}`, {
+      method: 'DELETE',
+      headers: { 'x-cosyncing-token': token },
+    });
+    assert.equal(revoke.status, 200);
+    const mailbox = await fetch(`${baseUrl}/api/transport/envelopes?peer=${peerB.accepted.peer.peerId}`, {
+      headers: {
+        'x-cosyncing-token': token,
+        'x-cosyncing-peer-token': peerB.material.peerToken,
+      },
+    });
+    assert.equal(mailbox.status, 200);
+    assert.deepEqual((await mailbox.json() as any).envelopes, []);
+  } finally {
+    broker.kill();
+    await broker.exited.catch(() => undefined);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 await test('broker opens paired encrypted session-control envelopes with sender auth and replay rejection', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-control-'));
   const port = await freePort();

@@ -49,6 +49,7 @@ function fakeTime() {
 function registration(deviceId: string, token = `${deviceId}-token`): WakeRegistration {
   return {
     deviceId,
+    owner: { kind: 'owner' },
     platform: 'fcm',
     token,
     createdAt: new Date(0).toISOString(),

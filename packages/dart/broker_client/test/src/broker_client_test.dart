@@ -264,9 +264,9 @@ void main() {
         expect(response.components?.broker?.scheduled, isTrue);
       });
 
-      test('gets tokdash quota with base query', () async {
+      test('gets tokdash quota from the broker-configured upstream', () async {
         dioAdapter.onGet(
-          'http://127.0.0.1:7734/api/tokdash/quota?base=http%3A%2F%2F127.0.0.1%3A55423',
+          'http://127.0.0.1:7734/api/tokdash/quota',
           (server) => server.reply(200, {
             'ok': true,
             'baseUrl': 'http://127.0.0.1:55423',
@@ -279,9 +279,7 @@ void main() {
           }),
         );
 
-        final response = await client.getTokdashQuota(
-          base: 'http://127.0.0.1:55423',
-        );
+        final response = await client.getTokdashQuota();
         expect(response.baseUrl, 'http://127.0.0.1:55423');
         expect(response.data, isNotNull);
       });
@@ -2134,6 +2132,122 @@ void main() {
         await authenticatedClient.fetchArtifactUrl(crossOrigin);
         authenticatedClient.close();
       });
+
+      test(
+        'refreshes one expired same-origin artifact ticket and retries',
+        () async {
+          final authenticatedClient = BrokerClient(
+            baseUrl: 'http://127.0.0.1:7734',
+            token: 'artifact-token',
+            dio: dio,
+          );
+          const stale =
+              'http://127.0.0.1:7734/api/sessions/codex/session-1/artifact/artifact-1?expires=1&sig=stale';
+          const fresh =
+              'http://127.0.0.1:7734/api/sessions/codex/session-1/artifact/artifact-1?expires=2&sig=fresh';
+          dioAdapter
+            ..onGet(
+              stale,
+              headers: {'x-cosyncing-token': 'artifact-token'},
+              (server) => server.reply(403, 'artifact URL expired'),
+            )
+            ..onPost(
+              'http://127.0.0.1:7734/api/sessions/codex/session-1/artifact/artifact-1/ticket',
+              headers: {
+                'content-type': 'application/json',
+                'x-cosyncing-token': 'artifact-token',
+              },
+              data: const <String, dynamic>{},
+              (server) => server.reply(201, {'ok': true, 'fetchUrl': fresh}),
+            )
+            ..onGet(
+              fresh,
+              headers: {'x-cosyncing-token': 'artifact-token'},
+              (server) =>
+                  server.reply(200, Uint8List.fromList(utf8.encode('fresh'))),
+            );
+
+          final result = await authenticatedClient.fetchArtifactUrl(stale);
+          expect(utf8.decode(result.bytes), 'fresh');
+          authenticatedClient.close();
+        },
+      );
+
+      test(
+        'revocation between ticket refresh and retry remains terminal',
+        () async {
+          final authenticatedClient = BrokerClient(
+            baseUrl: 'http://127.0.0.1:7734',
+            peerToken: 'peer-token',
+            dio: dio,
+          );
+          const stale =
+              'http://127.0.0.1:7734/api/sessions/codex/session-2/artifact/artifact-2?expires=1&sig=stale';
+          const fresh =
+              'http://127.0.0.1:7734/api/sessions/codex/session-2/artifact/artifact-2?expires=2&sig=fresh';
+          dioAdapter
+            ..onGet(
+              stale,
+              headers: {'x-cosyncing-peer-token': 'peer-token'},
+              (server) => server.reply(403, 'artifact URL expired'),
+            )
+            ..onPost(
+              'http://127.0.0.1:7734/api/sessions/codex/session-2/artifact/artifact-2/ticket',
+              headers: {
+                'content-type': 'application/json',
+                'x-cosyncing-peer-token': 'peer-token',
+              },
+              data: const <String, dynamic>{},
+              (server) => server.reply(201, {'ok': true, 'fetchUrl': fresh}),
+            )
+            ..onGet(
+              fresh,
+              headers: {'x-cosyncing-peer-token': 'peer-token'},
+              (server) => server.reply(401, 'revoked'),
+            );
+
+          await expectLater(
+            authenticatedClient.fetchArtifactUrl(stale),
+            throwsA(
+              isA<BrokerException>().having(
+                (error) => error.statusCode,
+                'statusCode',
+                401,
+              ),
+            ),
+          );
+          authenticatedClient.close();
+        },
+      );
+
+      test(
+        'never refreshes or authenticates a cross-origin legacy URL',
+        () async {
+          final authenticatedClient = BrokerClient(
+            baseUrl: 'http://127.0.0.1:7734',
+            token: 'artifact-token',
+            dio: dio,
+          );
+          const crossOrigin =
+              'https://cdn.example.net/api/sessions/codex/session-1/artifact/artifact-1?expires=1&sig=stale';
+          dioAdapter.onGet(
+            crossOrigin,
+            headers: const <String, dynamic>{},
+            (server) => server.reply(403, 'expired'),
+          );
+          await expectLater(
+            authenticatedClient.fetchArtifactUrl(crossOrigin),
+            throwsA(
+              isA<BrokerException>().having(
+                (error) => error.statusCode,
+                'statusCode',
+                403,
+              ),
+            ),
+          );
+          authenticatedClient.close();
+        },
+      );
     });
 
     group('fetchArtifactUrlBounded', () {
@@ -2154,6 +2268,47 @@ void main() {
         );
         expect(download.bytes.length, body.length);
       });
+
+      test(
+        'refreshes once and preserves the byte ceiling on bounded retry',
+        () async {
+          final authenticatedClient = BrokerClient(
+            baseUrl: 'http://127.0.0.1:7734',
+            token: 'artifact-token',
+            dio: dio,
+          );
+          const stale =
+              'http://127.0.0.1:7734/api/sessions/codex/bounded/artifact/diff?expires=1&sig=stale';
+          const fresh =
+              'http://127.0.0.1:7734/api/sessions/codex/bounded/artifact/diff?expires=2&sig=fresh';
+          dioAdapter
+            ..onGet(
+              stale,
+              headers: {'x-cosyncing-token': 'artifact-token'},
+              (server) => server.reply(403, 'expired'),
+            )
+            ..onPost(
+              'http://127.0.0.1:7734/api/sessions/codex/bounded/artifact/diff/ticket',
+              headers: {
+                'content-type': 'application/json',
+                'x-cosyncing-token': 'artifact-token',
+              },
+              data: const <String, dynamic>{},
+              (server) => server.reply(201, {'ok': true, 'fetchUrl': fresh}),
+            )
+            ..onGet(
+              fresh,
+              headers: {'x-cosyncing-token': 'artifact-token'},
+              (server) => server.reply(200, utf8.encode('fresh bounded body')),
+            );
+          final download = await authenticatedClient.fetchArtifactUrlBounded(
+            stale,
+            maxBytes: 1024,
+          );
+          expect(utf8.decode(download.bytes), 'fresh bounded body');
+          authenticatedClient.close();
+        },
+      );
 
       test('resolves a bounded root-relative URL against the broker', () async {
         final body = utf8.encode('bounded relative body');

@@ -125,7 +125,6 @@ const INTERNAL_ARTIFACT_SCOPE: ArtifactAuthorizationScope = {
   principalId: 'broker-internal',
   authGeneration: 0,
 };
-const INTERACTION_SIGNATURE_TTL_MS = 30 * 60 * 1000;
 const MAX_INTERACTION_BYTES = 16 * 1024;
 const MAX_INTERACTION_DEPTH = 4;
 const STRUCTURED_ACTIONS = ['form-submit', 'action'] as const;
@@ -504,34 +503,9 @@ export class ArtifactStore {
     if (!record || !existsSync(record.filePath)) {
       throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_NOT_FOUND', 'artifact interaction target was not found');
     }
-    if (!this.isStructured(record)) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_UNSUPPORTED', 'artifact is display-only');
-    }
-    if (typeof interactionRef !== 'string' || interactionRef.length > 1024) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    const parts = interactionRef.split('.');
-    const expires = Number(parts[1]);
-    if (parts.length !== 3 || parts[0] !== 'v1' || !Number.isSafeInteger(expires) || expires <= 0) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    if (Date.now() > expires) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_EXPIRED', 'artifact interaction reference expired');
-    }
-    const expected = this.signInteraction(record, expires);
-    try {
-      const suppliedBytes = Buffer.from(parts[2]!);
-      const expectedBytes = Buffer.from(expected);
-      if (suppliedBytes.length !== expectedBytes.length || !timingSafeEqual(suppliedBytes, expectedBytes)) {
-        throw new Error('mismatch');
-      }
-    } catch {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    return {
-      artifact: { artifactKey: record.artifactKey, name: record.name, path: record.path },
-      interaction: normalizeArtifactInteraction(interaction),
-    };
+    void interactionRef;
+    void interaction;
+    throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_UNSUPPORTED', 'artifact is display-only');
   }
 
   putFile(
@@ -909,21 +883,11 @@ export class ArtifactStore {
     return { mode: 'display-only', bridgeVersion: 1, schemaVersion: 1, allowedActions: [] };
   }
 
-  private isStructured(record: ArtifactRecord): boolean {
-    return record.deliveryClass !== 'export-attachment' && isHtmlMime(record.mimeType);
-  }
-
-  private interactionPolicy(record: ArtifactRecord): ArtifactInteractionPolicy {
-    if (!this.isStructured(record)) return this.displayOnlyPolicy();
-    const expiresAt = Date.now() + INTERACTION_SIGNATURE_TTL_MS;
-    return {
-      mode: 'structured',
-      bridgeVersion: 1,
-      schemaVersion: 1,
-      allowedActions: [...STRUCTURED_ACTIONS],
-      expiresAt,
-      interactionRef: `v1.${expiresAt}.${this.signInteraction(record, expiresAt)}`,
-    };
+  private interactionPolicy(_record: ArtifactRecord): ArtifactInteractionPolicy {
+    // Active artifact formats are delivered only as opaque attachments. Do not
+    // advertise a JavaScript bridge that the hardened delivery path cannot and
+    // must not execute.
+    return this.displayOnlyPolicy();
   }
 
   private signedUrl(

@@ -254,6 +254,10 @@ try {
     ['restart an updated runtime', 'POST', '/api/agent-runtime-updates/codex/restart'],
     ['synchronize Codex runtime state', 'POST', '/api/agents/codex/sync'],
     ['change the global quota preference', 'POST', '/api/tokdash/quota-preference'],
+    ['create a durable schedule', 'POST', '/api/schedules'],
+    ['list durable schedules', 'GET', '/api/schedules'],
+    ['invoke the agent-only send-file route', 'POST', '/api/tool/send_file'],
+    ['trigger a wake for another device', 'POST', '/api/push/wake'],
   ];
   for (const [label, method, path] of peerOwnerOnlyRequests) {
     check(`paired device cannot ${label}`,
@@ -263,6 +267,26 @@ try {
         ...(method === 'POST' ? { body: '{}' } : {}),
       })) === 403);
   }
+  const tokdashOverride = await fetch(
+    `${tokened.base}/api/tokdash/usage?base=${encodeURIComponent('http://127.0.0.1:1/private')}`,
+    { headers: peerHeaders },
+  );
+  const tokdashOverrideBody = await tokdashOverride.json().catch(() => ({})) as any;
+  check('remote Tokdash reads ignore caller-selected upstream URLs',
+    tokdashOverrideBody.baseUrl !== 'http://127.0.0.1:1/private');
+
+  const oversizedTicket = await fetch(`${tokened.base}/api/ws-auth-tickets`, {
+    method: 'POST',
+    headers: { ...peerHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ padding: 'x'.repeat(64 * 1024) }),
+  });
+  check('WebSocket ticket JSON is bounded in the broker', oversizedTicket.status === 413, `status=${oversizedTicket.status}`);
+  const oversizedOrdinaryJson = await fetch(`${tokened.base}/api/projects/rename`, {
+    method: 'POST',
+    headers: { ...peerHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ padding: 'x'.repeat(1024 * 1024) }),
+  });
+  check('ordinary API JSON is bounded in the broker', oversizedOrdinaryJson.status === 413, `status=${oversizedOrdinaryJson.status}`);
   const unauthenticatedOptionsSessions = await fetch(`${tokened.base}/api/sessions`, { method: 'OPTIONS' });
   check('OPTIONS /api/sessions cannot bypass roster authentication',
     unauthenticatedOptionsSessions.status === 401 && !(await unauthenticatedOptionsSessions.text()).includes('sessions'));

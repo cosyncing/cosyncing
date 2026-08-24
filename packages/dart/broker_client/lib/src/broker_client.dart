@@ -377,10 +377,10 @@ class BrokerClient {
   /// Gets Tokdash quota data through the broker proxy.
   ///
   /// `GET /api/tokdash/quota`
-  /// Adds `?base=` when provided.
-  Future<TokdashQuotaResponse> getTokdashQuota({String? base}) async {
+  /// The upstream endpoint is selected only by local broker configuration.
+  Future<TokdashQuotaResponse> getTokdashQuota() async {
     final response = await _get<Map<String, dynamic>>(
-      _resolver.tokdashQuotaEndpointFor(base: base),
+      _resolver.tokdashQuotaEndpoint,
     );
     return TokdashQuotaResponse.fromJson(response);
   }
@@ -1027,7 +1027,7 @@ class BrokerClient {
   /// cross-origin URLs never receive it.
   Future<ArtifactDownload> fetchArtifactUrl(String url) async {
     try {
-      final response = await _getBytes(_resolveArtifactUrl(url));
+      final response = await _getArtifactBytesWithRefresh(url);
       final headers = response.headers;
 
       return ArtifactDownload(
@@ -1077,27 +1077,10 @@ class BrokerClient {
     String url, {
     required int maxBytes,
   }) async {
-    final cancelToken = CancelToken();
-    var overLimit = false;
     try {
-      final resolvedUrl = _resolveArtifactUrl(url);
-      final response = await _dio.get<List<int>>(
-        resolvedUrl,
-        options: Options(
-          responseType: ResponseType.bytes,
-          headers: _artifactAuthHeaders(resolvedUrl),
-        ),
-        cancelToken: cancelToken,
-        onReceiveProgress: (received, total) {
-          // Abort as soon as EITHER the advertised size (`total`, when known)
-          // or the running received count exceeds the ceiling. On web this is
-          // the only place the transfer can be stopped before the body lands.
-          if (!overLimit &&
-              ((total > 0 && total > maxBytes) || received > maxBytes)) {
-            overLimit = true;
-            cancelToken.cancel('artifact exceeds client byte ceiling');
-          }
-        },
+      final response = await _getArtifactBytesBoundedWithRefresh(
+        url,
+        maxBytes: maxBytes,
       );
       final headers = response.headers;
       final advertised = _parseContentLength(headers.value('content-length'));
@@ -1136,10 +1119,6 @@ class BrokerClient {
         sourceUrl: response.requestOptions.uri.toString(),
       );
     } on DioException catch (e) {
-      // A cancel we triggered for size is a too-large signal, not a fetch fail.
-      if (overLimit || e.type == DioExceptionType.cancel) {
-        throw ArtifactTooLargeException(limit: maxBytes);
-      }
       throw BrokerException(
         message: 'Artifact fetch failed',
         statusCode: e.response?.statusCode,
@@ -1371,7 +1350,65 @@ class BrokerClient {
     }
   }
 
-  Future<Response<List<int>>> _getBytes(String path) async {
+  Future<Response<List<int>>> _getArtifactBytesWithRefresh(String value) async {
+    final resolved = _resolveArtifactUrl(value);
+    try {
+      return await _getArtifactBytes(resolved);
+    } on DioException catch (error) {
+      if (error.response?.statusCode != 403) rethrow;
+      final identity = _canonicalArtifactIdentity(resolved);
+      if (identity == null) rethrow;
+      final refreshed = await refreshArtifactTicket(
+        identity.tool,
+        identity.sessionId,
+        identity.artifactId,
+      );
+      final refreshedResolved = _resolveArtifactUrl(refreshed);
+      if (!_sameArtifactIdentity(
+        _canonicalArtifactIdentity(refreshedResolved),
+        identity,
+      )) {
+        throw const BrokerException(
+          message: 'Broker returned an invalid artifact ticket',
+        );
+      }
+      return _getArtifactBytes(refreshedResolved);
+    }
+  }
+
+  Future<Response<List<int>>> _getArtifactBytesBoundedWithRefresh(
+    String value, {
+    required int maxBytes,
+  }) async {
+    final resolved = _resolveArtifactUrl(value);
+    try {
+      return await _getArtifactBytesBounded(resolved, maxBytes: maxBytes);
+    } on DioException catch (error) {
+      if (error.response?.statusCode != 403) rethrow;
+      final identity = _canonicalArtifactIdentity(resolved);
+      if (identity == null) rethrow;
+      final refreshed = await refreshArtifactTicket(
+        identity.tool,
+        identity.sessionId,
+        identity.artifactId,
+      );
+      final refreshedResolved = _resolveArtifactUrl(refreshed);
+      if (!_sameArtifactIdentity(
+        _canonicalArtifactIdentity(refreshedResolved),
+        identity,
+      )) {
+        throw const BrokerException(
+          message: 'Broker returned an invalid artifact ticket',
+        );
+      }
+      return _getArtifactBytesBounded(
+        refreshedResolved,
+        maxBytes: maxBytes,
+      );
+    }
+  }
+
+  Future<Response<List<int>>> _getArtifactBytes(String path) async {
     return _dio.get<List<int>>(
       path,
       options: Options(
@@ -1381,15 +1418,83 @@ class BrokerClient {
     );
   }
 
+  Future<Response<List<int>>> _getArtifactBytesBounded(
+    String path, {
+    required int maxBytes,
+  }) async {
+    final cancelToken = CancelToken();
+    var overLimit = false;
+    try {
+      return await _dio.get<List<int>>(
+        path,
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: _artifactAuthHeaders(path),
+        ),
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (!overLimit &&
+              ((total > 0 && total > maxBytes) || received > maxBytes)) {
+            overLimit = true;
+            cancelToken.cancel('artifact exceeds client byte ceiling');
+          }
+        },
+      );
+    } on DioException catch (error) {
+      if (overLimit || error.type == DioExceptionType.cancel) {
+        throw ArtifactTooLargeException(limit: maxBytes);
+      }
+      rethrow;
+    }
+  }
+
   Map<String, String> _artifactAuthHeaders(String resolvedUrl) {
     final target = Uri.tryParse(resolvedUrl);
     final broker = Uri.tryParse(_resolver.baseUrl);
     if (target == null || broker == null) return const <String, String>{};
-    final sameOrigin =
-        target.scheme.toLowerCase() == broker.scheme.toLowerCase() &&
+    final sameOrigin = _sameOrigin(target, broker);
+    return sameOrigin ? _resolver.authHeaders : const <String, String>{};
+  }
+
+  _ArtifactTicketIdentity? _canonicalArtifactIdentity(String resolvedUrl) {
+    final target = Uri.tryParse(resolvedUrl);
+    final broker = Uri.tryParse(_resolver.baseUrl);
+    if (target == null || broker == null || !_sameOrigin(target, broker)) {
+      return null;
+    }
+    final segments = target.pathSegments;
+    if (segments.length != 6 ||
+        segments[0] != 'api' ||
+        segments[1] != 'sessions' ||
+        segments[4] != 'artifact' ||
+        segments
+            .sublist(2)
+            .any(
+              (segment) => segment.isEmpty || segment.contains('/'),
+            )) {
+      return null;
+    }
+    return _ArtifactTicketIdentity(
+      tool: segments[2],
+      sessionId: segments[3],
+      artifactId: segments[5],
+    );
+  }
+
+  bool _sameOrigin(Uri target, Uri broker) {
+    return target.scheme.toLowerCase() == broker.scheme.toLowerCase() &&
         target.host.toLowerCase() == broker.host.toLowerCase() &&
         target.port == broker.port;
-    return sameOrigin ? _resolver.authHeaders : const <String, String>{};
+  }
+
+  bool _sameArtifactIdentity(
+    _ArtifactTicketIdentity? left,
+    _ArtifactTicketIdentity right,
+  ) {
+    return left != null &&
+        left.tool == right.tool &&
+        left.sessionId == right.sessionId &&
+        left.artifactId == right.artifactId;
   }
 
   String _resolveArtifactUrl(String value) {
@@ -1442,6 +1547,18 @@ class BrokerClient {
     }
     return null;
   }
+}
+
+class _ArtifactTicketIdentity {
+  const _ArtifactTicketIdentity({
+    required this.tool,
+    required this.sessionId,
+    required this.artifactId,
+  });
+
+  final String tool;
+  final String sessionId;
+  final String artifactId;
 }
 
 /// Result of a conditional roster snapshot request.
