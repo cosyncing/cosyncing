@@ -3,8 +3,8 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=16&minimumBrokerRevision=15&'
-    'contractSurfaceHash=fnv1a32%3Aeff55ab5';
+    'clientVersion=0.0.0-dev&contractRevision=17&minimumBrokerRevision=16&'
+    'contractSurfaceHash=fnv1a32%3A3ff9de78';
 
 void main() {
   group('EndpointResolver', () {

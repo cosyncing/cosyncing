@@ -92,6 +92,7 @@ import { RosterRevisionStore } from '../roster/roster-revision.ts';
 import {
   ArtifactStore,
   artifactCacheRoot,
+  type ArtifactAuthorizationScope,
   type AuthorizedArtifactInteraction,
 } from '../artifacts/artifact-store.ts';
 import { buildDiffRefMessage, INLINE_DIFF_CAP } from '../sessions/diff-reference.ts';
@@ -143,6 +144,7 @@ import {
   assertPairingId,
   PAIRING_ACCEPT_MAX_BYTES,
   PairingHttpError,
+  type PeerRole,
   tokenHash,
   TransportPairingRegistry,
 } from '../transport/transport-pairing.ts';
@@ -212,7 +214,11 @@ import {
 } from './configuration.ts';
 import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
-import { WsAuthTicketRegistry, type WsAuthTicketBinding } from '../security/ws-auth-tickets.ts';
+import {
+  WsAuthTicketRegistry,
+  type WsAuthTicketBinding,
+  type WsAuthTicketPrincipal,
+} from '../security/ws-auth-tickets.ts';
 import { inspectDurableCorruptionEvidence, inspectDurableSchemas } from '../security/durable-state.ts';
 import { remoteFilesystemAllowed } from '../sessions/client-message-policy.ts';
 import {
@@ -244,7 +250,6 @@ import {
 import {
   BROKER_UPDATE_CHECK_INTERVAL_MS,
   BrokerUpdateChecker,
-  isBrokerUpdateManifestUrl,
   triggerBrokerUpdate,
 } from '../updates/broker-update.ts';
 
@@ -432,33 +437,131 @@ const CLAUDE_HOOKS_DEV_ENABLED = !BUILD_INFO.packaged && process.env.COSYNCING_D
 // opt in via CORP/CORS — notably a CDN-hosted CanvasKit (the default `flutter build web`). Only enable it with
 // a self-contained build: `flutter build web --base-href /cosy/ --no-web-resources-cdn`. Toggle: COSYNCING_WEB_COI=1.
 const WEB_COI = /^(1|true|yes|on)$/i.test(process.env.COSYNCING_WEB_COI?.trim() || '');
-// The installed shared secret is required on every data-bearing `/api/*` route. The deliberately public
-// surface is limited to minimal health, one-use pairing acceptance, and signed artifact downloads. Static
-// `/cosy/*` assets are outside `/api/*`. Every legitimate client carries the credential in a header; request
-// URLs are never credential carriers because reverse proxies routinely log them.
-/** True when the request may touch a protected path: no token configured → source-only loopback baseline;
- *  otherwise the request must carry the secret as `x-cosyncing-token`. The Pi integration credential is accepted
- *  only on `/pi/bridge/*` and never becomes a general broker credential. */
-function authed(req: Request, _url: URL, path: string): boolean {
-  if (!TOKEN) return true;
+type AuthenticatedPrincipal =
+  | { kind: 'owner'; credentialId: string }
+  | { kind: 'peer'; peerId: string; authGeneration: number; roles: ReadonlySet<PeerRole> }
+  | { kind: 'integration'; integration: 'pi' };
+
+const SOURCE_DEVELOPMENT_CREDENTIAL_ID = 'source-development-loopback';
+
+function authenticatedPrincipal(req: Request, path: string): AuthenticatedPrincipal | undefined {
+  if (!TOKEN) return { kind: 'owner', credentialId: SOURCE_DEVELOPMENT_CREDENTIAL_ID };
   const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
-  const peerTokens = [req.headers.get('x-cosyncing-peer-token')?.trim() || ''].filter(Boolean);
-  if (safeCredentialEqual(TOKEN, sharedToken)
-      || peerTokens.some((peerToken) => transportPairings.verifyAnyPeerToken(peerToken) === 'ok')) {
-    return true;
+  if (safeCredentialEqual(TOKEN, sharedToken)) {
+    return { kind: 'owner', credentialId: tokenHash(sharedToken) };
   }
-  if (!path.startsWith('/pi/bridge/') || !PI_INTEGRATION_TOKEN) return false;
+  const peerToken = req.headers.get('x-cosyncing-peer-token')?.trim() || '';
+  const peer = peerToken ? transportPairings.authenticatePeerToken(peerToken) : undefined;
+  if (peer) {
+    return {
+      kind: 'peer',
+      peerId: peer.peerId,
+      authGeneration: peer.authGeneration,
+      roles: peer.roles,
+    };
+  }
+  if (!path.startsWith('/pi/bridge/') || !PI_INTEGRATION_TOKEN) return undefined;
   const integrationToken = req.headers.get('x-cosyncing-integration-token')?.trim() || '';
-  return safeCredentialEqual(PI_INTEGRATION_TOKEN, integrationToken);
+  return safeCredentialEqual(PI_INTEGRATION_TOKEN, integrationToken)
+    ? { kind: 'integration', integration: 'pi' }
+    : undefined;
 }
 
-/** Unlike the loopback-compatible `authed`, this proves that an actual shared/peer credential was
- * supplied. The D12 Drive boundary requires this for direct `mode=resume`. */
-function credentialAuthenticated(req: Request, _url: URL): boolean {
-  const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
-  if (safeCredentialEqual(TOKEN, sharedToken)) return true;
-  const peerTokens = [req.headers.get('x-cosyncing-peer-token')?.trim() || ''].filter(Boolean);
-  return peerTokens.some((peerToken) => transportPairings.verifyAnyPeerToken(peerToken) === 'ok');
+function credentialAuthenticated(principal: AuthenticatedPrincipal | undefined): boolean {
+  return principal?.kind === 'peer'
+    || (principal?.kind === 'owner' && principal.credentialId !== SOURCE_DEVELOPMENT_CREDENTIAL_ID);
+}
+
+function artifactAuthorization(principal: AuthenticatedPrincipal): ArtifactAuthorizationScope {
+  if (principal.kind === 'peer') {
+    return {
+      principalId: `peer:${principal.peerId}`,
+      authGeneration: principal.authGeneration,
+    };
+  }
+  if (principal.kind === 'owner') {
+    return { principalId: `owner:${principal.credentialId}`, authGeneration: 0 };
+  }
+  return { principalId: `integration:${principal.integration}`, authGeneration: 0 };
+}
+
+function wsTicketPrincipal(principal: AuthenticatedPrincipal): WsAuthTicketPrincipal | undefined {
+  if (principal.kind === 'integration') return undefined;
+  return principal.kind === 'owner'
+    ? { kind: 'owner', credentialId: principal.credentialId }
+    : {
+      kind: 'peer',
+      peerId: principal.peerId,
+      authGeneration: principal.authGeneration,
+      roles: [...principal.roles],
+    };
+}
+
+function principalFromWsTicket(principal: WsAuthTicketPrincipal): AuthenticatedPrincipal {
+  return principal.kind === 'owner'
+    ? principal
+    : {
+      kind: 'peer',
+      peerId: principal.peerId,
+      authGeneration: principal.authGeneration,
+      roles: new Set(principal.roles.filter((role): role is PeerRole =>
+        role === 'observe' || role === 'drive' || role === 'files' || role === 'admin')),
+    };
+}
+
+function peerRoleDenied(principal: AuthenticatedPrincipal, role: PeerRole): Response | undefined {
+  if (!peerLacksRole(principal, role)) return undefined;
+  return json({ ok: false, error: `${role} role required` }, 403);
+}
+
+function peerLacksRole(principal: AuthenticatedPrincipal, role: PeerRole): boolean {
+  return principal.kind === 'peer' && !principal.roles.has(role);
+}
+
+function ownerOnlyDenied(principal: AuthenticatedPrincipal): Response | undefined {
+  return principal.kind === 'owner'
+    ? undefined
+    : json({ ok: false, error: 'owner credential required' }, 403);
+}
+
+function requestAuthorizationDenied(
+  principal: AuthenticatedPrincipal,
+  path: string,
+  method: string,
+): Response | undefined {
+  const ownerOnly =
+    (path === '/api/transport/pairings' && method === 'POST')
+    || (/^\/api\/transport\/pairings\/[^/]+$/.test(path) && method === 'GET')
+    || (path === '/api/transport/peers' && method === 'GET')
+    || (/^\/api\/transport\/peers\/[^/]+$/.test(path) && method === 'DELETE')
+    || (path === '/api/broker/update')
+    || (path === '/api/broker/restart' && method === 'POST')
+    || (path === '/api/broker/restart-all' && method === 'POST')
+    || (path === '/api/agent-runtime-update-policy' && method === 'POST')
+    || (/^\/api\/agent-runtime-updates\/[^/]+\/restart$/.test(path) && method === 'POST')
+    || (path === '/api/agents/codex/sync' && method === 'POST')
+    || (path === '/api/tokdash/quota-preference' && method === 'POST')
+    || (path === '/api/claude/hooks' && method === 'POST');
+  if (ownerOnly) return ownerOnlyDenied(principal);
+
+  const files = /^\/api\/sessions\/[^/]+\/[^/]+\/(?:artifact|fs|uploads|export)(?:\/|$)/.test(path)
+    || path === '/api/tool/send_file';
+  if (files) return peerRoleDenied(principal, 'files');
+
+  const drive = ((path.startsWith('/api/sessions/') || path === '/api/sessions')
+      && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS')
+    || path.startsWith('/api/projects/')
+    || path === '/api/projects/rename'
+    || path.startsWith('/api/schedules')
+    || path === '/api/transport/session-control';
+  if (drive) return peerRoleDenied(principal, 'drive');
+
+  const observe = path === '/api/ws-auth-tickets'
+    || path === '/api/sessions'
+    || path.startsWith('/api/sessions/')
+    || path === '/api/agents'
+    || path.startsWith('/api/agents/');
+  return observe ? peerRoleDenied(principal, 'observe') : undefined;
 }
 
 /** Stable durable-journal namespace.
@@ -468,23 +571,34 @@ function credentialAuthenticated(req: Request, _url: URL): boolean {
  * changing this value would make an ACK-lost outbox replay dispatch twice
  * across an upgrade.
  */
-function requestCredentialIdentity(req: Request, _url: URL): string {
+function requestCredentialIdentity(
+  req: Request,
+  _url: URL,
+  principal = authenticatedPrincipal(req, _url.pathname),
+): string {
+  if (principal?.kind === 'peer') {
+    const peerToken = req.headers.get('x-cosyncing-peer-token')?.trim() || '';
+    return peerToken ? `peer-token:${tokenHash(peerToken)}` : `peer:${principal.peerId}`;
+  }
+  if (principal?.kind === 'owner' && principal.credentialId === SOURCE_DEVELOPMENT_CREDENTIAL_ID) {
+    return 'loopback-local';
+  }
   const sharedToken = req.headers.get(PRODUCT_IDENTITY.tokenHeader)?.trim() || '';
-  return safeCredentialEqual(TOKEN, sharedToken)
-    ? `shared:${tokenHash(sharedToken)}`
-    : (() => {
-      const peerToken = [req.headers.get('x-cosyncing-peer-token')?.trim() || '']
-        .find((candidate) => candidate && transportPairings.verifyAnyPeerToken(candidate) === 'ok');
-      return peerToken ? `peer-token:${tokenHash(peerToken)}` : 'loopback-local';
-    })();
+  return principal?.kind === 'owner' && safeCredentialEqual(TOKEN, sharedToken)
+    ? `shared:${principal.credentialId}`
+    : 'loopback-local';
 }
 
 /** Credential plus exact client-profile incarnation for staged uploads. */
-function requestUploadIdentity(req: Request, url: URL): string {
+function requestUploadIdentity(
+  req: Request,
+  url: URL,
+  principal = authenticatedPrincipal(req, url.pathname),
+): string {
   const profileId = req.headers.get('x-cosyncing-client-profile')?.trim() || '';
   const incarnation = req.headers.get('x-cosyncing-client-incarnation')?.trim() || '';
   return scopedUploadIdentity(
-    requestCredentialIdentity(req, url),
+    requestCredentialIdentity(req, url, principal),
     profileId || undefined,
     incarnation || undefined,
   );
@@ -540,6 +654,11 @@ const ROSTER_SAFETY_RECONCILE_MS = envNumber('COSYNCING_ROSTER_SAFETY_RECONCILE_
 const TRANSPORT_MAX_BYTES = Number(process.env.COSYNCING_TRANSPORT_MAX_BYTES ?? 1024 * 1024);
 const TRANSPORT_MAILBOX_MAX = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_MAILBOX_MAX ?? 200) || 200);
 const TRANSPORT_MAILBOX_TTL_MS = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_TTL_MS ?? 10 * 60 * 1000) || 10 * 60 * 1000);
+const TRANSPORT_MAILBOX_COUNT_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_MAILBOX_COUNT_MAX', 256));
+const TRANSPORT_ENVELOPE_COUNT_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_ENVELOPE_COUNT_MAX', 4096));
+const TRANSPORT_MAILBOX_BYTES_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_MAILBOX_BYTES_MAX', 64 * 1024 * 1024));
+const TRANSPORT_PRINCIPAL_ENVELOPE_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_PRINCIPAL_ENVELOPE_MAX', 1000));
+const TRANSPORT_PRINCIPAL_BYTES_MAX = Math.max(1, envNumber('COSYNCING_TRANSPORT_PRINCIPAL_BYTES_MAX', 16 * 1024 * 1024));
 const TRANSPORT_PAIRING_TTL_MS = Math.max(1, Number(process.env.COSYNCING_TRANSPORT_PAIRING_TTL_MS ?? 5 * 60 * 1000) || 5 * 60 * 1000);
 
 interface StoredTransportEnvelope {
@@ -548,6 +667,7 @@ interface StoredTransportEnvelope {
   bytes: Uint8Array;
   expiresAt: number;
   mailboxTokenHash: string;
+  queuedBy: string;
   from?: string;
   to?: string;
   headers?: Record<string, string>;
@@ -1774,6 +1894,9 @@ interface WsData {
   identity: string;
   /** Credential/profile/incarnation-scoped staged-upload namespace. */
   uploadIdentity: string;
+  principal: AuthenticatedPrincipal;
+  artifactAuthorization: ArtifactAuthorizationScope;
+  canDrive: boolean;
   /** Negotiated before the Hub attach; hard incompatibility forces this socket to Observe. */
   compatibility: BrokerClientCompatibility;
   /** The client asked for a read-only socket (`?readOnly=1`) because it cannot
@@ -1804,6 +1927,43 @@ interface WsData {
   historyPagingUnavailableSource?: HistorySourceIdentity;
   /** True when a truncated source has no trustworthy revision probe. */
   historyPagingUnavailableWithoutIdentity?: boolean;
+}
+
+const activePeerSockets = new Map<string, Set<ServerWebSocket<WsData>>>();
+
+function registerPeerSocket(ws: ServerWebSocket<WsData>): void {
+  if (ws.data.principal.kind !== 'peer') return;
+  const sockets = activePeerSockets.get(ws.data.principal.peerId) ?? new Set();
+  sockets.add(ws);
+  activePeerSockets.set(ws.data.principal.peerId, sockets);
+}
+
+function unregisterPeerSocket(ws: ServerWebSocket<WsData>): void {
+  if (ws.data.principal.kind !== 'peer') return;
+  const sockets = activePeerSockets.get(ws.data.principal.peerId);
+  if (!sockets) return;
+  sockets.delete(ws);
+  if (!sockets.size) activePeerSockets.delete(ws.data.principal.peerId);
+}
+
+function closePeerSockets(peerId: string): number {
+  const sockets = activePeerSockets.get(peerId);
+  if (!sockets) return 0;
+  activePeerSockets.delete(peerId);
+  for (const socket of sockets) {
+    try {
+      socket.close(4401, 'peer credential revoked');
+    } catch {
+      /* already closed */
+    }
+  }
+  return sockets.size;
+}
+
+function socketPrincipalActive(ws: ServerWebSocket<WsData>): boolean {
+  const principal = ws.data.principal;
+  return principal.kind !== 'peer'
+    || transportPairings.isPeerGenerationActive(principal.peerId, principal.authGeneration);
 }
 
 const MIN_PROMPT_GAP_MS = 350;
@@ -2386,16 +2546,17 @@ function refMessage(
   mode: 'inline' | 'reference' | undefined,
   message: AgentMessage,
   brokerUrl?: string,
+  authorization?: ArtifactAuthorizationScope,
 ): AgentMessage {
   if (mode === 'reference' && message.type === 'tool-result') {
     const callId = message.callId || 'diff';
     return buildDiffRefMessage(message, INLINE_DIFF_CAP, (body) =>
-      artifactStore.stashDiff(tool, id, `${id}:${callId}`, body, brokerUrl),
+      artifactStore.stashDiff(tool, id, `${id}:${callId}`, body, brokerUrl, authorization),
     );
   }
   if (message.type !== 'file-artifact') return message;
   return mode === 'reference'
-    ? artifactStore.toReference({ tool, id }, message, brokerUrl)
+    ? artifactStore.toReference({ tool, id }, message, brokerUrl, authorization)
     : artifactStore.displayOnly(message);
 }
 
@@ -2405,8 +2566,11 @@ function refMessages(
   mode: 'inline' | 'reference' | undefined,
   messages: AgentMessage[],
   brokerUrl?: string,
+  authorization?: ArtifactAuthorizationScope,
 ): AgentMessage[] {
-  return mode === 'reference' ? messages.map((m) => refMessage(tool, id, mode, m, brokerUrl)) : messages;
+  return mode === 'reference'
+    ? messages.map((m) => refMessage(tool, id, mode, m, brokerUrl, authorization))
+    : messages;
 }
 
 /**
@@ -2428,6 +2592,17 @@ function routeInbound(ws: ServerWebSocket<WsData>, raw: string): void {
   }
   if (msg?.kind === 'history-page') {
     void handleHistoryPage(ws, msg);
+    return;
+  }
+  if (peerLacksRole(ws.data.principal, 'files')
+    && (msg?.kind === 'file' || msg?.kind === 'artifact-interaction')) {
+    const clientMessageId = parseClientMessageId(msg?.clientMessageId) || undefined;
+    ws.send(JSON.stringify({
+      kind: 'nack',
+      code: 'CLIENT_MESSAGE_FAILED',
+      message: 'files role required',
+      ...(clientMessageId ? { clientMessageId } : {}),
+    } satisfies WireEvent));
     return;
   }
   if (ws.data.compatibility.readOnly && isMutatingClientMessage(msg?.kind)) {
@@ -2645,6 +2820,8 @@ async function handleHistoryPage(ws: ServerWebSocket<WsData>, msg: any): Promise
     ws.data.id,
     ws.data.artifactMode,
     page.messages,
+    undefined,
+    ws.data.artifactAuthorization,
   );
   send({
     kind: 'history-page',
@@ -3404,20 +3581,43 @@ async function readUploadChunkBytes(req: Request): Promise<Uint8Array> {
   return out;
 }
 
-function transportEnvelopeFromRequest(req: Request, bytes: Uint8Array): StoredTransportEnvelope {
+const TRANSPORT_ENVELOPE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+const TRANSPORT_CHANNEL_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+const TRANSPORT_ENDPOINT_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/;
+
+function transportEnvelopeFromRequest(
+  req: Request,
+  bytes: Uint8Array,
+  queuedBy: string,
+): StoredTransportEnvelope {
   const headers = transportForwardHeaders(req.headers);
   const from = req.headers.get('x-cosyncing-from')?.trim() || undefined;
   const to = req.headers.get('x-cosyncing-to')?.trim() || undefined;
   const mailboxToken = req.headers.get('x-cosyncing-to-token')?.trim() || '';
   if (!mailboxToken) throw new HttpStatusError(403, 'recipient mailbox token is required');
-  const pairedToken = to ? transportPairings.verifyPeerToken(to, mailboxToken) : 'unknown';
-  if (pairedToken === 'forbidden') throw new HttpStatusError(403, 'recipient mailbox token is not paired');
+  const id = req.headers.get('x-cosyncing-envelope-id')?.trim() || '';
+  const channel = req.headers.get('x-cosyncing-channel')?.trim() || '';
+  if (!TRANSPORT_ENVELOPE_ID_PATTERN.test(id)) {
+    throw new HttpStatusError(400, 'envelope id is invalid');
+  }
+  if (!TRANSPORT_CHANNEL_PATTERN.test(channel)) {
+    throw new HttpStatusError(400, 'envelope channel is invalid');
+  }
+  if (from && !TRANSPORT_ENDPOINT_PATTERN.test(from)) {
+    throw new HttpStatusError(400, 'envelope sender is invalid');
+  }
+  if (!to || !TRANSPORT_ENDPOINT_PATTERN.test(to)) {
+    throw new HttpStatusError(400, 'envelope recipient is invalid');
+  }
+  const pairedToken = transportPairings.verifyPeerToken(to, mailboxToken);
+  if (pairedToken !== 'ok') throw new HttpStatusError(403, 'recipient mailbox token is not paired');
   return {
-    id: req.headers.get('x-cosyncing-envelope-id')?.trim() || '',
-    channel: req.headers.get('x-cosyncing-channel')?.trim() || '',
+    id,
+    channel,
     bytes,
     expiresAt: Date.now() + TRANSPORT_MAILBOX_TTL_MS,
     mailboxTokenHash: transportMailboxTokenHash(mailboxToken),
+    queuedBy,
     ...(from ? { from } : {}),
     ...(to ? { to } : {}),
     ...(Object.keys(headers).length ? { headers } : {}),
@@ -3493,6 +3693,43 @@ function pruneTransportMailbox(peer: string): StoredTransportEnvelope[] {
   if (pruned.length) transportMailboxes.set(peer, pruned);
   else transportMailboxes.delete(peer);
   return pruned;
+}
+
+function sweepTransportMailboxes(): void {
+  for (const peer of [...transportMailboxes.keys()]) pruneTransportMailbox(peer);
+}
+
+function transportMailboxCapacityError(envelope: StoredTransportEnvelope): string | undefined {
+  sweepTransportMailboxes();
+  if (!transportMailboxes.has(envelope.to!)
+    && transportMailboxes.size >= TRANSPORT_MAILBOX_COUNT_MAX) {
+    return 'transport mailbox count limit reached';
+  }
+  let totalCount = 0;
+  let totalBytes = 0;
+  let principalCount = 0;
+  let principalBytes = 0;
+  for (const mailbox of transportMailboxes.values()) {
+    for (const stored of mailbox) {
+      totalCount += 1;
+      totalBytes += stored.bytes.byteLength;
+      if (stored.queuedBy === envelope.queuedBy) {
+        principalCount += 1;
+        principalBytes += stored.bytes.byteLength;
+      }
+    }
+  }
+  if (totalCount >= TRANSPORT_ENVELOPE_COUNT_MAX) return 'transport envelope count limit reached';
+  if (totalBytes + envelope.bytes.byteLength > TRANSPORT_MAILBOX_BYTES_MAX) {
+    return 'transport mailbox byte limit reached';
+  }
+  if (principalCount >= TRANSPORT_PRINCIPAL_ENVELOPE_MAX) {
+    return 'transport principal envelope limit reached';
+  }
+  if (principalBytes + envelope.bytes.byteLength > TRANSPORT_PRINCIPAL_BYTES_MAX) {
+    return 'transport principal byte limit reached';
+  }
+  return undefined;
 }
 
 function normalizeTokdashUrl(input: unknown): string {
@@ -3821,6 +4058,7 @@ server = Bun.serve<WsData>({
   async fetch(req, srv) {
     const url = new URL(req.url);
     const path = url.pathname;
+    const principal = authenticatedPrincipal(req, path);
 
     // Packaged v1 has no Claude hook surface. Return absence before authentication so an inherited shared
     // token cannot turn the intentionally missing routes into a misleading 401-discoverable feature.
@@ -3830,24 +4068,21 @@ server = Bun.serve<WsData>({
 
     // Default-deny the data-bearing API. Reverse proxies make loopback the normal TCP source for remote
     // clients, so neither the peer address nor a forwarded header is authorization evidence. The only public
-    // API routes are minimal health, one-use pairing acceptance, and an artifact URL whose own signature is
-    // verified by ArtifactStore. Source-only tokenless runs retain their loopback development baseline.
+    // API routes are minimal health and one-use pairing acceptance. Artifact URLs additionally require the
+    // active principal they were signed for. Source-only tokenless runs retain their loopback baseline.
     const isPairingAccept = /^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path) && req.method === 'POST';
-    const isSignedArtifact = /^\/api\/sessions\/[^/]+\/[^/]+\/artifact\/[^/]+$/.test(path)
-      && (req.method === 'GET' || req.method === 'HEAD');
     const isWsTicketUpgrade = /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path)
       && req.method === 'GET'
       && !!url.searchParams.get('wsAuthTicket');
     const isPublicApiRequest = (path === '/api/health' && (req.method === 'GET' || req.method === 'HEAD'))
       || isPairingAccept
-      || isSignedArtifact
       || isWsTicketUpgrade;
     const isApiRequest = path.startsWith('/api/');
     const isPiIntegrationRoute = path.startsWith('/pi/bridge/');
     const isResumeStream = url.searchParams.get('mode') === 'resume'
       && /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path);
     if (
-      !authed(req, url, path) &&
+      !principal &&
       (
         (isApiRequest && !isPublicApiRequest) ||
         path.startsWith('/claude/hook/') ||
@@ -3875,8 +4110,13 @@ server = Bun.serve<WsData>({
         : new Response('unauthorized', { status: 401 });
     }
 
+    if (principal) {
+      const denied = requestAuthorizationDenied(principal, path, req.method);
+      if (denied) return denied;
+    }
+
     if (path === '/api/ws-auth-tickets' && req.method === 'POST') {
-      if (!credentialAuthenticated(req, url)) {
+      if (!principal || !credentialAuthenticated(principal)) {
         return json({ ok: false, code: 'AUTH_REQUIRED', error: 'authenticated credential required' }, 401);
       }
       const body = await req.json().catch(() => undefined) as any;
@@ -3899,15 +4139,26 @@ server = Bun.serve<WsData>({
         }
         params[key] = value;
       }
+      const requestedMode = params.mode;
+      if (principal.kind === 'peer'
+        && (requestedMode === 'resume' || requestedMode === 'live')
+        && !principal.roles.has('drive')) {
+        return json({ ok: false, error: 'drive role required' }, 403);
+      }
+      const ticketPrincipal = wsTicketPrincipal(principal);
+      if (!ticketPrincipal) {
+        return json({ ok: false, error: 'broker principal required' }, 403);
+      }
       return json({
         ok: true,
         ...wsAuthTickets.issue({
           tool,
           sessionId,
           params,
-          identity: requestCredentialIdentity(req, url),
-          uploadIdentity: requestUploadIdentity(req, url),
+          identity: requestCredentialIdentity(req, url, principal),
+          uploadIdentity: requestUploadIdentity(req, url, principal),
           credentialAuthenticated: true,
+          principal: ticketPrincipal,
         }),
       }, 201);
     }
@@ -3923,11 +4174,26 @@ server = Bun.serve<WsData>({
       if (TOKEN && !ticketBinding) {
         return json({ ok: false, code: 'AUTH_REQUIRED', error: 'valid WebSocket authorization ticket required' }, 401);
       }
+      const socketPrincipal = ticketBinding
+        ? principalFromWsTicket(ticketBinding.principal)
+        : principal;
+      if (!socketPrincipal) {
+        return json({ ok: false, code: 'AUTH_REQUIRED', error: 'authenticated principal required' }, 401);
+      }
+      if (socketPrincipal.kind === 'peer'
+        && !transportPairings.isPeerGenerationActive(
+          socketPrincipal.peerId,
+          socketPrincipal.authGeneration,
+        )) {
+        return json({ ok: false, code: 'AUTH_REQUIRED', error: 'peer credential was revoked' }, 401);
+      }
+      const observeDenied = peerRoleDenied(socketPrincipal, 'observe');
+      if (observeDenied) return observeDenied;
       const attachParams = ticketBinding
         ? new URLSearchParams(ticketBinding.params)
         : url.searchParams;
       const attachCredentialAuthenticated = ticketBinding?.credentialAuthenticated
-        ?? credentialAuthenticated(req, url);
+        ?? credentialAuthenticated(socketPrincipal);
       const requestedMode = attachParams.get('mode') ?? undefined; // e.g. mode=resume → drivable attach
       if (requestedMode === 'resume' && !attachCredentialAuthenticated) {
         return json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive resume' }, 401);
@@ -4006,12 +4272,15 @@ server = Bun.serve<WsData>({
       // the contract is fine, it is this attach that renounces authority. That
       // also carries the posture to the client in the hello it already reads,
       // so it stops offering Take over and a live composer.
-      const readOnlyRequested = attachParams.get('readOnly') === '1';
+      const roleReadOnly = socketPrincipal.kind === 'peer' && !socketPrincipal.roles.has('drive');
+      const readOnlyRequested = attachParams.get('readOnly') === '1' || roleReadOnly;
       const compatibility: BrokerClientCompatibility = readOnlyRequested && !negotiated.readOnly
         ? {
           ...negotiated,
           readOnly: true,
-          reason: 'this client attached read-only: it cannot interpret this session\'s attach mode',
+          reason: roleReadOnly
+            ? 'this paired device has observation-only access'
+            : 'this client attached read-only: it cannot interpret this session\'s attach mode',
         }
         : negotiated;
       const mode = compatibility.readOnly ? 'observe' : requestedMode;
@@ -4035,8 +4304,11 @@ server = Bun.serve<WsData>({
           since,
           historyLimit,
           artifactMode,
-          identity: ticketBinding?.identity ?? requestCredentialIdentity(req, url),
-          uploadIdentity: ticketBinding?.uploadIdentity ?? requestUploadIdentity(req, url),
+          identity: ticketBinding?.identity ?? requestCredentialIdentity(req, url, socketPrincipal),
+          uploadIdentity: ticketBinding?.uploadIdentity ?? requestUploadIdentity(req, url, socketPrincipal),
+          principal: socketPrincipal,
+          artifactAuthorization: artifactAuthorization(socketPrincipal),
+          canDrive: socketPrincipal.kind !== 'peer' || socketPrincipal.roles.has('drive'),
           compatibility,
           credentialAuthenticated: attachCredentialAuthenticated,
           ...(clientContract.clientVersion ? { clientVersion: clientContract.clientVersion } : {}),
@@ -4046,14 +4318,37 @@ server = Bun.serve<WsData>({
     }
 
     const artifact = path.match(/^\/api\/sessions\/([^/]+)\/([^/]+)\/artifact\/([^/]+)$/);
-    if (artifact && req.method === 'GET') {
-      return artifactStore.serve(
+    if (artifact && (req.method === 'GET' || req.method === 'HEAD')) {
+      if (!principal) return new Response('unauthorized', { status: 401 });
+      const response = artifactStore.serve(
         decodeURIComponent(artifact[1]!),
         decodeURIComponent(artifact[2]!),
         decodeURIComponent(artifact[3]!),
         url.searchParams.get('expires'),
         url.searchParams.get('sig'),
+        artifactAuthorization(principal),
       );
+      return req.method === 'HEAD'
+        ? new Response(null, { status: response.status, headers: response.headers })
+        : response;
+    }
+
+    const artifactTicket = path.match(
+      /^\/api\/sessions\/([^/]+)\/([^/]+)\/artifact\/([^/]+)\/ticket$/,
+    );
+    if (artifactTicket && req.method === 'POST') {
+      if (!principal) return new Response('unauthorized', { status: 401 });
+      const ticket = artifactStore.refreshDownloadTicket(
+        {
+          tool: decodeURIComponent(artifactTicket[1]!),
+          id: decodeURIComponent(artifactTicket[2]!),
+        },
+        decodeURIComponent(artifactTicket[3]!),
+        artifactAuthorization(principal),
+      );
+      return ticket
+        ? json({ ok: true, ...ticket }, 201)
+        : json({ ok: false, code: 'NOT_FOUND', error: 'artifact not found' }, 404);
     }
 
     if (path === '/api/transport/pairings' && req.method === 'POST') {
@@ -4111,11 +4406,24 @@ server = Bun.serve<WsData>({
     const revokeTransportPeer = path.match(/^\/api\/transport\/peers\/([^/]+)$/);
     if (revokeTransportPeer && req.method === 'DELETE') {
       const peerId = decodeURIComponent(revokeTransportPeer[1]!);
-      const revoked = transportPairings.revoke(peerId);
-      transportMailboxes.delete(peerId);
-      transportControlReplayCaches.delete(peerId);
-      if (revoked) {
-        await attentionService.upsertEvent({
+      const revocation = transportPairings.revokeWithState(peerId);
+      if (revocation) {
+        wsAuthTickets.invalidatePeer(revocation.peerId);
+        closePeerSockets(revocation.peerId);
+        uploadStaging.revokeCredentialIdentity(revocation.credentialIdentity);
+        const revokedEndpointIds = new Set([revocation.peerId, revocation.brokerPeerId]);
+        for (const endpointId of revokedEndpointIds) {
+          transportMailboxes.delete(endpointId);
+          transportControlReplayCaches.delete(endpointId);
+        }
+        for (const [mailboxId, mailbox] of transportMailboxes) {
+          const retained = mailbox.filter((envelope) =>
+            !revokedEndpointIds.has(envelope.from ?? '')
+            && !revokedEndpointIds.has(envelope.to ?? ''));
+          if (retained.length) transportMailboxes.set(mailboxId, retained);
+          else transportMailboxes.delete(mailboxId);
+        }
+        attentionWriteBestEffort(attentionService.upsertEvent({
           dedupeKey: `security-alert:revoked:${peerId}:${Date.now()}`,
           kind: 'security-alert',
           state: 'resolved',
@@ -4125,15 +4433,19 @@ server = Bun.serve<WsData>({
           action: { kind: 'open-attention-inbox' },
           presentationRevision: 1,
           presentationStage: 'immediate',
-        });
+        }), 'device-revoked');
       }
-      return json({ ok: true, revoked });
+      return json({ ok: true, revoked: !!revocation });
     }
 
     if (path === '/api/transport/session-control' && req.method === 'POST') {
       let envelope: StoredTransportEnvelope;
       try {
-        envelope = transportEnvelopeFromRequest(req, await readTransportRequestBytes(req));
+        envelope = transportEnvelopeFromRequest(
+          req,
+          await readTransportRequestBytes(req),
+          principal ? artifactAuthorization(principal).principalId : 'unauthenticated',
+        );
         if (!envelope.id || !envelope.channel || !envelope.from || !envelope.to) {
           throw new HttpStatusError(400, 'envelope id, channel, sender, and recipient are required');
         }
@@ -4181,12 +4493,18 @@ server = Bun.serve<WsData>({
       let envelope: StoredTransportEnvelope;
       try {
         bytes = await readTransportRequestBytes(req);
-        envelope = transportEnvelopeFromRequest(req, bytes);
+        envelope = transportEnvelopeFromRequest(
+          req,
+          bytes,
+          principal ? artifactAuthorization(principal).principalId : 'unauthenticated',
+        );
       } catch (err) {
         if (err instanceof HttpStatusError) return json({ error: err.message }, err.status);
         throw err;
       }
       if (!envelope.id || !envelope.channel || !envelope.to) return json({ error: 'envelope id, channel, and recipient are required' }, 400);
+      const capacityError = transportMailboxCapacityError(envelope);
+      if (capacityError) return json({ ok: false, code: 'RATE_LIMITED', error: capacityError }, 429);
       const mailbox = pruneTransportMailbox(envelope.to);
       mailbox.push(envelope);
       while (mailbox.length > TRANSPORT_MAILBOX_MAX) mailbox.shift();
@@ -4200,7 +4518,7 @@ server = Bun.serve<WsData>({
       const peerToken = req.headers.get('x-cosyncing-peer-token')?.trim() || '';
       if (!peerToken) return json({ error: 'peer mailbox token is required' }, 403);
       const registered = transportPairings.verifyPeerToken(peer, peerToken);
-      if (registered === 'forbidden') return json({ error: 'peer mailbox token is not paired' }, 403);
+      if (registered !== 'ok') return json({ error: 'peer mailbox token is not paired' }, 403);
       const peerTokenHash = transportMailboxTokenHash(peerToken);
       const channel = url.searchParams.get('channel')?.trim() || '';
       const mailbox = pruneTransportMailbox(peer);
@@ -4729,8 +5047,16 @@ server = Bun.serve<WsData>({
         session: { tool, id, cwd: base.cwd, title: base.title },
         artifactStore,
       });
-      if (!result.ok) return json({ error: result.error, code: result.code }, result.status);
-      return json({ ok: true, artifact: result.artifact });
+      if (!result.ok || !result.artifact) {
+        return json({ error: result.error, code: result.code }, result.status);
+      }
+      if (!principal) return new Response('unauthorized', { status: 401 });
+      const authorizedArtifact = artifactStore.authorizeReference(
+        { tool, id },
+        result.artifact,
+        artifactAuthorization(principal),
+      );
+      return json({ ok: true, artifact: authorizedArtifact });
     }
 
     // Display-only project rename: PATCH /api/projects/rename  (body: {cwd, name})
@@ -5300,12 +5626,14 @@ server = Bun.serve<WsData>({
     if (path === '/api/broker/update' && req.method === 'POST') {
       const body = await req.json().catch(() => ({})) as { manifestUrl?: unknown };
       const manifestUrl = body.manifestUrl === undefined ? undefined : String(body.manifestUrl).trim();
-      if (manifestUrl !== undefined && !isBrokerUpdateManifestUrl(manifestUrl)) {
-        return json({ ok: false, code: 'BAD_PARAM', error: 'manifestUrl must be a bounded HTTPS URL' }, 400);
+      if (manifestUrl !== undefined) {
+        return json({
+          ok: false,
+          code: 'BAD_PARAM',
+          error: 'manifestUrl overrides are available only to the local operator CLI',
+        }, 400);
       }
-      const update = manifestUrl
-        ? await brokerUpdateChecker.inspectManifest(manifestUrl)
-        : await brokerUpdateChecker.inspect({ refresh: true });
+      const update = await brokerUpdateChecker.inspect({ refresh: true });
       if (update.status !== 'update-available' || !update.latestVersion) {
         return json({
           ok: true,
@@ -5324,7 +5652,6 @@ server = Bun.serve<WsData>({
         stateHome: setupStateHome(),
         cacheRoot: artifactCacheRoot(),
         userHome: os.homedir(),
-        ...(manifestUrl ? { manifestUrl } : {}),
       }, update.latestVersion);
       return json(
         { ok: handoff.status === 'accepted', accepted: handoff.status === 'accepted', update, handoff },
@@ -5338,7 +5665,7 @@ server = Bun.serve<WsData>({
         product: PRODUCT_IDENTITY.productName,
         version: BUILD_INFO.version,
       };
-      if (TOKEN && !credentialAuthenticated(req, url)) return json(publicHealth);
+      if (TOKEN && !credentialAuthenticated(principal)) return json(publicHealth);
       return json({
         ...publicHealth,
         commit: BUILD_INFO.commit,
@@ -5636,6 +5963,11 @@ server = Bun.serve<WsData>({
     // partial record. Compression is opportunistic; image/base64-heavy histories may not shrink much.
     // Target design: docs/architecture/client-ui.md
     async open(ws) {
+      if (!socketPrincipalActive(ws)) {
+        ws.close(4401, 'peer credential revoked');
+        return;
+      }
+      registerPeerSocket(ws);
       const { tool, id, reason, expectedOwnerRevision, since, artifactMode } = ws.data;
       const sessionOptionsAbort = new AbortController();
       ws.data.sessionOptionsAbort = sessionOptionsAbort;
@@ -5645,9 +5977,29 @@ server = Bun.serve<WsData>({
         try {
           const prepared =
             ev.kind === 'message'
-              ? { ...ev, message: refMessage(tool, id, artifactMode, ev.message) }
+              ? {
+                ...ev,
+                message: refMessage(
+                  tool,
+                  id,
+                  artifactMode,
+                  ev.message,
+                  undefined,
+                  ws.data.artifactAuthorization,
+                ),
+              }
               : ev.kind === 'history'
-                ? { ...ev, messages: refMessages(tool, id, artifactMode, ev.messages) }
+                ? {
+                  ...ev,
+                  messages: refMessages(
+                    tool,
+                    id,
+                    artifactMode,
+                    ev.messages,
+                    undefined,
+                    ws.data.artifactAuthorization,
+                  ),
+                }
                 : ev.kind === 'session' && ws.data.mc
                   ? hub.sessionDetailFrame(
                     ws.data.mc,
@@ -6114,6 +6466,10 @@ server = Bun.serve<WsData>({
       }
     },
     message(ws, raw) {
+      if (!socketPrincipalActive(ws)) {
+        ws.close(4401, 'peer credential revoked');
+        return;
+      }
       // A prompt may arrive on the same tick as open() before attach finished; buffer it
       // rather than silently dropping it (the first-prompt-lost cold-attach bug, S2).
       if (!ws.data.ready) {
@@ -6123,6 +6479,7 @@ server = Bun.serve<WsData>({
       routeInbound(ws, String(raw));
     },
     close(ws) {
+      unregisterPeerSocket(ws);
       ws.data.sessionOptionsAbort?.abort();
       ws.data.sessionOptionsAbort = undefined;
       const { mc, client, tool, id, mode } = ws.data;

@@ -139,14 +139,12 @@ class BrokerClient {
 
   /// Requests an update through the broker's signed, rollback-capable upgrader.
   ///
-  /// A candidate manifest is accepted only when explicitly supplied by a
-  /// maintainer-controlled prerelease acceptance lane.
-  Future<BrokerUpdateTriggerResponse> triggerBrokerUpdate({
-    String? manifestUrl,
-  }) async {
+  /// Custom candidate manifests are a local operator CLI capability and cannot
+  /// be supplied through the broker API.
+  Future<BrokerUpdateTriggerResponse> triggerBrokerUpdate() async {
     final response = await _post<Map<String, dynamic>>(
       _resolver.brokerUpdateEndpoint,
-      data: {if (manifestUrl != null) 'manifestUrl': manifestUrl},
+      data: const <String, dynamic>{},
     );
     return BrokerUpdateTriggerResponse.fromJson(response);
   }
@@ -1002,10 +1000,31 @@ class BrokerClient {
     return TransportPairingAcceptResponse.fromJson(response);
   }
 
+  /// Refreshes an authenticated, principal-bound artifact download ticket.
+  Future<String> refreshArtifactTicket(
+    String tool,
+    String sessionId,
+    String artifactId,
+  ) async {
+    final response = await _post<Map<String, dynamic>>(
+      _resolver.artifactTicketEndpoint(tool, sessionId, artifactId),
+      data: const <String, dynamic>{},
+    );
+    final fetchUrl = response['fetchUrl'];
+    if (fetchUrl is! String || fetchUrl.trim().isEmpty) {
+      throw const BrokerException(
+        message: 'Broker returned an invalid artifact ticket',
+      );
+    }
+    return fetchUrl;
+  }
+
   /// Fetches an artifact URL directly.
   ///
   /// Uses a byte response mode and accepts either a fully-qualified legacy URL
-  /// or a root-relative URL resolved against this client's broker.
+  /// or a root-relative URL resolved against this client's broker. Current
+  /// same-origin references carry the active broker credential; legacy
+  /// cross-origin URLs never receive it.
   Future<ArtifactDownload> fetchArtifactUrl(String url) async {
     try {
       final response = await _getBytes(_resolveArtifactUrl(url));
@@ -1052,8 +1071,8 @@ class BrokerClient {
   /// progress callback still fires during download, so aborting there stops the
   /// browser mid-transfer (R4 finding 1). Rejects an advertised over-limit
   /// `content-length` early. Throws [ArtifactTooLargeException] in either case.
-  /// Like [fetchArtifactUrl], no broker auth header is attached (signed URLs
-  /// are bearer material).
+  /// Like [fetchArtifactUrl], same-origin references carry broker auth while
+  /// legacy cross-origin URLs never receive the credential.
   Future<ArtifactDownload> fetchArtifactUrlBounded(
     String url, {
     required int maxBytes,
@@ -1064,7 +1083,10 @@ class BrokerClient {
       final resolvedUrl = _resolveArtifactUrl(url);
       final response = await _dio.get<List<int>>(
         resolvedUrl,
-        options: Options(responseType: ResponseType.bytes),
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: _artifactAuthHeaders(resolvedUrl),
+        ),
         cancelToken: cancelToken,
         onReceiveProgress: (received, total) {
           // Abort as soon as EITHER the advertised size (`total`, when known)
@@ -1350,13 +1372,24 @@ class BrokerClient {
   }
 
   Future<Response<List<int>>> _getBytes(String path) async {
-    // Do not attach broker auth headers here: signed artifact URLs are bearer
-    // material in their own right, and this method intentionally accepts
-    // arbitrary fully-qualified artifact URLs.
     return _dio.get<List<int>>(
       path,
-      options: Options(responseType: ResponseType.bytes),
+      options: Options(
+        responseType: ResponseType.bytes,
+        headers: _artifactAuthHeaders(path),
+      ),
     );
+  }
+
+  Map<String, String> _artifactAuthHeaders(String resolvedUrl) {
+    final target = Uri.tryParse(resolvedUrl);
+    final broker = Uri.tryParse(_resolver.baseUrl);
+    if (target == null || broker == null) return const <String, String>{};
+    final sameOrigin =
+        target.scheme.toLowerCase() == broker.scheme.toLowerCase() &&
+        target.host.toLowerCase() == broker.host.toLowerCase() &&
+        target.port == broker.port;
+    return sameOrigin ? _resolver.authHeaders : const <String, String>{};
   }
 
   String _resolveArtifactUrl(String value) {

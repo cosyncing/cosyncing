@@ -79,6 +79,18 @@ async function testArtifactStore(): Promise<void> {
     const servedAfterRestart = reloaded.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), url.searchParams.get('sig'));
     assert(servedAfterRestart.status === 200, `reloaded store should serve existing signed URL, got ${servedAfterRestart.status}`);
     assert(await servedAfterRestart.text() === 'Hello', 'reloaded store should preserve indexed artifact bytes');
+    const ownerScope = { principalId: 'owner:test', authGeneration: 0 };
+    const scopedRef = reloaded.toReference(session, ref, undefined, ownerScope) as AgentMessage & { type: 'file-artifact' };
+    const scopedUrl = new URL(scopedRef.fetchUrl!, 'http://client.example');
+    const wrongPrincipal = reloaded.serve(
+      session.tool,
+      session.id,
+      ref.artifactKey!,
+      scopedUrl.searchParams.get('expires'),
+      scopedUrl.searchParams.get('sig'),
+      { principalId: 'peer:other', authGeneration: 1 },
+    );
+    assert(wrongPrincipal.status === 403, 'artifact signature should be bound to one authenticated principal');
 
     const sig = url.searchParams.get('sig')!;
     const denied = reloaded.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), sameLengthForgery(sig));
@@ -124,14 +136,14 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
     assert(served.status === 200, `interactive HTML artifact should serve, got ${served.status}`);
     const html = await served.text();
     const csp = served.headers.get('content-security-policy') || '';
-    assert(csp.includes("default-src 'none'"), `HTML artifact should be CSP-locked, got ${csp}`);
-    assert(csp.includes("script-src 'nonce-"), `HTML artifact should allow only nonce-bearing bridge script, got ${csp}`);
-    assert(csp.includes("connect-src 'none'"), `HTML artifact should block network fetch/XHR, got ${csp}`);
-    assert(html.includes('window.__COSYNCING__'), 'HTML artifact should receive the cosyncing bridge object');
-    assert(html.includes('cosyncing-artifact-interaction'), 'bridge should emit artifact interaction messages');
-    assert(/<script nonce="[^"]+"/.test(html), 'bridge script should carry the CSP nonce');
+    assert(csp === 'sandbox', `HTML artifact should be sandboxed for download, got ${csp}`);
+    assert(served.headers.get('content-type') === 'application/octet-stream', 'HTML must not retain an active MIME type');
+    assert(served.headers.get('content-disposition')?.startsWith('attachment;') === true, 'HTML must be forced to attachment');
+    assert(served.headers.get('cache-control') === 'no-store', 'artifact responses must not be cached');
+    assert(served.headers.get('referrer-policy') === 'no-referrer', 'artifact responses must suppress referrers');
+    assert(served.headers.get('cross-origin-resource-policy') === 'same-origin', 'artifact responses must remain same-origin');
+    assert(!html.includes('window.__COSYNCING__'), 'served HTML must not receive an executable bridge');
     assert(html.includes('data-cosyncing-action'), 'original artifact HTML should remain present');
-    assert(html.includes('bridgeVersion: 1') && html.includes('schemaVersion: 1'), 'bridge postMessage should carry explicit versions');
     assert(!html.includes('interactionRef'), 'signed interaction reference must never be injected into artifact JavaScript');
 
     const authorized = store.authorizeInteraction(

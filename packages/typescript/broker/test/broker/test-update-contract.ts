@@ -111,15 +111,15 @@ check('revision-15 client fails closed after the ticket-only stream boundary',
 // emits; it exists so a FUTURE mode degrades one field to read-only instead of
 // aborting a session decode, which is the lesson revision 14 paid for.
 //
-// Revision 16 is intentionally breaking at the authentication boundary. A
-// protected stream now requires a header-issued, one-use ticket and rejects the
-// long-lived query credential used by revision 15. Client releases therefore
-// ship first and retain a narrowly gated revision-15 broker fallback; once this
-// broker ships, its minimum-client floor makes any stale client visibly
-// read-only instead of letting attach fail later with an unexplained 401.
-check('the current broker declares the intentional revision-16 client floor',
-  BROKER_CONTRACT.revision === 16
-    && BROKER_CONTRACT.minimumClientRevision === 16
+// Revision 17 is intentionally breaking at the artifact authentication
+// boundary. Protected downloads now require the active principal credential,
+// which revision-16 clients did not send. Client releases therefore ship first
+// and retain a revision-16 broker fallback; once this broker ships, its
+// minimum-client floor makes stale clients visibly read-only instead of letting
+// downloads fail later with an unexplained 401.
+check('the current broker declares the intentional revision-17 client floor',
+  BROKER_CONTRACT.revision === 17
+    && BROKER_CONTRACT.minimumClientRevision === 17
     && clientBehind.status === 'hard-incompatible'
     && clientBehind.readOnly);
 check('the overlap window never overrides the explicit security floor',
@@ -423,12 +423,16 @@ try {
   check('source broker exposes an offline-safe unknown update status',
     authUpdate.status === 200 && authUpdateBody.update?.status === 'unknown'
       && authUpdateBody.update?.detailCode === 'release-channel-unconfigured');
-  const badCandidate = await fetch(`${base}/api/broker/update`, {
+  const candidateOverride = await fetch(`${base}/api/broker/update`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-cosyncing-token': token },
-    body: JSON.stringify({ manifestUrl: 'http://127.0.0.1/release-manifest.json' }),
+    body: JSON.stringify({ manifestUrl: 'https://releases.example/release-manifest.json' }),
   });
-  check('candidate manifest override is authenticated and credential-free HTTPS only', badCandidate.status === 400);
+  const candidateOverrideBody = await candidateOverride.json() as any;
+  check('HTTP update trigger refuses every caller-supplied manifest URL',
+    candidateOverride.status === 400
+      && candidateOverrideBody.code === 'BAD_PARAM'
+      && /local operator CLI/.test(candidateOverrideBody.error));
 } finally {
   broker.kill();
   await broker.exited.catch(() => undefined);

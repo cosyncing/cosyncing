@@ -271,6 +271,7 @@ export class UploadStaging {
   private readonly activeClaims = new Set<string>();
   /** Upload ids currently being hashed/finalized. */
   private readonly activeCompletions = new Set<string>();
+  private readonly revokedCredentialIdentities = new Set<string>();
 
   constructor(options?: {
     home?: string;
@@ -297,6 +298,7 @@ export class UploadStaging {
   }
 
   init(req: UploadInitRequest, identity = 'loopback-local'): UploadInitResult {
+    this.assertIdentityActive(identity);
     this.sweepExpired();
     const name = safeUploadName(req.name);
     const mimeType = sanitizeMime(req.mimeType);
@@ -339,6 +341,7 @@ export class UploadStaging {
     uploadId: string,
     identity = 'loopback-local',
   ): UploadStatus {
+    this.assertIdentityActive(identity);
     const record = this.loadRecord(tool, sessionId, uploadId, identity);
     return {
       uploadId: record.uploadId,
@@ -359,6 +362,7 @@ export class UploadStaging {
     chunk: Uint8Array,
     identity = 'loopback-local',
   ): UploadPatchResult {
+    this.assertIdentityActive(identity);
     const parsedOffset = this.parseOffset(offsetHeader);
     const record = this.loadRecord(tool, sessionId, uploadId, identity);
     if (this.activeCompletions.has(uploadId)) {
@@ -410,6 +414,7 @@ export class UploadStaging {
     sessionCwd: string,
     identity = 'loopback-local',
   ): Promise<UploadCompleteResult> {
+    this.assertIdentityActive(identity);
     const record = this.loadRecord(tool, sessionId, uploadId, identity);
     if (record.state === 'ready') return this.completeResult(record);
     if (this.activeCompletions.has(uploadId)) {
@@ -425,6 +430,7 @@ export class UploadStaging {
     this.activeCompletions.add(uploadId);
     try {
       const contentHash = await this.hashFile(record.dataPath);
+      this.assertIdentityActive(identity);
       if (
         record.expectedContentHash
         && record.expectedContentHash !== contentHash
@@ -462,6 +468,7 @@ export class UploadStaging {
     uploadId: string,
     identity = 'loopback-local',
   ): void {
+    this.assertIdentityActive(identity);
     const record = this.loadRecord(tool, sessionId, uploadId, identity);
     if (this.activeCompletions.has(uploadId)) {
       throw new UploadError(
@@ -476,6 +483,50 @@ export class UploadStaging {
     this.deleteRecord(record);
   }
 
+  /** Revoke every staged upload owned by one broker credential incarnation. */
+  revokeCredentialIdentity(credentialIdentity: string): number {
+    const normalized = credentialIdentity.trim();
+    if (!normalized) return 0;
+    this.revokedCredentialIdentities.add(normalized);
+    const root = join(this.home, 'uploads');
+    let removed = 0;
+    let toolDirs: string[] = [];
+    try {
+      toolDirs = readdirSync(root);
+    } catch {
+      return 0;
+    }
+    for (const toolDir of toolDirs) {
+      let sessionDirs: string[] = [];
+      try {
+        sessionDirs = readdirSync(join(root, toolDir));
+      } catch {
+        continue;
+      }
+      for (const sessionDir of sessionDirs) {
+        const sessionRoot = join(root, toolDir, sessionDir);
+        let names: string[] = [];
+        try {
+          names = readdirSync(sessionRoot);
+        } catch {
+          continue;
+        }
+        for (const name of names) {
+          if (!name.endsWith('.json')) continue;
+          try {
+            const record = readUploadRecord(join(sessionRoot, name));
+            if (!this.identityUsesCredential(record.identity, normalized)) continue;
+            this.deleteRecord(record);
+            removed += 1;
+          } catch {
+            /* malformed or concurrently removed transient record */
+          }
+        }
+      }
+    }
+    return removed;
+  }
+
   preparePromptFiles(options: {
     tool: string;
     sessionId: string;
@@ -484,6 +535,7 @@ export class UploadStaging {
     sessionCwd: string;
     files: unknown;
   }): PreparedPromptFiles {
+    this.assertIdentityActive(options.identity);
     const rawFiles = options.files;
     if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
       return { files: [], inlinePaths: [], staged: [] };
@@ -748,6 +800,18 @@ export class UploadStaging {
       throw new UploadError('BAD_PARAM', 'offset must be a non-negative integer');
     }
     return offset;
+  }
+
+  private identityUsesCredential(identity: string, credentialIdentity: string): boolean {
+    return identity === credentialIdentity || identity.startsWith(`${credentialIdentity}|`);
+  }
+
+  private assertIdentityActive(identity: string): void {
+    for (const credentialIdentity of this.revokedCredentialIdentities) {
+      if (this.identityUsesCredential(identity, credentialIdentity)) {
+        throw new UploadError('UPLOAD_SCOPE_MISMATCH', 'upload credential was revoked', 403);
+      }
+    }
   }
 
   private writeAt(fd: number, bytes: Uint8Array, offset: number): number {

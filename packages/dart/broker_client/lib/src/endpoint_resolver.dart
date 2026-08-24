@@ -260,6 +260,10 @@ class EndpointResolver {
   String artifactEndpoint(String tool, String id, String artifactId) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/artifact/${Uri.encodeComponent(artifactId)}';
 
+  /// Authenticated short-lived artifact ticket refresh endpoint.
+  String artifactTicketEndpoint(String tool, String id, String artifactId) =>
+      '${artifactEndpoint(tool, id, artifactId)}/ticket';
+
   /// Session filesystem listing endpoint.
   String fsDirectoryEndpoint(String tool, String id) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/fs';

@@ -81,7 +81,21 @@ try {
     assert.deepEqual(renameRegistry.listPeers(), []);
     assert.equal(renameRegistry.getOfferStatus(offer.pairingId)?.state, 'pending');
     rmSync(join(renameHome, 'transport-peers.json'), { recursive: true });
-    assert.equal(renameRegistry.accept(offer.pairingId, validInput('r')).peer.peerId, 'client-r');
+    const acceptedInput = validInput('r');
+    const accepted = renameRegistry.accept(offer.pairingId, acceptedInput);
+    assert.equal(accepted.peer.peerId, 'client-r');
+    const before = renameRegistry.authenticatePeerToken(accepted.broker.peerToken);
+    assert.equal(before?.authGeneration, 1);
+    assert.deepEqual([...before!.roles].sort(), ['drive', 'files', 'observe']);
+    mkdirSync(join(renameHome, 'transport-peers.json.tmp'));
+    assert.throws(() => renameRegistry.revokeWithState('client-r'), Error);
+    assert.equal(renameRegistry.verifyAnyPeerToken(accepted.broker.peerToken), 'ok');
+    rmSync(join(renameHome, 'transport-peers.json.tmp'), { recursive: true });
+    const revocation = renameRegistry.revokeWithState('client-r');
+    assert.equal(revocation?.authGeneration, 2);
+    assert.equal(renameRegistry.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
+    const reloaded = new TransportPairingRegistry({ home: renameHome });
+    assert.equal(reloaded.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
   } finally {
     rmSync(renameHome, { recursive: true, force: true });
   }

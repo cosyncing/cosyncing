@@ -3,7 +3,7 @@
  * Broker auth model (default-deny on data-bearing APIs) — deterministic, no real agents.
  *
  * When COSYNCING_TOKEN is set (required for any non-loopback bind), EVERY mutating route (POST/PATCH/DELETE)
- * must require the token. Only minimal health, pairing acceptance, and signed artifacts stay public. WebSocket
+ * must require the token. Only minimal health and pairing acceptance stay public. WebSocket
  * upgrades use a short-lived ticket issued over authenticated HTTP; long-lived query credentials are refused.
  *
  *   bun run packages/typescript/broker/test/broker/test-broker-auth.ts
@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { connect, createServer, type Socket } from 'node:net';
 import { WsAuthTicketRegistry } from '../../src/security/ws-auth-tickets.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
+import { tokenHash } from '../../src/transport/transport-pairing.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`); };
@@ -99,6 +100,7 @@ async function wsTicket(base: string, token: string, tool: string, sessionId: st
 }
 
 const TOKEN = 'auth-test-secret';
+const PEER_TOKEN = 'paired-device-token-0123456789abcdefghijklmnop';
 const PI_CREDENTIAL = 'pi-route-only-credential-0123456789abcdefghijklmno';
 const withTok: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN }, body: '{}' };
 const noTok = (method = 'POST'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: method === 'DELETE' ? undefined : '{}' });
@@ -113,6 +115,7 @@ const noTok = (method = 'POST'): RequestInit => ({ method, headers: { 'content-t
     identity: 'fixture',
     uploadIdentity: 'fixture',
     credentialAuthenticated: true,
+    principal: { kind: 'owner' as const, credentialId: 'fixture-owner' },
   };
   const wrongRoute = tickets.issue(binding).wsAuthTicket;
   check('WebSocket ticket is bound to one tool and session',
@@ -122,6 +125,18 @@ const noTok = (method = 'POST'): RequestInit => ({ method, headers: { 'content-t
   now += 11;
   check('WebSocket ticket expires before upgrade',
     tickets.consume(expired, 'codex', 'session-a') === undefined);
+  const peerTicket = tickets.issue({
+    ...binding,
+    principal: {
+      kind: 'peer',
+      peerId: 'peer-a',
+      authGeneration: 1,
+      roles: ['observe', 'drive', 'files'],
+    },
+  }).wsAuthTicket;
+  check('peer revocation invalidates every unused WebSocket ticket',
+    tickets.invalidatePeer('peer-a') === 1
+      && tickets.consume(peerTicket, 'codex', 'session-a') === undefined);
 }
 
 // Mutating routes that MUST be gated when a token is set (one representative per class the review flagged).
@@ -171,6 +186,22 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
   }), { mode: 0o600 });
   chmodSync(piCredentialFile, 0o600);
   process.env.COSYNCING_PI_INTEGRATION_FILE = piCredentialFile;
+  writeFileSync(join(home, 'transport-peers.json'), JSON.stringify({
+    version: 1,
+    peers: [{
+      peerId: 'peer-auth-test',
+      identityPublicKey: 'fixture-identity-key',
+      peerTokenHash: tokenHash('fixture-client-mailbox-token'),
+      brokerPeerId: 'broker_auth_test',
+      brokerPeerTokenHash: tokenHash(PEER_TOKEN),
+      brokerIdentityPublicKey: 'fixture-broker-key',
+      dataKey: { algorithm: 'AES-256-GCM', bytes: '' },
+      wrappedDataKey: {},
+      acceptedAt: new Date(0).toISOString(),
+      authGeneration: 1,
+      roles: ['observe', 'drive', 'files'],
+    }],
+  }), { mode: 0o600 });
 });
 try {
   check('tokened broker is up', tokened.up, tokened.base);
@@ -196,6 +227,42 @@ try {
   check('GET /api/sessions accepts a token', (await status(tokened.base, '/api/sessions', {
     headers: { 'x-cosyncing-token': TOKEN },
   })) === 200);
+  const peerHeaders = { 'x-cosyncing-peer-token': PEER_TOKEN };
+  check('paired device can observe the session roster',
+    (await status(tokened.base, '/api/sessions', { headers: peerHeaders })) === 200);
+  check('paired device cannot create another pairing offer',
+    (await status(tokened.base, '/api/transport/pairings', {
+      method: 'POST',
+      headers: { ...peerHeaders, 'content-type': 'application/json' },
+      body: '{}',
+    })) === 403);
+  check('paired device cannot list peer credentials',
+    (await status(tokened.base, '/api/transport/peers', { headers: peerHeaders })) === 403);
+  check('paired device cannot restart the broker',
+    (await status(tokened.base, '/api/broker/restart', {
+      method: 'POST',
+      headers: { ...peerHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ confirmRestart: true }),
+    })) === 403);
+  check('paired device cannot invoke broker update checks',
+    (await status(tokened.base, '/api/broker/update', { headers: peerHeaders })) === 403);
+  const peerOwnerOnlyRequests: Array<[string, string, string]> = [
+    ['read pairing status', 'GET', '/api/transport/pairings/pair_not_real_12345678901'],
+    ['revoke another device', 'DELETE', '/api/transport/peers/other-peer'],
+    ['restart every managed runtime', 'POST', '/api/broker/restart-all'],
+    ['change runtime update policy', 'POST', '/api/agent-runtime-update-policy'],
+    ['restart an updated runtime', 'POST', '/api/agent-runtime-updates/codex/restart'],
+    ['synchronize Codex runtime state', 'POST', '/api/agents/codex/sync'],
+    ['change the global quota preference', 'POST', '/api/tokdash/quota-preference'],
+  ];
+  for (const [label, method, path] of peerOwnerOnlyRequests) {
+    check(`paired device cannot ${label}`,
+      (await status(tokened.base, path, {
+        method,
+        headers: { ...peerHeaders, 'content-type': 'application/json' },
+        ...(method === 'POST' ? { body: '{}' } : {}),
+      })) === 403);
+  }
   const unauthenticatedOptionsSessions = await fetch(`${tokened.base}/api/sessions`, { method: 'OPTIONS' });
   check('OPTIONS /api/sessions cannot bypass roster authentication',
     unauthenticatedOptionsSessions.status === 401 && !(await unauthenticatedOptionsSessions.text()).includes('sessions'));

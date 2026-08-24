@@ -23,6 +23,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- Paired-device credentials now resolve to explicit principals with observe,
+  drive, and file roles. Device administration, broker/runtime changes,
+  restarts, and updates require the owner credential.
+- Artifact references expire after ten minutes, require the active principal
+  they were issued to, and can be refreshed through an authenticated ticket
+  endpoint. Only passive images and plain text remain inline; HTML, SVG, XML,
+  PDF, and other formats download as sandboxed octet-stream attachments.
+- Contract revision 17 requires a revision 17 client because older clients do
+  not attach credentials to artifact downloads. Revision 17 clients retain the
+  revision 16 broker fallback for client-first rollout.
 - The broker now has a strict loopback-only listener and configuration schema 2;
   remote connectivity is no longer configured, diagnosed, repaired, or removed
   by cosyncing.
@@ -38,6 +48,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Peer revocation is persisted before it reaches memory, invalidates unused
+  WebSocket tickets, closes active peer sockets, and clears peer upload,
+  mailbox, and replay state before reporting success.
+- Transport envelopes reject unknown recipients and enforce bounded field
+  grammar, mailbox count, global and per-principal envelope counts, and byte
+  budgets.
+- App-triggered broker updates no longer accept caller-supplied manifest URLs;
+  custom signed-channel testing remains a local operator CLI action.
 - Setup now accepts the supported schema-1 broker configuration during an npm
   upgrade, leaving it unchanged until a later confirmed `cosy repair` performs
   the backed-up schema-2 migration. Malformed and unknown schemas still block.

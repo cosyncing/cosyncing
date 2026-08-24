@@ -521,19 +521,20 @@ try {
     "scheduled retired selection is rejected without substitution",
   );
 
-  // Revision 16 raises the WebSocket client floor, but this request body is
-  // unchanged and remains accepted through the REST compatibility window. The
-  // eventual stream hello is what declares the stale client read-only.
+  // Revision 17 raises the artifact-authentication client floor, but this
+  // request body is unchanged and remains accepted through the REST
+  // compatibility window. The eventual stream hello is what declares the stale
+  // client read-only.
   const previousRevisionQuery =
-    "contractRevision=15&minimumBrokerRevision=2&" +
-    "contractSurfaceHash=fnv1a32%3A095f3c3c&clientVersion=0.9.9";
+    "contractRevision=16&minimumBrokerRevision=15&" +
+    "contractSurfaceHash=fnv1a32%3Aeff55ab5&clientVersion=0.9.9";
   const previousRevision = await request(
     running.base,
     `/api/sessions/claude?${previousRevisionQuery}`,
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 16);
+  assert.equal(BROKER_CONTRACT.revision, 17);
   assert.equal(
     previousRevision.status,
     200,

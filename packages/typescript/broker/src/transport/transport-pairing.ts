@@ -26,7 +26,25 @@ export interface AcceptedTransportPeer {
   dataKey: StoredDataKey;
   wrappedDataKey: WrappedDataKey;
   acceptedAt: string;
+  authGeneration: number;
+  roles: PeerRole[];
   revokedAt?: string;
+}
+
+export type PeerRole = 'observe' | 'drive' | 'files' | 'admin';
+
+export interface AuthenticatedTransportPeer {
+  peerId: string;
+  authGeneration: number;
+  roles: ReadonlySet<PeerRole>;
+  credentialIdentity: string;
+}
+
+export interface RevokedTransportPeer {
+  peerId: string;
+  brokerPeerId: string;
+  authGeneration: number;
+  credentialIdentity: string;
 }
 
 interface StoredDataKey {
@@ -82,6 +100,7 @@ export const PEER_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 const PAIRING_ACCEPT_MAX_FAILURES = 10;
 const PAIRING_ACCEPT_FAILURE_WINDOW_MS = 60 * 1000;
 const PAIRING_ACCEPT_FAILURE_MAX_BUCKETS = 1000;
+const DEFAULT_PEER_ROLES: readonly PeerRole[] = ['observe', 'drive', 'files'];
 
 export class TransportPairingRegistry {
   private readonly offers = new Map<string, PairingOffer>();
@@ -231,6 +250,8 @@ export class TransportPairingRegistry {
       dataKey: serializeDataKey(dataKey),
       wrappedDataKey,
       acceptedAt: new Date(this.now()).toISOString(),
+      authGeneration: 1,
+      roles: [...DEFAULT_PEER_ROLES],
     };
     // Persist a candidate snapshot before publishing either in-memory mutation. A failed write or
     // rename leaves the one-use offer pending and the peer registry unchanged.
@@ -274,11 +295,28 @@ export class TransportPairingRegistry {
   }
 
   revoke(peerId: string): boolean {
+    return this.revokeWithState(peerId) !== undefined;
+  }
+
+  /** Persist revocation before publishing it to memory. */
+  revokeWithState(peerId: string): RevokedTransportPeer | undefined {
     const peer = this.peers.get(peerId);
-    if (!peer || peer.revokedAt) return false;
-    peer.revokedAt = new Date(this.now()).toISOString();
-    this.save();
-    return true;
+    if (!peer || peer.revokedAt) return undefined;
+    const revoked: AcceptedTransportPeer = {
+      ...peer,
+      authGeneration: peer.authGeneration + 1,
+      revokedAt: new Date(this.now()).toISOString(),
+    };
+    const candidatePeers = new Map(this.peers);
+    candidatePeers.set(peerId, revoked);
+    this.save(candidatePeers);
+    this.peers.set(peerId, revoked);
+    return {
+      peerId: revoked.peerId,
+      brokerPeerId: revoked.brokerPeerId,
+      authGeneration: revoked.authGeneration,
+      credentialIdentity: `peer-token:${revoked.brokerPeerTokenHash}`,
+    };
   }
 
   verifyPeerToken(peerId: string, peerToken: string): 'unknown' | 'ok' | 'forbidden' {
@@ -290,14 +328,27 @@ export class TransportPairingRegistry {
   }
 
   verifyAnyPeerToken(peerToken: string): 'unknown' | 'ok' {
+    return this.authenticatePeerToken(peerToken) ? 'ok' : 'unknown';
+  }
+
+  authenticatePeerToken(peerToken: string): AuthenticatedTransportPeer | undefined {
     const tokenHashValue = tokenHash(peerToken);
     for (const peer of this.peers.values()) {
       if (peer.revokedAt) continue;
-      if (safeTokenHashEquals(peer.brokerPeerTokenHash, tokenHashValue)) {
-        return 'ok';
-      }
+      if (!safeTokenHashEquals(peer.brokerPeerTokenHash, tokenHashValue)) continue;
+      return {
+        peerId: peer.peerId,
+        authGeneration: peer.authGeneration,
+        roles: new Set(peer.roles),
+        credentialIdentity: `peer-token:${peer.brokerPeerTokenHash}`,
+      };
     }
-    return 'unknown';
+    return undefined;
+  }
+
+  isPeerGenerationActive(peerId: string, authGeneration: number): boolean {
+    const peer = this.peers.get(peerId);
+    return !!peer && !peer.revokedAt && peer.authGeneration === authGeneration;
   }
 
   brokerMaterialForRecipient(brokerPeerId: string): BrokerTransportPeerMaterial | undefined {
@@ -533,6 +584,17 @@ function normalizeStoredPeer(raw: any): AcceptedTransportPeer | undefined {
     ...(raw.dataKey ? { dataKey: raw.dataKey as StoredDataKey } : { dataKey: { algorithm: 'AES-256-GCM', bytes: '' } }),
     wrappedDataKey: raw.wrappedDataKey as WrappedDataKey,
     acceptedAt: String(raw.acceptedAt ?? new Date(0).toISOString()),
+    authGeneration: Number.isSafeInteger(raw.authGeneration) && raw.authGeneration > 0
+      ? raw.authGeneration
+      : 1,
+    roles: normalizePeerRoles(raw.roles),
     ...(raw.revokedAt ? { revokedAt: String(raw.revokedAt) } : {}),
   };
+}
+
+function normalizePeerRoles(raw: unknown): PeerRole[] {
+  if (!Array.isArray(raw)) return [...DEFAULT_PEER_ROLES];
+  const allowed = new Set<PeerRole>(['observe', 'drive', 'files', 'admin']);
+  const roles = [...new Set(raw.filter((role): role is PeerRole => typeof role === 'string' && allowed.has(role as PeerRole)))];
+  return roles.length ? roles : [...DEFAULT_PEER_ROLES];
 }

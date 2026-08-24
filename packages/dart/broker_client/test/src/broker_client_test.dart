@@ -1970,6 +1970,25 @@ void main() {
     });
 
     group('fetchArtifactUrl', () {
+      test('refreshes a principal-bound artifact ticket', () async {
+        dioAdapter.onPost(
+          'http://127.0.0.1:7734/api/sessions/codex/session-1/artifact/artifact-1/ticket',
+          data: const <String, dynamic>{},
+          (server) => server.reply(201, {
+            'ok': true,
+            'fetchUrl':
+                '/api/sessions/codex/session-1/artifact/artifact-1?expires=1&sig=fresh',
+          }),
+        );
+
+        final fetchUrl = await client.refreshArtifactTicket(
+          'codex',
+          'session-1',
+          'artifact-1',
+        );
+        expect(fetchUrl, contains('sig=fresh'));
+      });
+
       test('returns artifact bytes with response metadata', () async {
         const url =
             'https://cdn.example.net/api/sessions/opencode/session-1/artifact/file-html?expires=1700000000&sig=token';
@@ -2087,6 +2106,32 @@ void main() {
         await authenticatedClient.setTokdashQuotaPreference(
           const TokdashQuotaPreferenceRequest(enabled: true),
         );
+        authenticatedClient.close();
+      });
+
+      test('sends auth only for same-origin artifact references', () async {
+        final authenticatedClient = BrokerClient(
+          baseUrl: 'http://127.0.0.1:7734',
+          token: 'artifact-token',
+          dio: dio,
+        );
+        const sameOrigin =
+            'http://127.0.0.1:7734/api/sessions/codex/s/artifact/a?expires=1&sig=x';
+        dioAdapter.onGet(
+          sameOrigin,
+          headers: {'x-cosyncing-token': 'artifact-token'},
+          (server) => server.reply(200, [1]),
+        );
+        await authenticatedClient.fetchArtifactUrl(sameOrigin);
+
+        const crossOrigin =
+            'https://cdn.example.net/api/sessions/codex/s/artifact/a?expires=1&sig=x';
+        dioAdapter.onGet(
+          crossOrigin,
+          headers: const <String, dynamic>{},
+          (server) => server.reply(200, [2]),
+        );
+        await authenticatedClient.fetchArtifactUrl(crossOrigin);
         authenticatedClient.close();
       });
     });

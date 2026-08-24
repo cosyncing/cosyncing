@@ -37,8 +37,10 @@ Before exposing the broker:
 - Require HTTPS/WSS for public exposure. Use an authenticated, encrypted overlay
   or HTTPS for private remote access.
 - Keep all sensitive HTTP routes and WebSockets behind cosyncing authentication.
-- Pair devices so each receives a revocable credential. Do not share the master
-  broker token when a peer credential is sufficient.
+- Pair devices so each receives a revocable, non-owner credential. Paired
+  devices can observe, drive, and transfer files by default, but cannot create
+  pairing offers, administer devices, change global runtime policy, restart the
+  broker, or start updates.
 - Put credentials in protocol headers or frames, never URLs. Configure proxy
   access logs to omit authorization headers and sensitive request bodies.
 - Do not treat `Host`, `Forwarded`, or `X-Forwarded-*` headers as authorization or
@@ -46,7 +48,8 @@ Before exposing the broker:
 - Preserve broker upload and request-size limits. Add a proxy limit that is no
   smaller than the broker limit you intend to support.
 - Keep pairing bootstrap narrowly scoped and rate-limited. Revoke lost devices
-  and rotate any credential that may have leaked.
+  immediately and verify their HTTP, unused-ticket, and live-WebSocket access is
+  gone. Rotate any owner credential that may have leaked.
 - Patch the proxy, tunnel, VPN, and host OS. Their lifecycle is independent of
   `cosy setup`, `repair`, and `uninstall`.
 
@@ -60,6 +63,9 @@ proxy, tunnel, VPN, mesh route, or port forward.
 Any remotely reachable deployment must use setup-managed credentials or an
 explicit development credential. The loopback bind alone does not make a
 forwarded request local or authenticated.
+
+Before exposing any source broker, request `/api/sessions` through the final
+origin without credentials and require a `401 Unauthorized` response.
 
 Removal means stopping and deleting the operator-owned ingress, removing its DNS
 and firewall exposure, and rotating credentials if the endpoint was exposed to

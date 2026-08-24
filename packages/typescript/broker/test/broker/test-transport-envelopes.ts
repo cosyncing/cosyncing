@@ -35,11 +35,34 @@ function strongPeerToken(seed: string): string {
   return createHash('sha256').update(seed).digest('base64url');
 }
 
+async function pairDevice(baseUrl: string, ownerToken: string, peerId: string, seed: string): Promise<any> {
+  const created = await fetch(`${baseUrl}/api/transport/pairings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cosyncing-token': ownerToken },
+    body: JSON.stringify({ clientLabel: peerId }),
+  });
+  assert.equal(created.status, 201);
+  const offer = await created.json() as any;
+  const identity = generateIdentityKeyPair();
+  const exchange = generateX25519KeyPair();
+  const accepted = await fetch(`${baseUrl}/api/transport/pairings/${offer.pairingId}/accept`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      peerId,
+      peerToken: strongPeerToken(seed),
+      identityPublicKey: identity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+    }),
+  });
+  assert.equal(accepted.status, 200);
+  return await accepted.json();
+}
+
 await test('broker carries authenticated opaque encrypted transport envelopes', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-opaque-'));
   const port = await freePort();
   const token = `transport-${Date.now()}`;
-  const peerToken = `peer-${Date.now()}`;
   const baseUrl = `http://127.0.0.1:${port}`;
   const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
     env: {
@@ -58,16 +81,20 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
   try {
     await waitHealth(baseUrl);
 
-    const unauth = await fetch(`${baseUrl}/api/transport/envelopes?peer=broker`);
+    const paired = await pairDevice(baseUrl, token, 'phone', 'opaque-phone');
+    const brokerPeerId = String(paired.broker.peerId);
+    const brokerPeerToken = String(paired.broker.peerToken);
+
+    const unauth = await fetch(`${baseUrl}/api/transport/envelopes?peer=${brokerPeerId}`);
     assert.equal(unauth.status, 401);
-    const missingPeerToken = await fetch(`${baseUrl}/api/transport/envelopes?peer=broker`, { headers: { 'x-cosyncing-token': token } });
+    const missingPeerToken = await fetch(`${baseUrl}/api/transport/envelopes?peer=${brokerPeerId}`, { headers: { 'x-cosyncing-token': token } });
     assert.equal(missingPeerToken.status, 403);
 
     const key = generateDataKey();
     const transport = new BrokerHttpTransport({
       baseUrl,
-      peerId: 'broker',
-      peerToken,
+      peerId: brokerPeerId,
+      peerToken: brokerPeerToken,
       pollMs: 1,
       headers: { 'x-cosyncing-token': token },
     });
@@ -76,10 +103,10 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
       key,
       id: 'broker-env-1',
       from: 'phone',
-      to: 'broker',
+      to: brokerPeerId,
       channel: 'session-control',
       bytes: plaintext,
-      headers: { 'x-cosyncing-to-token': peerToken },
+      headers: { 'x-cosyncing-to-token': brokerPeerToken },
     });
 
     await transport.send(sealed);
@@ -95,7 +122,9 @@ await test('broker carries authenticated opaque encrypted transport envelopes', 
     assert.equal(received[0].id, 'broker-env-1');
     assert.deepEqual([...openTransportEnvelope(key, received[0]).bytes], [...plaintext]);
 
-    const drained = await fetch(`${baseUrl}/api/transport/envelopes?peer=broker`, { headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': peerToken } });
+    const drained = await fetch(`${baseUrl}/api/transport/envelopes?peer=${brokerPeerId}`, {
+      headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': brokerPeerToken },
+    });
     assert.deepEqual((await drained.json()).envelopes, []);
   } finally {
     broker.kill();
@@ -107,7 +136,6 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-transport-mailbox-'));
   const port = await freePort();
   const token = `transport-hardening-${Date.now()}`;
-  const peerToken = `peer-hardening-${Date.now()}`;
   const baseUrl = `http://127.0.0.1:${port}`;
   const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
     env: {
@@ -128,6 +156,9 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
   });
   try {
     await waitHealth(baseUrl);
+    const paired = await pairDevice(baseUrl, token, 'mailbox-peer', 'mailbox-peer');
+    const peerId = String(paired.peer.peerId);
+    const peerToken = strongPeerToken('mailbox-peer');
     const tooLarge = await fetch(`${baseUrl}/api/transport/envelopes`, {
       method: 'POST',
       headers: {
@@ -135,7 +166,7 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
         'content-type': 'application/octet-stream',
         'x-cosyncing-envelope-id': 'too-large',
         'x-cosyncing-channel': 'test',
-        'x-cosyncing-to': 'peer',
+        'x-cosyncing-to': peerId,
         'x-cosyncing-to-token': peerToken,
       },
       body: new Uint8Array(32),
@@ -150,14 +181,14 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
           'content-type': 'application/octet-stream',
           'x-cosyncing-envelope-id': id,
           'x-cosyncing-channel': 'test',
-          'x-cosyncing-to': 'peer',
+          'x-cosyncing-to': peerId,
           'x-cosyncing-to-token': peerToken,
         },
         body: new TextEncoder().encode(id),
       });
       assert.equal(res.status, 202);
     }
-    const capped = await fetch(`${baseUrl}/api/transport/envelopes?peer=peer`, {
+    const capped = await fetch(`${baseUrl}/api/transport/envelopes?peer=${peerId}`, {
       headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': peerToken },
     });
     assert.deepEqual((await capped.json()).envelopes.map((x: any) => x.id), ['env-2', 'env-3']);
@@ -169,14 +200,14 @@ await test('broker transport mailbox enforces cap, ttl, and early body limit', a
         'content-type': 'application/octet-stream',
         'x-cosyncing-envelope-id': 'expires',
         'x-cosyncing-channel': 'test',
-        'x-cosyncing-to': 'peer',
+        'x-cosyncing-to': peerId,
         'x-cosyncing-to-token': peerToken,
       },
       body: new TextEncoder().encode('ok'),
     });
     assert.equal(expiring.status, 202);
     await new Promise((resolve) => setTimeout(resolve, 60));
-    const expired = await fetch(`${baseUrl}/api/transport/envelopes?peer=peer`, {
+    const expired = await fetch(`${baseUrl}/api/transport/envelopes?peer=${peerId}`, {
       headers: { 'x-cosyncing-token': token, 'x-cosyncing-peer-token': peerToken },
     });
     assert.deepEqual((await expired.json()).envelopes, []);
@@ -348,7 +379,7 @@ await test('broker pairing accept route is tokenless one-time bootstrap', async 
     const peersWithBrokerPeerToken = await fetch(`${baseUrl}/api/transport/peers`, {
       headers: { 'x-cosyncing-peer-token': paired.broker.peerToken },
     });
-    assert.equal(peersWithBrokerPeerToken.status, 200, 'broker-issued peer token should authenticate REST routes');
+    assert.equal(peersWithBrokerPeerToken.status, 403, 'peer credentials cannot administer devices');
 
     const peerMailboxRoute = await fetch(`${baseUrl}/api/transport/envelopes?peer=phone-1`, {
       method: 'GET',
@@ -546,7 +577,7 @@ await test('public pairing acceptance rejects unsafe identities and bounds unkno
       assert.deepEqual((await peers.json() as any).peers, []);
     }
 
-    const oversized = await fetch(`${baseUrl}/api/transport/pairings/pair_unknown_1234567890/accept`, {
+    const oversized = await fetch(`${baseUrl}/api/transport/pairings/pair_not_real_12345678901/accept`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ ...baseInput, padding: 'x'.repeat(17 * 1024) }),

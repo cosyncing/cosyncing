@@ -610,13 +610,13 @@ try {
     bridgeUrl.searchParams.get('expires'),
     bridgeUrl.searchParams.get('sig'),
   );
-  const injectedBridgeHtml = await bridgeResponse.text();
-  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
-  check('9j artifact bridge keeps replacement metacharacters literal without duplicating HTML',
+  const downloadedHtml = await bridgeResponse.text();
+  check('9j active HTML artifacts download as sandboxed opaque bytes without bridge injection',
     bridgeResponse.status === 200
-      && injectedBridgeHtml.includes(`const artifactKey = ${JSON.stringify(bridgeArtifactKey)};`)
-      && occurrences(injectedBridgeHtml, 'before-marker') === 1
-      && occurrences(injectedBridgeHtml, 'after-marker') === 1);
+      && bridgeResponse.headers.get('content-type') === 'application/octet-stream'
+      && bridgeResponse.headers.get('content-disposition')?.startsWith('attachment;') === true
+      && bridgeResponse.headers.get('content-security-policy') === 'sandbox'
+      && downloadedHtml === bridgeHtml);
 
   // An oversized legacy index is rejected before JSON materialization. The
   // diagnostic backup is retained and no artifact is replayed.

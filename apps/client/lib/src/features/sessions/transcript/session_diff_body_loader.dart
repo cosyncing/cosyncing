@@ -33,8 +33,8 @@ class DiffBodyTooLargeException implements Exception {
 
 /// Fetches oversized tool-result diff bodies the broker moved behind a signed,
 /// content-hashed reference (mirrors the artifact fetch path). Bodies are
-/// cached by content hash so re-expanding a row never refetches. The signed URL
-/// is bearer material, so no broker auth header is attached.
+/// cached by content hash so re-expanding a row never refetches. The client
+/// attaches its broker credential only when the reference is same-origin.
 // ignore: one_member_abstracts
 abstract interface class DiffBodyLoader {
   /// Fetches the diff body at [url] (a signed broker URL), caching by

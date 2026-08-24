@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto';
 
+export type WsAuthTicketPrincipal =
+  | { kind: 'owner'; credentialId: string }
+  | { kind: 'peer'; peerId: string; authGeneration: number; roles: string[] };
+
 export interface WsAuthTicketBinding {
   tool: string;
   sessionId: string;
@@ -7,6 +11,7 @@ export interface WsAuthTicketBinding {
   identity: string;
   uploadIdentity: string;
   credentialAuthenticated: boolean;
+  principal: WsAuthTicketPrincipal;
 }
 
 export interface IssuedWsAuthTicket {
@@ -60,6 +65,16 @@ export class WsAuthTicketRegistry {
     if (stored.tool !== tool || stored.sessionId !== sessionId) return undefined;
     const { expiresAt: _expiresAt, ...binding } = stored;
     return { ...binding, params: { ...binding.params } };
+  }
+
+  invalidatePeer(peerId: string): number {
+    let invalidated = 0;
+    for (const [ticket, stored] of this.tickets) {
+      if (stored.principal.kind !== 'peer' || stored.principal.peerId !== peerId) continue;
+      this.tickets.delete(ticket);
+      invalidated += 1;
+    }
+    return invalidated;
   }
 
   private prune(now: number): void {

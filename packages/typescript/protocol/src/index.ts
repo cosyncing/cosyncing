@@ -1283,6 +1283,7 @@ export const BROKER_ROUTES = [
   '/api/sessions',
   '/api/sessions/{id}', // POST /api/sessions/:tool
   '/api/sessions/{id}/{id}/artifact/{id}',
+  '/api/sessions/{id}/{id}/artifact/{id}/ticket',
   '/api/sessions/{id}/{id}/fs',
   '/api/sessions/{id}/{id}/fs/read',
   '/api/sessions/{id}/{id}/fs/download',
@@ -1569,27 +1570,25 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * frame kind, message type or error code, which is
  * exactly why the revision must: a structural DTO change is reviewable only if
  * it is numbered. Revision 16 adds the authenticated WebSocket-ticket route.
- * All revision-5 through revision-16 additions are backward
- * compatible for a tolerant decoder, so the client minimum does not move. Raise
- * the minimum only after every supported store client has crossed the
- * corresponding revision.
+ * Revision 17 makes artifact downloads credentialed and adds their refresh
+ * route. Revision-16 clients do not send credentials for artifact URLs, so the
+ * broker's minimum client revision moves with that security boundary.
  */
-export const BROKER_CONTRACT_REVISION = 16 as const;
-// Revision 16 removes long-lived WebSocket query credentials. The client-first
-// release sequence must complete before this broker ships; older clients cannot
-// authenticate a protected stream and therefore must fail closed as read-only.
-export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 16 as const;
+export const BROKER_CONTRACT_REVISION = 17 as const;
+// Revision 17 removes public artifact bearer capabilities. The client-first
+// release sequence must complete before this broker ships; older clients do not
+// authenticate artifact downloads and therefore must fail closed as read-only.
+export const BROKER_MINIMUM_CLIENT_CONTRACT_REVISION = 17 as const;
 export const BROKER_CONTRACT_OVERLAP_REVISIONS = 1 as const;
 
 /**
- * Oldest broker contract the generated first-party client identity will drive. Revision 15 is the
- * one-revision client-first overlap for revision 16: it still accepts query credentials while the
- * updated client is staged. Older brokers are outside that overlap and must fail before a
- * long-lived credential is placed in a WebSocket URL. Compatibility is deliberately asymmetric:
- * older clients remain accepted by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and
- * the overlap window above.
+ * Oldest broker contract the generated first-party client identity will drive. Revision 16 is the
+ * one-revision client-first overlap for revision 17: the updated client can authenticate both the
+ * old public artifact route and the new credential-bound route while it is staged. Older brokers
+ * are outside that overlap. Compatibility is deliberately asymmetric: older clients are refused
+ * by this broker through BROKER_MINIMUM_CLIENT_CONTRACT_REVISION and the overlap window above.
  */
-export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 15 as const;
+export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 16 as const;
 
 /**
  * The client revisions that survive an agent value they have never heard of.

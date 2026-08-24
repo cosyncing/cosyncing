@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(54));
+      expect(brokerRoutes, hasLength(55));
     });
 
     test('contains the fs and upload routes', () {
@@ -17,6 +17,7 @@ void main() {
           '/api/sessions/{id}/{id}/uploads',
           '/api/sessions/{id}/{id}/uploads/{id}',
           '/api/sessions/{id}/{id}/uploads/{id}/complete',
+          '/api/sessions/{id}/{id}/artifact/{id}/ticket',
         ]),
       );
     });
