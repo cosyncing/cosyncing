@@ -646,6 +646,7 @@ export class ScheduleStore {
   runNow(id: string, expectedRevision: number): ScheduleRecord {
     return this.persistMutation(() => {
       const record = this.requireRevision(id, expectedRevision);
+      this.requireOwnerProvenance(record);
       if (record.state === 'paused' || record.state === 'canceled' || record.state === 'delivered') {
         throw new ScheduleMutationError('SCHEDULE_INVALID_STATE', 'this row cannot run now');
       }
@@ -667,6 +668,7 @@ export class ScheduleStore {
   recoverQuota(id: string, expectedRevision: number): ScheduleRecord {
     return this.persistMutation(() => {
       const record = this.requireRevision(id, expectedRevision);
+      this.requireOwnerProvenance(record);
       if (record.lastOutcome !== 'failed' || record.lastFailureKind !== 'quota' || record.nextRetryAt !== undefined) {
         throw new ScheduleMutationError('SCHEDULE_QUOTA_RECOVERY_UNAVAILABLE', 'the row has no exhausted quota failure');
       }
@@ -764,11 +766,20 @@ export class ScheduleStore {
     return record;
   }
 
-  private requireRevision(id: string, expectedRevision: number): ScheduleRecord {
-    const record = this.get(id);
+  private requireRevision(id: string, expectedRevision: number): StoredScheduleRecord {
+    const record = this.state.schedules.find((schedule) => schedule.id === id);
     if (!record) throw new ScheduleMutationError('SCHEDULE_NOT_FOUND', 'unknown schedule');
     this.assertRevision(record, expectedRevision);
     return record;
+  }
+
+  private requireOwnerProvenance(record: StoredScheduleRecord): void {
+    if (record.createdBy.kind !== 'owner') {
+      throw new ScheduleMutationError(
+        'SCHEDULE_INVALID_STATE',
+        'legacy schedules must be reviewed and recreated before they can run',
+      );
+    }
   }
 
   private assertRevision(record: ScheduleRecord, expectedRevision: number): void {
@@ -818,6 +829,7 @@ export class ScheduleStore {
   }
 
   private save(): void {
+    this.assertPersistableState();
     // Prune finished rows beyond the display window (never prunes live schedules).
     const finished = this.state.schedules
       .filter((s) => s.state !== 'scheduled' && s.state !== 'paused')
@@ -837,6 +849,14 @@ export class ScheduleStore {
       throw error;
     } finally {
       try { unlinkSync(tmp); } catch { /* renamed or never created */ }
+    }
+  }
+
+  private assertPersistableState(): void {
+    for (const record of this.state.schedules) {
+      if (!storedScheduleProvenanceIsSafe(record.createdBy, record.state)) {
+        throw new Error('schedule authorization provenance invariant violated');
+      }
     }
   }
 }

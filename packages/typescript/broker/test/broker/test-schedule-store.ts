@@ -320,7 +320,13 @@ function flushAsync(): Promise<void> {
       { ...legacyBase, id: 'legacy-scheduled', state: 'scheduled' as const },
       { ...legacyBase, id: 'legacy-paused', state: 'paused' as const },
       { ...legacyBase, id: 'legacy-delivered', state: 'delivered' as const },
-      { ...legacyBase, id: 'legacy-failed', state: 'failed' as const },
+      {
+        ...legacyBase,
+        id: 'legacy-failed',
+        state: 'failed' as const,
+        lastOutcome: 'failed' as const,
+        lastFailureKind: 'quota' as const,
+      },
       { ...legacyBase, id: 'legacy-missed', state: 'missed' as const },
       { ...legacyBase, id: 'legacy-canceled', state: 'canceled' as const },
     ];
@@ -334,6 +340,25 @@ function flushAsync(): Promise<void> {
     for (const state of ['delivered', 'failed', 'missed', 'canceled'] as const) {
       assert.equal(migrated.get(`legacy-${state}`)?.state, state, `legacy ${state} history remains inspectable`);
     }
+    const legacyFailed = migrated.get('legacy-failed')!;
+    const legacyMissed = migrated.get('legacy-missed')!;
+    assert.throws(
+      () => migrated.runNow(legacyFailed.id, legacyFailed.revision),
+      (error) => scheduleCode(error) === 'SCHEDULE_INVALID_STATE',
+      'run-now cannot silently adopt a failed legacy schedule',
+    );
+    assert.throws(
+      () => migrated.runNow(legacyMissed.id, legacyMissed.revision),
+      (error) => scheduleCode(error) === 'SCHEDULE_INVALID_STATE',
+      'run-now cannot silently adopt a missed legacy schedule',
+    );
+    assert.throws(
+      () => migrated.recoverQuota(legacyFailed.id, legacyFailed.revision),
+      (error) => scheduleCode(error) === 'SCHEDULE_INVALID_STATE',
+      'quota recovery cannot silently adopt a failed legacy schedule',
+    );
+    assert.equal(migrated.get(legacyFailed.id)?.state, 'failed');
+    assert.equal(migrated.get(legacyMissed.id)?.state, 'missed');
     assert.deepEqual(migrated.due(THU), [], 'no unprovenanced legacy row is executable');
     let deliveries = 0;
     const legacyRunner = new ScheduledSendRunner(migrated, {
@@ -347,6 +372,18 @@ function flushAsync(): Promise<void> {
     const owner = migrated.create({
       kind: 'message', tool: 'claude', sessionId: 'owner-session', text: 'owner schedule', at: THU,
     });
+    const internals = migrated as unknown as {
+      state: { schedules: Array<ScheduleRecord & { createdBy: { kind: string } }> };
+      save: () => void;
+    };
+    const injectedLegacy = internals.state.schedules.find((schedule) => schedule.id === legacyMissed.id)!;
+    injectedLegacy.state = 'scheduled';
+    assert.throws(
+      () => internals.save(),
+      /schedule authorization provenance invariant violated/,
+      'the durable write boundary rejects every live legacy schedule',
+    );
+    injectedLegacy.state = 'missed';
     const restartedLegacy = new ScheduleStore({ path: legacyPath, now: () => THU });
     const thirdLoad = new ScheduleStore({ path: legacyPath, now: () => THU });
     assert.deepEqual(restartedLegacy.due(THU).map((schedule) => schedule.id), [owner.id]);

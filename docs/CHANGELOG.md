@@ -39,12 +39,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   cancels active legacy schedules whose creator cannot be proven, and drops
   ownerless legacy wake registrations. Re-pair devices and let clients recreate
   wake registrations after upgrade; review canceled schedules before recreating
-  any required automation.
+  any required automation. Legacy terminal schedules cannot be run or quota-
+  recovered in place; recreate reviewed work as an owner-authorized schedule.
 - The first revision-17 startup advances broker-instance state to schema 2
-  before migrating authorization stores. This one-way fence prevents a failed
-  migration from restarting a revision-16 broker against legacy credentials,
-  schedules, or wake destinations; once crossed, recovery requires revision 17
-  or later.
+  before migrating authorization stores. This one-way fence prevents a restored
+  revision-16 broker from loading legacy credentials, schedules, or wake
+  destinations after a failed migration; it is a fail-closed authorization
+  boundary, not an automatic service rollback. Once crossed, recovery requires
+  revision 17 or later.
 - The broker now has a strict loopback-only listener and configuration schema 2;
   remote connectivity is no longer configured, diagnosed, repaired, or removed
   by cosyncing.

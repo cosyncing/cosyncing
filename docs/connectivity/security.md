@@ -77,11 +77,14 @@ revision-16 updater can still health-check a successful candidate. If any later
 store or completion-marker write fails, revision 17 does not start or advertise
 readiness, and revision 16 refuses to start against the fenced state.
 
-The migrations are fail-closed and idempotent. Once the fence is crossed, a
-failed candidate requires repair or another revision-17-or-later candidate; do
-not force a revision-16 restart. An updater shipped before this fence may report
+The migration is authorization-rollback-safe, fail-closed, and idempotent; it
+is not an automatic operational rollback. Once the fence is crossed, a failed
+candidate requires repair or another revision-17-or-later candidate; do not
+force a revision-16 restart. An updater shipped before this fence may report
 that it restored the old executable and may attempt to start it, but the old
-broker exits before loading peer, schedule, or wake state.
+broker exits before loading peer, schedule, or wake state. The first
+revision-16-to-revision-17 upgrade may therefore require manually reinstalling
+or rerunning a revision-17-or-later binary.
 
 If a revision-16 peer may have been compromised, an upgrade alone does not
 restore trust in commands or processes that already ran. Remove public ingress,
