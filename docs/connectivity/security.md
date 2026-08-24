@@ -42,6 +42,11 @@ Before exposing the broker:
   devices can observe, drive, and transfer files by default, but cannot create
   pairing offers, administer devices, change global runtime policy, restart the
   broker, or start updates.
+- Treat a paired device with `drive` as a high-trust, potentially host-equivalent
+  credential. It can direct a coding agent that may have same-user shell and
+  filesystem access. Owner-only broker routes limit direct API authority and
+  accidental misuse; they do not contain a malicious driver operating an
+  unrestricted agent. Use OS/process isolation if containment is required.
 - Put credentials in protocol headers or frames, never URLs. Configure proxy
   access logs to omit authorization headers and sensitive request bodies.
 - Do not treat `Host`, `Forwarded`, or `X-Forwarded-*` headers as authorization or
@@ -65,17 +70,27 @@ startup, the broker therefore:
   schedule runner starts; and
 - drops legacy push registrations so current clients can register replacements.
 
-These migrations are fail-closed and idempotent. If a migrated security store
-cannot be written, the broker does not start or advertise revision-17 readiness.
-An old broker restored after a failed revision-17 startup cannot reactivate the
-invalidated credentials or delayed work.
+Before touching those stores, the candidate atomically advances the durable
+broker-instance schema to version 2. That is a one-way rollback fence:
+revision-16 startup accepts only version 1, while the already-running
+revision-16 updater can still health-check a successful candidate. If any later
+store or completion-marker write fails, revision 17 does not start or advertise
+readiness, and revision 16 refuses to start against the fenced state.
+
+The migrations are fail-closed and idempotent. Once the fence is crossed, a
+failed candidate requires repair or another revision-17-or-later candidate; do
+not force a revision-16 restart. An updater shipped before this fence may report
+that it restored the old executable and may attempt to start it, but the old
+broker exits before loading peer, schedule, or wake state.
 
 If a revision-16 peer may have been compromised, an upgrade alone does not
 restore trust in commands or processes that already ran. Remove public ingress,
 rotate the owner credential through the supported setup or repair procedure,
-upgrade, and re-pair only known devices. Audit canceled schedules, agent state,
-hooks, running processes, and workspace changes. Rebuild the installation or
-host when its integrity cannot be established.
+upgrade, and re-pair only known devices. Rotation and revocation cannot undo
+already-authorized durable actions. Audit canceled schedules, wake
+registrations, hooks, global runtime settings, agent state, running processes,
+and workspace changes. Rebuild the installation or host when its integrity
+cannot be established.
 
 ## Source-development brokers
 

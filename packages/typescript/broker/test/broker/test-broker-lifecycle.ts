@@ -2037,11 +2037,22 @@ try {
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
   }
   {
+    const fixture = upgradeMachine();
+    atomicWriteOwnerOnly(join(fixture.m.home, 'broker-instance.json'), `${JSON.stringify({
+      version: 2,
+      instanceId: 'broker_existing_revision17_fixture_1234567890',
+    })}\n`, { mode: 0o600 });
+    const rolledBack = await runUpgrade({ ...upgradeOptions(fixture), verifyBrokerVersion: async () => false });
+    check('a pre-existing authorization fence still permits rollback to a fence-aware broker',
+      rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active());
+  }
+  {
     // A frozen schema-1 reader represents the released base service. The
     // candidate is the current runtime in a separate process. If candidate
     // startup persists schema 2, rollback restores the old executable but the
-    // frozen reader refuses its configuration and the transaction cannot
-    // become healthy.
+    // frozen reader refuses broker-instance v2 and the transaction cannot
+    // reactivate revision-16 authorization state.
     const fixture = upgradeMachine();
     const candidatePortLease = await reserveLoopbackFixturePort();
     const candidatePort = candidatePortLease.port;
@@ -2056,15 +2067,6 @@ try {
       },
       update: { channel: 'stable' },
     }, null, 2)}\n`, { mode: 0o600 });
-    const legacyArtifactSource = 'https://legacy.tailnet.ts.net';
-    const legacyArtifactSession = { tool: 'codex', id: 'cross-version-artifact' };
-    const legacyArtifactStore = new ArtifactStore(legacyArtifactSource, fixture.m.cache);
-    const legacyArtifact = legacyArtifactStore.putBytes(
-      legacyArtifactSession,
-      { type: 'file-artifact', path: 'rollback.txt', name: 'rollback.txt', mimeType: 'text/plain' },
-      Buffer.from('old broker can still read this'),
-    ) as Extract<import('@cosyncing/protocol').AgentMessage, { type: 'file-artifact' }>;
-    const legacyArtifactUrl = new URL(String(legacyArtifact.fetchUrl), legacyArtifactSource);
     let legacyServiceHealthy = false;
     const service: UpgradeServiceController = {
       async inspect() { return { active: true }; },
@@ -2073,6 +2075,8 @@ try {
         if (readFileSync(fixture.m.binary, 'utf8') !== 'old-binary-v1') return;
         const frozen = JSON.parse(readFileSync(join(fixture.m.home, 'config.json'), 'utf8')) as any;
         if (frozen.schemaVersion !== 1) throw new Error('released base rejects non-v1 config');
+        const frozenInstance = JSON.parse(readFileSync(join(fixture.m.home, 'broker-instance.json'), 'utf8')) as any;
+        if (frozenInstance.version !== 1) throw new Error('released base rejects non-v1 broker instance');
         legacyServiceHealthy = true;
       },
     };
@@ -2107,22 +2111,28 @@ try {
       },
     });
     const after = JSON.parse(readFileSync(join(fixture.m.home, 'config.json'), 'utf8')) as any;
-    const rolledBackArtifactStore = new ArtifactStore(legacyArtifactSource, fixture.m.cache);
-    const rolledBackArtifact = rolledBackArtifactStore.serve(
-      legacyArtifactSession.tool,
-      legacyArtifactSession.id,
-      String(legacyArtifact.artifactKey),
-      legacyArtifactUrl.searchParams.get('expires'),
-      legacyArtifactUrl.searchParams.get('sig'),
-    );
-    check('cross-version health failure restores schema-1 config and legacy artifact access',
-      rolledBack.detailCode === 'upgrade-rolled-back'
-        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+    const fencedInstance = JSON.parse(readFileSync(join(fixture.m.home, 'broker-instance.json'), 'utf8')) as any;
+    check('cross-version health failure preserves the candidate and blocks revision-16 rollback',
+      rolledBack.detailCode === 'upgrade-authorization-fence-crossed'
+        && rolledBack.exitCode === 4
+        && readFileSync(fixture.m.binary, 'utf8') === candidate.toString()
         && after.schemaVersion === 1
-        && legacyServiceHealthy
-        && rolledBackArtifact.status === 200
-        && await rolledBackArtifact.text() === 'old broker can still read this',
-      `${rolledBack.detailCode}/schema=${String(after.schemaVersion)}/healthy=${legacyServiceHealthy}/artifact=${rolledBackArtifact.status}`);
+        && fencedInstance.version === 2
+        && !legacyServiceHealthy
+        && existsSync(join(fixture.m.home, 'upgrade-journal.json')),
+      `${rolledBack.detailCode}/schema=${String(after.schemaVersion)}/fence=${String(fencedInstance.version)}/oldHealthy=${legacyServiceHealthy}`);
+    const recovery = await runUpgrade({
+      ...upgradeOptions({ ...fixture, service, active: () => true, failStart() {} }),
+      service,
+      fetch: (async () => new Response('unreachable', { status: 503 })) as unknown as typeof fetch,
+    });
+    check('upgrade-journal recovery cannot cross an authorization rollback fence',
+      recovery.detailCode === 'upgrade-authorization-fence-crossed'
+        && recovery.exitCode === 4
+        && readFileSync(fixture.m.binary, 'utf8') === candidate.toString()
+        && !legacyServiceHealthy
+        && existsSync(join(fixture.m.home, 'upgrade-journal.json')),
+      `${recovery.detailCode}/oldHealthy=${legacyServiceHealthy}`);
   }
   {
     const fixture = upgradeMachine();

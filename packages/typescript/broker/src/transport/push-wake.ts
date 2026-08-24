@@ -147,6 +147,8 @@ export interface WakePushRegistryOptions {
   globalMax?: number;
   peerMax?: number;
   mutationsPerMinute?: number;
+  /** Deterministic startup-migration fault injection. */
+  beforeMigrationPersist?: () => void;
 }
 
 export class WakePushError extends Error {
@@ -168,6 +170,7 @@ export class WakePushRegistry {
   private readonly globalMax: number;
   private readonly peerMax: number;
   private readonly mutationsPerMinute: number;
+  private readonly beforeMigrationPersist?: () => void;
 
   constructor(home = setupStateHome(), options: WakePushRegistryOptions = {}) {
     this.path = join(home, 'push-wake-tokens.json');
@@ -176,6 +179,7 @@ export class WakePushRegistry {
     this.globalMax = positiveLimit(options.globalMax, WAKE_REGISTRATION_GLOBAL_MAX);
     this.peerMax = positiveLimit(options.peerMax, WAKE_REGISTRATION_PEER_MAX);
     this.mutationsPerMinute = positiveLimit(options.mutationsPerMinute, WAKE_REGISTRATION_MUTATIONS_PER_MINUTE);
+    this.beforeMigrationPersist = options.beforeMigrationPersist;
     this.load();
   }
 
@@ -297,6 +301,7 @@ export class WakePushRegistry {
     if (parsed.version === 1) {
       // Revision-16 records do not say which credential registered the endpoint. They cannot be
       // promoted to owner authority safely, so persist an empty v2 store before startup continues.
+      this.beforeMigrationPersist?.();
       this.save();
       return;
     }

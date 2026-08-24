@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import { strict as assert } from 'node:assert';
-import { DeviceWakeCoalescer } from '../../src/transport/push-wake.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DeviceWakeCoalescer, WakePushRegistry } from '../../src/transport/push-wake.ts';
 import type { WakeRegistration } from '../../src/transport/push-wake.ts';
 
 let failures = 0;
@@ -130,6 +133,43 @@ await run('different devices coalesce independently', async () => {
     coalescer.request(registration('tablet')),
   ]);
   assert.deepEqual(sent.sort(), ['phone', 'tablet']);
+});
+
+await run('trailing wake revalidation blocks dispatch after peer revocation', async () => {
+  const time = fakeTime();
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-wake-coalescer-revocation-'));
+  let dispatches = 0;
+  try {
+    const registry = new WakePushRegistry(home, {
+      now: time.now,
+      isPeerGenerationActive: (peerId, generation) => peerId === 'peer-a' && generation === 7,
+    });
+    registry.register(
+      { deviceId: 'phone', platform: 'fcm', token: 'peer-token' },
+      { kind: 'peer', peerId: 'peer-a', authGeneration: 7 },
+    );
+    const item = registry.listForDispatch()[0]!;
+    const coalescer = new DeviceWakeCoalescer({
+      windowMs: 30_000,
+      now: time.now,
+      setTimer: time.setTimer,
+      clearTimer: time.clearTimer,
+      dispatch: async (pending) => {
+        registry.getForDispatch(pending.deviceId);
+        dispatches++;
+      },
+    });
+
+    await coalescer.request(item);
+    const trailing = coalescer.request(item);
+    const trailingRejected = assert.rejects(trailing, /not found/i);
+    assert.equal(registry.revokePeer('peer-a'), 1);
+    await time.advance(30_000);
+    await trailingRejected;
+    assert.equal(dispatches, 1, 'only the leading wake reaches the provider boundary');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 await run('stop cancels trailing wakes and reports dispatch failures without throwing to callers', async () => {

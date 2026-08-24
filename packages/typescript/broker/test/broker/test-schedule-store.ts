@@ -315,13 +315,26 @@ function flushAsync(): Promise<void> {
     // A revision-16 schedule has no creator provenance. Migration preserves its prompt for owner
     // inspection but makes it terminal before the runner can observe it.
     const legacyPath = join(root, 'legacy-schedules.json');
-    const legacy = { ...original } as Partial<ScheduleRecord>;
-    delete legacy.revision;
-    writeFileSync(legacyPath, JSON.stringify({ version: 1, schedules: [legacy] }));
+    const legacyBase = { ...original } as ScheduleRecord;
+    const legacyRows = [
+      { ...legacyBase, id: 'legacy-scheduled', state: 'scheduled' as const },
+      { ...legacyBase, id: 'legacy-paused', state: 'paused' as const },
+      { ...legacyBase, id: 'legacy-delivered', state: 'delivered' as const },
+      { ...legacyBase, id: 'legacy-failed', state: 'failed' as const },
+      { ...legacyBase, id: 'legacy-missed', state: 'missed' as const },
+      { ...legacyBase, id: 'legacy-canceled', state: 'canceled' as const },
+    ];
+    delete (legacyRows[0] as Partial<ScheduleRecord>).revision;
+    writeFileSync(legacyPath, JSON.stringify({ version: 1, schedules: legacyRows }));
     const migrated = new ScheduleStore({ path: legacyPath, now: () => now });
-    assert.equal(migrated.get(original.id)?.state, 'canceled');
-    assert.equal(migrated.get(original.id)?.text, original.text, 'quarantine preserves the prompt for inspection');
-    assert.equal(migrated.edit(original.id, { text: 'legacy edited', at: THU, expectedRevision: 2 }), undefined);
+    assert.equal(migrated.get('legacy-scheduled')?.state, 'canceled');
+    assert.equal(migrated.get('legacy-paused')?.state, 'canceled');
+    assert.equal(migrated.get('legacy-scheduled')?.text, original.text, 'quarantine preserves the prompt for inspection');
+    assert.equal(migrated.edit('legacy-scheduled', { text: 'legacy edited', at: THU, expectedRevision: 2 }), undefined);
+    for (const state of ['delivered', 'failed', 'missed', 'canceled'] as const) {
+      assert.equal(migrated.get(`legacy-${state}`)?.state, state, `legacy ${state} history remains inspectable`);
+    }
+    assert.deepEqual(migrated.due(THU), [], 'no unprovenanced legacy row is executable');
     let deliveries = 0;
     const legacyRunner = new ScheduledSendRunner(migrated, {
       now: () => THU,
@@ -330,19 +343,24 @@ function flushAsync(): Promise<void> {
     await legacyRunner.tick();
     await flushAsync();
     legacyRunner.stop();
-    const restartedLegacy = new ScheduleStore({ path: legacyPath, now: () => THU });
-    const restartedRunner = new ScheduledSendRunner(restartedLegacy, {
-      now: () => THU,
-      deliver: async () => { deliveries++; },
-    });
-    await restartedRunner.tick();
-    await flushAsync();
-    restartedRunner.stop();
     assert.equal(deliveries, 0, 'legacy schedules remain non-executable across restart');
+    const owner = migrated.create({
+      kind: 'message', tool: 'claude', sessionId: 'owner-session', text: 'owner schedule', at: THU,
+    });
+    const restartedLegacy = new ScheduleStore({ path: legacyPath, now: () => THU });
+    const thirdLoad = new ScheduleStore({ path: legacyPath, now: () => THU });
+    assert.deepEqual(restartedLegacy.due(THU).map((schedule) => schedule.id), [owner.id]);
+    assert.deepEqual(thirdLoad.due(THU).map((schedule) => schedule.id), [owner.id]);
+    assert.equal(
+      readdirSync(root).some((name) => name.startsWith('legacy-schedules.json.corrupt-')),
+      false,
+      'valid mixed v2 history must not poison the store on repeated restart',
+    );
     const migratedFile = JSON.parse(readFileSync(legacyPath, 'utf8')) as any;
     assert.equal(migratedFile.version, 2);
     assert.equal(migratedFile.schedules[0].createdBy.kind, 'legacy-unprovenanced');
-    assert.equal(migratedFile.schedules[0].securityRevision, 16);
+    assert.equal(migratedFile.schedules.some((row: any) => row.securityRevision !== undefined), false);
+    assert.equal(migratedFile.schedules.find((row: any) => row.id === owner.id).createdBy.kind, 'owner');
     store.cancel(original.id);
     groups++;
   } finally {

@@ -56,12 +56,10 @@ export class ScheduleMutationError extends Error {
 
 type StoredScheduleAuthority =
   | { kind: 'owner' }
-  | { kind: 'legacy-unprovenanced' };
+  | { kind: 'legacy-unprovenanced'; quarantinedAt?: number };
 
 interface StoredScheduleRecord extends ScheduleRecord {
   createdBy: StoredScheduleAuthority;
-  securityRevision: 16 | 17;
-  legacyQuarantinedAt?: number;
 }
 
 interface LegacyScheduleFile {
@@ -350,11 +348,19 @@ function readFile(
       const schedule = value as ScheduleRecord & {
         revision?: unknown;
         createdBy?: unknown;
-        securityRevision?: unknown;
       };
       if (typeof schedule.id !== 'string' || typeof schedule.text !== 'string' || !Number.isFinite(schedule.at)) {
         throw new Error('invalid schedule store record');
       }
+      if (!isScheduleState(schedule.state)) throw new Error('invalid schedule state');
+      // Draft revision-17 builds wrote protocol-number metadata into records. It was never an
+      // authorization boundary; strip it and the old top-level quarantine timestamp while
+      // normalizing to semantic provenance.
+      const {
+        securityRevision: _securityRevision,
+        legacyQuarantinedAt: _legacyQuarantinedAt,
+        ...normalizedSchedule
+      } = schedule as typeof schedule & { securityRevision?: unknown; legacyQuarantinedAt?: unknown };
       // Revision was added after the initial schedule-store release. Treat an absent field as the
       // first revision, but reject malformed present values instead of silently weakening CAS.
       const revision = schedule.revision === undefined ? 1 : schedule.revision;
@@ -362,24 +368,24 @@ function readFile(
       if (legacy) {
         const live = schedule.state === 'scheduled' || schedule.state === 'paused';
         return {
-          ...schedule,
+          ...normalizedSchedule,
           revision: live ? revision + 1 : revision,
           state: live ? 'canceled' : schedule.state,
           updatedAt: live ? quarantinedAt : schedule.updatedAt,
-          createdBy: { kind: 'legacy-unprovenanced' },
-          securityRevision: 16,
-          ...(live ? { legacyQuarantinedAt: quarantinedAt } : {}),
+          createdBy: {
+            kind: 'legacy-unprovenanced',
+            ...(live ? { quarantinedAt } : {}),
+          },
         };
       }
       if (!isStoredScheduleAuthority(schedule.createdBy)
-        || !storedScheduleProvenanceIsSafe(schedule.createdBy, schedule.securityRevision, schedule.state)) {
+        || !storedScheduleProvenanceIsSafe(schedule.createdBy, schedule.state)) {
         throw new Error('invalid schedule authorization provenance');
       }
       return {
-        ...schedule,
+        ...normalizedSchedule,
         revision,
         createdBy: schedule.createdBy,
-        securityRevision: schedule.securityRevision as 16 | 17,
       };
     });
     return { state: { version: 2, schedules }, migrated: legacy };
@@ -396,18 +402,28 @@ function readFile(
 
 function isStoredScheduleAuthority(raw: unknown): raw is StoredScheduleAuthority {
   if (!raw || typeof raw !== 'object') return false;
-  const kind = (raw as { kind?: unknown }).kind;
-  return kind === 'owner' || kind === 'legacy-unprovenanced';
+  const authority = raw as { kind?: unknown; quarantinedAt?: unknown };
+  if (authority.kind === 'owner') return authority.quarantinedAt === undefined;
+  return authority.kind === 'legacy-unprovenanced'
+    && (authority.quarantinedAt === undefined || Number.isFinite(authority.quarantinedAt));
+}
+
+const SCHEDULE_STATES = new Set<ScheduleRecord['state']>([
+  'scheduled', 'paused', 'delivered', 'failed', 'missed', 'canceled',
+]);
+const TERMINAL_SCHEDULE_STATES = new Set<ScheduleRecord['state']>([
+  'delivered', 'failed', 'missed', 'canceled',
+]);
+
+function isScheduleState(state: unknown): state is ScheduleRecord['state'] {
+  return typeof state === 'string' && SCHEDULE_STATES.has(state as ScheduleRecord['state']);
 }
 
 function storedScheduleProvenanceIsSafe(
   authority: StoredScheduleAuthority,
-  securityRevision: unknown,
   state: ScheduleRecord['state'],
 ): boolean {
-  return authority.kind === 'owner'
-    ? securityRevision === 17
-    : securityRevision === 16 && state === 'canceled';
+  return authority.kind === 'owner' || TERMINAL_SCHEDULE_STATES.has(state);
 }
 
 export interface ScheduleStoreOptions {
@@ -415,6 +431,8 @@ export interface ScheduleStoreOptions {
   now?: () => number;
   idFactory?: () => string;
   onPersistenceError?: (error: unknown) => void;
+  /** Deterministic startup-migration fault injection. */
+  beforeMigrationPersist?: () => void;
 }
 
 export class ScheduleStore {
@@ -433,7 +451,10 @@ export class ScheduleStore {
     this.state = loaded.state;
     // Persist the quarantine before a runner can observe this store. A write failure propagates
     // from the constructor and prevents the broker from advertising revision-17 readiness.
-    if (loaded.migrated) this.save();
+    if (loaded.migrated) {
+      options.beforeMigrationPersist?.();
+      this.save();
+    }
   }
 
   list(): ScheduleRecord[] {
@@ -490,7 +511,6 @@ export class ScheduleStore {
         createdAt: now,
         updatedAt: now,
         createdBy: { kind: 'owner' },
-        securityRevision: 17,
       };
       if (record.repeat) {
         record.timeZone = record.timeZone && isValidTimeZone(record.timeZone)

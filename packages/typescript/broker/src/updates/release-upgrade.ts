@@ -10,6 +10,7 @@ import type { BuildInfo } from '../runtime/build-info.ts';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import { inspectBrokerConfig } from '../runtime/configuration.ts';
 import { brokerTokenPath, inspectBrokerToken, readBrokerToken } from '../security/credentials.ts';
+import { authorizationMigrationRollbackFenceActive } from '../runtime/broker-instance.ts';
 import {
   durableStateLayout,
   inspectDurableSchemas,
@@ -153,6 +154,8 @@ interface UpgradeJournal {
   expectedSha256: string;
   previousSha256: string;
   serviceWasActive: boolean;
+  /** False means this upgrade may be the one that crossed the revision-16 rollback fence. */
+  authorizationFenceWasActive?: boolean;
   updatedAt: string;
 }
 
@@ -629,6 +632,8 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
       || resolve(value.stagingPath) !== resolve(join(home, 'bin', `${PRODUCT_IDENTITY.primaryBinary}.staging-${String(value.toVersion)}`))
       || !validSha(value.expectedSha256) || !validSha(value.previousSha256)
       || typeof value.serviceWasActive !== 'boolean'
+      || (value.authorizationFenceWasActive !== undefined
+        && typeof value.authorizationFenceWasActive !== 'boolean')
       || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))) {
     throw new Error('upgrade-journal-malformed');
   }
@@ -650,6 +655,13 @@ async function recoverUpgrade(options: {
 }): Promise<boolean> {
   const journal = parseJournal(options.home, options.targetPath);
   if (!journal) return false;
+  // A journal written before this field existed is necessarily from the revision-16 updater. If
+  // broker-instance v2 now exists, the candidate crossed the one-way security fence: restoring or
+  // starting the recorded revision-16 binary would reactivate whatever v1 store failed to migrate.
+  if (authorizationMigrationRollbackFenceActive(options.home)
+      && journal.authorizationFenceWasActive !== true) {
+    throw new Error('upgrade-authorization-fence-crossed');
+  }
   if (journal.phase !== 'prepared') {
     assertNoSymlinkComponents(journal.previousPath, false);
     if (!existsSync(journal.previousPath)) throw new Error('upgrade-rollback-binary-missing');
@@ -791,7 +803,17 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
   try {
     try {
       recovered = await recoverUpgrade({ home: dependencies.home, targetPath, service: dependencies.service });
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === 'upgrade-authorization-fence-crossed') {
+        return result(
+          'cleanup-required',
+          4,
+          'upgrade-authorization-fence-crossed',
+          'An interrupted authorization migration crossed its one-way rollback fence; the previous broker was not restored.',
+          fromVersion,
+          false,
+        );
+      }
       return result('cleanup-required', 4, 'upgrade-recovery-failed', 'An interrupted upgrade needs manual recovery; the journal was preserved.', fromVersion, false);
     }
     const currentInstall = inspectInstallState(dependencies.home);
@@ -873,6 +895,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     const previousSha256 = sha256(previousBytes);
     const now = () => (dependencies.now?.() ?? new Date()).toISOString();
     let serviceWasActive = false;
+    const authorizationFenceWasActive = authorizationMigrationRollbackFenceActive(dependencies.home);
     try {
       serviceWasActive = dependencies.service ? (await dependencies.service.inspect()).active : false;
       writeJournal(dependencies.home, {
@@ -887,6 +910,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         expectedSha256: verified.artifact.sha256,
         previousSha256,
         serviceWasActive,
+        authorizationFenceWasActive,
         updatedAt: now(),
       });
       if (dependencies.faultAfter === 'journal-prepared') throw new Error('upgrade-fixture-interrupted');
@@ -905,6 +929,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         expectedSha256: verified.artifact.sha256,
         previousSha256,
         serviceWasActive,
+        authorizationFenceWasActive,
         updatedAt: now(),
       });
       atomicWriteOwnerOnly(targetPath, readFileSync(stagingPath), { mode: 0o700 });
@@ -920,6 +945,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         expectedSha256: verified.artifact.sha256,
         previousSha256,
         serviceWasActive,
+        authorizationFenceWasActive,
         updatedAt: now(),
       });
       if (dependencies.faultAfter === 'binary-switched') throw new Error('upgrade-fixture-interrupted');
@@ -950,6 +976,24 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       unlinkRegular(upgradeJournalPath(dependencies.home));
       return result('complete', 0, 'upgrade-complete', `Upgraded cosyncing from ${fromVersion} to ${toVersion}.`, fromVersion, recovered, toVersion);
     } catch (error) {
+      if (!authorizationFenceWasActive
+          && authorizationMigrationRollbackFenceActive(dependencies.home)) {
+        try {
+          if (serviceWasActive && dependencies.service) await dependencies.service.stop();
+        } catch {
+          // The one-way fence still prevents the previous broker from starting. Preserve every
+          // recovery artifact and report manual cleanup even when service control also failed.
+        }
+        return result(
+          'cleanup-required',
+          4,
+          'upgrade-authorization-fence-crossed',
+          'The authorization migration crossed its one-way rollback fence; the previous broker was not restored. Repair or retry with a revision-17-or-later candidate.',
+          fromVersion,
+          recovered,
+          toVersion,
+        );
+      }
       if (error instanceof Error && error.message === 'upgrade-fixture-interrupted') {
         return result('cleanup-required', 4, 'upgrade-interrupted', 'Upgrade was interrupted; the durable journal will restore the previous release on the next run.', fromVersion, recovered, toVersion);
       }

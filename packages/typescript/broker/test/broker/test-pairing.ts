@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateIdentityKeyPair, generateX25519KeyPair, parseQrPairingPayload } from '@cosyncing/crypto';
@@ -10,9 +10,14 @@ import {
 } from '../../src/transport/pairing-url.ts';
 import { ScheduleStore } from '../../src/scheduling/schedule-store.ts';
 import {
-  completeRevision17SecurityMigration,
-  REVISION_17_SECURITY_MIGRATION_FILE,
-} from '../../src/security/revision-17-migration.ts';
+  AUTHORIZATION_PROVENANCE_MIGRATION_FILE,
+  AUTHORIZATION_PROVENANCE_MIGRATION_ID,
+  completeAuthorizationProvenanceMigration,
+} from '../../src/security/authorization-provenance-migration.ts';
+import {
+  authorizationMigrationRollbackFenceActive,
+  loadOrCreateBrokerInstance,
+} from '../../src/runtime/broker-instance.ts';
 import { PairingHttpError, tokenHash, TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
 import { WakePushRegistry } from '../../src/transport/push-wake.ts';
 import { terminalSafeText } from '../../src/cli/operator-commands.ts';
@@ -128,7 +133,6 @@ try {
     const legacyStore = structuredClone(stored);
     legacyStore.version = 1;
     delete legacyStore.peers[0]!.roles;
-    delete legacyStore.peers[0]!.securityRevision;
     writeFileSync(peerStorePath, `${JSON.stringify(legacyStore)}\n`);
     const legacyRoleReload = new TransportPairingRegistry({ home: renameHome });
     assert.equal(
@@ -165,6 +169,10 @@ try {
     authGeneration: 1,
   });
   try {
+    writeFileSync(join(migrationHome, 'broker-instance.json'), JSON.stringify({
+      version: 1,
+      instanceId: 'broker_legacy_authorization_fixture_1234567890',
+    }), { mode: 0o600 });
     const peerAToken = 'legacy-peer-a-token';
     const hiddenPeerBToken = 'legacy-hidden-peer-b-token';
     writeFileSync(join(migrationHome, 'transport-peers.json'), JSON.stringify({
@@ -193,13 +201,16 @@ try {
       }],
     }), { mode: 0o600 });
 
+    const instance = loadOrCreateBrokerInstance(migrationHome);
+    assert.equal(instance.version, 2);
+    assert.equal(authorizationMigrationRollbackFenceActive(migrationHome), true);
     const pairings = new TransportPairingRegistry({ home: migrationHome, now: () => migrationNow });
     const wake = new WakePushRegistry(migrationHome, {
       now: () => migrationNow,
       isPeerGenerationActive: (peerId, generation) => pairings.isPeerGenerationActive(peerId, generation),
     });
     const schedules = new ScheduleStore({ path: join(migrationHome, 'schedules.json'), now: () => migrationNow });
-    completeRevision17SecurityMigration(migrationHome, () => new Date(migrationNow));
+    completeAuthorizationProvenanceMigration(migrationHome, { now: () => new Date(migrationNow) });
     assert.equal(pairings.authenticatePeerToken(peerAToken), undefined);
     assert.equal(pairings.authenticatePeerToken(hiddenPeerBToken), undefined);
     assert.deepEqual(pairings.listPeers(), []);
@@ -213,12 +224,17 @@ try {
     const wakeFile = JSON.parse(readFileSync(join(migrationHome, 'push-wake-tokens.json'), 'utf8'));
     assert.equal(peerFile.version, 2);
     assert.ok(peerFile.peers.every((peer: any) => peer.revokedAt && peer.roles.length === 0));
+    assert.ok(peerFile.peers.every((peer: any) => peer.securityRevision === undefined));
     assert.equal(scheduleFile.version, 2);
     assert.ok(scheduleFile.schedules.every((schedule: any) => schedule.createdBy.kind === 'legacy-unprovenanced'));
     assert.deepEqual(wakeFile, { version: 2, registrations: [] });
     assert.deepEqual(
-      JSON.parse(readFileSync(join(migrationHome, REVISION_17_SECURITY_MIGRATION_FILE), 'utf8')),
-      { version: 1, securityRevision: 17, completedAt: new Date(migrationNow).toISOString() },
+      JSON.parse(readFileSync(join(migrationHome, AUTHORIZATION_PROVENANCE_MIGRATION_FILE), 'utf8')),
+      {
+        schemaVersion: 1,
+        migration: AUTHORIZATION_PROVENANCE_MIGRATION_ID,
+        completedAt: new Date(migrationNow).toISOString(),
+      },
     );
 
     const offer = pairings.createOffer();
@@ -238,11 +254,100 @@ try {
     rmSync(migrationHome, { recursive: true, force: true });
   }
 
+  // Failure injection at every migration boundary. The frozen revision-16 instance-file rule was
+  // exactly `version === 1`; once v2 is durable, an old broker cannot reach any still-v1 security
+  // store even when a later replacement or the completion marker fails.
+  const boundaryHome = (name: string) => mkdtempSync(join(tmpdir(), `cosyncing-auth-boundary-${name}-`));
+  const seedBoundary = (target: string) => {
+    writeFileSync(join(target, 'broker-instance.json'), JSON.stringify({
+      version: 1,
+      instanceId: 'broker_boundary_fixture_identity_1234567890',
+    }), { mode: 0o600 });
+    writeFileSync(join(target, 'transport-peers.json'), JSON.stringify({ version: 1, peers: [] }), { mode: 0o600 });
+    writeFileSync(join(target, 'push-wake-tokens.json'), JSON.stringify({
+      version: 1,
+      registrations: [{
+        deviceId: 'legacy-boundary-phone', platform: 'fcm', token: 'legacy-token',
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+      }],
+    }), { mode: 0o600 });
+    writeFileSync(join(target, 'schedules.json'), JSON.stringify({
+      version: 1,
+      schedules: [{
+        id: 'legacy-boundary-schedule', revision: 1, kind: 'message', tool: 'codex',
+        sessionId: 'session-boundary', text: 'must remain inert', at: migrationNow + 60_000,
+        state: 'scheduled', createdAt: 1, updatedAt: 1,
+      }],
+    }), { mode: 0o600 });
+  };
+  const storeVersion = (target: string, name: string) =>
+    (JSON.parse(readFileSync(join(target, name), 'utf8')) as { version: number }).version;
+  const revision16InstanceReaderAccepts = (target: string) =>
+    (JSON.parse(readFileSync(join(target, 'broker-instance.json'), 'utf8')) as { version?: unknown }).version === 1;
+
+  for (const boundary of ['fence', 'peer', 'wake', 'schedule', 'marker'] as const) {
+    const target = boundaryHome(boundary);
+    try {
+      seedBoundary(target);
+      if (boundary === 'fence') {
+        assert.throws(() => loadOrCreateBrokerInstance(target, {
+          beforeMigrationPersist: () => { throw new Error('injected fence failure'); },
+        }));
+        assert.equal(revision16InstanceReaderAccepts(target), true);
+        assert.equal(storeVersion(target, 'transport-peers.json'), 1);
+        continue;
+      }
+
+      loadOrCreateBrokerInstance(target);
+      assert.equal(revision16InstanceReaderAccepts(target), false, `${boundary}: revision 16 must reject the fence`);
+      if (boundary === 'peer') {
+        assert.throws(() => new TransportPairingRegistry({
+          home: target,
+          beforeMigrationPersist: () => { throw new Error('injected peer failure'); },
+        }));
+        assert.equal(storeVersion(target, 'transport-peers.json'), 1);
+        continue;
+      }
+
+      const pairings = new TransportPairingRegistry({ home: target });
+      assert.equal(storeVersion(target, 'transport-peers.json'), 2);
+      if (boundary === 'wake') {
+        assert.throws(() => new WakePushRegistry(target, {
+          beforeMigrationPersist: () => { throw new Error('injected wake failure'); },
+        }));
+        assert.equal(storeVersion(target, 'push-wake-tokens.json'), 1);
+        continue;
+      }
+
+      new WakePushRegistry(target, {
+        isPeerGenerationActive: (peerId, generation) => pairings.isPeerGenerationActive(peerId, generation),
+      });
+      assert.equal(storeVersion(target, 'push-wake-tokens.json'), 2);
+      if (boundary === 'schedule') {
+        assert.throws(() => new ScheduleStore({
+          path: join(target, 'schedules.json'),
+          beforeMigrationPersist: () => { throw new Error('injected schedule failure'); },
+        }));
+        assert.equal(storeVersion(target, 'schedules.json'), 1);
+        continue;
+      }
+
+      new ScheduleStore({ path: join(target, 'schedules.json') });
+      assert.equal(storeVersion(target, 'schedules.json'), 2);
+      assert.throws(() => completeAuthorizationProvenanceMigration(target, {
+        beforePersist: () => { throw new Error('injected marker failure'); },
+      }));
+      assert.equal(existsSync(join(target, AUTHORIZATION_PROVENANCE_MIGRATION_FILE)), false);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  }
+
   const markerFailureHome = mkdtempSync(join(tmpdir(), 'cosyncing-revision-17-marker-failure-'));
   try {
-    mkdirSync(join(markerFailureHome, REVISION_17_SECURITY_MIGRATION_FILE));
+    mkdirSync(join(markerFailureHome, AUTHORIZATION_PROVENANCE_MIGRATION_FILE));
     assert.throws(
-      () => completeRevision17SecurityMigration(markerFailureHome),
+      () => completeAuthorizationProvenanceMigration(markerFailureHome),
       Error,
       'a completion-marker write failure must escape startup instead of reporting readiness',
     );

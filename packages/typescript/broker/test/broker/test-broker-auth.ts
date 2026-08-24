@@ -200,7 +200,6 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
       acceptedAt: new Date(0).toISOString(),
       authGeneration: 1,
       roles: ['observe', 'drive', 'files'],
-      securityRevision: 17,
     }],
   }), { mode: 0o600 });
 });

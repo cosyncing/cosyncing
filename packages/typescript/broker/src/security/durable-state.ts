@@ -50,7 +50,7 @@ export interface DurableSchemaSpec {
 
 export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.freeze([
   { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 2, sensitive: false },
-  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'setup', root: 'state', relativePath: 'setup-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'install', root: 'state', relativePath: 'install-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 2, sensitive: true },
@@ -91,7 +91,8 @@ export function isRuntimeCompatibleConfigV1(
 export function isRuntimeSecurityMigrationV1(
   inspection: Readonly<DurableStoreInspection>,
 ): boolean {
-  return (inspection.id === 'peers'
+  return (inspection.id === 'broker-instance'
+      || inspection.id === 'peers'
       || inspection.id === 'schedules'
       || inspection.id === 'wake-registrations')
     && inspection.status === 'migration-required'
@@ -158,6 +159,9 @@ export function inspectDurableSchemas(layout = durableStateLayout()): DurableSto
       if (inspection.status === 'ok') {
         return { id: spec.id, status: 'ok', version: inspection.state.version, detailCode: inspection.detailCode };
       }
+      if (inspection.status === 'migration-required') {
+        return { id: spec.id, status: 'migration-required', version: 1, detailCode: inspection.detailCode };
+      }
       return {
         id: spec.id,
         status: inspection.status === 'unsafe' ? 'unsafe' : 'malformed',
@@ -203,7 +207,7 @@ function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): Dur
         detailCode: 'config-v1-migration-required',
       };
     }
-    if ((spec.id === 'peers' || spec.id === 'schedules' || spec.id === 'wake-registrations')
+    if ((spec.id === 'broker-instance' || spec.id === 'peers' || spec.id === 'schedules' || spec.id === 'wake-registrations')
       && version === 1 && spec.currentVersion === 2) {
       return {
         id: spec.id,

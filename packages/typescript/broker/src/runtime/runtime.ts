@@ -162,7 +162,7 @@ import {
   WakePushRegistry,
 } from '../transport/push-wake.ts';
 import { authorizeBrokerRoute } from '../security/route-authorization.ts';
-import { completeRevision17SecurityMigration } from '../security/revision-17-migration.ts';
+import { completeAuthorizationProvenanceMigration } from '../security/authorization-provenance-migration.ts';
 import {
   aggregatedMachines,
   fetchPeerMachineRoster,
@@ -397,6 +397,9 @@ const HTTP_R2_ENABLED_ACTIONS = new Set([
     : []),
   ...(!BUILD_INFO.packaged ? r2EnabledActions() : []),
 ]);
+// Broker-instance v2 is the one-way rollback fence. Revision-16 startup rejects it, while the
+// already-running revision-16 updater can still health-check this candidate. Cross the fence before
+// any legacy credential, delayed action, or wake destination can be migrated.
 const BROKER_INSTANCE = loadOrCreateBrokerInstance();
 const ARTIFACT_BROKER_SOURCE = `broker-instance:${BROKER_INSTANCE.instanceId}`;
 const LEGACY_ARTIFACT_BROKER_SOURCES = CONFIG_INSPECTION.status === 'ok'
@@ -975,9 +978,11 @@ const scheduleStore = new ScheduleStore({
   onPersistenceError: (error) =>
     console.error(`${LOG_PREFIX} schedule store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
 });
-completeRevision17SecurityMigration(setupStateHome());
+completeAuthorizationProvenanceMigration(setupStateHome());
 wakeCoalescer = new DeviceWakeCoalescer({
-  dispatch: (registration) => dispatchWakePush(registration),
+  // A trailing coalesced wake may outlive peer revocation. Resolve it again at the final provider
+  // boundary so a removed registration or stale authentication generation cannot dispatch.
+  dispatch: (registration) => dispatchWakePush(wakePush.getForDispatch(registration.deviceId)),
   onError: (error, registration) =>
     console.warn(`${LOG_PREFIX} opaque wake failed for ${registration.deviceId}: ${error instanceof Error ? error.message : String(error)}`),
 });

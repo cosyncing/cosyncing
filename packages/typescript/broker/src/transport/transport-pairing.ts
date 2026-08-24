@@ -28,7 +28,6 @@ export interface AcceptedTransportPeer {
   acceptedAt: string;
   authGeneration: number;
   roles: PeerRole[];
-  securityRevision: 17;
   revokedAt?: string;
 }
 
@@ -121,6 +120,8 @@ export class TransportPairingRegistry {
       ttlMs?: number;
       home?: string;
       now?: () => number;
+      /** Deterministic startup-migration fault injection. */
+      beforeMigrationPersist?: () => void;
     },
   ) {
     const home = opts.home ?? setupStateHome();
@@ -259,7 +260,6 @@ export class TransportPairingRegistry {
       acceptedAt: new Date(this.now()).toISOString(),
       authGeneration: previousPeer ? previousPeer.authGeneration + 1 : 1,
       roles: [...DEFAULT_PEER_ROLES],
-      securityRevision: 17,
     };
     // Persist a candidate snapshot before publishing either in-memory mutation. A failed write or
     // rename leaves the one-use offer pending and the peer registry unchanged.
@@ -395,10 +395,10 @@ export class TransportPairingRegistry {
           ...peer,
           authGeneration: peer.authGeneration + (peer.revokedAt ? 0 : 1),
           roles: [],
-          securityRevision: 17,
           revokedAt: peer.revokedAt ?? invalidatedAt,
         });
       }
+      this.opts.beforeMigrationPersist?.();
       this.save(candidate);
       for (const [peerId, peer] of candidate) this.peers.set(peerId, peer);
       return;
@@ -625,7 +625,6 @@ function normalizeStoredPeer(raw: any, legacy: boolean): AcceptedTransportPeer |
       ? raw.authGeneration
       : 1,
     roles: legacy ? [] : normalizePeerRoles(raw.roles),
-    securityRevision: legacy ? 17 : normalizePeerSecurityRevision(raw.securityRevision),
     ...(raw.revokedAt ? { revokedAt: String(raw.revokedAt) } : {}),
   };
 }
@@ -637,9 +636,4 @@ function normalizePeerRoles(raw: unknown): PeerRole[] {
     throw new Error('peer-roles-invalid');
   }
   return [...new Set(raw as PeerRole[])];
-}
-
-function normalizePeerSecurityRevision(raw: unknown): 17 {
-  if (raw !== 17) throw new Error('peer-security-revision-invalid');
-  return 17;
 }
