@@ -156,8 +156,6 @@ class _ManagedRuntimeSection extends StatelessWidget {
       key: const Key('settings-managed-runtimes'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _RuntimeOwnershipStrip(),
-        const SizedBox(height: 16),
         state.when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (error, _) => _RuntimeError(error: error, onRetry: onRefresh),
@@ -168,39 +166,47 @@ class _ManagedRuntimeSection extends StatelessWidget {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _RuntimePolicyControl(
-                  value: data.codexUpdatePolicy,
-                  onChanged: onPolicyChanged,
-                ),
-                const SizedBox(height: 12),
+                if (data.ownerOperationsAvailable) ...[
+                  const _RuntimeOwnershipStrip(),
+                  const SizedBox(height: 16),
+                  _RuntimePolicyControl(
+                    value: data.codexUpdatePolicy,
+                    onChanged: onPolicyChanged,
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 for (final update in data.updates) ...[
                   _RuntimeStatusRow(
                     update: update,
-                    onRestart: () => onRestartRuntime(update),
+                    onRestart: data.ownerOperationsAvailable
+                        ? () => onRestartRuntime(update)
+                        : null,
                   ),
                   const SizedBox(height: 12),
                 ],
                 QuotaStatusPanel(quota: quota, loading: quotaLoading),
-                const SizedBox(height: 12),
-                SwitchListTile(
-                  key: const Key('settings-quota-warnings'),
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(l10n.settingsQuotaWarningsTitle),
-                  subtitle: Text(l10n.settingsQuotaWarningsSubtitle),
-                  value: data.quotaWarningsEnabled,
-                  onChanged: (value) =>
-                      unawaited(onQuotaChanged(enabled: value)),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  key: const Key('settings-restart-everything'),
-                  onPressed: () => unawaited(onRestartEverything()),
-                  icon: const Icon(Icons.restart_alt),
-                  label: Text(l10n.settingsRestartEverythingAction),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
+                if (data.ownerOperationsAvailable) ...[
+                  const SizedBox(height: 12),
+                  SwitchListTile(
+                    key: const Key('settings-quota-warnings'),
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(l10n.settingsQuotaWarningsTitle),
+                    subtitle: Text(l10n.settingsQuotaWarningsSubtitle),
+                    value: data.quotaWarningsEnabled,
+                    onChanged: (value) =>
+                        unawaited(onQuotaChanged(enabled: value)),
                   ),
-                ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    key: const Key('settings-restart-everything'),
+                    onPressed: () => unawaited(onRestartEverything()),
+                    icon: const Icon(Icons.restart_alt),
+                    label: Text(l10n.settingsRestartEverythingAction),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
                 if (data.actionMessage != null) ...[
                   const SizedBox(height: 8),
                   SelectableText(
@@ -302,7 +308,7 @@ class _RuntimeStatusRow extends StatelessWidget {
   const _RuntimeStatusRow({required this.update, required this.onRestart});
 
   final AgentRuntimeUpdateStatus update;
-  final Future<void> Function() onRestart;
+  final Future<void> Function()? onRestart;
 
   @override
   Widget build(BuildContext context) {
@@ -351,13 +357,13 @@ class _RuntimeStatusRow extends StatelessWidget {
                 ],
               ),
             ),
-            if (pending) ...[
+            if (pending && onRestart != null) ...[
               const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerRight,
                 child: FilledButton.tonalIcon(
                   key: Key('settings-restart-runtime-${update.agent}'),
-                  onPressed: () => unawaited(onRestart()),
+                  onPressed: () => unawaited(onRestart!()),
                   icon: const Icon(Icons.restart_alt, size: 18),
                   label: Text(l10n.settingsRestartNow),
                 ),

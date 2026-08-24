@@ -88,6 +88,22 @@ for workflow in "$workflow_dir"/*.yml; do
   rg -q '^permissions:' "$workflow"
 done
 
+# GitHub's Ubuntu image declares ANDROID_HOME but no longer guarantees that
+# command-line tools are on PATH. Keep the runtime workflow rooted in the SDK
+# installation so an image PATH change cannot skip the Android integration run.
+platform_runtime="$workflow_dir/platform-runtime.yml"
+for fragment in \
+  'sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"' \
+  'sdkmanager_path="$sdk_root/cmdline-tools/latest/bin/sdkmanager"' \
+  'avdmanager_path="$sdk_root/cmdline-tools/latest/bin/avdmanager"' \
+  'emulator_path="$sdk_root/emulator/emulator"' \
+  'adb_path="$sdk_root/platform-tools/adb"'; do
+  rg -Fq "$fragment" "$platform_runtime" || {
+    echo "ERROR: platform-runtime.yml does not resolve Android tooling from the configured SDK root: $fragment" >&2
+    exit 1
+  }
+done
+
 for workflow in broker-release.yml broker-release-promote.yml; do
   rg -q 'COSYNCING_BINARY_RELEASE_LEGAL_APPROVED' "$workflow_dir/$workflow"
   rg -q 'test "\$BINARY_RELEASE_LEGAL_APPROVED" = true' "$workflow_dir/$workflow"

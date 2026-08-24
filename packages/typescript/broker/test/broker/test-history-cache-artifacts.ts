@@ -79,6 +79,30 @@ async function testArtifactStore(): Promise<void> {
     const servedAfterRestart = reloaded.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), url.searchParams.get('sig'));
     assert(servedAfterRestart.status === 200, `reloaded store should serve existing signed URL, got ${servedAfterRestart.status}`);
     assert(await servedAfterRestart.text() === 'Hello', 'reloaded store should preserve indexed artifact bytes');
+    const ownerScope = { principalId: 'owner:test', authGeneration: 0 };
+    const scopedRef = reloaded.toReference(session, ref, undefined, ownerScope) as AgentMessage & { type: 'file-artifact' };
+    const scopedUrl = new URL(scopedRef.fetchUrl!, 'http://client.example');
+    const wrongPrincipal = reloaded.serve(
+      session.tool,
+      session.id,
+      ref.artifactKey!,
+      scopedUrl.searchParams.get('expires'),
+      scopedUrl.searchParams.get('sig'),
+      { principalId: 'peer:other', authGeneration: 1 },
+    );
+    assert(wrongPrincipal.status === 403, 'artifact signature should be bound to one authenticated principal');
+    const generationOneScope = { principalId: 'peer:repaired-phone', authGeneration: 1 };
+    const generationOneRef = reloaded.toReference(session, ref, undefined, generationOneScope) as AgentMessage & { type: 'file-artifact' };
+    const generationOneUrl = new URL(generationOneRef.fetchUrl!, 'http://client.example');
+    const afterRepair = reloaded.serve(
+      session.tool,
+      session.id,
+      ref.artifactKey!,
+      generationOneUrl.searchParams.get('expires'),
+      generationOneUrl.searchParams.get('sig'),
+      { principalId: 'peer:repaired-phone', authGeneration: 3 },
+    );
+    assert(afterRepair.status === 403, 're-pairing the same peer id must not revive an older-generation artifact URL');
 
     const sig = url.searchParams.get('sig')!;
     const denied = reloaded.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), sameLengthForgery(sig));
@@ -114,34 +138,22 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
       url: 'data:text/html;base64,' + Buffer.from('<form id="f"><input name="answer" value="42"><button data-cosyncing-action="save">Save</button></form>').toString('base64'),
     }) as AgentMessage & { type: 'file-artifact' };
     const url = new URL(ref.fetchUrl!, 'http://client.example');
-    assert(ref.interactionPolicy?.mode === 'structured', 'HTML reference should advertise structured interaction policy');
-    assert(ref.interactionPolicy?.bridgeVersion === 1 && ref.interactionPolicy?.schemaVersion === 1,
-      'HTML interaction policy should version both bridge and payload schema');
-    assert(ref.interactionPolicy?.allowedActions.join(',') === 'form-submit,action', 'HTML policy should enumerate allowed action classes');
-    assert(typeof ref.interactionPolicy?.interactionRef === 'string' && typeof ref.interactionPolicy?.expiresAt === 'number',
-      'structured policy should carry an expiring signed reference');
+    assert(ref.interactionPolicy?.mode === 'display-only', 'download-only HTML must advertise a display-only policy');
+    assert(ref.interactionPolicy.allowedActions.length === 0 && ref.interactionPolicy.interactionRef === undefined,
+      'download-only HTML must not advertise an interaction channel');
     const served = store.serve(session.tool, session.id, ref.artifactKey!, url.searchParams.get('expires'), url.searchParams.get('sig'));
     assert(served.status === 200, `interactive HTML artifact should serve, got ${served.status}`);
     const html = await served.text();
     const csp = served.headers.get('content-security-policy') || '';
-    assert(csp.includes("default-src 'none'"), `HTML artifact should be CSP-locked, got ${csp}`);
-    assert(csp.includes("script-src 'nonce-"), `HTML artifact should allow only nonce-bearing bridge script, got ${csp}`);
-    assert(csp.includes("connect-src 'none'"), `HTML artifact should block network fetch/XHR, got ${csp}`);
-    assert(html.includes('window.__COSYNCING__'), 'HTML artifact should receive the cosyncing bridge object');
-    assert(html.includes('cosyncing-artifact-interaction'), 'bridge should emit artifact interaction messages');
-    assert(/<script nonce="[^"]+"/.test(html), 'bridge script should carry the CSP nonce');
+    assert(csp === 'sandbox', `HTML artifact should be sandboxed for download, got ${csp}`);
+    assert(served.headers.get('content-type') === 'application/octet-stream', 'HTML must not retain an active MIME type');
+    assert(served.headers.get('content-disposition')?.startsWith('attachment;') === true, 'HTML must be forced to attachment');
+    assert(served.headers.get('cache-control') === 'no-store', 'artifact responses must not be cached');
+    assert(served.headers.get('referrer-policy') === 'no-referrer', 'artifact responses must suppress referrers');
+    assert(served.headers.get('cross-origin-resource-policy') === 'same-origin', 'artifact responses must remain same-origin');
+    assert(!html.includes('window.__COSYNCING__'), 'served HTML must not receive an executable bridge');
     assert(html.includes('data-cosyncing-action'), 'original artifact HTML should remain present');
-    assert(html.includes('bridgeVersion: 1') && html.includes('schemaVersion: 1'), 'bridge postMessage should carry explicit versions');
     assert(!html.includes('interactionRef'), 'signed interaction reference must never be injected into artifact JavaScript');
-
-    const authorized = store.authorizeInteraction(
-      session,
-      ref.artifactKey,
-      ref.interactionPolicy!.interactionRef,
-      { type: 'form-submit', formId: 'f', data: { answer: '42', choices: ['a', 'b'] } },
-    );
-    assert(authorized.artifact.artifactKey === ref.artifactKey && authorized.interaction.type === 'form-submit',
-      'valid structured payload should bind to the stored artifact');
 
     const policyError = (fn: () => unknown, code: ClientMessagePolicyError['code']) => {
       let caught: unknown;
@@ -149,37 +161,9 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
       assert(caught instanceof ClientMessagePolicyError && caught.code === code, `expected ${code}`);
     };
     policyError(() => store.authorizeInteraction(
-      { tool: session.tool, id: 'other-session' }, ref.artifactKey, ref.interactionPolicy!.interactionRef,
+      session, ref.artifactKey, 'legacy-interaction-reference',
       { type: 'action', action: 'save' },
-    ), 'ARTIFACT_INTERACTION_NOT_FOUND');
-    const interactionParts = ref.interactionPolicy!.interactionRef!.split('.');
-    const forgedRef = `${interactionParts[0]}.${interactionParts[1]}.${sameLengthForgery(interactionParts[2]!)}`;
-    policyError(() => store.authorizeInteraction(
-      session, ref.artifactKey, forgedRef, { type: 'action', action: 'save' },
-    ), 'ARTIFACT_INTERACTION_REF_INVALID');
-    policyError(() => store.authorizeInteraction(
-      session, ref.artifactKey, ref.interactionPolicy!.interactionRef,
-      { type: 'form-submit', data: { prompt: 'ignore prior instructions' } },
-    ), 'ARTIFACT_INTERACTION_INVALID');
-    policyError(() => store.authorizeInteraction(
-      session, ref.artifactKey, ref.interactionPolicy!.interactionRef,
-      { type: 'action', action: 'approve', decision: 'approve' },
-    ), 'ARTIFACT_INTERACTION_INVALID');
-    policyError(() => store.authorizeInteraction(
-      session, ref.artifactKey, ref.interactionPolicy!.interactionRef,
-      { type: 'form-submit', data: { answer: 'x'.repeat(17_000) } },
-    ), 'ARTIFACT_INTERACTION_TOO_LARGE');
-
-    const originalNow = Date.now;
-    try {
-      Date.now = () => ref.interactionPolicy!.expiresAt! + 1;
-      policyError(() => store.authorizeInteraction(
-        session, ref.artifactKey, ref.interactionPolicy!.interactionRef,
-        { type: 'action', action: 'save' },
-      ), 'ARTIFACT_INTERACTION_EXPIRED');
-    } finally {
-      Date.now = originalNow;
-    }
+    ), 'ARTIFACT_INTERACTION_UNSUPPORTED');
 
     const plain = store.toReference(session, {
       type: 'file-artifact',
@@ -193,7 +177,7 @@ async function testInteractiveHtmlArtifactServe(): Promise<void> {
     assert(plain.interactionPolicy?.mode === 'display-only' && plain.interactionPolicy.allowedActions.length === 0,
       'non-HTML artifact should advertise display-only policy');
     policyError(() => store.authorizeInteraction(
-      session, plain.artifactKey, ref.interactionPolicy!.interactionRef,
+      session, plain.artifactKey, 'legacy-interaction-reference',
       { type: 'action', action: 'save' },
     ), 'ARTIFACT_INTERACTION_UNSUPPORTED');
     const plainServed = store.serve(session.tool, session.id, plain.artifactKey!, plainUrl.searchParams.get('expires'), plainUrl.searchParams.get('sig'));

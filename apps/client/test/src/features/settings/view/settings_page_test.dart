@@ -404,6 +404,33 @@ void main() {
       expect(find.byKey(const Key('settings-quota-warnings')), findsOneWidget);
     });
 
+    testWidgets('hides owner-only runtime controls for paired peers', (
+      tester,
+    ) async {
+      managedRuntimeApi.principalKind = 'peer';
+
+      await tester.pumpWidget(buildSubject(home: const AgentsSettingsPage()));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-managed-runtimes')),
+        300,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Managed Agent Runtimes'), findsOneWidget);
+      expect(find.text('Update ready'), findsOneWidget);
+      expect(find.byKey(const Key('settings-runtime-policy')), findsNothing);
+      expect(
+        find.byKey(const Key('settings-restart-runtime-codex')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('settings-restart-everything')),
+        findsNothing,
+      );
+      expect(find.byKey(const Key('settings-quota-warnings')), findsNothing);
+    });
+
     testWidgets('shows quota status bars while quota warnings stay off', (
       tester,
     ) async {
@@ -1596,6 +1623,7 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   String? brokerVersion = '1.0.0';
   Completer<void>? runtimeUpdatesGate;
   Error? runtimeUpdatesError;
+  String principalKind = 'owner';
 
   @override
   Future<RuntimeUpdatesResponse> getRuntimeUpdates({bool fresh = false}) async {
@@ -1637,8 +1665,11 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
       );
 
   @override
-  Future<BrokerHealthResponse> getHealth() async =>
-      const BrokerHealthResponse(status: 'healthy', checkedAt: 1);
+  Future<BrokerHealthResponse> getHealth() async => BrokerHealthResponse(
+    status: 'healthy',
+    checkedAt: 1,
+    principalKind: principalKind,
+  );
 
   @override
   Future<HealthResponse> getProductHealth() async =>

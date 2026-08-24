@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
@@ -12,12 +12,17 @@ import { setupStateHome } from '../installation/setup-state.ts';
 
 export interface WakeRegistration {
   deviceId: string;
+  owner: WakeRegistrationOwner;
   platform: WakePlatform;
   token: string;
   label?: string;
   createdAt: string;
   updatedAt: string;
 }
+
+export type WakeRegistrationOwner =
+  | { kind: 'owner' }
+  | { kind: 'peer'; peerId: string; authGeneration: number };
 
 export interface DeviceWakeCoalescerOptions<TTimer = ReturnType<typeof setTimeout>> {
   dispatch: (registration: WakeRegistration) => Promise<unknown> | unknown;
@@ -122,9 +127,28 @@ export class DeviceWakeCoalescer<TTimer = ReturnType<typeof setTimeout>> {
   }
 }
 
-interface WakeStoreFile {
+interface LegacyWakeStoreFile {
   version: 1;
+  registrations: unknown[];
+}
+
+interface WakeStoreFile {
+  version: 2;
   registrations: WakeRegistration[];
+}
+
+export const WAKE_REGISTRATION_GLOBAL_MAX = 256;
+export const WAKE_REGISTRATION_PEER_MAX = 4;
+const WAKE_REGISTRATION_MUTATIONS_PER_MINUTE = 30;
+
+export interface WakePushRegistryOptions {
+  now?: () => number;
+  isPeerGenerationActive?: (peerId: string, authGeneration: number) => boolean;
+  globalMax?: number;
+  peerMax?: number;
+  mutationsPerMinute?: number;
+  /** Deterministic startup-migration fault injection. */
+  beforeMigrationPersist?: () => void;
 }
 
 export class WakePushError extends Error {
@@ -140,25 +164,66 @@ export class WakePushError extends Error {
 export class WakePushRegistry {
   private readonly path: string;
   private readonly registrations = new Map<string, WakeRegistration>();
+  private readonly mutationWindows = new Map<string, { startedAt: number; count: number }>();
+  private readonly now: () => number;
+  private readonly isPeerGenerationActive: (peerId: string, authGeneration: number) => boolean;
+  private readonly globalMax: number;
+  private readonly peerMax: number;
+  private readonly mutationsPerMinute: number;
+  private readonly beforeMigrationPersist?: () => void;
 
-  constructor(home = setupStateHome()) {
+  constructor(home = setupStateHome(), options: WakePushRegistryOptions = {}) {
     this.path = join(home, 'push-wake-tokens.json');
+    this.now = options.now ?? Date.now;
+    this.isPeerGenerationActive = options.isPeerGenerationActive ?? (() => true);
+    this.globalMax = positiveLimit(options.globalMax, WAKE_REGISTRATION_GLOBAL_MAX);
+    this.peerMax = positiveLimit(options.peerMax, WAKE_REGISTRATION_PEER_MAX);
+    this.mutationsPerMinute = positiveLimit(options.mutationsPerMinute, WAKE_REGISTRATION_MUTATIONS_PER_MINUTE);
+    this.beforeMigrationPersist = options.beforeMigrationPersist;
     this.load();
   }
 
-  register(input: WakeRegistrationInput): WakeRegistrationPublic {
+  register(input: WakeRegistrationInput, owner: WakeRegistrationOwner): WakeRegistrationPublic {
     const platform = normalizePlatform(input.platform);
     const token = String(input.token ?? '').trim();
     if (!token) throw new WakePushError('BAD_PARAM', 'push token is required');
     if (token.length > 4096) throw new WakePushError('BAD_PARAM', 'push token is too long');
-    const deviceId = normalizeDeviceId(input.deviceId) ?? `dev_${randomBytes(9).toString('base64url')}`;
-    const now = new Date().toISOString();
+    const requestedDeviceId = normalizeDeviceId(input.deviceId);
+    if (owner.kind === 'peer' && !requestedDeviceId) {
+      throw new WakePushError('BAD_PARAM', 'deviceId is required for paired devices');
+    }
+    const deviceId = registrationId(owner, requestedDeviceId);
+    const now = new Date(this.now()).toISOString();
     const prior = this.registrations.get(deviceId);
+    const label = input.label
+      ? String(input.label).trim().slice(0, 80)
+      : prior?.label;
+    if (prior
+      && registrationOwnerEquals(prior.owner, owner)
+      && prior.platform === platform
+      && prior.token === token
+      && prior.label === label) {
+      return publicRegistration(prior);
+    }
+    if (!prior) {
+      if (this.registrations.size >= this.globalMax) {
+        throw new WakePushError('BAD_PARAM', 'push registration limit reached', 429);
+      }
+      if (owner.kind === 'peer') {
+        const peerRegistrations = [...this.registrations.values()]
+          .filter((registration) => registrationOwnerEquals(registration.owner, owner)).length;
+        if (peerRegistrations >= this.peerMax) {
+          throw new WakePushError('BAD_PARAM', 'paired-device push registration limit reached', 429);
+        }
+      }
+    }
+    this.assertMutationAllowed(owner);
     const registration: WakeRegistration = {
       deviceId,
+      owner,
       platform,
       token,
-      ...(input.label ? { label: String(input.label).trim().slice(0, 80) } : prior?.label ? { label: prior.label } : {}),
+      ...(label ? { label } : {}),
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
     };
@@ -167,50 +232,116 @@ export class WakePushRegistry {
     return publicRegistration(registration);
   }
 
-  list(): WakeRegistrationPublic[] {
-    return [...this.registrations.values()].map(publicRegistration).sort((a, b) => a.deviceId.localeCompare(b.deviceId));
+  list(owner: WakeRegistrationOwner): WakeRegistrationPublic[] {
+    return [...this.registrations.values()]
+      .filter((registration) => owner.kind === 'owner' || registrationOwnerEquals(registration.owner, owner))
+      .map(publicRegistration)
+      .sort((a, b) => a.deviceId.localeCompare(b.deviceId));
   }
 
   /** Broker-internal delivery view. Never return this from an HTTP route or write it to logs. */
   listForDispatch(): WakeRegistration[] {
-    return [...this.registrations.values()].map((registration) => ({ ...registration }));
+    return [...this.registrations.values()]
+      .filter((registration) => this.dispatchable(registration))
+      .map((registration) => ({ ...registration }));
   }
 
-  get(deviceId: string): WakeRegistration {
+  get(deviceId: string, owner: WakeRegistrationOwner): WakeRegistration {
     const id = normalizeDeviceId(deviceId);
     const registration = id ? this.registrations.get(id) : undefined;
-    if (!registration) throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    if (!registration || (owner.kind !== 'owner' && !registrationOwnerEquals(registration.owner, owner))) {
+      throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    }
     return registration;
   }
 
-  revoke(deviceId: string): boolean {
+  /** Broker-internal lookup for attention delivery. */
+  getForDispatch(deviceId: string): WakeRegistration {
+    const id = normalizeDeviceId(deviceId);
+    const registration = id ? this.registrations.get(id) : undefined;
+    if (!registration || !this.dispatchable(registration)) {
+      throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    }
+    return registration;
+  }
+
+  revoke(deviceId: string, owner: WakeRegistrationOwner): boolean {
     const id = normalizeDeviceId(deviceId);
     if (!id) throw new WakePushError('BAD_PARAM', 'deviceId is required');
+    const registration = this.registrations.get(id);
+    if (!registration || (owner.kind !== 'owner' && !registrationOwnerEquals(registration.owner, owner))) {
+      return false;
+    }
     const deleted = this.registrations.delete(id);
     if (deleted) this.save();
     return deleted;
   }
 
+  revokePeer(peerId: string): number {
+    let removed = 0;
+    for (const [deviceId, registration] of this.registrations) {
+      if (registration.owner.kind !== 'peer' || registration.owner.peerId !== peerId) continue;
+      this.registrations.delete(deviceId);
+      removed++;
+    }
+    if (removed) this.save();
+    return removed;
+  }
+
   private load(): void {
+    if (!existsSync(this.path)) return;
+    let parsed: LegacyWakeStoreFile | WakeStoreFile;
     try {
-      if (!existsSync(this.path)) return;
-      const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as WakeStoreFile;
-      if (parsed.version !== 1 || !Array.isArray(parsed.registrations)) return;
-      for (const raw of parsed.registrations) {
-        const normalized = normalizeStored(raw);
-        if (normalized) this.registrations.set(normalized.deviceId, normalized);
-      }
+      parsed = JSON.parse(readFileSync(this.path, 'utf8')) as LegacyWakeStoreFile | WakeStoreFile;
     } catch {
       this.registrations.clear();
+      return;
+    }
+    if (!Array.isArray(parsed.registrations)) return;
+    if (parsed.version === 1) {
+      // Revision-16 records do not say which credential registered the endpoint. They cannot be
+      // promoted to owner authority safely, so persist an empty v2 store before startup continues.
+      this.beforeMigrationPersist?.();
+      this.save();
+      return;
+    }
+    if (parsed.version !== 2) return;
+    for (const raw of parsed.registrations) {
+      const normalized = normalizeStored(raw);
+      if (normalized) this.registrations.set(normalized.deviceId, normalized);
     }
   }
 
   private save(): void {
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: 1, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n');
+    writeFileSync(tmp, JSON.stringify({ version: 2, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n', { mode: 0o600 });
     renameSync(tmp, this.path);
   }
+
+  private dispatchable(registration: WakeRegistration): boolean {
+    return registration.owner.kind === 'owner'
+      || this.isPeerGenerationActive(registration.owner.peerId, registration.owner.authGeneration);
+  }
+
+  private assertMutationAllowed(owner: WakeRegistrationOwner): void {
+    if (owner.kind !== 'peer') return;
+    const key = `${owner.peerId}:${owner.authGeneration}`;
+    const now = this.now();
+    const window = this.mutationWindows.get(key);
+    if (!window || now - window.startedAt >= 60_000) {
+      this.mutationWindows.set(key, { startedAt: now, count: 1 });
+      return;
+    }
+    if (window.count >= this.mutationsPerMinute) {
+      throw new WakePushError('BAD_PARAM', 'push registration updates are rate limited', 429);
+    }
+    window.count += 1;
+  }
+}
+
+function positiveLimit(value: number | undefined, fallback: number): number {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
 export async function dispatchWakePush(
@@ -288,6 +419,7 @@ function normalizeStored(raw: any): WakeRegistration | undefined {
     if (!deviceId || !token) return undefined;
     return {
       deviceId,
+      owner: normalizeStoredOwner(raw?.owner),
       platform,
       token,
       ...(raw.label ? { label: String(raw.label) } : {}),
@@ -297,4 +429,37 @@ function normalizeStored(raw: any): WakeRegistration | undefined {
   } catch {
     return undefined;
   }
+}
+
+function registrationId(owner: WakeRegistrationOwner, requestedDeviceId: string | undefined): string {
+  if (owner.kind === 'owner') return requestedDeviceId ?? `dev_${randomBytes(9).toString('base64url')}`;
+  const source = requestedDeviceId ?? `dev_${randomBytes(9).toString('base64url')}`;
+  const digest = createHash('sha256')
+    .update(`${owner.peerId}\0${owner.authGeneration}\0${source}`)
+    .digest('base64url')
+    .slice(0, 24);
+  return `peer_${digest}`;
+}
+
+function registrationOwnerEquals(a: WakeRegistrationOwner, b: WakeRegistrationOwner): boolean {
+  return a.kind === b.kind
+    && (a.kind === 'owner'
+      || (b.kind === 'peer' && a.peerId === b.peerId && a.authGeneration === b.authGeneration));
+}
+
+function normalizeStoredOwner(raw: unknown): WakeRegistrationOwner {
+  if (!raw || typeof raw !== 'object') throw new Error('wake-registration-owner-invalid');
+  const value = raw as Record<string, unknown>;
+  if (value.kind === 'owner') return { kind: 'owner' };
+  if (value.kind === 'peer'
+    && typeof value.peerId === 'string'
+    && Number.isSafeInteger(value.authGeneration)
+    && Number(value.authGeneration) > 0) {
+    return {
+      kind: 'peer',
+      peerId: value.peerId,
+      authGeneration: Number(value.authGeneration),
+    };
+  }
+  throw new Error('wake-registration-owner-invalid');
 }

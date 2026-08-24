@@ -480,6 +480,8 @@ class BrokerHealthResponse {
     required this.checkedAt,
     this.ok,
     this.machine,
+    this.principalKind,
+    this.principalRoles = const <String>[],
     this.components = const <String, BrokerHealthComponentSnapshot>{},
     this.diagnostics,
     this.raw = const <String, dynamic>{},
@@ -488,9 +490,14 @@ class BrokerHealthResponse {
   /// Creates a [BrokerHealthResponse] from JSON.
   factory BrokerHealthResponse.fromJson(Map<String, dynamic> json) {
     final componentsJson = json['components'];
+    final principal = json['principal'];
     return BrokerHealthResponse(
       ok: json['ok'] as bool?,
       machine: json['machine'] as String?,
+      principalKind: principal is Map ? principal['kind'] as String? : null,
+      principalRoles: principal is Map
+          ? _toStringList(principal['roles'])
+          : const <String>[],
       status: json['status'] as String? ?? 'unknown',
       checkedAt: _toInt(json['checkedAt']) ?? 0,
       components: componentsJson is Map
@@ -512,6 +519,15 @@ class BrokerHealthResponse {
 
   /// Machine label, often host.
   final String? machine;
+
+  /// Authenticated principal kind (`owner` or `peer`) when advertised.
+  final String? principalKind;
+
+  /// Roles carried by a paired-device principal.
+  final List<String> principalRoles;
+
+  /// Whether owner-only administration should be presented by clients.
+  bool get ownerOperationsAvailable => principalKind != 'peer';
 
   /// Overall broker health state.
   final String status;
@@ -539,6 +555,14 @@ class BrokerHealthResponse {
       ..['components'] = components.map(
         (name, component) => MapEntry(name, component.toJson()),
       );
+    if (principalKind == null) {
+      output.remove('principal');
+    } else {
+      output['principal'] = {
+        'kind': principalKind,
+        if (principalKind == 'peer') 'roles': principalRoles,
+      };
+    }
     if (diagnostics == null) {
       output.remove('diagnostics');
     } else {

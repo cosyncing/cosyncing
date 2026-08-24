@@ -54,9 +54,22 @@ export class ScheduleMutationError extends Error {
   }
 }
 
-interface ScheduleFile {
+type StoredScheduleAuthority =
+  | { kind: 'owner' }
+  | { kind: 'legacy-unprovenanced'; quarantinedAt?: number };
+
+interface StoredScheduleRecord extends ScheduleRecord {
+  createdBy: StoredScheduleAuthority;
+}
+
+interface LegacyScheduleFile {
   version: 1;
-  schedules: ScheduleRecord[];
+  schedules: unknown[];
+}
+
+interface ScheduleFile {
+  version: 2;
+  schedules: StoredScheduleRecord[];
 }
 
 interface WallParts {
@@ -305,7 +318,7 @@ export function nextOccurrence(
 }
 
 function emptyFile(): ScheduleFile {
-  return { version: 1, schedules: [] };
+  return { version: 2, schedules: [] };
 }
 
 function reportPersistenceError(callback: ((error: unknown) => void) | undefined, error: unknown): void {
@@ -318,32 +331,99 @@ function cleanOptional(value: string | null | undefined, maxLength?: number): st
   return cleaned ? (maxLength === undefined ? cleaned : cleaned.slice(0, maxLength)) : undefined;
 }
 
-function readFile(path: string, onPersistenceError?: (error: unknown) => void): ScheduleFile {
+function readFile(
+  path: string,
+  now: () => number,
+  onPersistenceError?: (error: unknown) => void,
+): { state: ScheduleFile; migrated: boolean } {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<ScheduleFile>;
-    if (raw.version !== 1 || !Array.isArray(raw.schedules)) throw new Error('unsupported schedule store schema');
-    const schedules = raw.schedules.map((value) => {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<LegacyScheduleFile | ScheduleFile>;
+    if ((raw.version !== 1 && raw.version !== 2) || !Array.isArray(raw.schedules)) {
+      throw new Error('unsupported schedule store schema');
+    }
+    const legacy = raw.version === 1;
+    const quarantinedAt = now();
+    const schedules = raw.schedules.map((value): StoredScheduleRecord => {
       if (!value || typeof value !== 'object') throw new Error('invalid schedule store record');
-      const schedule = value as ScheduleRecord & { revision?: unknown };
+      const schedule = value as ScheduleRecord & {
+        revision?: unknown;
+        createdBy?: unknown;
+      };
       if (typeof schedule.id !== 'string' || typeof schedule.text !== 'string' || !Number.isFinite(schedule.at)) {
         throw new Error('invalid schedule store record');
       }
+      if (!isScheduleState(schedule.state)) throw new Error('invalid schedule state');
+      // Draft revision-17 builds wrote protocol-number metadata into records. It was never an
+      // authorization boundary; strip it and the old top-level quarantine timestamp while
+      // normalizing to semantic provenance.
+      const {
+        securityRevision: _securityRevision,
+        legacyQuarantinedAt: _legacyQuarantinedAt,
+        ...normalizedSchedule
+      } = schedule as typeof schedule & { securityRevision?: unknown; legacyQuarantinedAt?: unknown };
       // Revision was added after the initial schedule-store release. Treat an absent field as the
       // first revision, but reject malformed present values instead of silently weakening CAS.
       const revision = schedule.revision === undefined ? 1 : schedule.revision;
       if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('invalid schedule revision');
-      return { ...schedule, revision };
+      if (legacy) {
+        const live = schedule.state === 'scheduled' || schedule.state === 'paused';
+        return {
+          ...normalizedSchedule,
+          revision: live ? revision + 1 : revision,
+          state: live ? 'canceled' : schedule.state,
+          updatedAt: live ? quarantinedAt : schedule.updatedAt,
+          createdBy: {
+            kind: 'legacy-unprovenanced',
+            ...(live ? { quarantinedAt } : {}),
+          },
+        };
+      }
+      if (!isStoredScheduleAuthority(schedule.createdBy)
+        || !storedScheduleProvenanceIsSafe(schedule.createdBy, schedule.state)) {
+        throw new Error('invalid schedule authorization provenance');
+      }
+      return {
+        ...normalizedSchedule,
+        revision,
+        createdBy: schedule.createdBy,
+      };
     });
-    return { version: 1, schedules };
+    return { state: { version: 2, schedules }, migrated: legacy };
   } catch (error) {
-    if ((error as { code?: string })?.code === 'ENOENT') return emptyFile();
+    if ((error as { code?: string })?.code === 'ENOENT') return { state: emptyFile(), migrated: false };
     // Preserve malformed or unreadable state for diagnosis instead of letting the next successful
     // create silently overwrite it. Recovery starts from an empty in-memory list.
     const backup = `${path}.corrupt-${Date.now()}-${randomUUID()}`;
     try { renameSync(path, backup); } catch { /* retain the original in place if backup fails */ }
     reportPersistenceError(onPersistenceError, error);
-    return emptyFile();
+    return { state: emptyFile(), migrated: false };
   }
+}
+
+function isStoredScheduleAuthority(raw: unknown): raw is StoredScheduleAuthority {
+  if (!raw || typeof raw !== 'object') return false;
+  const authority = raw as { kind?: unknown; quarantinedAt?: unknown };
+  if (authority.kind === 'owner') return authority.quarantinedAt === undefined;
+  return authority.kind === 'legacy-unprovenanced'
+    && (authority.quarantinedAt === undefined || Number.isFinite(authority.quarantinedAt));
+}
+
+const SCHEDULE_STATES = new Set<ScheduleRecord['state']>([
+  'scheduled', 'paused', 'delivered', 'failed', 'missed', 'canceled',
+]);
+const TERMINAL_SCHEDULE_STATES = new Set<ScheduleRecord['state']>([
+  'delivered', 'failed', 'missed', 'canceled',
+]);
+
+function isScheduleState(state: unknown): state is ScheduleRecord['state'] {
+  return typeof state === 'string' && SCHEDULE_STATES.has(state as ScheduleRecord['state']);
+}
+
+function storedScheduleProvenanceIsSafe(
+  authority: StoredScheduleAuthority,
+  state: ScheduleRecord['state'],
+): boolean {
+  return authority.kind === 'owner' || TERMINAL_SCHEDULE_STATES.has(state);
 }
 
 export interface ScheduleStoreOptions {
@@ -351,6 +431,8 @@ export interface ScheduleStoreOptions {
   now?: () => number;
   idFactory?: () => string;
   onPersistenceError?: (error: unknown) => void;
+  /** Deterministic startup-migration fault injection. */
+  beforeMigrationPersist?: () => void;
 }
 
 export class ScheduleStore {
@@ -365,7 +447,14 @@ export class ScheduleStore {
     this.now = options.now ?? Date.now;
     this.idFactory = options.idFactory ?? randomUUID;
     this.onPersistenceError = options.onPersistenceError;
-    this.state = readFile(this.file, this.onPersistenceError);
+    const loaded = readFile(this.file, this.now, this.onPersistenceError);
+    this.state = loaded.state;
+    // Persist the quarantine before a runner can observe this store. A write failure propagates
+    // from the constructor and prevents the broker from advertising revision-17 readiness.
+    if (loaded.migrated) {
+      options.beforeMigrationPersist?.();
+      this.save();
+    }
   }
 
   list(): ScheduleRecord[] {
@@ -411,7 +500,7 @@ export class ScheduleStore {
       const at = cron ? nextCronOccurrence(cron, now) : Number(input.at);
       if (!Number.isFinite(at) || at <= 0) throw new ScheduleMutationError('SCHEDULE_INVALID', 'at is required when cron is absent');
       const retryPolicy = input.retryPolicy ? validateRetryPolicy(input.retryPolicy) : undefined;
-      const record: ScheduleRecord = {
+      const record: StoredScheduleRecord = {
         ...input,
         at,
         ...(cron ? { cron } : {}),
@@ -421,6 +510,7 @@ export class ScheduleStore {
         state: 'scheduled',
         createdAt: now,
         updatedAt: now,
+        createdBy: { kind: 'owner' },
       };
       if (record.repeat) {
         record.timeZone = record.timeZone && isValidTimeZone(record.timeZone)
@@ -556,6 +646,7 @@ export class ScheduleStore {
   runNow(id: string, expectedRevision: number): ScheduleRecord {
     return this.persistMutation(() => {
       const record = this.requireRevision(id, expectedRevision);
+      this.requireOwnerProvenance(record);
       if (record.state === 'paused' || record.state === 'canceled' || record.state === 'delivered') {
         throw new ScheduleMutationError('SCHEDULE_INVALID_STATE', 'this row cannot run now');
       }
@@ -577,6 +668,7 @@ export class ScheduleStore {
   recoverQuota(id: string, expectedRevision: number): ScheduleRecord {
     return this.persistMutation(() => {
       const record = this.requireRevision(id, expectedRevision);
+      this.requireOwnerProvenance(record);
       if (record.lastOutcome !== 'failed' || record.lastFailureKind !== 'quota' || record.nextRetryAt !== undefined) {
         throw new ScheduleMutationError('SCHEDULE_QUOTA_RECOVERY_UNAVAILABLE', 'the row has no exhausted quota failure');
       }
@@ -674,11 +766,20 @@ export class ScheduleStore {
     return record;
   }
 
-  private requireRevision(id: string, expectedRevision: number): ScheduleRecord {
-    const record = this.get(id);
+  private requireRevision(id: string, expectedRevision: number): StoredScheduleRecord {
+    const record = this.state.schedules.find((schedule) => schedule.id === id);
     if (!record) throw new ScheduleMutationError('SCHEDULE_NOT_FOUND', 'unknown schedule');
     this.assertRevision(record, expectedRevision);
     return record;
+  }
+
+  private requireOwnerProvenance(record: StoredScheduleRecord): void {
+    if (record.createdBy.kind !== 'owner') {
+      throw new ScheduleMutationError(
+        'SCHEDULE_INVALID_STATE',
+        'legacy schedules must be reviewed and recreated before they can run',
+      );
+    }
   }
 
   private assertRevision(record: ScheduleRecord, expectedRevision: number): void {
@@ -714,7 +815,7 @@ export class ScheduleStore {
    *  must never claim a schedule was created/canceled/removed when its durable write failed. */
   private persistMutation<T>(mutate: () => T): T {
     const before: ScheduleFile = {
-      version: 1,
+      version: 2,
       schedules: this.state.schedules.map((schedule) => ({ ...schedule })),
     };
     try {
@@ -728,6 +829,7 @@ export class ScheduleStore {
   }
 
   private save(): void {
+    this.assertPersistableState();
     // Prune finished rows beyond the display window (never prunes live schedules).
     const finished = this.state.schedules
       .filter((s) => s.state !== 'scheduled' && s.state !== 'paused')
@@ -747,6 +849,14 @@ export class ScheduleStore {
       throw error;
     } finally {
       try { unlinkSync(tmp); } catch { /* renamed or never created */ }
+    }
+  }
+
+  private assertPersistableState(): void {
+    for (const record of this.state.schedules) {
+      if (!storedScheduleProvenanceIsSafe(record.createdBy, record.state)) {
+        throw new Error('schedule authorization provenance invariant violated');
+      }
     }
   }
 }

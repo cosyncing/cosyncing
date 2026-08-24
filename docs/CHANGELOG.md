@@ -23,6 +23,30 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Changed
 
+- Paired-device credentials now resolve to explicit principals with observe,
+  drive, and file roles. Every broker route has an exhaustive, default-deny
+  peer policy. Device administration, durable schedules, agent-only file
+  surfacing, broker/runtime changes, restarts, and updates require the owner
+  credential.
+- Artifact references expire after ten minutes, require the active principal
+  they were issued to, and can be refreshed through an authenticated ticket
+  endpoint. Only passive images and plain text remain inline; HTML, SVG, XML,
+  PDF, and other formats download as sandboxed octet-stream attachments.
+- Contract revision 17 requires a revision 17 client because older clients do
+  not attach credentials to artifact downloads. Revision 17 clients retain the
+  revision 16 broker fallback for client-first rollout.
+- The revision-17 broker invalidates every revision-16 paired credential,
+  cancels active legacy schedules whose creator cannot be proven, and drops
+  ownerless legacy wake registrations. Re-pair devices and let clients recreate
+  wake registrations after upgrade; review canceled schedules before recreating
+  any required automation. Legacy terminal schedules cannot be run or quota-
+  recovered in place; recreate reviewed work as an owner-authorized schedule.
+- The first revision-17 startup advances broker-instance state to schema 2
+  before migrating authorization stores. This one-way fence prevents a restored
+  revision-16 broker from loading legacy credentials, schedules, or wake
+  destinations after a failed migration; it is a fail-closed authorization
+  boundary, not an automatic service rollback. Once crossed, recovery requires
+  revision 17 or later.
 - The broker now has a strict loopback-only listener and configuration schema 2;
   remote connectivity is no longer configured, diagnosed, repaired, or removed
   by cosyncing.
@@ -38,6 +62,26 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Peer revocation is persisted before it reaches memory, invalidates unused
+  WebSocket tickets, closes active peer sockets, and clears peer upload,
+  push-registration, mailbox, and replay state before reporting success.
+- Legacy terminal schedule history survives repeated schema-2 loads without
+  becoming executable or invalidating new owner schedules. Trailing coalesced
+  wakes revalidate their registration at the provider boundary after revocation.
+- Artifact and referenced-diff downloads refresh an expired same-origin ticket
+  once while preserving authentication and byte ceilings; cross-origin legacy
+  references are never authenticated or refreshed.
+- Push registrations are scoped to their owner or exact peer generation, peer
+  IDs retain monotonic authentication generations across re-pairing, and
+  malformed or empty stored role sets fail closed. Peer registrations require
+  stable device IDs and enforce per-peer, global, and write-rate limits.
+- Remote Tokdash reads use only the locally configured upstream and no longer
+  accept a caller-selected loopback URL.
+- Transport envelopes reject unknown recipients and enforce bounded field
+  grammar, mailbox count, global and per-principal envelope counts, and byte
+  budgets.
+- App-triggered broker updates no longer accept caller-supplied manifest URLs;
+  custom signed-channel testing remains a local operator CLI action.
 - Setup now accepts the supported schema-1 broker configuration during an npm
   upgrade, leaving it unchanged until a later confirmed `cosy repair` performs
   the backed-up schema-2 migration. Malformed and unknown schemas still block.
@@ -54,11 +98,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   reconnect, so it can cross a live revision-16 upgrade without an app restart.
 - Stale revision-15 clients can still load the roster from a revision-16 broker,
   but cannot open sessions until updated because query credentials are retired.
-- Candidate startup no longer persists configuration schema 2 during an
-  upgrade, so a failed upgrade can restore a schema-1 broker safely.
+- Before the revision-17 authorization fence is crossed, candidate startup
+  leaves configuration schema 1 intact so a pre-migration failure can still
+  restore the compatible broker safely.
 - Artifact persistence uses a durable installation identity rather than a
   public URL. It retains and resolves legacy advertised-URL records without
-  deleting the keys required by an old-binary rollback.
+  deleting the keys required by the earlier compatible rollback window.
 - Version 3 pairing acceptance proves ownership of the identity key committed
   in the QR before the client stores the endpoint or credential.
 - Public pairing acceptance now rejects oversized or malformed bodies, weak

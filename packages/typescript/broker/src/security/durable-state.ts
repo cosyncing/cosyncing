@@ -29,6 +29,7 @@ export interface DurableStateLayout {
   schedules: string;
   attention: string;
   peers: string;
+  wakeRegistrations: string;
   transportKeys: string;
   brokerToken: string;
   piIntegration: string;
@@ -39,7 +40,7 @@ export interface DurableStateLayout {
 }
 
 export interface DurableSchemaSpec {
-  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'artifacts';
+  id: 'config' | 'broker-instance' | 'setup' | 'install' | 'schedules' | 'attention' | 'peers' | 'wake-registrations' | 'artifacts';
   root: 'state' | 'cache';
   relativePath: string;
   versionField: 'schemaVersion' | 'version';
@@ -49,12 +50,13 @@ export interface DurableSchemaSpec {
 
 export const DURABLE_SCHEMA_REGISTRY: readonly DurableSchemaSpec[] = Object.freeze([
   { id: 'config', root: 'state', relativePath: 'config.json', versionField: 'schemaVersion', currentVersion: 2, sensitive: false },
-  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'broker-instance', root: 'state', relativePath: 'broker-instance.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'setup', root: 'state', relativePath: 'setup-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
   { id: 'install', root: 'state', relativePath: 'install-state.json', versionField: 'schemaVersion', currentVersion: 1, sensitive: false },
-  { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'schedules', root: 'state', relativePath: 'schedules.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'attention', root: 'state', relativePath: 'attention-events.json', versionField: 'version', currentVersion: 1, sensitive: true },
-  { id: 'peers', root: 'state', relativePath: 'transport-peers.json', versionField: 'version', currentVersion: 1, sensitive: true },
+  { id: 'peers', root: 'state', relativePath: 'transport-peers.json', versionField: 'version', currentVersion: 2, sensitive: true },
+  { id: 'wake-registrations', root: 'state', relativePath: 'push-wake-tokens.json', versionField: 'version', currentVersion: 2, sensitive: true },
   { id: 'artifacts', root: 'cache', relativePath: 'artifacts/index.json', versionField: 'version', currentVersion: 1, sensitive: true },
 ]);
 
@@ -80,6 +82,19 @@ export function isRuntimeCompatibleConfigV1(
   inspection: Readonly<DurableStoreInspection>,
 ): boolean {
   return inspection.id === 'config'
+    && inspection.status === 'migration-required'
+    && inspection.version === 1;
+}
+
+/** These broker-owned v1 stores are accepted only as input to the fail-closed revision-17
+ * startup migration. They are never treated as current revision-17 authorization state. */
+export function isRuntimeSecurityMigrationV1(
+  inspection: Readonly<DurableStoreInspection>,
+): boolean {
+  return (inspection.id === 'broker-instance'
+      || inspection.id === 'peers'
+      || inspection.id === 'schedules'
+      || inspection.id === 'wake-registrations')
     && inspection.status === 'migration-required'
     && inspection.version === 1;
 }
@@ -123,6 +138,7 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
     schedules: join(stateRoot, 'schedules.json'),
     attention: join(stateRoot, 'attention-events.json'),
     peers: join(stateRoot, 'transport-peers.json'),
+    wakeRegistrations: join(stateRoot, 'push-wake-tokens.json'),
     transportKeys: join(stateRoot, 'transport-keys'),
     brokerToken: join(stateRoot, 'secrets', 'broker-token'),
     piIntegration: join(stateRoot, 'secrets', 'pi-integration.json'),
@@ -142,6 +158,9 @@ export function inspectDurableSchemas(layout = durableStateLayout()): DurableSto
       }
       if (inspection.status === 'ok') {
         return { id: spec.id, status: 'ok', version: inspection.state.version, detailCode: inspection.detailCode };
+      }
+      if (inspection.status === 'migration-required') {
+        return { id: spec.id, status: 'migration-required', version: 1, detailCode: inspection.detailCode };
       }
       return {
         id: spec.id,
@@ -188,6 +207,15 @@ function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): Dur
         detailCode: 'config-v1-migration-required',
       };
     }
+    if ((spec.id === 'broker-instance' || spec.id === 'peers' || spec.id === 'schedules' || spec.id === 'wake-registrations')
+      && version === 1 && spec.currentVersion === 2) {
+      return {
+        id: spec.id,
+        status: 'migration-required',
+        version,
+        detailCode: `${spec.id}-v1-security-migration-required`,
+      };
+    }
     return {
       id: spec.id,
       status: 'unsupported-version',
@@ -212,11 +240,13 @@ export function inspectDurableStatePermissionRepair(
     if (spec.id === 'broker-instance') {
       return inspectBrokerInstance(dirname(repair.path)).status === 'ok' ? 'current' : 'blocked';
     }
-    return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'current' : 'blocked';
+    const inspection = inspectDurableSchemaContent(spec, repair.path);
+    return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'current' : 'blocked';
   }
   if (file.status !== 'unsafe' || file.problem !== 'unsafe-mode') return 'blocked';
   if (spec.id === 'broker-instance') return 'blocked';
-  return inspectDurableSchemaContent(spec, repair.path).status === 'ok' ? 'tightenable' : 'blocked';
+  const inspection = inspectDurableSchemaContent(spec, repair.path);
+  return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'tightenable' : 'blocked';
 }
 
 /** Classify every durable doctor failure before setup is allowed to plan a commit. */
@@ -230,7 +260,7 @@ export function assessDurableStateForSetup(
     // The current broker reads config v1 in memory. Setup must be able to switch and health-check the
     // candidate while leaving that file untouched; only a later confirmed repair persists v2 with its
     // two-root backup. Treat no other old or unknown schema as safe at this boundary.
-    if (isRuntimeCompatibleConfigV1(inspection)) continue;
+    if (isRuntimeCompatibleConfigV1(inspection) || isRuntimeSecurityMigrationV1(inspection)) continue;
     const spec = DURABLE_SCHEMA_REGISTRY.find((candidate) => candidate.id === inspection.id);
     if (!spec) {
       blockers.push(inspection);
@@ -287,6 +317,10 @@ export function planDurableStateMigrations(layout = durableStateLayout()): Durab
       steps.push({ id: 'setup-state-v0-to-v1', store: 'setup', fromVersion: 0, toVersion: 1 });
     } else if (isRuntimeCompatibleConfigV1(inspection)) {
       steps.push({ id: 'broker-config-v1-to-v2', store: 'config', fromVersion: 1, toVersion: 2 });
+    } else if (isRuntimeSecurityMigrationV1(inspection)) {
+      // The broker owns this migration because it must invalidate executable/credential state
+      // before it begins serving. The generic repair command must not reinterpret provenance.
+      continue;
     } else if (inspection.status !== 'ok' && inspection.status !== 'missing') {
       blockers.push({ store: inspection.id, detailCode: inspection.detailCode });
     }
@@ -425,6 +459,7 @@ export function backupDurableStores(options: {
     { path: layout.schedules, label: 'state/schedules.json', destination: join(path, 'state', 'schedules.json') },
     { path: layout.attention, label: 'state/attention-events.json', destination: join(path, 'state', 'attention-events.json') },
     { path: layout.peers, label: 'state/transport-peers.json', destination: join(path, 'state', 'transport-peers.json') },
+    { path: layout.wakeRegistrations, label: 'state/push-wake-tokens.json', destination: join(path, 'state', 'push-wake-tokens.json') },
     { path: layout.transportKeys, label: 'state/transport-keys', destination: join(path, 'state', 'transport-keys') },
     { path: layout.brokerToken, label: 'state/secrets/broker-token', destination: join(path, 'state', 'secrets', 'broker-token') },
     { path: layout.piIntegration, label: 'state/secrets/pi-integration.json', destination: join(path, 'state', 'secrets', 'pi-integration.json') },

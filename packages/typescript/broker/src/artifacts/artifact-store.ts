@@ -30,6 +30,11 @@ export interface ArtifactSession {
   id: string;
 }
 
+export interface ArtifactAuthorizationScope {
+  principalId: string;
+  authGeneration: number;
+}
+
 type DeliveryClass = 'interactive' | 'export-attachment';
 type ArtifactMessage = Extract<AgentMessage, { type: 'file-artifact' }>;
 type ArtifactInteractionPolicy = NonNullable<ArtifactMessage['interactionPolicy']>;
@@ -115,8 +120,11 @@ export const DEFAULT_SESSION_ARTIFACT_REPLAY_LIMIT = 128;
 const HARD_SESSION_ARTIFACT_REPLAY_LIMIT = 512;
 const DEFAULT_MAX_INDEX_BYTES = 32 * 1024 * 1024;
 const HARD_MAX_INDEX_BYTES = 64 * 1024 * 1024;
-const SIGNATURE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const INTERACTION_SIGNATURE_TTL_MS = 30 * 60 * 1000;
+const SIGNATURE_TTL_MS = 10 * 60 * 1000;
+const INTERNAL_ARTIFACT_SCOPE: ArtifactAuthorizationScope = {
+  principalId: 'broker-internal',
+  authGeneration: 0,
+};
 const MAX_INTERACTION_BYTES = 16 * 1024;
 const MAX_INTERACTION_DEPTH = 4;
 const STRUCTURED_ACTIONS = ['form-submit', 'action'] as const;
@@ -138,6 +146,12 @@ const normalizeBrokerSource = (raw: string): string => {
   }
 };
 const isHtmlMime = (mimeType: string): boolean => /\bhtml\b/i.test(mimeType);
+const passiveInlineMime = (mimeType: string): string | undefined => {
+  const normalized = mimeType.split(';', 1)[0]!.trim().toLowerCase();
+  return new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'text/plain']).has(normalized)
+    ? normalized
+    : undefined;
+};
 const positiveNumber = (raw: string | undefined, fallback: number): number => {
   const n = raw == null || raw.trim() === '' ? Number.NaN : Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -412,11 +426,16 @@ export class ArtifactStore {
     if (retained.length !== loaded.length) this.persist('sweep');
   }
 
-  toReference(session: ArtifactSession, message: AgentMessage, brokerUrl?: string): AgentMessage {
+  toReference(
+    session: ArtifactSession,
+    message: AgentMessage,
+    brokerUrl?: string,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
+  ): AgentMessage {
     if (message.type !== 'file-artifact') return message;
     if (message.url?.startsWith('data:')) {
       const parsed = parseDataUrl(message.url);
-      if (parsed) return this.putBytes(session, message, parsed.bytes, parsed.mimeType, brokerUrl);
+      if (parsed) return this.putBytes(session, message, parsed.bytes, parsed.mimeType, brokerUrl, {}, authorization);
     }
     const key = message.artifactKey;
     if (!key) return this.displayOnly(message);
@@ -425,7 +444,43 @@ export class ArtifactStore {
       const { fetchUrl: _fetchUrl, interactionPolicy: _interactionPolicy, ...rest } = message;
       return this.displayOnly(rest as ArtifactMessage);
     }
-    return this.asMessage(session, message, record, brokerUrl);
+    return this.asMessage(session, message, record, brokerUrl, authorization);
+  }
+
+  authorizeReference(
+    session: ArtifactSession,
+    message: AgentMessage & { type: 'file-artifact' },
+    authorization: ArtifactAuthorizationScope,
+    brokerUrl?: string,
+  ): AgentMessage & { type: 'file-artifact' } {
+    const record = message.artifactKey
+      ? this.lookupRecord(session.tool, session.id, message.artifactKey)
+      : undefined;
+    if (!record) throw new Error('artifact reference is unavailable');
+    return this.asMessage(session, message, record, brokerUrl, authorization);
+  }
+
+  refreshDownloadTicket(
+    session: ArtifactSession,
+    artifactKey: string,
+    authorization: ArtifactAuthorizationScope,
+    brokerUrl?: string,
+  ): { fetchUrl: string; expiresAt: number } | undefined {
+    const record = this.lookupRecord(session.tool, session.id, artifactKey);
+    if (!record || !existsSync(record.filePath)) return undefined;
+    if (record.expiresAt && Date.now() > record.expiresAt) return undefined;
+    const fetchUrl = this.signedUrl(
+      session.tool,
+      session.id,
+      artifactKey,
+      brokerUrl,
+      SIGNATURE_TTL_MS,
+      authorization,
+    );
+    return {
+      fetchUrl,
+      expiresAt: Number(new URL(fetchUrl, 'http://broker.invalid').searchParams.get('expires')),
+    };
   }
 
   /** Add the broker's conservative policy to an inline/back-compat artifact without converting it
@@ -448,34 +503,9 @@ export class ArtifactStore {
     if (!record || !existsSync(record.filePath)) {
       throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_NOT_FOUND', 'artifact interaction target was not found');
     }
-    if (!this.isStructured(record)) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_UNSUPPORTED', 'artifact is display-only');
-    }
-    if (typeof interactionRef !== 'string' || interactionRef.length > 1024) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    const parts = interactionRef.split('.');
-    const expires = Number(parts[1]);
-    if (parts.length !== 3 || parts[0] !== 'v1' || !Number.isSafeInteger(expires) || expires <= 0) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    if (Date.now() > expires) {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_EXPIRED', 'artifact interaction reference expired');
-    }
-    const expected = this.signInteraction(record, expires);
-    try {
-      const suppliedBytes = Buffer.from(parts[2]!);
-      const expectedBytes = Buffer.from(expected);
-      if (suppliedBytes.length !== expectedBytes.length || !timingSafeEqual(suppliedBytes, expectedBytes)) {
-        throw new Error('mismatch');
-      }
-    } catch {
-      throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_REF_INVALID', 'artifact interaction reference is invalid');
-    }
-    return {
-      artifact: { artifactKey: record.artifactKey, name: record.name, path: record.path },
-      interaction: normalizeArtifactInteraction(interaction),
-    };
+    void interactionRef;
+    void interaction;
+    throw new ClientMessagePolicyError('ARTIFACT_INTERACTION_UNSUPPORTED', 'artifact is display-only');
   }
 
   putFile(
@@ -495,6 +525,7 @@ export class ArtifactStore {
     fallbackMimeType = 'application/octet-stream',
     brokerUrl?: string,
     options: { sessionQualified?: boolean } = {},
+    authorization = INTERNAL_ARTIFACT_SCOPE,
   ): AgentMessage & { type: 'file-artifact' } {
     const contentHash = sha256(bytes);
     const rel = message.path || message.name || contentHash;
@@ -521,7 +552,7 @@ export class ArtifactStore {
       ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
     };
     this.commitRecord(rec, createdBlob);
-    return this.asMessage(session, message, rec, brokerUrl);
+    return this.asMessage(session, message, rec, brokerUrl, authorization);
   }
 
   /**
@@ -537,6 +568,7 @@ export class ArtifactStore {
     keyBase: string,
     body: string,
     brokerUrl?: string,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
   ): { fetchUrl: string; contentHash: string; byteSize: number } {
     const bytes = Buffer.from(body, 'utf8');
     const contentHash = sha256(bytes);
@@ -564,7 +596,7 @@ export class ArtifactStore {
     };
     this.commitRecord(rec, createdBlob);
     return {
-      fetchUrl: this.signedUrl(tool, sessionId, artifactKey, brokerUrl),
+      fetchUrl: this.signedUrl(tool, sessionId, artifactKey, brokerUrl, SIGNATURE_TTL_MS, authorization),
       contentHash,
       byteSize: bytes.byteLength,
     };
@@ -747,10 +779,19 @@ export class ArtifactStore {
     return n;
   }
 
-  serve(tool: string, sessionId: string, artifactKey: string, expiresRaw: string | null, sigRaw: string | null): Response {
+  serve(
+    tool: string,
+    sessionId: string,
+    artifactKey: string,
+    expiresRaw: string | null,
+    sigRaw: string | null,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
+  ): Response {
     const expires = Number(expiresRaw ?? 0);
     if (!expires || !sigRaw || Date.now() > expires) return new Response('artifact URL expired', { status: 403 });
-    if (!this.verify(tool, sessionId, artifactKey, expires, sigRaw)) return new Response('invalid artifact signature', { status: 403 });
+    if (!this.verify(tool, sessionId, artifactKey, expires, sigRaw, authorization)) {
+      return new Response('invalid artifact signature', { status: 403 });
+    }
     const rec = this.lookupRecord(tool, sessionId, artifactKey);
     if (!rec || !existsSync(rec.filePath)) return new Response('artifact not found', { status: 404 });
     // R2 export-attachment: download-only, never inline-rendered, never bridge-injected. Enforce the
@@ -764,6 +805,8 @@ export class ArtifactStore {
       h.set('cache-control', 'no-store');
       h.set('content-security-policy', 'sandbox');
       h.set('x-content-type-options', 'nosniff');
+      h.set('referrer-policy', 'no-referrer');
+      h.set('cross-origin-resource-policy', 'same-origin');
       h.set('x-cosyncing-artifact-key', rec.artifactKey);
       h.set('x-cosyncing-content-hash', rec.contentHash);
       h.set('content-length', String(rec.size));
@@ -771,32 +814,18 @@ export class ArtifactStore {
     }
     this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
     const headers = new Headers();
-    headers.set('content-type', rec.mimeType || 'application/octet-stream');
-    headers.set('cache-control', 'private, max-age=604800');
+    const passiveMime = passiveInlineMime(rec.mimeType);
+    headers.set('content-type', passiveMime || 'application/octet-stream');
+    headers.set('cache-control', 'no-store');
+    headers.set('referrer-policy', 'no-referrer');
+    headers.set('cross-origin-resource-policy', 'same-origin');
     headers.set('x-cosyncing-artifact-key', rec.artifactKey);
     headers.set('x-cosyncing-content-hash', rec.contentHash);
     headers.set('x-content-type-options', 'nosniff');
-    if (isHtmlMime(rec.mimeType)) {
-      const nonce = randomBytes(18).toString('base64url');
-      const html = injectCosyncingBridge(readFileSync(rec.filePath, 'utf8'), rec.artifactKey, nonce);
-      headers.set(
-        'content-security-policy',
-        [
-          "default-src 'none'",
-          `script-src 'nonce-${nonce}'`,
-          "style-src 'self' 'unsafe-inline'",
-          "img-src 'self' data: blob:",
-          "connect-src 'none'",
-          "frame-src 'none'",
-          "object-src 'none'",
-          "base-uri 'none'",
-          "form-action 'none'",
-        ].join('; '),
-      );
-      headers.set('cache-control', 'no-store');
-      headers.set('x-frame-options', 'SAMEORIGIN');
-      headers.set('content-length', String(Buffer.byteLength(html)));
-      return new Response(html, { headers });
+    if (!passiveMime) {
+      const safeName = exportFileName(rec.name || 'artifact', 'bin');
+      headers.set('content-disposition', `attachment; filename="${safeName}"`);
+      headers.set('content-security-policy', 'sandbox');
     }
     headers.set('content-length', String(rec.size));
     return new Response(Bun.file(rec.filePath), { headers });
@@ -827,6 +856,7 @@ export class ArtifactStore {
     message: AgentMessage & { type: 'file-artifact' },
     rec: ArtifactRecord,
     brokerUrl?: string,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
   ): AgentMessage & { type: 'file-artifact' } {
     const { url: _url, interactionPolicy: _interactionPolicy, ...rest } = message;
     return {
@@ -837,7 +867,14 @@ export class ArtifactStore {
       size: message.size ?? rec.size,
       artifactKey: rec.artifactKey,
       contentHash: rec.contentHash,
-      fetchUrl: this.signedUrl(session.tool, session.id, rec.artifactKey, brokerUrl),
+      fetchUrl: this.signedUrl(
+        session.tool,
+        session.id,
+        rec.artifactKey,
+        brokerUrl,
+        SIGNATURE_TTL_MS,
+        authorization,
+      ),
       interactionPolicy: this.interactionPolicy(rec),
     };
   }
@@ -846,34 +883,45 @@ export class ArtifactStore {
     return { mode: 'display-only', bridgeVersion: 1, schemaVersion: 1, allowedActions: [] };
   }
 
-  private isStructured(record: ArtifactRecord): boolean {
-    return record.deliveryClass !== 'export-attachment' && isHtmlMime(record.mimeType);
+  private interactionPolicy(_record: ArtifactRecord): ArtifactInteractionPolicy {
+    // Active artifact formats are delivered only as opaque attachments. Do not
+    // advertise a JavaScript bridge that the hardened delivery path cannot and
+    // must not execute.
+    return this.displayOnlyPolicy();
   }
 
-  private interactionPolicy(record: ArtifactRecord): ArtifactInteractionPolicy {
-    if (!this.isStructured(record)) return this.displayOnlyPolicy();
-    const expiresAt = Date.now() + INTERACTION_SIGNATURE_TTL_MS;
-    return {
-      mode: 'structured',
-      bridgeVersion: 1,
-      schemaVersion: 1,
-      allowedActions: [...STRUCTURED_ACTIONS],
-      expiresAt,
-      interactionRef: `v1.${expiresAt}.${this.signInteraction(record, expiresAt)}`,
-    };
-  }
-
-  private signedUrl(tool: string, sessionId: string, artifactKey: string, _brokerUrl = this.brokerUrl, ttlMs = SIGNATURE_TTL_MS): string {
-    const expires = Date.now() + ttlMs;
-    const sig = this.sign(tool, sessionId, artifactKey, expires);
+  private signedUrl(
+    tool: string,
+    sessionId: string,
+    artifactKey: string,
+    _brokerUrl = this.brokerUrl,
+    ttlMs = SIGNATURE_TTL_MS,
+    authorization = INTERNAL_ARTIFACT_SCOPE,
+  ): string {
+    const expires = Date.now() + Math.min(ttlMs, SIGNATURE_TTL_MS);
+    const sig = this.sign(tool, sessionId, artifactKey, expires, authorization);
     const path = `/api/sessions/${safePart(tool)}/${safePart(sessionId)}/artifact/${safePart(artifactKey)}`;
     const query = new URLSearchParams({ expires: String(expires), sig });
     return `${path}?${query}`;
   }
 
-  private sign(tool: string, sessionId: string, artifactKey: string, expires: number): string {
+  private sign(
+    tool: string,
+    sessionId: string,
+    artifactKey: string,
+    expires: number,
+    authorization: ArtifactAuthorizationScope,
+  ): string {
     return createHmac('sha256', this.secret)
-      .update(`${this.brokerSource}\0${tool}\0${sessionId}\0${artifactKey}\0${expires}`)
+      .update([
+        this.brokerSource,
+        tool,
+        sessionId,
+        artifactKey,
+        String(expires),
+        authorization.principalId,
+        String(authorization.authGeneration),
+      ].join('\0'))
       .digest('base64url');
   }
 
@@ -892,10 +940,17 @@ export class ArtifactStore {
       .digest('base64url');
   }
 
-  private verify(tool: string, sessionId: string, artifactKey: string, expires: number, sig: string): boolean {
+  private verify(
+    tool: string,
+    sessionId: string,
+    artifactKey: string,
+    expires: number,
+    sig: string,
+    authorization: ArtifactAuthorizationScope,
+  ): boolean {
     try {
       const a = Buffer.from(sig);
-      const b = Buffer.from(this.sign(tool, sessionId, artifactKey, expires));
+      const b = Buffer.from(this.sign(tool, sessionId, artifactKey, expires, authorization));
       return a.length === b.length && timingSafeEqual(a, b);
     } catch {
       return false;

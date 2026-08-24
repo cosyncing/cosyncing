@@ -460,7 +460,9 @@ export async function runPairCommand(
       options.stdout.write(
         `${fit.fits ? 'Scan' : 'Open'} before ${offer.expiresAt}. This pairing offer is one-use and expires in five minutes.\n`,
       );
-      options.stdout.write('Warning: a paired device receives a revocable credential with full broker API access in v1.\n');
+      options.stdout.write(
+        'A paired device receives a revocable credential for session observation, control, and file transfer; owner operations stay local.\n',
+      );
     };
     let offer = await createPairingOffer(dependencies, access, options.clientLabel, brokerUrl);
 
@@ -476,7 +478,7 @@ export async function runPairCommand(
           // after the machine-readable output advances to schemaVersion 2.
           advertisedUrl: brokerUrl,
         } : {}),
-        tokenScope: 'full-broker-api-v1',
+        tokenScope: 'observe-drive-files-v1',
       }, null, 2)}\n`);
       return { exitCode: 0, detailCode: 'pairing-created' };
     }
@@ -503,7 +505,7 @@ export async function runPairCommand(
             expiresAt: offer.expiresAt,
             brokerUrl,
             advertisedUrl: brokerUrl,
-            tokenScope: 'full-broker-api-v1',
+            tokenScope: 'observe-drive-files-v1',
           }, null, 2)}\n`);
           return { exitCode: 0, detailCode: 'pairing-accepted' };
         }
@@ -576,7 +578,7 @@ export async function runDevicesListCommand(
     } else if (peers.length === 0) {
       options.stdout.write('No paired devices.\n');
     } else {
-      options.stdout.write('Paired devices (v1 credentials have full broker API access):\n');
+      options.stdout.write('Paired devices (observe, drive, and file access):\n');
       for (const peer of peers) {
         options.stdout.write(`- ${terminalSafeText(peer.peerId)}${peer.label ? ` (${terminalSafeText(peer.label)})` : ''}${peer.acceptedAt ? ` — paired ${terminalSafeText(peer.acceptedAt)}` : ''}\n`);
       }
@@ -590,7 +592,7 @@ export async function runDevicesListCommand(
 async function defaultConfirmRevoke(peerId: string): Promise<boolean> {
   const prompts = await import('@clack/prompts');
   const answer = await prompts.confirm({
-    message: `Revoke full broker access for ${terminalSafeText(peerId)}?`,
+    message: `Revoke broker access for ${terminalSafeText(peerId)}?`,
     initialValue: false,
   });
   return !prompts.isCancel(answer) && answer === true;

@@ -249,52 +249,54 @@ void main() {
         expect(bounded.state, SessionConnectionState.reconnecting);
       });
 
-      test('uses the legacy query only for a pre-ticket broker', () async {
-        final dio = Dio();
-        var ticketRequests = 0;
-        dio.interceptors.add(
-          InterceptorsWrapper(
-            onRequest: (options, handler) {
-              if (options.path.endsWith('/api/ws-auth-tickets')) {
-                ticketRequests += 1;
-              }
-              handler.resolve(
-                Response<Map<String, dynamic>>(
-                  requestOptions: options,
-                  statusCode: 200,
-                  data: {
-                    'ok': true,
-                    'contract': {'revision': 15},
-                  },
-                ),
-              );
+      test(
+        'refuses a revision 15 broker without putting a credential in a URL',
+        () async {
+          final dio = Dio();
+          var ticketRequests = 0;
+          var socketUrls = 0;
+          dio.interceptors.add(
+            InterceptorsWrapper(
+              onRequest: (options, handler) {
+                if (options.path.endsWith('/api/ws-auth-tickets')) {
+                  ticketRequests += 1;
+                }
+                handler.resolve(
+                  Response<Map<String, dynamic>>(
+                    requestOptions: options,
+                    statusCode: 200,
+                    data: {
+                      'ok': true,
+                      'contract': {'revision': 15},
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+          final legacy = SessionConnection(
+            resolver: EndpointResolver(
+              baseUrl: 'https://old-broker.example.com',
+              token: 'rollout-only-secret',
+            ),
+            tool: 'codex',
+            sessionId: 'legacy-session',
+            dio: dio,
+            adapterFactory: (_) {
+              socketUrls += 1;
+              return FakeWebSocketAdapter();
             },
-          ),
-        );
-        String? legacyUrl;
-        final legacy = SessionConnection(
-          resolver: EndpointResolver(
-            baseUrl: 'https://old-broker.example.com',
-            token: 'rollout-only-secret',
-          ),
-          tool: 'codex',
-          sessionId: 'legacy-session',
-          dio: dio,
-          adapterFactory: (url) {
-            legacyUrl = url;
-            return FakeWebSocketAdapter();
-          },
-        );
-        addTearDown(legacy.dispose);
+          );
+          addTearDown(legacy.dispose);
 
-        await legacy.connect();
+          await legacy.connect();
 
-        expect(ticketRequests, 0);
-        expect(
-          Uri.parse(legacyUrl!).queryParameters['token'],
-          'rollout-only-secret',
-        );
-      });
+          expect(ticketRequests, 0);
+          expect(socketUrls, 0);
+          expect(legacy.lastConnectionError, isA<UnsupportedError>());
+          expect(legacy.state, SessionConnectionState.reconnecting);
+        },
+      );
 
       test(
         'refuses revision 14 without putting a credential in a URL',
@@ -346,7 +348,8 @@ void main() {
       );
 
       test(
-        'automatic reconnect crosses revision 15 to ticket authentication',
+        'automatic reconnect starts after revision 15 upgrades to '
+        'ticket authentication',
         () async {
           final dio = Dio();
           var brokerRevision = 15;
@@ -403,14 +406,11 @@ void main() {
           addTearDown(upgrading.dispose);
 
           await upgrading.connect();
-          expect(
-            Uri.parse(streamUrls.single).queryParameters['token'],
-            'rollout-secret',
-          );
+          expect(streamUrls, isEmpty);
           expect(ticketRequests, 0);
+          expect(upgrading.lastConnectionError, isA<UnsupportedError>());
 
           brokerRevision = 16;
-          adapters.single.simulateDisconnect();
           await Future<void>.delayed(const Duration(milliseconds: 1200));
           await flush();
 
@@ -424,7 +424,7 @@ void main() {
       );
 
       test(
-        'failed ticket reconnect re-probes a revision 15 rollback',
+        'failed ticket reconnect refuses a revision 15 rollback',
         () async {
           final dio = Dio();
           var brokerRevision = 16;
@@ -502,11 +502,9 @@ void main() {
 
           expect(healthRequests, 2);
           expect(ticketRequests, 2);
-          expect(
-            Uri.parse(streamUrls.last).queryParameters['token'],
-            'rollback-secret',
-          );
-          expect(rollingBack.state, SessionConnectionState.connected);
+          expect(streamUrls, hasLength(1));
+          expect(rollingBack.lastConnectionError, isA<UnsupportedError>());
+          expect(rollingBack.state, SessionConnectionState.reconnecting);
         },
       );
 

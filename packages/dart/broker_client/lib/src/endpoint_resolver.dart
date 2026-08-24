@@ -218,13 +218,6 @@ class EndpointResolver {
     return _appendQuery(agentRuntimeUpdatesEndpoint, params);
   }
 
-  /// Builds the Tokdash quota endpoint with an optional localhost base URL.
-  String tokdashQuotaEndpointFor({String? base}) {
-    final params = <String, String>{};
-    if (base != null) params['base'] = base;
-    return _appendQuery(tokdashQuotaEndpoint, params);
-  }
-
   /// Create session endpoint for a specific tool.
   String createSessionEndpoint(String tool) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}';
@@ -259,6 +252,10 @@ class EndpointResolver {
   /// Artifact endpoint.
   String artifactEndpoint(String tool, String id, String artifactId) =>
       '$baseUrl/api/sessions/${Uri.encodeComponent(tool)}/${Uri.encodeComponent(id)}/artifact/${Uri.encodeComponent(artifactId)}';
+
+  /// Authenticated short-lived artifact ticket refresh endpoint.
+  String artifactTicketEndpoint(String tool, String id, String artifactId) =>
+      '${artifactEndpoint(tool, id, artifactId)}/ticket';
 
   /// Session filesystem listing endpoint.
   String fsDirectoryEndpoint(String tool, String id) =>

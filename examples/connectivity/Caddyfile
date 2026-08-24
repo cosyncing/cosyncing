@@ -1,5 +1,20 @@
 # Replace the site address. Caddy owns TLS and this public listener.
 cosy.example.com {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	request_body {
+		max_size 64MB
+	}
+
+	# Stock Caddy has no built-in request-rate limiter. Put this site behind an
+	# identity-aware/rate-limiting ingress or install and configure a reviewed
+	# rate-limit module before exposing it to an unrestricted public network.
+	# Access logging is intentionally not enabled: request targets can contain
+	# short-lived WebSocket/artifact tickets and one-use pairing IDs.
 	reverse_proxy 127.0.0.1:7734 {
 		stream_close_delay 5m
 	}

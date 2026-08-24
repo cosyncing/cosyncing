@@ -40,12 +40,29 @@ jobs:
       - name: Create and start Android emulator
         shell: bash
         run: |
-          sdkmanager "platform-tools" "emulator" "platforms;android-35" "system-images;android-35;google_apis;x86_64"
-          printf 'no\n' | avdmanager create avd --force --name cosyncing-ci --package "system-images;android-35;google_apis;x86_64"
-          "$ANDROID_HOME/emulator/emulator" -avd cosyncing-ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
-          adb wait-for-device
-          timeout 300 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
-          adb shell input keyevent 82
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          test -n "$sdk_root"
+          sdkmanager_path="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          avdmanager_path="$sdk_root/cmdline-tools/latest/bin/avdmanager"
+          emulator_path="$sdk_root/emulator/emulator"
+          adb_path="$sdk_root/platform-tools/adb"
+          for executable in "$sdkmanager_path" "$avdmanager_path" "$emulator_path" "$adb_path"; do
+            test -x "$executable"
+          done
+
+          "$sdkmanager_path" "platform-tools" "emulator" "platforms;android-35" "system-images;android-35;google_apis;x86_64"
+          printf 'no\n' | "$avdmanager_path" create avd --force --name cosyncing-ci --package "system-images;android-35;google_apis;x86_64"
+          "$emulator_path" -avd cosyncing-ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
+          "$adb_path" wait-for-device
+          boot_deadline=$((SECONDS + 300))
+          until [[ "$("$adb_path" shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" == 1 ]]; do
+            if ((SECONDS >= boot_deadline)); then
+              "$adb_path" devices -l
+              exit 1
+            fi
+            sleep 2
+          done
+          "$adb_path" shell input keyevent 82
       - run: flutter test integration_test/adaptive_shell_test.dart -d emulator-5554
 
   apple:

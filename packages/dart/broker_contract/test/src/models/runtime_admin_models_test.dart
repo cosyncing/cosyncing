@@ -72,6 +72,10 @@ void main() {
         final response = BrokerHealthResponse.fromJson({
           'ok': true,
           'machine': 'dev-machine',
+          'principal': {
+            'kind': 'peer',
+            'roles': ['observe', 'files'],
+          },
           'status': 'critical',
           'checkedAt': 1730011111111,
           'components': {
@@ -96,6 +100,9 @@ void main() {
         });
 
         expect(response.status, 'critical');
+        expect(response.principalKind, 'peer');
+        expect(response.principalRoles, ['observe', 'files']);
+        expect(response.ownerOperationsAvailable, isFalse);
         expect(response.checkedAt, 1730011111111);
         expect(response.components, hasLength(3));
         expect(response.components['state-filesystem']!.detailCodes, [

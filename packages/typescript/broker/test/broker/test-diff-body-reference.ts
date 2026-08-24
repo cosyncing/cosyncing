@@ -56,7 +56,11 @@ async function main() {
     const key = url.pathname.split('/').pop()!;
     const served = store.serve('codex', 'sess-1', decodeURIComponent(key), url.searchParams.get('expires'), url.searchParams.get('sig'));
     check('served body is byte-identical', served.status === 200 && (await served.text()) === body);
-    check('served content-type is text/x-diff + content-hash header matches', served.headers.get('content-type')?.startsWith('text/x-diff') === true && served.headers.get('x-cosyncing-content-hash') === ref.contentHash);
+    check('diff is a no-store attachment with the expected content hash',
+      served.headers.get('content-type') === 'application/octet-stream'
+        && served.headers.get('content-disposition')?.startsWith('attachment;') === true
+        && served.headers.get('cache-control') === 'no-store'
+        && served.headers.get('x-cosyncing-content-hash') === ref.contentHash);
 
     // 2. Idempotent + durable across restart (content-addressed blob persists).
     const ref2 = store.stashDiff('codex', 'sess-1', 'sess-1:call-1', body, 'http://broker.default:7734');
