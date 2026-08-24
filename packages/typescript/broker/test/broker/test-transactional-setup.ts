@@ -1824,11 +1824,11 @@ try {
     });
     const peerDoctor = inspection.doctor.sections.flatMap((section) => section.checks)
       .find((candidate) => candidate.id === 'state.schema.peers');
-    check('setup transactionally tightens a valid owner-held legacy peers file before committing',
+    check('setup tightens legacy peer state while doctor keeps the pending security migration visible',
       complete.status === 'complete'
         && complete.actions.includes('durable-state.permissions')
         && (statSync(peers).mode & 0o777) === 0o600
-        && peerDoctor?.status === 'pass'
+        && peerDoctor?.status === 'warn'
         && inspectInstallState(join(machine, '.cosyncing')).committed,
       `${complete.status}:mode=${(statSync(peers).mode & 0o777).toString(8)} doctor=${peerDoctor?.status}`);
   }

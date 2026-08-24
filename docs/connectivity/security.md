@@ -54,6 +54,29 @@ Before exposing the broker:
 - Patch the proxy, tunnel, VPN, and host OS. Their lifecycle is independent of
   `cosy setup`, `repair`, and `uninstall`.
 
+## Revision-17 security migration
+
+Revision 16 did not record enough provenance to prove that an existing peer,
+schedule, or push destination was owner-authorized. On first revision-17
+startup, the broker therefore:
+
+- invalidates every revision-16 paired credential and requires re-pairing;
+- preserves active legacy schedules for inspection but cancels them before the
+  schedule runner starts; and
+- drops legacy push registrations so current clients can register replacements.
+
+These migrations are fail-closed and idempotent. If a migrated security store
+cannot be written, the broker does not start or advertise revision-17 readiness.
+An old broker restored after a failed revision-17 startup cannot reactivate the
+invalidated credentials or delayed work.
+
+If a revision-16 peer may have been compromised, an upgrade alone does not
+restore trust in commands or processes that already ran. Remove public ingress,
+rotate the owner credential through the supported setup or repair procedure,
+upgrade, and re-pair only known devices. Audit canceled schedules, agent state,
+hooks, running processes, and workspace changes. Rebuild the installation or
+host when its integrity cannot be established.
+
 ## Source-development brokers
 
 The unconfigured source runtime retains a tokenless loopback mode for local

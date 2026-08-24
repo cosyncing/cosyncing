@@ -127,9 +127,26 @@ export class DeviceWakeCoalescer<TTimer = ReturnType<typeof setTimeout>> {
   }
 }
 
-interface WakeStoreFile {
+interface LegacyWakeStoreFile {
   version: 1;
+  registrations: unknown[];
+}
+
+interface WakeStoreFile {
+  version: 2;
   registrations: WakeRegistration[];
+}
+
+export const WAKE_REGISTRATION_GLOBAL_MAX = 256;
+export const WAKE_REGISTRATION_PEER_MAX = 4;
+const WAKE_REGISTRATION_MUTATIONS_PER_MINUTE = 30;
+
+export interface WakePushRegistryOptions {
+  now?: () => number;
+  isPeerGenerationActive?: (peerId: string, authGeneration: number) => boolean;
+  globalMax?: number;
+  peerMax?: number;
+  mutationsPerMinute?: number;
 }
 
 export class WakePushError extends Error {
@@ -145,9 +162,20 @@ export class WakePushError extends Error {
 export class WakePushRegistry {
   private readonly path: string;
   private readonly registrations = new Map<string, WakeRegistration>();
+  private readonly mutationWindows = new Map<string, { startedAt: number; count: number }>();
+  private readonly now: () => number;
+  private readonly isPeerGenerationActive: (peerId: string, authGeneration: number) => boolean;
+  private readonly globalMax: number;
+  private readonly peerMax: number;
+  private readonly mutationsPerMinute: number;
 
-  constructor(home = setupStateHome()) {
+  constructor(home = setupStateHome(), options: WakePushRegistryOptions = {}) {
     this.path = join(home, 'push-wake-tokens.json');
+    this.now = options.now ?? Date.now;
+    this.isPeerGenerationActive = options.isPeerGenerationActive ?? (() => true);
+    this.globalMax = positiveLimit(options.globalMax, WAKE_REGISTRATION_GLOBAL_MAX);
+    this.peerMax = positiveLimit(options.peerMax, WAKE_REGISTRATION_PEER_MAX);
+    this.mutationsPerMinute = positiveLimit(options.mutationsPerMinute, WAKE_REGISTRATION_MUTATIONS_PER_MINUTE);
     this.load();
   }
 
@@ -157,15 +185,41 @@ export class WakePushRegistry {
     if (!token) throw new WakePushError('BAD_PARAM', 'push token is required');
     if (token.length > 4096) throw new WakePushError('BAD_PARAM', 'push token is too long');
     const requestedDeviceId = normalizeDeviceId(input.deviceId);
+    if (owner.kind === 'peer' && !requestedDeviceId) {
+      throw new WakePushError('BAD_PARAM', 'deviceId is required for paired devices');
+    }
     const deviceId = registrationId(owner, requestedDeviceId);
-    const now = new Date().toISOString();
+    const now = new Date(this.now()).toISOString();
     const prior = this.registrations.get(deviceId);
+    const label = input.label
+      ? String(input.label).trim().slice(0, 80)
+      : prior?.label;
+    if (prior
+      && registrationOwnerEquals(prior.owner, owner)
+      && prior.platform === platform
+      && prior.token === token
+      && prior.label === label) {
+      return publicRegistration(prior);
+    }
+    if (!prior) {
+      if (this.registrations.size >= this.globalMax) {
+        throw new WakePushError('BAD_PARAM', 'push registration limit reached', 429);
+      }
+      if (owner.kind === 'peer') {
+        const peerRegistrations = [...this.registrations.values()]
+          .filter((registration) => registrationOwnerEquals(registration.owner, owner)).length;
+        if (peerRegistrations >= this.peerMax) {
+          throw new WakePushError('BAD_PARAM', 'paired-device push registration limit reached', 429);
+        }
+      }
+    }
+    this.assertMutationAllowed(owner);
     const registration: WakeRegistration = {
       deviceId,
       owner,
       platform,
       token,
-      ...(input.label ? { label: String(input.label).trim().slice(0, 80) } : prior?.label ? { label: prior.label } : {}),
+      ...(label ? { label } : {}),
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
     };
@@ -183,7 +237,9 @@ export class WakePushRegistry {
 
   /** Broker-internal delivery view. Never return this from an HTTP route or write it to logs. */
   listForDispatch(): WakeRegistration[] {
-    return [...this.registrations.values()].map((registration) => ({ ...registration }));
+    return [...this.registrations.values()]
+      .filter((registration) => this.dispatchable(registration))
+      .map((registration) => ({ ...registration }));
   }
 
   get(deviceId: string, owner: WakeRegistrationOwner): WakeRegistration {
@@ -199,7 +255,9 @@ export class WakePushRegistry {
   getForDispatch(deviceId: string): WakeRegistration {
     const id = normalizeDeviceId(deviceId);
     const registration = id ? this.registrations.get(id) : undefined;
-    if (!registration) throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    if (!registration || !this.dispatchable(registration)) {
+      throw new WakePushError('PUSH_TOKEN_NOT_FOUND', 'push token not found', 404);
+    }
     return registration;
   }
 
@@ -227,25 +285,58 @@ export class WakePushRegistry {
   }
 
   private load(): void {
+    if (!existsSync(this.path)) return;
+    let parsed: LegacyWakeStoreFile | WakeStoreFile;
     try {
-      if (!existsSync(this.path)) return;
-      const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as WakeStoreFile;
-      if (parsed.version !== 1 || !Array.isArray(parsed.registrations)) return;
-      for (const raw of parsed.registrations) {
-        const normalized = normalizeStored(raw);
-        if (normalized) this.registrations.set(normalized.deviceId, normalized);
-      }
+      parsed = JSON.parse(readFileSync(this.path, 'utf8')) as LegacyWakeStoreFile | WakeStoreFile;
     } catch {
       this.registrations.clear();
+      return;
+    }
+    if (!Array.isArray(parsed.registrations)) return;
+    if (parsed.version === 1) {
+      // Revision-16 records do not say which credential registered the endpoint. They cannot be
+      // promoted to owner authority safely, so persist an empty v2 store before startup continues.
+      this.save();
+      return;
+    }
+    if (parsed.version !== 2) return;
+    for (const raw of parsed.registrations) {
+      const normalized = normalizeStored(raw);
+      if (normalized) this.registrations.set(normalized.deviceId, normalized);
     }
   }
 
   private save(): void {
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: 1, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n');
+    writeFileSync(tmp, JSON.stringify({ version: 2, registrations: [...this.registrations.values()] } satisfies WakeStoreFile, null, 2) + '\n', { mode: 0o600 });
     renameSync(tmp, this.path);
   }
+
+  private dispatchable(registration: WakeRegistration): boolean {
+    return registration.owner.kind === 'owner'
+      || this.isPeerGenerationActive(registration.owner.peerId, registration.owner.authGeneration);
+  }
+
+  private assertMutationAllowed(owner: WakeRegistrationOwner): void {
+    if (owner.kind !== 'peer') return;
+    const key = `${owner.peerId}:${owner.authGeneration}`;
+    const now = this.now();
+    const window = this.mutationWindows.get(key);
+    if (!window || now - window.startedAt >= 60_000) {
+      this.mutationWindows.set(key, { startedAt: now, count: 1 });
+      return;
+    }
+    if (window.count >= this.mutationsPerMinute) {
+      throw new WakePushError('BAD_PARAM', 'push registration updates are rate limited', 429);
+    }
+    window.count += 1;
+  }
+}
+
+function positiveLimit(value: number | undefined, fallback: number): number {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
 export async function dispatchWakePush(
@@ -352,7 +443,7 @@ function registrationOwnerEquals(a: WakeRegistrationOwner, b: WakeRegistrationOw
 }
 
 function normalizeStoredOwner(raw: unknown): WakeRegistrationOwner {
-  if (!raw || typeof raw !== 'object') return { kind: 'owner' };
+  if (!raw || typeof raw !== 'object') throw new Error('wake-registration-owner-invalid');
   const value = raw as Record<string, unknown>;
   if (value.kind === 'owner') return { kind: 'owner' };
   if (value.kind === 'peer'

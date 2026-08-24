@@ -35,6 +35,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Contract revision 17 requires a revision 17 client because older clients do
   not attach credentials to artifact downloads. Revision 17 clients retain the
   revision 16 broker fallback for client-first rollout.
+- The revision-17 broker invalidates every revision-16 paired credential,
+  cancels active legacy schedules whose creator cannot be proven, and drops
+  ownerless legacy wake registrations. Re-pair devices and let clients recreate
+  wake registrations after upgrade; review canceled schedules before recreating
+  any required automation.
 - The broker now has a strict loopback-only listener and configuration schema 2;
   remote connectivity is no longer configured, diagnosed, repaired, or removed
   by cosyncing.
@@ -58,7 +63,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   references are never authenticated or refreshed.
 - Push registrations are scoped to their owner or exact peer generation, peer
   IDs retain monotonic authentication generations across re-pairing, and
-  malformed or empty stored role sets fail closed.
+  malformed or empty stored role sets fail closed. Peer registrations require
+  stable device IDs and enforce per-peer, global, and write-rate limits.
 - Remote Tokdash reads use only the locally configured upstream and no longer
   accept a caller-selected loopback URL.
 - Transport envelopes reject unknown recipients and enforce bounded field

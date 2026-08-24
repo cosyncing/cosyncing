@@ -187,7 +187,7 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
   chmodSync(piCredentialFile, 0o600);
   process.env.COSYNCING_PI_INTEGRATION_FILE = piCredentialFile;
   writeFileSync(join(home, 'transport-peers.json'), JSON.stringify({
-    version: 1,
+    version: 2,
     peers: [{
       peerId: 'peer-auth-test',
       identityPublicKey: 'fixture-identity-key',
@@ -200,6 +200,7 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
       acceptedAt: new Date(0).toISOString(),
       authGeneration: 1,
       roles: ['observe', 'drive', 'files'],
+      securityRevision: 17,
     }],
   }), { mode: 0o600 });
 });

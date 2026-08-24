@@ -72,7 +72,7 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/session-roster-deltas', methods: ['GET'], policy: OBSERVE },
   { route: '/api/sessions', methods: ['GET'], policy: OBSERVE },
   { route: '/api/sessions/{id}', methods: ['POST'], policy: DRIVE },
-  { route: '/api/sessions/{id}/{id}/artifact/{id}', methods: ['GET'], policy: FILES },
+  { route: '/api/sessions/{id}/{id}/artifact/{id}', methods: ['GET', 'HEAD'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/artifact/{id}/ticket', methods: ['POST'], policy: OBSERVE_FILES },
   { route: '/api/sessions/{id}/{id}/fs', methods: ['GET'], policy: FILES },
   { route: '/api/sessions/{id}/{id}/fs/read', methods: ['GET'], policy: FILES },

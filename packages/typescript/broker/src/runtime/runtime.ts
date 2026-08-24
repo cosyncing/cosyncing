@@ -162,6 +162,7 @@ import {
   WakePushRegistry,
 } from '../transport/push-wake.ts';
 import { authorizeBrokerRoute } from '../security/route-authorization.ts';
+import { completeRevision17SecurityMigration } from '../security/revision-17-migration.ts';
 import {
   aggregatedMachines,
   fetchPeerMachineRoster,
@@ -963,7 +964,18 @@ const rosterPublication = createRosterPublicationBoundary({
   onReconcileError: (err, info) =>
     console.error(`${LOG_PREFIX} session-info refresh failed for ${info.tool}:${info.id}`, err),
 });
-wakePush = new WakePushRegistry();
+wakePush = new WakePushRegistry(setupStateHome(), {
+  isPeerGenerationActive: (peerId, authGeneration) =>
+    transportPairings.isPeerGenerationActive(peerId, authGeneration),
+});
+// Complete every revision-17 security-store migration before starting a timer, dispatcher, or
+// HTTP listener. Constructor persistence failures escape module startup, so partial migration can
+// only be retried idempotently and can never advertise a ready contract-17 broker.
+const scheduleStore = new ScheduleStore({
+  onPersistenceError: (error) =>
+    console.error(`${LOG_PREFIX} schedule store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
+});
+completeRevision17SecurityMigration(setupStateHome());
 wakeCoalescer = new DeviceWakeCoalescer({
   dispatch: (registration) => dispatchWakePush(registration),
   onError: (error, registration) =>
@@ -992,10 +1004,6 @@ attentionScheduler.start();
 // ── Scheduled sends (part-3 #50) ─────────────────────────────────────────────
 // Store + timer loop; delivery/notification wiring lives in deliverScheduledSend /
 // recordScheduleOutcomeAttention below (hoisted function declarations).
-const scheduleStore = new ScheduleStore({
-  onPersistenceError: (error) =>
-    console.error(`${LOG_PREFIX} schedule store persistence failed: ${error instanceof Error ? error.message : String(error)}`),
-});
 const scheduleRunner = new ScheduledSendRunner(scheduleStore, {
   deliver: (schedule) => deliverScheduledSend(schedule),
   onOutcome: (schedule, outcome, error) => recordScheduleOutcomeAttention(schedule, outcome, error),

@@ -54,9 +54,24 @@ export class ScheduleMutationError extends Error {
   }
 }
 
-interface ScheduleFile {
+type StoredScheduleAuthority =
+  | { kind: 'owner' }
+  | { kind: 'legacy-unprovenanced' };
+
+interface StoredScheduleRecord extends ScheduleRecord {
+  createdBy: StoredScheduleAuthority;
+  securityRevision: 16 | 17;
+  legacyQuarantinedAt?: number;
+}
+
+interface LegacyScheduleFile {
   version: 1;
-  schedules: ScheduleRecord[];
+  schedules: unknown[];
+}
+
+interface ScheduleFile {
+  version: 2;
+  schedules: StoredScheduleRecord[];
 }
 
 interface WallParts {
@@ -305,7 +320,7 @@ export function nextOccurrence(
 }
 
 function emptyFile(): ScheduleFile {
-  return { version: 1, schedules: [] };
+  return { version: 2, schedules: [] };
 }
 
 function reportPersistenceError(callback: ((error: unknown) => void) | undefined, error: unknown): void {
@@ -318,13 +333,25 @@ function cleanOptional(value: string | null | undefined, maxLength?: number): st
   return cleaned ? (maxLength === undefined ? cleaned : cleaned.slice(0, maxLength)) : undefined;
 }
 
-function readFile(path: string, onPersistenceError?: (error: unknown) => void): ScheduleFile {
+function readFile(
+  path: string,
+  now: () => number,
+  onPersistenceError?: (error: unknown) => void,
+): { state: ScheduleFile; migrated: boolean } {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<ScheduleFile>;
-    if (raw.version !== 1 || !Array.isArray(raw.schedules)) throw new Error('unsupported schedule store schema');
-    const schedules = raw.schedules.map((value) => {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<LegacyScheduleFile | ScheduleFile>;
+    if ((raw.version !== 1 && raw.version !== 2) || !Array.isArray(raw.schedules)) {
+      throw new Error('unsupported schedule store schema');
+    }
+    const legacy = raw.version === 1;
+    const quarantinedAt = now();
+    const schedules = raw.schedules.map((value): StoredScheduleRecord => {
       if (!value || typeof value !== 'object') throw new Error('invalid schedule store record');
-      const schedule = value as ScheduleRecord & { revision?: unknown };
+      const schedule = value as ScheduleRecord & {
+        revision?: unknown;
+        createdBy?: unknown;
+        securityRevision?: unknown;
+      };
       if (typeof schedule.id !== 'string' || typeof schedule.text !== 'string' || !Number.isFinite(schedule.at)) {
         throw new Error('invalid schedule store record');
       }
@@ -332,18 +359,55 @@ function readFile(path: string, onPersistenceError?: (error: unknown) => void): 
       // first revision, but reject malformed present values instead of silently weakening CAS.
       const revision = schedule.revision === undefined ? 1 : schedule.revision;
       if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('invalid schedule revision');
-      return { ...schedule, revision };
+      if (legacy) {
+        const live = schedule.state === 'scheduled' || schedule.state === 'paused';
+        return {
+          ...schedule,
+          revision: live ? revision + 1 : revision,
+          state: live ? 'canceled' : schedule.state,
+          updatedAt: live ? quarantinedAt : schedule.updatedAt,
+          createdBy: { kind: 'legacy-unprovenanced' },
+          securityRevision: 16,
+          ...(live ? { legacyQuarantinedAt: quarantinedAt } : {}),
+        };
+      }
+      if (!isStoredScheduleAuthority(schedule.createdBy)
+        || !storedScheduleProvenanceIsSafe(schedule.createdBy, schedule.securityRevision, schedule.state)) {
+        throw new Error('invalid schedule authorization provenance');
+      }
+      return {
+        ...schedule,
+        revision,
+        createdBy: schedule.createdBy,
+        securityRevision: schedule.securityRevision as 16 | 17,
+      };
     });
-    return { version: 1, schedules };
+    return { state: { version: 2, schedules }, migrated: legacy };
   } catch (error) {
-    if ((error as { code?: string })?.code === 'ENOENT') return emptyFile();
+    if ((error as { code?: string })?.code === 'ENOENT') return { state: emptyFile(), migrated: false };
     // Preserve malformed or unreadable state for diagnosis instead of letting the next successful
     // create silently overwrite it. Recovery starts from an empty in-memory list.
     const backup = `${path}.corrupt-${Date.now()}-${randomUUID()}`;
     try { renameSync(path, backup); } catch { /* retain the original in place if backup fails */ }
     reportPersistenceError(onPersistenceError, error);
-    return emptyFile();
+    return { state: emptyFile(), migrated: false };
   }
+}
+
+function isStoredScheduleAuthority(raw: unknown): raw is StoredScheduleAuthority {
+  if (!raw || typeof raw !== 'object') return false;
+  const kind = (raw as { kind?: unknown }).kind;
+  return kind === 'owner' || kind === 'legacy-unprovenanced';
+}
+
+function storedScheduleProvenanceIsSafe(
+  authority: StoredScheduleAuthority,
+  securityRevision: unknown,
+  state: ScheduleRecord['state'],
+): boolean {
+  return authority.kind === 'owner'
+    ? securityRevision === 17
+    : securityRevision === 16 && state === 'canceled';
 }
 
 export interface ScheduleStoreOptions {
@@ -365,7 +429,11 @@ export class ScheduleStore {
     this.now = options.now ?? Date.now;
     this.idFactory = options.idFactory ?? randomUUID;
     this.onPersistenceError = options.onPersistenceError;
-    this.state = readFile(this.file, this.onPersistenceError);
+    const loaded = readFile(this.file, this.now, this.onPersistenceError);
+    this.state = loaded.state;
+    // Persist the quarantine before a runner can observe this store. A write failure propagates
+    // from the constructor and prevents the broker from advertising revision-17 readiness.
+    if (loaded.migrated) this.save();
   }
 
   list(): ScheduleRecord[] {
@@ -411,7 +479,7 @@ export class ScheduleStore {
       const at = cron ? nextCronOccurrence(cron, now) : Number(input.at);
       if (!Number.isFinite(at) || at <= 0) throw new ScheduleMutationError('SCHEDULE_INVALID', 'at is required when cron is absent');
       const retryPolicy = input.retryPolicy ? validateRetryPolicy(input.retryPolicy) : undefined;
-      const record: ScheduleRecord = {
+      const record: StoredScheduleRecord = {
         ...input,
         at,
         ...(cron ? { cron } : {}),
@@ -421,6 +489,8 @@ export class ScheduleStore {
         state: 'scheduled',
         createdAt: now,
         updatedAt: now,
+        createdBy: { kind: 'owner' },
+        securityRevision: 17,
       };
       if (record.repeat) {
         record.timeZone = record.timeZone && isValidTimeZone(record.timeZone)
@@ -714,7 +784,7 @@ export class ScheduleStore {
    *  must never claim a schedule was created/canceled/removed when its durable write failed. */
   private persistMutation<T>(mutate: () => T): T {
     const before: ScheduleFile = {
-      version: 1,
+      version: 2,
       schedules: this.state.schedules.map((schedule) => ({ ...schedule })),
     };
     try {

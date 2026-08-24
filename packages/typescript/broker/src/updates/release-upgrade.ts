@@ -14,6 +14,7 @@ import {
   durableStateLayout,
   inspectDurableSchemas,
   isRuntimeCompatibleConfigV1,
+  isRuntimeSecurityMigrationV1,
 } from '../security/durable-state.ts';
 import {
   inspectInstallState,
@@ -812,7 +813,10 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         // Config v1 remains an intentionally supported runtime input. An upgrade must not require
         // persisting v2 before switching binaries, because the previous service needs v1 intact if
         // candidate health fails and rollback restores it.
-        && !isRuntimeCompatibleConfigV1(store));
+        && !isRuntimeCompatibleConfigV1(store)
+        // Revision 17 owns these fail-closed migrations at startup. Allow the candidate to reach
+        // that boundary; the old schema is never accepted as current authorization state.
+        && !isRuntimeSecurityMigrationV1(store));
     if (schemaProblems.length > 0) {
       return result('blocked', 1, 'upgrade-schema-repair-required', 'Repair or migrate durable state before changing binary versions.', fromVersion, recovered);
     }

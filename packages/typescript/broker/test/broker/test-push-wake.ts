@@ -6,10 +6,15 @@
  */
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatchWakePush, WakePushRegistry } from '../../src/transport/push-wake.ts';
+import {
+  dispatchWakePush,
+  WAKE_REGISTRATION_PEER_MAX,
+  WakePushError,
+  WakePushRegistry,
+} from '../../src/transport/push-wake.ts';
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -48,6 +53,97 @@ async function run(name: string, fn: () => Promise<void> | void): Promise<void> 
 
 let failures = 0;
 const TOKEN = 'w7-push-token';
+
+await run('legacy ownerless wake registrations are dropped before dispatch', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-legacy-'));
+  const path = join(home, 'push-wake-tokens.json');
+  try {
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      registrations: [{
+        deviceId: 'attacker-phone',
+        platform: 'fcm',
+        token: 'legacy-attacker-token',
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      }],
+    }), { mode: 0o600 });
+    const registry = new WakePushRegistry(home);
+    assert.deepEqual(registry.list({ kind: 'owner' }), []);
+    assert.deepEqual(registry.listForDispatch(), []);
+    assert.throws(() => registry.getForDispatch('attacker-phone'), /not found/i);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { version: 2, registrations: [] });
+    const replacement = registry.register({ deviceId: 'owner-phone', platform: 'fcm', token: 'new-token' }, { kind: 'owner' });
+    assert.equal(replacement.deviceId, 'owner-phone');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+await run('peer wake registrations require stable ids, are bounded, idempotent, and generation-checked', () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-bounds-'));
+  let active = true;
+  let now = Date.parse('2026-08-24T00:00:00Z');
+  try {
+    const registry = new WakePushRegistry(home, {
+      now: () => now,
+      isPeerGenerationActive: (peerId, generation) => active && peerId === 'peer-a' && generation === 7,
+    });
+    const peer = { kind: 'peer' as const, peerId: 'peer-a', authGeneration: 7 };
+    assert.throws(
+      () => registry.register({ platform: 'fcm', token: 'missing-id' }, peer),
+      (error) => error instanceof WakePushError && error.status === 400,
+    );
+    const first = registry.register({ deviceId: 'phone-0', platform: 'fcm', token: 'token-0' }, peer);
+    const path = join(home, 'push-wake-tokens.json');
+    const beforeIdempotent = readFileSync(path, 'utf8');
+    now += 1_000;
+    const repeated = registry.register({ deviceId: 'phone-0', platform: 'fcm', token: 'token-0' }, peer);
+    assert.deepEqual(repeated, first);
+    assert.equal(readFileSync(path, 'utf8'), beforeIdempotent, 'an unchanged registration does not rewrite durable state');
+    for (let i = 1; i < WAKE_REGISTRATION_PEER_MAX; i++) {
+      registry.register({ deviceId: `phone-${i}`, platform: 'fcm', token: `token-${i}` }, peer);
+    }
+    assert.throws(
+      () => registry.register({ deviceId: 'phone-over-limit', platform: 'fcm', token: 'extra' }, peer),
+      (error) => error instanceof WakePushError && error.status === 429,
+    );
+    assert.equal(registry.listForDispatch().length, WAKE_REGISTRATION_PEER_MAX);
+    active = false;
+    assert.deepEqual(registry.listForDispatch(), [], 'inactive peer generations are never dispatched');
+    assert.throws(() => registry.getForDispatch(first.deviceId), /not found/i);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+await run('wake registration global and write-rate limits return 429 without eviction', () => {
+  const globalHome = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-global-limit-'));
+  const rateHome = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-rate-limit-'));
+  try {
+    const globalRegistry = new WakePushRegistry(globalHome, { globalMax: 2 });
+    globalRegistry.register({ deviceId: 'owner-a', platform: 'fcm', token: 'a' }, { kind: 'owner' });
+    globalRegistry.register({ deviceId: 'owner-b', platform: 'fcm', token: 'b' }, { kind: 'owner' });
+    assert.throws(
+      () => globalRegistry.register({ deviceId: 'owner-c', platform: 'fcm', token: 'c' }, { kind: 'owner' }),
+      (error) => error instanceof WakePushError && error.status === 429,
+    );
+    assert.equal(globalRegistry.list({ kind: 'owner' }).length, 2);
+
+    const peer = { kind: 'peer' as const, peerId: 'peer-rate', authGeneration: 1 };
+    const rateRegistry = new WakePushRegistry(rateHome, { mutationsPerMinute: 2 });
+    rateRegistry.register({ deviceId: 'phone', platform: 'fcm', token: 'one' }, peer);
+    rateRegistry.register({ deviceId: 'phone', platform: 'fcm', token: 'two' }, peer);
+    assert.throws(
+      () => rateRegistry.register({ deviceId: 'phone', platform: 'fcm', token: 'three' }, peer),
+      (error) => error instanceof WakePushError && error.status === 429,
+    );
+    assert.match(readFileSync(join(rateHome, 'push-wake-tokens.json'), 'utf8'), /"token": "two"/);
+  } finally {
+    rmSync(globalHome, { recursive: true, force: true });
+    rmSync(rateHome, { recursive: true, force: true });
+  }
+});
 
 await run('wake registrations are principal-scoped and peer revocation removes only that peer', () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-w7-push-registry-'));

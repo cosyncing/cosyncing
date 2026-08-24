@@ -8,7 +8,13 @@ import {
   normalizePairingBrokerUrl,
   PairingBrokerUrlError,
 } from '../../src/transport/pairing-url.ts';
-import { PairingHttpError, TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
+import { ScheduleStore } from '../../src/scheduling/schedule-store.ts';
+import {
+  completeRevision17SecurityMigration,
+  REVISION_17_SECURITY_MIGRATION_FILE,
+} from '../../src/security/revision-17-migration.ts';
+import { PairingHttpError, tokenHash, TransportPairingRegistry } from '../../src/transport/transport-pairing.ts';
+import { WakePushRegistry } from '../../src/transport/push-wake.ts';
 import { terminalSafeText } from '../../src/cli/operator-commands.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'cosyncing-pairing-'));
@@ -104,20 +110,11 @@ try {
     assert.equal(reloaded.verifyAnyPeerToken(accepted.broker.peerToken), 'unknown');
 
     const peerStorePath = join(renameHome, 'transport-peers.json');
-    const stored = JSON.parse(readFileSync(peerStorePath, 'utf8')) as { peers: Array<Record<string, unknown>> };
+    const stored = JSON.parse(readFileSync(peerStorePath, 'utf8')) as { version: number; peers: Array<Record<string, unknown>> };
     stored.peers[0]!.roles = [];
     writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
     const zeroRoleReload = new TransportPairingRegistry({ home: renameHome });
     assert.deepEqual([...zeroRoleReload.authenticatePeerToken(repaired.broker.peerToken)!.roles], []);
-
-    delete stored.peers[0]!.roles;
-    writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
-    const legacyRoleReload = new TransportPairingRegistry({ home: renameHome });
-    assert.deepEqual(
-      [...legacyRoleReload.authenticatePeerToken(repaired.broker.peerToken)!.roles].sort(),
-      ['drive', 'files', 'observe'],
-      'only a legacy missing role field receives migration defaults',
-    );
 
     stored.peers[0]!.roles = ['invalid-role'];
     writeFileSync(peerStorePath, `${JSON.stringify(stored)}\n`);
@@ -127,11 +124,133 @@ try {
       undefined,
       'malformed stored authorization state must fail closed',
     );
+
+    const legacyStore = structuredClone(stored);
+    legacyStore.version = 1;
+    delete legacyStore.peers[0]!.roles;
+    delete legacyStore.peers[0]!.securityRevision;
+    writeFileSync(peerStorePath, `${JSON.stringify(legacyStore)}\n`);
+    const legacyRoleReload = new TransportPairingRegistry({ home: renameHome });
+    assert.equal(
+      legacyRoleReload.authenticatePeerToken(repaired.broker.peerToken),
+      undefined,
+      'a legacy peer without revision-17 provenance is invalidated instead of receiving roles',
+    );
+    const migrated = JSON.parse(readFileSync(peerStorePath, 'utf8')) as {
+      version: number;
+      peers: Array<{ authGeneration: number; roles: string[]; revokedAt?: string }>;
+    };
+    assert.equal(migrated.version, 2);
+    assert.deepEqual(migrated.peers[0]?.roles, []);
+    assert.ok(migrated.peers[0]?.revokedAt);
+    assert.ok((migrated.peers[0]?.authGeneration ?? 0) > (repairedPrincipal?.authGeneration ?? 0));
   } finally {
     rmSync(renameHome, { recursive: true, force: true });
   }
 
-  console.log('PASS pairing URL, terminal safety, and failure-atomic persistence contracts');
+  // Cross-version adversarial fixture: revision 16 could not prove who created peers, schedules,
+  // or wake destinations. All three stores must become inert before revision-17 startup proceeds.
+  const migrationHome = mkdtempSync(join(tmpdir(), 'cosyncing-revision-17-migration-'));
+  const migrationNow = Date.parse('2026-08-24T12:00:00Z');
+  const legacyPeer = (peerId: string, peerToken: string) => ({
+    peerId,
+    identityPublicKey: `identity-${peerId}`,
+    peerTokenHash: tokenHash(`mailbox-${peerId}`),
+    brokerPeerId: `broker-${peerId}`,
+    brokerPeerTokenHash: tokenHash(peerToken),
+    brokerIdentityPublicKey: `broker-identity-${peerId}`,
+    dataKey: { algorithm: 'AES-256-GCM', bytes: '' },
+    wrappedDataKey: {},
+    acceptedAt: new Date(0).toISOString(),
+    authGeneration: 1,
+  });
+  try {
+    const peerAToken = 'legacy-peer-a-token';
+    const hiddenPeerBToken = 'legacy-hidden-peer-b-token';
+    writeFileSync(join(migrationHome, 'transport-peers.json'), JSON.stringify({
+      version: 1,
+      peers: [legacyPeer('peer-a', peerAToken), legacyPeer('hidden-peer-b', hiddenPeerBToken)],
+    }), { mode: 0o600 });
+    writeFileSync(join(migrationHome, 'schedules.json'), JSON.stringify({
+      version: 1,
+      schedules: [
+        {
+          id: 'legacy-one-shot', revision: 1, kind: 'message', tool: 'codex', sessionId: 'session-a',
+          text: 'legacy delayed command', at: migrationNow + 60_000, state: 'scheduled', createdAt: 1, updatedAt: 1,
+        },
+        {
+          id: 'legacy-repeat', revision: 1, kind: 'new-session', tool: 'codex',
+          text: 'legacy recurring command', at: migrationNow + 60_000, repeat: 'daily', state: 'scheduled',
+          createdAt: 1, updatedAt: 1,
+        },
+      ],
+    }), { mode: 0o600 });
+    writeFileSync(join(migrationHome, 'push-wake-tokens.json'), JSON.stringify({
+      version: 1,
+      registrations: [{
+        deviceId: 'legacy-attacker-phone', platform: 'fcm', token: 'legacy-push-token',
+        createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+      }],
+    }), { mode: 0o600 });
+
+    const pairings = new TransportPairingRegistry({ home: migrationHome, now: () => migrationNow });
+    const wake = new WakePushRegistry(migrationHome, {
+      now: () => migrationNow,
+      isPeerGenerationActive: (peerId, generation) => pairings.isPeerGenerationActive(peerId, generation),
+    });
+    const schedules = new ScheduleStore({ path: join(migrationHome, 'schedules.json'), now: () => migrationNow });
+    completeRevision17SecurityMigration(migrationHome, () => new Date(migrationNow));
+    assert.equal(pairings.authenticatePeerToken(peerAToken), undefined);
+    assert.equal(pairings.authenticatePeerToken(hiddenPeerBToken), undefined);
+    assert.deepEqual(pairings.listPeers(), []);
+    assert.deepEqual(schedules.due(migrationNow + 365 * 24 * 60 * 60_000), []);
+    assert.ok(schedules.list().every((schedule) => schedule.state === 'canceled'));
+    assert.deepEqual(wake.list({ kind: 'owner' }), []);
+    assert.deepEqual(wake.listForDispatch(), []);
+
+    const peerFile = JSON.parse(readFileSync(join(migrationHome, 'transport-peers.json'), 'utf8'));
+    const scheduleFile = JSON.parse(readFileSync(join(migrationHome, 'schedules.json'), 'utf8'));
+    const wakeFile = JSON.parse(readFileSync(join(migrationHome, 'push-wake-tokens.json'), 'utf8'));
+    assert.equal(peerFile.version, 2);
+    assert.ok(peerFile.peers.every((peer: any) => peer.revokedAt && peer.roles.length === 0));
+    assert.equal(scheduleFile.version, 2);
+    assert.ok(scheduleFile.schedules.every((schedule: any) => schedule.createdBy.kind === 'legacy-unprovenanced'));
+    assert.deepEqual(wakeFile, { version: 2, registrations: [] });
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(migrationHome, REVISION_17_SECURITY_MIGRATION_FILE), 'utf8')),
+      { version: 1, securityRevision: 17, completedAt: new Date(migrationNow).toISOString() },
+    );
+
+    const offer = pairings.createOffer();
+    const identity = generateIdentityKeyPair();
+    const exchange = generateX25519KeyPair();
+    const repaired = pairings.accept(offer.pairingId, {
+      peerId: 'peer-a',
+      peerToken: tokenHash('revision-17-peer-token'),
+      identityPublicKey: identity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+    });
+    const principal = pairings.authenticatePeerToken(repaired.broker.peerToken);
+    assert.ok(principal && principal.authGeneration > 2);
+    assert.equal(pairings.revoke('peer-a'), true);
+    assert.equal(pairings.authenticatePeerToken(repaired.broker.peerToken), undefined);
+  } finally {
+    rmSync(migrationHome, { recursive: true, force: true });
+  }
+
+  const markerFailureHome = mkdtempSync(join(tmpdir(), 'cosyncing-revision-17-marker-failure-'));
+  try {
+    mkdirSync(join(markerFailureHome, REVISION_17_SECURITY_MIGRATION_FILE));
+    assert.throws(
+      () => completeRevision17SecurityMigration(markerFailureHome),
+      Error,
+      'a completion-marker write failure must escape startup instead of reporting readiness',
+    );
+  } finally {
+    rmSync(markerFailureHome, { recursive: true, force: true });
+  }
+
+  console.log('PASS pairing, revision-17 migration, and failure-atomic persistence contracts');
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

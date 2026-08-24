@@ -291,7 +291,7 @@ function flushAsync(): Promise<void> {
   }
 }
 
-// ── store: edit is an in-place durable CAS mutation, including legacy migration ──
+// ── store: edit is an in-place durable CAS mutation; unprovenanced v1 work is quarantined ──
 {
   let now = WED - 60 * MINUTE;
   const { store, root, path } = tempStore(() => now);
@@ -312,16 +312,37 @@ function flushAsync(): Promise<void> {
     );
     assert.deepEqual(store.get(original.id), beforeStale, 'stale edit leaves the canonical row untouched');
 
-    // A pre-revision file loads as revision 1 and can immediately participate in CAS updates.
+    // A revision-16 schedule has no creator provenance. Migration preserves its prompt for owner
+    // inspection but makes it terminal before the runner can observe it.
     const legacyPath = join(root, 'legacy-schedules.json');
     const legacy = { ...original } as Partial<ScheduleRecord>;
     delete legacy.revision;
     writeFileSync(legacyPath, JSON.stringify({ version: 1, schedules: [legacy] }));
     const migrated = new ScheduleStore({ path: legacyPath, now: () => now });
-    assert.equal(migrated.get(original.id)?.revision, 1, 'legacy rows without revision load as revision 1');
-    const migratedEdit = migrated.edit(original.id, { text: 'legacy edited', at: THU, expectedRevision: 1 });
-    assert.equal(migratedEdit?.revision, 2, 'legacy row revision increments on first mutation');
-    assert.equal(new ScheduleStore({ path: legacyPath, now: () => now }).get(original.id)?.revision, 2, 'migrated revision persists');
+    assert.equal(migrated.get(original.id)?.state, 'canceled');
+    assert.equal(migrated.get(original.id)?.text, original.text, 'quarantine preserves the prompt for inspection');
+    assert.equal(migrated.edit(original.id, { text: 'legacy edited', at: THU, expectedRevision: 2 }), undefined);
+    let deliveries = 0;
+    const legacyRunner = new ScheduledSendRunner(migrated, {
+      now: () => THU,
+      deliver: async () => { deliveries++; },
+    });
+    await legacyRunner.tick();
+    await flushAsync();
+    legacyRunner.stop();
+    const restartedLegacy = new ScheduleStore({ path: legacyPath, now: () => THU });
+    const restartedRunner = new ScheduledSendRunner(restartedLegacy, {
+      now: () => THU,
+      deliver: async () => { deliveries++; },
+    });
+    await restartedRunner.tick();
+    await flushAsync();
+    restartedRunner.stop();
+    assert.equal(deliveries, 0, 'legacy schedules remain non-executable across restart');
+    const migratedFile = JSON.parse(readFileSync(legacyPath, 'utf8')) as any;
+    assert.equal(migratedFile.version, 2);
+    assert.equal(migratedFile.schedules[0].createdBy.kind, 'legacy-unprovenanced');
+    assert.equal(migratedFile.schedules[0].securityRevision, 16);
     store.cancel(original.id);
     groups++;
   } finally {

@@ -28,6 +28,7 @@ export interface AcceptedTransportPeer {
   acceptedAt: string;
   authGeneration: number;
   roles: PeerRole[];
+  securityRevision: 17;
   revokedAt?: string;
 }
 
@@ -81,8 +82,13 @@ interface PairingFailureBucket {
   windowStart: number;
 }
 
-interface PairingStoreFile {
+interface LegacyPairingStoreFile {
   version: 1;
+  peers: unknown[];
+}
+
+interface PairingStoreFile {
+  version: 2;
   peers: AcceptedTransportPeer[];
 }
 
@@ -253,6 +259,7 @@ export class TransportPairingRegistry {
       acceptedAt: new Date(this.now()).toISOString(),
       authGeneration: previousPeer ? previousPeer.authGeneration + 1 : 1,
       roles: [...DEFAULT_PEER_ROLES],
+      securityRevision: 17,
     };
     // Persist a candidate snapshot before publishing either in-memory mutation. A failed write or
     // rename leaves the one-use offer pending and the peer registry unchanged.
@@ -365,12 +372,41 @@ export class TransportPairingRegistry {
   }
 
   private load(): void {
+    if (!existsSync(this.path)) return;
+    let parsed: LegacyPairingStoreFile | PairingStoreFile;
     try {
-      if (!existsSync(this.path)) return;
-      const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as PairingStoreFile;
-      if (parsed.version !== 1 || !Array.isArray(parsed.peers)) return;
-      for (const rawPeer of parsed.peers as any[]) {
-        const peer = normalizeStoredPeer(rawPeer);
+      parsed = JSON.parse(readFileSync(this.path, 'utf8')) as LegacyPairingStoreFile | PairingStoreFile;
+    } catch {
+      this.peers.clear();
+      return;
+    }
+    if (!Array.isArray(parsed.peers)) return;
+
+    if (parsed.version === 1) {
+      // Revision 16 allowed every peer token to create another peer, so no record from that
+      // schema has trustworthy owner-issued authorization provenance. Invalidate every legacy
+      // credential before publishing the migrated map. A failed durable write aborts startup.
+      const invalidatedAt = new Date(this.now()).toISOString();
+      const candidate = new Map<string, AcceptedTransportPeer>();
+      for (const rawPeer of parsed.peers) {
+        const peer = normalizeStoredPeer(rawPeer, true);
+        if (!peer) continue;
+        candidate.set(peer.peerId, {
+          ...peer,
+          authGeneration: peer.authGeneration + (peer.revokedAt ? 0 : 1),
+          roles: [],
+          securityRevision: 17,
+          revokedAt: peer.revokedAt ?? invalidatedAt,
+        });
+      }
+      this.save(candidate);
+      for (const [peerId, peer] of candidate) this.peers.set(peerId, peer);
+      return;
+    }
+    if (parsed.version !== 2) return;
+    try {
+      for (const rawPeer of parsed.peers) {
+        const peer = normalizeStoredPeer(rawPeer, false);
         if (peer) this.peers.set(peer.peerId, peer);
       }
     } catch {
@@ -382,7 +418,7 @@ export class TransportPairingRegistry {
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
     // The store holds raw per-peer data keys — owner-only, matching cosyncing-keys.json.
-    writeFileSync(tmp, JSON.stringify({ version: 1, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ version: 2, peers: [...peers.values()] } satisfies PairingStoreFile, null, 2) + '\n', { mode: 0o600 });
     renameSync(tmp, this.path);
   }
 
@@ -566,7 +602,7 @@ function safeTokenHashEquals(a: string, b: string): boolean {
   return timingSafeEqual(aBuffer, bBuffer);
 }
 
-function normalizeStoredPeer(raw: any): AcceptedTransportPeer | undefined {
+function normalizeStoredPeer(raw: any, legacy: boolean): AcceptedTransportPeer | undefined {
   if (!raw?.peerId || !raw?.identityPublicKey || !raw?.peerTokenHash || !raw?.brokerPeerId) return undefined;
   const brokerPeerTokenHash = typeof raw.brokerPeerTokenHash === 'string'
     ? raw.brokerPeerTokenHash
@@ -588,17 +624,22 @@ function normalizeStoredPeer(raw: any): AcceptedTransportPeer | undefined {
     authGeneration: Number.isSafeInteger(raw.authGeneration) && raw.authGeneration > 0
       ? raw.authGeneration
       : 1,
-    roles: normalizePeerRoles(raw.roles),
+    roles: legacy ? [] : normalizePeerRoles(raw.roles),
+    securityRevision: legacy ? 17 : normalizePeerSecurityRevision(raw.securityRevision),
     ...(raw.revokedAt ? { revokedAt: String(raw.revokedAt) } : {}),
   };
 }
 
 function normalizePeerRoles(raw: unknown): PeerRole[] {
-  if (raw === undefined) return [...DEFAULT_PEER_ROLES];
   if (!Array.isArray(raw)) throw new Error('peer-roles-invalid');
   const allowed = new Set<PeerRole>(['observe', 'drive', 'files', 'admin']);
   if (raw.some((role) => typeof role !== 'string' || !allowed.has(role as PeerRole))) {
     throw new Error('peer-roles-invalid');
   }
   return [...new Set(raw as PeerRole[])];
+}
+
+function normalizePeerSecurityRevision(raw: unknown): 17 {
+  if (raw !== 17) throw new Error('peer-security-revision-invalid');
+  return 17;
 }
