@@ -27,7 +27,11 @@ import {
   PI_BRIDGE_EMBEDDED_SOURCE,
   PI_BRIDGE_LEGACY_MARKER,
 } from '@cosyncing/adapter-pi';
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import {
+  bunSpawnResolvedInvocation,
+  resolveInvocation,
+  type SetupDiagnosisContext,
+} from '@cosyncing/adapter-api';
 import { artifactCacheRoot, resolveArtifactCacheRoot } from '../artifacts/artifact-store.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
 import { brokerConfigPath, inspectBrokerConfig, type BrokerConfig } from '../runtime/configuration.ts';
@@ -104,7 +108,7 @@ import {
   type DurableServiceProvider,
   type DurableServiceStatus,
   type ServiceCommandRunner,
-  type SystemdProviderOptions,
+  type DurableServiceProviderOptions,
 } from './service-manager.ts';
 import {
   assertNoSymlinkComponents,
@@ -115,6 +119,7 @@ import {
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import { readSetupTransactionJournal } from './setup-transaction.ts';
+import { windowsServiceVersionKey } from './windows-service-install.ts';
 import {
   isDurableServiceChoice,
   readCodexDaemonOwnership,
@@ -147,7 +152,9 @@ export interface LifecycleBaseOptions {
   /** The external runtime that executes it, for distributions that have one. Absent for a native build. */
   runtimePath?: string;
   context?: SetupDiagnosisContext;
-  systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
+  durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
+  /** @deprecated Use durableServiceProviderFactory. */
+  systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   runner?: ServiceCommandRunner;
   piAgentDir?: string;
   claudeSettingsPath?: string;
@@ -183,7 +190,7 @@ export interface LifecycleStatusReport {
   ok: boolean;
   installation: { committed: boolean; detailCode: string };
   service: {
-    mode: 'foreground' | 'systemd' | 'launchd' | 'unconfigured';
+    mode: 'foreground' | 'systemd' | 'launchd' | 'task-scheduler' | 'unconfigured';
     supported: boolean;
     active: DurableServiceStatus['active'];
     enabled: DurableServiceStatus['enabled'];
@@ -316,13 +323,19 @@ function cacheRoot(options: LifecycleBaseOptions, context: SetupDiagnosisContext
   return configured ? resolveArtifactCacheRoot(configured) : artifactCacheRoot();
 }
 
-export function createLifecycleSystemdProvider(options: LifecycleBaseOptions): DurableServiceProvider {
+export function createLifecycleDurableServiceProvider(options: LifecycleBaseOptions): DurableServiceProvider {
   const context = options.context ?? createSetupDiagnosisContext();
   const home = options.home ?? setupStateHome();
-  return (options.systemdProviderFactory ?? createDurableServiceProvider)({
+  const install = inspectInstallState(home);
+  return (options.durableServiceProviderFactory ?? options.systemdProviderFactory ?? createDurableServiceProvider)({
     context,
     homeDir: context.homeDir,
     stateHome: home,
+    ...(install.committed && install.state.installationId
+      ? { installationId: install.state.installationId }
+      : {}),
+    taskSchedulerReceiptResources: install.committed ? install.state.resources : [],
+    versionKey: windowsServiceVersionKey(options.buildInfo),
     cacheRoot: cacheRoot(options, context),
     // The same resolution setup used when it wrote the unit, so status/repair compare against the identical
     // expected definition no matter which binary (installed copy or acquisition launcher) is running now.
@@ -331,6 +344,7 @@ export function createLifecycleSystemdProvider(options: LifecycleBaseOptions): D
       home,
       executablePath: options.executablePath,
     }),
+    acquisitionExecutablePath: options.executablePath,
     distribution: options.buildInfo.distribution,
     // The unit names the interpreter, so status and repair must expect the same one. A Bun that MOVED since
     // setup therefore reads back as a drifted definition — which is the intended signal, and exactly what
@@ -349,6 +363,9 @@ export function createLifecycleSystemdProvider(options: LifecycleBaseOptions): D
   });
 }
 
+/** Compatibility alias for integrations using the pre-Phase-4 name. */
+export const createLifecycleSystemdProvider = createLifecycleDurableServiceProvider;
+
 async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvironment> {
   const home = options.home ?? setupStateHome();
   const context = options.context ?? createSetupDiagnosisContext();
@@ -357,7 +374,7 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
   const setupState = readSetupState(home);
   const install = inspectInstallState(home);
   const provider = isDurableServiceChoice(setupState.serviceChoice)
-    ? createLifecycleSystemdProvider({ ...options, home, context })
+    ? createLifecycleDurableServiceProvider({ ...options, home, context })
     : undefined;
   return {
     home,
@@ -747,7 +764,12 @@ export async function readServiceLogs(options: LifecycleBaseOptions & {
   if (options.follow && !options.runner) {
     let child: ReturnType<typeof Bun.spawn>;
     try {
-      child = Bun.spawn([executable, ...args], {
+      const invocation = resolveInvocation(executable, {
+        env: env.context.env,
+        platform: env.context.platform,
+      });
+      if (!invocation) throw new Error('service log executable unavailable');
+      child = bunSpawnResolvedInvocation(invocation, args, {
         env: { ...env.context.env },
         stdin: 'ignore',
         stdout: 'pipe',

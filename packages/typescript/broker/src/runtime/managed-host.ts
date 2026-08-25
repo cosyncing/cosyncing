@@ -78,6 +78,12 @@
  */
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  HostProcessProvider,
+  bunSpawnResolvedInvocation,
+  resolveInvocation,
+  terminateHostProcessTree,
+} from '@cosyncing/adapter-api';
 import { atomicWriteJsonOwnerOnly } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 
@@ -128,6 +134,8 @@ export interface HostProcessIdentity {
    * successful read of a process that happens to be named nothing.
    */
   comm: string;
+  /** Live executable evidence when the OS exposes it. Diagnostic, not ownership proof. */
+  executable?: string;
 }
 
 /** Durable proof that this product started a particular host process. */
@@ -303,7 +311,7 @@ export interface ManagedHostEffects {
    * every ambiguous result (two listeners on one port) is 'unknown'.
    */
   listener(port: number): ManagedHostLocation;
-  liveProcess(pid: number): LiveProcess;
+  liveProcess(pid: number, options?: { fresh?: boolean }): LiveProcess;
   spawn(launch: ManagedHostLaunch): ManagedHostChild;
   /** Send a signal. Must be a no-op for a pid that no longer exists. */
   signal(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
@@ -598,7 +606,7 @@ export async function startManagedHost(
   // stop would let those spend the new host's budget and then fail it for being
   // slow. Each earlier phase is separately bounded, so the whole start still is.
   const deadline = effects.now() + plan.readyTimeoutMs;
-  const spawned = effects.liveProcess(child.pid);
+  const spawned = effects.liveProcess(child.pid, { fresh: true });
   if (spawned.state !== 'running') {
     // Stop it with the handle we still hold — this is the one moment ownership
     // needs no proof, because the child has not left this function.
@@ -813,9 +821,9 @@ export async function stopManagedHost(
   if (verdict !== 'owned') return { action: 'preserved', verdict };
   if (pid === effects.selfPid()) return { action: 'preserved', verdict: 'foreign' };
 
-  const stillOurs = (): boolean =>
-    classifyManagedHost(record, effects.liveProcess(pid), record.identityKey) === 'owned';
-  const result = await terminate(pid, plan.stopGraceMs, effects, () => !stillOurs());
+  const stillOurs = (options?: { fresh?: boolean }): boolean =>
+    classifyManagedHost(record, effects.liveProcess(pid, options), record.identityKey) === 'owned';
+  const result = await terminate(pid, plan.stopGraceMs, effects, (options) => !stillOurs(options));
   // The record outlives a FAILED stop, on purpose. If SIGTERM and SIGKILL both
   // failed to land, a process that is still running is still ours, and this
   // record is the only evidence that will ever authorize another attempt at it.
@@ -832,7 +840,7 @@ export async function stopManagedHost(
 }
 
 /**
- * SIGTERM, wait, SIGKILL — with `gone()` consulted before every signal.
+ * SIGTERM, wait, SIGKILL — with a fresh `gone()` proof before every signal.
  *
  * `gone()` is the caller's proof that the pid is still the process it meant.
  * When it goes true the escalation stops immediately, which is what makes the
@@ -843,13 +851,13 @@ async function terminate(
   pid: number,
   graceMs: number,
   effects: ManagedHostEffects,
-  gone: () => boolean,
+  gone: (options?: { fresh?: boolean }) => boolean,
 ): Promise<{ gone: boolean; escalated: boolean; signalled: boolean }> {
   // `signalled` is reported separately from `gone` because the two come apart
   // in exactly the case this guard exists for: a process that vanishes between
   // the decision and the signal is gone WITHOUT having been stopped by us, and
   // calling that "stopped" would credit this code with an effect it never had.
-  if (gone()) return { gone: true, escalated: false, signalled: false };
+  if (gone({ fresh: true })) return { gone: true, escalated: false, signalled: false };
   if (pid === effects.selfPid()) return { gone: false, escalated: false, signalled: false };
   effects.signal(pid, 'SIGTERM');
   const deadline = effects.now() + graceMs;
@@ -857,14 +865,14 @@ async function terminate(
     await effects.sleep(Math.min(50, Math.max(1, graceMs)));
     if (gone()) return { gone: true, escalated: false, signalled: true };
   }
-  if (gone()) return { gone: true, escalated: false, signalled: true };
+  if (gone({ fresh: true })) return { gone: true, escalated: false, signalled: true };
   effects.signal(pid, 'SIGKILL');
   const killDeadline = effects.now() + graceMs;
   while (effects.now() < killDeadline) {
     await effects.sleep(Math.min(50, Math.max(1, graceMs)));
     if (gone()) return { gone: true, escalated: true, signalled: true };
   }
-  return { gone: gone(), escalated: true, signalled: true };
+  return { gone: gone({ fresh: true }), escalated: true, signalled: true };
 }
 
 // ── driving it from an adapter's own description ────────────────────────────
@@ -1527,87 +1535,13 @@ export const MANAGED_HOST_OUTPUT_LIMIT = 8 * 1024;
  * therefore return null rather than a partial identity, because a partial
  * identity that happens to compare equal would authorize a kill.
  *
- * `adapters/opencode/src/managed-server.ts` has an equivalent reader predating
- * this engine. The duplication is deliberate and safe — each copy is only ever
- * compared against records the same copy wrote, so a format difference between
- * them cannot produce a false match — and it goes away when that lane migrates
- * onto this engine.
+ * The provider lives at the adapter API boundary so every broker and adapter
+ * lifecycle sees the same OS identity and listener rules.
  */
-/**
- * This boot's identifier, or '' where the platform has none.
- *
- * Cached: it cannot change without the process ceasing to exist, and it is read
- * on every identity comparison.
- */
-let cachedBootId: string | undefined;
-export function readBootId(): string {
-  if (cachedBootId !== undefined) return cachedBootId;
-  if (process.platform !== 'linux') {
-    cachedBootId = '';
-    return cachedBootId;
-  }
-  try {
-    cachedBootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-  } catch {
-    cachedBootId = '';
-  }
-  return cachedBootId;
-}
+const hostProcessProvider = new HostProcessProvider();
 
-export function readLiveProcess(pid: number): LiveProcess {
-  if (!Number.isInteger(pid) || pid <= 0) return PROCESS_UNKNOWN;
-  if (process.platform === 'linux') {
-    // No boot id, no comparable start token, so no identity at all — rather than
-    // an identity missing the one field that makes the others mean anything.
-    const boot = readBootId();
-    if (!boot) return PROCESS_UNKNOWN;
-    let stat: string;
-    try {
-      // `/proc/<pid>/stat` is `pid (comm) state ...`, and comm may itself contain
-      // spaces and parentheses — so fields are parsed AFTER the last ')'. From
-      // there `state` is field 3, which puts start time (field 22) at index 19.
-      stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    } catch (error) {
-      // ENOENT is the kernel positively stating there is no such process, and it
-      // is the ONLY error here that means 'absent'. EACCES, EPERM, an unmounted
-      // procfs and everything else mean the question went unanswered.
-      return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? PROCESS_ABSENT : PROCESS_UNKNOWN;
-    }
-    const rparen = stat.lastIndexOf(')');
-    if (rparen < 0) return PROCESS_UNKNOWN;
-    const start = stat.slice(rparen + 1).trim().split(/\s+/)[19];
-    if (!start) return PROCESS_UNKNOWN;
-    let comm = '';
-    try { comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { /* handled below */ }
-    if (!comm) return PROCESS_UNKNOWN;
-    return { state: 'running', identity: { pid, start, boot, comm } };
-  }
-  const ps = Bun.which('ps');
-  if (!ps) return PROCESS_UNKNOWN;
-  const field = (format: string): { ok: true; value: string } | { ok: false; absent: boolean } => {
-    try {
-      const result = Bun.spawnSync([ps, '-o', format, '-p', String(pid)], {
-        stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3_000,
-      });
-      const value = new TextDecoder().decode(result.stdout).trim();
-      if (result.exitCode === 0 && value) return { ok: true, value };
-      // `ps -p` exits 1 with nothing on either stream when the pid does not
-      // exist. Anything it complained about is an unanswered question instead.
-      const noise = new TextDecoder().decode(result.stderr).trim();
-      return { ok: false, absent: result.exitCode === 1 && !value && !noise };
-    } catch {
-      return { ok: false, absent: false };
-    }
-  };
-  // `lstart` is an absolute wall-clock start time, so it is stable across reads
-  // in a way an elapsed-time field would not be.
-  const start = field('lstart=');
-  if (!start.ok) return start.absent ? PROCESS_ABSENT : PROCESS_UNKNOWN;
-  const comm = field('comm=');
-  if (!comm.ok) return comm.absent ? PROCESS_ABSENT : PROCESS_UNKNOWN;
-  // '' for boot: this platform's start token is an absolute wall-clock time, so
-  // it is already unique across reboots and needs no boot qualifier.
-  return { state: 'running', identity: { pid, start: start.value, boot: '', comm: comm.value } };
+export function readLiveProcess(pid: number, options: { fresh?: boolean } = {}): LiveProcess {
+  return hostProcessProvider.liveProcess(pid, options);
 }
 
 function boundedCapture(stream: ReadableStream<Uint8Array> | undefined | null): { read(): string } {
@@ -1639,40 +1573,18 @@ function boundedCapture(stream: ReadableStream<Uint8Array> | undefined | null): 
  */
 export function defaultManagedHostEffects(): ManagedHostEffects {
   return {
-    listener: (port) => {
-      const lsof = Bun.which('lsof');
-      if (!lsof) return HOST_UNKNOWN;
-      try {
-        // -t prints pids only; the -iTCP/-sTCP pair narrows to the LISTENING
-        // socket on that port. Same flags on Linux and macOS.
-        const result = Bun.spawnSync([lsof, '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
-          stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3_000,
-        });
-        const pids = new TextDecoder().decode(result.stdout).trim().split(/\s+/).filter(Boolean);
-        if (result.exitCode !== 0) {
-          // lsof exits 1 both for "nothing matched" and for its own failures,
-          // and only the first is proof of an empty address. It is quiet on a
-          // clean miss and complains on everything else, so a silent exit 1 is
-          // the one that authorizes spawning here.
-          const noise = new TextDecoder().decode(result.stderr).trim();
-          return result.exitCode === 1 && pids.length === 0 && !noise ? HOST_ABSENT : HOST_UNKNOWN;
-        }
-        // More than one listener on one port means this machine is not telling a
-        // simple story (dual-stack duplicates, a fork sharing the socket), and
-        // picking one would be a guess. Refuse to name any of them.
-        if (pids.length !== 1) return HOST_UNKNOWN;
-        return hostAt(Number(pids[0]));
-      } catch {
-        return HOST_UNKNOWN;
-      }
-    },
+    listener: (port) => hostProcessProvider.listener(port),
     liveProcess: readLiveProcess,
     spawn: (launch) => {
-      const child = Bun.spawn([launch.command, ...launch.args], {
+      const env = launch.env ? { ...process.env, ...launch.env } : { ...process.env };
+      const invocation = resolveInvocation(launch.command, { env, platform: process.platform });
+      if (!invocation) throw new Error(`Managed host executable is unavailable: ${launch.command}`);
+      const child = bunSpawnResolvedInvocation(invocation, launch.args, {
         stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: launch.env ? { ...process.env, ...launch.env } : { ...process.env },
+        env,
+        windowsHide: process.platform === 'win32',
         ...(launch.cwd ? { cwd: launch.cwd } : {}),
       });
       const stdout = boundedCapture(child.stdout as ReadableStream<Uint8Array> | undefined);
@@ -1685,6 +1597,10 @@ export function defaultManagedHostEffects(): ManagedHostEffects {
       };
     },
     signal: (pid, signal) => {
+      if (process.platform === 'win32') {
+        terminateHostProcessTree(pid, signal === 'SIGKILL');
+        return;
+      }
       try {
         process.kill(pid, signal);
       } catch {
@@ -1744,6 +1660,9 @@ export function readManagedHostOwnership(agent: string, home = setupStateHome())
       start: record.start,
       boot: record.boot,
       comm: record.comm,
+      ...(typeof record.executable === 'string' && record.executable.length > 0
+        ? { executable: record.executable }
+        : {}),
       agent,
       identityKey: record.identityKey,
       recordedAtMs: record.recordedAtMs,

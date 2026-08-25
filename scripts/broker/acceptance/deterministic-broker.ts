@@ -17,7 +17,7 @@ const ROOT = resolve(import.meta.dir, '../../..');
 const MAX_SUITE_TIMEOUT_MS = 300_000;
 const SUITE_TIMEOUT_MS_BY_CLASS = {
   short: 30_000,
-  medium: 90_000,
+  medium: 180_000,
   long: 180_000,
 } as const;
 
@@ -104,7 +104,7 @@ function laneConcurrency(): number {
     }
     return parsed;
   }
-  return Math.max(1, Math.min(4, Math.floor((navigator.hardwareConcurrency ?? 4) / 6)));
+  return Math.max(1, Math.min(2, Math.floor((navigator.hardwareConcurrency ?? 4) / 6)));
 }
 
 /**

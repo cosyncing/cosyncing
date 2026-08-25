@@ -71,8 +71,11 @@ import {
   type Unsubscribe,
   boundToolSemantic,
   boundedStream,
+  bunSpawnResolvedInvocation,
   commandSemantic,
   fileReadSemantic,
+  resolveInvocation,
+  terminateHostProcessTree,
   searchGroup,
   searchSemantic,
   webSemantic,
@@ -519,13 +522,13 @@ async function createPiSessionViaRpc(
 ): Promise<PiRpcSessionState> {
   const bin = resolveBin('pi');
   if (!bin) throw new Error('Pi CLI is not available on PATH; cannot create a Pi session.');
-  const args = [bin, '--mode', 'rpc'];
+  const args = ['--mode', 'rpc'];
   const env: NodeJS.ProcessEnv = { ...process.env, COSYNCING_NO_BRIDGE: '1' };
   if (PI_SESSION_ROOT_OVERRIDE) {
     args.push('--session-dir', PI_SESSION_ROOT_OVERRIDE);
     env.PI_CODING_AGENT_SESSION_DIR = PI_SESSION_ROOT_OVERRIDE;
   }
-  const proc = Bun.spawn(args, {
+  const proc = spawnPi(bin, args, {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -655,17 +658,7 @@ async function createPiSessionViaRpc(
   } finally {
     for (const resolve of pending.values()) resolve({ success: false, error: 'Pi createSession process closed.' });
     pending.clear();
-    try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
-    }
-    try {
-      proc.kill();
-    } catch {
-      /* ignore */
-    }
-    await Promise.race([proc.exited.catch(() => undefined), new Promise((r) => setTimeout(r, 1000))]);
+    await endPiChild(proc);
     await Promise.race([Promise.allSettled([stdoutPump, stderrPump]), new Promise((r) => setTimeout(r, 1000))]);
   }
 }
@@ -673,7 +666,7 @@ async function createPiSessionViaRpc(
 async function renamePiSessionViaRpc(sessionFile: string, title: string): Promise<PiRpcSessionState> {
   const bin = resolveBin('pi');
   if (!bin) throw new Error('Pi CLI is not available on PATH; cannot rename a Pi session.');
-  const proc = Bun.spawn([bin, '--mode', 'rpc', '--session', sessionFile], {
+  const proc = spawnPi(bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -739,17 +732,7 @@ async function renamePiSessionViaRpc(sessionFile: string, title: string): Promis
   } finally {
     for (const resolve of pending.values()) resolve({ success: false, error: 'Pi rename process closed.' });
     pending.clear();
-    try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
-    }
-    try {
-      proc.kill();
-    } catch {
-      /* ignore */
-    }
-    await Promise.race([proc.exited.catch(() => undefined), new Promise((r) => setTimeout(r, 1000))]);
+    await endPiChild(proc);
     await Promise.race([Promise.allSettled([stdoutPump, stderrPump]), new Promise((r) => setTimeout(r, 1000))]);
   }
 }
@@ -761,7 +744,7 @@ async function runPiLifecycleRpc(
 ): Promise<PiRpcSessionState> {
   const bin = resolveBin('pi');
   if (!bin) throw new Error(`Pi CLI is not available on PATH; cannot ${action} a Pi session.`);
-  const proc = Bun.spawn([bin, '--mode', 'rpc', '--session', sessionFile], {
+  const proc = spawnPi(bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -817,30 +800,58 @@ async function runPiLifecycleRpc(
     });
   };
   try {
-    const cmd: Record<string, unknown> = { type: action };
-    if (action === 'fork' && opts.messageId) cmd.messageId = opts.messageId;
+    /**
+     * Pi's fork RPC takes `entryId`, and it is REQUIRED: `fork(undefined)` throws
+     * `Invalid entry ID for forking` before anything is copied. The field was previously sent as
+     * `messageId`, which Pi silently ignores, so every fork — with or without a chosen message —
+     * was refused on every platform. A native Windows trace is what surfaced it; the adapter's own
+     * fixture had modelled the wrong field on both sides and agreed with itself.
+     *
+     * A BARE fork — no message chosen — has no fork RPC of its own. Pi's `clone` is exactly that
+     * operation (it forks at the current leaf), so a bare fork issues it rather than sending an
+     * incomplete `fork` Pi can only refuse.
+     */
+    const forkPoint = action === 'fork' && opts.messageId ? opts.messageId : undefined;
+    const cmd: Record<string, unknown> = forkPoint ? { type: 'fork', entryId: forkPoint } : { type: 'clone' };
     const actionResp = await rpc(cmd, 15000);
     if (actionResp?.success !== true) throw new Error(piLifecycleFailure(action, actionResp));
+    // `success: true` is not the same as `it happened`: Pi reports an extension-cancelled fork as a
+    // successful call carrying `cancelled`. Without this the adapter would read the UNCHANGED state
+    // back and hand a client the source session dressed as its own copy.
+    if (actionResp?.data?.cancelled === true) {
+      throw new Error(`Pi ${action} cancelled by native extension`);
+    }
+    /**
+     * The child's identity comes from `get_state` and from NOWHERE else.
+     *
+     * Pi's own fork response carries `{text, cancelled}` and its clone response carries
+     * `{cancelled}` — neither has ever carried a session file. So falling back to the action
+     * response meant falling back to the SOURCE path, and handing a client the session it forked
+     * FROM wearing the new session's name: every later prompt, rename and delete would land on the
+     * original. A `get_state` that fails, times out, or names the source is refused here instead.
+     */
     const stateResp = await rpc({ type: 'get_state' }, 15000);
-    if (stateResp?.success === true && stateResp.data) return stateResp.data;
-    return actionResp.data ?? {};
+    const state: PiRpcSessionState | undefined =
+      stateResp?.success === true && stateResp.data ? stateResp.data : undefined;
+    const childFile = typeof state?.sessionFile === 'string' ? state.sessionFile.trim() : '';
+    if (!childFile) {
+      throw new Error(
+        `Pi ${action} did not report the new session, so the original is being kept rather than returned as the copy.`,
+      );
+    }
+    if (canonicalSessionFile(childFile) === canonicalSessionFile(sessionFile)) {
+      throw new Error(
+        `Pi ${action} named the original session as its own result, so no copy was returned.`,
+      );
+    }
+    return state!;
   } catch (err) {
     if (err instanceof Error && err.message.startsWith('Pi ')) throw err;
     throw new Error(`Pi ${action} failed`);
   } finally {
     for (const resolve of pending.values()) resolve({ success: false, error: `Pi ${action} process closed.` });
     pending.clear();
-    try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
-    }
-    try {
-      proc.kill();
-    } catch {
-      /* ignore */
-    }
-    await Promise.race([proc.exited.catch(() => undefined), new Promise((r) => setTimeout(r, 1000))]);
+    await endPiChild(proc);
     await Promise.race([Promise.allSettled([stdoutPump, stderrPump]), new Promise((r) => setTimeout(r, 1000))]);
   }
 }
@@ -853,7 +864,7 @@ async function runPiLifecycleRpc(
 async function runPiExportHtmlRpc(sessionFile: string, outputPath: string, timeoutMs: number): Promise<string> {
   const bin = resolveBin('pi');
   if (!bin) throw new Error('Pi CLI is not available on PATH; cannot export transcript.');
-  const proc = Bun.spawn([bin, '--mode', 'rpc', '--session', sessionFile], {
+  const proc = spawnPi(bin, ['--mode', 'rpc', '--session', sessionFile], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -920,17 +931,7 @@ async function runPiExportHtmlRpc(sessionFile: string, outputPath: string, timeo
   } finally {
     for (const resolve of pending.values()) resolve({ success: false, error: 'Pi export process closed.' });
     pending.clear();
-    try {
-      proc.stdin.end();
-    } catch {
-      /* ignore */
-    }
-    try {
-      proc.kill();
-    } catch {
-      /* ignore */
-    }
-    await Promise.race([proc.exited.catch(() => undefined), new Promise((r) => setTimeout(r, 1000))]);
+    await endPiChild(proc);
     await Promise.race([Promise.allSettled([stdoutPump, stderrPump]), new Promise((r) => setTimeout(r, 1000))]);
   }
 }
@@ -939,6 +940,11 @@ function piLifecycleFailure(action: 'fork' | 'clone', resp: any): string {
   const raw = String(resp?.error ?? '');
   if (/cancel/i.test(raw)) return `Pi ${action} cancelled by native extension`;
   if (resp?.timeout) return `Pi ${action} timed out`;
+  // Classified from a known phrase into text WE own. Pi's raw error is never echoed: it can quote
+  // provider or filesystem detail, and the redaction rule here is older than this classification.
+  if (/invalid entry id/i.test(raw)) {
+    return `Pi ${action} failed: the chosen message is not a fork point in this session`;
+  }
   return `Pi ${action} failed`;
 }
 
@@ -1083,8 +1089,7 @@ class PiConnection implements SessionConnection {
     // Resolve the absolute binary path so Windows picks up `pi.cmd`/`pi.exe` (Bun.spawn won't append
     // those itself); fall back to bare 'pi' for PATH lookup elsewhere.
     const bin = resolveBin('pi') ?? 'pi';
-    const cmd = [bin, '--mode', 'rpc', '--session', this.sessionPath];
-    this.proc = Bun.spawn(cmd, {
+    this.proc = spawnPi(bin, ['--mode', 'rpc', '--session', this.sessionPath], {
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -1781,7 +1786,8 @@ class PiConnection implements SessionConnection {
     }
     this.handlers.clear();
     this.toolArgs.clear();
-    this.proc?.kill();
+    // Not `kill()`: on Windows that would leave the Pi this connection started running forever.
+    if (this.proc) await endPiChild(this.proc);
   }
 }
 
@@ -2862,6 +2868,48 @@ function resolveBin(bin: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Launch the exact file discovery selected, including npm's Windows .cmd shim. */
+/**
+ * End a Pi child, and mean it on Windows.
+ *
+ * A Windows npm launcher runs as `cmd.exe /c pi.cmd`, so the process this adapter holds is the
+ * SHELL, not Pi. `kill()` takes the wrapper and leaves the `node.exe` actually running Pi alive —
+ * still holding the session file and this broker's pipes. A native Phase 6 lane found exactly that:
+ * the wrapper gone, Pi still running twenty minutes later, and the probe unable to exit because the
+ * surviving grandchild held its stdio open. Every closed Drive session leaked one.
+ *
+ * Closing stdin is how Pi is ASKED to leave — its RPC mode shuts down on input end — and the tree
+ * kill is what makes it true when it does not. On POSIX the tree kill is the same signal `kill()`
+ * would have sent, so nothing changes there.
+ */
+async function endPiChild(
+  proc: { pid: number; exited: Promise<unknown>; exitCode: number | null; kill: () => void; stdin?: unknown },
+  graceMs = 1_000,
+): Promise<void> {
+  const stdin = proc.stdin as { end?: () => void } | undefined;
+  try { stdin?.end?.(); } catch { /* already closed */ }
+  await Promise.race([proc.exited.catch(() => undefined), Bun.sleep(graceMs)]);
+  if (proc.exitCode !== null) return;
+  try { terminateHostProcessTree(proc.pid, true); } catch { /* already gone */ }
+  try { proc.kill(); } catch { /* already gone */ }
+  await Promise.race([proc.exited.catch(() => undefined), Bun.sleep(graceMs)]);
+}
+
+function spawnPi<
+  const In extends Bun.SpawnOptions.Writable,
+  const Out extends Bun.SpawnOptions.Readable,
+  const Err extends Bun.SpawnOptions.Readable,
+>(
+  executable: string,
+  args: readonly string[],
+  options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
+): Bun.Subprocess<In, Out, Err> {
+  const env = (options?.env ?? process.env) as Readonly<Record<string, string | undefined>>;
+  const invocation = resolveInvocation(executable, { env, platform: process.platform });
+  if (!invocation) throw new Error(`Pi executable is no longer available: ${executable}`);
+  return bunSpawnResolvedInvocation(invocation, args, options);
 }
 
 function shellQuote(s: string): string {

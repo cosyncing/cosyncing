@@ -12,8 +12,12 @@ import {
   statSync,
   unlinkSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import { dirname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
+import {
+  bunSpawnResolvedInvocation,
+  resolveInvocation,
+  type SetupDiagnosisContext,
+} from '@cosyncing/adapter-api';
 import type { DistributionKind } from '../runtime/application-identity.ts';
 import { buildFingerprint, type BuildInfo } from '../runtime/build-info.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
@@ -34,6 +38,8 @@ import type {
 } from './setup-transaction.ts';
 import type { InstalledResourceRecord } from './install-state.ts';
 import { managedHostServiceEnvironmentEntries } from './shipped-adapters.ts';
+import { windowsServiceInstallPaths } from './windows-service-install.ts';
+import { WindowsTaskSchedulerServiceProvider } from './windows-task-scheduler-provider.ts';
 
 export const SYSTEMD_SERVICE_NAME = `${PRODUCT_IDENTITY.serviceName}.service`;
 /** launchd job label; also the plist filename stem and the `gui/<uid>/<label>` service target. */
@@ -50,7 +56,7 @@ export const SERVICE_TRANSITION_TIMEOUT_MS = 30_000;
 export const SYSTEMD_MUTATION_TIMEOUT_MS = 180_000;
 export const SERVICE_COMMAND_OUTPUT_LIMIT = 16 * 1024;
 
-export type DurableServiceProviderId = 'systemd' | 'launchd';
+export type DurableServiceProviderId = 'systemd' | 'launchd' | 'task-scheduler';
 
 export interface ServiceCommandResult {
   status: 'ok' | 'error' | 'timeout' | 'unavailable';
@@ -93,6 +99,16 @@ export interface DurableServiceProvider {
   logsCommand(request: Readonly<ServiceLogsRequest>): readonly string[];
   expectedDefinition(): string;
   expectedEnvironment(): string;
+  /** Files covered by the shared setup journal. Defaults to definitionPath and environmentPath. */
+  transactionFilePaths?(): readonly string[];
+  /** Provider-owned state that is not represented by files, such as Task Scheduler folders and task XML. */
+  captureTransactionState?(): Promise<Record<string, unknown>>;
+  /** Restore a snapshot returned by captureTransactionState after journaled files have been restored. */
+  restoreTransactionState?(state: Readonly<Record<string, unknown>>): Promise<void>;
+  /** Receipt records for providers whose owned objects are not the two legacy service files. */
+  installedResources?(): InstalledResourceRecord[];
+  /** Remove superseded receipt-owned artifacts only after the new receipt and health gate have committed. */
+  finalizeCommitted?(): Promise<void>;
   inspect(): Promise<DurableServiceStatus>;
   installDefinition(): Promise<void>;
   reloadDefinition(): Promise<void>;
@@ -106,20 +122,27 @@ export interface DurableServiceProvider {
 }
 
 /**
- * Construction inputs shared by both durable providers. The name stays systemd-shaped because it is the
- * argument type of the `systemdProviderFactory` seam that setup, repair, and status already thread through;
- * the launchd provider slots into the same seam and only adds its own optional overrides.
+ * Construction inputs shared by durable service providers. Provider-specific options extend this shape;
+ * setup, repair, status, and lifecycle commands all pass through the same provider-neutral seam.
  */
-export interface SystemdProviderOptions {
+export interface DurableServiceProviderOptions {
   context: SetupDiagnosisContext;
   homeDir: string;
   stateHome: string;
+  /** Stable receipt identity used by providers that own non-file service-manager objects. */
+  installationId?: string;
+  /** Exact receipts from which the Windows provider derives folder authority after resolving the current SID. */
+  taskSchedulerReceiptResources?: readonly InstalledResourceRecord[];
+  /** Immutable version-directory key selected by setup for pointer-based providers. */
+  versionKey?: string;
   cacheRoot: string;
   /**
    * The cosyncing APPLICATION the unit must run — always the receipt-owned copy at `<home>/bin/cosyncing`,
    * never the runtime that executes it and never the acquisition artifact.
    */
   executablePath: string;
+  /** Acquisition application used only as immutable Windows staging input. */
+  acquisitionExecutablePath?: string;
   /**
    * How that application was built, and therefore whether a runtime is mandatory.
    *
@@ -158,7 +181,10 @@ export interface SystemdProviderOptions {
   userIdentifier?: string;
 }
 
-export interface LaunchdProviderOptions extends SystemdProviderOptions {
+/** Compatibility alias for external fixtures while the provider-neutral name rolls through the tree. */
+export type SystemdProviderOptions = DurableServiceProviderOptions;
+
+export interface LaunchdProviderOptions extends DurableServiceProviderOptions {
   launchctlPath?: string;
   tailPath?: string;
   /** Defaults to `<homeDir>/Library/LaunchAgents`. */
@@ -210,7 +236,9 @@ export function createServiceCommandRunner(
       }
       let child: ReturnType<typeof Bun.spawn>;
       try {
-        child = Bun.spawn([executable, ...args], {
+        const invocation = resolveInvocation(executable, { env, platform: process.platform });
+        if (!invocation) return { status: 'unavailable', stdout: '', stderr: '' };
+        child = bunSpawnResolvedInvocation(invocation, args, {
           env: { ...env },
           stdin: 'ignore',
           stdout: 'pipe',
@@ -271,14 +299,20 @@ export function createServiceCommandRunner(
 
 /**
  * Every path this module writes into a service definition or its environment. `%` is a systemd specifier
- * marker and `:` is the PATH separator; neither has an escape where these paths land. The identity resolver
- * refuses both upstream, but the providers are exported and constructible without it, so this boundary
- * refuses them independently — a runtime like `/tmp/a:b/bin/bun` must fail here, not render a PATH whose
- * directory silently split into two bogus entries.
+ * marker and `:` is the PATH separator; neither has an escape where these paths land. Application identity
+ * is intentionally platform-neutral, and these providers are also exported and constructible on their own,
+ * so this serialization boundary refuses both independently — a runtime like `/tmp/a:b/bin/bun` must fail
+ * here, not render a PATH whose directory silently split into two bogus entries.
  */
 function cleanAbsolutePath(value: string, label: string): string {
   if (!isAbsolute(value) || /[\0\r\n%:]/.test(value)) throw new Error(`invalid ${label} path`);
   return resolve(value);
+}
+
+function cleanHostPath(value: string, label: string, platform: string): string {
+  if (platform !== 'win32') return cleanAbsolutePath(value, label);
+  if (!win32.isAbsolute(value) || /[\0\r\n;]/.test(value)) throw new Error(`invalid ${label} path`);
+  return win32.resolve(value);
 }
 
 /**
@@ -313,10 +347,10 @@ function environmentLine(name: string, value: string): string {
   return `${name}=${systemdQuote(value)}`;
 }
 
-function servicePathDirectory(value: string): string {
-  // The PATH separator and the systemd specifier marker are both refused by cleanAbsolutePath itself, so an
-  // ambiguous entry can never render a different search path from the one setup inspected.
-  return cleanAbsolutePath(value, 'agent executable directory');
+function servicePathDirectory(value: string, platform: string = process.platform): string {
+  // Refuse the selected platform's PATH separator before the directory reaches durable environment state.
+  // The POSIX branch additionally rejects systemd's `%` specifier marker; a Windows drive colon is valid.
+  return cleanHostPath(value, 'agent executable directory', platform);
 }
 
 export interface ServiceAgentExecutable {
@@ -335,6 +369,19 @@ export const SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES = [
 export type ServiceAgentExecutableOverrideName = typeof SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES[number];
 
 export type ServiceAgentExecutableOverrides = Partial<Record<ServiceAgentExecutableOverrideName, string>>;
+
+function serviceEnvValue(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+  platform: string,
+): string | undefined {
+  if (platform !== 'win32') return env[name];
+  const wanted = name.toLowerCase();
+  for (const key of Object.keys(env).sort()) {
+    if (key.toLowerCase() === wanted) return env[key];
+  }
+  return undefined;
+}
 
 function executableFile(path: string): boolean {
   try {
@@ -355,17 +402,22 @@ function executableInvocationPath(
   command: string,
   canonicalExecutable: string,
   env: Readonly<Record<string, string | undefined>>,
+  platform: string = process.platform,
 ): string {
+  const pathApi = platform === 'win32' ? win32 : posix;
   let canonical: string;
-  try { canonical = realpathSync(canonicalExecutable); } catch { canonical = resolve(canonicalExecutable); }
-  const candidates = command.includes('/')
-    ? [isAbsolute(command) ? command : resolve(command)]
-    : (env.PATH ?? '').split(':').filter(Boolean).map((root) => join(root, command));
+  try { canonical = realpathSync(canonicalExecutable); } catch { canonical = pathApi.resolve(canonicalExecutable); }
+  const candidate = resolveInvocation(command, {
+    env,
+    platform,
+    canonicalize: (path) => path,
+  })?.originalPath;
+  const candidates = candidate ? [candidate] : [];
   for (const candidate of candidates) {
-    if (!executableFile(candidate)) continue;
+    if (platform !== 'win32' && !executableFile(candidate)) continue;
     let target: string;
-    try { target = realpathSync(candidate); } catch { target = resolve(candidate); }
-    if (target === canonical) return resolve(candidate);
+    try { target = realpathSync(candidate); } catch { target = pathApi.resolve(candidate); }
+    if (target === canonical) return pathApi.resolve(candidate);
   }
   return canonical;
 }
@@ -376,27 +428,32 @@ function executableInvocationPath(
  * before any parent directory can enter a boot-service PATH. The whole interactive PATH is never copied.
  */
 export function resolveServiceAgentExecutables(
-  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'>,
+  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'> & { platform?: string },
 ): ServiceAgentExecutable[] {
+  const platform = context.platform ?? process.platform;
+  const pathApi = platform === 'win32' ? win32 : posix;
   const commands = [
-    ['codex', context.env.COSYNCING_CODEX_BIN?.trim() || 'codex', 'COSYNCING_CODEX_BIN'],
+    ['codex', serviceEnvValue(context.env, 'COSYNCING_CODEX_BIN', platform)?.trim() || 'codex', 'COSYNCING_CODEX_BIN'],
     ['opencode', 'opencode', undefined],
-    ['pi', context.env.COSYNCING_PI_BIN?.trim() || 'pi', 'COSYNCING_PI_BIN'],
-    ['claude', context.env.COSYNCING_CLAUDE_BIN?.trim() || 'claude', 'COSYNCING_CLAUDE_BIN'],
+    ['pi', serviceEnvValue(context.env, 'COSYNCING_PI_BIN', platform)?.trim() || 'pi', 'COSYNCING_PI_BIN'],
+    ['claude', serviceEnvValue(context.env, 'COSYNCING_CLAUDE_BIN', platform)?.trim() || 'claude', 'COSYNCING_CLAUDE_BIN'],
   ] as const;
   return commands.flatMap(([id, command, overrideVariable]): ServiceAgentExecutable[] => {
     const resolvedExecutable = context.resolveExecutable(command);
-    if (!resolvedExecutable || !isAbsolute(resolvedExecutable) || /[\0\r\n]/.test(resolvedExecutable)) return [];
+    if (!resolvedExecutable || !pathApi.isAbsolute(resolvedExecutable) || /[\0\r\n]/.test(resolvedExecutable)) return [];
     try {
-      const cleanExecutable = cleanAbsolutePath(
-        executableInvocationPath(command, resolvedExecutable, context.env),
+      const cleanExecutable = cleanHostPath(
+        executableInvocationPath(command, resolvedExecutable, context.env, platform),
         `${id} executable`,
+        platform,
       );
       return [{
         id,
         executablePath: cleanExecutable,
-        directory: servicePathDirectory(dirname(cleanExecutable)),
-        ...(overrideVariable && context.env[overrideVariable]?.trim() ? { overrideVariable } : {}),
+        directory: servicePathDirectory(pathApi.dirname(cleanExecutable), platform),
+        ...(overrideVariable && serviceEnvValue(context.env, overrideVariable, platform)?.trim()
+          ? { overrideVariable }
+          : {}),
       }];
     } catch {
       return [];
@@ -405,19 +462,21 @@ export function resolveServiceAgentExecutables(
 }
 
 export function serviceAgentExecutableDirectories(
-  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'>,
+  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'> & { platform?: string },
 ): string[] {
+  const platform = context.platform ?? process.platform;
+  const pathApi = platform === 'win32' ? win32 : posix;
   const executables = resolveServiceAgentExecutables(context);
   const directories = executables.map((agent) => agent.directory);
   if (executables.some((agent) => executableUsesEnvNode(agent.executablePath))) {
     const resolvedNode = context.resolveExecutable('node');
-    if (resolvedNode && isAbsolute(resolvedNode) && !/[\0\r\n]/.test(resolvedNode)) {
+    if (resolvedNode && pathApi.isAbsolute(resolvedNode) && !/[\0\r\n]/.test(resolvedNode)) {
       try {
-        const invocation = executableInvocationPath('node', resolvedNode, context.env);
+        const invocation = executableInvocationPath('node', resolvedNode, context.env, platform);
         // An npm launcher can live beside an older `node` binary after the user upgrades Node through a
         // different manager. Preserve the interpreter setup actually resolved: /usr/bin/env selects the
         // first match, so its directory must precede every launcher directory in the durable PATH.
-        directories.unshift(servicePathDirectory(dirname(invocation)));
+        directories.unshift(servicePathDirectory(pathApi.dirname(invocation), platform));
       } catch {
         // A missing or unsafe interpreter stays absent. Doctor then reports
         // the agent runtime unavailable instead of copying arbitrary PATH.
@@ -444,7 +503,7 @@ function executableUsesEnvNode(path: string): boolean {
 }
 
 export function serviceAgentExecutableOverrides(
-  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'>,
+  context: Pick<SetupDiagnosisContext, 'env' | 'resolveExecutable'> & { platform?: string },
 ): ServiceAgentExecutableOverrides {
   const overrides: ServiceAgentExecutableOverrides = {};
   for (const executable of resolveServiceAgentExecutables(context)) {
@@ -458,9 +517,15 @@ export function servicePathEntries(
   executablePath: string,
   agentExecutableDirectories: readonly string[],
   runtimePath?: string,
+  platform: string = process.platform,
 ): string[] {
-  const entries = [
-    ...agentExecutableDirectories.map(servicePathDirectory),
+  const pathApi = platform === 'win32' ? win32 : posix;
+  const entries = platform === 'win32' ? [
+    ...agentExecutableDirectories.map((entry) => servicePathDirectory(entry, platform)),
+    pathApi.dirname(executablePath),
+    ...(runtimePath ? [pathApi.dirname(runtimePath)] : []),
+  ] : [
+    ...agentExecutableDirectories.map((entry) => servicePathDirectory(entry, platform)),
     join(homeDir, '.local', 'bin'),
     join(homeDir, 'bin'),
     join(homeDir, '.bun', 'bin'),
@@ -475,7 +540,7 @@ export function servicePathEntries(
     '/usr/bin',
     '/bin',
   ];
-  return [...new Set(entries.map((entry) => cleanAbsolutePath(entry, 'PATH entry')))];
+  return [...new Set(entries.map((entry) => cleanHostPath(entry, 'PATH entry', platform)))];
 }
 
 /** PATH is ordered state: equal membership with a different order can select a different interpreter. */
@@ -492,16 +557,19 @@ function minimalServicePath(
   executablePath: string,
   agentExecutableDirectories: readonly string[],
   runtimePath?: string,
+  platform: string = process.platform,
 ): string {
-  return servicePathEntries(homeDir, executablePath, agentExecutableDirectories, runtimePath).join(':');
+  return servicePathEntries(homeDir, executablePath, agentExecutableDirectories, runtimePath, platform)
+    .join(platform === 'win32' ? ';' : ':');
 }
 
 function serviceAgentOverrideEntries(
   overrides: Readonly<ServiceAgentExecutableOverrides>,
+  platform: string = process.platform,
 ): Array<readonly [ServiceAgentExecutableOverrideName, string]> {
   return SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES.flatMap((name) => {
     const executable = overrides[name];
-    return executable ? [[name, cleanAbsolutePath(executable, `${name} executable`)] as const] : [];
+    return executable ? [[name, cleanHostPath(executable, `${name} executable`, platform)] as const] : [];
   });
 }
 
@@ -521,26 +589,30 @@ export function brokerServiceEnvironmentEntries(options: {
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
   webDir: string;
+  platform?: string;
 }): Array<readonly [string, string]> {
-  const stateHome = cleanAbsolutePath(options.stateHome, 'state');
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === 'win32' ? win32 : posix;
+  const stateHome = cleanHostPath(options.stateHome, 'state', platform);
   return [
-    ['HOME', cleanAbsolutePath(options.homeDir, 'home')],
+    ['HOME', cleanHostPath(options.homeDir, 'home', platform)],
     ['PATH', minimalServicePath(
       options.homeDir,
       options.executablePath,
       options.agentExecutableDirectories ?? [],
       options.runtimePath,
+      platform,
     )],
-    ...serviceAgentOverrideEntries(options.agentExecutableOverrides ?? {}),
+    ...serviceAgentOverrideEntries(options.agentExecutableOverrides ?? {}, platform),
     ['COSYNCING_HOME', stateHome],
-    ['COSYNCING_CACHE_DIR', cleanAbsolutePath(options.cacheRoot, 'cache')],
-    ['COSYNCING_TOKEN_FILE', join(stateHome, 'secrets', 'broker-token')],
-    ['COSYNCING_PI_INTEGRATION_FILE', join(stateHome, 'secrets', 'pi-integration.json')],
+    ['COSYNCING_CACHE_DIR', cleanHostPath(options.cacheRoot, 'cache', platform)],
+    ['COSYNCING_TOKEN_FILE', pathApi.join(stateHome, 'secrets', 'broker-token')],
+    ['COSYNCING_PI_INTEGRATION_FILE', pathApi.join(stateHome, 'secrets', 'pi-integration.json')],
     // Not derivable inside the service. `executablePath` above is the bootstrap copy the unit execs, and no
     // web sidecar is ever placed beside it; the sidecar sits beside the acquisition executable, which is
     // exactly where setup measured it. Without this entry a packaged service install serves "no web app" on
     // a host where setup told the operator the app was there.
-    ['COSYNCING_WEB_DIR', cleanAbsolutePath(options.webDir, 'web')],
+    ['COSYNCING_WEB_DIR', cleanHostPath(options.webDir, 'web', platform)],
     // Managed external hosts, on by default for the service the installer owns.
     //
     // The alternative was an installed broker that can see a `kimi web` or
@@ -702,7 +774,7 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
   private readonly definition: string;
   private readonly environment: string;
 
-  constructor(readonly options: SystemdProviderOptions) {
+  constructor(readonly options: DurableServiceProviderOptions) {
     const configHome = options.configHome?.trim()
       || options.context.env.XDG_CONFIG_HOME?.trim()
       || join(options.homeDir, '.config');
@@ -1093,27 +1165,34 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
   }
 }
 
-interface SystemdRollbackData extends Record<string, unknown> {
+interface DurableServiceRollbackData extends Record<string, unknown> {
   files: SetupRollbackRecord;
   wasEnabled: boolean;
   wasActive: boolean;
   lingering: 'enabled' | 'disabled' | 'unknown';
+  providerState?: Record<string, unknown>;
 }
 
-function serviceRollback(record: Readonly<SetupRollbackRecord>): SystemdRollbackData {
+function serviceRollback(record: Readonly<SetupRollbackRecord>): DurableServiceRollbackData {
   if (record.kind !== 'systemd-service-v1' || !record.data.files
       || typeof record.data.wasEnabled !== 'boolean' || typeof record.data.wasActive !== 'boolean'
-      || !['enabled', 'disabled', 'unknown'].includes(String(record.data.lingering))) {
+      || !['enabled', 'disabled', 'unknown'].includes(String(record.data.lingering))
+      || (record.data.providerState !== undefined
+        && (!record.data.providerState || typeof record.data.providerState !== 'object'
+          || Array.isArray(record.data.providerState)))) {
     throw new Error('invalid systemd rollback record');
   }
-  return record.data as SystemdRollbackData;
+  return record.data as DurableServiceRollbackData;
 }
 
-export interface SystemdSetupActionOptions {
+export interface DurableServiceSetupActionOptions {
   desired: 'installed' | 'absent';
   enableLingering: boolean;
   lingeringAlreadyOwned: boolean;
 }
+
+/** Compatibility alias for callers that still use the pre-Phase-4 API name. */
+export type SystemdSetupActionOptions = DurableServiceSetupActionOptions;
 
 /** `service-systemd` / `service-launchd`: the receipt naming the definition file this provider owns. */
 export function serviceDefinitionResourceId(provider: Pick<DurableServiceProvider, 'id'>): string {
@@ -1124,6 +1203,12 @@ export function serviceDefinitionResourceId(provider: Pick<DurableServiceProvide
 export const SERVICE_RESOURCE_IDS: readonly string[] = Object.freeze([
   'service-systemd',
   'service-launchd',
+  'service-task-scheduler',
+  'service-task-scheduler-sid-folder',
+  'service-task-scheduler-shared-folder',
+  'service-windows-bootstrap',
+  'service-windows-active-install',
+  'service-windows-version',
   'service-environment',
   'service-systemd-linger',
 ]);
@@ -1133,33 +1218,56 @@ export const SERVICE_RESOURCE_IDS: readonly string[] = Object.freeze([
  * service manager on darwin, and systemd is the only one v1 supports on linux.
  */
 export function durableServiceProviderId(platform: string): DurableServiceProviderId {
-  return platform === 'darwin' ? 'launchd' : 'systemd';
+  return platform === 'win32' ? 'task-scheduler' : platform === 'darwin' ? 'launchd' : 'systemd';
 }
 
-export function createDurableServiceProvider(options: SystemdProviderOptions): DurableServiceProvider {
-  return durableServiceProviderId(options.context.platform) === 'launchd'
-    ? new LaunchdUserServiceProvider(options)
-    : new SystemdUserServiceProvider(options);
+export function createDurableServiceProvider(options: DurableServiceProviderOptions): DurableServiceProvider {
+  const provider = durableServiceProviderId(options.context.platform);
+  if (provider === 'launchd') return new LaunchdUserServiceProvider(options);
+  if (provider === 'systemd') return new SystemdUserServiceProvider(options);
+  if (!options.versionKey) throw new Error('Task Scheduler provider requires a version key');
+  const paths = windowsServiceInstallPaths(options.stateHome, options.versionKey);
+  return new WindowsTaskSchedulerServiceProvider({
+    ...options,
+    versionKey: options.versionKey,
+    environmentEntries: brokerServiceEnvironmentEntries({
+      homeDir: options.homeDir,
+      stateHome: options.stateHome,
+      cacheRoot: options.cacheRoot,
+      executablePath: paths.applicationPath,
+      runtimePath: options.runtimePath,
+      agentExecutableDirectories: options.agentExecutableDirectories,
+      agentExecutableOverrides: options.agentExecutableOverrides,
+      webDir: paths.webRoot,
+      platform: 'win32',
+    }),
+  });
 }
 
-export function createSystemdSetupAction(
+export function createDurableServiceSetupAction(
   provider: DurableServiceProvider,
-  options: Readonly<SystemdSetupActionOptions>,
+  options: Readonly<DurableServiceSetupActionOptions>,
 ): SetupTransactionAction {
   return {
     id: 'service.systemd',
     async prepare(context) {
       const status = await provider.inspect();
+      const providerState = await provider.captureTransactionState?.();
       return {
         kind: 'systemd-service-v1',
         data: {
-          files: snapshotSetupFiles(context, 'service.systemd', [provider.definitionPath, provider.environmentPath]),
+          files: snapshotSetupFiles(
+            context,
+            'service.systemd',
+            provider.transactionFilePaths?.() ?? [provider.definitionPath, provider.environmentPath],
+          ),
           wasEnabled: status.enabled === 'enabled',
           wasActive: status.active === 'active',
           lingering: status.lingering === 'enabled' || status.lingering === 'disabled'
             ? status.lingering
             : 'unknown',
-        } satisfies SystemdRollbackData,
+          ...(providerState ? { providerState } : {}),
+        } satisfies DurableServiceRollbackData,
       };
     },
     async apply() {
@@ -1178,7 +1286,7 @@ export function createSystemdSetupAction(
       const enabledLingeringNow = options.enableLingering && status.lingering === 'disabled';
       if (enabledLingeringNow) await provider.enableLingering();
       return {
-        resources: [
+        resources: provider.installedResources?.() ?? [
           {
             id: serviceDefinitionResourceId(provider),
             kind: 'service',
@@ -1221,7 +1329,11 @@ export function createSystemdSetupAction(
       await provider.stop();
       await provider.uninstall();
       rollbackSetupFiles(prior.files);
-      await provider.reloadDefinition();
+      if (provider.restoreTransactionState && prior.providerState) {
+        await provider.restoreTransactionState(prior.providerState);
+      } else {
+        await provider.reloadDefinition();
+      }
       const restored = await provider.inspect();
       // Nothing was on disk before this transaction, so there is no posture to restore: uninstall plus the
       // file rollback already left the host as it was, and enable/disable against an absent definition only
@@ -1262,6 +1374,13 @@ export function createSystemdSetupAction(
     },
   };
 }
+
+/**
+ * Legacy API alias. The action id and rollback kind remain systemd-shaped on purpose: they are persisted
+ * journal identifiers, not descriptions of the selected provider. Changing them requires a versioned
+ * recovery migration for transactions written by older releases.
+ */
+export const createSystemdSetupAction = createDurableServiceSetupAction;
 
 /**
  * Wait for a just-issued lifecycle command to actually reach its target state.
@@ -1325,7 +1444,7 @@ export interface ServiceStartVerification {
  *   Compared verbatim — both sides are the same function over the same stamped record, so normalizing here
  *   could only mask a genuine mismatch.
  */
-export async function startAndVerifySystemdService(options: {
+export async function startAndVerifyDurableService(options: {
   provider: DurableServiceProvider;
   context: SetupDiagnosisContext;
   internalUrl: string;
@@ -1382,3 +1501,7 @@ export async function startAndVerifySystemdService(options: {
       + `${attempts} attempts (active=${lastActive}, health=${lastHealth}, build=${lastBuild})`,
   };
 }
+
+
+/** Compatibility alias for callers that still use the pre-Phase-4 API name. */
+export const startAndVerifySystemdService = startAndVerifyDurableService;

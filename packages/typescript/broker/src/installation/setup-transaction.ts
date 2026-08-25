@@ -31,6 +31,8 @@ export interface SetupTransactionPlan {
   schemaVersion: 1;
   id: string;
   preconditionHash: string;
+  /** Additive stable identity for provider-owned objects. Older journals legitimately omit it. */
+  installationId?: string;
   actions: SetupPlanAction[];
 }
 
@@ -239,6 +241,9 @@ function normalizeApplied(value: unknown): AppliedSetupAction | undefined {
 function normalizePlan(value: unknown): SetupTransactionPlan | undefined {
   if (!plainRecord(value) || value.schemaVersion !== 1 || !safeIdentifier(value.id)) return undefined;
   if (typeof value.preconditionHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.preconditionHash)) return undefined;
+  if (value.installationId !== undefined
+      && (typeof value.installationId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.installationId))) return undefined;
   if (!Array.isArray(value.actions)) return undefined;
   const actions: SetupPlanAction[] = [];
   for (const candidate of value.actions) {
@@ -256,6 +261,7 @@ function normalizePlan(value: unknown): SetupTransactionPlan | undefined {
     schemaVersion: 1,
     id: value.id,
     preconditionHash: value.preconditionHash,
+    ...(typeof value.installationId === 'string' ? { installationId: value.installationId } : {}),
     actions,
   };
 }

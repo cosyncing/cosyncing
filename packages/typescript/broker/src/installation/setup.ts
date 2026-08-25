@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { inspectPiBridgeAsset } from '@cosyncing/adapter-pi';
@@ -31,6 +31,7 @@ import {
 import {
   inspectInstallState,
   serviceExecutablePath,
+  type InstalledResourceRecord,
   type InstallStateInspection,
 } from './install-state.ts';
 import {
@@ -79,10 +80,10 @@ import {
 } from '@cosyncing/adapter-opencode';
 import {
   createDurableServiceProvider,
-  createSystemdSetupAction,
+  createDurableServiceSetupAction,
   durableServiceProviderId,
   serviceDefinitionResourceId,
-  startAndVerifySystemdService,
+  startAndVerifyDurableService,
   SERVICE_RESOURCE_IDS,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
@@ -90,7 +91,7 @@ import {
   type DurableServiceProviderId,
   type DurableServiceStatus,
   type ServiceAgentExecutableOverrides,
-  type SystemdProviderOptions,
+  type DurableServiceProviderOptions,
 } from './service-manager.ts';
 import {
   createSetupActionCatalog,
@@ -107,6 +108,7 @@ import {
   setupStateHome,
   type SetupState,
 } from './setup-state.ts';
+import { windowsServiceVersionKey } from './windows-service-install.ts';
 import {
   hasLegacyConnectivityIntent,
   LEGACY_TAILSCALE_RESOURCE_ID,
@@ -128,7 +130,7 @@ import {
  * How the broker runs after setup. Exactly one durable option is offered per host — `systemd` on linux,
  * `launchd` on darwin — because each is the only user service manager its platform has.
  */
-export type SetupServiceChoice = 'foreground' | 'systemd' | 'launchd';
+export type SetupServiceChoice = 'foreground' | 'systemd' | 'launchd' | 'task-scheduler';
 
 /**
  * What the quota prompt may truthfully promise about setting a Tokdash up, given what is on PATH.
@@ -231,15 +233,15 @@ export interface SetupInspection {
   agentExecutableOverrides?: ServiceAgentExecutableOverrides;
 
   /**
-   * The single durable manager this host could use. Every `systemd*` field below describes THAT provider —
-   * the names are kept because the provider seam, receipts, and plan wiring are shared; only the id differs.
+   * The single durable manager this host could use. Availability, inspection, and owned targets describe
+   * that provider without assuming a particular service manager.
    */
   durableServiceProvider: DurableServiceProviderId;
-  systemdAvailable: boolean;
-  systemdStatus?: DurableServiceStatus;
-  systemdDefinitionPath?: string;
-  systemdEnvironmentPath?: string;
-  systemdPersistenceTarget?: string;
+  durableServiceAvailable: boolean;
+  durableServiceStatus?: DurableServiceStatus;
+  durableServiceDefinitionPath?: string;
+  durableServiceEnvironmentPath?: string;
+  durableServicePersistenceTarget?: string;
   /**
    * Whether THIS build can actually serve the browser client. The Flutter bundle ships beside a packaged
    * executable and is routinely absent from the npm tarball, so the outro reads this rather than assuming
@@ -376,11 +378,14 @@ export interface SetupDependencies {
     runtimePath?: string;
     home: string;
     context: SetupDiagnosisContext;
-    systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
+    installationId?: string;
+    durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   }) => Promise<SetupInspection>;
   acquireLock?: (options: { command: 'setup'; home: string }) => InstallationLockHandle;
   actionCatalogFactory?: typeof createSetupActionCatalog;
-  systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
+  durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
+  /** @deprecated Use durableServiceProviderFactory. */
+  systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   serviceHealthAttempts?: number;
 }
 
@@ -637,11 +642,11 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     agentExecutableDirectories: input.agentExecutableDirectories,
     agentExecutableOverrides: input.agentExecutableOverrides,
     durableServiceProvider: input.durableServiceProvider,
-    systemdAvailable: input.systemdAvailable,
-    systemdStatus: input.systemdStatus,
-    systemdDefinitionPath: input.systemdDefinitionPath,
-    systemdEnvironmentPath: input.systemdEnvironmentPath,
-    systemdPersistenceTarget: input.systemdPersistenceTarget,
+    durableServiceAvailable: input.durableServiceAvailable,
+    durableServiceStatus: input.durableServiceStatus,
+    durableServiceDefinitionPath: input.durableServiceDefinitionPath,
+    durableServiceEnvironmentPath: input.durableServiceEnvironmentPath,
+    durableServicePersistenceTarget: input.durableServicePersistenceTarget,
     blockingIssueCodes: input.blockingIssues.map((issue) => issue.code).sort(),
   };
 }
@@ -652,7 +657,10 @@ export async function inspectSetupEnvironment(options: {
   runtimePath?: string;
   home: string;
   context: SetupDiagnosisContext;
-  systemdProviderFactory?: (options: SystemdProviderOptions) => DurableServiceProvider;
+  installationId?: string;
+  durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
+  /** @deprecated Use durableServiceProviderFactory. */
+  systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
 }): Promise<SetupInspection> {
   const config = inspectBrokerConfig(options.home);
   const targetConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
@@ -769,22 +777,26 @@ export async function inspectSetupEnvironment(options: {
     });
   }
   const durableServiceProvider = durableServiceProviderId(options.context.platform);
-  const systemdCheck = check(doctor, DURABLE_SERVICE_CHECK_ID[durableServiceProvider]);
+  const durableServiceCheck = check(doctor, DURABLE_SERVICE_CHECK_ID[durableServiceProvider]);
   // A source entry point is not a stable executable for a boot service. Durable installation is exposed only
   // by the packaged binary; contributor source runs retain foreground setup for local development.
-  const systemdAvailable = options.buildInfo.packaged
-    && (systemdCheck?.status === 'pass' || systemdCheck?.detailCode === 'systemd-user-degraded');
-  const systemdProvider = systemdAvailable
-    ? (options.systemdProviderFactory ?? createDurableServiceProvider)({
+  const durableServiceAvailable = options.buildInfo.packaged
+    && (durableServiceCheck?.status === 'pass' || durableServiceCheck?.detailCode === 'systemd-user-degraded');
+  const durableService = durableServiceAvailable
+    ? (options.durableServiceProviderFactory ?? options.systemdProviderFactory ?? createDurableServiceProvider)({
         context: options.context,
         homeDir: options.context.homeDir,
         stateHome: options.home,
+        ...(options.installationId ? { installationId: options.installationId } : {}),
+        versionKey: windowsServiceVersionKey(options.buildInfo),
+        taskSchedulerReceiptResources: installState.committed ? installState.state.resources : [],
         cacheRoot,
         executablePath: serviceExecutablePath({
           packaged: options.buildInfo.packaged,
           home: options.home,
           executablePath: options.executablePath,
         }),
+        acquisitionExecutablePath: options.executablePath,
         distribution: options.buildInfo.distribution,
         ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
         agentExecutableDirectories,
@@ -797,7 +809,7 @@ export async function inspectSetupEnvironment(options: {
         }),
       })
     : undefined;
-  const systemdStatus = systemdProvider ? await systemdProvider.inspect() : undefined;
+  const durableServiceStatus = durableService ? await durableService.inspect() : undefined;
   const withoutHash: Omit<SetupInspection, 'preconditionHash' | 'doctor'> = {
     schemaVersion: 1,
     product: PRODUCT_IDENTITY.productName,
@@ -828,12 +840,12 @@ export async function inspectSetupEnvironment(options: {
     agentExecutableDirectories,
     agentExecutableOverrides,
     durableServiceProvider,
-    systemdAvailable,
-    ...(systemdStatus ? { systemdStatus } : {}),
-    ...(systemdProvider ? {
-      systemdDefinitionPath: systemdProvider.definitionPath,
-      systemdEnvironmentPath: systemdProvider.environmentPath,
-      systemdPersistenceTarget: systemdProvider.persistenceTarget,
+    durableServiceAvailable,
+    ...(durableServiceStatus ? { durableServiceStatus } : {}),
+    ...(durableService ? {
+      durableServiceDefinitionPath: durableService.definitionPath,
+      durableServiceEnvironmentPath: durableService.environmentPath,
+      durableServicePersistenceTarget: durableService.persistenceTarget,
     } : {}),
     webAppAvailable: existsSync(join(resolveFlutterWebRoot({
       override: options.context.env.COSYNCING_WEB_DIR,
@@ -1021,7 +1033,7 @@ function packageOwnedFile(inspection: SetupInspection, id: string, target?: stri
   }
 }
 
-function systemdOwnership(inspection: SetupInspection): {
+function durableServiceOwnership(inspection: SetupInspection): {
   serviceFiles: boolean;
   lingering: boolean;
 } {
@@ -1030,12 +1042,12 @@ function systemdOwnership(inspection: SetupInspection): {
     serviceFiles: packageOwnedFile(
       inspection,
       serviceDefinitionResourceId({ id: inspection.durableServiceProvider }),
-      inspection.systemdDefinitionPath,
+      inspection.durableServiceDefinitionPath,
     )
-      && packageOwnedFile(inspection, 'service-environment', inspection.systemdEnvironmentPath),
+      && packageOwnedFile(inspection, 'service-environment', inspection.durableServiceEnvironmentPath),
     lingering: !!lingering
       && lingering.kind === 'other'
-      && lingering.target === inspection.systemdPersistenceTarget
+      && lingering.target === inspection.durableServicePersistenceTarget
       && lingering.ownership?.proof === 'receipt',
   };
 }
@@ -1047,6 +1059,7 @@ function targetConfigForChoices(inspection: SetupInspection, _choices: SetupChoi
 export function buildSetupPlan(options: {
   inspection: SetupInspection;
   choices: SetupChoices;
+  installationId?: string;
   acknowledgedAt?: string;
   now?: () => Date;
 }): SetupPlan {
@@ -1236,8 +1249,8 @@ export function buildSetupPlan(options: {
       }
     }
   }
-  const ownership = systemdOwnership(options.inspection);
-  const serviceStatus = options.inspection.systemdStatus;
+  const ownership = durableServiceOwnership(options.inspection);
+  const serviceStatus = options.inspection.durableServiceStatus;
   const serviceArtifactsPresent = !!serviceStatus && (
     serviceStatus.definition !== 'missing'
     || serviceStatus.environment !== 'missing'
@@ -1248,7 +1261,7 @@ export function buildSetupPlan(options: {
   const provider = options.inspection.durableServiceProvider;
   let serviceAction: 'installed' | 'absent' | undefined;
   if (durableServiceChoice(options.choices)) {
-    if (!options.inspection.systemdAvailable || !serviceStatus?.supported) {
+    if (!options.inspection.durableServiceAvailable || !serviceStatus?.supported) {
       blockingIssues.push({
         code: `${provider}-user-unavailable`,
         summary: `A usable ${provider} user service manager is required for persistent service mode.`,
@@ -1297,7 +1310,7 @@ export function buildSetupPlan(options: {
       if (needsServiceReconcile) serviceAction = 'installed';
     }
   } else if (ownership.serviceFiles || ownership.lingering) {
-    if (!options.inspection.systemdAvailable || !serviceStatus?.supported) {
+    if (!options.inspection.durableServiceAvailable || !serviceStatus?.supported) {
       blockingIssues.push({
         code: `${provider}-removal-unavailable`,
         summary: `The package-owned ${provider} service cannot be removed because the user manager is unavailable.`,
@@ -1327,7 +1340,7 @@ export function buildSetupPlan(options: {
     // operator-visible gain (the title and summary below are what the wizard actually shows).
     actions.unshift(planned(
       serviceAction === 'installed'
-        ? { kind: 'service-install', definitionPath: options.inspection.systemdDefinitionPath ?? '' }
+        ? { kind: 'service-install', definitionPath: options.inspection.durableServiceDefinitionPath ?? '' }
         : { kind: 'service-remove', provider, product: PRODUCT_IDENTITY.productName },
       {
         id: 'service.systemd',
@@ -1384,11 +1397,13 @@ export function buildSetupPlan(options: {
     targetConfig,
     actions: planActions,
     requiresCommit,
+    installationId: options.installationId,
   });
   const transaction: SetupTransactionPlan = {
     schemaVersion: 1,
     id: `setup-${planHash.slice(0, 24)}`,
     preconditionHash: options.inspection.preconditionHash,
+    ...(options.installationId ? { installationId: options.installationId } : {}),
     actions: planActions,
   };
   return {
@@ -1414,6 +1429,7 @@ function actionInputs(options: {
   context: SetupDiagnosisContext;
   buildInfo: Readonly<BuildInfo>;
   executablePath: string;
+  installationId: string;
   aliasPath?: string;
   now?: () => Date;
 }): SetupActionInputs {
@@ -1462,6 +1478,7 @@ function actionInputs(options: {
     opencodeShimPort: opencodeShimPort(options.context.env.OPENCODE_URL),
     opencodeShimHost: opencodeShimHost(options.context.env.OPENCODE_URL),
     installMetadata: {
+      installationId: options.installationId,
       version: options.buildInfo.version,
       packaged: options.buildInfo.packaged,
       executablePath: options.executablePath,
@@ -1755,7 +1772,7 @@ function defaultAliasPath(executablePath: string): string | undefined {
   return existsSync(candidate) ? candidate : undefined;
 }
 
-function createSystemdProviderForSetup(options: {
+function createDurableProviderForSetup(options: {
   context: SetupDiagnosisContext;
   home: string;
   packaged: boolean;
@@ -1763,9 +1780,12 @@ function createSystemdProviderForSetup(options: {
   executablePath: string;
   runtimePath?: string;
   version: string;
+  versionKey: string;
+  installationId?: string;
+  taskSchedulerReceiptResources?: readonly InstalledResourceRecord[];
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
-  factory?: (options: SystemdProviderOptions) => DurableServiceProvider;
+  factory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
 }): DurableServiceProvider {
   const cacheRoot = resolveArtifactCacheRoot(
     options.context.env.COSYNCING_CACHE_DIR?.trim()
@@ -1775,9 +1795,13 @@ function createSystemdProviderForSetup(options: {
     context: options.context,
     homeDir: options.context.homeDir,
     stateHome: options.home,
+    ...(options.installationId ? { installationId: options.installationId } : {}),
+    versionKey: options.versionKey,
+    taskSchedulerReceiptResources: options.taskSchedulerReceiptResources ?? [],
     cacheRoot,
     // Must match inspectSetupEnvironment's provider exactly, or the written unit reads back as drifted.
     executablePath: serviceExecutablePath(options),
+    acquisitionExecutablePath: options.executablePath,
     distribution: options.distribution,
     ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
     agentExecutableDirectories: options.agentExecutableDirectories
@@ -1800,10 +1824,17 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   const acquireLock = dependencies.acquireLock ?? ((options) => acquireInstallationLock(options));
   const catalogFactory = dependencies.actionCatalogFactory ?? createSetupActionCatalog;
   const aliasPath = dependencies.aliasPath ?? defaultAliasPath(dependencies.executablePath);
+  // Read the journal BEFORE choosing an identity. An interrupted first install has no committed receipt yet;
+  // its journal is the only durable source for the marker already written into provider-owned objects.
+  const pendingJournal = readSetupTransactionJournal(home);
+  const existingInstall = inspectInstallState(home);
+  const installationId = pendingJournal?.plan.installationId
+    ?? (existingInstall.committed && existingInstall.state.installationId
+    ? existingInstall.state.installationId
+    : randomUUID());
   let recovered = false;
 
   // Interrupted setup is always rolled back to its journaled pre-state before a fresh inspection/plan.
-  const pendingJournal = readSetupTransactionJournal(home);
   if (pendingJournal) {
     const lock = acquireLock({ command: 'setup', home });
     try {
@@ -1821,6 +1852,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         installOpencodeShim: true,
         opencodeShimPort: opencodeShimPort(context.env.OPENCODE_URL),
         installMetadata: {
+          installationId,
           version: dependencies.buildInfo.version,
           packaged: dependencies.buildInfo.packaged,
           executablePath: dependencies.executablePath,
@@ -1833,7 +1865,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       const recoveryCatalog = catalogFactory(recoveryInputs);
       const recoveryActions = [...recoveryCatalog.actions];
       if (pendingJournal.plan.actions.some((action) => action.id === 'service.systemd')) {
-        const recoveryProvider = createSystemdProviderForSetup({
+        const recoveryProvider = createDurableProviderForSetup({
           context,
           home,
           packaged: dependencies.buildInfo.packaged,
@@ -1841,11 +1873,16 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           executablePath: dependencies.executablePath,
           ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
           version: dependencies.buildInfo.version,
+          versionKey: windowsServiceVersionKey(dependencies.buildInfo),
+          installationId,
+          taskSchedulerReceiptResources: existingInstall.committed
+            ? existingInstall.state.resources
+            : [],
           agentExecutableDirectories: serviceAgentExecutableDirectories(context),
           agentExecutableOverrides: serviceAgentExecutableOverrides(context),
-          factory: dependencies.systemdProviderFactory,
+          factory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
         });
-        recoveryActions.unshift(createSystemdSetupAction(recoveryProvider, {
+        recoveryActions.unshift(createDurableServiceSetupAction(recoveryProvider, {
           desired: 'installed',
           enableLingering: false,
           lingeringAlreadyOwned: false,
@@ -1872,7 +1909,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
     home,
     context,
-    systemdProviderFactory: dependencies.systemdProviderFactory,
+    installationId,
+    durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
   });
   // FIRST prompt, ahead of the intro panels: every panel below is copy, and copy needs a language before it
   // can be rendered. Cancelling here is a cancel like any other — nothing has been mutated yet.
@@ -2056,7 +2094,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     replaceLegacyPiBridge,
     upgradeLegacyAgentSkill,
   };
-  const plan = buildSetupPlan({ inspection, choices, now: dependencies.now });
+  const plan = buildSetupPlan({ inspection, choices, installationId, now: dependencies.now });
   if (plan.blockingIssues.length > 0) {
     await dependencies.presenter.showBlockers(plan.blockingIssues);
     const blocked = result({
@@ -2093,11 +2131,13 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
       home,
       context,
-      systemdProviderFactory: dependencies.systemdProviderFactory,
+      installationId,
+      durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
     });
     const lockedPlan = buildSetupPlan({
       inspection,
       choices,
+      installationId,
       acknowledgedAt: plan.acknowledgedAt,
       now: dependencies.now,
     });
@@ -2123,13 +2163,14 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       context,
       buildInfo: dependencies.buildInfo,
       executablePath: dependencies.executablePath,
+      installationId,
       aliasPath,
       now: dependencies.now,
     });
     const catalog = catalogFactory(inputs);
     const hasSystemdAction = lockedPlan.actions.some((action) => action.id === 'service.systemd');
-    const systemdProvider = (hasSystemdAction || durableServiceChoice(lockedPlan.choices))
-      ? createSystemdProviderForSetup({
+    const durableService = (hasSystemdAction || durableServiceChoice(lockedPlan.choices))
+      ? createDurableProviderForSetup({
           context,
           home,
           packaged: dependencies.buildInfo.packaged,
@@ -2137,17 +2178,22 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
           executablePath: dependencies.executablePath,
           ...(dependencies.runtimePath ? { runtimePath: dependencies.runtimePath } : {}),
           version: dependencies.buildInfo.version,
+          versionKey: windowsServiceVersionKey(dependencies.buildInfo),
+          installationId,
+          taskSchedulerReceiptResources: inspection.installState.committed
+            ? inspection.installState.state.resources
+            : [],
           agentExecutableDirectories: inspection.agentExecutableDirectories,
           agentExecutableOverrides: inspection.agentExecutableOverrides,
-          factory: dependencies.systemdProviderFactory,
+          factory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
         })
       : undefined;
     const transactionActions = [...catalog.actions];
-    if (systemdProvider && hasSystemdAction) {
-      transactionActions.unshift(createSystemdSetupAction(systemdProvider, {
+    if (durableService && hasSystemdAction) {
+      transactionActions.unshift(createDurableServiceSetupAction(durableService, {
         desired: durableServiceChoice(lockedPlan.choices) ? 'installed' : 'absent',
         enableLingering: lockedPlan.choices.enableLingering,
-        lingeringAlreadyOwned: systemdOwnership(inspection).lingering,
+        lingeringAlreadyOwned: durableServiceOwnership(inspection).lingering,
       }));
     }
     await executeSetupTransaction({
@@ -2156,14 +2202,14 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       actions: transactionActions,
       commitAction: catalog.commitAction,
       verifyAll: () => verifySetup({ plan: lockedPlan, inspection, context }),
-      ...(systemdProvider && durableServiceChoice(lockedPlan.choices) ? {
+      ...(durableService && durableServiceChoice(lockedPlan.choices) ? {
         verifyCommitted: async () => {
           const brokerCredential = inspectBrokerToken(brokerTokenPath(home));
           if (brokerCredential.status !== 'ok') {
             return { ok: false, detail: 'the installed broker credential is unavailable' };
           }
-          const serviceReady = await startAndVerifySystemdService({
-            provider: systemdProvider,
+          const serviceReady = await startAndVerifyDurableService({
+            provider: durableService,
             context,
             internalUrl: lockedPlan.targetConfig.broker.internalUrl,
             healthHeaders: {
@@ -2182,6 +2228,10 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       } : {}),
       now: dependencies.now,
     });
+    // A Windows version remains rollback material until the new active manifest, service health, and receipt
+    // have all committed. Cleanup is deliberately outside the transaction; failure preserves the old version
+    // and a later setup can retry without invalidating the successful installation.
+    await durableService?.finalizeCommitted?.().catch(() => undefined);
     // Optional work, deliberately AFTER the commit. The transaction is all-or-nothing: an in-transaction
     // Tokdash step that failed would roll back a broker install that is otherwise complete and verified, and
     // what it mutates (pipx's state, Tokdash's own service) is not something the file-snapshot rollback can

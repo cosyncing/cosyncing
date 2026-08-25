@@ -51,12 +51,13 @@ import {
   watch,
   type FSWatcher,
 } from 'node:fs';
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { connect, type Socket } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { join, basename, dirname, resolve, relative, sep, extname } from 'node:path';
 import {
   PRODUCT_IDENTITY,
+  HostProcessProvider,
   summarizeDiff,
   gitDiffPath,
   type AgentBackend,
@@ -95,6 +96,8 @@ import {
   searchSemantic,
   webSemantic,
   OwnershipConflictError,
+  resolveInvocation,
+  spawnResolvedInvocation,
 } from '@cosyncing/adapter-api';
 import { diagnoseClaudeSetup } from './diagnostics.ts';
 
@@ -318,9 +321,8 @@ function slugForCwd(cwd: string): string {
  * NOT a local interactive CLI launch is.
  *
  * Join key is the `sessionId` field, never the pid (pids recycle; one sessionId can appear in several pid
- * files — any bridged file for it marks the session). Liveness-guarded on Linux (`/proc/<pid>`) so a
- * stale pid-file can't wrongly block a free session; on other platforms a bridged entry blocks
- * conservatively.
+ * files — any bridged file for it marks the session). Liveness comes from the
+ * shared host-process provider; an unreadable identity blocks conservatively.
  */
 export function bridgedUuids(store: ClaudeStore): Set<string> {
   const out = new Set<string>();
@@ -346,8 +348,7 @@ export function bridgedUuids(store: ClaudeStore): Set<string> {
       // Claude ≥2.1.x — it is drivable, not remote-controlled — so don't block Drive on it. Only a
       // bridged session that is NOT a local interactive CLI launch is owned by the official remote client.
       if (j.kind === 'interactive' && j.entrypoint === 'cli') continue;
-      const alive =
-        process.platform === 'linux' && typeof j.pid === 'number' ? existsSync('/proc/' + j.pid) : true;
+      const alive = pidAlive(j.pid);
       if (alive) out.add(j.sessionId);
     } catch {
       /* skip malformed pid-file */
@@ -356,14 +357,13 @@ export function bridgedUuids(store: ClaudeStore): Set<string> {
   return out;
 }
 
+const hostProcesses = new HostProcessProvider();
+
 function pidAlive(pid: unknown): boolean {
-  if (typeof pid !== 'number' || !Number.isFinite(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false;
+  // Unknown includes access denied and probe failure. Both preserve the owner;
+  // only an OS-confirmed absence permits treating the registry entry as stale.
+  return hostProcesses.liveProcess(pid).state !== 'absent';
 }
 
 /** Live local terminal owner for a Claude transcript uuid, from `<configDir>/sessions/*.json`.
@@ -2942,16 +2942,19 @@ export class ClaudeResumeConnection implements SessionConnection {
     const args = resumeArgs(targetUuid, { model, mode, effort, isDefault: this.store.isDefault, fresh: !existsSync(targetPath) });
     let proc: ChildProcessWithoutNullStreams;
     try {
-      proc = spawn(this.store.bin, args, {
+      const env = resumeEnv(this.store);
+      const invocation = resolveInvocation(this.store.bin, { env, platform: process.platform });
+      if (!invocation) throw new Error(`Claude executable is unavailable: ${this.store.bin}`);
+      proc = spawnResolvedInvocation(invocation, args, {
         // `claude --resume <uuid>` is CWD-SCOPED — it only finds a session belonging to the current
         // directory's project, so we MUST launch in the session's own cwd or resume fails with "No
         // conversation found" (and the turn should run in its workspace anyway).
         cwd: this.info.cwd && existsSync(this.info.cwd) ? this.info.cwd : undefined,
         // Cost safety: default store drives on subscription OAuth — scrub any inherited API key/token
         // so a drive never silently bills the API; wrappers keep their env (own endpoint auth).
-        env: resumeEnv(this.store),
+        env,
         stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      }) as ChildProcessWithoutNullStreams;
     } catch (e) {
       this.emit({ type: 'error', message: 'Claude launch failed: ' + String(e) });
       return false;
@@ -6300,9 +6303,5 @@ function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefi
 }
 
 function resolveBin(bin: string): string | null {
-  try {
-    return Bun.which(bin);
-  } catch {
-    return null;
-  }
+  return resolveInvocation(bin, { env: process.env, platform: process.platform })?.originalPath ?? null;
 }

@@ -44,10 +44,12 @@ import {
   SessionCreateTemporarilyUnavailableError,
   boundToolSemantic,
   boundedStream,
+  bunSpawnResolvedInvocation,
   commandSemantic,
   fileReadSemantic,
   searchGroup,
   searchSemantic,
+  resolveInvocation,
   splitUnifiedDiffFiles,
   webSemantic,
 } from '@cosyncing/adapter-api';
@@ -1062,7 +1064,7 @@ export class OpenCodeAdapter implements AgentBackend {
   ): Promise<{ path: string; format: 'json' }> {
     if (!this.opencodeBin) throw new Error('OpenCode CLI is not available on PATH; cannot export transcript.');
     const outPath = join(opts.tempDir, 'export.json');
-    const proc = Bun.spawn([this.opencodeBin, 'export', sessionId, '--sanitize'], {
+    const proc = spawnOpenCode(this.opencodeBin, ['export', sessionId, '--sanitize'], {
       stdout: 'pipe',
       stderr: 'pipe',
       env: process.env,
@@ -1368,7 +1370,7 @@ class OpenCodeRunConnection extends OpenCodeObserveConnection {
     if (input.agent) args.push('--agent', input.agent);
     for (const path of filePaths) args.push('--file', path);
     if (input.text) args.push(input.text);
-    const proc = Bun.spawn([this.bin, ...args], {
+    const proc = spawnOpenCode(this.bin, args, {
       cwd: this.info.cwd,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -4122,16 +4124,22 @@ function shellQuote(s: string): string {
 }
 
 function resolveBin(bin: string): string | null {
-  const paths = (process.env.PATH ?? '').split(':').filter(Boolean);
-  for (const p of paths) {
-    const full = join(p, bin);
-    try {
-      if (existsSync(full)) return full;
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
+  return resolveInvocation(bin, { env: process.env, platform: process.platform })?.originalPath ?? null;
+}
+
+function spawnOpenCode<
+  const In extends Bun.SpawnOptions.Writable,
+  const Out extends Bun.SpawnOptions.Readable,
+  const Err extends Bun.SpawnOptions.Readable,
+>(
+  executable: string,
+  args: readonly string[],
+  options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
+): Bun.Subprocess<In, Out, Err> {
+  const env = (options.env ?? process.env) as Readonly<Record<string, string | undefined>>;
+  const invocation = resolveInvocation(executable, { env, platform: process.platform });
+  if (!invocation) throw new Error(`OpenCode executable is unavailable: ${executable}`);
+  return bunSpawnResolvedInvocation(invocation, args, options);
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -96,11 +96,11 @@ export interface SetupState {
   /** One required disclosure/acknowledgement covers supported managed Codex/OpenCode/Pi ownership. */
   managedRuntimeAcknowledgedAt?: string;
   /**
-   * BPC5 records the user's service choice; BPC6 owns installing the persistent provider. `launchd` is the
-   * darwin durable option and is additive to schemaVersion 1: state written before it existed simply never
-   * carries the value, and every reader below treats an unknown value as foreground.
+   * BPC5 records the user's service choice; BPC6 owns installing the persistent provider. New provider ids
+   * are additive to schemaVersion 1: state written before they existed simply never carries the value, and
+   * every reader below treats an unknown value as foreground.
    */
-  serviceChoice?: 'foreground' | 'systemd' | 'launchd';
+  serviceChoice?: 'foreground' | 'systemd' | 'launchd' | 'task-scheduler';
   /** Separate BPC6 consent; true records intent, while the install receipt proves whether cosyncing enabled it. */
   systemdLingeringRequested?: boolean;
   /** One consent controls the package-owned cosyncing agent skill installed in both native discovery roots. */
@@ -122,8 +122,8 @@ export interface SetupState {
  * `foreground`, or a value written by a newer build this one does not know — is foreground, so an older
  * binary reading newer state degrades to the safe mode instead of constructing a provider it cannot drive.
  */
-export function isDurableServiceChoice(value: unknown): value is 'systemd' | 'launchd' {
-  return value === 'systemd' || value === 'launchd';
+export function isDurableServiceChoice(value: unknown): value is 'systemd' | 'launchd' | 'task-scheduler' {
+  return value === 'systemd' || value === 'launchd' || value === 'task-scheduler';
 }
 
 export function getQuotaWarningsEnabled(): boolean {

@@ -179,6 +179,7 @@ function readOpencodeServeOwnership(): OpencodeServeOwnership | null {
     if (record.schemaVersion !== OPENCODE_SERVE_OWNER_SCHEMA_VERSION) return null;
     if (typeof record.pid !== 'number' || !Number.isInteger(record.pid) || record.pid <= 0) return null;
     if (typeof record.start !== 'string' || record.start.length === 0) return null;
+    if (typeof record.boot !== 'string') return null;
     if (typeof record.comm !== 'string') return null;
     if (typeof record.baseUrl !== 'string' || record.baseUrl.length === 0) return null;
     if (typeof record.recordedAtMs !== 'number' || !Number.isFinite(record.recordedAtMs)) return null;
@@ -186,7 +187,11 @@ function readOpencodeServeOwnership(): OpencodeServeOwnership | null {
       schemaVersion: OPENCODE_SERVE_OWNER_SCHEMA_VERSION,
       pid: record.pid,
       start: record.start,
+      boot: record.boot,
       comm: record.comm,
+      ...(typeof record.executable === 'string' && record.executable.length > 0
+        ? { executable: record.executable }
+        : {}),
       baseUrl: record.baseUrl,
       recordedAtMs: record.recordedAtMs,
     };

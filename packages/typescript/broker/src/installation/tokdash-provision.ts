@@ -68,8 +68,11 @@
  *   does NOT do is terminate TLS — `serve` speaks plain HTTP — so an `https://` override names an endpoint it
  *   will never answer as, and that is reported instead of quietly provisioned somewhere else.
  */
-import { spawn } from 'node:child_process';
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import {
+  resolveInvocation,
+  spawnResolvedInvocation,
+  type SetupDiagnosisContext,
+} from '@cosyncing/adapter-api';
 import type { TokdashEndpoint } from './tokdash-quota.ts';
 
 /** The PyPI distribution and the console script it installs. Both are `tokdash`. */
@@ -198,7 +201,12 @@ export const runTokdashCommand: TokdashCommandRunner = (executable, args, timeou
     const timers: ReturnType<typeof setTimeout>[] = [];
     let settled = false;
     let timedOut = false;
-    const child = spawn(executable, [...args], { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    const invocation = resolveInvocation(executable, { env: process.env, platform: process.platform });
+    if (!invocation) {
+      resolveResult({ ok: false, stdout: '', stderr: '' });
+      return;
+    }
+    const child = spawnResolvedInvocation(invocation, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const finish = (ok: boolean): void => {
       if (settled) return;
       settled = true;

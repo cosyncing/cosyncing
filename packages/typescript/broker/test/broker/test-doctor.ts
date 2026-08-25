@@ -972,6 +972,58 @@ try {
     wslChecks.some((item) => item.detailCode === 'wsl-foreground-only' && item.status === 'warn')
       && !wslChecks.some((item) => item.id.includes('tailscale') || item.id.includes('advertised')));
 
+  // Connectivity is operator-owned on every host, and the native Windows path is the newest one. Doctor may
+  // refuse the host, but it must never resolve, run, or report an external connectivity provider while
+  // doing so — a Windows row that inspected Tailscale would re-create the ownership this architecture drops.
+  {
+    const resolved: string[] = [];
+    const ran: string[] = [];
+    const windowsContext: SetupDiagnosisContext = {
+      ...fakeContext({
+        homeDir: userHome,
+        platform: 'win32',
+        env: { HOME: userHome, COSYNCING_HOME: stateHome, COSYNCING_CACHE_DIR: cacheHome },
+        executables: {
+          'tailscale.exe': 'C:\\Program Files\\Tailscale\\tailscale.exe',
+          tailscale: 'C:\\Program Files\\Tailscale\\tailscale.exe',
+        },
+      }),
+      resolveExecutable: (command) => {
+        resolved.push(command);
+        return command === 'tailscale' || command === 'tailscale.exe'
+          ? 'C:\\Program Files\\Tailscale\\tailscale.exe'
+          : undefined;
+      },
+      runReadOnly: async (executable, args) => {
+        ran.push([executable, ...args].join(' '));
+        return { status: 'unavailable', stdout: '', stderr: '' };
+      },
+    };
+    const windowsReport = observeDoctorReport(await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: windowsContext,
+      assetReport: inspectRuntimeAssets(),
+      adapters: cleanAdapters,
+      stateHome,
+      codexTuiReadiness: {
+        status: 'unsupported',
+        customSocket: false,
+        staleCandidatePids: [],
+        message: 'fixture-only raw message',
+      },
+    }));
+    const windowsChecks = windowsReport.sections.flatMap((section) => section.checks);
+    const connectivity = /tailscale|serve|advertised|tunnel|vpn|mesh/i;
+    check('native Windows doctor refuses the host without inspecting external connectivity',
+      windowsChecks.some((item) => item.detailCode === 'native-windows-not-v1')
+        && !windowsChecks.some((item) => connectivity.test(item.id)
+          || connectivity.test(item.detailCode ?? '')
+          || connectivity.test(item.summary ?? ''))
+        && !resolved.some((command) => connectivity.test(command))
+        && !ran.some((command) => connectivity.test(command)),
+      `${resolved.join(',')}|${ran.join(',')}`);
+  }
+
   // macOS honesty: doctor must not call a supported host "not a v1 host", must not report a missing
   // systemd/systemctl, and must not send the operator to journalctl or a lingering policy that has no
   // launchd equivalent.

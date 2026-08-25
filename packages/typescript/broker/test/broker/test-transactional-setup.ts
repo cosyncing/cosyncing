@@ -11,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,8 +38,10 @@ import {
 } from '../../src/security/secure-files.ts';
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import {
+  createDurableServiceSetupAction,
   SYSTEMD_SERVICE_NAME,
   type DurableServiceProvider,
+  type DurableServiceProviderOptions,
   type DurableServiceStatus,
 } from '../../src/installation/service-manager.ts';
 import {
@@ -344,8 +347,127 @@ async function crashChild(home: string, marker: string): Promise<never> {
   throw new Error('crash child unexpectedly completed');
 }
 
+function interruptedSchedulerProvider(options: {
+  installationId: string;
+  taskPath: string;
+  markerPath?: string;
+  hangAfterCreate?: boolean;
+}): DurableServiceProvider {
+  const taskIdentity = (): string | undefined => {
+    if (!existsSync(options.taskPath)) return undefined;
+    return JSON.parse(readFileSync(options.taskPath, 'utf8')).installationId as string | undefined;
+  };
+  return {
+    id: 'task-scheduler',
+    serviceName: '\\Cosyncing\\S-1-fixture\\Broker',
+    definitionPath: '\\Cosyncing\\S-1-fixture\\Broker',
+    environmentPath: join(dirname(options.taskPath), 'environment.json'),
+    persistenceTarget: 'task-scheduler-login:S-1-fixture',
+    logsCommand: () => ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'],
+    expectedDefinition: () => options.installationId,
+    expectedEnvironment: () => '{}',
+    transactionFilePaths: () => [],
+    captureTransactionState: async () => ({ taskExisted: existsSync(options.taskPath) }),
+    restoreTransactionState: async () => {},
+    inspect: async () => {
+      const identity = taskIdentity();
+      const present = identity !== undefined;
+      const owned = identity === options.installationId;
+      return {
+        provider: 'task-scheduler',
+        supported: true,
+        definition: !present ? 'missing' : owned ? 'current' : 'unsafe',
+        environment: !present ? 'missing' : owned ? 'current' : 'unsafe',
+        enabled: present ? 'enabled' : 'disabled',
+        active: 'inactive',
+        lingering: 'unsupported',
+      };
+    },
+    installDefinition: async () => {
+      writeFileSync(options.taskPath, JSON.stringify({ installationId: options.installationId }));
+      if (options.markerPath) writeFileSync(options.markerPath, 'ready');
+      if (options.hangAfterCreate) await Bun.sleep(60_000);
+    },
+    reloadDefinition: async () => {},
+    setEnabled: async () => {},
+    enableLingering: async () => { throw new Error('unsupported'); },
+    disableLingering: async () => { throw new Error('unsupported'); },
+    start: async () => {},
+    stop: async () => {},
+    restart: async () => {},
+    uninstall: async () => {
+      if (!existsSync(options.taskPath)) return;
+      if (taskIdentity() !== options.installationId) throw new Error('scheduler-ownership-conflict');
+      unlinkSync(options.taskPath);
+    },
+  };
+}
+
+async function schedulerIdentityCrashChild(
+  home: string,
+  marker: string,
+  taskPath: string,
+  installationId: string,
+): Promise<never> {
+  const inputs: SetupActionInputs = {
+    home,
+    config: defaultBrokerConfig(),
+    setupState: { schemaVersion: 1 },
+    piAgentDir: join(home, 'pi-agent'),
+    installPiBridge: false,
+    agentSkillTargets: [],
+    installAgentSkill: false,
+    removeAgentSkillResourceIds: [],
+    installMetadata: {
+      installationId,
+      version: BUILD_INFO.version,
+      packaged: false,
+      executablePath: import.meta.path,
+      serviceChoice: 'task-scheduler',
+      systemdLingeringRequested: false,
+    },
+    now,
+  };
+  const catalog = createSetupActionCatalog(inputs);
+  const provider = interruptedSchedulerProvider({
+    installationId,
+    taskPath,
+    markerPath: marker,
+    hangAfterCreate: true,
+  });
+  const service = createDurableServiceSetupAction(provider, {
+    desired: 'installed',
+    enableLingering: false,
+    lingeringAlreadyOwned: false,
+  });
+  const plan: SetupTransactionPlan = {
+    schemaVersion: 1,
+    id: 'setup-scheduler-identity-crash',
+    preconditionHash: '1'.repeat(64),
+    installationId,
+    actions: [{ id: service.id, title: 'fixture', summary: 'fixture', reversible: true }],
+  };
+  const lock = acquireInstallationLock({ command: 'setup', home });
+  try {
+    await executeSetupTransaction({
+      home,
+      plan,
+      actions: [service],
+      commitAction: catalog.commitAction,
+      verifyAll: () => true,
+      now,
+    });
+  } finally {
+    lock.release();
+  }
+  throw new Error('scheduler identity crash child unexpectedly completed');
+}
+
 if (process.argv[2] === '--crash-child') {
   await crashChild(process.argv[3]!, process.argv[4]!);
+}
+if (process.argv[2] === '--scheduler-identity-crash-child') {
+  await schedulerIdentityCrashChild(process.argv[3]!, process.argv[4]!, process.argv[5]!, process.argv[6]!);
 }
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-transactional-setup-'));
@@ -443,6 +565,38 @@ try {
         && after.state.legacyConnectivityMigration?.preservedTargets.includes(target) === true
         && !presenter.calls.some((call) => /tailscale/i.test(call)),
       `${presenter.calls.join(',')}:${JSON.stringify(migrated.legacyConnectivityMigration)}`);
+  }
+
+  // Native Windows is still refused by host policy, and that refusal is the whole Windows setup surface
+  // today. It must stay connectivity-free: no provider executable resolved, no provider command run, no
+  // prompt offering a route, and no planned action naming one. A Windows Tailscale choice would put
+  // cosyncing back in the connectivity-ownership business the loopback boundary removed.
+  {
+    const machine = join(root, 'windows-host-policy');
+    mkdirSync(join(machine, 'bin'), { recursive: true });
+    const resolved: string[] = [];
+    const ran: string[] = [];
+    const base = contextFor(machine, {}, 'win32');
+    const context = {
+      ...base,
+      resolveExecutable: (command: string) => { resolved.push(command); return undefined; },
+      runReadOnly: async (executable: string, args: readonly string[]) => {
+        ran.push([executable, ...args].join(' '));
+        return { status: 'unavailable' as const, stdout: '', stderr: '' };
+      },
+    };
+    const presenter = new ScriptedPresenter();
+    const windowsSetup = await runSetup(setupOptions(machine, presenter, { context }));
+    const connectivity = /tailscale|serve|advertis|tunnel|vpn|mesh/i;
+    check('native Windows setup refuses on host policy without any connectivity provider or prompt',
+      windowsSetup.status === 'blocked' && windowsSetup.exitCode === 1
+        && windowsSetup.issueCodes?.includes('native-windows-not-v1') === true
+        && (windowsSetup.actions ?? []).length === 0
+        && !resolved.some((command) => connectivity.test(command))
+        && !ran.some((command) => connectivity.test(command))
+        && !presenter.calls.some((call) => connectivity.test(call))
+        && !('tailscaleServeRequested' in readSetupState(join(machine, '.cosyncing'))),
+      `${windowsSetup.status}:${(windowsSetup.issueCodes ?? []).join(',')}:${presenter.calls.join(',')}`);
   }
 
   // Planner purity and the first real zero-agent transaction.
@@ -1741,6 +1895,55 @@ try {
       presenter.calls.join(','));
   }
 
+  // A first-install scheduler marker exists before any committed receipt. The transaction plan is the
+  // durable identity source across the killed process; recovery must construct its provider from that exact
+  // value or the task becomes an unowned collision and cannot be rolled back.
+  {
+    const machine = join(root, 'scheduler-identity-recovery');
+    const home = join(machine, '.cosyncing');
+    const marker = join(root, 'scheduler-identity-crash-ready');
+    const taskPath = join(home, 'scheduler-task.json');
+    const installationId = 'install-process-restart-fixture';
+    const child = Bun.spawn([
+      'bun',
+      import.meta.path,
+      '--scheduler-identity-crash-child',
+      home,
+      marker,
+      taskPath,
+      installationId,
+    ], {
+      cwd: join(import.meta.dir, '../../../../..'),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    for (let index = 0; index < 200 && !existsSync(marker); index += 1) await Bun.sleep(10);
+    const interrupted = readSetupTransactionJournal(home);
+    check('interrupted first scheduler install journals its ownership identity before task creation returns',
+      existsSync(marker) && existsSync(taskPath) && interrupted?.plan.installationId === installationId,
+      interrupted?.plan.installationId);
+    child.kill('SIGKILL');
+    await child.exited;
+
+    let recoveredProviderId: string | undefined;
+    const presenter = new ScriptedPresenter();
+    const recovered = await runSetup(setupOptions(machine, presenter, {
+      durableServiceProviderFactory: (providerOptions: DurableServiceProviderOptions) => {
+        recoveredProviderId = providerOptions.installationId;
+        return interruptedSchedulerProvider({
+          installationId: providerOptions.installationId ?? 'missing-recovery-identity',
+          taskPath,
+        });
+      },
+    }));
+    check('process-restart recovery reuses the journaled scheduler identity and removes the exact task',
+      recoveredProviderId === installationId
+        && recovered.recoveredInterruptedTransaction
+        && !existsSync(taskPath)
+        && !readSetupTransactionJournal(home),
+      `provider=${recoveredProviderId} result=${recovered.status}`);
+  }
+
   // Port conflicts are visible and never killed.
   {
     const machine = join(root, 'port-conflict');
@@ -2813,14 +3016,14 @@ try {
       pipxAvailable: false,
       tokdashAvailable: false,
       durableServiceProvider: 'systemd',
-      systemdAvailable: true,
-      systemdStatus: {
+      durableServiceAvailable: true,
+      durableServiceStatus: {
         provider: 'systemd', supported: true, definition: 'current', environment: 'current',
         enabled: 'enabled', active: 'active', lingering: 'disabled',
       },
-      systemdDefinitionPath: definitionPath,
-      systemdEnvironmentPath: environmentPath,
-      systemdPersistenceTarget: 'systemd-user-linger:fixture',
+      durableServiceDefinitionPath: definitionPath,
+      durableServiceEnvironmentPath: environmentPath,
+      durableServicePersistenceTarget: 'systemd-user-linger:fixture',
       webAppAvailable: false,
       agents: [],
       doctor: {

@@ -134,6 +134,9 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'The launchd GUI user domain is available.': 'launchd GUI 用户域可用。',
   'The launchd GUI user domain could not be inspected; foreground mode remains supported.': '无法检查 launchd GUI 用户域；仍可使用前台模式。',
   'Sign in to a macOS GUI session for service mode, or run the broker in the foreground.': '如需服务模式，请登录 macOS GUI 会话；也可以以前台模式运行 broker。',
+  'The Task Scheduler per-user COM API is available.': '任务计划程序的每用户 COM API 可用。',
+  'The Task Scheduler per-user COM API is unavailable.': '任务计划程序的每用户 COM API 不可用。',
+  'Restore Windows Task Scheduler before persistent broker setup.': '请先恢复 Windows 任务计划程序，再配置 broker 持久服务。',
   'WSL systemd is unavailable; foreground broker mode remains supported.': 'WSL systemd 不可用；仍可使用 broker 前台模式。',
   'systemd user-service tooling is unavailable.': 'systemd 用户服务工具不可用。',
   'Run the broker in the foreground, or enable WSL systemd for persistence.': '请以前台模式运行 broker，或启用 WSL systemd 以保持后台运行。',
@@ -330,6 +333,10 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^(.*) state schema is current\.$/, (id) => `${id} 状态 schema 为当前版本。`)
     ?? replaceMatch(source, /^(.*) state has not been created yet\.$/, (id) => `${id} 状态尚未创建。`)
     ?? replaceMatch(source, /^(.*) state requires repair or migration\.$/, (id) => `${id} 状态需要修复或迁移。`)
+    ?? replaceMatch(source, /^(.*) directory is owner-only\.$/, (id) => `${id} 目录仅所有者可访问。`)
+    ?? replaceMatch(source, /^(.*) directory has not been created yet\.$/, (id) => `${id} 目录尚未创建。`)
+    ?? replaceMatch(source, /^(.*) directory is not owner-only\.$/, (id) => `${id} 目录并非仅所有者可访问。`)
+    ?? replaceMatch(source, /^Repair the (.*) directory security\.$/, (id) => `请修复 ${id} 目录的安全设置。`)
     ?? replaceMatch(source, /^(\d+) already-running Codex terminal(?:s)? must be reopened to join the shared server\.$/, (count) => `需要重新打开 ${count} 个正在运行的 Codex 终端，才能连接共享服务器。`)
     ?? replaceMatch(source, /^(.*) is not installed or is not on PATH\.$/, (name) => `${name} 未安装或不在 PATH 中。`)
     ?? replaceMatch(source, /^Version was not checked because the (.*) binary is missing\.$/, (name) => `缺少 ${name} 可执行文件，因此未检查版本。`)
@@ -437,6 +444,7 @@ export const ZH_STATUS_VALUES = Object.freeze({
   foreground: '前台',
   systemd: 'systemd',
   launchd: 'launchd',
+  'task-scheduler': '任务计划程序',
   unconfigured: '未配置',
   active: '运行中',
   inactive: '未运行',

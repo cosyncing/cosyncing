@@ -16,6 +16,12 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'broker-alias',
   'service-systemd',
   'service-launchd',
+  'service-task-scheduler',
+  'service-task-scheduler-sid-folder',
+  'service-task-scheduler-shared-folder',
+  'service-windows-bootstrap',
+  'service-windows-active-install',
+  'service-windows-version',
   'service-environment',
   'service-systemd-linger',
   'pi-bridge',
@@ -63,6 +69,8 @@ export interface CommittedInstallState {
     status: 'committed';
     committedAt: string;
   };
+  /** Stable identity for receipt-owned external objects whose mutable definition may be repaired. */
+  installationId?: string;
   resources: InstalledResourceRecord[];
   migrations: InstallMigrationRecord[];
   /** Explicit record that legacy connectivity ownership was relinquished while
@@ -139,6 +147,9 @@ function normalizeCommittedInstallState(value: unknown): CommittedInstallState |
   if (setup.status !== 'committed' || typeof setup.committedAt !== 'string') return undefined;
   const committedAt = setup.committedAt.trim();
   if (committedAt.length === 0 || !Number.isFinite(Date.parse(committedAt))) return undefined;
+  if (record.installationId !== undefined
+      && (typeof record.installationId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(record.installationId))) return undefined;
   // BPC1 already emitted schema-v1 receipts before these additive journals existed. Normalize that exact
   // shape in memory so an upgrade does not invalidate the D14 first-run gate; malformed present fields still
   // fail closed, and the next installer-owned write persists both arrays.
