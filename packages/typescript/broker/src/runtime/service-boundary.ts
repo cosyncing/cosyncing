@@ -2,7 +2,7 @@ import { applicationLaunchCommand, type ApplicationIdentity } from './applicatio
 
 export const SERVICE_RESTART_EXIT_CODE = 75;
 
-export type BrokerServiceProvider = 'foreground' | 'systemd' | 'launchd';
+export type BrokerServiceProvider = 'foreground' | 'systemd' | 'launchd' | 'task-scheduler';
 
 export interface BrokerServiceBoundary {
   provider: BrokerServiceProvider;
@@ -29,8 +29,8 @@ export function brokerRelaunchCommand(options: {
 }
 
 /**
- * BPC1 process-owner boundary. BPC6 supplies the systemd unit and later launchd
- * implementation; those providers set the internal environment marker.
+ * BPC1 process-owner boundary. Every durable provider sets the internal environment marker before broker
+ * initialization, including the Windows bootstrap before it loads the active installation.
  */
 export function detectBrokerServiceBoundary(
   environment: Readonly<{ COSYNCING_SERVICE_PROVIDER?: string }> = process.env as {
@@ -38,7 +38,7 @@ export function detectBrokerServiceBoundary(
   },
 ): BrokerServiceBoundary {
   const configured = environment.COSYNCING_SERVICE_PROVIDER?.trim().toLowerCase();
-  if (configured === 'systemd' || configured === 'launchd') {
+  if (configured === 'systemd' || configured === 'launchd' || configured === 'task-scheduler') {
     return { provider: configured, managed: true, restartStrategy: 'service-manager-exit' };
   }
   return { provider: 'foreground', managed: false, restartStrategy: 'self-spawn' };

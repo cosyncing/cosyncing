@@ -245,12 +245,12 @@ export function createClackSetupPresenter(): SetupPresenter {
           {
             value: provider,
             label: text().serviceDurableLabel(provider),
-            hint: text().serviceDurableHint({ provider, available: inspection.systemdAvailable }),
-            disabled: !inspection.systemdAvailable,
+            hint: text().serviceDurableHint({ provider, available: inspection.durableServiceAvailable }),
+            disabled: !inspection.durableServiceAvailable,
           },
         ],
         // The persistent service is the recommended shape; foreground stays one keystroke away.
-        initialValue: inspection.systemdAvailable ? provider : 'foreground',
+        initialValue: inspection.durableServiceAvailable ? provider : 'foreground',
       });
       if (!isCancel(value) && value === 'launchd') log.info(text().launchdSessionNote);
       return cancelled(value);
@@ -426,7 +426,7 @@ export function createNonInteractiveSetupPresenter(
       };
     },
     async chooseService(inspection): Promise<SetupServiceChoice> {
-      return inspection.systemdAvailable ? inspection.durableServiceProvider : 'foreground';
+      return inspection.durableServiceAvailable ? inspection.durableServiceProvider : 'foreground';
     },
     async confirmQuotaWarnings(inspection): Promise<boolean> {
       // Reported here too, at the same point the wizard reports it, so a scripted install is not the one

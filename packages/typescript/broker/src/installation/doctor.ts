@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, win32 } from 'node:path';
 import type {
   AgentBackend,
   AgentSetupDiagnosis,
@@ -33,18 +33,19 @@ import {
   type InstalledResourceRecord,
   type InstallStateInspection,
 } from './install-state.ts';
-import type { RuntimeAssetReport } from '../runtime/runtime-assets.ts';
+import { serviceFlutterWebRoot, type RuntimeAssetReport } from '../runtime/runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
 import { isSupportedBrokerHost, supportedBrokerHostList } from './supported-hosts.ts';
 import { shippedAdapters } from './shipped-adapters.ts';
 import { brokerManagedHostIdentities } from './managed-host-posture.ts';
-import { inspectOwnerOnlyFile } from '../security/secure-files.ts';
+import { inspectOwnerOnlyDirectory, inspectOwnerOnlyFile } from '../security/secure-files.ts';
 import {
   inspectAgentSkills,
   AGENT_SKILL_SHA256,
 } from './agent-skill.ts';
 import {
   durableServiceProviderId,
+  createDurableServiceProvider,
   parseLaunchdPrintState,
   resolveServiceAgentExecutables,
   serviceAgentExecutableDirectories,
@@ -73,6 +74,8 @@ import {
 } from '../runtime/managed-host.ts';
 import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
 import { parseMachinePeers } from '../roster/machine-aggregation.ts';
+import { WindowsTaskSchedulerPowerShellBackend } from './windows-task-scheduler-powershell.ts';
+import { parseWindowsServiceEnvironment, windowsServiceVersionKey } from './windows-service-install.ts';
 
 export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
 
@@ -84,6 +87,7 @@ export const DOCTOR_REPORT_SCHEMA_VERSION = 1 as const;
 export const DURABLE_SERVICE_CHECK_ID: Readonly<Record<DurableServiceProviderId, string>> = Object.freeze({
   systemd: 'service.systemd-user',
   launchd: 'service.launchd-user',
+  'task-scheduler': 'service.task-scheduler',
 });
 
 export interface DoctorSection {
@@ -231,7 +235,8 @@ function assetChecks(report: RuntimeAssetReport): SetupCheck[] {
  * runtime is named, two means the application is its own runtime. Anything else is left unanswered rather
  * than guessed.
  */
-function recordedServiceRuntimePath(definitionPath: string, provider: 'systemd' | 'launchd'): string | undefined {
+function recordedServiceRuntimePath(definitionPath: string, provider: DurableServiceProviderId): string | undefined {
+  if (provider === 'task-scheduler') return undefined;
   if (inspectOwnerOnlyFile(definitionPath).status !== 'ok') return undefined;
   let content: string;
   try {
@@ -436,6 +441,48 @@ function durableChecks(
   });
 }
 
+function durableDirectoryChecks(home: string, context: SetupDiagnosisContext): SetupCheck[] {
+  const cacheRoot = context.env.COSYNCING_CACHE_DIR?.trim()
+    || join(context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName);
+  const layout = durableStateLayout({ stateRoot: home, cacheRoot });
+  const directories = [
+    { id: 'state-root', path: layout.stateRoot },
+    { id: 'secrets', path: join(layout.stateRoot, 'secrets') },
+    { id: 'transport-keys', path: layout.transportKeys },
+    { id: 'cache-root', path: layout.cacheRoot },
+    { id: 'artifact-blobs', path: layout.artifactBlobs },
+    { id: 'backups', path: layout.backups },
+  ] as const;
+  return directories.map(({ id, path }) => {
+    const inspection = inspectOwnerOnlyDirectory(path);
+    if (inspection.status === 'ok') {
+      return {
+        id: `state.directory.${id}`,
+        status: 'pass',
+        detailCode: `${id}-directory-owner-only`,
+        summary: `${id} directory is owner-only.`,
+        evidence: { path: context.displayPath(path) },
+      } satisfies SetupCheck;
+    }
+    if (inspection.status === 'missing') {
+      return {
+        id: `state.directory.${id}`,
+        status: 'skip',
+        detailCode: `${id}-directory-missing`,
+        summary: `${id} directory has not been created yet.`,
+      } satisfies SetupCheck;
+    }
+    return {
+      id: `state.directory.${id}`,
+      status: 'fail',
+      detailCode: `${id}-directory-${inspection.problem ?? inspection.status}`,
+      summary: `${id} directory is not owner-only.`,
+      evidence: { path: context.displayPath(path) },
+      remediation: remediation('cosyncing repair', `Repair the ${id} directory security.`),
+    } satisfies SetupCheck;
+  });
+}
+
 function environmentPrecedenceCheck(options: {
   packaged: boolean;
   home: string;
@@ -614,7 +661,28 @@ async function launchdServiceChecks(context: SetupDiagnosisContext): Promise<Set
 }
 
 async function serviceChecks(context: SetupDiagnosisContext, wsl: boolean): Promise<SetupCheck[]> {
-  if (durableServiceProviderId(context.platform) === 'launchd') return launchdServiceChecks(context);
+  const provider = durableServiceProviderId(context.platform);
+  if (provider === 'launchd') return launchdServiceChecks(context);
+  if (provider === 'task-scheduler') {
+    try {
+      const sid = new WindowsTaskSchedulerPowerShellBackend().currentUserSid();
+      return [{
+        id: DURABLE_SERVICE_CHECK_ID['task-scheduler'],
+        status: 'pass',
+        detailCode: 'task-scheduler-user-ready',
+        summary: 'The Task Scheduler per-user COM API is available.',
+        evidence: { principal: sid ? 'current-user-sid' : 'unknown' },
+      }];
+    } catch {
+      return [{
+        id: DURABLE_SERVICE_CHECK_ID['task-scheduler'],
+        status: 'fail',
+        detailCode: 'task-scheduler-user-unavailable',
+        summary: 'The Task Scheduler per-user COM API is unavailable.',
+        remediation: { kind: 'manual', message: 'Restore Windows Task Scheduler before persistent broker setup.' },
+      }];
+    }
+  }
   const systemctl = context.resolveExecutable('systemctl');
   if (!systemctl) {
     return [{
@@ -729,8 +797,14 @@ function serviceAgentPathCheck(
     };
   }
   let durableEnvironment: Record<string, string> | undefined;
-  try { durableEnvironment = parseServiceEnvironment(readFileSync(environment.target, 'utf8')); } catch { /* integrity check owns the error */ }
-  const entries = durableEnvironment?.PATH?.split(':').filter(Boolean);
+  try {
+    if (context.platform === 'win32') {
+      durableEnvironment = parseWindowsServiceEnvironment(JSON.parse(readFileSync(environment.target, 'utf8')))?.variables;
+    } else {
+      durableEnvironment = parseServiceEnvironment(readFileSync(environment.target, 'utf8'));
+    }
+  } catch { /* integrity check owns the error */ }
+  const entries = durableEnvironment?.PATH?.split(context.platform === 'win32' ? ';' : ':').filter(Boolean);
   if (!durableEnvironment || !entries) {
     return {
       id: 'service.agent-executable-path',
@@ -741,11 +815,14 @@ function serviceAgentPathCheck(
     };
   }
   const requiredDirectories = serviceAgentExecutableDirectories(context);
-  const serviceExecutable = resources.find((resource) => resource.id === 'broker-binary')?.target
-    ?? installedBinaryPath(home);
+  const serviceExecutable = context.platform === 'win32'
+    ? win32.join(win32.dirname(environment.target), PRODUCT_IDENTITY.primaryBinary)
+    : resources.find((resource) => resource.id === 'broker-binary')?.target ?? installedBinaryPath(home);
   let expectedEntries: string[];
   try {
-    expectedEntries = servicePathEntries(context.homeDir, serviceExecutable, requiredDirectories, runtimePath);
+    expectedEntries = servicePathEntries(
+      context.homeDir, serviceExecutable, requiredDirectories, runtimePath, context.platform,
+    );
   } catch {
     return {
       id: 'service.agent-executable-path',
@@ -755,11 +832,14 @@ function serviceAgentPathCheck(
       remediation: remediation('cosyncing repair', 'Rebuild the durable service environment.'),
     };
   }
-  const missing = expectedEntries.filter((directory) => !entries.includes(directory));
-  const obsolete = entries.filter((directory) => !expectedEntries.includes(directory));
+  const normalizedEntries = context.platform === 'win32' ? entries.map((entry) => entry.toLowerCase()) : entries;
+  const normalizedExpected = context.platform === 'win32'
+    ? expectedEntries.map((entry) => entry.toLowerCase()) : expectedEntries;
+  const missing = normalizedExpected.filter((directory) => !normalizedEntries.includes(directory));
+  const obsolete = normalizedEntries.filter((directory) => !normalizedExpected.includes(directory));
   const orderingMismatch = missing.length === 0
     && obsolete.length === 0
-    && !servicePathMatchesExpected(entries, expectedEntries);
+    && !servicePathMatchesExpected(normalizedEntries, normalizedExpected);
   const expectedOverrides = serviceAgentExecutableOverrides(context);
   const overrideMismatches = SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES.filter(
     (name) => durableEnvironment[name] !== expectedOverrides[name],
@@ -992,7 +1072,8 @@ async function installedServicePosture(
 async function installedBrokerServiceChecks(
   context: SetupDiagnosisContext,
   home: string,
-  runtimePath: string | undefined,
+  identity: Readonly<ApplicationIdentity>,
+  buildInfo: Readonly<BuildInfo>,
 ): Promise<SetupCheck[]> {
   const setupState = readSetupState(home);
   const provider = durableServiceProviderId(context.platform);
@@ -1011,10 +1092,73 @@ async function installedBrokerServiceChecks(
   const definition = resources.find((resource) => resource.id === serviceDefinitionResourceId({ id: provider }));
   const environment = resources.find((resource) => resource.id === 'service-environment');
   const definitionIntegrity = resourceIntegrity(definition);
-  const environmentIntegrity = resourceIntegrity(environment);
-  const agentPathCheck = serviceAgentPathCheck(context, home, resources, environment, environmentIntegrity, runtimePath);
+  const windowsEnvironmentInspection = environment ? inspectOwnerOnlyFile(environment.target) : undefined;
+  const environmentIntegrity: ReturnType<typeof resourceIntegrity> = provider === 'task-scheduler'
+    ? (!environment || environment.ownership.proof !== 'receipt'
+      ? 'missing'
+      : windowsEnvironmentInspection?.status === 'ok' ? 'ok'
+        : windowsEnvironmentInspection?.status === 'missing' ? 'missing' : 'unsafe')
+    : resourceIntegrity(environment);
+  const agentPathCheck = serviceAgentPathCheck(context, home, resources, environment, environmentIntegrity, identity.runtimePath);
   let serviceCheck: SetupCheck;
-  if (!manager) {
+  if (provider === 'task-scheduler') {
+    try {
+      if (!install.committed || !install.state.installationId || !identity.runtimePath) {
+        throw new Error('incomplete Windows service receipt');
+      }
+      const durable = createDurableServiceProvider({
+        context,
+        homeDir: context.homeDir,
+        stateHome: home,
+        installationId: install.state.installationId,
+        taskSchedulerReceiptResources: resources,
+        versionKey: windowsServiceVersionKey(buildInfo),
+        cacheRoot: context.env.COSYNCING_CACHE_DIR?.trim()
+          || join(context.homeDir, '.cache', PRODUCT_IDENTITY.cacheDirectoryName),
+        executablePath: installedBinaryPath(home),
+        acquisitionExecutablePath: identity.applicationPath,
+        distribution: buildInfo.distribution,
+        runtimePath: identity.runtimePath,
+        agentExecutableDirectories: serviceAgentExecutableDirectories(context),
+        agentExecutableOverrides: serviceAgentExecutableOverrides(context),
+        webDir: serviceFlutterWebRoot({
+          override: context.env.COSYNCING_WEB_DIR,
+          packaged: buildInfo.packaged,
+          executablePath: identity.applicationPath,
+          version: buildInfo.version,
+        }),
+      });
+      const status = await durable.inspect();
+      if (status.definition === 'current' && status.environment === 'current'
+          && status.enabled === 'enabled' && status.active === 'active') {
+        serviceCheck = {
+          id: 'service.broker', status: 'pass', detailCode: 'broker-service-healthy',
+          summary: 'The receipt-owned broker service is enabled and active.',
+        };
+      } else {
+        serviceCheck = {
+          id: 'service.broker', status: 'fail',
+          detailCode: status.active === 'failed' ? 'broker-service-failed' : 'broker-service-inactive',
+          summary: status.active === 'failed'
+            ? 'The broker service is failed or crash-looping.'
+            : 'The broker service is disabled, inactive, or still transitioning.',
+          evidence: {
+            definition: status.definition,
+            environment: status.environment,
+            enabled: status.enabled,
+            active: status.active,
+          },
+          remediation: remediation('cosyncing repair', 'Reconcile and start the owned service.'),
+        };
+      }
+    } catch {
+      serviceCheck = {
+        id: 'service.broker', status: 'fail', detailCode: 'broker-service-definition-invalid',
+        summary: 'The broker service definition or owner-only environment file is missing, unsafe, or changed outside its receipt.',
+        remediation: remediation('cosyncing repair', 'Reconcile the receipt-owned task-scheduler service files.'),
+      };
+    }
+  } else if (!manager) {
     serviceCheck = {
       id: 'service.broker',
       status: 'fail',
@@ -1454,7 +1598,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
       adapters,
     )),
     serviceChecks(dependencies.context, host.wsl),
-    installedBrokerServiceChecks(dependencies.context, home, identity.runtimePath),
+    installedBrokerServiceChecks(dependencies.context, home, identity, dependencies.buildInfo),
   ]);
   const agents = reconcilePiBridgeDoctorDiagnosis(
     dependencies.context,
@@ -1503,6 +1647,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         ...agentSkillChecks(home, dependencies.context),
         ...setupFailureChecks(home, dependencies.context),
         ...managedHostChecks(home),
+        ...durableDirectoryChecks(home, dependencies.context),
         ...durableChecks(home, dependencies.context),
       ],
     },

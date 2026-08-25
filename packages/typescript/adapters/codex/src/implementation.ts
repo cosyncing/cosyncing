@@ -91,12 +91,14 @@ import {
   type Unsubscribe,
   boundToolSemantic,
   boundedStream,
+  bunSpawnResolvedInvocation,
   clipTailBytes,
   commandSemantic,
   webSemantic,
   COMMAND_MAX_CHARS,
   COMMAND_STREAM_MAX_BYTES,
   PATH_MAX_CHARS,
+  resolveInvocation,
 } from '@cosyncing/adapter-api';
 import {
   CODEX_TUI_BIRTH_WINDOW_MS,
@@ -1277,7 +1279,7 @@ async function ensureCodexDaemonAsync(
     return;
   }
   try {
-    const proc = Bun.spawn([bin, 'app-server', 'daemon', 'start'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    const proc = spawnCodex(bin, ['app-server', 'daemon', 'start'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
     const stdout = boundedStreamCapture(proc.stdout);
     const stderr = boundedStreamCapture(proc.stderr);
     _codexDaemonEnsureProcess = proc;
@@ -2074,7 +2076,7 @@ export function parseCodexDaemonVersionOutput(output: string): CodexDaemonVersio
 async function runCodexDaemonCommand(command: 'version' | 'restart' | 'stop', timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
   const bin = resolveBin('codex');
   if (!bin) throw new Error('Codex CLI is not available on PATH.');
-  const proc = Bun.spawn([bin, 'app-server', 'daemon', command], {
+  const proc = spawnCodex(bin, ['app-server', 'daemon', command], {
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -2126,7 +2128,7 @@ export async function stopCodexDaemon(timeoutMs = 15_000): Promise<void> {
 async function withCodexAppServerRpc<T>(cwd: string, fn: (rpc: <R = any>(method: string, params: unknown, timeoutMs?: number) => Promise<R>, write: (obj: unknown) => void) => Promise<T>): Promise<T> {
   const bin = resolveBin('codex');
   if (!bin) throw new Error('Codex CLI is not available on PATH.');
-  const proc = Bun.spawn([bin, 'app-server', '--stdio'], {
+  const proc = spawnCodex(bin, ['app-server', '--stdio'], {
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -3499,7 +3501,7 @@ class CodexResumeConnection implements SessionConnection {
       this.daemon = new CodexUnixSocketTransport(sock, (line) => this.onLine(line), (message) => this.emit({ type: 'error', message: message.slice(0, 220) }));
       await this.daemon.connect();
     } else {
-      this.proc = Bun.spawn([bin, 'app-server', '--stdio'], {
+      this.proc = spawnCodex(bin, ['app-server', '--stdio'], {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
@@ -9613,4 +9615,19 @@ function resolveBin(bin: string): string | null {
   } catch {
     return null;
   }
+}
+
+function spawnCodex<
+  const In extends Bun.SpawnOptions.Writable,
+  const Out extends Bun.SpawnOptions.Readable,
+  const Err extends Bun.SpawnOptions.Readable,
+>(
+  executable: string,
+  args: readonly string[],
+  options: Bun.SpawnOptions.SpawnOptions<In, Out, Err>,
+): Bun.Subprocess<In, Out, Err> {
+  const env = (options.env ?? process.env) as Readonly<Record<string, string | undefined>>;
+  const invocation = resolveInvocation(executable, { env, platform: process.platform });
+  if (!invocation) throw new Error(`Codex executable is unavailable: ${executable}`);
+  return bunSpawnResolvedInvocation(invocation, args, options);
 }

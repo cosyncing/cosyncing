@@ -76,12 +76,11 @@ function assertSafePath(value: string, label: string, detailCode: string): strin
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new ApplicationIdentityError(detailCode, `${label} path is empty`);
   }
-  // `%` is a systemd specifier marker and `:` is the PATH separator; both reach service files verbatim, and
-  // neither has an escape there. A colon is the more dangerous of the two precisely because it does NOT
-  // break the unit: the directory silently splits into two bogus PATH entries and the broker's child
-  // processes lose the runtime that a colon-free install would have found.
-  if (/[\0\r\n%:]/.test(value)) {
-    throw new ApplicationIdentityError(detailCode, `${label} path contains characters no service file can carry`);
+  // Identity is platform-neutral. Provider-specific grammars validate again when a path is serialized:
+  // systemd refuses `%` and `:` because they are a specifier and PATH separator there, while Windows
+  // requires the colon in every drive-qualified absolute path.
+  if (/[\0\r\n]/.test(value)) {
+    throw new ApplicationIdentityError(detailCode, `${label} path contains control characters`);
   }
   if (!isAbsolute(value)) {
     throw new ApplicationIdentityError(detailCode, `${label} path must be absolute, received ${JSON.stringify(value)}`);

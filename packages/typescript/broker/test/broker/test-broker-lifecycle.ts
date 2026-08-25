@@ -682,6 +682,7 @@ try {
       foreground: '前台',
       systemd: 'systemd',
       launchd: 'launchd',
+      'task-scheduler': '任务计划程序',
       unconfigured: '未配置',
       active: '运行中',
       inactive: '未运行',

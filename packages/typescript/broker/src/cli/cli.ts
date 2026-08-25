@@ -488,7 +488,7 @@ async function defaultRunUpgrade(options: {
   const setupState = (await import('../installation/setup-state.ts')).readSetupState(home);
   const service = (await import('../installation/setup-state.ts')).isDurableServiceChoice(setupState.serviceChoice)
     ? (() => {
-        const provider = lifecycle.createLifecycleSystemdProvider({
+        const provider = lifecycle.createLifecycleDurableServiceProvider({
           home,
           buildInfo: options.buildInfo,
           ...applicationLaunchInputs(options.buildInfo),

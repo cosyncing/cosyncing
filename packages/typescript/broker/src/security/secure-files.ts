@@ -15,6 +15,12 @@ import {
   type Stats,
 } from 'node:fs';
 import { dirname, isAbsolute, parse, resolve } from 'node:path';
+import {
+  createWindowsOwnerOnlyDirectory,
+  enforceWindowsOwnerOnlyDacl,
+  inspectWindowsOwnerOnlyDacl,
+  type WindowsSecurePathKind,
+} from './windows-dacl.ts';
 
 export type SecurePathProblem =
   | 'not-absolute'
@@ -22,7 +28,8 @@ export type SecurePathProblem =
   | 'not-file'
   | 'not-directory'
   | 'wrong-owner'
-  | 'unsafe-mode';
+  | 'unsafe-mode'
+  | 'unsafe-dacl';
 
 export class SecurePathError extends Error {
   constructor(readonly problem: SecurePathProblem, readonly target: string) {
@@ -72,12 +79,30 @@ export function assertNoSymlinkComponents(target: string, includeLeaf = true): v
 /** Create or tighten one application-owned directory. Shared ancestors are inspected, never chmodded. */
 export function ensureOwnerOnlyDirectory(target: string): void {
   assertNoSymlinkComponents(target);
-  mkdirSync(target, { recursive: true, mode: 0o700 });
+  const missing: string[] = [];
+  let cursor = resolve(target);
+  const root = parse(cursor).root;
+  while (cursor !== root && !existsSync(cursor)) {
+    missing.push(cursor);
+    cursor = dirname(cursor);
+  }
+  if (process.platform === 'win32') {
+    // Create each missing level with its final descriptor in the create operation. A post-mkdir DACL change
+    // would leave a window in which a principal admitted by a shared parent could retain an open handle.
+    for (const directory of missing.reverse()) createWindowsOwnerOnlyDirectory(directory);
+  } else {
+    mkdirSync(target, { recursive: true, mode: 0o700 });
+  }
   const stat = lstatSync(target);
   if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
   if (!stat.isDirectory()) throw new SecurePathError('not-directory', target);
-  assertOwned(stat, target);
-  chmodSync(target, 0o700);
+  if (process.platform === 'win32') {
+    // An existing application-owned directory may have drifted and is safe to converge after owner proof.
+    if (missing.length === 0) enforceWindowsOwnerOnlyDacl(target, 'directory');
+  } else {
+    assertOwned(stat, target);
+    chmodSync(target, 0o700);
+  }
 }
 
 export interface SecureFileInspection {
@@ -87,14 +112,22 @@ export interface SecureFileInspection {
 }
 
 /** Read-only owner/mode/symlink inspection for configuration and credential files. */
-export function inspectOwnerOnlyFile(target: string): SecureFileInspection {
+function inspectOwnerOnlyPath(target: string, kind: WindowsSecurePathKind): SecureFileInspection {
   try {
     assertNoSymlinkComponents(target, false);
     const stat = lstatIfPresent(target);
     if (!stat) return { status: 'missing', path: target };
     if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
-    if (!stat.isFile()) throw new SecurePathError('not-file', target);
-    assertOwned(stat, target);
+    if (kind === 'file' && !stat.isFile()) throw new SecurePathError('not-file', target);
+    if (kind === 'directory' && !stat.isDirectory()) throw new SecurePathError('not-directory', target);
+    if (process.platform === 'win32') {
+      const dacl = inspectWindowsOwnerOnlyDacl(target, kind);
+      if (!dacl.ok) {
+        throw new SecurePathError(dacl.problem === 'wrong-owner' ? 'wrong-owner' : 'unsafe-dacl', target);
+      }
+    } else {
+      assertOwned(stat, target);
+    }
     if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
       throw new SecurePathError('unsafe-mode', target);
     }
@@ -104,6 +137,30 @@ export function inspectOwnerOnlyFile(target: string): SecureFileInspection {
       return { status: 'unsafe', path: target, problem: error.problem };
     }
     return { status: 'unreadable', path: target };
+  }
+}
+
+/** Read-only owner/mode/symlink inspection for configuration and credential files. */
+export function inspectOwnerOnlyFile(target: string): SecureFileInspection {
+  return inspectOwnerOnlyPath(target, 'file');
+}
+
+/** Read-only owner/mode/symlink inspection for application-owned directories. */
+export function inspectOwnerOnlyDirectory(target: string): SecureFileInspection {
+  return inspectOwnerOnlyPath(target, 'directory');
+}
+
+/** Tighten one current-user-owned regular file without changing its contents. */
+export function enforceOwnerOnlyFile(target: string, mode = 0o600): void {
+  assertNoSymlinkComponents(target);
+  const stat = lstatSync(target);
+  if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
+  if (!stat.isFile()) throw new SecurePathError('not-file', target);
+  if (process.platform === 'win32') {
+    enforceWindowsOwnerOnlyDacl(target, 'file');
+  } else {
+    assertOwned(stat, target);
+    chmodSync(target, mode);
   }
 }
 
@@ -141,7 +198,14 @@ export function atomicWriteOwnerOnly(
     const stat = existing;
     if (stat.isSymbolicLink()) throw new SecurePathError('symlink', target);
     if (!stat.isFile()) throw new SecurePathError('not-file', target);
-    assertOwned(stat, target);
+    if (process.platform === 'win32') {
+      const dacl = inspectWindowsOwnerOnlyDacl(target, 'file');
+      if (!dacl.ok && dacl.problem === 'wrong-owner') {
+        throw new SecurePathError('wrong-owner', target);
+      }
+    } else {
+      assertOwned(stat, target);
+    }
     if (options.preserveMode) mode = stat.mode & 0o777;
   }
 
@@ -149,6 +213,8 @@ export function atomicWriteOwnerOnly(
   let fd: number | undefined;
   try {
     fd = openSync(temp, 'wx', mode);
+    // On Windows, inherited access must be removed before any secret bytes are written.
+    if (process.platform === 'win32') enforceWindowsOwnerOnlyDacl(temp, 'file');
     writeFileSync(fd, content);
     fsyncSync(fd);
     closeSync(fd);
@@ -166,7 +232,7 @@ export function atomicWriteOwnerOnly(
       throw new SecurePathError('symlink', target);
     }
     renameSync(temp, target);
-    chmodSync(target, mode);
+    enforceOwnerOnlyFile(target, mode);
     try {
       const dirFd = openSync(parent, 'r');
       try { fsyncSync(dirFd); } finally { closeSync(dirFd); }

@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import {
-  chmodSync,
   existsSync,
   lstatSync,
   readFileSync,
@@ -37,6 +36,7 @@ import {
 import {
   assertNoSymlinkComponents,
   atomicWriteOwnerOnly,
+  enforceOwnerOnlyFile,
 } from '../security/secure-files.ts';
 import {
   inspectAgentSkill,
@@ -125,11 +125,12 @@ export interface SetupActionInputs {
   /** Managed serve host pinned into the rc block; resolved from OPENCODE_URL. Defaults to 127.0.0.1 when omitted. */
   opencodeShimHost?: string;
   installMetadata: {
+    installationId?: string;
     version: string;
     packaged: boolean;
     executablePath: string;
     aliasPath?: string;
-    serviceChoice: 'foreground' | 'systemd' | 'launchd';
+    serviceChoice: 'foreground' | 'systemd' | 'launchd' | 'task-scheduler';
     systemdLingeringRequested: boolean;
   };
   removeResourceIds?: readonly string[];
@@ -478,7 +479,7 @@ export function createDurableStatePermissionsSetupAction(inputs: SetupActionInpu
         if (status !== 'tightenable') {
           throw new Error(`durable state is not safely permission-repairable: ${repair.id}`);
         }
-        chmodSync(repair.path, 0o600);
+        enforceOwnerOnlyFile(repair.path, 0o600);
       }
     },
     verify: () => repairs.every((repair) => inspectDurableStatePermissionRepair(repair) === 'current'),
@@ -672,6 +673,9 @@ export function createInstallCommitAction(inputs: SetupActionInputs): SetupCommi
       const committedAt = (inputs.now?.() ?? new Date()).toISOString();
       writeInstallState({
         ...base,
+        ...((base.installationId ?? inputs.installMetadata.installationId)
+          ? { installationId: base.installationId ?? inputs.installMetadata.installationId }
+          : {}),
         setup: { status: 'committed', committedAt },
         resources: expectedResources,
         installer: {

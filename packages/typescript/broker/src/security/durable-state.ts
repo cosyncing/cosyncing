@@ -228,7 +228,8 @@ function inspectDurableSchemaContent(spec: DurableSchemaSpec, path: string): Dur
 
 /**
  * A setup-safe permission migration is intentionally narrow: an owner-held regular file, no symlinked
- * parent, current schema, and the mode as its only defect. Content and ownership problems remain blockers.
+ * parent, current schema, and its owner-only permissions as the only defect. Content and ownership problems
+ * remain blockers.
  */
 export function inspectDurableStatePermissionRepair(
   repair: Readonly<DurableStatePermissionRepair>,
@@ -243,7 +244,9 @@ export function inspectDurableStatePermissionRepair(
     const inspection = inspectDurableSchemaContent(spec, repair.path);
     return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'current' : 'blocked';
   }
-  if (file.status !== 'unsafe' || file.problem !== 'unsafe-mode') return 'blocked';
+  if (file.status !== 'unsafe' || (file.problem !== 'unsafe-mode' && file.problem !== 'unsafe-dacl')) {
+    return 'blocked';
+  }
   if (spec.id === 'broker-instance') return 'blocked';
   const inspection = inspectDurableSchemaContent(spec, repair.path);
   return inspection.status === 'ok' || isRuntimeSecurityMigrationV1(inspection) ? 'tightenable' : 'blocked';

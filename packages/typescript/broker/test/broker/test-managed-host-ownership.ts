@@ -108,6 +108,7 @@ function ownership(overrides: Partial<ManagedHostOwnership> = {}): ManagedHostOw
 function fakeEffects(options: {
   identities?: Map<number, HostProcessIdentity>;
   identityScript?: LiveProcess[];
+  onLiveRead?: (pid: number, options: { fresh?: boolean } | undefined) => void;
   onSignal?: (pid: number, signal: 'SIGTERM' | 'SIGKILL', table: Map<number, HostProcessIdentity>) => void;
   spawnPid?: number;
   childExitsAfter?: number;
@@ -139,7 +140,8 @@ function fakeEffects(options: {
     // A port this fixture was told nothing about is 'unknown', never 'absent':
     // proof of an empty address has to be stated, exactly as on a real machine.
     listener: (port) => options.listeners?.get(port) ?? HOST_UNKNOWN,
-    liveProcess: (pid) => {
+    liveProcess: (pid, readOptions) => {
+      options.onLiveRead?.(pid, readOptions);
       if (script) return script.length > 1 ? script.shift()! : script[0]!;
       const identity = table.get(pid);
       return identity ? running(identity) : (options.missingProcess ?? PROCESS_UNKNOWN);
@@ -495,9 +497,11 @@ try {
   // ── stop: only what is proven ours ─────────────────────────────────────────
   {
     const table = new Map([[HOST_PID, OWNED]]);
+    const liveReads: Array<{ fresh?: boolean } | undefined> = [];
     const { effects, signals } = fakeEffects({
       identities: table,
       missingProcess: PROCESS_ABSENT,
+      onLiveRead: (_pid, options) => liveReads.push(options),
       onSignal: (pid, signal, live) => { if (signal === 'SIGTERM') live.delete(pid); },
     });
     const { store, records } = memoryStore();
@@ -508,6 +512,9 @@ try {
       outcome.action === 'stopped' && outcome.escalated === false
         && signals.length === 1 && signals[0]?.signal === 'SIGTERM' && records.size === 0,
       JSON.stringify({ outcome, signals }));
+    check('every identity read immediately authorizing termination bypasses cached process data',
+      liveReads.length >= 3 && liveReads[1]?.fresh === true,
+      JSON.stringify(liveReads));
   }
   {
     const table = new Map([[HOST_PID, OWNED]]);

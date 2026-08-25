@@ -42,6 +42,7 @@ import {
   type OpencodeServeOwnership,
   type ProcessIdentity,
 } from '../../../adapters/opencode/src/managed-server.ts';
+import { HostProcessProvider, type WindowsProcessSnapshot } from '../../../adapter-api/src/host-process.ts';
 import '../../src/runtime/managed-runtime-state.ts';
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
@@ -140,16 +141,18 @@ function resetCase(): void {
 try {
   // ── Part A: the pure ownership decision ────────────────────────────────────────────────────────────
   const base = 'http://127.0.0.1:4096';
+  const boot = 'fixture-boot';
   const rec = (over: Partial<OpencodeServeOwnership> = {}): OpencodeServeOwnership => ({
-    schemaVersion: 1, pid: 4242, start: '111', comm: 'opencode', baseUrl: base, recordedAtMs: 0, ...over,
+    schemaVersion: 2, pid: 4242, start: '111', boot, comm: 'opencode', baseUrl: base, recordedAtMs: 0, ...over,
   });
-  const live = (over: Partial<ProcessIdentity> = {}): ProcessIdentity => ({ pid: 4242, start: '111', comm: 'opencode', ...over });
+  const live = (over: Partial<ProcessIdentity> = {}): ProcessIdentity => ({ pid: 4242, start: '111', boot, comm: 'opencode', ...over });
 
   check('classify: pid+start+comm all match → owned', classifyServeOwnership(rec(), live(), base) === 'owned');
   check('classify: no record → unowned (external serve)', classifyServeOwnership(null, live(), base) === 'unowned');
   check('classify: base mismatch → unowned', classifyServeOwnership(rec({ baseUrl: 'http://127.0.0.1:9999' }), live(), base) === 'unowned');
   check('classify: pid mismatch (stale) → unowned', classifyServeOwnership(rec(), live({ pid: 9999 }), base) === 'unowned');
   check('classify: pid reuse (start differs) → unowned', classifyServeOwnership(rec(), live({ start: '222' }), base) === 'unowned');
+  check('classify: previous boot → unowned', classifyServeOwnership(rec(), live({ boot: 'other-boot' }), base) === 'unowned');
   check('classify: wrong executable (comm differs) → unowned', classifyServeOwnership(rec(), live({ comm: 'python' }), base) === 'unowned');
   check('classify: live identity unresolved → indeterminate', classifyServeOwnership(rec(), null, base) === 'indeterminate');
 
@@ -162,7 +165,7 @@ try {
     const orphan = startFakeServe({ disposes: true });
     const b = `http://127.0.0.1:${orphan.port}`;
     process.env.OPENCODE_URL = b;
-    const identity: ProcessIdentity = { pid: 123456, start: 'S', comm: 'opencode' };
+    const identity: ProcessIdentity = { pid: 123456, start: 'S', boot, comm: 'opencode' };
     __setLiveIdentityOverrideForTest(() => identity);
     __writeOpencodeServeOwnershipForTest(identity, b);
 
@@ -187,7 +190,7 @@ try {
     const foreign = startFakeServe({ disposes: true });
     const b = `http://127.0.0.1:${foreign.port}`;
     process.env.OPENCODE_URL = b;
-    __setLiveIdentityOverrideForTest(() => ({ pid: 777, start: 'X', comm: 'opencode' })); // resolvable, but NO record
+    __setLiveIdentityOverrideForTest(() => ({ pid: 777, start: 'X', boot, comm: 'opencode' })); // resolvable, but NO record
     await ensureManagedOpencodeServe();
     const state = __getManagedOpencodeServeStateForTest();
     check('unowned: module stays UNMANAGED (no take-over)', state.managed === false, JSON.stringify(state));
@@ -215,8 +218,8 @@ try {
     const foreign = startFakeServe({ disposes: true });
     const b = `http://127.0.0.1:${foreign.port}`;
     process.env.OPENCODE_URL = b;
-    __writeOpencodeServeOwnershipForTest({ pid: 555, start: 'A', comm: 'opencode' }, b);
-    __setLiveIdentityOverrideForTest(() => ({ pid: 555, start: 'B', comm: 'opencode' })); // same pid, different start → reuse
+    __writeOpencodeServeOwnershipForTest({ pid: 555, start: 'A', boot, comm: 'opencode' }, b);
+    __setLiveIdentityOverrideForTest(() => ({ pid: 555, start: 'B', boot, comm: 'opencode' })); // same pid, different start → reuse
     await ensureManagedOpencodeServe();
     const state = __getManagedOpencodeServeStateForTest();
     check('pid-reuse: module stays UNMANAGED', state.managed === false, JSON.stringify(state));
@@ -232,7 +235,7 @@ try {
     process.env.OPENCODE_URL = b;
     process.env.COSYNCING_OPENCODE_NO_AUTOSERVE = '1';
     // Even a matching record + owned identity must not matter when opted out.
-    const identity: ProcessIdentity = { pid: 999, start: 'Z', comm: 'opencode' };
+    const identity: ProcessIdentity = { pid: 999, start: 'Z', boot, comm: 'opencode' };
     __setLiveIdentityOverrideForTest(() => identity);
     __writeOpencodeServeOwnershipForTest(identity, b);
     await ensureManagedOpencodeServe();
@@ -249,7 +252,7 @@ try {
     const stubborn = startFakeServe({ disposes: false });
     const b = `http://127.0.0.1:${stubborn.port}`;
     process.env.OPENCODE_URL = b;
-    const identity: ProcessIdentity = { pid: 424242, start: 'S', comm: 'opencode' };
+    const identity: ProcessIdentity = { pid: 424242, start: 'S', boot, comm: 'opencode' };
     __setLiveIdentityOverrideForTest(() => identity);
     __writeOpencodeServeOwnershipForTest(identity, b);
     await ensureManagedOpencodeServe();
@@ -266,7 +269,7 @@ try {
     const b = `http://127.0.0.1:${foreign.port}`;
     process.env.OPENCODE_URL = b;
     process.env.COSYNCING_OPENCODE_REPLACE_UNOWNED_SERVE = '1';
-    __setLiveIdentityOverrideForTest(() => ({ pid: 321, start: 'Q', comm: 'foreign' })); // unproven (no record)
+    __setLiveIdentityOverrideForTest(() => ({ pid: 321, start: 'Q', boot, comm: 'foreign' })); // unproven (no record)
     await ensureManagedOpencodeServe();
     const state = __getManagedOpencodeServeStateForTest();
     check('replace-unowned: escape hatch takes over → module is OWNED', state.managed === true, JSON.stringify(state));
@@ -284,8 +287,8 @@ try {
     const stranger = startFakeServe({ disposes: true }); // would dispose itself IF asked — we assert it is NOT asked
     const b = `http://127.0.0.1:${stranger.port}`;
     process.env.OPENCODE_URL = b;
-    const A: ProcessIdentity = { pid: 111111, start: 'A', comm: 'opencode' };
-    const B: ProcessIdentity = { pid: 222222, start: 'B', comm: 'opencode' };
+    const A: ProcessIdentity = { pid: 111111, start: 'A', boot, comm: 'opencode' };
+    const B: ProcessIdentity = { pid: 222222, start: 'B', boot, comm: 'opencode' };
     __writeOpencodeServeOwnershipForTest(A, b); // record matches A → classification is 'owned'
     let calls = 0;
     __setLiveIdentityOverrideForTest(() => { calls += 1; return calls === 1 ? A : B; }); // classify sees A; take-over sees B
@@ -322,8 +325,8 @@ try {
     if (!server) throw new Error('could not allocate a fake serve for the between-disposes case');
     const b = `http://127.0.0.1:${server.port}`;
     process.env.OPENCODE_URL = b;
-    const A: ProcessIdentity = { pid: 131313, start: 'A', comm: 'opencode' };
-    const B: ProcessIdentity = { pid: 242424, start: 'B', comm: 'opencode' };
+    const A: ProcessIdentity = { pid: 131313, start: 'A', boot, comm: 'opencode' };
+    const B: ProcessIdentity = { pid: 242424, start: 'B', boot, comm: 'opencode' };
     __writeOpencodeServeOwnershipForTest(A, b); // record matches A → classification is 'owned'
     let calls = 0;
     // A for classify (1) and the recheck before /instance/dispose (2); B (a stranger) from the recheck before
@@ -351,6 +354,96 @@ try {
   process.env.PATH = savedEnv.PATH;
   rmSync(fakeBinDir, { recursive: true, force: true });
   rmSync(homeDir, { recursive: true, force: true });
+}
+
+// ── Part C: ancestry, which is what connects a Windows spawn handle to the process holding the port ──
+// `opencode` resolves to `opencode.cmd`, and batch has no exec, so the broker spawns a `cmd.exe` that
+// CALLS the real executable. The record must name the LISTENER, and may only do so once the listener
+// is proven to be ours. Every answer here is 'unknown' rather than a guess when it cannot be proven,
+// because the caller uses it to decide whether a process may later be signalled.
+{
+  const proc = (pid: number, parentPid: number, start: string, name: string) =>
+    ({ pid, parentPid, start, name, executable: `C:\\${name}` });
+  const snapshotOf = (processes: ReturnType<typeof proc>[]): WindowsProcessSnapshot =>
+    ({ processesOk: true, listenersOk: true, processes, listeners: [] });
+  const windows = (processes: ReturnType<typeof proc>[]) => new HostProcessProvider({
+    platform: 'win32',
+    runWindowsSnapshot: () => snapshotOf(processes),
+    windowsSnapshotTtlMs: 0,
+  });
+
+  // The real shape: broker(100) → cmd.exe(200) → opencode.exe(300).
+  const chain = [
+    proc(100, 1, '2026-08-25T10:00:00.0000000Z', 'bun.exe'),
+    proc(200, 100, '2026-08-25T10:00:01.0000000Z', 'cmd.exe'),
+    proc(300, 200, '2026-08-25T10:00:02.0000000Z', 'opencode.exe'),
+  ];
+  check('ancestry: the listener under the spawned shim is proven ours',
+    windows(chain).descendsFrom(300, 100) === 'yes');
+  check('ancestry: the shim itself is proven ours', windows(chain).descendsFrom(200, 100) === 'yes');
+  check('ancestry: a process is its own ancestor', windows(chain).descendsFrom(100, 100) === 'yes');
+  // A complete chain that never reaches us is a real 'no'. An INCOMPLETE one is 'unknown' (below):
+  // "we could not follow it" and "it is not ours" are different answers and must not be merged.
+  const stranger = [
+    ...chain,
+    proc(500, 0, '2026-08-25T09:00:00.0000000Z', 'explorer.exe'),
+    proc(400, 500, '2026-08-25T10:00:03.0000000Z', 'opencode.exe'),
+  ];
+  check('ancestry: a stranger serve with a complete chain is proven NOT ours',
+    windows(stranger).descendsFrom(400, 100) === 'no');
+
+  // An orphan's parent is gone, so nothing can be proven — and an unprovable serve must never be signalled.
+  check('ancestry: a reparented orphan is unknown, never assumed ours',
+    windows([proc(300, 200, '2026-08-25T10:00:02.0000000Z', 'opencode.exe')]).descendsFrom(300, 100) === 'unknown');
+
+  // Pid reuse: a "parent" that started AFTER its child is a recycled pid, not an ancestor.
+  const reused = [
+    proc(100, 1, '2026-08-25T10:00:00.0000000Z', 'bun.exe'),
+    proc(200, 100, '2026-08-25T11:00:00.0000000Z', 'cmd.exe'),
+    proc(300, 200, '2026-08-25T10:00:02.0000000Z', 'opencode.exe'),
+  ];
+  check('ancestry: a parent pid recycled after its child proves nothing',
+    windows(reused).descendsFrom(300, 100) === 'no');
+
+  check('ancestry: a pid appearing twice makes every answer about it unknown',
+    windows([...chain, proc(300, 1, '2026-08-25T10:00:09.0000000Z', 'other.exe')]).descendsFrom(300, 100) === 'unknown');
+  check('ancestry: a snapshot that cannot be taken is unknown',
+    new HostProcessProvider({ platform: 'win32', runWindowsSnapshot: () => null, windowsSnapshotTtlMs: 0 })
+      .descendsFrom(300, 100) === 'unknown');
+  // Taking the snapshot spawns PowerShell, which loses to a busy host often enough to matter. One
+  // lost race must not decide the answer: a broker that reads "the machine will not say" preserves a
+  // serve it could have proven and abandons a reclaim it was entitled to make. Seen on a real host.
+  {
+    let attempts = 0;
+    const flaky = new HostProcessProvider({
+      platform: 'win32',
+      windowsSnapshotTtlMs: 0,
+      runWindowsSnapshot: () => {
+        attempts += 1;
+        return attempts === 1 ? null : snapshotOf(chain);
+      },
+    });
+    check('ancestry: one lost snapshot is retried rather than answered',
+      flaky.descendsFrom(300, 100) === 'yes', `attempts=${attempts}`);
+  }
+  {
+    let attempts = 0;
+    const broken = new HostProcessProvider({
+      platform: 'win32',
+      windowsSnapshotTtlMs: 0,
+      runWindowsSnapshot: () => { attempts += 1; return null; },
+    });
+    const verdict = broken.descendsFrom(300, 100);
+    check('ancestry: a snapshot that never answers stays unknown, and is not retried forever',
+      verdict === 'unknown' && attempts === 2, `verdict=${verdict} attempts=${attempts}`);
+  }
+  check('ancestry: a cycle terminates rather than spinning',
+    windows([proc(300, 301, '2026-08-25T10:00:00.0000000Z', 'a.exe'), proc(301, 300, '2026-08-25T10:00:00.0000000Z', 'b.exe')])
+      .descendsFrom(300, 100) === 'unknown');
+  // POSIX needs no ancestry: the process the broker spawns IS the serve. Saying so is honest;
+  // guessing 'no' would silently stop recording ownership if that ever stopped being true.
+  check('ancestry: off Windows the question is not answered rather than guessed',
+    new HostProcessProvider({ platform: 'linux', runWindowsSnapshot: () => null }).descendsFrom(300, 100) === 'unknown');
 }
 
 const failed = results.filter((r) => !r.ok);

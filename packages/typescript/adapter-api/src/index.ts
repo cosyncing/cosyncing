@@ -2,6 +2,8 @@
 export * from '@cosyncing/protocol';
 export * from './diagnosis.ts';
 export * from './integration.ts';
+export * from './invocation.ts';
+export * from './host-process.ts';
 export * from './tool-semantics.ts';
 import { type AgentCapabilities, type AttachMode, type DriveAttachReason, type FileChange, type FileOperation, type ModelOption, type PromptInput, type SessionConnection, type SessionInfo, type Unsubscribe } from '@cosyncing/protocol';
 import type { AgentSetupDiagnosis, SetupDiagnosisContext } from './diagnosis.ts';

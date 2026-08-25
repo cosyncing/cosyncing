@@ -293,11 +293,12 @@ async function withSourceBroker(
 {
   const required = RUNTIME_ASSET_MANIFEST.filter((asset) => asset.requiredForV1);
   const requiredIds = required.map((asset) => asset.id).sort();
-  check('manifest contains exactly the four embedded v1 assets, both service templates included',
+  check('manifest contains every embedded service asset, including the Windows bootstrap',
     JSON.stringify(requiredIds) === JSON.stringify([
       'pi/cosyncing-bridge/index.ts',
       'service/launchd/cosyncing.plist',
       'service/systemd/cosyncing.service',
+      'service/windows/service-bootstrap.mjs',
       'skill/cosyncing/SKILL.md',
     ]),
     requiredIds.join(','));
@@ -336,6 +337,13 @@ async function withSourceBroker(
       launchd.includes('{{ENVIRONMENT_VARIABLES}}') &&
       launchd.includes('<string>{{STANDARD_OUT_PATH}}</string>') &&
       launchd.includes('<key>RunAtLoad</key>') && !launchd.includes('COSYNCING_TOKEN='));
+
+  const windowsBootstrap = embeddedRuntimeAsset('service/windows/service-bootstrap.mjs').content!;
+  check('Windows bootstrap opens its log before reading the active installation and launches no mutable shim',
+    windowsBootstrap.indexOf("openSync(logPath, 'a'") < windowsBootstrap.indexOf('const active = activeInstall()') &&
+      windowsBootstrap.includes("COSYNCING_SERVICE_PROVIDER: 'task-scheduler'") &&
+      windowsBootstrap.includes("join(versionRoot, 'cosyncing')") &&
+      !windowsBootstrap.includes('.cmd'));
 
   // Neither service manager may be left holding a licence to kill our children.
   //
@@ -604,7 +612,7 @@ try {
   const packageChecks = doctorJson.sections?.find((section) => section.id === 'package')?.checks ?? [];
   check('copied artifact doctor validates every embedded required asset',
     doctor.exitCode === 1 && doctorJson.ok === false &&
-      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 4 &&
+      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 5 &&
       packageChecks.every((item) => !String(item.id).includes('poc-ui')),
     doctor.stderr.trim().slice(0, 180));
   check('packaged doctor is read-only',

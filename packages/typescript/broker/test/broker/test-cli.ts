@@ -451,12 +451,15 @@ rmSync(pureCliHome, { recursive: true, force: true });
   const foreground = detectBrokerServiceBoundary({});
   const systemd = detectBrokerServiceBoundary({ COSYNCING_SERVICE_PROVIDER: 'systemd' });
   const launchd = detectBrokerServiceBoundary({ COSYNCING_SERVICE_PROVIDER: 'launchd' });
-  // Both durable providers stamp their marker into their own definition (systemd `Environment=`, launchd
-  // `EnvironmentVariables`), so a managed broker exits for its manager instead of respawning itself.
-  check('restart ownership distinguishes foreground from both managed service providers',
+  const taskScheduler = detectBrokerServiceBoundary({ COSYNCING_SERVICE_PROVIDER: 'TASK-SCHEDULER' });
+  // Each durable provider stamps its marker before broker initialization, so a managed broker exits for
+  // its manager instead of respawning itself. Marker decoding is case-insensitive like Windows env names.
+  check('restart ownership distinguishes foreground from managed service providers',
     foreground.restartStrategy === 'self-spawn' && !foreground.managed &&
       systemd.restartStrategy === 'service-manager-exit' && systemd.managed &&
-      launchd.restartStrategy === 'service-manager-exit' && launchd.managed);
+      launchd.restartStrategy === 'service-manager-exit' && launchd.managed &&
+      taskScheduler.provider === 'task-scheduler' &&
+      taskScheduler.restartStrategy === 'service-manager-exit' && taskScheduler.managed);
 }
 
 async function freePort(): Promise<number> {

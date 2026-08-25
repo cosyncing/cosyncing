@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import {
   accessSync,
   constants,
@@ -6,11 +5,11 @@ import {
   opendirSync,
   readFileSync,
   realpathSync,
-  statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import { basename, dirname, join, parse, posix, win32 } from 'node:path';
 import { connect } from 'node:net';
+import { resolveInvocation, spawnResolvedInvocation } from '@cosyncing/adapter-api';
 import type {
   SetupCommandProbe,
   SetupDiagnosisContext,
@@ -46,32 +45,6 @@ function bodyCeiling(requested: number | undefined): number {
 function boundedAppend(current: string, chunk: Buffer | string, limit: number): string {
   if (current.length >= limit) return current;
   return `${current}${String(chunk).slice(0, limit - current.length)}`;
-}
-
-function executable(path: string): boolean {
-  try {
-    const stat = statSync(path);
-    if (!stat.isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function resolveExecutable(command: string, env: Readonly<Record<string, string | undefined>>): string | undefined {
-  if (!command || /[\0\r\n]/.test(command)) return undefined;
-  if (command.includes('/')) {
-    const target = isAbsolute(command) ? command : resolve(command);
-    if (!executable(target)) return undefined;
-    try { return realpathSync(target); } catch { return target; }
-  }
-  for (const root of (env.PATH ?? '').split(':').filter(Boolean)) {
-    const target = join(root, command);
-    if (!executable(target)) continue;
-    try { return realpathSync(target); } catch { return target; }
-  }
-  return undefined;
 }
 
 function inspectPath(path: string, displayPath: (value: string) => string): SetupPathInspection {
@@ -136,11 +109,15 @@ async function runReadOnly(
   executablePath: string,
   args: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
+  platform: string,
   timeoutMs = 5_000,
 ): Promise<SetupCommandProbe> {
-  if (!isAbsolute(executablePath) || args.some((arg) => /[\0\r\n]/.test(arg))) {
+  const pathApi = platform === 'win32' ? win32 : posix;
+  if (!pathApi.isAbsolute(executablePath) || args.some((arg) => /[\0\r\n]/.test(arg))) {
     return { status: 'unavailable', stdout: '', stderr: '' };
   }
+  const invocation = resolveInvocation(executablePath, { env, platform });
+  if (!invocation) return { status: 'unavailable', stdout: '', stderr: '' };
   return new Promise((resolveProbe) => {
     let stdout = '';
     let stderr = '';
@@ -149,10 +126,10 @@ async function runReadOnly(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let child;
     try {
-      child = spawn(executablePath, [...args], {
+      child = spawnResolvedInvocation(invocation, args, {
         env: { ...env },
-        shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: platform === 'win32',
       });
     } catch {
       resolveProbe({ status: 'unavailable', stdout: '', stderr: '' });
@@ -330,24 +307,30 @@ function processAlive(pid: number): boolean {
 
 export function createSetupDiagnosisContext(options: SetupDiagnosisContextOptions = {}): SetupDiagnosisContext {
   const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === 'win32' ? win32 : posix;
   const homeDir = options.homeDir ?? homedir();
   const displayPath = (value: string): string => {
-    const absolute = isAbsolute(value) ? resolve(value) : value;
-    if (absolute === homeDir) return '~';
-    if (absolute.startsWith(`${homeDir}/`)) return `~/${absolute.slice(homeDir.length + 1)}`;
+    const absolute = pathApi.isAbsolute(value) ? pathApi.resolve(value) : value;
+    const fromHome = pathApi.isAbsolute(absolute) ? pathApi.relative(homeDir, absolute) : undefined;
+    if (fromHome === '') return '~';
+    if (fromHome !== undefined && fromHome !== '..' && !fromHome.startsWith(`..${pathApi.sep}`)
+        && !pathApi.isAbsolute(fromHome)) {
+      return `~/${fromHome.split(pathApi.sep).join('/')}`;
+    }
     return absolute;
   };
   return {
     effects: 'forbidden',
-    platform: options.platform ?? process.platform,
+    platform,
     arch: options.arch ?? process.arch,
     env,
     homeDir,
-    resolveExecutable: (command) => resolveExecutable(command, env),
+    resolveExecutable: (command) => resolveInvocation(command, { env, platform })?.originalPath,
     inspectPath: (path) => inspectPath(path, displayPath),
     readText,
     readPackageVersion,
-    runReadOnly: (path, args, timeoutMs) => runReadOnly(path, args, env, timeoutMs),
+    runReadOnly: (path, args, timeoutMs) => runReadOnly(path, args, env, platform, timeoutMs),
     fetchJson,
     probeTcp,
     listDirectory,

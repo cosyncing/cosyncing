@@ -6,6 +6,8 @@ import { PI_BRIDGE_EMBEDDED_SOURCE } from '@cosyncing/adapter-pi/bridge-asset';
 import systemdServiceTemplateModule from '../../assets/systemd/cosyncing.service' with { type: 'text' };
 // @ts-expect-error Bun's text loader supports service templates that have no TypeScript module declaration.
 import launchdServiceTemplateModule from '../../assets/launchd/cosyncing.plist' with { type: 'text' };
+// @ts-expect-error Bun's text loader supports the standalone Windows bootstrap as an embedded text asset.
+import windowsServiceBootstrapModule from '../../assets/windows/service-bootstrap.mjs' with { type: 'text' };
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import { AGENT_SKILL_SOURCE } from '../installation/agent-skill.ts';
 
@@ -13,12 +15,14 @@ import { AGENT_SKILL_SOURCE } from '../installation/agent-skill.ts';
 // special module type to the service templates, so narrow once at this loader boundary.
 const systemdServiceTemplate = systemdServiceTemplateModule as unknown as string;
 const launchdServiceTemplate = launchdServiceTemplateModule as unknown as string;
+const windowsServiceBootstrap = windowsServiceBootstrapModule as unknown as string;
 
 export type RuntimeAssetId =
   | 'pi/cosyncing-bridge/index.ts'
   | 'service/systemd/cosyncing.service'
   | 'skill/cosyncing/SKILL.md'
   | 'service/launchd/cosyncing.plist'
+  | 'service/windows/service-bootstrap.mjs'
   | 'flutter-web';
 
 export type RuntimeAssetDelivery = 'embedded' | 'adjacent' | 'reserved';
@@ -97,6 +101,13 @@ export const RUNTIME_ASSET_MANIFEST: readonly RuntimeAsset[] = Object.freeze([
     installTarget: '~/Library/LaunchAgents/dev.cosyncing.broker.plist',
     mediaType: 'application/xml; charset=utf-8',
     stage: 'darwin-v1',
+  }),
+  embeddedAsset({
+    id: 'service/windows/service-bootstrap.mjs',
+    content: windowsServiceBootstrap,
+    installTarget: '~/.cosyncing/service/windows/service-bootstrap.mjs',
+    mediaType: 'text/javascript; charset=utf-8',
+    stage: 'optional',
   }),
   Object.freeze({
     id: 'flutter-web',

@@ -993,9 +993,9 @@ try {
         && readFileSync(afterMove.definitionPath, 'utf8').includes(`"${movedRuntime}"`),
       readFileSync(afterMove.definitionPath, 'utf8').split('\n').find((line) => line.startsWith('ExecStart=')));
 
-    // The providers are exported and constructible without the identity resolver that already refuses this
-    // path, so they must refuse it independently: `/tmp/a:b` is a legal directory name, but PATH has no
-    // escape for `:` — rendered anyway, the runtime's directory splits into two bogus search entries.
+    // Application identity preserves provider-specific path characters, and the providers are exported and
+    // constructible on their own, so serialization must refuse them here: `/tmp/a:b` is a legal directory
+    // name, but PATH has no escape for `:`; `%` is a systemd specifier marker.
     const renderRefused = (render: () => string): boolean => {
       try { render(); return false; } catch { return true; }
     };
@@ -1010,6 +1010,10 @@ try {
           launchctlPath: '/bin/launchctl',
           tailPath: '/usr/bin/tail',
         }).expectedDefinition()));
+    const percentProviderOptions = { ...providerOptions, runtimePath: '/tmp/a%b/bin/bun' };
+    check('service providers refuse a runtime path containing a systemd specifier at their own boundary',
+      renderRefused(() => new SystemdUserServiceProvider(percentProviderOptions).expectedDefinition())
+        && renderRefused(() => new SystemdUserServiceProvider(percentProviderOptions).expectedEnvironment()));
 
     // Uninstall removes cosyncing-owned service resources and nothing else. Bun was never copied and never
     // receipted, so there is nothing that could remove it — this proves the absence rather than assuming it.
@@ -1320,7 +1324,7 @@ try {
       .find((candidate) => candidate.id === 'service.agent-executable-path');
     check('setup and repair both detect a moved versioned agent executable as service-environment drift',
       first.status === 'complete'
-        && inspection.systemdStatus?.environment === 'drifted'
+        && inspection.durableServiceStatus?.environment === 'drifted'
         && doctorAgentPath?.status === 'fail'
         && doctorAgentPath.detailCode === 'service-agent-path-stale'
         && setupPlan.actions.some((action) => action.id === 'service.systemd')
@@ -1441,7 +1445,7 @@ try {
     });
     const afterOne = readFileSync(provider.environmentPath, 'utf8');
     check('doctor detects one removed agent and repair removes only its obsolete service PATH directory',
-      oneRemoved.inspection.systemdStatus?.environment === 'drifted'
+      oneRemoved.inspection.durableServiceStatus?.environment === 'drifted'
         && oneRemoved.doctorPath?.status === 'fail'
         && oneRemoved.doctorPath.evidence?.obsoleteDirectories === 1
         && oneRemoved.plan.actions.some((action) => action.id === 'service.reconcile')
@@ -1462,7 +1466,7 @@ try {
     });
     const afterLast = readFileSync(provider.environmentPath, 'utf8');
     check('doctor detects removal of the last agent and repair removes its obsolete service PATH directory',
-      lastRemoved.inspection.systemdStatus?.environment === 'drifted'
+      lastRemoved.inspection.durableServiceStatus?.environment === 'drifted'
         && lastRemoved.doctorPath?.status === 'fail'
         && lastRemoved.doctorPath.evidence?.detectedExecutables === 0
         && lastRemoved.doctorPath.evidence?.obsoleteDirectories === 1
@@ -1527,9 +1531,9 @@ try {
       check(`doctor expects the runtime directory a fresh ${flavor.id} JavaScript install put on the service PATH`,
         installed.status === 'complete'
           && durablePath.includes(dirname(process.execPath))
-          && inspection.systemdStatus?.environment === 'current'
+          && inspection.durableServiceStatus?.environment === 'current'
           && doctorPath?.status === 'pass',
-        `${installed.status} env=${inspection.systemdStatus?.environment} `
+        `${installed.status} env=${inspection.durableServiceStatus?.environment} `
           + `${doctorPath?.status}:${doctorPath?.detailCode} ${JSON.stringify(doctorPath?.evidence)}`);
 
       // The converse: when Bun genuinely moved, the same reconstruction must fail toward a repair that HAS

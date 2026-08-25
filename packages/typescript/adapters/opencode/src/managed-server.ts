@@ -12,9 +12,9 @@
  * decide whether it is OURS (an orphan from a prior broker run) or a FOREIGN serve (a user's own
  * `opencode serve` — :4096 is OpenCode's default port, so this is a real collision). We NEVER dispose or
  * kill a serve we cannot PROVE we started. Proof is a durable ownership record ({@link OpencodeServeOwnership}:
- * pid + a locale-free process start token + comm + base) written whenever the broker spawns the serve, and
+ * pid + a locale-free process start token + boot identity + comm + base) written whenever the broker spawns the serve, and
  * re-verified against the live listener's process identity at startup:
- *  - PROVEN OWNED (record matches the live pid + start token + comm) → reclaim it: free the port (graceful
+ *  - PROVEN OWNED (record matches the live pid + start token + boot + comm) → reclaim it: free the port (graceful
  *    `POST /instance/dispose`, else signal the listener — safe, it is our own process) and relaunch under
  *    broker control so `managed` is set and the config-reload watch activates.
  *  - UNPROVEN (no record / stale / mismatched pid / pid-reuse / different executable) or INDETERMINATE
@@ -30,8 +30,15 @@
  *
  * Governing contract: docs/architecture/client-ui.md §3 (D20).
  */
-import { PRODUCT_IDENTITY } from '@cosyncing/adapter-api';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  PRODUCT_IDENTITY,
+  HostProcessProvider,
+  bunSpawnResolvedInvocation,
+  bunSpawnSyncResolvedInvocation,
+  resolveInvocation,
+  terminateHostProcessTree,
+} from '@cosyncing/adapter-api';
+import { readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveLocalOpencodeBaseUrl } from './implementation.ts';
@@ -152,21 +159,11 @@ async function postDispose(baseUrl: string, path: string, timeoutMs = 1500): Pro
 
 /** PID of the process LISTENING on a TCP port (Linux + macOS via `lsof`). undefined if it can't be
  *  resolved (lsof absent, no match) — the caller then keeps the adopt-and-log fallback. */
-function pidListeningOnPort(port: number): number | undefined {
-  const lsof = Bun.which('lsof');
-  if (!lsof) return undefined;
-  try {
-    // -t: pids only; -iTCP:<port> -sTCP:LISTEN: the listening socket on that TCP port. Same flags on
-    // Linux and macOS. A local serve is the sole listener, so matching by port is unambiguous.
-    const res = Bun.spawnSync([lsof, '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
-      stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', env: { ...process.env }, timeout: 3000,
-    });
-    if (res.exitCode !== 0) return undefined;
-    const pid = Number(new TextDecoder().decode(res.stdout).trim().split(/\s+/)[0]);
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-  } catch {
-    return undefined;
-  }
+const hostProcesses = new HostProcessProvider();
+
+function pidListeningOnPort(port: number, options: { fresh?: boolean } = {}): number | undefined {
+  const listener = hostProcesses.listener(port, options);
+  return listener.state === 'identified' ? listener.pid : undefined;
 }
 
 // ── ownership proof ─────────────────────────────────────────────────────────
@@ -176,15 +173,19 @@ function pidListeningOnPort(port: number): number | undefined {
 // durable record we wrote when we spawned it. The start token defeats pid reuse (a reused pid starts at a
 // different time); comm guards a reused pid running a different program.
 
-export const OPENCODE_SERVE_OWNER_SCHEMA_VERSION = 1 as const;
+export const OPENCODE_SERVE_OWNER_SCHEMA_VERSION = 2 as const;
 
 /** Stable OS identity of a process (used to prove we started the live serve). */
 export interface ProcessIdentity {
   pid: number;
   /** Locale-free start token: Linux `/proc/<pid>/stat` field 22 (starttime in clock ticks); macOS `ps -o lstart=`. */
   start: string;
+  /** Boot identity for relative start tokens; empty when `start` is absolute. */
+  boot: string;
   /** Command name (Linux `/proc/<pid>/comm`; macOS `ps -o comm=`); '' when it can't be read. */
   comm: string;
+  /** Live executable evidence when available. Diagnostic, not ownership proof. */
+  executable?: string;
 }
 
 /** Durable ownership record for a broker-spawned `opencode serve`. Written on spawn, re-verified on restart. */
@@ -224,43 +225,9 @@ function clearOwnershipRecord(): void {
 
 /** Read a live process's stable identity. Returns null when it can't be determined — the caller then treats
  *  ownership as INDETERMINATE and PRESERVES the serve (never touches a process it can't identify). */
-export function readProcessIdentity(pid: number): ProcessIdentity | null {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (process.platform === 'linux') {
-    try {
-      // `/proc/<pid>/stat`: `pid (comm) state ...`. comm may contain spaces/parens, so parse AFTER the last
-      // ')'. The remaining fields start at `state` (field 3); starttime is field 22 → index 19 from there.
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      const rparen = stat.lastIndexOf(')');
-      if (rparen < 0) return null;
-      const after = stat.slice(rparen + 1).trim().split(/\s+/);
-      const start = after[19];
-      if (!start) return null;
-      let comm = '';
-      try { comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { /* best-effort */ }
-      return { pid, start, comm };
-    } catch {
-      return null;
-    }
-  }
-  // macOS / other unix: `ps -o lstart=` is an absolute (stable) start time; `-o comm=` the executable.
-  const ps = Bun.which('ps');
-  if (!ps) return null;
-  const psField = (fmt: string): string | undefined => {
-    try {
-      const res = Bun.spawnSync([ps, '-o', fmt, '-p', String(pid)], {
-        stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', env: { ...process.env }, timeout: 3000,
-      });
-      if (res.exitCode !== 0) return undefined;
-      const out = new TextDecoder().decode(res.stdout).trim();
-      return out || undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const start = psField('lstart=');
-  if (!start) return null;
-  return { pid, start, comm: psField('comm=') ?? '' };
+export function readProcessIdentity(pid: number, options: { fresh?: boolean } = {}): ProcessIdentity | null {
+  const live = hostProcesses.liveProcess(pid, options);
+  return live.state === 'running' ? live.identity : null;
 }
 
 export type ServeOwnershipVerdict = 'owned' | 'unowned' | 'indeterminate';
@@ -284,8 +251,23 @@ export function classifyServeOwnership(
   if (!record || record.baseUrl !== base) return 'unowned';
   if (record.pid !== live.pid) return 'unowned';
   if (record.start !== live.start) return 'unowned';
+  if (record.boot !== live.boot) return 'unowned';
   if (record.comm !== live.comm) return 'unowned';
   return 'owned';
+}
+
+/**
+ * The identity to record for a serve we just spawned: the process holding the listener, but only
+ * when it is provably the spawned child or one of its descendants. Returns null when that cannot be
+ * proven, so the caller clears the record rather than claiming a process it may not own.
+ */
+function ownedServeIdentity(childPid: number | undefined, port: number): ProcessIdentity | null {
+  if (!childPid) return null;
+  const listener = resolveLiveIdentity(port, { fresh: true });
+  if (!listener) return null;
+  // The common POSIX case: the process we spawned IS the serve.
+  if (listener.pid === childPid) return listener;
+  return hostProcesses.descendsFrom(listener.pid, childPid, { fresh: true }) === 'yes' ? listener : null;
 }
 
 /** Test seam: override how the live listener's identity is resolved so the wiring is deterministic without
@@ -294,9 +276,9 @@ let liveIdentityOverrideForTest: ((port: number) => ProcessIdentity | null) | nu
 let opencodeBinOverrideForTest: string | null = null;
 
 /** Resolve the identity of the process listening on `port` (lsof → pid → OS identity), or the test override. */
-function resolveLiveIdentity(port: number): ProcessIdentity | null {
+function resolveLiveIdentity(port: number, options: { fresh?: boolean } = {}): ProcessIdentity | null {
   if (liveIdentityOverrideForTest) return liveIdentityOverrideForTest(port);
-  const pid = pidListeningOnPort(port);
+  const pid = pidListeningOnPort(port, options);
   return pid !== undefined ? readProcessIdentity(pid) : null;
 }
 
@@ -307,7 +289,7 @@ function replaceUnownedServeRequested(): boolean {
 }
 
 function identityMatches(a: ProcessIdentity | null, b: ProcessIdentity): boolean {
-  return a !== null && a.pid === b.pid && a.start === b.start && a.comm === b.comm;
+  return a !== null && a.pid === b.pid && a.start === b.start && a.boot === b.boot && a.comm === b.comm;
 }
 
 /**
@@ -329,7 +311,7 @@ function identityMatches(a: ProcessIdentity | null, b: ProcessIdentity): boolean
  */
 async function takeOverExistingServe(baseUrl: string, expected: ProcessIdentity | null, graceMs = 3000): Promise<boolean> {
   const port = Number(new URL(baseUrl).port) || 4096;
-  const stillExpected = (): boolean => !expected || identityMatches(resolveLiveIdentity(port), expected);
+  const stillExpected = (): boolean => !expected || identityMatches(resolveLiveIdentity(port, { fresh: true }), expected);
 
   // 1. Graceful shutdown via OpenCode's dispose endpoints, confirmed by the port actually freeing. Both are
   //    PORT-addressed, so re-prove ownership before EACH and stop the instant the port frees — never let
@@ -344,19 +326,19 @@ async function takeOverExistingServe(baseUrl: string, expected: ProcessIdentity 
   // 2. Force: signal the OS process holding the port. Re-validate immediately before signaling, signal ONLY
   //    the expected pid (re-resolved), and never our own pid (in tests the fake serve is in-process).
   if (!stillExpected()) return false;
-  const pid = pidListeningOnPort(port);
+  const pid = pidListeningOnPort(port, { fresh: true });
   if (!pid || pid === process.pid) return false;
   if (expected && (pid !== expected.pid || !identityMatches(readProcessIdentity(pid), expected))) return false;
-  try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  terminateHostProcessTree(pid, false);
   if (await waitUntilPortFree(baseUrl, graceMs)) return true;
 
   // 3. Escalate to SIGKILL — SIGTERM may have freed the port and a stranger taken it, so re-resolve and
   //    re-validate the pid one more time before the harder signal.
   if (!stillExpected()) return false;
-  const pid2 = pidListeningOnPort(port);
+  const pid2 = pidListeningOnPort(port, { fresh: true });
   if (!pid2 || pid2 === process.pid) return false;
   if (expected && (pid2 !== expected.pid || !identityMatches(readProcessIdentity(pid2), expected))) return false;
-  try { process.kill(pid2, 'SIGKILL'); } catch { /* already gone */ }
+  terminateHostProcessTree(pid2, true);
   return waitUntilPortFree(baseUrl, graceMs);
 }
 
@@ -364,6 +346,15 @@ function registerTeardown(): void {
   if (teardownRegistered) return;
   teardownRegistered = true;
   const kill = () => {
+    // The TREE, not the handle. On Windows the handle is the `cmd.exe` shim and the serve is its
+    // child, so killing the handle leaves a serve holding the port after the broker is gone — the
+    // exact orphan this teardown exists to prevent. `terminateHostProcessTree` is synchronous,
+    // which an exit handler requires.
+    try {
+      if (managed?.pid) terminateHostProcessTree(managed.pid, true);
+    } catch {
+      /* already gone */
+    }
     try {
       managed?.kill();
     } catch {
@@ -442,19 +433,23 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
   }
   if (!shouldContinue()) return;
 
-  const bin = opencodeBinOverrideForTest ?? Bun.which('opencode');
-  if (!bin) return; // not installed → OpenCode stays observe/resume only
+  const invocation = resolveInvocation(opencodeBinOverrideForTest ?? 'opencode', {
+    env: process.env,
+    platform: process.platform,
+  });
+  if (!invocation) return; // not installed → OpenCode stays observe/resume only
   if (!shouldContinue()) return;
 
   let child: Bun.Subprocess;
   let stdout: ReturnType<typeof boundedStreamCapture> | undefined;
   let stderr: ReturnType<typeof boundedStreamCapture> | undefined;
   try {
-    const spawned = Bun.spawn([bin, 'serve', '--hostname', bu.hostname, '--port', bu.port || '4096'], {
+    const spawned = bunSpawnResolvedInvocation(invocation, ['serve', '--hostname', bu.hostname, '--port', bu.port || '4096'], {
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
       env: { ...process.env },
+      windowsHide: process.platform === 'win32',
     });
     child = spawned;
     stdout = boundedStreamCapture(spawned.stdout);
@@ -503,7 +498,16 @@ async function ensureManagedOpencodeServeInternal(shouldContinue: () => boolean)
       // Record ownership so a later broker restart can PROVE this serve is ours and reclaim it (rather than
       // preserving it as a stranger's). If we can't fingerprint our own child, clear any stale record so we
       // never falsely claim ownership — next restart then preserves it instead of killing it.
-      const identity = child.pid ? readProcessIdentity(child.pid) : null;
+      // Record the process that actually HOLDS THE LISTENER, because that is what ownership is later
+      // proven against. On Windows those are two different processes: `opencode` resolves to
+      // `opencode.cmd`, and batch has no exec, so the spawned handle is a `cmd.exe` that CALLS the
+      // real executable. Recording the handle meant a broker could never prove its own serve — it
+      // preserved it as a stranger's on restart and no later broker could ever stop it.
+      //
+      // The listener is only recorded once it is PROVEN to be ours by ancestry. An unproven listener
+      // clears the record instead: a wrong record authorizes signalling somebody else's process,
+      // while a missing one only costs a reclaim.
+      const identity = ownedServeIdentity(child.pid, Number(bu.port) || 4096);
       if (identity) writeOwnershipRecord(identity, base);
       else clearOwnershipRecord();
       console.log(`${LOG_PREFIX} managed opencode serve ready at ${base} (pid ${child.pid}) — OpenCode sync-by-default (D20)`);
@@ -553,12 +557,15 @@ async function managedOpencodeRunningVersion(): Promise<string | undefined> {
 }
 
 function installedOpencodeVersion(): string | undefined {
-  const bin = Bun.which('opencode');
-  if (!bin) return undefined;
+  const invocation = resolveInvocation('opencode', { env: process.env, platform: process.platform });
+  if (!invocation) return undefined;
   try {
     // timeout: this runs synchronously ON the broker event loop (every poll + every status GET) — a
     // hung binary must not freeze the whole broker.
-    const result = Bun.spawnSync([bin, '--version'], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 3000 });
+    const result = bunSpawnSyncResolvedInvocation(invocation, ['--version'], {
+      stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env },
+      timeout: 3000, windowsHide: process.platform === 'win32',
+    });
     if (result.exitCode !== 0) return undefined;
     const version = normalizeOpencodeVersion(new TextDecoder().decode(result.stdout));
     return version || undefined;
@@ -815,17 +822,27 @@ export function __clearOpencodeServeOwnershipForTest(): void {
  */
 export async function stopManagedOpencodeServe(graceMs = 2000): Promise<void> {
   const m = managed;
+  const stoppingBase = managedBaseUrl;
   managed = null;
   managedBaseUrl = null;
   if (!m) return;
+  // Who actually holds the port, captured BEFORE any signal. On Windows the handle is the batch shim
+  // and the serve is its child, so the handle exiting is not the serve exiting — and awaiting the
+  // handle is how a stop came back successful with the port still occupied.
+  const stoppingPort = stoppingBase ? Number(new URL(stoppingBase).port) || 4096 : 0;
+  const listener = stoppingPort ? resolveLiveIdentity(stoppingPort, { fresh: true }) : null;
   // The serve we owned is going away (shutdown or restart). Drop the ownership record so a stale pid is never
   // reclaimed later; the restart path rewrites a fresh record once the replacement serve is ready.
   clearOwnershipRecord();
   let killer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // Ask the whole tree to go. Signalling only the handle stops the Windows shim and leaves the
+    // serve it called still listening, so a stop that reported success left the port occupied.
+    if (m.pid) terminateHostProcessTree(m.pid, false);
     m.kill(); // SIGTERM
     killer = setTimeout(() => {
       try {
+        if (m.pid) terminateHostProcessTree(m.pid, true);
         m.kill(9); // escalate if it ignores SIGTERM
       } catch {
         /* already gone */
@@ -837,5 +854,14 @@ export async function stopManagedOpencodeServe(graceMs = 2000): Promise<void> {
     /* already gone */
   } finally {
     if (killer) clearTimeout(killer);
+  }
+  // The handle is gone; the serve it called may not be. Re-prove the identity captured above before
+  // signalling — a pid recycled in the meantime is somebody else's — then take the tree and wait for
+  // the port itself to free, because the port is what the next broker will test.
+  if (listener && stoppingBase) {
+    if (identityMatches(readProcessIdentity(listener.pid, { fresh: true }), listener)) {
+      terminateHostProcessTree(listener.pid, true);
+    }
+    await waitUntilPortFree(stoppingBase, graceMs);
   }
 }

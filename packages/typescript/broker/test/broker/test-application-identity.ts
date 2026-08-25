@@ -259,8 +259,9 @@ try {
     probes === 1 && selfEvident.version === '1.3.8' && overrideProbed.path === outdatedBun,
     `${probes} probe(s)`);
 
-  // Newlines and `%` reach a systemd unit verbatim and have no escape there; a colon is worse, because it
-  // does not break the unit at all — it silently splits the runtime directory into two bogus PATH entries.
+  // Identity rejects only cross-platform control characters. Provider serializers own their narrower
+  // grammars: the systemd suite separately proves that it refuses `%` and colon-bearing PATH entries, while
+  // Windows drive-qualified paths must survive this shared boundary.
   const unsafeCharacters = threw(() => resolveBunRuntime({
     execPath: bunRuntime,
     override: `${bunRuntime}\nExecStart=/bin/sh`,
@@ -268,9 +269,14 @@ try {
   const colonDirectory = join(root, 'runtimes', 'a:b');
   mkdirSync(colonDirectory, { recursive: true });
   const colonRuntime = fakeRuntime(join(colonDirectory, 'bun'), 'echo 1.3.8+aaaaaaaaaa');
-  const colonRefusal = threw(() => resolveBunRuntime({ execPath: bunRuntime, override: colonRuntime }));
-  check('a runtime path carrying service-file control characters or a PATH separator is refused',
-    !!unsafeCharacters && !!colonRefusal, colonRefusal);
+  const colonIdentity = resolveBunRuntime({ execPath: bunRuntime, override: colonRuntime });
+  const percentDirectory = join(root, 'runtimes', 'a%b');
+  mkdirSync(percentDirectory, { recursive: true });
+  const percentRuntime = fakeRuntime(join(percentDirectory, 'bun'), 'echo 1.3.8+aaaaaaaaaa');
+  const percentIdentity = resolveBunRuntime({ execPath: bunRuntime, override: percentRuntime });
+  check('identity refuses control characters but preserves provider-specific path characters',
+    !!unsafeCharacters && colonIdentity.path === colonRuntime && percentIdentity.path === percentRuntime,
+    unsafeCharacters);
 
   // A symlinked / version-manager Bun is a legitimate installation and must be accepted as given: pinning
   // its realpath would break an in-place upgrade behind a stable shim.

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "938aaafc4c0bd2bc4adabb547458372a557b8782",
+  "acceptedBase": "b211719eb44f10798e5b16c1093f28e6899ce750",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.agent-create-readiness",
@@ -430,6 +430,10 @@
       "fingerprint": "sha256:2678bbefabcad20253e14acf538e384b0320610e47678573ef92b39e5fde735a"
     },
     {
+      "id": "invocation",
+      "fingerprint": "sha256:08439f8e78d26f426a67ee6f9da3a23c0962582038c1f0c6df1ec3bab09ae177"
+    },
+    {
       "id": "kimi-attach-priming",
       "fingerprint": "sha256:86c3114e2bae574b51f07870b7af5956619829dc7ebc232ae3cf16d64f605e11"
     },
@@ -558,6 +562,10 @@
       "fingerprint": "sha256:716c0e3e42face9ba820fa72c2e6dd8054589fd149ddaffc2e2d616080cb7e5b"
     },
     {
+      "id": "route-authorization",
+      "fingerprint": "sha256:c50e2cdcabf65fc1a01572da85a5320ccd7f8069c87b6d51d9c9ccde4c8eaab5"
+    },
+    {
       "id": "session-truth-conformance",
       "fingerprint": "sha256:382925fca8e830757bb2041befd11cd07704b08cc30a4d1e4158bf80de62ed32"
     },
@@ -588,6 +596,18 @@
     {
       "id": "web-origin",
       "fingerprint": "sha256:7463e5f2ea580ac9daf2279e96cfe3b94147f08bb7c44116caaf50a42f22a1df"
+    },
+    {
+      "id": "windows-dacl",
+      "fingerprint": "sha256:9bd1065aa2cee49b6dcf00effe685dd919ea0076586c6894ebf737e6f296de66"
+    },
+    {
+      "id": "windows-process",
+      "fingerprint": "sha256:db4684c3f15ce9df3414511b6c310f80d18b2acc1f0cecad30fd2ee374d0b195"
+    },
+    {
+      "id": "windows-service",
+      "fingerprint": "sha256:d9e68c68d7ec2bec4841da3763f394326e33b94e22a2f1b83ba9b77a726eb6c0"
     },
     {
       "id": "zero-agent-doctor",

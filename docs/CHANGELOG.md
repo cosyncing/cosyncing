@@ -13,6 +13,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Gated native-Windows broker foundations now cover command invocation,
+  owner-only state, process ownership, Task Scheduler service management, and
+  native qualification harnesses. Windows broker hosting remains disabled
+  until the remaining adapter, CI, packaging, and enablement gates pass.
 - Pairing offers accept an optional, one-time client-reachable broker URL and
   emit provider-neutral version 3 payloads while clients retain legacy QR support.
 - Connectivity guides and copyable operator-owned proxy and tunnel examples are
@@ -62,6 +66,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Pi fork and clone now follow Pi's actual RPC contract and refuse a result
+  unless it identifies a distinct child session. Windows npm launchers are
+  classified through the shared invocation boundary and their installed
+  package metadata instead of being mistaken for native executables.
+- Managed OpenCode servers now record and re-prove the process that owns the
+  listener behind command wrappers, and shutdown waits for the owned listener
+  to release its port instead of leaving an orphaned server.
 - Peer revocation is persisted before it reaches memory, invalidates unused
   WebSocket tickets, closes active peer sockets, and clears peer upload,
   push-registration, mailbox, and replay state before reporting success.
