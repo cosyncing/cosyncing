@@ -122,27 +122,16 @@ class _ArtifactMetadataChip extends StatelessWidget {
 }
 
 class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
+  const _ErrorBanner({required this.failure});
 
-  final String message;
+  final LocalizedFailure failure;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
-    final visibleMessage = switch (message) {
-      sessionAttachmentUnsupportedErrorKey =>
-        l10n.sessionAttachmentUnsupportedTooltip,
-      sessionAttachmentSelectionErrorKey =>
-        l10n.sessionAttachmentSelectionError,
-      sessionAttachmentIntakeErrorKey => l10n.sessionAttachmentIntakeError,
-      sessionAttachmentReplacementErrorKey =>
-        l10n.sessionAttachmentReplacementError,
-      sessionAttachmentLimitErrorKey => l10n.sessionAttachmentLimitError,
-      sessionAttachmentStagingErrorKey => l10n.sessionAttachmentStagingError,
-      sessionAttachmentDeliveryErrorKey => l10n.sessionAttachmentDeliveryError,
-      _ => l10n.sessionDetailUpdateFailed,
-    };
+    final visibleMessage = localizedFailureText(l10n, failure);
+    final detail = failure.detail;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: theme.colorScheme.errorContainer,
@@ -159,13 +148,13 @@ class _ErrorBanner extends StatelessWidget {
                 color: theme.colorScheme.onErrorContainer,
               ),
             ),
-            if (visibleMessage == l10n.sessionDetailUpdateFailed)
+            if (detail != null && detail.isNotEmpty)
               Material(
                 type: MaterialType.transparency,
                 child: ExpansionTile(
                   tilePadding: EdgeInsets.zero,
                   title: Text(l10n.technicalDetails),
-                  children: [SelectableText(message)],
+                  children: [SelectableText(detail)],
                 ),
               ),
           ],

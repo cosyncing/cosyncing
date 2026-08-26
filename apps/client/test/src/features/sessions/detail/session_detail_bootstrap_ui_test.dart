@@ -388,7 +388,11 @@ void main() {
           tool: 'claude',
           sessionId: 'session-1',
           bootstrapState: testCase.$3,
-          error: 'raw transport exception must stay hidden',
+          error: const LocalizedFailure(
+            lead: FailureLead.connectSession,
+            kind: FailureKind.offline,
+            detail: 'raw transport exception must stay hidden',
+          ),
         );
         await tester.pumpWidget(
           buildSessionDetailTestPage(

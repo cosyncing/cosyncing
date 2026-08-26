@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/schedules/controller/schedule_controller.dart';
 import 'package:cosyncing_client/src/features/schedules/model/schedule_timing.dart';
@@ -456,13 +458,16 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final scheduleError = switch (scheduleState.presentationIssue) {
       SchedulePresentationIssue.modelSourceMismatch =>
         l10n.newSessionModelSourceMismatch,
-      null when scheduleState.error != null => l10n.newSessionScheduleFailed,
+      null when scheduleState.error != null => localizedFailureText(
+        l10n,
+        scheduleState.error!,
+      ),
       null => null,
     };
     final displayError = _localIssue == null
         ? state.error == null
               ? scheduleError
-              : l10n.newSessionCreateFailed
+              : localizedFailureText(l10n, state.error!)
         : _newSessionIssueMessage(l10n, _localIssue!);
     final agents = state.agents;
     final effectiveTool = agents.any((agent) => agent.id == _selectedTool)
@@ -727,9 +732,11 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                   children: [
                     Expanded(
                       child: SelectableText(
-                        modelOptions.isEmpty
-                            ? l10n.newSessionModelFailed
-                            : l10n.newSessionModelStale,
+                        _modelFailureText(
+                          l10n,
+                          state.modelError,
+                          retainedOptions: modelOptions.isNotEmpty,
+                        ),
                       ),
                     ),
                     TextButton(
@@ -906,6 +913,22 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       ),
     );
   }
+}
+
+// A failed catalog refresh carries a typed reason. Render it, and keep the
+// stale-choice warning when retained options stay selectable.
+String _modelFailureText(
+  AppLocalizations l10n,
+  LocalizedFailure? failure, {
+  required bool retainedOptions,
+}) {
+  if (failure == null) {
+    return retainedOptions
+        ? l10n.newSessionModelStale
+        : l10n.newSessionModelFailed;
+  }
+  final text = localizedFailureText(l10n, failure);
+  return retainedOptions ? '$text ${l10n.newSessionModelStaleNote}' : text;
 }
 
 String _newSessionIssueMessage(

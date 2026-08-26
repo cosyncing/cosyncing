@@ -7,6 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 const List<Locale> kSupportedLocales = <Locale>[
   Locale('en'),
   Locale('zh'),
+  Locale('ja'),
+  Locale('ko'),
+  Locale('es'),
 ];
 
 /// Durable UI locale selection. `null` means "follow the system locale".

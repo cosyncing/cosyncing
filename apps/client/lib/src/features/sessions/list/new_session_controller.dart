@@ -94,10 +94,10 @@ final class NewSessionState {
   final int? modelRefreshedAt;
 
   /// Honest refresh error. Retained [models] are stale when this is non-null.
-  final String? modelError;
+  final LocalizedFailure? modelError;
 
   /// Last honest load/create error.
-  final String? error;
+  final LocalizedFailure? error;
 
   /// Whether a request is active.
   bool get isBusy => phase != NewSessionPhase.idle;
@@ -111,8 +111,8 @@ final class NewSessionState {
     List<ModelOption>? models,
     RosterSource? modelCatalogSource,
     int? modelRefreshedAt,
-    String? modelError,
-    String? error,
+    LocalizedFailure? modelError,
+    LocalizedFailure? error,
     bool clearError = false,
     bool clearModelError = false,
   }) => NewSessionState(
@@ -351,10 +351,7 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     } on Object catch (error) {
       if (!_canAdmitAgents(admission)) return;
       state = NewSessionState(
-        error: userFacingMessage(
-          error,
-          lead: "Couldn't load the list of agents.",
-        ),
+        error: LocalizedFailure.from(error, lead: FailureLead.loadAgents),
       );
     } finally {
       keepAlive.close();
@@ -382,7 +379,9 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
       state = state.copyWith(
         modelCatalogPhase: NewSessionModelCatalogPhase.failed,
         modelTool: tool,
-        modelError: 'Connect to a server before loading models.',
+        modelError: const LocalizedFailure.notice(
+          FailureLead.modelsRequireServer,
+        ),
       );
       return;
     }
@@ -438,9 +437,9 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
         modelTool: tool,
         models: retained,
         modelCatalogSource: source,
-        modelError: userFacingMessage(
+        modelError: LocalizedFailure.from(
           error,
-          lead: "Couldn't refresh the model catalog.",
+          lead: FailureLead.refreshModelCatalog,
         ),
       );
     }
@@ -466,7 +465,9 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     RosterSource? modelSource,
   }) async {
     if (!state.agents.any((agent) => agent.id == tool)) {
-      state = state.copyWith(error: 'Choose a creatable agent.');
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.chooseCreatableAgent),
+      );
       return null;
     }
     state = state.copyWith(phase: NewSessionPhase.creating, clearError: true);
@@ -487,7 +488,7 @@ final class NewSessionController extends AutoDisposeNotifier<NewSessionState> {
     } on Object catch (error) {
       state = state.copyWith(
         phase: NewSessionPhase.idle,
-        error: userFacingMessage(error, lead: "Couldn't create the session."),
+        error: LocalizedFailure.from(error, lead: FailureLead.createSession),
       );
       return null;
     }

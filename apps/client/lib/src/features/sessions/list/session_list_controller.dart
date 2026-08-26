@@ -474,7 +474,7 @@ class SessionListController extends Notifier<SessionListState> {
       if (!keepLastGood) {
         state = SessionListState(
           status: SessionListStatus.error,
-          error: userFacingMessage(e, lead: "Couldn't load sessions."),
+          error: LocalizedFailure.from(e, lead: FailureLead.loadSessions),
           sessions: state.sessions,
           machine: state.machine,
           revision: state.revision,

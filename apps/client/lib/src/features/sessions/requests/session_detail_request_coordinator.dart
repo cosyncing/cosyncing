@@ -25,7 +25,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     final trimmedRequestId = requestId.trim();
     if (trimmedRequestId.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot send permission decisions without a request id.',
+        error: const LocalizedFailure.notice(
+          FailureLead.permissionDecisionMissingRequestId,
+        ),
       );
       return false;
     }
@@ -33,7 +35,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     final trimmedDecision = decision.trim();
     if (trimmedDecision.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot send empty permission decisions.',
+        error: const LocalizedFailure.notice(
+          FailureLead.permissionDecisionEmpty,
+        ),
       );
       return false;
     }
@@ -42,9 +46,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error:
-            'Cannot send permission decision until '
-            'the session is connected.',
+        error: const LocalizedFailure.notice(
+          FailureLead.permissionDecisionDisconnected,
+        ),
       );
       return false;
     }
@@ -82,7 +86,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
   Future<bool> _setAgentCoordinated(String agent) async {
     final trimmedAgent = agent.trim();
     if (trimmedAgent.isEmpty) {
-      state = state.copyWith(error: 'Cannot switch to an empty agent name.');
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.agentSwitchEmptyName),
+      );
       return false;
     }
     final advertised = state.agents.any(
@@ -90,13 +96,17 @@ extension _SessionDetailRequestActions on SessionDetailController {
     );
     if (!advertised) {
       state = state.copyWith(
-        error: 'This session does not advertise that agent.',
+        error: const LocalizedFailure.notice(
+          FailureLead.agentSwitchUnadvertised,
+        ),
       );
       return false;
     }
     if (!SessionControlView.fromSessionDetailState(state).canMutate) {
       state = state.copyWith(
-        error: 'Switching agents requires a Drive or sync session.',
+        error: const LocalizedFailure.notice(
+          FailureLead.agentSwitchRequiresDrive,
+        ),
       );
       return false;
     }
@@ -104,7 +114,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Cannot switch agents until the session is connected.',
+        error: const LocalizedFailure.notice(
+          FailureLead.agentSwitchDisconnected,
+        ),
       );
       return false;
     }
@@ -121,7 +133,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
       return true;
     } on Object catch (e) {
       state = state.copyWith(
-        error: userFacingMessage(e, lead: "Couldn't change the session agent."),
+        error: LocalizedFailure.from(e, lead: FailureLead.changeSessionAgent),
       );
       return false;
     }
@@ -139,7 +151,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     final trimmedRequestId = requestId.trim();
     if (trimmedRequestId.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot send question answers without a request id.',
+        error: const LocalizedFailure.notice(
+          FailureLead.questionAnswerMissingRequestId,
+        ),
       );
       return false;
     }
@@ -155,7 +169,7 @@ extension _SessionDetailRequestActions on SessionDetailController {
         .toList();
     if (normalizedAnswers.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot send empty question answers.',
+        error: const LocalizedFailure.notice(FailureLead.questionAnswerEmpty),
       );
       return false;
     }
@@ -164,7 +178,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Cannot send question answer until the session is connected.',
+        error: const LocalizedFailure.notice(
+          FailureLead.questionAnswerDisconnected,
+        ),
       );
       return false;
     }
@@ -199,7 +215,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     final trimmedRequestId = requestId.trim();
     if (trimmedRequestId.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot reject a question without a request id.',
+        error: const LocalizedFailure.notice(
+          FailureLead.questionRejectMissingRequestId,
+        ),
       );
       return false;
     }
@@ -208,7 +226,9 @@ extension _SessionDetailRequestActions on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Cannot reject a question until the session is connected.',
+        error: const LocalizedFailure.notice(
+          FailureLead.questionRejectDisconnected,
+        ),
       );
       return false;
     }

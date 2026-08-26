@@ -53,6 +53,18 @@
     "description": "Endonym for the English language option."
   },
   "languageChinese": "中文",
+  "languageJapanese": "日本語",
+  "@languageJapanese": {
+    "description": "Japanese language option, written in Japanese."
+  },
+  "languageKorean": "한국어",
+  "@languageKorean": {
+    "description": "Korean language option, written in Korean."
+  },
+  "languageSpanish": "Español",
+  "@languageSpanish": {
+    "description": "Spanish language option, written in Spanish."
+  },
   "@languageChinese": {
     "description": "Endonym for the Chinese language option."
   },
@@ -273,6 +285,378 @@
   "failureAdviceUnknown": "Try again. If it keeps happening, the technical details can help support.",
   "@failureAdviceUnknown": {
     "description": "Recovery advice for an unclassified failure. Deliberately makes no claim about the cause."
+  },
+  "sessionRenameRequiresServer": "Connect to a server before renaming this session.",
+  "@sessionRenameRequiresServer": {
+    "description": "Refusal: rename attempted with no server connection."
+  },
+  "sessionRenameUnsupported": "Rename is not available for this agent.",
+  "@sessionRenameUnsupported": {
+    "description": "Refusal: the agent does not support native rename."
+  },
+  "sessionRenameInProgress": "Renaming session…",
+  "@sessionRenameInProgress": {
+    "description": "Progress: a rename is in flight."
+  },
+  "sessionRenameRejected": "Server rejected the rename.",
+  "@sessionRenameRejected": {
+    "description": "Refusal: the broker refused the rename."
+  },
+  "sessionRenameSucceeded": "Session title updated.",
+  "@sessionRenameSucceeded": {
+    "description": "Success: the rename landed."
+  },
+  "sessionForkRequiresServer": "Connect to a server before forking this session.",
+  "@sessionForkRequiresServer": {
+    "description": "Refusal: fork attempted with no server connection."
+  },
+  "sessionForkUnsupported": "Fork is not available for this agent.",
+  "@sessionForkUnsupported": {
+    "description": "Refusal: the agent does not support fork."
+  },
+  "sessionForkAlreadyRunning": "Fork is already in progress.",
+  "@sessionForkAlreadyRunning": {
+    "description": "Refusal: a fork is already running for this session."
+  },
+  "sessionForkReturnedNothing": "Fork returned no new session.",
+  "@sessionForkReturnedNothing": {
+    "description": "Failure: the broker accepted the fork but named no session."
+  },
+  "sessionCloneRequiresServer": "Connect to a server before duplicating this session.",
+  "@sessionCloneRequiresServer": {
+    "description": "Refusal: clone attempted with no server connection."
+  },
+  "sessionCloneUnsupported": "Duplicate is not available for this agent.",
+  "@sessionCloneUnsupported": {
+    "description": "Refusal: the agent does not support clone."
+  },
+  "sessionCloneAlreadyRunning": "A duplicate is already in progress.",
+  "@sessionCloneAlreadyRunning": {
+    "description": "Refusal: a clone is already running for this session."
+  },
+  "sessionCloneReturnedNothing": "Duplicate returned no new session.",
+  "@sessionCloneReturnedNothing": {
+    "description": "Failure: the broker accepted the clone but named no session."
+  },
+  "sessionExportConfirmationStale": "Transcript export confirmation expired or changed. Try again.",
+  "@sessionExportConfirmationStale": {
+    "description": "Refusal: the export confirmation token expired or changed."
+  },
+  "sessionExportRateLimited": "Transcript export is rate limited. Try again later.",
+  "@sessionExportRateLimited": {
+    "description": "Refusal: transcript export is rate limited."
+  },
+  "sessionExportDisabled": "Transcript export is disabled for this server or client.",
+  "@sessionExportDisabled": {
+    "description": "Refusal: transcript export is switched off."
+  },
+  "sessionExportBadParam": "Transcript export request was rejected by the server.",
+  "@sessionExportBadParam": {
+    "description": "Refusal: the broker rejected the export request."
+  },
+  "failureNoticeHistoryPageTimeout": "Loading earlier history timed out. Reconnect or try again.",
+  "@failureNoticeHistoryPageTimeout": {
+    "description": "Notice: a history page request timed out."
+  },
+  "failureNoticeHistoryPageOffline": "Reconnect before loading earlier history.",
+  "@failureNoticeHistoryPageOffline": {
+    "description": "Notice: history paging attempted while disconnected."
+  },
+  "failureNoticeScheduleConflict": "This schedule changed on another client. Refresh before retrying.",
+  "@failureNoticeScheduleConflict": {
+    "description": "Notice: a schedule was modified concurrently elsewhere."
+  },
+  "failureNoticeExportRequiresServer": "Connect to a server before exporting transcripts.",
+  "@failureNoticeExportRequiresServer": {
+    "description": "Notice: transcript export attempted with no server connection."
+  },
+  "failureNoticeExportConfirmationMissing": "Transcript export confirmation is missing.",
+  "@failureNoticeExportConfirmationMissing": {
+    "description": "Notice: the export confirmation nonce was blank."
+  },
+  "failureNoticeExportNoArtifact": "Transcript export completed without an artifact.",
+  "@failureNoticeExportNoArtifact": {
+    "description": "Notice: the broker reported export success but returned no artifact."
+  },
+  "failureNoticeHistoryPageMemoryBudget": "This history page exceeds the active decoded-memory budget.",
+  "@failureNoticeHistoryPageMemoryBudget": {
+    "description": "Notice: a history page was refused by the client memory budget."
+  },
+  "failureNoticeHistoryPageMalformed": "The server returned a malformed history page.",
+  "@failureNoticeHistoryPageMalformed": {
+    "description": "Notice: the broker returned an unparseable history page."
+  },
+  "failureNoticeCommandModelArgument": "Remove \"model\" from command arguments. Use the model selector instead.",
+  "@failureNoticeCommandModelArgument": {
+    "description": "Notice: model must not be passed as a command argument."
+  },
+  "failureNoticeModelsRequireServer": "Connect to a server before loading models.",
+  "@failureNoticeModelsRequireServer": {
+    "description": "Notice: model catalog load attempted with no server connection."
+  },
+  "failureNoticeServerUnhealthy": "The server answered but reported itself unhealthy. Check the server host, then try again.",
+  "@failureNoticeServerUnhealthy": {
+    "description": "Notice: the broker responded but failed its own health check."
+  },
+  "failureNoticePermissionDecisionMissingRequestId": "Cannot send permission decisions without a request id.",
+  "@failureNoticePermissionDecisionMissingRequestId": {
+    "description": "Notice: a permission decision was attempted with no request id."
+  },
+  "failureNoticePermissionDecisionEmpty": "Cannot send empty permission decisions.",
+  "@failureNoticePermissionDecisionEmpty": {
+    "description": "Notice: an empty permission decision was attempted."
+  },
+  "failureNoticePermissionDecisionDisconnected": "Cannot send permission decision until the session is connected.",
+  "@failureNoticePermissionDecisionDisconnected": {
+    "description": "Notice: a permission decision was attempted while disconnected."
+  },
+  "failureNoticeAgentSwitchEmptyName": "Cannot switch to an empty agent name.",
+  "@failureNoticeAgentSwitchEmptyName": {
+    "description": "Notice: an agent switch was attempted with a blank name."
+  },
+  "failureNoticeAgentSwitchUnadvertised": "This session does not advertise that agent.",
+  "@failureNoticeAgentSwitchUnadvertised": {
+    "description": "Notice: the requested agent is not advertised by the session."
+  },
+  "failureNoticeAgentSwitchRequiresDrive": "Switching agents requires a Drive or sync session.",
+  "@failureNoticeAgentSwitchRequiresDrive": {
+    "description": "Notice: switching agents needs drive authority."
+  },
+  "failureNoticeAgentSwitchDisconnected": "Cannot switch agents until the session is connected.",
+  "@failureNoticeAgentSwitchDisconnected": {
+    "description": "Notice: an agent switch was attempted while disconnected."
+  },
+  "failureNoticeQuestionAnswerMissingRequestId": "Cannot send question answers without a request id.",
+  "@failureNoticeQuestionAnswerMissingRequestId": {
+    "description": "Notice: a question answer was attempted with no request id."
+  },
+  "failureNoticeQuestionAnswerEmpty": "Cannot send empty question answers.",
+  "@failureNoticeQuestionAnswerEmpty": {
+    "description": "Notice: an empty question answer was attempted."
+  },
+  "failureNoticeQuestionAnswerDisconnected": "Cannot send question answer until the session is connected.",
+  "@failureNoticeQuestionAnswerDisconnected": {
+    "description": "Notice: a question answer was attempted while disconnected."
+  },
+  "failureNoticeQuestionRejectMissingRequestId": "Cannot reject a question without a request id.",
+  "@failureNoticeQuestionRejectMissingRequestId": {
+    "description": "Notice: a question rejection was attempted with no request id."
+  },
+  "failureNoticeQuestionRejectDisconnected": "Cannot reject a question until the session is connected.",
+  "@failureNoticeQuestionRejectDisconnected": {
+    "description": "Notice: a question rejection was attempted while disconnected."
+  },
+  "failureNoticePromptDisconnected": "Cannot send prompt until the session is connected.",
+  "@failureNoticePromptDisconnected": {
+    "description": "Notice: a prompt was attempted while disconnected."
+  },
+  "failureNoticePlanActionMissingIdentity": "Plan action is missing plan identity.",
+  "@failureNoticePlanActionMissingIdentity": {
+    "description": "Notice: a plan action arrived without plan identity."
+  },
+  "failureNoticePlanRevisionEmpty": "A plan revision cannot be empty.",
+  "@failureNoticePlanRevisionEmpty": {
+    "description": "Notice: an empty plan revision was submitted."
+  },
+  "failureNoticePlanActionPolicyMismatch": "Plan action does not match the current server policy.",
+  "@failureNoticePlanActionPolicyMismatch": {
+    "description": "Notice: a plan action conflicts with the server policy."
+  },
+  "failureNoticePlanActionRequiresDrive": "Plan actions require a prompt-capable Drive or sync session.",
+  "@failureNoticePlanActionRequiresDrive": {
+    "description": "Notice: plan actions need drive authority."
+  },
+  "failureNoticeArtifactInteractionMissingContext": "Artifact interaction is missing trusted artifact context.",
+  "@failureNoticeArtifactInteractionMissingContext": {
+    "description": "Notice: an artifact interaction lacked trusted context."
+  },
+  "failureNoticeArtifactInteractionRequiresDrive": "Artifact interactions require a prompt-capable Drive or sync session.",
+  "@failureNoticeArtifactInteractionRequiresDrive": {
+    "description": "Notice: artifact interactions need drive authority."
+  },
+  "failureNoticeCommandUnadvertised": "This session does not advertise that action command.",
+  "@failureNoticeCommandUnadvertised": {
+    "description": "Notice: the requested command is not advertised by the session."
+  },
+  "failureNoticeCommandRequiresDrive": "Action commands require a prompt-capable Drive or sync session.",
+  "@failureNoticeCommandRequiresDrive": {
+    "description": "Notice: action commands need drive authority."
+  },
+  "failureNoticeCommandNameEmpty": "Cannot send an empty command name.",
+  "@failureNoticeCommandNameEmpty": {
+    "description": "Notice: an empty command name was submitted."
+  },
+  "failureNoticeCommandPermissionModeArgument": "Remove \"permissionMode\" from command arguments. Use the permission selector instead.",
+  "@failureNoticeCommandPermissionModeArgument": {
+    "description": "Notice: permissionMode must not be passed as a command argument."
+  },
+  "failureNoticeCommandDisconnected": "Cannot send command until the session is connected.",
+  "@failureNoticeCommandDisconnected": {
+    "description": "Notice: a command was attempted while disconnected."
+  },
+  "failureNoticeTakeOverDisconnected": "Reconnect before taking over this session.",
+  "@failureNoticeTakeOverDisconnected": {
+    "description": "Notice: takeover was attempted while disconnected."
+  },
+  "failureNoticeControlChangedReview": "Session control changed; review its current status first.",
+  "@failureNoticeControlChangedReview": {
+    "description": "Notice: session control changed under the user."
+  },
+  "failureNoticeTakeOverReconnectFailed": "Take over could not reconnect.",
+  "@failureNoticeTakeOverReconnectFailed": {
+    "description": "Notice: takeover failed to re-establish the connection."
+  },
+  "failureNoticeHandBackDisconnected": "Reconnect before handing control back to the terminal.",
+  "@failureNoticeHandBackDisconnected": {
+    "description": "Notice: handback was attempted while disconnected."
+  },
+  "failureNoticeHandBackReconnectFailed": "Terminal handoff could not reconnect.",
+  "@failureNoticeHandBackReconnectFailed": {
+    "description": "Notice: handback failed to re-establish the connection."
+  },
+  "failureNoticeHandBackUnconfirmed": "The server did not confirm terminal handoff.",
+  "@failureNoticeHandBackUnconfirmed": {
+    "description": "Notice: the broker never confirmed the handback."
+  },
+  "failureNoticeAttachRequiresServer": "Connect to a server before attaching to a session.",
+  "@failureNoticeAttachRequiresServer": {
+    "description": "Notice: attaching needs an active server."
+  },
+  "failureNoticeChooseCreatableAgent": "Choose a creatable agent.",
+  "@failureNoticeChooseCreatableAgent": {
+    "description": "Notice: the chosen agent cannot create sessions."
+  },
+  "failureNoticeScheduleUnavailable": "The schedule is no longer available.",
+  "@failureNoticeScheduleUnavailable": {
+    "description": "Notice: the schedule row vanished before the action ran."
+  },
+  "failureLeadAccessFile": "Couldn't access this file.",
+  "@failureLeadAccessFile": {
+    "description": "Lead for a session-file read or listing failure."
+  },
+  "failureLeadAcknowledgeHistory": "Couldn't acknowledge the attached history.",
+  "@failureLeadAcknowledgeHistory": {
+    "description": "Lead for a failure acknowledging replayed attach history."
+  },
+  "failureLeadChangeSessionAgent": "Couldn't change the session agent.",
+  "@failureLeadChangeSessionAgent": {
+    "description": "Lead for a failure switching the agent backing a session."
+  },
+  "failureLeadCloneSession": "Couldn't duplicate this session.",
+  "@failureLeadCloneSession": {
+    "description": "Lead for a session clone failure."
+  },
+  "failureLeadConnectSession": "Couldn't connect to this session.",
+  "@failureLeadConnectSession": {
+    "description": "Lead for a failure attaching to a session."
+  },
+  "failureLeadCreateSession": "Couldn't create the session.",
+  "@failureLeadCreateSession": {
+    "description": "Lead for a new-session creation failure."
+  },
+  "failureLeadDownloadFile": "Couldn't download this file.",
+  "@failureLeadDownloadFile": {
+    "description": "Lead for a session-file download failure."
+  },
+  "failureLeadExportTranscript": "Couldn't export this transcript.",
+  "@failureLeadExportTranscript": {
+    "description": "Lead for a transcript export failure."
+  },
+  "failureLeadForkSession": "Couldn't fork this session.",
+  "@failureLeadForkSession": {
+    "description": "Lead for a session fork failure."
+  },
+  "failureLeadHandBackControl": "Couldn't hand control back to the terminal.",
+  "@failureLeadHandBackControl": {
+    "description": "Lead for a failure handing drive authority back to the terminal."
+  },
+  "failureLeadLoadAgents": "Couldn't load the list of agents.",
+  "@failureLeadLoadAgents": {
+    "description": "Lead for a failure loading the available-agent list."
+  },
+  "failureLeadLoadEarlierHistory": "Couldn't load earlier history.",
+  "@failureLeadLoadEarlierHistory": {
+    "description": "Lead for a failure paging in earlier transcript history."
+  },
+  "failureLeadLoadScheduledSends": "Couldn't load scheduled sends.",
+  "@failureLeadLoadScheduledSends": {
+    "description": "Lead for a failure loading the scheduled-send list."
+  },
+  "failureLeadLoadSessions": "Couldn't load sessions.",
+  "@failureLeadLoadSessions": {
+    "description": "Lead for a session-roster load failure."
+  },
+  "failureLeadPrepareArtifactPreview": "Couldn't prepare this artifact preview.",
+  "@failureLeadPrepareArtifactPreview": {
+    "description": "Lead for an artifact-preview preparation failure."
+  },
+  "failureLeadReachServer": "Couldn't reach the server.",
+  "@failureLeadReachServer": {
+    "description": "Lead for a broker health-probe failure."
+  },
+  "failureLeadRefreshModelCatalog": "Couldn't refresh the model catalog.",
+  "@failureLeadRefreshModelCatalog": {
+    "description": "Lead for a model-catalog refresh failure."
+  },
+  "failureLeadRenameSession": "Couldn't rename this session.",
+  "@failureLeadRenameSession": {
+    "description": "Lead for a session rename failure."
+  },
+  "failureLeadRestoreControl": "Couldn't restore control of this session.",
+  "@failureLeadRestoreControl": {
+    "description": "Lead for a failure restoring drive authority after a reconnect."
+  },
+  "failureLeadSaveArtifact": "Couldn't save this artifact.",
+  "@failureLeadSaveArtifact": {
+    "description": "Lead for a failure saving an artifact to device storage."
+  },
+  "failureLeadSaveTranscript": "Couldn't save this transcript on the device.",
+  "@failureLeadSaveTranscript": {
+    "description": "Lead for a failure persisting the transcript on the device."
+  },
+  "failureLeadScheduleSend": "Couldn't schedule that send.",
+  "@failureLeadScheduleSend": {
+    "description": "Lead for a scheduled-send creation failure."
+  },
+  "failureLeadSendArtifactInteraction": "Couldn't send the artifact interaction.",
+  "@failureLeadSendArtifactInteraction": {
+    "description": "Lead for a failure sending an artifact interaction."
+  },
+  "failureLeadSendCommand": "Couldn't send the command.",
+  "@failureLeadSendCommand": {
+    "description": "Lead for a slash-command send failure."
+  },
+  "failureLeadSendTranscriptReceipt": "The transcript was saved, but its receipt could not be sent.",
+  "@failureLeadSendTranscriptReceipt": {
+    "description": "Lead for a transcript saved on the device whose receipt never reached the broker."
+  },
+  "failureLeadSendPrompt": "Couldn't send the prompt.",
+  "@failureLeadSendPrompt": {
+    "description": "Lead for a prompt send failure."
+  },
+  "failureLeadStartBackgroundDownload": "Couldn't start the background download.",
+  "@failureLeadStartBackgroundDownload": {
+    "description": "Lead for a failure starting a background download."
+  },
+  "failureLeadTakeOverSession": "Couldn't take over this session.",
+  "@failureLeadTakeOverSession": {
+    "description": "Lead for a failure taking over drive authority."
+  },
+  "failureLeadUpdateBackgroundDownload": "Couldn't update this background download.",
+  "@failureLeadUpdateBackgroundDownload": {
+    "description": "Lead for a failure updating a background download."
+  },
+  "failureLeadUpdatePlan": "Couldn't update the plan.",
+  "@failureLeadUpdatePlan": {
+    "description": "Lead for a plan-update failure."
+  },
+  "failureLeadUpdateSchedule": "Couldn't update this schedule.",
+  "@failureLeadUpdateSchedule": {
+    "description": "Lead for a failure updating an existing schedule."
+  },
+  "failureLeadUploadFile": "Couldn't upload this file.",
+  "@failureLeadUploadFile": {
+    "description": "Lead for a file-upload failure."
   },
   "brokerProfilesLoadFailed": "Couldn't load saved servers.",
   "brokerProfileActivated": "{profileName} is now the active server.",
@@ -2804,6 +3188,8 @@
   "@newSessionModelFailed": {"description": "Status after model catalog refresh fails without retained options."},
   "newSessionModelStale": "Refresh failed. These model choices are stale.",
   "@newSessionModelStale": {"description": "Status after refresh fails while retained model options remain visible."},
+  "newSessionModelStaleNote": "These model choices are stale.",
+  "@newSessionModelStaleNote": {"description": "Qualifier appended when a failed refresh leaves retained model options selectable."},
   "newSessionModelRetired": "The selected model is no longer available. Choose another model or use the tool default.",
   "@newSessionModelRetired": {"description": "Validation error when a selected model disappears from a fresh catalog."},
   "newSessionModelSourceMismatch": "The selected model belongs to a different server connection. Refresh the model list and choose again.",

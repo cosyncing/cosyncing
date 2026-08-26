@@ -134,20 +134,16 @@ class AppearanceSettingsPage extends ConsumerWidget {
             onTap: () =>
                 ref.read(localeControllerProvider.notifier).setLocale(null),
           ),
-          _ChoiceTile(
-            title: l10n.languageEnglish,
-            selected: activeLanguage == 'en',
-            onTap: () => ref
-                .read(localeControllerProvider.notifier)
-                .setLocale(const Locale('en')),
-          ),
-          _ChoiceTile(
-            title: l10n.languageChinese,
-            selected: activeLanguage == 'zh',
-            onTap: () => ref
-                .read(localeControllerProvider.notifier)
-                .setLocale(const Locale('zh')),
-          ),
+          // Driven by `kSupportedLocales` so adding a locale changes one loop
+          // input rather than duplicating a tile. `_languageName` owns the
+          // corresponding native-language label.
+          for (final locale in kSupportedLocales)
+            _ChoiceTile(
+              title: _languageName(l10n, locale.languageCode),
+              selected: activeLanguage == locale.languageCode,
+              onTap: () =>
+                  ref.read(localeControllerProvider.notifier).setLocale(locale),
+            ),
         ],
       ),
     );
@@ -392,3 +388,18 @@ class _ChoiceTile extends StatelessWidget {
     );
   }
 }
+
+/// The name of [languageCode], written in that language.
+///
+/// Every registered locale should appear here. The raw-code fallback keeps
+/// Settings usable if registration and localization temporarily drift; tests
+/// should catch that drift before release.
+String _languageName(AppLocalizations l10n, String languageCode) =>
+    switch (languageCode) {
+      'en' => l10n.languageEnglish,
+      'zh' => l10n.languageChinese,
+      'ja' => l10n.languageJapanese,
+      'ko' => l10n.languageKorean,
+      'es' => l10n.languageSpanish,
+      _ => languageCode,
+    };

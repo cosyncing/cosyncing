@@ -1,3 +1,4 @@
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_connection.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -97,7 +98,7 @@ final class RosterFreshnessPresentation {
   final SessionFreshness freshness;
 
   /// Actionable failure text, when [freshness] is [SessionFreshness.failed].
-  final String? error;
+  final LocalizedFailure? error;
 
   /// Whether the shared slot is the surface that offers Retry.
   ///

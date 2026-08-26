@@ -31,9 +31,7 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
       final response = await client.getHealth();
       if (!response.ok) {
         return const HealthProbeResult.failure(
-          error:
-              'The server answered but reported itself unhealthy. Check '
-              'the server host, then try again.',
+          error: LocalizedFailure.notice(FailureLead.serverUnhealthy),
           unhealthy: true,
         );
       }
@@ -44,7 +42,7 @@ class RealBrokerHealthProbe implements BrokerHealthProbe {
       // raw SocketException/ClientException text in the Connection screen's
       // status card.
       return HealthProbeResult.failure(
-        error: userFacingMessage(e, lead: "Couldn't reach the server."),
+        error: LocalizedFailure.from(e, lead: FailureLead.reachServer),
         detail: failureDetail(e),
       );
     } finally {

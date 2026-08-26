@@ -6,7 +6,7 @@ class _TranscriptExportFailure {
     this.code,
   });
 
-  final String message;
+  final LocalizedFailure message;
   final String? code;
 }
 

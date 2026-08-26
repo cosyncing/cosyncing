@@ -4,6 +4,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/schedules/controller/schedule_controller.dart';
 import 'package:cosyncing_client/src/features/schedules/platform/device_time_zone.dart';
@@ -133,7 +134,7 @@ class _ScheduleManagerPageState extends ConsumerState<ScheduleManagerPage> {
               Padding(
                 padding: const EdgeInsets.only(top: 12),
                 child: SelectableText(
-                  l10n.schedulesLoadFailed,
+                  localizedFailureText(l10n, state.error!),
                   key: const Key('schedule-manager-error'),
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),

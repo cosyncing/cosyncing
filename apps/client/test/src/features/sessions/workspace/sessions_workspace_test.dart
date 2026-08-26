@@ -6,6 +6,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -41,7 +42,7 @@ void main() {
   Widget buildSubject(
     List<SessionInfo> sessions, {
     SessionListStatus status = SessionListStatus.loaded,
-    String? error,
+    LocalizedFailure? error,
     int unreadCount = 0,
     _StubSessionListController? controller,
     _FakeWorkspacePrefsStore? prefsStore,
@@ -492,7 +493,7 @@ void main() {
         final controller = _StubSessionListController(
           SessionListState(
             status: SessionListStatus.error,
-            error: "Couldn't load sessions.",
+            error: const LocalizedFailure.notice(FailureLead.loadSessions),
             sessions: [_session('claude', 'kept', title: 'Kept session')],
           ),
         );
@@ -500,7 +501,7 @@ void main() {
           buildSubject(
             [_session('claude', 'kept', title: 'Kept session')],
             status: SessionListStatus.error,
-            error: "Couldn't load sessions.",
+            error: const LocalizedFailure.notice(FailureLead.loadSessions),
             controller: controller,
           ),
         );
@@ -526,23 +527,23 @@ void main() {
       final controller = _StubSessionListController(
         const SessionListState(
           status: SessionListStatus.error,
-          error: 'broker unavailable',
+          error: LocalizedFailure.notice(FailureLead.loadSessions),
         ),
       );
       await tester.pumpWidget(
         buildSubject(
           const [],
           status: SessionListStatus.error,
-          error: 'broker unavailable',
+          error: const LocalizedFailure.notice(FailureLead.loadSessions),
           controller: controller,
         ),
       );
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('session-roster-error')), findsOneWidget);
-      expect(find.text('broker unavailable'), findsOneWidget);
+      expect(find.text("Couldn't load sessions."), findsOneWidget);
       expect(
-        find.widgetWithText(SelectableText, 'broker unavailable'),
+        find.widgetWithText(SelectableText, "Couldn't load sessions."),
         findsOneWidget,
       );
       final initialLoads = controller.loadCount;

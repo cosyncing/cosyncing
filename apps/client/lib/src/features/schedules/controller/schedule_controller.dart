@@ -37,7 +37,7 @@ final class ScheduleStateModel {
   final Set<String> mutatingIds;
 
   /// Last honest API error.
-  final String? error;
+  final LocalizedFailure? error;
 
   /// Last typed failure that requires localized presentation.
   final SchedulePresentationIssue? presentationIssue;
@@ -47,7 +47,7 @@ final class ScheduleStateModel {
     List<ScheduleRecord>? schedules,
     bool? loading,
     Set<String>? mutatingIds,
-    String? error,
+    LocalizedFailure? error,
     SchedulePresentationIssue? presentationIssue,
     bool clearError = false,
   }) => ScheduleStateModel(
@@ -109,9 +109,9 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
       if (!_canApplyListResult(source, generation)) return;
       state = state.copyWith(
         loading: false,
-        error: userFacingMessage(
+        error: LocalizedFailure.from(
           error,
-          lead: "Couldn't load scheduled sends.",
+          lead: FailureLead.loadScheduledSends,
         ),
       );
     } finally {
@@ -158,7 +158,7 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
     } on Object catch (error) {
       if (!_sourceMatches(source)) return null;
       state = state.copyWith(
-        error: userFacingMessage(error, lead: "Couldn't schedule that send."),
+        error: LocalizedFailure.from(error, lead: FailureLead.scheduleSend),
       );
       return null;
     } finally {
@@ -179,7 +179,9 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
   Future<bool> action(String id, ScheduleAction action) async {
     final schedule = state.schedules.where((row) => row.id == id).firstOrNull;
     if (schedule == null) {
-      state = state.copyWith(error: 'The schedule is no longer available.');
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.scheduleUnavailable),
+      );
       return false;
     }
     return _mutate(
@@ -297,11 +299,11 @@ final class ScheduleController extends AutoDisposeNotifier<ScheduleStateModel> {
       _sourceMatches(source) && _listGeneration == generation;
 }
 
-String _scheduleMutationMessage(Object error) {
+LocalizedFailure _scheduleMutationMessage(Object error) {
   if (isScheduleConflict(error)) {
-    return 'This schedule changed on another client. Refresh before retrying.';
+    return const LocalizedFailure.notice(FailureLead.scheduleConflict);
   }
-  return userFacingMessage(error, lead: "Couldn't update this schedule.");
+  return LocalizedFailure.from(error, lead: FailureLead.updateSchedule);
 }
 
 List<ScheduleRecord> _orderedSchedules(Iterable<ScheduleRecord> rows) {

@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -826,7 +827,9 @@ void main() {
     );
     expect(identical(state.eventSummaries, state.eventSummaries), isTrue);
 
-    final metadataOnlyCopy = state.copyWith(error: 'metadata changed');
+    final metadataOnlyCopy = state.copyWith(
+      error: const LocalizedFailure.notice(FailureLead.connectSession),
+    );
     expect(
       identical(state.messageEvents, metadataOnlyCopy.messageEvents),
       isTrue,
@@ -1697,7 +1700,7 @@ void main() {
           modes: [ModeOption(value: 'a-mode', label: 'A mode')],
         ),
       ],
-      error: 'profile A error',
+      error: LocalizedFailure.notice(FailureLead.connectSession),
       draftSurface: SessionDraftSurface(
         text: 'profile A draft',
         token: 3,
@@ -1715,7 +1718,9 @@ void main() {
         phase: SessionActionPhase.inProgress,
       ),
       interruptPhase: SessionInterruptPhase.requested,
-      historyPageError: 'profile A paging error',
+      historyPageError: LocalizedFailure.notice(
+        FailureLead.historyPageOffline,
+      ),
     );
 
     test('the same broker keeps every field', () {

@@ -263,7 +263,7 @@ class ConnectionController extends Notifier<ConnectionStateModel> {
         failureKind: result.unhealthy
             ? ConnectionFailureKind.brokerUnhealthy
             : ConnectionFailureKind.unreachable,
-        technicalDetail: result.detail ?? result.error,
+        technicalDetail: result.detail ?? result.error?.detail,
       );
       return false;
     }

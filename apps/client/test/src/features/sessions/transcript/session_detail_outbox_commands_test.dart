@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -237,8 +238,8 @@ void main() {
             isEmpty,
           );
           expect(
-            container.read(sessionDetailControllerProvider(key)).error,
-            contains('broker rejected the prompt'),
+            container.read(sessionDetailControllerProvider(key)).error?.lead,
+            FailureLead.sendPrompt,
           );
         },
       );
@@ -327,8 +328,8 @@ void main() {
           expect(fakeConnection.sendCommandCount, 0);
           expect(fakeOutboxRepository.messages, isEmpty);
           expect(
-            container.read(sessionDetailControllerProvider(key)).error,
-            contains('prompt-capable'),
+            container.read(sessionDetailControllerProvider(key)).error?.lead,
+            FailureLead.commandRequiresDrive,
           );
         },
       );
@@ -1031,8 +1032,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendPromptCount, 0);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('Cannot send prompt until the session is connected.'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.promptDisconnected,
         );
       });
 
@@ -1050,8 +1051,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendPromptCount, 1);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains("Couldn't send the prompt."),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.sendPrompt,
         );
         expect(
           container
@@ -1164,8 +1165,8 @@ void main() {
         expect(fakeConnection.sendCommandCount, 0);
         expect(fakeOutboxRepository.messages, isEmpty);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('permission selector'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.commandPermissionModeArgument,
         );
       });
 
@@ -1281,8 +1282,8 @@ void main() {
           expect(fakeConnection.sendCommandCount, 0);
           expect(fakeOutboxRepository.messages, isEmpty);
           expect(
-            container.read(sessionDetailControllerProvider(key)).error,
-            sessionCommandModelArgError,
+            container.read(sessionDetailControllerProvider(key)).error?.lead,
+            FailureLead.commandModelArgument,
           );
         },
       );
@@ -1297,8 +1298,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendCommandCount, 0);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('empty command name'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.commandNameEmpty,
         );
       });
 
@@ -1312,8 +1313,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendCommandCount, 0);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('until the session is connected'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.commandDisconnected,
         );
       });
 
@@ -1331,8 +1332,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendCommandCount, 1);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains("Couldn't send the command."),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.sendCommand,
         );
       });
 
@@ -1474,7 +1475,7 @@ void main() {
 
           expect(picked, isFalse);
           expect(state.stagedAttachments, isEmpty);
-          expect(state.error, sessionAttachmentLimitErrorKey);
+          expect(state.error?.lead, FailureLead.attachmentLimit);
           expect(fakeConnection.sendPromptCount, 0);
         },
       );
@@ -1559,8 +1560,11 @@ void main() {
             isEmpty,
           );
           expect(
-            throwingContainer.read(sessionDetailControllerProvider(key)).error,
-            sessionAttachmentSelectionErrorKey,
+            throwingContainer
+                .read(sessionDetailControllerProvider(key))
+                .error
+                ?.lead,
+            FailureLead.attachmentSelection,
           );
         },
       );

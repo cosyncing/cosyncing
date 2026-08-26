@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
@@ -101,7 +102,7 @@ void main() {
 
       final state = container.read(sessionListControllerProvider);
       expect(state.status, SessionListStatus.error);
-      expect(state.error, contains("Couldn't load sessions"));
+      expect(state.error?.lead, FailureLead.loadSessions);
     });
 
     test('refresh transitions from loaded to refreshing to loaded', () async {

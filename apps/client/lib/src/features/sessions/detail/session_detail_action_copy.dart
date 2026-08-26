@@ -1,5 +1,27 @@
 part of 'session_detail_page.dart';
 
+/// Localized text for a typed local refusal, or null when there is none.
+///
+/// Shared by the rename, fork, and clone status lines so one refusal cannot
+/// read differently depending on which action surfaced it.
+String? _sessionActionRefusalText(
+  AppLocalizations l10n,
+  SessionActionRefusal refusal,
+) => switch (refusal) {
+  SessionActionRefusal.agentOwnedSession => l10n.sessionForkAgentOwnedRefusal,
+  SessionActionRefusal.renameRequiresServer => l10n.sessionRenameRequiresServer,
+  SessionActionRefusal.renameUnsupported => l10n.sessionRenameUnsupported,
+  SessionActionRefusal.renameRejected => l10n.sessionRenameRejected,
+  SessionActionRefusal.forkRequiresServer => l10n.sessionForkRequiresServer,
+  SessionActionRefusal.forkUnsupported => l10n.sessionForkUnsupported,
+  SessionActionRefusal.forkAlreadyRunning => l10n.sessionForkAlreadyRunning,
+  SessionActionRefusal.forkReturnedNothing => l10n.sessionForkReturnedNothing,
+  SessionActionRefusal.cloneRequiresServer => l10n.sessionCloneRequiresServer,
+  SessionActionRefusal.cloneUnsupported => l10n.sessionCloneUnsupported,
+  SessionActionRefusal.cloneAlreadyRunning => l10n.sessionCloneAlreadyRunning,
+  SessionActionRefusal.cloneReturnedNothing => l10n.sessionCloneReturnedNothing,
+};
+
 /// Status line for a fork action, or `null` when there is none.
 ///
 /// A typed [SessionActionState.refusal] wins over broker-authored detail so the
@@ -9,12 +31,9 @@ String? _forkActionStatusText(
   SessionActionState action,
 ) {
   final refusal = action.refusal;
-  if (refusal != null) {
-    return switch (refusal) {
-      SessionActionRefusal.agentOwnedSession =>
-        l10n.sessionForkAgentOwnedRefusal,
-    };
-  }
+  if (refusal != null) return _sessionActionRefusalText(l10n, refusal);
+  final failure = action.failure;
+  if (failure != null) return localizedFailureText(l10n, failure);
   return switch (action.phase) {
     SessionActionPhase.idle => null,
     SessionActionPhase.inProgress => l10n.sessionForkCreating,
@@ -28,14 +47,20 @@ String? _forkActionStatusText(
 String? _cloneActionStatusText(
   AppLocalizations l10n,
   SessionActionState action,
-) => switch (action.phase) {
-  SessionActionPhase.idle => null,
-  SessionActionPhase.inProgress => l10n.sessionCloneCreating,
-  SessionActionPhase.success => l10n.sessionCloneCreated(
-    _sessionActionCreatedTitle(action),
-  ),
-  SessionActionPhase.failed => l10n.sessionCloneFailed,
-};
+) {
+  final refusal = action.refusal;
+  if (refusal != null) return _sessionActionRefusalText(l10n, refusal);
+  final failure = action.failure;
+  if (failure != null) return localizedFailureText(l10n, failure);
+  return switch (action.phase) {
+    SessionActionPhase.idle => null,
+    SessionActionPhase.inProgress => l10n.sessionCloneCreating,
+    SessionActionPhase.success => l10n.sessionCloneCreated(
+      _sessionActionCreatedTitle(action),
+    ),
+    SessionActionPhase.failed => l10n.sessionCloneFailed,
+  };
+}
 
 String _sessionActionCreatedTitle(SessionActionState action) {
   final title = action.createdSessionTitle?.trim();

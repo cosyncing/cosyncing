@@ -2,6 +2,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_freshness.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
@@ -35,7 +36,7 @@ void main() {
       final freshness = RosterFreshnessPresentation.fromListState(
         const SessionListState(
           status: SessionListStatus.error,
-          error: 'broker unreachable',
+          error: LocalizedFailure.notice(FailureLead.loadSessions),
           sessions: [
             SessionInfo(
               id: 'kept',
@@ -53,14 +54,14 @@ void main() {
       expect(freshness.freshness, SessionFreshness.failed);
       expect(freshness.freshness.isBusy, isFalse);
       expect(freshness.slotOwnsRecovery, isTrue);
-      expect(freshness.error, 'broker unreachable');
+      expect(freshness.error?.lead, FailureLead.loadSessions);
     });
 
     test('a failure with only cached rows leaves Retry to the cached pane', () {
       final freshness = RosterFreshnessPresentation.fromListState(
         SessionListState(
           status: SessionListStatus.error,
-          error: 'broker unreachable',
+          error: const LocalizedFailure.notice(FailureLead.loadSessions),
           cachedRoster: cached(CachedRosterReason.unreachable),
         ),
       );
@@ -73,7 +74,7 @@ void main() {
       final freshness = RosterFreshnessPresentation.fromListState(
         const SessionListState(
           status: SessionListStatus.error,
-          error: 'broker unreachable',
+          error: LocalizedFailure.notice(FailureLead.loadSessions),
         ),
       );
 
@@ -122,7 +123,7 @@ void main() {
         host(
           const RosterFreshnessPresentation(
             freshness: SessionFreshness.failed,
-            error: 'broker unreachable',
+            error: LocalizedFailure.notice(FailureLead.loadSessions),
             slotOwnsRecovery: true,
           ),
           () => taps++,
@@ -143,7 +144,7 @@ void main() {
         host(
           const RosterFreshnessPresentation(
             freshness: SessionFreshness.failed,
-            error: 'broker unreachable',
+            error: LocalizedFailure.notice(FailureLead.loadSessions),
           ),
           () {},
         ),

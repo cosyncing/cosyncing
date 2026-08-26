@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/schedules/controller/schedule_controller.dart';
@@ -215,7 +216,7 @@ void main() {
     expect(await controller.action('live', ScheduleAction.pause), isFalse);
 
     final state = container.read(scheduleControllerProvider);
-    expect(state.error, contains('changed on another client'));
+    expect(state.error?.lead, FailureLead.scheduleConflict);
     expect(fake.listCount, 2);
     expect(state.mutatingIds, isEmpty);
   });

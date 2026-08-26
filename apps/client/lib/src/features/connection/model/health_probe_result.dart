@@ -1,3 +1,5 @@
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
+
 /// Result of a broker health probe.
 ///
 /// The health probe is the first step in verifying a broker is reachable.
@@ -34,11 +36,12 @@ class HealthProbeResult {
   /// The machine name reported by the broker, if available.
   final String? machine;
 
-  /// Plain-language error message if the probe failed.
+  /// Classified failure if the probe failed.
   ///
-  /// Safe to render directly: it names what happened and what to do next, and
-  /// never contains exception text.
-  final String? error;
+  /// Typed rather than a finished sentence so the Connection screen renders it
+  /// in the active locale. Raw exception text stays in [detail] and in
+  /// [LocalizedFailure.detail]; it is never the primary copy.
+  final LocalizedFailure? error;
 
   /// Raw, untranslated diagnostic for a "Technical details" disclosure.
   final String? detail;

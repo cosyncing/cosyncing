@@ -2806,7 +2806,7 @@ class _HistoryScopeNotice extends StatelessWidget {
   final bool startReached;
   final bool connected;
   final bool loading;
-  final String? pagingError;
+  final LocalizedFailure? pagingError;
   final String? pagingErrorCode;
   final VoidCallback? onLoadEarlier;
 
