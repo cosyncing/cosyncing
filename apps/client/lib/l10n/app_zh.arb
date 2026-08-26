@@ -428,6 +428,8 @@
   "settingsQuotaAntigravityClaudeGptModels": "Claude 和 GPT 模型",
   "settingsQuotaWindowFiveHour": "5 小时",
   "settingsQuotaWindowWeekly": "每周",
+  "settingsQuotaWindowScopedFiveHour": "{model} 5 小时",
+  "settingsQuotaWindowScopedWeekly": "{model} 每周",
   "settingsQuotaWindowGeneric": "用量上限",
   "settingsQuotaPercentRemaining": "剩余 {percent}%",
   "settingsQuotaPercentCompact": "{percent}%",

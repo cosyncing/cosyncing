@@ -310,11 +310,22 @@ List<_QuotaBucketPresentation> _quotaBucketsForPresentation(
           a.bucket,
         ).index.compareTo(_quotaWindowKind(b.bucket).index);
         if (kindOrder != 0) return kindOrder;
+        // Pooled windows above model-scoped ones within each kind, so the
+        // shared limit always leads its group.
+        final scopedOrder =
+            (_scopedWindowLabel(providerId, a, l10n) == null ? 0 : 1).compareTo(
+              _scopedWindowLabel(providerId, b, l10n) == null ? 0 : 1,
+            );
+        if (scopedOrder != 0) return scopedOrder;
         return a.bucketLabel.compareTo(b.bucketLabel);
       });
     return [
       for (final bucket in buckets)
-        _QuotaBucketPresentation(bucket: bucket, key: bucket.bucket),
+        _QuotaBucketPresentation(
+          bucket: bucket,
+          key: bucket.bucket,
+          windowLabel: _scopedWindowLabel(providerId, bucket, l10n),
+        ),
     ];
   }
 
@@ -562,6 +573,60 @@ _QuotaWindowKind _quotaWindowKind(String bucketId) {
     return _QuotaWindowKind.weekly;
   }
   return _QuotaWindowKind.other;
+}
+
+/// Window label for a MODEL-SCOPED quota pool, or `null` for the pooled
+/// windows. Tokdash reports per-model limits beside the shared ones — Codex
+/// ships `codex_<model>_5h`/`codex_<model>_7d` and Claude ships
+/// `weekly_scoped_<model>` — and rendering those through the generic
+/// "5-hour"/"Weekly" labels produced two indistinguishable rows per window.
+/// The scoped row names its model instead: "Sparks 5h", "Sparks Weekly".
+String? _scopedWindowLabel(
+  String providerId,
+  TokdashQuotaBucket bucket,
+  AppLocalizations l10n,
+) {
+  final id = bucket.bucket.toLowerCase();
+  switch (providerId.toLowerCase()) {
+    case 'codex':
+      final match = RegExp(r'^codex_(.+)_(5h|7d)$').firstMatch(id);
+      if (match == null) return null;
+      final model = quotaScopedModelDisplayName(
+        match.group(1)!,
+        bucket.bucketLabel,
+      );
+      return match.group(2) == '5h'
+          ? l10n.settingsQuotaWindowScopedFiveHour(model)
+          : l10n.settingsQuotaWindowScopedWeekly(model);
+    case 'claude':
+      final match = RegExp(r'^weekly_scoped_(.+)$').firstMatch(id);
+      if (match == null) return null;
+      return l10n.settingsQuotaWindowScopedWeekly(
+        quotaScopedModelDisplayName(match.group(1)!, bucket.bucketLabel),
+      );
+  }
+  return null;
+}
+
+/// Display name for a model-scoped quota pool. Model names are brand names,
+/// exempt from translation. Unknown scopes fall back to the server label's
+/// model prefix (Tokdash writes "GPT-5.3-Codex-Spark · 5-hour"), then to
+/// capitalizing the scope id.
+String quotaScopedModelDisplayName(String scopeId, String bucketLabel) {
+  switch (scopeId.toLowerCase()) {
+    case 'bengalfox':
+      return 'Sparks';
+    case 'fable':
+      return 'Fable';
+    case 'opus':
+      return 'Opus';
+    case 'sonnet':
+      return 'Sonnet';
+  }
+  final separator = bucketLabel.indexOf(' \u00b7 ');
+  if (separator > 0) return bucketLabel.substring(0, separator);
+  if (scopeId.isEmpty) return scopeId;
+  return scopeId[0].toUpperCase() + scopeId.substring(1);
 }
 
 /// Display name for a Tokdash provider id. Brand/tool names are exempt from

@@ -113,8 +113,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   launched daemon is identified separately and migrated only through the
   confirmed setup plan; restart failures keep the last valid Settings status
   visible and show the broker's reason.
-- Claude's scoped Fable quota keeps its provider label instead of appearing as
-  a second generic Weekly row.
+- Model-scoped quota rows name their model, distinguishing Sparks and Fable
+  weekly limits from the shared Codex and Claude windows.
 - Pi `ask_user` prompts appear in both the native terminal and Cosyncing; the
   first answer closes the other surface, and the terminal remains usable when
   the broker is unavailable. New Pi sessions also expose the model's native

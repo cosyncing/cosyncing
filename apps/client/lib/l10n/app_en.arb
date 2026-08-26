@@ -1469,6 +1469,24 @@
   "@settingsQuotaWindowWeekly": {
     "description": "Label for the weekly quota window row."
   },
+  "settingsQuotaWindowScopedFiveHour": "{model} 5h",
+  "@settingsQuotaWindowScopedFiveHour": {
+    "description": "Label for a five-hour quota window scoped to one model, e.g. 'Sparks 5h'.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      }
+    }
+  },
+  "settingsQuotaWindowScopedWeekly": "{model} Weekly",
+  "@settingsQuotaWindowScopedWeekly": {
+    "description": "Label for a weekly quota window scoped to one model, e.g. 'Sparks Weekly'.",
+    "placeholders": {
+      "model": {
+        "type": "String"
+      }
+    }
+  },
   "settingsQuotaWindowGeneric": "Usage limit",
   "@settingsQuotaWindowGeneric": {
     "description": "Fallback label for a quota window with no known kind and no server label."

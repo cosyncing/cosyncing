@@ -339,7 +339,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Weekly'), findsOneWidget);
-        expect(find.text('Fable'), findsOneWidget);
+        expect(find.text('Fable Weekly'), findsOneWidget);
         expect(find.text('Weekly All'), findsNothing);
         expect(find.text('80%'), findsOneWidget);
         expect(find.text('60%'), findsOneWidget);
@@ -556,6 +556,89 @@ void main() {
         find.byKey(const Key('settings-quota-row-codex-5h')),
       );
       expect(freshSemantics.label, isNot(contains('Stale')));
+    });
+
+    testWidgets('model-scoped pools name their model instead of duplicating '
+        'the pooled window labels', (tester) async {
+      final response = quota(
+        providers: {
+          'codex': providerJson(
+            id: 'codex',
+            buckets: [
+              bucketJson(remaining: 55),
+              bucketJson(id: '7d', label: '7-day window', remaining: 80),
+              bucketJson(
+                id: 'codex_bengalfox_5h',
+                label: 'GPT-5.3-Codex-Spark \u00b7 5-hour',
+                remaining: 100,
+              ),
+              bucketJson(
+                id: 'codex_bengalfox_7d',
+                label: 'GPT-5.3-Codex-Spark \u00b7 7-day',
+                remaining: 100,
+              ),
+            ],
+          ),
+          'claude': providerJson(
+            id: 'claude',
+            buckets: [
+              bucketJson(id: 'session', label: 'Session', remaining: 97),
+              bucketJson(id: 'weekly_all', label: 'Weekly All', remaining: 97),
+              bucketJson(
+                id: 'weekly_scoped_fable',
+                label: 'Fable',
+                remaining: 96,
+              ),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+
+      // The Spark-scoped Codex rows read "Sparks 5h" / "Sparks Weekly", and
+      // the pooled windows keep their generic labels beside them.
+      expect(find.text('Sparks 5h'), findsOneWidget);
+      expect(find.text('Sparks Weekly'), findsOneWidget);
+      expect(
+        find.text('5-hour'),
+        findsNWidgets(2),
+      ); // codex 5h + claude session
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-codex_bengalfox_5h')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('settings-quota-row-codex-codex_bengalfox_7d')),
+        findsOneWidget,
+      );
+
+      // Claude's model-scoped weekly names its model too, so it no longer
+      // renders as a second indistinguishable "Weekly" row.
+      expect(find.text('Fable Weekly'), findsOneWidget);
+      expect(find.text('Weekly'), findsNWidgets(2)); // codex 7d + weekly_all
+    });
+
+    testWidgets('an unknown scoped model falls back to the server label '
+        'prefix', (tester) async {
+      final response = quota(
+        providers: {
+          'codex': providerJson(
+            id: 'codex',
+            buckets: [
+              bucketJson(
+                id: 'codex_redpanda_5h',
+                label: 'GPT-6-Codex-Nova \u00b7 5-hour',
+                remaining: 90,
+              ),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(buildSubject(response: response));
+      await tester.pumpAndSettle();
+
+      expect(find.text('GPT-6-Codex-Nova 5h'), findsOneWidget);
     });
 
     testWidgets('unconfigured shells alone render the global unavailable', (
