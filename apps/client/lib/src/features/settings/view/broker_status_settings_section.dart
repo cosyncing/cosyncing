@@ -90,6 +90,88 @@ class BrokerStatusSettingsSection extends ConsumerWidget {
   }
 }
 
+/// Owner-controlled exposure gate for direct workspace-file browsing.
+class WorkspaceBrowsingSettingsSection extends ConsumerWidget {
+  /// Creates the workspace browsing settings section.
+  const WorkspaceBrowsingSettingsSection({super.key});
+
+  Future<void> _change(
+    BuildContext context,
+    WidgetRef ref, {
+    required bool enabled,
+  }) async {
+    final l10n = AppLocalizations.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          enabled
+              ? l10n.settingsWorkspaceBrowsingEnableTitle
+              : l10n.settingsWorkspaceBrowsingDisableTitle,
+        ),
+        content: SelectionArea(
+          child: Text(
+            enabled
+                ? l10n.settingsWorkspaceBrowsingEnableBody
+                : l10n.settingsWorkspaceBrowsingDisableBody,
+          ),
+        ),
+        actions: [
+          const SettingsDialogCancelButton(),
+          SettingsDialogConfirmButton(
+            label: enabled
+                ? l10n.settingsWorkspaceBrowsingEnableAction
+                : l10n.settingsWorkspaceBrowsingDisableAction,
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    try {
+      await ref
+          .read(managedRuntimeControllerProvider.notifier)
+          .setWorkspaceBrowsing(enabled: enabled);
+    } on Object {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(l10n.settingsWorkspaceBrowsingChangeFailed)),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(managedRuntimeControllerProvider);
+    final data = state.valueOrNull;
+    final enabled = data?.health?.httpWorkspaceBrowsingEnabled;
+    if (data?.connected != true || enabled == null) {
+      return const SizedBox.shrink();
+    }
+    final l10n = AppLocalizations.of(context);
+    final owner = data!.ownerOperationsAvailable;
+    return SettingsSection(
+      title: l10n.settingsWorkspaceBrowsingSection,
+      child: SwitchListTile(
+        key: const Key('settings-workspace-browsing'),
+        contentPadding: EdgeInsets.zero,
+        secondary: const Icon(Icons.folder_open_outlined),
+        title: Text(l10n.settingsWorkspaceBrowsingTitle),
+        subtitle: Text(
+          owner
+              ? enabled
+                    ? l10n.settingsWorkspaceBrowsingOn
+                    : l10n.settingsWorkspaceBrowsingOff
+              : l10n.settingsWorkspaceBrowsingOwnerOnly,
+        ),
+        value: enabled,
+        onChanged: owner && !state.isLoading
+            ? (value) => unawaited(_change(context, ref, enabled: value))
+            : null,
+      ),
+    );
+  }
+}
+
 class _BrokerHealthRow extends StatelessWidget {
   const _BrokerHealthRow({required this.health});
 

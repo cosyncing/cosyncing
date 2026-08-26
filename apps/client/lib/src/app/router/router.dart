@@ -5,6 +5,8 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/nav_badge_label.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
+import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/attention/view/attention_page.dart';
@@ -29,7 +31,6 @@ import 'package:cosyncing_client/src/features/settings/view/notification_setting
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/tool_display_settings_page.dart';
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -364,48 +365,20 @@ void _openSessionTab(
   });
 }
 
-/// Keyboard activators that grow the UI text size one rung.
-///
-/// Both the Control and Meta variants are bound on every platform, matching the
-/// route shortcuts above. `equal` is listed with and without Shift because "+"
-/// is Shift+= on most layouts and browsers accept either.
-const List<SingleActivator> _textScaleUpActivators = [
-  SingleActivator(LogicalKeyboardKey.equal, control: true),
-  SingleActivator(LogicalKeyboardKey.equal, meta: true),
-  SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true),
-  SingleActivator(LogicalKeyboardKey.equal, meta: true, shift: true),
-  SingleActivator(LogicalKeyboardKey.numpadAdd, control: true),
-  SingleActivator(LogicalKeyboardKey.numpadAdd, meta: true),
-];
-
-/// Keyboard activators that shrink the UI text size one rung.
-const List<SingleActivator> _textScaleDownActivators = [
-  SingleActivator(LogicalKeyboardKey.minus, control: true),
-  SingleActivator(LogicalKeyboardKey.minus, meta: true),
-  SingleActivator(LogicalKeyboardKey.numpadSubtract, control: true),
-  SingleActivator(LogicalKeyboardKey.numpadSubtract, meta: true),
-];
-
 /// Whether the host browser owns zoom instead of the app's `UiTextScale`.
 ///
-/// On web the browser owns Ctrl/Cmd +/- and Ctrl/Cmd+wheel: it scales the whole
-/// page, unbounded, which is the wanted behavior. The app therefore must not
-/// intercept those on web, where doing so would trap the events on a text-only,
-/// clamped `UiTextScale` step (and, over the transcript, do nothing at all
-/// because `Scrollable` claims the wheel first). On native desktop there is no
-/// browser, so the keyboard and wheel handlers stay bound and `UiTextScale` is
-/// the only zoom.
+/// On web the browser owns Ctrl/Cmd +/- , Ctrl/Cmd+0 and Ctrl/Cmd+wheel: it
+/// scales the whole page, unbounded, which is the wanted behavior. The app
+/// therefore must not intercept those on web, where doing so would trap the
+/// events on a text-only, clamped `UiTextScale` step (and, over the transcript,
+/// do nothing at all because `Scrollable` claims the wheel first). On native
+/// desktop there is no browser, so the keyboard and wheel handlers stay bound
+/// and `UiTextScale` is the only zoom.
 ///
-/// Reads [kIsWeb] by default. [debugBrowserOwnsZoomOverride] overrides it for
-/// tests, because `kIsWeb` is a compile-time constant that is always false
-/// under the Flutter VM test runner, leaving the web branch otherwise
-/// unreachable.
-bool get _browserOwnsZoom => debugBrowserOwnsZoomOverride ?? kIsWeb;
-
-/// Test-only override for [_browserOwnsZoom]. Set it to exercise the web branch
-/// and reset it to `null` in a tear-down.
-@visibleForTesting
-bool? debugBrowserOwnsZoomOverride;
+/// This is the same question as every other reserved chord, so it reads the one
+/// flag in `app/shortcuts/app_shortcuts.dart` rather than a private copy;
+/// `debugWebReservedChordsOverride` drives the web branch in tests.
+bool get _browserOwnsZoom => appShortcutsWebReserved;
 
 /// Releases every key [HardwareKeyboard] still believes is pressed by feeding
 /// it synthesized key-ups.
@@ -501,6 +474,20 @@ class _AppCommandShell extends ConsumerWidget {
     );
   }
 
+  /// Pins the app text size back to [UiTextScale.standard] — Chrome's Ctrl+0,
+  /// the third of the zoom triad.
+  ///
+  /// An absolute set, not a step, so it never has to resolve `system` against
+  /// an ambient scaler first. Like stepping, it leaves "follow the OS" behind
+  /// and pins a concrete size; the appearance settings restore it.
+  void _resetTextScale(WidgetRef ref) {
+    unawaited(
+      ref
+          .read(uiScaleControllerProvider.notifier)
+          .setTextScale(UiTextScale.standard),
+    );
+  }
+
   /// Handles Ctrl/Cmd+wheel as a text-size step.
   ///
   /// Unmodified scrolling is left completely alone — without the zoom modifier
@@ -551,12 +538,19 @@ class _AppCommandShell extends ConsumerWidget {
         if (item.role == _AppRouteRole.primary)
           if (item.menuShortcut != null)
             item.menuShortcut!: () => context.go(item.route),
-      if (!browserOwnsZoom)
-        for (final activator in _textScaleUpActivators)
-          activator: () => _stepTextScale(context, ref, 1),
-      if (!browserOwnsZoom)
-        for (final activator in _textScaleDownActivators)
-          activator: () => _stepTextScale(context, ref, -1),
+      // Text size comes from the registry, which carries only native
+      // activators for it: on web the browser owns the whole triad and these
+      // contribute nothing.
+      ...appShortcutBindings(
+        specs: appShortcutsForScope(AppShortcutScope.global),
+        handlers: {
+          AppShortcutId.increaseTextSize: () => _stepTextScale(context, ref, 1),
+          AppShortcutId.decreaseTextSize: () =>
+              _stepTextScale(context, ref, -1),
+          AppShortcutId.resetTextSize: () => _resetTextScale(ref),
+        },
+        webReserved: browserOwnsZoom,
+      ),
     };
 
     final Widget shellChild = Focus(

@@ -18,6 +18,7 @@ void main() {
     String? parentThreadId,
     SessionOrigin? origin,
     int? updatedAt,
+    int? createdAt,
   }) => SessionRosterIdentity(
     tool: tool,
     sessionId: id,
@@ -29,6 +30,7 @@ void main() {
     parentThreadId: parentThreadId,
     origin: origin,
     updatedAt: updatedAt,
+    createdAt: createdAt,
   );
 
   const showAll = SessionVisibilityPreferences(showBackgroundSessions: true);
@@ -37,13 +39,14 @@ void main() {
     test('a child renders directly beneath its parent', () {
       final projection = CachedRosterProjection.build(
         rows: [
-          identity(id: 'parent', nativeId: 'n-parent'),
-          identity(id: 'other'),
+          identity(id: 'parent', nativeId: 'n-parent', updatedAt: 300),
+          identity(id: 'other', updatedAt: 100),
           identity(
             id: 'child',
             nativeId: 'n-child',
             parentThreadId: 'n-parent',
             origin: SessionOrigin.subagent,
+            updatedAt: 200,
           ),
         ],
         preferences: showAll,
@@ -244,6 +247,141 @@ void main() {
 
       expect(projection.isEmpty, isTrue);
     });
+  });
+
+  // D4: the cached pane derives its order instead of rendering the stored row
+  // sequence, and carries `createdAt` so a session that has never been updated
+  // can be ranked at all.
+  group('order', () {
+    test('roots and siblings order by recency, not by stored row order', () {
+      final projection = CachedRosterProjection.build(
+        // Stored order is a RETENTION ranking, not a display order: the bound
+        // pass inserts a parent just ahead of the child that pulled it in.
+        rows: [
+          identity(id: 'r2', updatedAt: 200),
+          identity(id: 'p1', nativeId: 'n-p1', updatedAt: 500),
+          identity(
+            id: 'c2',
+            nativeId: 'n-c2',
+            parentThreadId: 'n-p1',
+            origin: SessionOrigin.subagent,
+            updatedAt: 300,
+          ),
+          identity(id: 'r1', updatedAt: 900),
+          identity(
+            id: 'c1',
+            nativeId: 'n-c1',
+            parentThreadId: 'n-p1',
+            origin: SessionOrigin.subagent,
+            updatedAt: 400,
+          ),
+        ],
+        preferences: showAll,
+      );
+
+      expect(projection.rows.map((row) => row.identity.sessionId), [
+        'r1',
+        'p1',
+        'c1',
+        'c2',
+        'r2',
+      ]);
+      expect(projection.rows.map((row) => row.depth), [0, 0, 1, 1, 0]);
+    });
+
+    test('a row with no updatedAt ranks by createdAt', () {
+      final projection = CachedRosterProjection.build(
+        rows: [
+          identity(id: 'older', updatedAt: 500, createdAt: 100),
+          // Created but never updated. Before the anchor was carried this row
+          // ranked at zero and sank to the bottom of the pane, which is the
+          // opposite of where the authoritative roster puts it.
+          identity(id: 'fresh', createdAt: 900),
+        ],
+        preferences: showAll,
+      );
+
+      expect(projection.rows.map((row) => row.identity.sessionId), [
+        'fresh',
+        'older',
+      ]);
+    });
+
+    test('rows with no timestamps at all hold a stable order', () {
+      List<String> order(List<SessionRosterIdentity> rows) =>
+          CachedRosterProjection.build(
+            rows: rows,
+            preferences: showAll,
+          ).rows.map((row) => row.identity.sessionId).toList();
+      final rows = [identity(id: 'b'), identity(id: 'c'), identity(id: 'a')];
+
+      // Nothing to rank on, so composite identity decides — the same tie-break
+      // the authoritative comparator uses.
+      expect(order(rows), ['a', 'b', 'c']);
+      expect(order(rows.reversed.toList()), ['a', 'b', 'c']);
+    });
+
+    test(
+      'the cached order matches the authoritative order for settled rows',
+      () {
+        // The cache has no status and never will, so it cannot reproduce the
+        // working band. It CAN agree about everything that is not working, and
+        // this pins that agreement rather than assuming it.
+        const sessions = [
+          SessionInfo(
+            id: 'a',
+            tool: 'codex',
+            title: 'A',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+            machine: 'mac',
+            cwd: '/work/app',
+            updatedAt: 200,
+            createdAt: 10,
+          ),
+          SessionInfo(
+            id: 'b',
+            tool: 'codex',
+            title: 'B',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+            machine: 'mac',
+            cwd: '/work/app',
+            updatedAt: 900,
+            createdAt: 20,
+          ),
+          SessionInfo(
+            id: 'c',
+            tool: 'codex',
+            title: 'C',
+            status: SessionStatus.idle,
+            attachMode: AttachMode.live,
+            machine: 'mac',
+            cwd: '/work/app',
+            updatedAt: 500,
+            createdAt: 30,
+          ),
+        ];
+        final authoritative = SessionRosterProjection.build(
+          sessions: sessions,
+          preferences: showAll,
+        );
+        final cached = CachedRosterProjection.build(
+          rows: sessions.map(SessionRosterIdentity.fromSession).toList(),
+          preferences: showAll,
+        );
+
+        expect(
+          cached.rows.map((row) => row.identity.sessionId),
+          authoritative.visibleSessions.map((session) => session.id),
+        );
+        expect(cached.rows.map((row) => row.identity.sessionId), [
+          'b',
+          'c',
+          'a',
+        ]);
+      },
+    );
   });
 
   test('duplicate composite identities are projected once', () {

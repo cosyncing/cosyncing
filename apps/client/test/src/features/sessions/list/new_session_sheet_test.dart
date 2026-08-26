@@ -220,6 +220,60 @@ void main() {
     expect(fake.createdModel?.modelID, 'gpt-test');
   });
 
+  testWidgets('Pi thinking effort reaches immediate create exactly', (
+    tester,
+  ) async {
+    final store = _InMemoryModelPreferenceStore();
+    final fake = _FakeBrokerClient(
+      agents: const [_AgentFixture('pi', 'Pi')],
+      catalogs: {
+        'pi': [
+          _model(
+            'pi-reasoner',
+            'Pi Reasoner',
+            provider: 'minimax-cn',
+            reasoningEfforts: const [
+              ReasoningEffort(effort: 'off', label: 'Off'),
+              ReasoningEffort(effort: 'medium', label: 'Medium'),
+              ReasoningEffort(effort: 'high', label: 'High'),
+            ],
+            defaultReasoningEffort: 'medium',
+          ),
+        ],
+      },
+    );
+    await tester.pumpWidget(_host(fake, modelPreferenceStore: store));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('new-session-reasoning-effort')), findsNothing);
+    await tester.tap(find.text(en.newSessionModelDefault));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Pi Reasoner').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('new-session-reasoning-effort')),
+      findsOneWidget,
+    );
+    expect(find.text('Medium'), findsOneWidget);
+    await tester.tap(_effortDropdown());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('High').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-session-submit')));
+    await tester.pumpAndSettle();
+
+    expect(fake.createdModel?.providerID, 'minimax-cn');
+    expect(fake.createdModel?.modelID, 'pi-reasoner');
+    expect(fake.createdModel?.reasoningEffort, 'high');
+    final saved = await store.loadToolDefault(
+      brokerProfileId: _localSourceKey(),
+      tool: 'pi',
+    );
+    expect(saved?.reasoningEffort, 'high');
+  });
+
   testWidgets('per-tool last-picked default preselects a catalog match', (
     tester,
   ) async {
@@ -893,6 +947,15 @@ Finder _modelDropdown() => find.byWidgetPredicate(
       ),
 );
 
+Finder _effortDropdown() => find.byWidgetPredicate(
+  (widget) =>
+      widget is DropdownButtonFormField<String> &&
+      widget.key is ValueKey<String> &&
+      (widget.key! as ValueKey<String>).value.startsWith(
+        'new-session-reasoning-effort-',
+      ),
+);
+
 /// The profile `_host` installs as active; tests compute the matching
 /// preference scope from it instead of duplicating a storage-key literal.
 BrokerProfile _localProfile() => BrokerProfile(
@@ -1163,7 +1226,15 @@ ModelOption _model(
   String id,
   String label, {
   String provider = 'openai',
-}) => ModelOption(providerID: provider, modelID: id, label: label);
+  List<ReasoningEffort>? reasoningEfforts,
+  String? defaultReasoningEffort,
+}) => ModelOption(
+  providerID: provider,
+  modelID: id,
+  label: label,
+  reasoningEfforts: reasoningEfforts,
+  defaultReasoningEffort: defaultReasoningEffort,
+);
 
 ScheduleRecord _schedule(ScheduleCreate request) => ScheduleRecord(
   id: 'schedule-1',

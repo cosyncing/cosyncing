@@ -141,6 +141,7 @@ class SessionListPane extends ConsumerStatefulWidget {
     this.onOpenCached,
     this.queryWindow = SessionRosterQueryWindow.any,
     this.onQueryWindowChanged,
+    this.searchFocusNode,
     this.now,
     super.key,
   });
@@ -196,6 +197,15 @@ class SessionListPane extends ConsumerStatefulWidget {
 
   /// Requests a durable query-window change.
   final ValueChanged<SessionRosterQueryWindow>? onQueryWindowChanged;
+
+  /// Focus node for the roster's search field, owned by the mounting surface.
+  ///
+  /// Exposed rather than kept private because the search shortcut
+  /// (`AppShortcutId.focusRosterSearch`) is bound one layer up, where the
+  /// roster's chords live — and a shortcut that cannot reach the field it
+  /// names is a help-page row that does nothing. Optional: a surface that
+  /// binds no chord passes nothing and the field manages its own focus.
+  final FocusNode? searchFocusNode;
 
   /// Clock override for deterministic relative-time tests.
   final DateTime Function()? now;
@@ -384,6 +394,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
           tools: widget.sessions.map((session) => session.tool).toSet().toList()
             ..sort(),
           searchController: _searchController,
+          searchFocusNode: widget.searchFocusNode,
           onChanged: (filters) {
             final activityChanged = filters.activity != _filters.activity;
             setState(() {
@@ -560,12 +571,14 @@ class _RosterFiltersBar extends StatelessWidget {
     required this.filters,
     required this.tools,
     required this.searchController,
+    required this.searchFocusNode,
     required this.onChanged,
   });
 
   final SessionRosterFilters filters;
   final List<String> tools;
   final TextEditingController searchController;
+  final FocusNode? searchFocusNode;
   final ValueChanged<SessionRosterFilters> onChanged;
 
   bool get _hasFilters => filters.isNarrowing;
@@ -583,6 +596,7 @@ class _RosterFiltersBar extends StatelessWidget {
             child: TextField(
               key: const Key('session-roster-search'),
               controller: searchController,
+              focusNode: searchFocusNode,
               onChanged: (query) => onChanged(filters.copyWith(query: query)),
               textInputAction: TextInputAction.search,
               style: textTheme.bodySmall,

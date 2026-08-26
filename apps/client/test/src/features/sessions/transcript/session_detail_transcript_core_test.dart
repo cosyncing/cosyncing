@@ -367,7 +367,7 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('Reject'), findsOneWidget);
-        expect(find.text('Allow once'), findsOneWidget);
+        expect(find.text('Allow'), findsOneWidget);
         expect(
           find.byKey(
             const Key('session-detail-question-answer-button-q-1'),

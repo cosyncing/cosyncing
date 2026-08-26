@@ -5,17 +5,22 @@
  */
 import { strict as assert } from 'node:assert';
 import { createServer } from 'node:net';
-import { closeSync, mkdtempSync, mkdirSync, readSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { closeSync, mkdtempSync, mkdirSync, readSync, realpathSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { basename, join, relative } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
 
 import {
   FsBrowseError,
   looksUtf8ish,
   prepareSessionDownload,
+  readSessionDirectory,
+  readSessionFile,
+  readSessionStat,
+  toWorkspaceRelative,
   validateBrowsePath,
 } from '../../src/artifacts/fs-browse.ts';
 import { DownloadRangeError, ifRangeMatches, parseDownloadRange } from '../../src/artifacts/fs-browse.ts';
+import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
 
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
@@ -54,51 +59,39 @@ async function waitHealthy(base: string): Promise<void> {
   throw new Error('broker did not become healthy');
 }
 
-async function startBroker(port: number, token: string, opencodeData: string, home: string, fsReadCap = '64'): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
-  const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-    env: {
-      ...process.env,
-      PORT: String(port),
-      HOST: '127.0.0.1',
-      COSYNCING_TOKEN: token,
-      COSYNCING_FS_READ_MAX_BYTES: fsReadCap,
-      COSYNCING_FS_DOWNLOAD_MAX_BYTES: '16',
-      COSYNCING_WEB_COI: '0',
-      COSYNCING_HOME: home,
-      OPENCODE_DATA: opencodeData,
-      COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
-    },
-    stdout: 'ignore',
-    stderr: 'pipe',
+async function startBroker(port: number, token: string, opencodeData: string, home: string, fsReadCap = '64', userHome?: string): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
+  return startBrokerWithEnv({
+    PORT: String(port),
+    COSYNCING_TOKEN: token,
+    COSYNCING_FS_READ_MAX_BYTES: fsReadCap,
+    COSYNCING_FS_DOWNLOAD_MAX_BYTES: '16',
+    COSYNCING_HOME: home,
+    OPENCODE_DATA: opencodeData,
+    // `~` expands against the broker host's own home, so the suite owns HOME rather than inheriting
+    // the developer's — which also keeps real ~/.codex and ~/.claude state out of discovery.
+    ...(userHome ? { HOME: userHome, USERPROFILE: userHome } : {}),
+    // Every HTTP client is T2 since the loopback-only listener landed: a loopback TCP peer may be a
+    // reverse proxy, so workspace browsing is opt-in for all of them (docs/connectivity/security.md).
+    COSYNCING_FS_REMOTE_ENABLED: '1',
   });
-  const base = `http://127.0.0.1:${port}`;
-  await waitHealthy(base);
-  return { broker, base };
 }
 
-async function startBrokerWithEnv(env: Record<string, string>, baseHost = '127.0.0.1'): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
+async function startBrokerWithEnv(env: Record<string, string>): Promise<{ broker: ReturnType<typeof Bun.spawn>; base: string }> {
   const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
     env: {
       ...process.env,
       COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
       COSYNCING_WEB_COI: '0',
+      COSYNCING_FS_REMOTE_ENABLED: '',
       ...env,
     },
     stdout: 'ignore',
     stderr: 'pipe',
   });
-  const base = `http://${baseHost}:${env.PORT}`;
+  // The listener is pinned to BROKER_LISTEN_HOST (127.0.0.1); HOST is not read at all.
+  const base = `http://127.0.0.1:${env.PORT}`;
   await waitHealthy(base);
   return { broker, base };
-}
-
-function firstNonLoopbackIpv4(): string | undefined {
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.family === 'IPv4' && !entry.internal) return entry.address;
-    }
-  }
-  return undefined;
 }
 
 const TOK = 'w3-workspace-route-token';
@@ -125,6 +118,92 @@ await test('helper primitives validate browse path safety', () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+function browseCode(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof FsBrowseError) return err.code;
+    return `not-an-FsBrowseError: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  return 'no-throw';
+}
+
+await test('absolute and ~ requests normalize to the workspace-relative form', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosyncing-w3-abs-'));
+  const linkParent = mkdtempSync(join(tmpdir(), 'cosyncing-w3-abs-link-'));
+  const outsideDir = mkdtempSync(join(tmpdir(), 'cosyncing-w3-abs-outside-'));
+  const linkRoot = join(linkParent, 'root');
+  try {
+    writeFileSync(join(root, 'hello.txt'), 'hello-from-workspace');
+    mkdirSync(join(root, 'nested'));
+    writeFileSync(join(root, 'nested', 'note.txt'), 'nested-note');
+    mkdirSync(join(root, 'realdir'));
+    writeFileSync(join(root, 'realdir', 'inner.txt'), 'inner');
+    symlinkSync(join(root, 'realdir'), join(root, 'linkdir'));
+    writeFileSync(join(outsideDir, 'secret.txt'), 'do not serve this');
+    symlinkSync(join(outsideDir, 'secret.txt'), join(root, 'link-to-secret'));
+    symlinkSync(root, linkRoot);
+
+    // Today's inputs are returned untouched — no relative request changes shape.
+    assert.equal(toWorkspaceRelative(root, 'nested/note.txt'), 'nested/note.txt');
+    assert.equal(toWorkspaceRelative(root, '../etc'), '../etc');
+    assert.equal(toWorkspaceRelative(root, ''), '');
+    assert.equal(toWorkspaceRelative(root, null), null);
+    assert.equal(toWorkspaceRelative(root, undefined), undefined);
+    // A NUL byte stays assertSafePath's BAD_PARAM, not a normalization failure.
+    assert.equal(browseCode(() => validateBrowsePath(root, `${root}/a\0b`)), 'BAD_PARAM');
+
+    assert.equal(toWorkspaceRelative(root, join(root, 'nested', 'note.txt')), join('nested', 'note.txt'));
+    assert.equal(toWorkspaceRelative(root, root), '.');
+    assert.equal(browseCode(() => toWorkspaceRelative(root, join(outsideDir, 'secret.txt'))), 'PATH_ESCAPE');
+    assert.equal(browseCode(() => toWorkspaceRelative('', join(root, 'hello.txt'))), 'NO_CWD');
+
+    // `~` is the broker host's home, expanded here and never by the client.
+    assert.equal(toWorkspaceRelative(homedir(), '~'), '.');
+    assert.equal(toWorkspaceRelative(homedir(), '~/a/b.txt'), join('a', 'b.txt'));
+    assert.equal(toWorkspaceRelative(join(homedir(), 'proj'), '~/proj/lib/x.dart'), join('lib', 'x.dart'));
+    // `~user` is somebody else's home and stays a literal relative name.
+    assert.equal(toWorkspaceRelative(root, '~someone/x'), '~someone/x');
+    if (relative(homedir(), root).startsWith('..')) {
+      assert.equal(browseCode(() => toWorkspaceRelative(root, '~')), 'PATH_ESCAPE');
+      assert.equal(browseCode(() => toWorkspaceRelative(root, '~/x.txt')), 'PATH_ESCAPE');
+    }
+
+    // A workspace reached through a symlinked root resolves either spelling, in both directions.
+    assert.equal(toWorkspaceRelative(linkRoot, join(realpathSync(root), 'hello.txt')), 'hello.txt');
+    assert.equal(toWorkspaceRelative(root, join(linkRoot, 'hello.txt')), 'hello.txt');
+
+    // All four helpers accept an absolute path and answer exactly as the relative form does.
+    assert.deepEqual(readSessionStat(root, join(root, 'hello.txt')), readSessionStat(root, 'hello.txt'));
+    assert.deepEqual(readSessionDirectory(root, join(root, 'nested')), readSessionDirectory(root, 'nested'));
+    assert.deepEqual(readSessionFile(root, join(root, 'hello.txt'), 1024), readSessionFile(root, 'hello.txt', 1024));
+    assert.equal(readSessionDirectory(root, root).path, '.');
+    assert.equal(readSessionFile(root, join(root, 'hello.txt'), 1024).data, 'hello-from-workspace');
+    const absDownload = prepareSessionDownload(root, join(root, 'nested', 'note.txt'), 1024);
+    try {
+      assert.equal(absDownload.path, 'nested/note.txt');
+    } finally {
+      closeSync(absDownload.fd);
+    }
+
+    // Containment, the per-segment symlink walk, and every error code survive the new pre-step.
+    assert.equal(browseCode(() => readSessionStat(root, join(outsideDir, 'secret.txt'))), 'PATH_ESCAPE');
+    assert.equal(browseCode(() => readSessionFile(root, join(outsideDir, 'secret.txt'), 1024)), 'PATH_ESCAPE');
+    assert.equal(browseCode(() => prepareSessionDownload(root, join(outsideDir, 'secret.txt'), 1024)), 'PATH_ESCAPE');
+    assert.equal(browseCode(() => readSessionStat(root, join(root, 'link-to-secret'))), 'PATH_SYMLINK');
+    assert.equal(browseCode(() => readSessionStat(root, join(root, 'linkdir', 'inner.txt'))), 'PATH_SYMLINK');
+    assert.equal(browseCode(() => readSessionStat(root, join(linkRoot, 'linkdir', 'inner.txt'))), 'PATH_SYMLINK');
+    // A missing path inside the workspace is still NOT_FOUND, never PATH_ESCAPE.
+    assert.equal(browseCode(() => readSessionStat(root, join(root, 'gone.txt'))), 'NOT_FOUND');
+    assert.equal(browseCode(() => readSessionFile(root, join(root, 'nested'), 1024)), 'NOT_REGULAR_FILE');
+  } finally {
+    rmSync(linkRoot, { force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(linkParent, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
 await test('download range parser covers closed, open, suffix, If-Range, and 416 cases', () => {
   assert.deepEqual(parseDownloadRange('bytes=0-4', 10), { start: 0, end: 4 });
   assert.deepEqual(parseDownloadRange('bytes=7-', 10), { start: 7, end: 9 });
@@ -143,7 +222,11 @@ await test('download range parser covers closed, open, suffix, If-Range, and 416
 await test('w3 session workspace API is read-only, bounded, and safe', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cosyncing-w3-home-'));
   const opencodeData = mkdtempSync(join(tmpdir(), 'cosyncing-w3-opencode-data-'));
-  const sessionCwd = mkdtempSync(join(tmpdir(), 'cosyncing-w3-workspace-'));
+  // The workspace sits one level under the broker's HOME, so `~/<ws>/…` resolves in and `~` itself
+  // resolves out — both halves of the §3.1 `~` rule are then observable over the real routes.
+  const userHome = mkdtempSync(join(tmpdir(), 'cosyncing-w3-userhome-'));
+  const sessionCwd = mkdtempSync(join(userHome, 'workspace-'));
+  const workspaceName = basename(sessionCwd);
   const sessionId = 'w3-session';
   const secretDir = mkdtempSync(join(tmpdir(), 'cosyncing-w3-secret-'));
   const secretFile = join(secretDir, 'secret.txt');
@@ -166,7 +249,7 @@ await test('w3 session workspace API is read-only, bounded, and safe', async () 
   symlinkSync(secretFile, join(sessionCwd, 'link-to-secret'));
 
   const port = await freePort();
-  const { broker, base } = await startBroker(port, TOK, opencodeData, home, '8');
+  const { broker, base } = await startBroker(port, TOK, opencodeData, home, '8', userHome);
 
   const requestJson = async (path: string, tokened = true): Promise<{ res: Response; body: any }> => {
     const headers: Record<string, string> = {};
@@ -300,32 +383,90 @@ await test('w3 session workspace API is read-only, bounded, and safe', async () 
 
     const missingSession = await requestJson(`/api/sessions/opencode/missing-${sessionId}/fs`);
     assert.equal(missingSession.res.status, 404);
+
+    // ── Absolute and `~` requests over the real routes ────────────────────────
+    const sessionFs = (route: string, path: string) =>
+      requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}${route}${route.includes('?') ? '&' : '?'}path=${encodeURIComponent(path)}`);
+
+    const absStat = await sessionFs('/fs', join(sessionCwd, 'hello.txt'));
+    assert.equal(absStat.res.status, 200);
+    assert.deepEqual(absStat.body.stat, fileStat.body.stat);
+
+    const absDirList = await sessionFs('/fs', sessionCwd);
+    const relDirList = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs`);
+    assert.equal(absDirList.res.status, 200);
+    assert.equal(absDirList.body.stat.type, 'directory');
+    assert.deepEqual(absDirList.body, relDirList.body);
+
+    const absNestedList = await sessionFs('/fs', join(sessionCwd, 'nested'));
+    assert.equal(absNestedList.res.status, 200);
+    assert.equal(absNestedList.body.path, 'nested');
+    assert.deepEqual(absNestedList.body.entries.map((e: any) => e.name), ['note.txt']);
+
+    const absRead = await sessionFs('/fs/read?maxBytes=5', join(sessionCwd, 'hello.txt'));
+    assert.equal(absRead.res.status, 200);
+    assert.equal(absRead.body.path, 'hello.txt');
+    assert.equal(absRead.body.data, 'hello');
+
+    const absDownload = await fetch(
+      `${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/download?path=${encodeURIComponent(join(sessionCwd, 'nested', 'note.txt'))}`,
+      { headers: { 'x-cosyncing-token': TOK } },
+    );
+    assert.equal(absDownload.status, 200);
+    assert.equal(absDownload.headers.get('content-disposition'), 'attachment; filename=\"note.txt\"');
+    assert.equal(await absDownload.text(), 'nested-note');
+
+    const absOutside = await sessionFs('/fs/read', secretFile);
+    assert.equal(absOutside.res.status, 400);
+    assert.equal(absOutside.body.code, 'PATH_ESCAPE');
+
+    const absOutsideStat = await sessionFs('/fs', secretFile);
+    assert.equal(absOutsideStat.res.status, 400);
+    assert.equal(absOutsideStat.body.code, 'PATH_ESCAPE');
+
+    const absSymlink = await sessionFs('/fs/read', join(sessionCwd, 'link-to-secret'));
+    assert.equal(absSymlink.res.status, 400);
+    assert.equal(absSymlink.body.code, 'PATH_SYMLINK');
+
+    const absMissing = await sessionFs('/fs', join(sessionCwd, 'not-here.txt'));
+    assert.equal(absMissing.res.status, 404);
+    assert.equal(absMissing.body.code, 'NOT_FOUND');
+
+    const tildeRead = await sessionFs('/fs/read?maxBytes=5', `~/${workspaceName}/hello.txt`);
+    assert.equal(tildeRead.res.status, 200);
+    assert.equal(tildeRead.body.path, 'hello.txt');
+    assert.equal(tildeRead.body.data, 'hello');
+
+    const tildeDir = await sessionFs('/fs', `~/${workspaceName}/nested`);
+    assert.equal(tildeDir.res.status, 200);
+    assert.equal(tildeDir.body.path, 'nested');
+
+    const tildeOutside = await sessionFs('/fs', '~');
+    assert.equal(tildeOutside.res.status, 400);
+    assert.equal(tildeOutside.body.code, 'PATH_ESCAPE');
   } finally {
     broker.kill();
     await broker.exited.catch(() => undefined);
     rmSync(home, { recursive: true, force: true });
     rmSync(opencodeData, { recursive: true, force: true });
-    rmSync(sessionCwd, { recursive: true, force: true });
+    rmSync(userHome, { recursive: true, force: true });
     rmSync(secretDir, { recursive: true, force: true });
   }
 });
 
-await test('workspace file API is default-denied to non-loopback tokened clients unless locally enabled', async () => {
-  const remoteHost = firstNonLoopbackIpv4();
-  if (!remoteHost) {
-    console.log('SKIP  no non-loopback IPv4 address available for T2 fs gate probe');
-    return;
-  }
-
-  const home = mkdtempSync(join(tmpdir(), 'cosyncing-w3-remote-home-'));
-  const opencodeData = mkdtempSync(join(tmpdir(), 'cosyncing-w3-remote-opencode-'));
-  const sessionCwd = mkdtempSync(join(tmpdir(), 'cosyncing-w3-remote-session-'));
-  const sessionId = 'w3-remote-session';
+// The listener is loopback-only (`BROKER_LISTEN_HOST`, configuration.ts), so a non-loopback caller
+// can no longer be produced in-process. The gate that replaced the address check treats every HTTP
+// client as T2, so the default-deny probe is now the loopback tokened client itself.
+await test('workspace file API is default-denied to authenticated HTTP clients unless locally enabled', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-w3-gate-home-'));
+  const opencodeData = mkdtempSync(join(tmpdir(), 'cosyncing-w3-gate-opencode-'));
+  const sessionCwd = mkdtempSync(join(tmpdir(), 'cosyncing-w3-gate-session-'));
+  const sessionId = 'w3-gate-session';
   mkdirSync(join(opencodeData, 'storage', 'session', 'demo'), { recursive: true });
   writeFileSync(join(opencodeData, 'storage', 'session', 'demo', `${sessionId}.json`), JSON.stringify({
     id: sessionId,
     directory: sessionCwd,
-    title: 'W3 Remote Session',
+    title: 'W3 Gated Session',
     time: { created: Date.now(), updated: Date.now() },
   }));
   writeFileSync(join(sessionCwd, 'secret.env'), 'TOKEN=do-not-read-remotely');
@@ -333,28 +474,48 @@ await test('workspace file API is default-denied to non-loopback tokened clients
   const port = await freePort();
   const { broker, base } = await startBrokerWithEnv({
     PORT: String(port),
-    HOST: '0.0.0.0',
     COSYNCING_TOKEN: TOK,
     COSYNCING_HOME: home,
     OPENCODE_DATA: opencodeData,
     COSYNCING_FS_DOWNLOAD_MAX_BYTES: '64',
-  }, remoteHost);
+  });
 
   try {
-    const deniedRead = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=secret.env`, {
-      headers: { 'x-cosyncing-token': TOK },
-    });
-    assert.equal(deniedRead.status, 403);
-    assert.equal((await deniedRead.json()).code, 'FS_REMOTE_DISABLED');
-
-    const deniedDownload = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/download?path=secret.env`, {
-      headers: { 'x-cosyncing-token': TOK },
-    });
-    assert.equal(deniedDownload.status, 403);
-    assert.equal((await deniedDownload.json()).code, 'FS_REMOTE_DISABLED');
+    for (const route of ['/fs', '/fs/read?path=secret.env', '/fs/download?path=secret.env']) {
+      const denied = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}${route}`, {
+        headers: { 'x-cosyncing-token': TOK },
+      });
+      assert.equal(denied.status, 403, route);
+      assert.equal((await denied.json()).code, 'FS_REMOTE_DISABLED', route);
+    }
   } finally {
     broker.kill();
     await broker.exited.catch(() => undefined);
+  }
+
+  // The documented production knob (features.httpWorkspaceBrowsing) opens the same routes.
+  writeBrokerConfig({
+    ...defaultBrokerConfig(),
+    features: { httpWorkspaceBrowsing: true },
+  }, home);
+  const enabledPort = await freePort();
+  const enabled = await startBrokerWithEnv({
+    PORT: String(enabledPort),
+    COSYNCING_TOKEN: TOK,
+    COSYNCING_HOME: home,
+    OPENCODE_DATA: opencodeData,
+    COSYNCING_FS_DOWNLOAD_MAX_BYTES: '64',
+  });
+
+  try {
+    const allowed = await fetch(`${enabled.base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=secret.env`, {
+      headers: { 'x-cosyncing-token': TOK },
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal((await allowed.json()).data, 'TOKEN=do-not-read-remotely');
+  } finally {
+    enabled.broker.kill();
+    await enabled.broker.exited.catch(() => undefined);
     rmSync(home, { recursive: true, force: true });
     rmSync(opencodeData, { recursive: true, force: true });
     rmSync(sessionCwd, { recursive: true, force: true });

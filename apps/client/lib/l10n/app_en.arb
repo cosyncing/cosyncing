@@ -509,6 +509,14 @@
   "@settingsRuntimeStatusUnavailable": {
     "description": "Shown when the managed-runtime section failed to load. A Retry button sits beside it."
   },
+  "settingsRuntimeLoadFailedDetail": "Details: {detail}",
+  "@settingsRuntimeLoadFailedDetail": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
+  "settingsRuntimeActionFailed": "Restart failed: {detail}",
+  "@settingsRuntimeActionFailed": {
+    "placeholders": { "detail": { "type": "String" } }
+  },
   "settingsAttentionDeliveryUnavailable": "Couldn't load notification delivery settings.",
   "@settingsAttentionDeliveryUnavailable": {
     "description": "Shown when the Attention delivery section failed to load."
@@ -565,6 +573,10 @@
   "@shortcutGroupSessions": {
     "description": "Heading for the session list shortcut group."
   },
+  "shortcutGroupOpenSessions": "Open sessions",
+  "@shortcutGroupOpenSessions": {
+    "description": "Heading for the opened-sessions tab strip shortcut group."
+  },
   "shortcutGroupSessionDetail": "Session detail",
   "@shortcutGroupSessionDetail": {
     "description": "Heading for the session detail shortcut group."
@@ -601,6 +613,10 @@
   "@shortcutDecreaseTextSize": {
     "description": "Description of the text-size decrease shortcut."
   },
+  "shortcutResetTextSize": "Reset text to the standard size. The numpad 0 also works.",
+  "@shortcutResetTextSize": {
+    "description": "Description of the text-size reset shortcut."
+  },
   "shortcutWheelTextSize": "Hold Ctrl or Cmd and scroll: up makes text bigger, down makes it smaller.",
   "@shortcutWheelTextSize": {
     "description": "Description of the Ctrl/Cmd + mouse wheel text-size gesture."
@@ -608,6 +624,38 @@
   "shortcutRefreshSessions": "Refresh the session list",
   "@shortcutRefreshSessions": {
     "description": "Description of the session list refresh shortcut."
+  },
+  "shortcutFocusRosterSearch": "Focus the session search box. Bare / is not live while typing.",
+  "@shortcutFocusRosterSearch": {
+    "description": "Description of the roster search focus shortcut."
+  },
+  "shortcutJumpToSession": "Go to an open session by its position. Not while typing.",
+  "@shortcutJumpToSession": {
+    "description": "Description of the bare 1-8 session ordinal shortcuts."
+  },
+  "shortcutJumpToLastSession": "Go to the last open session. Not while typing.",
+  "@shortcutJumpToLastSession": {
+    "description": "Description of the bare 9 last-session shortcut."
+  },
+  "shortcutNextSession": "Go to the next open session.",
+  "@shortcutNextSession": {
+    "description": "Description of the next open session shortcut."
+  },
+  "shortcutPreviousSession": "Go to the previous open session.",
+  "@shortcutPreviousSession": {
+    "description": "Description of the previous open session shortcut."
+  },
+  "shortcutCloseSession": "Close the current session view. The agent keeps running.",
+  "@shortcutCloseSession": {
+    "description": "Description of the close open session shortcut."
+  },
+  "shortcutNewSession": "Start a new session.",
+  "@shortcutNewSession": {
+    "description": "Description of the new session shortcut."
+  },
+  "shortcutSafariGap": "Safari keeps Cmd+Opt+W for its own tabs, so that shortcut does nothing there. Every other browser is fine.",
+  "@shortcutSafariGap": {
+    "description": "Footnote naming the shortcut Safari reserves for itself."
   },
   "shortcutFocusComposer": "Focus the prompt box",
   "@shortcutFocusComposer": {
@@ -1286,6 +1334,20 @@
     }
   },
   "settingsBrokerAndUpdateSection": "Server health & updates",
+  "settingsWorkspaceBrowsingSection": "Workspace access",
+  "@settingsWorkspaceBrowsingSection": {"description": "Settings section containing the broker-wide HTTP workspace browsing exposure gate."},
+  "settingsWorkspaceBrowsingTitle": "Workspace browsing",
+  "@settingsWorkspaceBrowsingTitle": {"description": "Title of the owner-controlled workspace browsing switch."},
+  "settingsWorkspaceBrowsingOn": "Authenticated clients with file access can browse files inside session workspaces.",
+  "settingsWorkspaceBrowsingOff": "HTTP clients cannot browse workspace files.",
+  "settingsWorkspaceBrowsingOwnerOnly": "Only a server owner credential can change this setting.",
+  "settingsWorkspaceBrowsingEnableTitle": "Enable workspace browsing?",
+  "settingsWorkspaceBrowsingEnableBody": "This grants direct workspace-file access to authenticated clients that have the Files role. A proxy can make a remote request look local, so the server cannot safely limit this to same-machine browsers. Enable it only when you trust the server route and every file-enabled device. The server will restart.",
+  "settingsWorkspaceBrowsingDisableTitle": "Disable workspace browsing?",
+  "settingsWorkspaceBrowsingDisableBody": "Workspace files will stop opening in HTTP clients after the server restarts.",
+  "settingsWorkspaceBrowsingEnableAction": "Enable and restart",
+  "settingsWorkspaceBrowsingDisableAction": "Disable and restart",
+  "settingsWorkspaceBrowsingChangeFailed": "Couldn't change workspace browsing.",
   "settingsBrokerStatusUnavailable": "Couldn't load server health and update status.",
   "settingsConnectToInspectBroker": "Connect to a server to inspect its health, version, and available updates.",
   "settingsBrokerTechnicalDetails": "Technical details",
@@ -2179,8 +2241,15 @@
   "sessionRequestConnectToReply": "Connect to the session to reply.",
   "sessionRequestReadOnlyReply": "This request is read-only. Answer where the agent is running.",
   "sessionRequestReject": "Reject",
+  "sessionRequestApprove": "Allow",
+  "@sessionRequestApprove": {
+    "description": "Approve button on a permission card that offers no session-scoped option; 'once' would imply a second choice that is not on screen."
+  },
   "sessionRequestApproveOnce": "Allow once",
   "sessionRequestApproveSession": "Allow for session",
+  "sessionRequestApproveRule": "Allow matching commands",
+  "sessionRequestShowDetails": "Show command and reason",
+  "sessionRequestHideDetails": "Hide command and reason",
   "sessionRequestDismiss": "Dismiss",
   "sessionRequestSubmit": "Submit",
   "sessionRequestAnswerLabel": "Answer",
@@ -2194,6 +2263,7 @@
   "@sessionRequestOutcomeApprovedSession": {
     "description": "Compact outcome on a settled permission card approved for the whole session."
   },
+  "sessionRequestOutcomeApprovedRule": "Allowed matching commands",
   "sessionRequestOutcomeRejected": "Rejected",
   "@sessionRequestOutcomeRejected": {
     "description": "Compact outcome on a settled permission card whose request was rejected."
@@ -3065,5 +3135,22 @@
   "sessionClearAllCacheConfirmBody": "This removes rebuildable transcript and roster snapshots for all server profiles. Drafts, queued sends, settings, and native sessions are kept.",
   "sessionClearAllCacheConfirm": "Clear all cache",
   "sessionAllCacheCleared": "All local session cache was cleared",
-  "sessionAllCacheClearFailed": "Couldn't clear all local session cache"
+  "sessionAllCacheClearFailed": "Couldn't clear all local session cache",
+  "transcriptFileLinkSemantics": "Open {path} in Files",
+  "@transcriptFileLinkSemantics": {"description": "Screen-reader label for a workspace path rendered as a link in a transcript row.", "placeholders": {"path": {"type": "String"}}},
+  "transcriptWebLinkSemantics": "Open link {url}",
+  "@transcriptWebLinkSemantics": {"description": "Screen-reader label for an http(s) link in a transcript message body.", "placeholders": {"url": {"type": "String"}}},
+  "transcriptFileLinkCopyPath": "Copy path",
+  "transcriptFileLinkPathCopied": "Path copied",
+  "transcriptFileLinkOpenFolder": "Open containing folder",
+  "sessionFilesLinksOff": "File paths in this session's transcript stay plain text because workspace browsing is off on this Server.",
+  "@sessionFilesLinksOff": {"description": "The single line explaining why transcript file mentions are not links. Shown once in the Files surface, never per mention."},
+  "sessionFilesLinksOffNoWorkspace": "File paths in this session's transcript stay plain text because this session has no working directory.",
+  "@sessionFilesLinksOffNoWorkspace": {"description": "The same single line, for a session whose workspace root cannot be resolved at all."},
+  "sessionFilePreviewLineWindow": "Showing lines {first}–{last} of this preview.",
+  "@sessionFilePreviewLineWindow": {"description": "Stated when the viewer renders a bounded window of a long preview instead of all of it.", "placeholders": {"first": {"type": "int"}, "last": {"type": "int"}}},
+  "sessionFilePreviewAnchorBeyond": "Line {line} is beyond the {count} lines this preview covers.",
+  "@sessionFilePreviewAnchorBeyond": {"description": "Honest note when a mention's line anchor lies past the bounded prefix the Server returned.", "placeholders": {"line": {"type": "int"}, "count": {"type": "int"}}},
+  "sessionFilePreviewAnchorLine": "Line {line}",
+  "@sessionFilePreviewAnchorLine": {"description": "Label for the line a file preview was opened at.", "placeholders": {"line": {"type": "int"}}}
 }

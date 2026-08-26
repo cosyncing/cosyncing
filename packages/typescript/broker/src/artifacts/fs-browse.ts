@@ -6,9 +6,10 @@
  * followed. All helpers are path-local, non-writing, and throw narrow typed errors for precise API
  * responses.
  */
-import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
+import { closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { FsDirEntry, FsDirectoryResult, FsNodeInfo, FsReadResult, FsRejectCode } from '@cosyncing/protocol';
 
 export const DEFAULT_FS_READ_CAP_BYTES = 1024 * 1024;
@@ -127,6 +128,81 @@ function assertSafePath(baseDir: string, requestedPath: string | null | undefine
   return validateResolvedWorkspacePath(baseDir, resolve(baseDir, safe));
 }
 
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Ancestor chain of an absolute path, filesystem root first, the path itself last. */
+function ancestorChain(target: string): string[] {
+  const chain: string[] = [];
+  let cursor = target;
+  for (;;) {
+    chain.push(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return chain.reverse();
+}
+
+/**
+ * Rewrite an absolute or `~`-prefixed request into the workspace-relative form `assertSafePath`
+ * already accepts. Transcript file mentions are overwhelmingly absolute (claude's `file_path`,
+ * codex's `apply_patch` headers, dsh's `view.path`) and only the broker's host can decide what an
+ * absolute path means: realpath, case, and `~` are all host facts.
+ *
+ * This is the single normalization step in the tree — the Windows port replaces this function, not
+ * a second copy elsewhere. It narrows and widens nothing: a relative request is returned untouched,
+ * and an absolute request outside the root still reaches `PATH_ESCAPE`, just at this step instead of
+ * the unconditional absolute-path rejection inside `assertSafePath`.
+ */
+export function toWorkspaceRelative(baseDir: string, raw: string | null | undefined): string | null | undefined {
+  if (typeof raw !== 'string' || !raw) return raw;
+  // A NUL byte is `assertSafePath`'s BAD_PARAM, not ours; hand it back unexamined.
+  if (raw.includes('\0')) return raw;
+
+  let candidate = raw;
+  if (raw === '~' || raw.startsWith('~/') || raw.startsWith(`~${sep}`)) {
+    // Only the broker host's own home. `~user` is not expanded — it stays a literal relative name.
+    const home = homedir();
+    if (!home) return raw;
+    candidate = raw === '~' ? home : join(home, raw.slice(2));
+  } else if (!isAbsolute(raw)) {
+    return raw;
+  }
+
+  if (!baseDir) throw new FsBrowseError('NO_CWD', 'session has no workspace root');
+  const target = resolve(candidate);
+  const base = resolve(baseDir);
+  if (isWithin(base, target)) return relative(base, target) || '.';
+
+  // A workspace reached through a symlinked root (`/srv/x/proj` -> `/mnt/proj`) is still the same
+  // workspace, whichever spelling the request or the roster used.
+  const realBase = realpathOrSelf(base);
+  if (realBase !== base && isWithin(realBase, target)) return relative(realBase, target) || '.';
+
+  // The request may spell the root through a symlink the base does not name. Walk the target's
+  // ancestors from the filesystem root down to its longest existing prefix and stop at the FIRST one
+  // that lands inside the workspace: everything below that point stays literal, so the per-segment
+  // symlink walk in `validateResolvedWorkspacePath` still sees — and still refuses — every symlink
+  // inside the jail.
+  for (const prefix of ancestorChain(target)) {
+    if (!existsSync(prefix)) break;
+    const real = realpathOrSelf(prefix);
+    if (!isWithin(realBase, real)) continue;
+    const inside = relative(realBase, real);
+    const tail = relative(prefix, target);
+    if (!tail) return inside || '.';
+    return inside ? join(inside, tail) : tail;
+  }
+
+  throw new FsBrowseError('PATH_ESCAPE', 'path escapes workspace root');
+}
+
 function nodeInfo(abs: string, rel: string): FsNodeInfo {
   let st;
   try {
@@ -148,12 +224,12 @@ function nodeInfo(abs: string, rel: string): FsNodeInfo {
 }
 
 export function readSessionStat(cwd: string, rawPath: string | null | undefined): FsNodeInfo {
-  const { abs, rel } = assertSafePath(cwd, rawPath);
+  const { abs, rel } = assertSafePath(cwd, toWorkspaceRelative(cwd, rawPath));
   return nodeInfo(abs, rel);
 }
 
 export function readSessionDirectory(cwd: string, rawPath: string | null | undefined): FsDirectoryResult {
-  const { abs, rel } = assertSafePath(cwd, rawPath);
+  const { abs, rel } = assertSafePath(cwd, toWorkspaceRelative(cwd, rawPath));
   const st = (() => {
     try {
       return lstatSync(abs);
@@ -206,7 +282,7 @@ export function readSessionFile(
   maxBytes: number,
   capBytes = DEFAULT_FS_READ_CAP_BYTES,
 ): FsReadResult {
-  const { abs, rel } = assertSafePath(cwd, rawPath);
+  const { abs, rel } = assertSafePath(cwd, toWorkspaceRelative(cwd, rawPath));
   const safeCap = Number.isFinite(capBytes) ? Math.max(1, Math.floor(capBytes)) : DEFAULT_FS_READ_CAP_BYTES;
   const maxRaw = Number.isFinite(maxBytes) ? Math.max(1, Math.floor(maxBytes)) : safeCap;
   const max = Math.min(maxRaw, safeCap);
@@ -247,7 +323,7 @@ export function prepareSessionDownload(
   rawPath: string | null | undefined,
   maxBytes: number,
 ): FsDownloadResult {
-  const { abs, rel } = assertSafePath(baseDir, rawPath);
+  const { abs, rel } = assertSafePath(baseDir, toWorkspaceRelative(baseDir, rawPath));
   let st;
   try {
     st = lstatSync(abs);
@@ -303,5 +379,5 @@ export function looksUtf8ish(bytes: Uint8Array): boolean {
 /** Small smoke helper: detect impossible paths in a way that mirrors the broker-facing helper checks. */
 export function validateBrowsePath(cwd: string, raw: string | null | undefined): { abs: string; rel: string } {
   if (typeof cwd !== 'string') throw new Error('cwd is required');
-  return assertSafePath(cwd, raw);
+  return assertSafePath(cwd, toWorkspaceRelative(cwd, raw));
 }

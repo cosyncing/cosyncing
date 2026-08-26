@@ -337,6 +337,19 @@ void main() {
       );
     });
 
+    test('permission-resolved types a persistent approval rule', () {
+      final message = AgentMessage.fromJson({
+        'type': 'permission-resolved',
+        'requestId': 'perm-rule',
+        'decision': 'approve-rule',
+      });
+
+      expect(
+        message.permissionResolutionDecision,
+        PermissionResolutionDecision.approveRule,
+      );
+    });
+
     test('permission-resolved tolerates future and malformed decisions', () {
       final future = AgentMessage.fromJson({
         'type': 'permission-resolved',

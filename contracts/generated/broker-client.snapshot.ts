@@ -72,7 +72,11 @@ export function isRestoreDriveAttachReason(reason: DriveAttachReason): boolean {
 
 export type AgentStatus = 'starting' | 'running' | 'idle' | 'stopped' | 'error';
 
-export type PermissionDecision = 'approve' | 'approve-session' | 'reject';
+export type PermissionDecision =
+  | 'approve'
+  | 'approve-session'
+  | 'approve-rule'
+  | 'reject';
 
 export type PermissionGranularity = 'none' | 'per-tool' | 'per-session' | 'yolo';
 
@@ -659,6 +663,8 @@ export interface PlanActionInput {
 /** A selectable model for this session, with a human label. */
 export interface ModelOption {
   providerID: string;
+  /** Human-facing provider/profile name; providerID remains the exact wire identity. */
+  providerLabel?: string;
   modelID: string;
   variant?: string;
   label: string;
@@ -1284,6 +1290,7 @@ export const BROKER_ROUTES = [
   '/api/attention-events/{id}/ack',
   '/api/attention-events/{id}/dismiss',
   '/api/broker/health',
+  '/api/broker/features/workspace-browsing',
   '/api/broker/restart',
   '/api/broker/restart-all',
   '/api/broker/update',
@@ -1591,9 +1598,13 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * it is numbered. Revision 16 adds the authenticated WebSocket-ticket route.
  * Revision 17 makes artifact downloads credentialed and adds their refresh
  * route. Revision-16 clients do not send credentials for artifact URLs, so the
- * broker's minimum client revision moves with that security boundary.
+ * broker's minimum client revision moves with that security boundary. Revision
+ * 18 adds the owner-controlled workspace-browsing exposure route,
+ * provider/profile display labels, and a distinct persistent-rule permission
+ * decision. Older clients ignore the unknown optional answer and retain the
+ * safe approve-once/reject floor.
  */
-export const BROKER_CONTRACT_REVISION = 17 as const;
+export const BROKER_CONTRACT_REVISION = 18 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

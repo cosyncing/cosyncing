@@ -712,7 +712,7 @@ void main() {
     );
 
     testWidgets(
-      'a created tab stays unopened until its Drive handoff completes',
+      'a created tab opens while its Drive handoff is still connecting',
       (tester) async {
         final connecting = Completer<NewSessionConnectionHandoff>();
         await tester.pumpWidget(
@@ -733,11 +733,11 @@ void main() {
           await tester.pump();
         }
 
+        expect(find.text('DETAIL codex/created'), findsOneWidget);
         expect(
-          find.byKey(const Key('new-session-launch-connecting')),
-          findsOneWidget,
+          find.byKey(const Key('new-session-launch-page')),
+          findsNothing,
         );
-        expect(find.text('DETAIL codex/created'), findsNothing);
 
         connecting.complete(NewSessionConnectionHandoff(() {}));
         await tester.pump();

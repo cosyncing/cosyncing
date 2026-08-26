@@ -151,7 +151,9 @@ void main() {
         anchorViewportTop: 24,
       );
 
-      container.read(openSessionsControllerProvider.notifier).close(a.key);
+      unawaited(
+        container.read(openSessionsControllerProvider.notifier).close(a.key),
+      );
       await tester.pump();
       await tester.pump();
 

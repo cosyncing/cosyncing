@@ -299,7 +299,7 @@ export class PiAdapter implements AgentBackend {
     });
     return (response.models ?? [])
       .slice(0, PI_MAX_MODEL_OPTIONS)
-      .map((model) => piModelOption(model))
+      .map((model) => piModelOption(model, response.thinkingLevel))
       .filter((model): model is ModelOption => !!model);
   }
 
@@ -608,10 +608,16 @@ async function createPiSessionViaRpc(
           catalog?.error ?? 'Pi get_available_models failed.',
         );
       }
+      // This zero-turn process uses the same configured initial thinking level as a subsequent
+      // create. Carry that native default with the catalog instead of making the client guess.
+      const state = await rpc({ type: 'get_state' }, 15000);
       return {
         models: Array.isArray(catalog?.data?.models)
           ? catalog.data.models.slice(0, PI_MAX_MODEL_OPTIONS)
           : [],
+        thinkingLevel: state?.success === true
+          ? normalizePiThinkingLevel(state?.data?.thinkingLevel)
+          : undefined,
       };
     }
     let stateResp = await rpc({ type: 'get_state' }, 20000);
@@ -1382,6 +1388,9 @@ class PiConnection implements SessionConnection {
         // ACTUAL choice is sent back (previously select collapsed to options[0] on approve).
         if (ev.method === 'confirm') {
           this.pendingUi.set(ev.id, { method: 'confirm', options: ev.options });
+          // Deliberately no `options`: a confirm is a one-shot yes/no with no session scope to
+          // grant, so the client's approve/reject default is the whole vocabulary here (the
+          // bridged tool-approval card in bridge.ts is the path that advertises approve-session).
           this.emit({ type: 'permission-request', requestId: ev.id, title: ev.title ?? 'Confirm?', detail: ev.message });
         } else if (ev.method === 'select') {
           this.pendingUi.set(ev.id, { method: 'select', options: ev.options });
@@ -1693,6 +1702,9 @@ class PiConnection implements SessionConnection {
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('Pi does not support persistent approval rules through this connection');
+    }
     const ui = this.pendingUi.get(requestId);
     this.pendingUi.delete(requestId);
     if (!ui) return;

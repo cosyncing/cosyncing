@@ -8,7 +8,9 @@ import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/transcript_markdown.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_diff_body_loader.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_file_link_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_presentation.dart';
@@ -23,6 +25,7 @@ part 'tool_diff_view.dart';
 part 'tool_family_views.dart';
 part 'tool_message_cards.dart';
 part 'transcript_code_block.dart';
+part 'transcript_file_link.dart';
 part 'transcript_markdown_body.dart';
 part 'transcript_message_widgets.dart';
 

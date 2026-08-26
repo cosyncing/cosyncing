@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_status_panel.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
@@ -215,6 +216,16 @@ class _ManagedRuntimeSection extends StatelessWidget {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
+                if (data.actionError != null) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    l10n.settingsRuntimeActionFailed(data.actionError!),
+                    key: const Key('settings-runtime-action-error'),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
               ],
             );
           },
@@ -423,13 +434,20 @@ class _RuntimeError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(AppLocalizations.of(context).settingsRuntimeStatusUnavailable),
+        Text(l10n.settingsRuntimeStatusUnavailable),
+        const SizedBox(height: 4),
+        SelectableText(
+          l10n.settingsRuntimeLoadFailedDetail(failureDetail(error)),
+          key: const Key('settings-runtime-load-error'),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
         TextButton(
           onPressed: () => unawaited(onRetry()),
-          child: Text(AppLocalizations.of(context).retry),
+          child: Text(l10n.retry),
         ),
       ],
     );

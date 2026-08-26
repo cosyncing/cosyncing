@@ -313,6 +313,40 @@ void main() {
     );
 
     testWidgets(
+      'Claude keeps a scoped Fable quota distinct from the weekly-all quota',
+      (tester) async {
+        final response = quota(
+          providers: {
+            'claude': providerJson(
+              id: 'claude',
+              buckets: [
+                bucketJson(
+                  id: 'weekly_all',
+                  label: 'Weekly All',
+                  remaining: 80,
+                ),
+                bucketJson(
+                  id: 'weekly_scoped_fable',
+                  label: 'Fable',
+                  remaining: 60,
+                ),
+              ],
+            ),
+          },
+        );
+
+        await tester.pumpWidget(buildSubject(response: response));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Weekly'), findsOneWidget);
+        expect(find.text('Fable'), findsOneWidget);
+        expect(find.text('Weekly All'), findsNothing);
+        expect(find.text('80%'), findsOneWidget);
+        expect(find.text('60%'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
       'Antigravity collapses per-model readings into two shared quota pools',
       (tester) async {
         final response = quota(

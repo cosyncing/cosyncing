@@ -173,23 +173,33 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Source-qualified: a switch to another broker moves this panel onto that
+    // host's browser rather than leaving the previous machine's listing up.
+    final browserKey = ref.watch(
+      sessionFileBrowserKeyProvider(widget.sessionKey),
+    );
     if (widget.isConnected && !_started) {
       _started = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          ref
-              .read(
-                sessionFileBrowserControllerProvider(
-                  widget.sessionKey,
-                ).notifier,
-              )
-              .load();
-        }
-      });
+      // The once-per-attach gate probe already makes the workspace-root call,
+      // so a browser that is no longer idle has (or is getting) its listing.
+      // Re-loading here would cost a second round-trip and would clear a
+      // preview a transcript file link just opened.
+      final browsed =
+          ref.read(sessionFileBrowserControllerProvider(browserKey)).phase !=
+          SessionFileBrowserPhase.idle;
+      if (!browsed) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            ref
+                .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+                .load();
+          }
+        });
+      }
     }
 
     final state = widget.isConnected
-        ? ref.watch(sessionFileBrowserControllerProvider(widget.sessionKey))
+        ? ref.watch(sessionFileBrowserControllerProvider(browserKey))
         : null;
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
@@ -239,6 +249,20 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
           style: _sectionHeadingStyle(theme),
         ),
         const SizedBox(height: 8),
+        // The closed gate is stated exactly ONCE, here, where a reader who
+        // noticed the transcript's paths are not links would come looking.
+        // Never on a mention, never as a dialog, never per tap.
+        if (_sessionFileLinksOffMessage(l10n, state?.gate)
+            case final String message) ...[
+          Text(
+            message,
+            key: const Key('session-detail-files-links-off'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
         // Governed by docs/architecture/client-ui.md:
         // Files is read-only session work state, not raw broker endpoint UI.
         if (state == null)
@@ -270,7 +294,11 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
 
   void _loadPath(String path) {
     ref
-        .read(sessionFileBrowserControllerProvider(widget.sessionKey).notifier)
+        .read(
+          sessionFileBrowserControllerProvider(
+            ref.read(sessionFileBrowserKeyProvider(widget.sessionKey)),
+          ).notifier,
+        )
         .load(path: path);
   }
 }
@@ -389,6 +417,22 @@ class _SessionFilesMessageBanner extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The one line explaining why this session's transcript paths are plain text.
+///
+/// Null whenever links are live, still being probed, or failed for a reason
+/// that is not a settled host posture — claiming "workspace browsing is off"
+/// after a dropped connection would be a lie the reader cannot act on.
+String? _sessionFileLinksOffMessage(
+  AppLocalizations l10n,
+  SessionFileLinkGate? gate,
+) {
+  return switch (gate) {
+    SessionFileLinkGate.remoteDisabled => l10n.sessionFilesLinksOff,
+    SessionFileLinkGate.noWorkspace => l10n.sessionFilesLinksOffNoWorkspace,
+    _ => null,
+  };
 }
 
 String _sessionFileBrowserNotice(

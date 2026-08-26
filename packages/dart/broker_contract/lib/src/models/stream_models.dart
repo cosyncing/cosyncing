@@ -54,6 +54,7 @@ class ModelOption {
     required this.providerID,
     required this.modelID,
     required this.label,
+    this.providerLabel,
     this.variant,
     this.description,
     this.reasoningEfforts,
@@ -64,6 +65,7 @@ class ModelOption {
       _$ModelOptionFromJson(json);
 
   final String providerID;
+  final String? providerLabel;
   final String modelID;
   final String? variant;
   final String label;

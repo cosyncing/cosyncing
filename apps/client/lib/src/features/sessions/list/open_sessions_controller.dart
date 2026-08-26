@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
@@ -211,7 +213,62 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
 
   /// Closes [key] from the working set (not the broker). If it was active,
   /// activates a neighbor.
-  void close(String key) {
+  ///
+  /// The draft-durability barrier lives HERE rather than in each caller.
+  /// Closing a tab drops the resident lease `OpenSessionSyncSupervisor` holds
+  /// on that session's detail controller, which auto-disposes it — and a value
+  /// typed inside the 300 ms persistence debounce has not crossed Drift yet.
+  /// Every close path (the compact page, the wide tab strip's button, the wide
+  /// Ctrl/Cmd+W chord) therefore gets the flush by construction; a future close
+  /// button cannot forget it.
+  ///
+  /// The returned future completes once the working set has been mutated. A
+  /// session with nothing staged never awaits at all, so the tab still leaves
+  /// the strip synchronously in that case.
+  Future<void> close(String key) {
+    final barrier = _draftDurabilityBarrier(key);
+    if (barrier == null) {
+      _closeNow(key);
+      return Future<void>.value();
+    }
+    return barrier.then((_) => _closeNow(key));
+  }
+
+  /// Makes the closing session's composer value durable before the tab goes.
+  ///
+  /// Null when there is nothing to wait for: [key] is not open, its detail
+  /// controller was never created (or has already auto-disposed), or no
+  /// composer ever staged a value for it.
+  ///
+  /// The flush is best effort by design. A failed one still closes the tab:
+  /// this notifier has no surface to report a refused write on, the DR1b
+  /// keepalive record already holds the text synchronously, and a tab that
+  /// silently refuses to close would be the worse failure. The compact page
+  /// keeps its own barrier for exactly that reason — it CAN report, so it
+  /// still aborts and shows the message. Its flush and this one coalesce:
+  /// `flushLocalDraft` of an unchanged value performs no write and no relay,
+  /// and draft mutations are serialized, never nested, so the second call
+  /// cannot deadlock behind the first.
+  Future<void>? _draftDurabilityBarrier(String key) {
+    SessionRef? closing;
+    for (final entry in _current.refs) {
+      if (entry.key == key) {
+        closing = entry;
+        break;
+      }
+    }
+    if (closing == null) return null;
+    final provider = sessionDetailControllerProvider(
+      SessionDetailKey(tool: closing.tool, sessionId: closing.id),
+    );
+    // Never `read` a detail controller into existence here: creating one to
+    // close a session would build an attach-capable controller for a session
+    // the user is walking away from.
+    if (!ref.exists(provider)) return null;
+    return ref.read(provider.notifier).flushStagedLocalDraft();
+  }
+
+  void _closeNow(String key) {
     final current = _current;
     final index = current.refs.indexWhere((ref) => ref.key == key);
     if (index < 0) {
@@ -240,7 +297,44 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
   }
 
   /// Closes every open session except [key].
-  void closeOthers(String key) {
+  ///
+  /// Carries the same draft-durability contract as [close], for N tabs at
+  /// once: closing a tab drops the resident lease on its detail controller, so
+  /// a value typed inside the 300 ms debounce dies with it — and "close
+  /// others" is precisely the gesture aimed at the tabs the user is NOT
+  /// looking at, where an unsaved draft is most likely to be sitting.
+  ///
+  /// Every closing key's barrier is gathered first and awaited together, then
+  /// the working set is mutated once. Barriers must not be serialized behind
+  /// each other (N debounce flushes in sequence), and the mutation must not be
+  /// split per tab (each split would publish an intermediate strip).
+  ///
+  /// Like [close], a working set with nothing staged never awaits at all, so
+  /// the tabs still leave the strip synchronously in that case.
+  Future<void> closeOthers(String key) {
+    final current = _current;
+    final kept = current.refs.where((ref) => ref.key == key).toList();
+    if (kept.isEmpty) {
+      return Future<void>.value();
+    }
+    final barriers = <Future<void>>[];
+    for (final ref in current.refs) {
+      if (ref.key == key) {
+        continue;
+      }
+      final barrier = _draftDurabilityBarrier(ref.key);
+      if (barrier != null) {
+        barriers.add(barrier);
+      }
+    }
+    if (barriers.isEmpty) {
+      _closeOthersNow(key);
+      return Future<void>.value();
+    }
+    return Future.wait(barriers).then((_) => _closeOthersNow(key));
+  }
+
+  void _closeOthersNow(String key) {
     final current = _current;
     final kept = current.refs.where((ref) => ref.key == key).toList();
     if (kept.isEmpty) {

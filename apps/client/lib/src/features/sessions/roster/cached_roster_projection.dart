@@ -72,6 +72,8 @@ final class CachedRosterGroup {
 /// * linkage identity is `(machine, tool, nativeId)` and never crosses a
 ///   machine or tool boundary;
 /// * self-links and cycles fail open as roots;
+/// * roots and sibling lists are ordered by [compareRosterIdentities], which is
+///   the authoritative settled-band rule;
 /// * children are emitted directly beneath their parent, parent-first;
 /// * a resolved child inherits its logical root's project group;
 /// * groups key on the root's `machine` + real `cwd`, labelled by
@@ -142,6 +144,18 @@ final class CachedRosterProjection {
         colour[key] = settled;
       }
     }
+
+    // Order is DERIVED here, not inherited from the stored row sequence.
+    //
+    // The stored sequence is a retention ranking: `boundRosterSnapshotPayload`
+    // inserts a parent immediately ahead of the child that pulled it in, so a
+    // parent lands wherever its child ranked rather than where its own recency
+    // puts it, and the byte budget then truncates from the end. Rendering that
+    // sequence made the cached pane disagree with the live pane about rows
+    // neither of them considers active. Sorting here is what removes the
+    // disagreement; the residual cached -> live jump is the status bands, which
+    // this projection has no way to know and no business guessing.
+    order.sort((a, b) => compareRosterIdentities(byKey[a]!, byKey[b]!));
 
     final childKeysByParentKey = <String, List<String>>{};
     for (final key in order) {

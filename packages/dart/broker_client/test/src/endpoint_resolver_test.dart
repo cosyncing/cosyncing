@@ -3,8 +3,8 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
 const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=17&minimumBrokerRevision=16&'
-    'contractSurfaceHash=fnv1a32%3A3ff9de78';
+    'clientVersion=0.0.0-dev&contractRevision=18&minimumBrokerRevision=16&'
+    'contractSurfaceHash=fnv1a32%3A4531a029';
 
 void main() {
   group('EndpointResolver', () {
@@ -47,6 +47,16 @@ void main() {
         'http://127.0.0.1:7734/api/agent-runtime-updates/codex%20runtime/restart',
       );
     });
+
+    test(
+      'workspaceBrowsingSettingsEndpoint returns the owner setting path',
+      () {
+        expect(
+          resolver.workspaceBrowsingSettingsEndpoint,
+          'http://127.0.0.1:7734/api/broker/features/workspace-browsing',
+        );
+      },
+    );
 
     test('agentRuntimeUpdatesEndpointFor encodes fresh=1', () {
       expect(

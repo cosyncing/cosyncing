@@ -5,7 +5,8 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, kMiddleMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -91,6 +92,63 @@ void main() {
 
       expect(selected, ['codex/b']);
       expect(closed, ['claude/a']);
+    });
+
+    // The one Chrome tab affordance that needs no chord and no browser
+    // reservation, so it works identically on native and on web.
+    testWidgets('middle-click closes a tab without selecting it', (
+      tester,
+    ) async {
+      final selected = <String>[];
+      final closed = <String>[];
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [_ref('claude', 'a'), _ref('codex', 'b')],
+            activeKey: 'claude/a',
+            onSelect: selected.add,
+            onClose: closed.add,
+          ),
+        ),
+      );
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('open-session-tab-codex/b'))),
+        kind: PointerDeviceKind.mouse,
+        buttons: kMiddleMouseButton,
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(closed, ['codex/b']);
+      expect(selected, isEmpty);
+    });
+
+    testWidgets('a primary click still selects rather than closes', (
+      tester,
+    ) async {
+      final selected = <String>[];
+      final closed = <String>[];
+      await tester.pumpWidget(
+        host(
+          OpenSessionsTabStrip(
+            refs: [_ref('claude', 'a'), _ref('codex', 'b')],
+            activeKey: 'claude/a',
+            onSelect: selected.add,
+            onClose: closed.add,
+          ),
+        ),
+      );
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('open-session-tab-codex/b'))),
+        kind: PointerDeviceKind.mouse,
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(selected, ['codex/b']);
+      expect(closed, isEmpty);
     });
 
     testWidgets('a mouse wheel scrolls the strip horizontally', (tester) async {

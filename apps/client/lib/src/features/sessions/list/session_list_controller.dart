@@ -12,6 +12,7 @@ import 'package:cosyncing_client/src/features/sessions/list/session_list_reposit
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_status_registry.dart';
 import 'package:flutter/widgets.dart';
@@ -815,16 +816,15 @@ class SessionListController extends Notifier<SessionListState> {
   String _sessionKey(SessionInfo session) =>
       '${session.machine ?? state.machine ?? ''}/${session.tool}/${session.id}';
 
-  static int _compareSessions(SessionInfo a, SessionInfo b) {
-    int rank(SessionStatus status) => switch (status) {
-      SessionStatus.needsInput => 0,
-      SessionStatus.working => 1,
-      SessionStatus.idle => 2,
-    };
-    return rank(a.status).compareTo(rank(b.status)) != 0
-        ? rank(a.status).compareTo(rank(b.status))
-        : (b.updatedAt ?? 0).compareTo(a.updatedAt ?? 0);
-  }
+  /// Delta-path order.
+  ///
+  /// Delegates to the shared roster comparator rather than restating the rule,
+  /// so the delta path cannot invent a second order. All this layer can see is
+  /// canonical status, which is fine: the lineage re-sorts on effective status
+  /// downstream, so a parent promoted by a working descendant still lands in
+  /// the working band without any rollup here.
+  static int _compareSessions(SessionInfo a, SessionInfo b) =>
+      compareRosterSessions(a, b);
 
   void _stopFeed({bool keepRepository = false}) {
     _feedGeneration++;
@@ -899,5 +899,12 @@ final sessionRosterResumeRefreshProvider = Provider<SessionRosterResumeRefresh>(
 /// layouts necessarily agree with each other and with the open detail.
 final rosterSessionsProvider = Provider<List<SessionInfo>>((ref) {
   final rows = ref.watch(sessionListControllerProvider).sessions;
-  return ref.watch(sessionStatusRegistryProvider).apply(rows);
+  // Ordered AFTER the registry overlay, never before. The overlay changes a
+  // row's STATUS from a live session frame; without a re-order the row would
+  // keep its old band slot — an idle pill sitting in a working slot until the
+  // next roster publish happened to move it. Canonical status is all this layer
+  // has, and that is enough: the lineage re-sorts on effective status.
+  return orderRosterSessions(
+    ref.watch(sessionStatusRegistryProvider).apply(rows),
+  );
 });

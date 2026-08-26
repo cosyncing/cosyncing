@@ -17,6 +17,7 @@ library;
 import 'dart:convert';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
 
 /// Which dedicated presentation renders a tool row.
 enum ToolPresentationFamily {
@@ -336,10 +337,18 @@ final class ToolFileReadPresentation {
     required this.truncated,
     this.totalLines,
     this.unavailable,
+    this.reference,
   });
 
   /// Read path.
   final String path;
+
+  /// The unclipped, resolvable reference behind [path], when one was derivable.
+  ///
+  /// Carried as data beside the display string so a link never re-parses what
+  /// is on screen — the collapsed summary clips paths, and a link built from a
+  /// clipped string would open the wrong file.
+  final SessionFileReference? reference;
 
   /// Bounded, sanitized, line-numbered preview rows.
   final List<ToolPreviewLine> lines;
@@ -362,10 +371,15 @@ final class ToolSearchGroupPresentation {
     required this.matches,
     required this.truncated,
     this.matchCount,
+    this.reference,
   });
 
   /// File the matches belong to.
   final String path;
+
+  /// The unclipped, resolvable reference behind [path], anchored at the first
+  /// published match so a tap lands on evidence rather than on line 1.
+  final SessionFileReference? reference;
 
   /// Authoritative match count, which may exceed [matches].length.
   final int? matchCount;
@@ -740,6 +754,7 @@ ToolFileReadPresentation? buildToolFileReadPresentation({
 }) {
   final semantic = (result?.toolSemantic ?? call?.toolSemantic)?.fileRead;
   if (semantic == null) return null;
+  final reference = fileReadReference(semantic);
   if (semantic.unavailable != null) {
     return ToolFileReadPresentation(
       path: semantic.path,
@@ -747,6 +762,7 @@ ToolFileReadPresentation? buildToolFileReadPresentation({
       truncated: false,
       totalLines: semantic.totalLines,
       unavailable: semantic.unavailable,
+      reference: reference,
     );
   }
   final bounded = boundToolBody(
@@ -764,6 +780,7 @@ ToolFileReadPresentation? buildToolFileReadPresentation({
       unavailable: semantic.preview == null
           ? null
           : ToolReadUnavailableReason.empty,
+      reference: reference,
     );
   }
   // A source that published no start line gets NO gutter numbers — a number
@@ -784,6 +801,7 @@ ToolFileReadPresentation? buildToolFileReadPresentation({
     lines: List.unmodifiable(rows),
     truncated: bounded.truncated || semantic.previewTruncated,
     totalLines: semantic.totalLines,
+    reference: reference,
   );
 }
 
@@ -822,6 +840,7 @@ ToolSearchPresentation? buildToolSearchPresentation({
         matchCount: group.matchCount,
         matches: List.unmodifiable(matches),
         truncated: group.truncated || matches.length < group.matches.length,
+        reference: searchGroupReference(group),
       ),
     );
   }

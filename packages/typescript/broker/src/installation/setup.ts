@@ -2,6 +2,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { inspectPiBridgeAsset } from '@cosyncing/adapter-pi';
+import {
+  inspectLegacyCodexDaemon,
+  migrateLegacyCodexDaemon,
+  readCodexDaemonVersion,
+  codexDaemonIsManaged,
+  type CodexDaemonOwnershipEvidence,
+  type LegacyCodexDaemonInspection,
+  type LegacyCodexDaemonProcess,
+} from '@cosyncing/adapter-codex';
 import type { SetupCheck, SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import type { DistributionKind } from '../runtime/application-identity.ts';
 import type { BuildInfo } from '../runtime/build-info.ts';
@@ -105,6 +114,7 @@ import {
   readTokdashOwnership,
   setTokdashCompletion,
   setTokdashOwnership,
+  setCodexDaemonOwnership,
   setupStateHome,
   type SetupState,
 } from './setup-state.ts';
@@ -123,6 +133,7 @@ import {
   SetupTransactionError,
   type SetupFailureDiagnostic,
   type SetupPlanAction,
+  type SetupTransactionAction,
   type SetupTransactionPlan,
 } from './setup-transaction.ts';
 
@@ -152,6 +163,8 @@ export interface SetupChoices {
   replaceLegacyPiBridge?: boolean;
   /** One-run migration consent; never authorizes any skill content except the exact known predecessor. */
   upgradeLegacyAgentSkill?: boolean;
+  /** One-run consent embodied by the reviewed final plan; never persisted as a preference. */
+  migrateLegacyCodexDaemon?: boolean;
 }
 
 /** Per-rc-file view used by the plan to decide whether the managed block needs installing. */
@@ -250,6 +263,8 @@ export interface SetupInspection {
    */
   webAppAvailable: boolean;
   agents: SetupAgentSummary[];
+  /** A pre-managed direct-launch Codex daemon, when one is currently answering. */
+  legacyCodexDaemon?: LegacyCodexDaemonInspection;
   doctor: DoctorReport;
   blockingIssues: SetupBlockingIssue[];
   preconditionHash: string;
@@ -380,7 +395,10 @@ export interface SetupDependencies {
     context: SetupDiagnosisContext;
     installationId?: string;
     durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
+    inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
   }) => Promise<SetupInspection>;
+  /** Injected so setup acceptance tests never inspect or mutate the host-global Codex daemon. */
+  inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
   acquireLock?: (options: { command: 'setup'; home: string }) => InstallationLockHandle;
   actionCatalogFactory?: typeof createSetupActionCatalog;
   durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
@@ -639,6 +657,7 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
       minimumVersion,
       ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
     })),
+    legacyCodexDaemon: input.legacyCodexDaemon,
     agentExecutableDirectories: input.agentExecutableDirectories,
     agentExecutableOverrides: input.agentExecutableOverrides,
     durableServiceProvider: input.durableServiceProvider,
@@ -661,6 +680,7 @@ export async function inspectSetupEnvironment(options: {
   durableServiceProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   /** @deprecated Use durableServiceProviderFactory. */
   systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
+  inspectLegacyCodexDaemon?: (codexBin: string) => Promise<LegacyCodexDaemonInspection | undefined>;
 }): Promise<SetupInspection> {
   const config = inspectBrokerConfig(options.home);
   const targetConfig = config.status === 'ok' ? config.config : defaultBrokerConfig();
@@ -707,6 +727,18 @@ export async function inspectSetupEnvironment(options: {
     stateHome: options.home,
   });
   const agents = agentSummaries(doctor);
+  let legacyCodexDaemon: LegacyCodexDaemonInspection | undefined;
+  const codexBin = options.context.resolveExecutable('codex');
+  if (codexBin && existsSync(codexBin)
+      && agents.some((agent) => agent.id === 'codex' && agent.state === 'supported')) {
+    try {
+      legacyCodexDaemon = options.inspectLegacyCodexDaemon
+        ? await options.inspectLegacyCodexDaemon(codexBin)
+        : await inspectLegacyCodexDaemon({ codexBin });
+    } catch {
+      legacyCodexDaemon = { state: 'unproven', detail: 'The running Codex daemon could not be inspected safely.' };
+    }
+  }
   const agentExecutableDirectories = serviceAgentExecutableDirectories(options.context);
   const agentExecutableOverrides = serviceAgentExecutableOverrides(options.context);
   const currentPort = await portStatus({
@@ -725,6 +757,13 @@ export async function inspectSetupEnvironment(options: {
     doctor,
     new Set(durableAssessment.permissionRepairs.map((repair) => repair.id)),
   ), ...durableStateBlockers(durableAssessment.blockers)];
+  if (legacyCodexDaemon?.state === 'unproven') {
+    issues.push({
+      code: 'codex-legacy-daemon-unproven',
+      summary: 'A legacy unmanaged Codex app server is running, but setup cannot prove its process identity.',
+      remediation: `${legacyCodexDaemon.detail} Stop that Codex process explicitly, then rerun setup.`,
+    });
+  }
   if (config.status === 'error') {
     issues.push({
       code: config.detailCode,
@@ -855,6 +894,7 @@ export async function inspectSetupEnvironment(options: {
       sourceRoot: resolve(import.meta.dir, '../../../../../apps/client/build/web'),
     }), 'index.html')),
     agents,
+    ...(legacyCodexDaemon ? { legacyCodexDaemon } : {}),
     blockingIssues: uniqueIssues(issues),
   };
   return {
@@ -1164,7 +1204,9 @@ export function buildSetupPlan(options: {
   // hand.
   const plansInstalledBinary = needsInstalledBinary
     && !blockingIssues.some((issue) => issue.code.startsWith('installed-binary-'));
-  const mutationsPending = (): boolean => actions.length > 0 || plansInstalledBinary;
+  const plansLegacyCodexMigration = options.choices.migrateLegacyCodexDaemon === true
+    && options.inspection.legacyCodexDaemon?.state === 'detected';
+  const mutationsPending = (): boolean => actions.length > 0 || plansInstalledBinary || plansLegacyCodexMigration;
 
   const skillReceipts = options.inspection.agentSkills.map((target) => ({
     target,
@@ -1351,6 +1393,16 @@ export function buildSetupPlan(options: {
       },
     ));
   }
+  if (plansLegacyCodexMigration) {
+    actions.push(planned(
+      { kind: 'codex-legacy-daemon-migration' },
+      {
+        id: 'codex.daemon.migrate-legacy',
+        title: 'Migrate the legacy Codex app server',
+        reversible: false,
+      },
+    ));
+  }
   if (options.inspection.portStatus === 'owned-running' && mutationsPending() && !serviceAction) {
     blockingIssues.push({
       code: 'foreground-broker-reconfigure-required',
@@ -1500,6 +1552,26 @@ function actionInputs(options: {
         }
       : {}),
     now: options.now,
+  };
+}
+
+function createLegacyCodexDaemonSetupAction(options: {
+  expected?: LegacyCodexDaemonProcess;
+  migrated?: (evidence: CodexDaemonOwnershipEvidence) => void;
+}): SetupTransactionAction {
+  return {
+    id: 'codex.daemon.migrate-legacy',
+    prepare: () => ({ kind: 'codex-daemon-migration', data: {} }),
+    apply: async () => {
+      if (!options.expected) throw new Error('The confirmed legacy Codex daemon identity is unavailable.');
+      options.migrated?.(await migrateLegacyCodexDaemon(options.expected));
+    },
+    verify: async () => codexDaemonIsManaged(
+      await readCodexDaemonVersion(options.expected?.managerExecutable),
+    ),
+    // The old direct-launch process cannot be recreated safely. Once takeover succeeds, preserving the
+    // newly managed daemon is the only honest rollback posture; its ownership is recorded by runSetup.
+    rollback: () => {},
   };
 }
 
@@ -1864,6 +1936,9 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       };
       const recoveryCatalog = catalogFactory(recoveryInputs);
       const recoveryActions = [...recoveryCatalog.actions];
+      if (pendingJournal.plan.actions.some((action) => action.id === 'codex.daemon.migrate-legacy')) {
+        recoveryActions.push(createLegacyCodexDaemonSetupAction({}));
+      }
       if (pendingJournal.plan.actions.some((action) => action.id === 'service.systemd')) {
         const recoveryProvider = createDurableProviderForSetup({
           context,
@@ -1911,6 +1986,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     context,
     installationId,
     durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
+    inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
   });
   // FIRST prompt, ahead of the intro panels: every panel below is copy, and copy needs a language before it
   // can be rendered. Cancelling here is a cancel like any other — nothing has been mutated yet.
@@ -1950,6 +2026,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     language,
   };
   const existingPlan = buildSetupPlan({ inspection, choices: existingChoices, now: dependencies.now });
+  const legacyCodexMigrationPending = inspection.legacyCodexDaemon?.state === 'detected';
   const legacyPiMigrationPending = inspection.agents.some((agent) => agent.id === 'pi' && agent.state === 'supported')
     && decidePiBridgeOwnership(inspection.installState, inspection.piBridge).status === 'legacy-unreceipted';
   const legacyAgentSkillMigrationPending = existingChoices.installAgentSkill
@@ -1972,7 +2049,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   if (inspection.installState.committed
       && existingPlan.noOp
       && !legacyPiMigrationPending
-      && !legacyAgentSkillMigrationPending) {
+      && !legacyAgentSkillMigrationPending
+      && !legacyCodexMigrationPending) {
     // A committed rerun is a no-op for the transaction, but not for Tokdash. Provisioning is post-commit and
     // best-effort, so a first run that failed — no pipx on the host, say — leaves consent recorded and
     // nothing provisioned, and exiting here meant the operator's retry, pipx now installed, never reached
@@ -2093,6 +2171,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     installOpencodeShim,
     replaceLegacyPiBridge,
     upgradeLegacyAgentSkill,
+    migrateLegacyCodexDaemon: legacyCodexMigrationPending,
   };
   const plan = buildSetupPlan({ inspection, choices, installationId, now: dependencies.now });
   if (plan.blockingIssues.length > 0) {
@@ -2124,6 +2203,8 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
   }
 
   const lock = acquireLock({ command: 'setup', home });
+  let migratedCodexEvidence: CodexDaemonOwnershipEvidence | undefined;
+  let codexOwnershipRecorded = false;
   try {
     inspection = await inspect({
       buildInfo: dependencies.buildInfo,
@@ -2133,6 +2214,7 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       context,
       installationId,
       durableServiceProviderFactory: dependencies.durableServiceProviderFactory ?? dependencies.systemdProviderFactory,
+      inspectLegacyCodexDaemon: dependencies.inspectLegacyCodexDaemon,
     });
     const lockedPlan = buildSetupPlan({
       inspection,
@@ -2196,6 +2278,15 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         lingeringAlreadyOwned: durableServiceOwnership(inspection).lingering,
       }));
     }
+    if (lockedPlan.actions.some((action) => action.id === 'codex.daemon.migrate-legacy')) {
+      const expected = inspection.legacyCodexDaemon?.state === 'detected'
+        ? inspection.legacyCodexDaemon
+        : undefined;
+      transactionActions.push(createLegacyCodexDaemonSetupAction({
+        expected,
+        migrated: (evidence) => { migratedCodexEvidence = evidence; },
+      }));
+    }
     await executeSetupTransaction({
       home,
       plan: lockedPlan.transaction,
@@ -2228,6 +2319,13 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
       } : {}),
       now: dependencies.now,
     });
+    if (migratedCodexEvidence) {
+      setCodexDaemonOwnership({
+        ...migratedCodexEvidence,
+        recordedAt: (dependencies.now?.() ?? new Date()).toISOString(),
+      }, home);
+      codexOwnershipRecorded = true;
+    }
     // A Windows version remains rollback material until the new active manifest, service health, and receipt
     // have all committed. Cleanup is deliberately outside the transaction; failure preserves the old version
     // and a later setup can retry without invalidating the successful installation.
@@ -2264,6 +2362,19 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
     await dependencies.presenter.complete(complete);
     return complete;
   } catch (error) {
+    // A completed takeover cannot restore the direct-launch process during transaction rollback. Preserve
+    // truthful ownership of the managed replacement even when a later setup step fails.
+    if (migratedCodexEvidence && !codexOwnershipRecorded) {
+      try {
+        setCodexDaemonOwnership({
+          ...migratedCodexEvidence,
+          recordedAt: (dependencies.now?.() ?? new Date()).toISOString(),
+        }, home);
+        codexOwnershipRecorded = true;
+      } catch {
+        /* the setup failure below remains authoritative; ownership stays fail-closed when persistence fails */
+      }
+    }
     const rollbackIncomplete = error instanceof SetupTransactionError && error.code === 'rollback-failed';
     // The diagnostic is read back rather than reconstructed: what the operator is told is exactly what was
     // persisted, so a bug report quoting the terminal and a bug report quoting the file cannot disagree.

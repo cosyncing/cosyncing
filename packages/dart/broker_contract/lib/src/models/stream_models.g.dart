@@ -39,6 +39,7 @@ ModelOption _$ModelOptionFromJson(Map<String, dynamic> json) => ModelOption(
   providerID: json['providerID'] as String,
   modelID: json['modelID'] as String,
   label: json['label'] as String,
+  providerLabel: json['providerLabel'] as String?,
   variant: json['variant'] as String?,
   description: json['description'] as String?,
   reasoningEfforts: (json['reasoningEfforts'] as List<dynamic>?)
@@ -50,6 +51,7 @@ ModelOption _$ModelOptionFromJson(Map<String, dynamic> json) => ModelOption(
 Map<String, dynamic> _$ModelOptionToJson(ModelOption instance) =>
     <String, dynamic>{
       'providerID': instance.providerID,
+      'providerLabel': instance.providerLabel,
       'modelID': instance.modelID,
       'variant': instance.variant,
       'label': instance.label,

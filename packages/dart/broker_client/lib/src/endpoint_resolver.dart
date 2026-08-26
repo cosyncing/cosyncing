@@ -55,6 +55,10 @@ class EndpointResolver {
   /// Broker health endpoint.
   String get brokerHealthEndpoint => '$baseUrl/api/broker/health';
 
+  /// Workspace-browsing exposure setting endpoint.
+  String get workspaceBrowsingSettingsEndpoint =>
+      '$baseUrl/api/broker/features/workspace-browsing';
+
   /// Signed broker release-channel status and update endpoint.
   String get brokerUpdateEndpoint => '$baseUrl/api/broker/update';
 

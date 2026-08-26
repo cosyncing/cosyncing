@@ -2525,6 +2525,9 @@ class OpenCodeConnection implements SessionConnection {
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('OpenCode does not support persistent approval rules through this connection');
+    }
     const reply = decision === 'reject' ? 'reject' : decision === 'approve-session' ? 'always' : 'once';
     const res = await fetch(this.url(`/permission/${requestId}/reply${this.dirq()}`), {
       method: 'POST',
@@ -3450,6 +3453,21 @@ function writeInboxFile(cwd: string | undefined, file: FileInput): string | unde
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The canonical rows one OpenCode message part maps to.
+ *
+ * A named export over the private `mapPart` seam, so the cross-adapter
+ * path-stamp contract test can drive OpenCode the way it drives every other
+ * adapter — as a pure function over a recorded native record. The five
+ * siblings already export theirs (`mapTranscript`, `mapRollout`,
+ * `mapPiJsonlText`, `mapKimiMessage`, `mapDshEvent`); without this one a suite
+ * spanning all six would have to stand up an HTTP and SSE server for exactly
+ * one of them.
+ */
+export function mapOpenCodePart(part: unknown, historical = true): AgentMessage[] {
+  return mapPart(part, historical);
 }
 
 /** Map an OpenCode Part to zero or more normalized AgentMessages. */

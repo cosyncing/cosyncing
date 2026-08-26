@@ -5,6 +5,9 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_file_link_scope.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -165,6 +168,8 @@ class SessionFilePreview {
     required this.limit,
     required this.truncated,
     required this.text,
+    this.anchorLine,
+    this.anchorColumn,
   });
 
   /// Workspace-relative path.
@@ -187,6 +192,28 @@ class SessionFilePreview {
 
   /// Decoded preview text.
   final String text;
+
+  /// 1-based line the viewer should scroll to, when the mention carried one.
+  final int? anchorLine;
+
+  /// 1-based column to highlight inside [anchorLine], when one was carried.
+  final int? anchorColumn;
+
+  /// Lines the broker actually returned.
+  ///
+  /// `/fs/read` reads from byte 0 with no offset, so this is a prefix of the
+  /// file whenever [truncated] is true — which is exactly when an anchor can
+  /// point past the end of what was delivered.
+  int get previewedLineCount =>
+      text.isEmpty ? 0 : '\n'.allMatches(text).length + 1;
+
+  /// Whether [anchorLine] names a line the broker did not deliver.
+  ///
+  /// The viewer must say so rather than silently landing on line 1: an honest
+  /// "line N is beyond the previewed prefix" keeps a truncated read from
+  /// reading as a complete one.
+  bool get anchorBeyondPreview =>
+      anchorLine != null && anchorLine! > previewedLineCount;
 }
 
 /// Immutable state for one session file browser.
@@ -196,6 +223,7 @@ class SessionFileBrowserState {
   SessionFileBrowserState({
     this.phase = SessionFileBrowserPhase.idle,
     this.currentPath = '',
+    this.gate = SessionFileLinkGate.unknown,
     this.result,
     this.preview,
     this.errorCode,
@@ -206,6 +234,13 @@ class SessionFileBrowserState {
 
   /// Current load phase.
   final SessionFileBrowserPhase phase;
+
+  /// Cached outcome of this attach's single workspace-file-API gate probe.
+  ///
+  /// Held here rather than on a mention because the gate is a property of the
+  /// host connection: one probe per attach answers it for every link on the
+  /// page, and no amount of scrolling re-asks.
+  final SessionFileLinkGate gate;
 
   /// Workspace-relative directory path currently shown.
   final String currentPath;
@@ -266,6 +301,7 @@ class SessionFileBrowserState {
   SessionFileBrowserState copyWith({
     SessionFileBrowserPhase? phase,
     String? currentPath,
+    SessionFileLinkGate? gate,
     FsDirectoryResult? result,
     SessionFilePreview? preview,
     String? errorCode,
@@ -279,6 +315,7 @@ class SessionFileBrowserState {
     return SessionFileBrowserState(
       phase: phase ?? this.phase,
       currentPath: currentPath ?? this.currentPath,
+      gate: gate ?? this.gate,
       result: result ?? this.result,
       preview: clearPreview ? null : preview ?? this.preview,
       errorCode: clearError ? null : errorCode ?? this.errorCode,
@@ -309,13 +346,100 @@ class SessionFileBreadcrumb {
   final String path;
 }
 
+/// Source-qualified identity for one session's read-only file browser.
+///
+/// [SessionDetailKey] alone is NOT this identity. Both things this controller
+/// holds are facts about a HOST: the trust-gate verdict ("does this machine
+/// serve workspace files to remote clients") and the loaded listing (that
+/// machine's directory contents). Two brokers can hand out the same native
+/// tool/session id, so a `(tool, sessionId)`-only key let a switch of the
+/// active profile to a different broker keep the previous host's open/closed
+/// verdict and its files on screen.
+///
+/// The qualifier is the exact `RosterSource.storageKey` — profile AND endpoint
+/// AND incarnation — the same one the inline-schedule diagnostics and model
+/// preference keys use: a profile is an editable pointer, so re-pointing it at
+/// another machine keeps its id and an id-keyed verdict would be shown as the
+/// new machine's.
+@immutable
+final class SessionFileBrowserKey {
+  /// Creates a source-qualified file browser identity.
+  const SessionFileBrowserKey({
+    required this.brokerScopeKey,
+    required this.session,
+  });
+
+  /// `RosterSource.storageKey` of the broker being browsed, or null when no
+  /// profile is active.
+  final String? brokerScopeKey;
+
+  /// The session within that broker.
+  final SessionDetailKey session;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionFileBrowserKey &&
+      other.brokerScopeKey == brokerScopeKey &&
+      other.session == session;
+
+  @override
+  int get hashCode => Object.hash(brokerScopeKey, session);
+
+  @override
+  String toString() =>
+      'SessionFileBrowserKey(${brokerScopeKey ?? 'no-profile'} '
+      '${session.tool}/${session.sessionId})';
+}
+
+/// The active broker's file browser identity for one session.
+///
+/// One place derives the qualifier, so the page, the Files panel and the gate
+/// probe all land on the same notifier — and a profile switch moves them
+/// together onto a fresh one instead of leaving some watchers behind.
+final AutoDisposeProviderFamily<SessionFileBrowserKey, SessionDetailKey>
+sessionFileBrowserKeyProvider = Provider.autoDispose
+    .family<SessionFileBrowserKey, SessionDetailKey>((ref, session) {
+      return SessionFileBrowserKey(
+        brokerScopeKey: ref.watch(
+          activeBrokerProfileProvider.select(
+            (profile) => RosterSource.of(profile)?.storageKey,
+          ),
+        ),
+        session: session,
+      );
+    });
+
 /// Controller for the read-only file browser slice.
 class SessionFileBrowserController
     extends
-        AutoDisposeFamilyNotifier<SessionFileBrowserState, SessionDetailKey> {
+        AutoDisposeFamilyNotifier<
+          SessionFileBrowserState,
+          SessionFileBrowserKey
+        > {
   @override
-  SessionFileBrowserState build(SessionDetailKey arg) {
+  SessionFileBrowserState build(SessionFileBrowserKey arg) {
     return SessionFileBrowserState();
+  }
+
+  /// Whether a gate probe is already in flight for this session.
+  bool _probing = false;
+
+  /// Probes the workspace-file gate exactly once per attach.
+  ///
+  /// Reuses the workspace-root `/fs?path=` call the Files tab already makes, so
+  /// a session that later opens Files pays for one request, not two, and a
+  /// session that never opens Files still learns whether its mentions can be
+  /// links at all. Idempotent: once [SessionFileBrowserState.gate] is resolved
+  /// this is a no-op, which is what keeps scrolling from ever re-asking.
+  Future<void> probeGate() async {
+    if (_probing || state.gate != SessionFileLinkGate.unknown) return;
+    if (state.phase != SessionFileBrowserPhase.idle) return;
+    _probing = true;
+    try {
+      await load();
+    } finally {
+      _probing = false;
+    }
   }
 
   /// Loads [path], replacing the current directory/stat result.
@@ -343,10 +467,11 @@ class SessionFileBrowserController
     }
 
     try {
-      final result = await repository.listPath(arg, path: normalized);
+      final result = await repository.listPath(arg.session, path: normalized);
       state = SessionFileBrowserState(
         phase: SessionFileBrowserPhase.ready,
         currentPath: result.path,
+        gate: SessionFileLinkGate.open,
         result: result,
       );
     } on BrokerException catch (e) {
@@ -358,9 +483,155 @@ class SessionFileBrowserController
       state = SessionFileBrowserState(
         phase: SessionFileBrowserPhase.error,
         currentPath: normalized,
+        gate: _gateAfterFailure(path: normalized, code: null),
         notice: SessionFileBrowserNotice.failed,
         technicalDetail: failureDetail(e),
       );
+    }
+  }
+
+  /// Opens one transcript file mention in this session's Files surface.
+  ///
+  /// One `/fs?path=` stat decides the shape — the broker owns every filesystem
+  /// fact, and the client re-decides none of them. A directory becomes the
+  /// current listing; a file is read and returned as a preview carrying the
+  /// mention's line anchor. Every error code keeps the notice the Files surface
+  /// already localizes, shown in place: no tab is forced, and nothing retries.
+  ///
+  /// The raw path is sent exactly as the adapter recorded it. Absolute and `~`
+  /// forms are relativized against the session root by the broker, which is the
+  /// only side that can `realpath` either end.
+  Future<SessionFilePreview?> openReference(
+    SessionFileReference reference,
+  ) async {
+    final requested = reference.rawPath;
+    state = state.copyWith(
+      phase: SessionFileBrowserPhase.loading,
+      notice: SessionFileBrowserNotice.loading,
+      clearError: true,
+      clearPreview: true,
+    );
+
+    final repository = await ref.read(
+      sessionFileBrowserRepositoryProvider.future,
+    );
+    if (repository == null) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.error,
+        notice: SessionFileBrowserNotice.connectToBrowse,
+      );
+      return null;
+    }
+
+    final FsDirectoryResult stat;
+    try {
+      stat = await repository.listPath(arg.session, path: requested);
+    } on BrokerException catch (e) {
+      state = _stateForBrokerException(path: state.currentPath, exception: e);
+      return null;
+    } on Object catch (e) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.error,
+        notice: SessionFileBrowserNotice.failed,
+        technicalDetail: failureDetail(e),
+      );
+      return null;
+    }
+
+    if (stat.stat.isDirectory) {
+      state = SessionFileBrowserState(
+        phase: SessionFileBrowserPhase.ready,
+        currentPath: stat.path,
+        gate: SessionFileLinkGate.open,
+        result: stat,
+      );
+      return null;
+    }
+
+    if (!stat.stat.isRegularFile) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.ready,
+        gate: SessionFileLinkGate.open,
+        notice: SessionFileBrowserNotice.notRegularFile,
+      );
+      return null;
+    }
+
+    // The broker's resolved, workspace-relative spelling — never the client's
+    // guess at one — is what the read and the parent listing both use.
+    final resolvedPath = stat.stat.path;
+    state = state.copyWith(
+      phase: SessionFileBrowserPhase.previewing,
+      gate: SessionFileLinkGate.open,
+      notice: SessionFileBrowserNotice.reading,
+      noticeArgument: _basename(resolvedPath),
+    );
+
+    final FsReadResult read;
+    try {
+      read = await repository.readFile(arg.session, path: resolvedPath);
+    } on BrokerException catch (e) {
+      state = _stateForBrokerException(path: state.currentPath, exception: e);
+      return null;
+    } on Object catch (e) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.error,
+        notice: SessionFileBrowserNotice.failed,
+        technicalDetail: failureDetail(e),
+      );
+      return null;
+    }
+
+    if (!isPreviewableMime(read.mimeType)) {
+      state = state.copyWith(
+        phase: SessionFileBrowserPhase.ready,
+        notice: SessionFileBrowserNotice.previewMimeUnavailable,
+        noticeArgument: read.mimeType,
+      );
+      await _listContaining(repository, resolvedPath);
+      return null;
+    }
+
+    final preview = SessionFilePreview(
+      path: read.path,
+      displayName: _basename(resolvedPath),
+      mimeType: read.mimeType,
+      size: read.size,
+      limit: read.limit,
+      truncated: read.truncated,
+      text: decodeSessionFileReadText(read),
+      anchorLine: reference.line,
+      anchorColumn: reference.column,
+    );
+    state = state.copyWith(
+      phase: SessionFileBrowserPhase.ready,
+      preview: preview,
+      notice: read.truncated ? SessionFileBrowserNotice.previewTruncated : null,
+      noticeArgument: read.truncated ? read.limit.toString() : null,
+      clearError: true,
+      clearNotice: !read.truncated,
+    );
+    // Best-effort: leaving the surface on the file's own directory is what
+    // makes "look, then come back" land somewhere useful. A failure here must
+    // not discard the preview the user asked for, so it is not surfaced.
+    await _listContaining(repository, resolvedPath);
+    return preview;
+  }
+
+  /// Lists the directory containing [path], keeping the current preview.
+  Future<void> _listContaining(
+    SessionFileBrowserRepository repository,
+    String path,
+  ) async {
+    final parent = SessionFileReference(rawPath: path).parent.rawPath;
+    final normalized = normalizeSessionFilePath(parent);
+    if (normalized == state.currentPath && state.result != null) return;
+    try {
+      final listing = await repository.listPath(arg.session, path: normalized);
+      state = state.copyWith(currentPath: listing.path, result: listing);
+    } on Object {
+      // The preview stands on its own; a failed sibling listing is not an error
+      // the reader can act on.
     }
   }
 
@@ -402,7 +673,7 @@ class SessionFileBrowserController
     }
 
     try {
-      final read = await repository.readFile(arg, path: entry.path);
+      final read = await repository.readFile(arg.session, path: entry.path);
       if (!isPreviewableMime(read.mimeType)) {
         state = state.copyWith(
           phase: SessionFileBrowserPhase.ready,
@@ -422,6 +693,7 @@ class SessionFileBrowserController
       );
       state = state.copyWith(
         phase: SessionFileBrowserPhase.ready,
+        gate: SessionFileLinkGate.open,
         preview: preview,
         notice: read.truncated
             ? SessionFileBrowserNotice.previewTruncated
@@ -456,6 +728,7 @@ class SessionFileBrowserController
       return SessionFileBrowserState(
         phase: SessionFileBrowserPhase.remoteDisabled,
         currentPath: path,
+        gate: SessionFileLinkGate.remoteDisabled,
         errorCode: code,
         notice: SessionFileBrowserNotice.remoteDisabled,
         technicalDetail: exception.message,
@@ -464,11 +737,44 @@ class SessionFileBrowserController
     return SessionFileBrowserState(
       phase: SessionFileBrowserPhase.error,
       currentPath: path,
+      gate: _gateAfterFailure(path: path, code: code),
       errorCode: code,
       notice: _noticeForSessionFileError(code),
       technicalDetail: exception.message,
     );
   }
+
+  /// The gate outcome a failed request implies, if any.
+  ///
+  /// Only a WORKSPACE-ROOT request can decide the gate: a `NOT_FOUND` on a
+  /// nested path means that file is gone, while the same code on the root means
+  /// the session has no working directory — the fs routes short-circuit
+  /// `NO_CWD` to 404 ahead of the error mapper, so the two arrive identically
+  /// and only the requested path tells them apart. A nested failure leaves an
+  /// already-resolved gate exactly where it was.
+  SessionFileLinkGate _gateAfterFailure({
+    required String path,
+    required String? code,
+  }) {
+    if (code == 'FS_REMOTE_DISABLED') return SessionFileLinkGate.remoteDisabled;
+    if (path.isNotEmpty) return state.gate;
+    if (code == 'NO_CWD' || code == 'NOT_FOUND') {
+      return SessionFileLinkGate.noWorkspace;
+    }
+    return state.gate == SessionFileLinkGate.unknown
+        ? SessionFileLinkGate.unavailable
+        : state.gate;
+  }
+}
+
+String _basename(String path) {
+  final normalized = path.replaceAll(r'\', '/');
+  final trimmed = normalized.length > 1 && normalized.endsWith('/')
+      ? normalized.substring(0, normalized.length - 1)
+      : normalized;
+  final index = trimmed.lastIndexOf('/');
+  final name = index < 0 ? trimmed : trimmed.substring(index + 1);
+  return name.isEmpty ? path : name;
 }
 
 SessionFileBrowserNotice _noticeForSessionFileError(String? code) {
@@ -486,17 +792,17 @@ SessionFileBrowserNotice _noticeForSessionFileError(String? code) {
   };
 }
 
-/// Provider for one session's read-only file browser.
+/// Provider for one session's read-only file browser, on one exact broker.
 final AutoDisposeNotifierProviderFamily<
   SessionFileBrowserController,
   SessionFileBrowserState,
-  SessionDetailKey
+  SessionFileBrowserKey
 >
 sessionFileBrowserControllerProvider = NotifierProvider.autoDispose
     .family<
       SessionFileBrowserController,
       SessionFileBrowserState,
-      SessionDetailKey
+      SessionFileBrowserKey
     >(SessionFileBrowserController.new);
 
 /// Normalizes a cwd-relative POSIX path for UI navigation.

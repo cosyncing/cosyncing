@@ -719,6 +719,7 @@ final class ArtifactInteractionPolicy {
 enum PermissionResolutionDecision {
   approve('approve'),
   approveSession('approve-session'),
+  approveRule('approve-rule'),
   reject('reject'),
   external('external'),
   unknown('unknown');
@@ -733,6 +734,7 @@ enum PermissionResolutionDecision {
     return switch (wire) {
       'approve' => PermissionResolutionDecision.approve,
       'approve-session' => PermissionResolutionDecision.approveSession,
+      'approve-rule' => PermissionResolutionDecision.approveRule,
       'reject' => PermissionResolutionDecision.reject,
       'external' => PermissionResolutionDecision.external,
       _ => PermissionResolutionDecision.unknown,

@@ -15,9 +15,14 @@ does not replace broker-token or paired-device authentication.
 Every HTTP and WebSocket client is treated as remote, including a browser on
 the broker host. A loopback TCP source can be a proxy and is never evidence of
 same-machine trust. Authenticated workspace browsing and transcript export are
-therefore disabled by default for all HTTP clients. To enable either feature,
-add the corresponding local-only flags to `~/.cosyncing/config.json`, preserving
-the existing fields, then run `cosy restart`:
+therefore disabled by default for all HTTP clients.
+
+An owner-authenticated revision-18 client can change workspace browsing under
+Settings → Servers → Workspace access. Enabling it requires an explicit
+remote-file-access confirmation and restarts the broker. Paired-device
+credentials can inspect this setting but cannot change it. Operators can also
+enable either feature in `~/.cosyncing/config.json`, preserving the existing
+fields, then run `cosy restart`:
 
 ```json
 {
@@ -28,8 +33,9 @@ the existing fields, then run `cosy restart`:
 }
 ```
 
-These flags grant the feature to authenticated HTTP clients; they do not make
-proxy source addresses trusted. Enable only the features the deployment needs.
+These flags grant the feature to authenticated HTTP clients with the required
+file role; they do not make proxy source addresses trusted. Enable only the
+features the deployment needs.
 
 Before exposing the broker:
 

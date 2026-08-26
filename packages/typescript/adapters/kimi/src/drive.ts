@@ -777,6 +777,9 @@ export class KimiDriveConnection extends KimiObserveConnection {
   }
 
   override async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('Kimi does not support persistent approval rules through this connection');
+    }
     // Built BEFORE the door, like every other content write's body: a refusal
     // must cost zero HTTP, and nothing may sit between the door's last check and
     // the POST.

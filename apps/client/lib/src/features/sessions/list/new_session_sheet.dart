@@ -189,7 +189,10 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
       return;
     }
     for (final option in state.models) {
-      final selection = _selectionOf(option);
+      final selection = _selectionOf(
+        option,
+        preferredEffort: saved.reasoningEffort,
+      );
       if (_modelKey(selection) == _modelKey(saved)) {
         setState(() {
           _selectedModel = selection;
@@ -203,11 +206,89 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
   String _modelKey(SessionCurrentModel model) =>
       '${model.providerID}\u0000${model.modelID}\u0000${model.variant ?? ''}';
 
-  SessionCurrentModel _selectionOf(ModelOption option) => SessionCurrentModel(
+  String _modelTooltip(ModelOption option) {
+    final provider = option.providerLabel ?? option.providerID;
+    final variant = option.variant;
+    final variantSuffix = variant == null || variant == option.providerLabel
+        ? ''
+        : ' · $variant';
+    return '$provider/${option.modelID}$variantSuffix';
+  }
+
+  String? _effortFor(ModelOption option, {String? preferred}) {
+    final efforts = option.reasoningEfforts ?? const <ReasoningEffort>[];
+    if (efforts.isEmpty) return null;
+    if (preferred != null &&
+        efforts.any((candidate) => candidate.effort == preferred)) {
+      return preferred;
+    }
+    final advertisedDefault = option.defaultReasoningEffort;
+    if (advertisedDefault != null &&
+        efforts.any((candidate) => candidate.effort == advertisedDefault)) {
+      return advertisedDefault;
+    }
+    return efforts.first.effort;
+  }
+
+  SessionCurrentModel _selectionOf(
+    ModelOption option, {
+    String? preferredEffort,
+  }) => SessionCurrentModel(
     providerID: option.providerID,
     modelID: option.modelID,
     variant: option.variant,
+    reasoningEffort: _effortFor(option, preferred: preferredEffort),
   );
+
+  void _selectReasoningEffort({
+    required String tool,
+    required RosterSource? renderedSource,
+    required String effort,
+  }) {
+    final selected = _selectedModel;
+    final source = RosterSource.of(ref.read(activeBrokerProfileProvider));
+    final catalog = ref.read(newSessionControllerProvider);
+    if (selected == null ||
+        source == null ||
+        renderedSource != source ||
+        catalog.modelTool != tool ||
+        catalog.modelCatalogSource != source) {
+      return;
+    }
+    ModelOption? option;
+    for (final candidate in catalog.models) {
+      if (_modelKey(_selectionOf(candidate)) == _modelKey(selected)) {
+        option = candidate;
+        break;
+      }
+    }
+    if (option == null ||
+        !(option.reasoningEfforts ?? const <ReasoningEffort>[]).any(
+          (candidate) => candidate.effort == effort,
+        )) {
+      return;
+    }
+    final updated = SessionCurrentModel(
+      providerID: selected.providerID,
+      modelID: selected.modelID,
+      variant: selected.variant,
+      reasoningEffort: effort,
+    );
+    setState(() {
+      _selectedModel = updated;
+      _localIssue = null;
+    });
+    unawaited(
+      ref
+          .read(sessionModelPreferenceStoreProvider)
+          .saveToolDefault(
+            brokerProfileId: source.storageKey,
+            tool: tool,
+            model: updated,
+          )
+          .catchError((Object _, StackTrace _) {}),
+    );
+  }
 
   @override
   void dispose() {
@@ -231,20 +312,28 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final currentSource = RosterSource.of(
       ref.read(activeBrokerProfileProvider),
     );
-    final selectedModel = _selectedModel;
+    var selectedModel = _selectedModel;
     if (selectedModel != null) {
+      ModelOption? selectedOption;
+      for (final option in modelState.models) {
+        if (_modelKey(_selectionOf(option)) == _modelKey(selectedModel)) {
+          selectedOption = option;
+          break;
+        }
+      }
       final selectedIsFresh =
           modelState.modelCatalogPhase == NewSessionModelCatalogPhase.ready &&
           modelState.modelTool == tool &&
           modelState.modelCatalogSource == currentSource &&
-          modelState.models.any(
-            (option) =>
-                _modelKey(_selectionOf(option)) == _modelKey(selectedModel),
-          );
+          selectedOption != null;
       if (!selectedIsFresh) {
         setState(() => _localIssue = _NewSessionIssue.modelRetired);
         return;
       }
+      selectedModel = _selectionOf(
+        selectedOption,
+        preferredEffort: selectedModel.reasoningEffort,
+      );
     }
     setState(() => _localIssue = null);
     if (!_start.isScheduled) {
@@ -385,11 +474,23 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
     final selectedModelKey = _selectedModel == null
         ? ''
         : _modelKey(_selectedModel!);
+    final selectedModelOption = _selectedModel == null
+        ? null
+        : modelOptions
+              .where(
+                (option) => _modelKey(_selectionOf(option)) == selectedModelKey,
+              )
+              .firstOrNull;
     final selectedIsInCatalog =
-        _selectedModel == null ||
-        modelOptions.any(
-          (option) => _modelKey(_selectionOf(option)) == selectedModelKey,
-        );
+        _selectedModel == null || selectedModelOption != null;
+    final reasoningEfforts =
+        selectedModelOption?.reasoningEfforts ?? const <ReasoningEffort>[];
+    final selectedReasoningEffort = selectedModelOption == null
+        ? null
+        : _effortFor(
+            selectedModelOption,
+            preferred: _selectedModel?.reasoningEffort,
+          );
     final projectLabel = widget.projectName?.trim();
     final projectContextLabel = projectLabel == null || projectLabel.isEmpty
         ? l10n.newSessionProjectFallback
@@ -474,10 +575,7 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                   DropdownMenuItem(
                     value: _modelKey(_selectionOf(option)),
                     child: Tooltip(
-                      message:
-                          '${option.providerID}/${option.modelID}'
-                          '${option.variant == null ? '' : ' · '
-                                    '${option.variant}'}',
+                      message: _modelTooltip(option),
                       child: Text(
                         option.label,
                         overflow: TextOverflow.ellipsis,
@@ -564,6 +662,43 @@ class _NewSessionSheetState extends ConsumerState<_NewSessionSheet> {
                       );
                     },
             ),
+            if (selectedModelOption != null && reasoningEfforts.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              KeyedSubtree(
+                key: const Key('new-session-reasoning-effort'),
+                child: DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'new-session-reasoning-effort-$selectedModelKey-'
+                    '${selectedReasoningEffort ?? 'none'}',
+                  ),
+                  initialValue: selectedReasoningEffort,
+                  decoration: InputDecoration(labelText: l10n.reasoningEffort),
+                  items: [
+                    for (final effort in reasoningEfforts)
+                      DropdownMenuItem(
+                        value: effort.effort,
+                        child: effort.description == null
+                            ? Text(effort.label)
+                            : Tooltip(
+                                message: effort.description,
+                                child: Text(effort.label),
+                              ),
+                      ),
+                  ],
+                  onChanged: busy
+                      ? null
+                      : (value) {
+                          final tool = effectiveTool;
+                          if (tool == null || value == null) return;
+                          _selectReasoningEffort(
+                            tool: tool,
+                            renderedSource: state.modelCatalogSource,
+                            effort: value,
+                          );
+                        },
+                ),
+              ),
+            ],
             if (state.modelCatalogPhase ==
                     NewSessionModelCatalogPhase.unavailable &&
                 effectiveTool != null)

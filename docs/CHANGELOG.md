@@ -24,8 +24,32 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Setup and the READMEs now link directly to the connectivity guides and suggest
   a copyable agent-assisted handoff for Tailscale Serve, EasyTier, and other
   operator-owned routes. The Tailscale guide documents `--bg` reboot behavior.
+- Keyboard shortcuts drive the session workspace. Native builds use Ctrl/Cmd
+  chords and reset text size with Ctrl/Cmd+0. The web client uses bare keys
+  where the browser owns the chord — 1 through 8 select an open session, 9
+  jumps to the last, `[` and `]` cycle — and moves close and new session to
+  Ctrl/Cmd+Alt+W and Ctrl/Cmd+Alt+N. A shortcuts help page renders from the
+  same registry the bindings come from, and hides the chords a browser takes
+  for itself.
+- File paths in tool cards are clickable. A mention opens the session's Files
+  tab on that file, at its line when the mention names one, and absolute and
+  `~` paths resolve on the broker. Where the host's filesystem access is
+  closed, mentions stay plain text and the Files surface says so once.
+- Claude subagent sessions appear in the roster as observe-only child rows
+  under the session that spawned them.
+- Approval cards advertise only the decisions the agent accepts. Codex command
+  requests can offer its persistent matching-command rule as a distinct third
+  choice, while session-scoped harnesses retain “Allow for session.” Full
+  command and reason text can be expanded and selected.
+- Server owners can enable authenticated workspace browsing from Settings
+  after confirming the remote file-access risk. The broker persists the gate
+  and restarts; paired devices can inspect it but cannot change it.
 
 ### Changed
+
+- New sessions open as soon as creation succeeds and the protected Drive attach
+  starts. Slow agent bootstrap continues in Session Detail instead of holding
+  the full-page creation spinner.
 
 - Paired-device credentials now resolve to explicit principals with observe,
   drive, and file roles. Every broker route has an exhaustive, default-deny
@@ -39,6 +63,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Contract revision 17 requires a revision 17 client because older clients do
   not attach credentials to artifact downloads. Revision 17 clients retain the
   revision 16 broker fallback for client-first rollout.
+- Contract revision 18 adds the owner-controlled workspace-browsing setting.
+  Revision 18 clients retain the revision 17 broker overlap.
 - The revision-17 broker invalidates every revision-16 paired credential,
   cancels active legacy schedules whose creator cannot be proven, and drops
   ownerless legacy wake registrations. Re-pair devices and let clients recreate
@@ -63,9 +89,36 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   URL-only `COSYNCING_MACHINE_PEERS` entries before the peer upgrade.
 - The revision-16 client declares revision 15 as its minimum broker contract,
   matching the single-revision compatibility overlap it actually implements.
+- The session roster groups rows into three bands: needs input, working, and
+  settled. Working rows hold a stable creation-anchored order instead of
+  reordering on every activity tick, and the cached roster pane matches.
+- A permission card offering only approve and reject labels the approve
+  button "Allow"; "Allow once" appears only when a session-scoped option is
+  also on screen.
 
 ### Fixed
 
+- Claude child rows show their model before the session is opened. Web tabs
+  with open sessions request browser close confirmation for Ctrl/Cmd+W and
+  other accidental unloads.
+- Codex model choices preserve profile boundaries, show the built-in provider
+  as Default, load complete per-profile catalogs, and keep a created session's
+  exact provider, model, and profile selected. Catalog snapshots also avoid
+  redundant app-server launches during session creation. Silent provider-model
+  fallback is rejected, and terminal sync commands include the owning profile.
+- The Codex "Restart now" action verifies that the managed daemon actually
+  changed generation and runs the installed version. If Codex acknowledges a
+  restart without replacing the old daemon, the broker uses a verified
+  stop/start cycle instead of reporting false success. A legacy directly
+  launched daemon is identified separately and migrated only through the
+  confirmed setup plan; restart failures keep the last valid Settings status
+  visible and show the broker's reason.
+- Claude's scoped Fable quota keeps its provider label instead of appearing as
+  a second generic Weekly row.
+- Pi `ask_user` prompts appear in both the native terminal and Cosyncing; the
+  first answer closes the other surface, and the terminal remains usable when
+  the broker is unavailable. New Pi sessions also expose the model's native
+  thinking levels and apply the selected level during creation.
 - Pi fork and clone now follow Pi's actual RPC contract and refuse a result
   unless it identifies a distinct child session. Windows npm launchers are
   classified through the shared invocation boundary and their installed
@@ -126,6 +179,22 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   delivery rejects symlinked workspace paths, and the web shell cannot be framed.
 - Artifact caches relocated through a symlinked parent remain durable across
   broker restarts; proactive artifact surfacing intentionally rejects symlinked workspace paths.
+- Codex approvals offer "approve for this session" and send the session-scoped
+  decision on Codex 0.149. The option was gated on a decision list 0.149 never
+  sends, so the test failed closed and every real request offered approve and
+  reject alone.
+- An approval card ignores an advertised option it cannot answer instead of
+  rendering a button that does nothing, and a read-only card renders no answer
+  buttons at all.
+- Codex sessions on a model provider that exists only in a non-default profile
+  can be driven: the provider configuration is injected on resume and start. A
+  cold-restored session of that kind is no longer labeled openai.
+- A Claude session with a recent unnotified background task keeps its roster
+  row working. The fallback existed but was unreachable behind live-turn
+  evidence, so those rows read idle.
+- Closing a session tab from the wide layout, by button or Ctrl/Cmd+W, flushes
+  the staged draft before the tab goes; the barrier now lives in the close
+  itself, matching the compact path.
 
 ## 0.4.1 — 2026-08-21
 

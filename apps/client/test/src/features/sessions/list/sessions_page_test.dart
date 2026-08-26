@@ -5,6 +5,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
@@ -1123,6 +1124,143 @@ void main() {
         findsWidgets,
         reason: 'and the name the user tapped is what the tab shows',
       );
+    });
+
+    group('roster search shortcut', () {
+      Future<void> press(
+        WidgetTester tester,
+        LogicalKeyboardKey key, {
+        List<LogicalKeyboardKey> modifiers = const [],
+      }) async {
+        for (final modifier in modifiers) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyDownEvent(key);
+        await tester.sendKeyUpEvent(key);
+        for (final modifier in modifiers.reversed) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pumpAndSettle();
+      }
+
+      bool searchHasFocus(WidgetTester tester) => tester
+          .widget<TextField>(find.byKey(const Key('session-roster-search')))
+          .focusNode!
+          .hasFocus;
+
+      testWidgets('bare / focuses the search field', (tester) async {
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [
+              SessionInfo(
+                id: 's1',
+                tool: 'claude',
+                title: 'Alpha',
+                status: SessionStatus.idle,
+                attachMode: AttachMode.live,
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(searchHasFocus(tester), isFalse);
+
+        await press(tester, LogicalKeyboardKey.slash);
+
+        expect(searchHasFocus(tester), isTrue);
+      });
+
+      testWidgets('Ctrl+F focuses it on native', (tester) async {
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [
+              SessionInfo(
+                id: 's1',
+                tool: 'claude',
+                title: 'Alpha',
+                status: SessionStatus.idle,
+                attachMode: AttachMode.live,
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await press(
+          tester,
+          LogicalKeyboardKey.keyF,
+          modifiers: const [LogicalKeyboardKey.controlLeft],
+        );
+
+        expect(searchHasFocus(tester), isTrue);
+      });
+
+      testWidgets('web keeps the +Alt form and drops the plain Ctrl+F', (
+        tester,
+      ) async {
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [
+              SessionInfo(
+                id: 's1',
+                tool: 'claude',
+                title: 'Alpha',
+                status: SessionStatus.idle,
+                attachMode: AttachMode.live,
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await press(
+          tester,
+          LogicalKeyboardKey.keyF,
+          modifiers: const [LogicalKeyboardKey.controlLeft],
+        );
+        expect(searchHasFocus(tester), isFalse);
+
+        await press(
+          tester,
+          LogicalKeyboardKey.keyF,
+          modifiers: const [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.altLeft,
+          ],
+        );
+        expect(searchHasFocus(tester), isTrue);
+      });
+
+      // The bare-key guard: inside the field, `/` is a character the user is
+      // typing, not a command.
+      testWidgets('/ typed into the search field stays a character', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: const [
+              SessionInfo(
+                id: 's1',
+                tool: 'claude',
+                title: 'Alpha',
+                status: SessionStatus.idle,
+                attachMode: AttachMode.live,
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('session-roster-search'));
+        await tester.tap(field);
+        await tester.pumpAndSettle();
+
+        await tester.enterText(field, 'src/lib');
+        await tester.pumpAndSettle();
+
+        expect(find.text('src/lib'), findsOneWidget);
+      });
     });
   });
 }

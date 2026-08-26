@@ -882,6 +882,28 @@ extension SessionDetailDrafts on SessionDetailController {
     return result.persistence;
   }
 
+  /// Flushes whatever the mounted composer last staged, for a caller that
+  /// cannot reach the composer itself.
+  ///
+  /// The page-level barrier flushes `_promptController.text`, which only a
+  /// widget holding that controller can read. The opened-sessions close paths
+  /// run from the tab strip and from the keyboard — neither has the composer —
+  /// yet closing a tab is exactly the boundary that must not lose a draft.
+  /// [stageLocalDraft] already records the live value inside the keystroke's
+  /// own turn, so the controller holds the same text the composer shows and
+  /// this is the SAME flush, not a second persistence concept.
+  ///
+  /// Returns null when nothing was ever staged (no composer mounted, or a
+  /// profile switch reset it). Null rather than a completed future is what
+  /// lets a synchronous caller stay synchronous: the close path must not defer
+  /// its state mutation by a microtask for the common case of a session with
+  /// no draft at all.
+  Future<SessionDraftPersistenceResult>? flushStagedLocalDraft() {
+    final staged = _stagedLocalDraftText;
+    if (staged == null) return null;
+    return flushLocalDraft(staged);
+  }
+
   /// Backwards-compatible draft relay: persists locally, then publishes when
   /// connected. Supersedes the old widget-memory-only relay.
   Future<bool> _sendDraftCoordinated(String text) => recordLocalDraft(text);

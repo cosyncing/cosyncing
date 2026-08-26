@@ -544,10 +544,13 @@ await (async () => {
   check('discovery finds real Claude sessions', sessions.length > 0, `${sessions.length} sessions`);
   if (!sessions.length) return;
 
-  // DEPTH-1 only: no discovered session may be a sub-agent transcript under <uuid>/subagents/.
+  // The SESSION sweep is still depth-1: a sub-agent transcript under <uuid>/subagents/ may appear only
+  // as a lineage-tagged CHILD row (observe-only, `origin:'subagent'` + a parentThreadId to nest under),
+  // never as a top-level session. See test-claude-roster-subagents.ts for the fixture-level contract.
   const dec = (s: string) => Buffer.from(s, 'base64url').toString('utf8');
-  const leaked = sessions.filter((s) => /\/subagents\//.test(dec(s.id)));
-  check('discovery excludes nested subagents/ transcripts', leaked.length === 0, `${leaked.length} leaked`);
+  const nested = sessions.filter((s) => /\/subagents\//.test(dec(s.id)));
+  const leaked = nested.filter((s) => s.origin !== 'subagent' || !s.parentThreadId || !s.nativeId);
+  check('nested subagents/ transcripts are only ever child rows, never top-level sessions', leaked.length === 0, `${leaked.length} leaked of ${nested.length} children`);
 
   const newest = [...sessions].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]!;
   const conn = await adapter.attach(newest.id);

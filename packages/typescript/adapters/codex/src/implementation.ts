@@ -98,6 +98,7 @@ import {
   COMMAND_MAX_CHARS,
   COMMAND_STREAM_MAX_BYTES,
   PATH_MAX_CHARS,
+  HostProcessProvider,
   resolveInvocation,
 } from '@cosyncing/adapter-api';
 import {
@@ -108,6 +109,12 @@ import {
   resolveCodexMacConfiguredExecutable,
 } from './tui-presence.ts';
 import { diagnoseCodexSetup } from './diagnostics.ts';
+import {
+  codexBaseHasCustomModelCatalog,
+  codexModelCatalogSources,
+  codexThreadConfigOverride,
+  resolveCodexProfile,
+} from './provider-resolver.ts';
 import {
   codexBaselineSourceIntact,
   codexSeedContextCouldDemote,
@@ -205,6 +212,11 @@ export class CodexAdapter implements AgentBackend {
     reportManagedStart?: ManagedRuntimeStartReporter;
     reportDaemonOwnership?: CodexDaemonOwnershipReporter;
     reportAttachDiagnostic?: CodexAttachDiagnosticReporter;
+    resolveStoredCurrentModel?: (info: {
+      tool: string;
+      id: string;
+      nativeId?: string;
+    }) => SessionInfo['currentModel'] | undefined;
     resumeStartupTimeoutMs?: number;
     resumeProcessStopTimeoutMs?: number;
   } = {}) {}
@@ -230,6 +242,15 @@ export class CodexAdapter implements AgentBackend {
   }
 
   async listModels(): Promise<ModelOption[]> {
+    // Codex persists the authenticated default catalog and profile catalogs on disk. When those
+    // snapshots cover the default picker, reading them avoids starting a whole app-server once to
+    // render the sheet and again to revalidate Create. Homes without a complete snapshot retain the
+    // native model/list fallback below.
+    const configured = codexConfiguredModelOptions(undefined, 'openai');
+    const hasDefaultSnapshot = codexBaseHasCustomModelCatalog()
+      || codexModelCatalogSources().some((source) => !source.profile);
+    if (hasDefaultSnapshot && configured.length) return configured;
+
     const cwd = homedir();
     return withCodexAppServerRpc(cwd, async (rpc) => {
       const [config, response] = await Promise.all([
@@ -243,7 +264,7 @@ export class CodexAdapter implements AgentBackend {
         ),
       ]);
       const provider = String(config?.config?.model_provider ?? 'openai');
-      return codexModelOptions(response, provider);
+      return codexConfiguredModelOptions(response, provider);
     });
   }
 
@@ -260,13 +281,27 @@ export class CodexAdapter implements AgentBackend {
     if (!path) throw new Error('Codex thread/start did not return a durable rollout path.');
     const threadId = String(thread.id ?? '');
     const actualCwd = String(started?.cwd ?? thread.cwd ?? cwd);
-    const terminalSyncHint = this.syncHint(threadId, actualCwd, started?.model ? String(started.model) : undefined);
-    const terminalPresence = classifyCodexTerminalPresence(
-      await codexPresenceScanAsync(codexAppServerSock()),
+    const currentProvider = String(
+      started?.modelProvider ?? opts.model?.providerID ?? 'openai',
+    );
+    const currentModel = started?.model
+      ? String(started.model)
+      : opts.model?.modelID;
+    const currentProfile =
+      opts.model?.variant ??
+      resolveCodexProfile(currentProvider, currentModel)?.name;
+    const terminalSyncHint = this.syncHint(
       threadId,
       actualCwd,
-      timestampToMs(thread.createdAt ?? started?.created_at ?? started?.startedAt),
+      currentModel,
+      false,
+      currentProvider,
+      currentProfile,
     );
+    // This thread was created on the short-lived stdio app-server above and has
+    // never been handed to a terminal. A host-wide process/socket scan is both
+    // unnecessary and very expensive on machines with many Codex TUIs.
+    const terminalPresence = 'absent' as const;
     const title = opts.title?.trim() || String(thread.name ?? '') || (actualCwd ? basename(actualCwd) : threadId.slice(0, 8) || 'Codex session');
     return {
       id: enc(path),
@@ -286,6 +321,7 @@ export class CodexAdapter implements AgentBackend {
               started?.modelProvider ?? opts.model?.providerID ?? 'openai',
             ),
             modelID: String(started?.model ?? opts.model?.modelID),
+            ...(currentProfile ? { variant: currentProfile } : {}),
             // createCodexThread applies an explicit effort through the
             // schema-supported thread/settings/update RPC and rejects if that
             // update fails. Its successful selection therefore supersedes a
@@ -373,7 +409,14 @@ export class CodexAdapter implements AgentBackend {
           : undefined,
       });
       const attachMode = agentOwned ? 'observe' : codexAttachMode(canResume, status, liveLoaded);
-      const terminalSyncHint = this.syncHint(id, cwd, surface.model, agentOwned);
+      const terminalSyncHint = this.syncHint(
+        id,
+        cwd,
+        surface.model,
+        agentOwned,
+        surface.currentModel?.providerID,
+        surface.currentModel?.variant,
+      );
       out.push({
         id: enc(full), // base64url of the rollout path — attach re-opens the exact file (like Pi)
         tool: this.id,
@@ -578,7 +621,14 @@ export class CodexAdapter implements AgentBackend {
           ? classifyCodexTerminalPresence(scan, parentThreadId)
           : undefined,
       });
-      const terminalSyncHint = this.syncHint(id, cwd, surface.model, agentOwned);
+      const terminalSyncHint = this.syncHint(
+        id,
+        cwd,
+        surface.model,
+        agentOwned,
+        surface.currentModel?.providerID,
+        surface.currentModel?.variant,
+      );
       out.push({
         id: enc(full),
         tool: this.id,
@@ -761,6 +811,17 @@ export class CodexAdapter implements AgentBackend {
     const launchSurface = codexRolloutLaunchSurface(meta);
     const originTag = codexSessionOrigin(meta);
     const agentOwned = codexAgentOwned(originTag.origin);
+    if (!surface.currentModel) {
+      const stored = this.options.resolveStoredCurrentModel?.({
+        tool: this.id,
+        id: sessionId,
+        nativeId: threadId,
+      });
+      if (stored) {
+        surface.model = stored.modelID;
+        surface.currentModel = { ...stored };
+      }
+    }
     const restorationAttempt = mode === 'resume' && !!opts?.reason && isRestoreDriveAttachReason(opts.reason);
     // A permanent capability boundary, so a plain Error (an OwnershipConflictError would advertise a
     // contended owner the caller could take over from). Refused ABOVE the daemon probe and every
@@ -804,7 +865,14 @@ export class CodexAdapter implements AgentBackend {
       throw new Error('Codex CLI is not available on PATH; cannot Drive this session.');
     }
     const observe = mode === 'observe' || (!liveEligible && mode !== 'resume');
-    const terminalSyncHint = this.syncHint(threadId, cwd, surface.model, agentOwned);
+    const terminalSyncHint = this.syncHint(
+      threadId,
+      cwd,
+      surface.model,
+      agentOwned,
+      surface.currentModel?.providerID,
+      surface.currentModel?.variant,
+    );
     // Restoration is a control decision, not a badge refresh. It must bypass a cached absence so a
     // terminal that appeared inside the normal 2-second display TTL cannot be overwritten.
     const presenceScan = await this.presenceScan(restorationAttempt);
@@ -1068,9 +1136,16 @@ export class CodexAdapter implements AgentBackend {
    *  is a runnable join command that travels in the roster payload as its OWN field, so suppressing
    *  only `control.terminalSync` would leave it on the wire. (No client in this repo renders it today
    *  — the contract is what is being kept honest, not one renderer.) */
-  private syncHint(threadId: string, cwd?: string, model?: string, agentOwned = false): SessionInfo['terminalSyncHint'] | undefined {
+  private syncHint(
+    threadId: string,
+    cwd?: string,
+    model?: string,
+    agentOwned = false,
+    provider?: string,
+    profile?: string,
+  ): SessionInfo['terminalSyncHint'] | undefined {
     if (!this.capabilities.supportsLiveAttach || agentOwned) return undefined;
-    return codexTerminalSyncHint(threadId, cwd, model);
+    return codexTerminalSyncHint(threadId, cwd, model, provider, profile);
   }
 
   /** Attach-time presence evidence. Honors the injected test scanner so restore
@@ -1255,8 +1330,8 @@ function ensureCodexDaemon(
  * Read-only stat of the resolved app-server control socket; undefined when the file is absent or not a
  * socket. Used to fingerprint the broker-started daemon so uninstall can prove instance identity.
  */
-export function codexAppServerSocketFingerprint(): CodexDaemonSocketFingerprint | undefined {
-  const explicit = process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim();
+export function codexAppServerSocketFingerprint(pathOverride?: string): CodexDaemonSocketFingerprint | undefined {
+  const explicit = pathOverride?.trim() || process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim();
   try {
     const stat = lstatSync(explicit || DEFAULT_APP_SERVER_CONTROL_SOCK);
     if (!stat.isSocket()) return undefined;
@@ -1516,15 +1591,23 @@ export function codexControlState(opts: {
   return { drive, terminalSync };
 }
 
-function codexTerminalSyncHint(threadId: string, cwd?: string, model?: string): SessionInfo['terminalSyncHint'] {
+function codexTerminalSyncHint(
+  threadId: string,
+  cwd?: string,
+  model?: string,
+  provider?: string,
+  profile?: string,
+): SessionInfo['terminalSyncHint'] {
   const remote = codexRemoteAddr();
   const cd = cwd ? `cd ${shellQuote(cwd)} && ` : '';
+  const resolvedProfile = profile ?? resolveCodexProfile(provider, model)?.name;
+  const profileArg = resolvedProfile ? ` -p ${shellQuote(resolvedProfile)}` : '';
   // Carry the session's recorded model: a bare resume falls back to the user's default model and
   // codex warns "recorded with X but resuming with Y" (maintainer hit spark→sol drift on this hint).
   const modelArg = model ? ` -m ${shellQuote(model)}` : '';
   return {
     label: 'Sync with your terminal (optional)',
-    command: `${cd}codex resume --remote ${shellQuote(remote)}${modelArg} ${shellQuote(threadId)}`,
+    command: `${cd}codex${profileArg} resume --remote ${shellQuote(remote)}${modelArg} ${shellQuote(threadId)}`,
     note: `Optional — this joins the same Codex app-server daemon as ${PRODUCT_IDENTITY.productName}. Plain Codex sessions on the same machine can auto-connect after daemon startup; use this exact command when you need manual fallback behavior.`,
   };
 }
@@ -1708,7 +1791,8 @@ function codexSessionSurface(path: string, meta: any): CodexSessionSurface {
   const surface: CodexSessionSurface = {};
   if (modelID) surface.model = modelID;
   if (modelID && providerID) {
-    surface.currentModel = { providerID, modelID };
+    const profile = resolveCodexProfile(providerID, modelID)?.name;
+    surface.currentModel = { providerID, modelID, ...(profile ? { variant: profile } : {}) };
     if (reasoningEffort) surface.currentModel.reasoningEffort = reasoningEffort;
   }
   if (approvalPolicy !== undefined || approvalsReviewer !== undefined || sandboxPolicy !== undefined) {
@@ -1726,7 +1810,13 @@ function codexCurrentModelFromNative(value: any, fallbackProvider?: string): Ses
     fallbackProvider;
   if (!providerID) return undefined;
   const reasoningEffort = firstMetadataString(candidates, ['reasoningEffort', 'reasoning_effort', 'model_reasoning_effort', 'effort']);
-  return { providerID, modelID, ...(reasoningEffort ? { reasoningEffort } : {}) };
+  const profile = resolveCodexProfile(providerID, modelID)?.name;
+  return {
+    providerID,
+    modelID,
+    ...(profile ? { variant: profile } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  };
 }
 
 function firstMetadataString(candidates: any[], keys: string[]): string | undefined {
@@ -1925,6 +2015,173 @@ export interface CodexDaemonVersion {
   cliVersion: string;
   appServerVersion: string;
   socketPath?: string;
+  /** Present when the Codex CLI recognizes the running daemon as one it manages. */
+  backend?: string;
+  /** Additive daemon identity exposed by newer Codex CLIs. */
+  pid?: number;
+}
+
+export class CodexUnmanagedDaemonError extends Error {
+  constructor() {
+    super('The running Codex app server is not managed by the Codex daemon command. Run `cosyncing setup` to review and migrate this legacy process before retrying.');
+    this.name = 'CodexUnmanagedDaemonError';
+  }
+}
+
+export function codexDaemonIsManaged(version: CodexDaemonVersion | undefined): boolean {
+  return version?.status === 'running' && typeof version.backend === 'string' && version.backend.trim().length > 0;
+}
+
+export interface LegacyCodexDaemonProcess {
+  state: 'detected';
+  pid: number;
+  start: string;
+  boot: string;
+  executable: string;
+  /** Exact current Codex CLI selected by setup; takeover never falls back to the host PATH. */
+  managerExecutable: string;
+  argv: string[];
+  socketPath: string;
+}
+
+export type LegacyCodexDaemonInspection = LegacyCodexDaemonProcess | {
+  state: 'unproven';
+  detail: string;
+};
+
+const legacyCodexProcessProvider = new HostProcessProvider();
+
+function linuxUnixListenerPid(socketPath: string): number | undefined {
+  const ss = Bun.which('ss');
+  if (!ss) return undefined;
+  const result = Bun.spawnSync([ss, '-xlpH'], {
+    stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env }, timeout: 5_000,
+  });
+  if (result.exitCode !== 0) return undefined;
+  const matches = new Set<number>();
+  for (const line of new TextDecoder().decode(result.stdout).split('\n')) {
+    if (!line.split(/\s+/).includes(socketPath)) continue;
+    for (const match of line.matchAll(/\bpid=(\d+)\b/g)) {
+      const pid = Number(match[1]);
+      if (Number.isSafeInteger(pid) && pid > 0) matches.add(pid);
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : undefined;
+}
+
+function readLegacyCodexProcess(
+  pid: number,
+  socketPath: string,
+  expectedExecutable: string,
+): LegacyCodexDaemonProcess | undefined {
+  if (process.platform !== 'linux' || pid === process.pid) return undefined;
+  const live = legacyCodexProcessProvider.liveProcess(pid, { fresh: true });
+  if (live.state !== 'running') return undefined;
+  let executable: string;
+  let argv: string[];
+  try {
+    if (typeof process.getuid !== 'function' || lstatSync(`/proc/${pid}`).uid !== process.getuid()) return undefined;
+    executable = realpathSync(`/proc/${pid}/exe`);
+    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((part) => part.length > 0);
+  } catch {
+    return undefined;
+  }
+  let resolvedExpected: string;
+  try { resolvedExpected = realpathSync(expectedExecutable); } catch { return undefined; }
+  // Updates retarget `standalone/current` before setup migrates the still-running previous release. Accept
+  // only another versioned binary under the same trusted `standalone/releases` root; an arbitrary binary
+  // with the same name is not enough.
+  const sameExecutable = executable === resolvedExpected;
+  const executableRelease = dirname(dirname(executable));
+  const expectedRelease = dirname(dirname(resolvedExpected));
+  const sameStandaloneReleaseRoot = dirname(executableRelease) === dirname(expectedRelease)
+    && basename(executable) === basename(resolvedExpected)
+    && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$/.test(basename(executableRelease));
+  if (!sameExecutable && !sameStandaloneReleaseRoot) return undefined;
+  // This is intentionally the exact argv emitted by the legacy cosyncing launch path. A daemon with extra
+  // or reordered arguments may be legitimate, but setup has no proof it owns that variant and preserves it.
+  if (JSON.stringify(argv.slice(1)) !== JSON.stringify(['app-server', '--remote-control', '--listen', 'unix://'])) {
+    return undefined;
+  }
+  return {
+    state: 'detected',
+    pid,
+    start: live.identity.start,
+    boot: live.identity.boot,
+    executable,
+    managerExecutable: resolvedExpected,
+    argv,
+    socketPath,
+  };
+}
+
+/** Read-only proof for the one legacy direct-launch shape cosyncing used before managed daemon startup. */
+export async function inspectLegacyCodexDaemon(options: {
+  codexBin?: string;
+} = {}): Promise<LegacyCodexDaemonInspection | undefined> {
+  const codexBin = options.codexBin?.trim();
+  if (!codexBin) return undefined;
+  const version = await readCodexDaemonVersion(codexBin);
+  if (!version || version.status !== 'running' || codexDaemonIsManaged(version)) return undefined;
+  if (process.platform !== 'linux') {
+    return { state: 'unproven', detail: 'Automatic legacy Codex daemon migration is not supported on this host.' };
+  }
+  const socketPath = version.socketPath?.trim() || DEFAULT_APP_SERVER_CONTROL_SOCK;
+  const pid = linuxUnixListenerPid(socketPath);
+  if (!pid) return { state: 'unproven', detail: 'The Codex control-socket owner could not be identified uniquely.' };
+  return readLegacyCodexProcess(pid, socketPath, codexBin)
+    ?? { state: 'unproven', detail: 'The Codex process identity or exact legacy launch arguments could not be proven.' };
+}
+
+function sameLegacyCodexProcess(expected: LegacyCodexDaemonProcess): boolean {
+  const current = readLegacyCodexProcess(
+    expected.pid,
+    expected.socketPath,
+    expected.managerExecutable,
+  );
+  return !!current
+    && current.start === expected.start
+    && current.boot === expected.boot
+    && current.executable === expected.executable
+    && current.managerExecutable === expected.managerExecutable
+    && JSON.stringify(current.argv) === JSON.stringify(expected.argv)
+    && linuxUnixListenerPid(expected.socketPath) === expected.pid;
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const live = legacyCodexProcessProvider.liveProcess(pid, { fresh: true });
+    if (live.state === 'absent') return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  } while (true);
+}
+
+/** Confirmed setup-only takeover. Re-proves PID/start/boot/executable/argv/socket immediately before signals. */
+export async function migrateLegacyCodexDaemon(
+  expected: LegacyCodexDaemonProcess,
+): Promise<CodexDaemonOwnershipEvidence> {
+  if (!sameLegacyCodexProcess(expected)) {
+    throw new Error('The legacy Codex daemon changed after confirmation; no process was signalled.');
+  }
+  process.kill(expected.pid, 'SIGTERM');
+  if (!await waitForProcessExit(expected.pid, 5_000)) {
+    if (!sameLegacyCodexProcess(expected)) {
+      throw new Error('The legacy Codex daemon identity changed while stopping; takeover was abandoned.');
+    }
+    process.kill(expected.pid, 'SIGKILL');
+    if (!await waitForProcessExit(expected.pid, 5_000)) {
+      throw new Error('The confirmed legacy Codex daemon did not stop.');
+    }
+  }
+  const started = await runCodexDaemonCommand('start', 30_000, expected.managerExecutable);
+  if (started.code !== 0) throw new Error(daemonCommandFailure('start', started));
+  const version = await waitForCodexDaemon(codexDaemonIsManaged, 15_000, expected.managerExecutable);
+  if (!codexDaemonIsManaged(version)) throw new Error('The managed Codex daemon did not start after legacy takeover.');
+  const socket = codexAppServerSocketFingerprint(expected.socketPath);
+  if (!socket) throw new Error('The managed Codex daemon started, but its control socket could not be fingerprinted.');
+  return { startedByBroker: true, socket };
 }
 
 export interface CodexConfigFreshness {
@@ -2067,14 +2324,20 @@ export function parseCodexDaemonVersionOutput(output: string): CodexDaemonVersio
       cliVersion,
       appServerVersion,
       ...(typeof value.socketPath === 'string' ? { socketPath: value.socketPath } : {}),
+      ...(typeof value.backend === 'string' && value.backend.trim() ? { backend: value.backend.trim() } : {}),
+      ...(Number.isSafeInteger(value.pid) && value.pid > 0 ? { pid: value.pid } : {}),
     };
   } catch {
     return undefined;
   }
 }
 
-async function runCodexDaemonCommand(command: 'version' | 'restart' | 'stop', timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
-  const bin = resolveBin('codex');
+async function runCodexDaemonCommand(
+  command: 'version' | 'restart' | 'stop' | 'start',
+  timeoutMs: number,
+  binOverride?: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const bin = binOverride?.trim() || resolveBin('codex');
   if (!bin) throw new Error('Codex CLI is not available on PATH.');
   const proc = spawnCodex(bin, ['app-server', 'daemon', command], {
     stdin: 'ignore',
@@ -2097,16 +2360,110 @@ async function runCodexDaemonCommand(command: 'version' | 'restart' | 'stop', ti
 }
 
 /** Read-only native probe. A stopped daemon returns undefined; this command does not start it. */
-export async function readCodexDaemonVersion(): Promise<CodexDaemonVersion | undefined> {
-  if (!resolveBin('codex')) return undefined;
-  const result = await runCodexDaemonCommand('version', 5000);
+export async function readCodexDaemonVersion(binOverride?: string): Promise<CodexDaemonVersion | undefined> {
+  const bin = binOverride?.trim() || resolveBin('codex');
+  if (!bin) return undefined;
+  const result = await runCodexDaemonCommand('version', 5000, bin);
   return result.code === 0 ? parseCodexDaemonVersionOutput(result.stdout.trim()) : undefined;
+}
+
+function daemonGeneration(version: CodexDaemonVersion | undefined): string | undefined {
+  const path = version?.socketPath?.trim()
+    || process.env.COSYNCING_CODEX_APP_SERVER_SOCK?.trim()
+    || DEFAULT_APP_SERVER_CONTROL_SOCK;
+  try {
+    const stat = lstatSync(path);
+    return `${stat.dev}:${stat.ino}:${stat.mtimeMs}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function codexRestartVerifyMs(): number {
+  const configured = Number(process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 2_000;
+}
+
+async function waitForCodexDaemon(
+  predicate: (version: CodexDaemonVersion | undefined) => boolean,
+  timeoutMs: number,
+  binOverride?: string,
+): Promise<CodexDaemonVersion | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  let version: CodexDaemonVersion | undefined;
+  do {
+    version = await readCodexDaemonVersion(binOverride);
+    if (predicate(version)) return version;
+    if (Date.now() >= deadline) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  } while (true);
+  return version;
+}
+
+function daemonRunsInstalledVersion(version: CodexDaemonVersion | undefined): boolean {
+  return version?.status === 'running' && version.cliVersion === version.appServerVersion;
+}
+
+function daemonRestartApplied(
+  before: CodexDaemonVersion | undefined,
+  beforeGeneration: string | undefined,
+  after: CodexDaemonVersion | undefined,
+): boolean {
+  if (!daemonRunsInstalledVersion(after)) return false;
+  // A binary-version mismatch resolving proves that a new app-server process took over. When the
+  // restart is configuration-only, require a changed control-socket generation instead; otherwise
+  // `daemon restart` returning zero while leaving the old process alive would be a false success.
+  if (before?.cliVersion !== before?.appServerVersion) return true;
+  const afterGeneration = daemonGeneration(after);
+  return beforeGeneration != null && afterGeneration != null && afterGeneration !== beforeGeneration;
+}
+
+function daemonCommandFailure(command: string, result: { code: number; stdout: string; stderr: string }): string {
+  return result.stderr.trim() || result.stdout.trim() || `codex daemon ${command} exited ${result.code}`;
 }
 
 /** Explicit lifecycle mutation used only after the idle-only gate or a confirmed manual action. */
 export async function restartCodexDaemon(): Promise<void> {
-  const result = await runCodexDaemonCommand('restart', 30_000);
-  if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `codex daemon restart exited ${result.code}`);
+  const before = await readCodexDaemonVersion();
+  // An older directly-launched app server answers the daemon status probe but rejects every managed
+  // lifecycle command. Do not disguise that state as a failed stop/start fallback: setup owns the one-time,
+  // explicitly confirmed takeover path.
+  if (before?.status === 'running' && !codexDaemonIsManaged(before)) {
+    throw new CodexUnmanagedDaemonError();
+  }
+  const beforeGeneration = daemonGeneration(before);
+  const nativeRestart = await runCodexDaemonCommand('restart', 30_000);
+  if (nativeRestart.code === 0) {
+    const restarted = await waitForCodexDaemon(
+      (version) => daemonRestartApplied(before, beforeGeneration, version),
+      codexRestartVerifyMs(),
+    );
+    if (daemonRestartApplied(before, beforeGeneration, restarted)) return;
+  }
+
+  // Some Codex versions acknowledge `daemon restart` without replacing an older daemon. A restart
+  // request has already passed the idle gate or explicit confirmation, so fall back to an observable
+  // stop/start cycle. Never start until the old daemon is proven down.
+  const stopped = await runCodexDaemonCommand('stop', 15_000);
+  const afterStop = await waitForCodexDaemon((version) => version == null, 10_000);
+  if (afterStop) {
+    const nativeDetail = nativeRestart.code === 0
+      ? 'codex daemon restart returned success but the old daemon stayed active'
+      : daemonCommandFailure('restart', nativeRestart);
+    const stopDetail = stopped.code === 0
+      ? 'codex daemon stop returned success but the daemon stayed active'
+      : daemonCommandFailure('stop', stopped);
+    throw new Error(`${nativeDetail}; ${stopDetail}`);
+  }
+
+  const started = await runCodexDaemonCommand('start', 30_000);
+  const afterStart = await waitForCodexDaemon(daemonRunsInstalledVersion, 15_000);
+  if (!daemonRunsInstalledVersion(afterStart)) {
+    const detail = started.code === 0
+      ? 'Codex daemon did not report the installed version after stop/start.'
+      : daemonCommandFailure('start', started);
+    throw new Error(detail);
+  }
 }
 
 /**
@@ -2202,6 +2559,16 @@ async function createCodexThread(
   name?: string,
   model?: PromptInput['model'],
 ): Promise<any> {
+  // A provider defined only in a `$CODEX_HOME/<profile>.config.toml` overlay does not exist for a
+  // broker-spawned app-server, which loads the base config alone: `thread/start` refuses it with
+  // "Model provider `X` not found". Materialize the definition through the per-thread `config`
+  // override (probed accepted on 0.149.0). Nothing is sent when the base config already resolves the
+  // provider — an override there would be a no-op that also puts a credential on the wire.
+  const threadConfig = codexThreadConfigOverride(
+    model?.providerID,
+    model?.modelID,
+    model?.variant,
+  );
   return withCodexAppServerRpc(cwd, async (rpc) => {
     const started = await rpc('thread/start', {
       cwd,
@@ -2210,9 +2577,21 @@ async function createCodexThread(
         ? {
             model: model.modelID,
             modelProvider: model.providerID,
+            allowProviderModelFallback: false,
           }
         : {}),
+      ...(threadConfig ? { config: threadConfig } : {}),
     });
+    if (
+      model &&
+      ((started?.model && String(started.model) !== model.modelID) ||
+        (started?.modelProvider &&
+          String(started.modelProvider) !== model.providerID))
+    ) {
+      throw new Error(
+        `Codex started ${String(started?.modelProvider ?? 'unknown')}/${String(started?.model ?? 'unknown')} instead of the selected ${model.providerID}/${model.modelID}.`,
+      );
+    }
     // `thread/start` only ALLOCATES the rollout path — codex writes the file lazily, normally on the
     // first turn. A create→attach flow therefore raced a file that would never exist ("failed to
     // resolve rollout path", issues-part1 codex create). `thread/name/set` is the cheapest RPC that
@@ -3440,6 +3819,8 @@ class CodexResumeConnection implements SessionConnection {
   private readonly countedLiveRuntimeTurns = new Set<string>();
   private closeFlight: Promise<void> | undefined;
   private firstRealTurnStart = true;
+  /** `undefined` = not yet read; `null` = read, the rollout records no provider. */
+  private rolloutProviderCache: string | null | undefined;
 
   constructor(
     private readonly path: string,
@@ -3493,6 +3874,9 @@ class CodexResumeConnection implements SessionConnection {
     // later exact matching terminal retires it through the same generic turn-id fence used for
     // main and subagent threads.
     const rolloutActiveTurnId = await exactActiveRolloutTurnId(this.path);
+    const storedCreateModel = this.info.currentModel
+      ? { ...this.info.currentModel }
+      : undefined;
     if (rolloutActiveTurnId) this.markRunning(rolloutActiveTurnId);
     const bin = resolveBin('codex') ?? 'codex';
     if (this.transport === 'daemon-proxy') {
@@ -3578,12 +3962,27 @@ class CodexResumeConnection implements SessionConnection {
       /* fresh stdio server or older daemon: treat as a cold load */
     }
     this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'thread/resume', outcome: 'started' });
+    // Profile Drive parity: a session started with `codex -p <profile>` records a provider that
+    // lives only in `$CODEX_HOME/<profile>.config.toml`, which this app-server never loaded — native
+    // `thread/resume` refuses it ("Model provider `X` not found") and the row is permanently Observe.
+    // Supplying the definition through the per-thread `config` override makes the provider resolvable
+    // and the subsequent cold-restore settings update lands (probes B/C, 0.149.0). Undefined when the
+    // base config already resolves the provider, and when nobody defines it — the second case stays
+    // honestly Observe rather than resuming onto the process default provider.
+    const rolloutProvider = this.rolloutModelProvider();
+    const rolloutModel = this.info.currentModel?.modelID ?? this.info.model;
+    const threadConfig = codexThreadConfigOverride(
+      rolloutProvider,
+      rolloutModel,
+      this.info.currentModel?.variant,
+    );
     let resumed: any;
     try {
       resumed = await this.rpc('thread/resume', {
         threadId: this.threadId,
         path: this.path,
         cwd: this.cwd,
+        ...(threadConfig ? { config: threadConfig } : {}),
         // A resume response populates thread.turns by default. That made the
         // 451 MB Computer Use session serialize and synchronously JSON.parse
         // its complete native history on the broker event loop before the
@@ -3598,7 +3997,11 @@ class CodexResumeConnection implements SessionConnection {
       this.diagnostic({ event: 'rpc-stage', transport: this.transport, stage: 'thread/resume', outcome: 'succeeded' });
     } catch (error) {
       const rejected = nativeRpcRejected(error);
-      const facts = nativeRpcDiagnostic(error, [this.threadId, this.path, this.cwd]);
+      // The injected provider definition can carry a bearer token. A server that echoes our params
+      // back inside a rejection message would otherwise put it in an attach diagnostic, so every
+      // string leaf of the override joins the redaction set (the provider NAME is a key, not a
+      // value, so ``Model provider `vllm-hpc` not found`` stays readable).
+      const facts = nativeRpcDiagnostic(error, [this.threadId, this.path, this.cwd, threadConfig]);
       this.diagnostic({
         event: 'rpc-stage',
         transport: this.transport,
@@ -3622,9 +4025,13 @@ class CodexResumeConnection implements SessionConnection {
     }
     await this.applyResumedThreadState(resumed);
     if (resumed?.model) {
+      const providerID = String(resumed.modelProvider ?? 'openai');
+      const modelID = String(resumed.model);
+      const profile = resolveCodexProfile(providerID, modelID)?.name;
       this.info.currentModel = {
-        providerID: String(resumed.modelProvider ?? 'openai'),
-        modelID: String(resumed.model),
+        providerID,
+        modelID,
+        ...(profile ? { variant: profile } : {}),
         reasoningEffort: resumed?.reasoningEffort ? String(resumed.reasoningEffort) : undefined,
       };
     }
@@ -3643,11 +4050,40 @@ class CodexResumeConnection implements SessionConnection {
         approvalsReviewer = restored.approvalsReviewer ?? approvalsReviewer;
         sandboxPolicy = restored.sandboxPolicy ?? sandboxPolicy;
         if (restored.model) {
+          // `restored.modelProvider` now comes from session_meta when turn_context has none, which
+          // it never does — before that, every cold-restored non-OpenAI session was labelled
+          // `openai` here. The literal remains only as the last resort for a rollout with no
+          // provider anywhere (codex's own default).
+          const providerID =
+            restored.modelProvider ?? this.info.currentModel?.providerID ?? 'openai';
+          const profile = resolveCodexProfile(providerID, restored.model)?.name;
           this.info.currentModel = {
-            providerID: restored.modelProvider ?? this.info.currentModel?.providerID ?? 'openai',
+            providerID,
             modelID: restored.model,
+            ...(profile ? { variant: profile } : {}),
             ...(restored.effort ? { reasoningEffort: restored.effort } : {}),
           };
+        }
+      }
+      // Empty Codex rollouts persist model_provider in session_meta but no
+      // model. A fresh app-server therefore resumes them on its own default.
+      // Reapply the app's durable create-time choice until a real turn_context
+      // becomes the native source of truth.
+      if (!restored?.model && storedCreateModel) {
+        try {
+          await this.rpc('thread/settings/update', {
+            threadId: this.threadId,
+            model: storedCreateModel.modelID,
+            modelProvider: storedCreateModel.providerID,
+            ...(storedCreateModel.reasoningEffort
+              ? { effort: storedCreateModel.reasoningEffort }
+              : {}),
+          }, 5000);
+          this.info.model = storedCreateModel.modelID;
+          this.info.currentModel = storedCreateModel;
+        } catch {
+          // Older app-servers that cannot apply an exact provider/model keep
+          // their native resume result; never claim a selection that did not land.
         }
       }
       // Never-configured session (no turn_context mode in the rollout): the daemon's config default
@@ -3700,22 +4136,52 @@ class CodexResumeConnection implements SessionConnection {
     const approvalsReviewer = ctx?.approvals_reviewer ?? ctx?.approvalsReviewer;
     const sandboxPolicy = wireSandboxPolicyFromRollout(ctx?.sandbox_policy ?? ctx?.sandboxPolicy);
     const model = firstMetadataString([ctx], ['model', 'modelID', 'modelId', 'model_id']);
-    const modelProvider = firstMetadataString([ctx], ['modelProvider', 'model_provider', 'provider']);
+    // turn_context carries the model but NEVER the provider — measured over a 125-rollout sample:
+    // 2,575 turn_context lines, 0 with `model_provider`; 139 session_meta lines, 139 with it. Reading
+    // only turn_context therefore always returned undefined, which is why the caller's `?? 'openai'`
+    // mislabelled every cold-restored non-OpenAI session.
+    const modelProvider =
+      firstMetadataString([ctx], ['modelProvider', 'model_provider', 'provider']) ?? this.rolloutModelProvider();
     const effort = firstMetadataString([ctx], ['effort', 'reasoningEffort', 'reasoning_effort', 'model_reasoning_effort']);
     if (approvalPolicy === undefined && approvalsReviewer === undefined && sandboxPolicy === undefined && !model) return null;
+    const settings = {
+      threadId: this.threadId,
+      ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
+      ...(approvalsReviewer !== undefined ? { approvalsReviewer } : {}),
+      ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+    };
+    // A cold resume initializes the thread from the process config default, so restoring the model
+    // without its provider is exactly the masquerading case this method exists to prevent: the model
+    // name would park on the default provider and the first turn would run against the wrong
+    // endpoint. `modelProvider` on `thread/settings/update` is not in 0.149's stable schema, so it is
+    // sent as a probe and retried without it — an older server keeps today's mode/model restore
+    // instead of losing the whole update to one unknown field.
+    if (modelProvider) {
+      try {
+        await this.rpc('thread/settings/update', { ...settings, modelProvider }, 5000);
+        return { approvalPolicy, approvalsReviewer, sandboxPolicy, model, modelProvider, effort };
+      } catch {
+        /* server without modelProvider support — fall through to the settings it does accept */
+      }
+    }
     try {
-      await this.rpc('thread/settings/update', {
-        threadId: this.threadId,
-        ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
-        ...(approvalsReviewer !== undefined ? { approvalsReviewer } : {}),
-        ...(sandboxPolicy !== undefined ? { sandboxPolicy } : {}),
-        ...(model ? { model } : {}),
-        ...(effort ? { effort } : {}),
-      }, 5000);
+      await this.rpc('thread/settings/update', settings, 5000);
       return { approvalPolicy, approvalsReviewer, sandboxPolicy, model, modelProvider, effort };
     } catch {
       return null;
     }
+  }
+
+  /** `model_provider` from session_meta (rollout line 1), the only record that carries it. Cached:
+   *  codex writes it once, at session creation, and it never changes for the life of the rollout. */
+  private rolloutModelProvider(): string | undefined {
+    if (this.rolloutProviderCache === undefined) {
+      this.rolloutProviderCache =
+        firstMetadataString([readSessionMeta(this.path)], ['modelProvider', 'model_provider', 'provider']) ?? null;
+    }
+    return this.rolloutProviderCache ?? undefined;
   }
 
   /** Rebuild the advertised sync command whenever this conn learns a new current model. The roster
@@ -3724,7 +4190,13 @@ class CodexResumeConnection implements SessionConnection {
   private refreshSyncHint(): void {
     const ts = this.info.control?.terminalSync;
     if (!this.info.terminalSyncHint && !ts?.supported) return; // sync disabled at attach time
-    const hint = codexTerminalSyncHint(this.threadId, this.cwd, this.info.currentModel?.modelID ?? this.info.model);
+    const hint = codexTerminalSyncHint(
+      this.threadId,
+      this.cwd,
+      this.info.currentModel?.modelID ?? this.info.model,
+      this.info.currentModel?.providerID,
+      this.info.currentModel?.variant,
+    );
     if (!hint) return;
     this.info.terminalSyncHint = hint;
     if (ts?.supported && !ts.active && ts.command) ts.command = hint.command;
@@ -4988,9 +5460,10 @@ class CodexResumeConnection implements SessionConnection {
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     const pending = this.pendingApprovals.get(requestId);
-    this.pendingApprovals.delete(requestId);
     if (!pending) return;
-    this.write({ id: pending.rpcId, result: approvalResponse(pending.method, pending.params, decision) });
+    const result = approvalResponse(pending.method, pending.params, decision);
+    this.pendingApprovals.delete(requestId);
+    this.write({ id: pending.rpcId, result });
     this.emit({ type: 'permission-resolved', requestId, decision });
   }
 
@@ -5117,14 +5590,33 @@ class CodexResumeConnection implements SessionConnection {
   }
 
   async listModels(): Promise<ModelOption[]> {
+    const current = this.info.currentModel;
+    const providerID = current?.providerID?.trim() || 'openai';
+    const profile = current?.variant?.trim()
+      || resolveCodexProfile(providerID, current?.modelID)?.name;
+    const sources = codexModelCatalogSources().filter((source) =>
+      source.providerID === providerID
+      && (profile ? source.profile === profile : !source.profile));
+    const configured = sources.flatMap((source) => codexModelOptions(
+      source.models,
+      source.providerID,
+      source.profile,
+      source.providerLabel,
+    ));
+    if (configured.length) return configured.slice(0, CODEX_MAX_MODEL_OPTIONS);
+
     try {
-      const defaultProvider = await this.currentModelProvider();
       const response = await this.rpc(
         'model/list',
         { limit: CODEX_MAX_MODEL_OPTIONS, includeHidden: false },
         10000,
       );
-      return codexModelOptions(response, defaultProvider);
+      return codexModelOptions(
+        response,
+        providerID,
+        profile,
+        profile ?? (providerID === 'openai' ? 'Default' : providerID),
+      );
     } catch {
       return [];
     }
@@ -5132,15 +5624,6 @@ class CodexResumeConnection implements SessionConnection {
 
   async listModes(): Promise<ModeOption[]> {
     return CODEX_PERMISSION_MODES;
-  }
-
-  private async currentModelProvider(): Promise<string> {
-    try {
-      const resp = await this.rpc('config/read', { cwd: this.cwd, includeLayers: false }, 5000);
-      return String(resp?.config?.model_provider ?? 'openai');
-    } catch {
-      return 'openai';
-    }
   }
 
   private async refreshSkills(): Promise<{ name: string; path: string; description?: string }[]> {
@@ -6903,13 +7386,25 @@ export const CODEX_MAX_REASONING_EFFORTS = 16;
 function codexModelOptions(
   response: any,
   defaultProvider: string,
+  profile?: string,
+  providerLabel?: string,
 ): ModelOption[] {
-  const models: any[] = Array.isArray(response?.data)
-    ? response.data.slice(0, CODEX_MAX_MODEL_OPTIONS)
+  const rows = Array.isArray(response) ? response : response?.data;
+  const models: any[] = Array.isArray(rows)
+    ? rows.slice(0, CODEX_MAX_MODEL_OPTIONS)
     : [];
   const unique = new Map<string, ModelOption>();
   for (const model of models) {
-    if (!model?.id && !model?.model) continue;
+    if ((!model?.id && !model?.model && !model?.slug) || model?.hidden === true) {
+      continue;
+    }
+    if (String(model?.visibility ?? '').toLowerCase() === 'hide') continue;
+    const modelID = String(model.model ?? model.id ?? model.slug);
+    const displayName = String(
+      model.displayName ?? model.display_name ?? modelID,
+    );
+    const supportedEfforts =
+      model.supportedReasoningEfforts ?? model.supported_reasoning_levels;
     const option: ModelOption = {
       providerID: String(
         model.providerID ??
@@ -6918,13 +7413,15 @@ function codexModelOptions(
           model.modelProvider ??
           defaultProvider,
       ),
-      modelID: String(model.model ?? model.id),
-      label: String(model.displayName ?? model.model ?? model.id),
+      ...(providerLabel ? { providerLabel } : {}),
+      modelID,
+      ...(profile ? { variant: profile } : {}),
+      label: profile ? `${displayName} · ${profile}` : displayName,
       description: model.description
         ? String(model.description)
         : undefined,
-      reasoningEfforts: (Array.isArray(model.supportedReasoningEfforts)
-        ? model.supportedReasoningEfforts.slice(
+      reasoningEfforts: (Array.isArray(supportedEfforts)
+        ? supportedEfforts.slice(
             0,
             CODEX_MAX_REASONING_EFFORTS,
           )
@@ -6950,12 +7447,47 @@ function codexModelOptions(
             : null;
         })
         .filter(Boolean) as ModelOption['reasoningEfforts'],
-      defaultReasoningEffort: model.defaultReasoningEffort
-        ? String(model.defaultReasoningEffort)
+      defaultReasoningEffort: (model.defaultReasoningEffort ??
+        model.default_reasoning_level)
+        ? String(
+            model.defaultReasoningEffort ?? model.default_reasoning_level,
+          )
         : undefined,
     };
-    const key = `${option.providerID}\0${option.modelID}`;
+    const key = `${option.providerID}\0${option.modelID}\0${option.variant ?? ''}`;
     if (!unique.has(key)) unique.set(key, option);
+  }
+  return [...unique.values()];
+}
+
+function codexConfiguredModelOptions(
+  nativeResponse: any,
+  defaultProvider: string,
+): ModelOption[] {
+  const unique = new Map<string, ModelOption>();
+  const add = (option: ModelOption): void => {
+    const key = `${option.providerID}\0${option.modelID}\0${option.variant ?? ''}`;
+    if (!unique.has(key) && unique.size < CODEX_MAX_MODEL_OPTIONS) {
+      unique.set(key, option);
+    }
+  };
+  if (!codexBaseHasCustomModelCatalog()) {
+    for (const option of codexModelOptions(
+      nativeResponse,
+      defaultProvider,
+      undefined,
+      defaultProvider === 'openai' ? 'Default' : defaultProvider,
+    )) add(option);
+  }
+  for (const source of codexModelCatalogSources()) {
+    for (const option of codexModelOptions(
+      source.models,
+      source.providerID,
+      source.profile,
+      source.providerLabel,
+    )) {
+      add(option);
+    }
   }
   return [...unique.values()];
 }
@@ -7051,51 +7583,134 @@ function codexModeFromSettings(approvalPolicy: unknown, approvalsReviewer: unkno
   return CODEX_DEFAULT_PERMISSION_MODE;
 }
 
+/**
+ * The session-scoped decision each approval method answers "don't ask again this session" with.
+ * `undefined` = the method carries the scope as a field rather than a decision value
+ * (`item/permissions/requestApproval` takes `scope: 'session'`), so it is always available.
+ *
+ * ONE table drives both the advertisement ({@link codexApprovalOptions}) and the wire answer
+ * ({@link approvalResponse}); they cannot drift into a button with no working decision behind it.
+ * Measured against Codex's generated schema. A newer server may advertise a narrower decision
+ * vocabulary for one request; {@link codexApprovalOptions} honors that request-local capability.
+ */
+const CODEX_SESSION_DECISIONS: Record<string, string | undefined> = {
+  'item/commandExecution/requestApproval': 'acceptForSession',
+  'item/fileChange/requestApproval': 'acceptForSession',
+  'item/permissions/requestApproval': undefined,
+  execCommandApproval: 'approved_for_session',
+  applyPatchApproval: 'approved_for_session',
+};
+
+/**
+ * Options this request can ACTUALLY be answered with.
+ *
+ * Codex 0.149.1 can advertise a structured execpolicy amendment instead of `acceptForSession`.
+ * That is a persistent command-prefix rule, so it has its own canonical `approve-rule` answer. It
+ * must never be presented as session scope. When the server supplies `availableDecisions`, the
+ * exact structured decision is the authority. Older servers that only supply
+ * `proposedExecpolicyAmendment` remain answerable with the same exact proposal.
+ */
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0
+      || value.some((part) => typeof part !== 'string')) {
+    return undefined;
+  }
+  return [...value];
+}
+
+function codexExecpolicyAmendment(params: any): string[] | undefined {
+  const advertised = params?.availableDecisions;
+  if (Array.isArray(advertised) && advertised.length > 0) {
+    for (const decision of advertised) {
+      const amendment = stringArray(
+        decision?.acceptWithExecpolicyAmendment?.execpolicy_amendment,
+      );
+      if (amendment) return amendment;
+    }
+    return undefined;
+  }
+  return stringArray(params?.proposedExecpolicyAmendment);
+}
+
+function codexApprovalOptions(method: string, params: any): string[] {
+  const sessionDecision = CODEX_SESSION_DECISIONS[method];
+  const advertised = params?.availableDecisions;
+  const sessionScoped =
+    sessionDecision === undefined || !Array.isArray(advertised) || advertised.length === 0
+      ? true
+      : advertised.includes(sessionDecision);
+  return [
+    'approve',
+    ...(sessionScoped ? ['approve-session'] : []),
+    ...(method === 'item/commandExecution/requestApproval' && codexExecpolicyAmendment(params)
+      ? ['approve-rule']
+      : []),
+    'reject',
+  ];
+}
+
 function approvalMessage(method: string, requestId: string, params: any): AgentMessage {
+  const options = codexApprovalOptions(method, params);
   if (method === 'item/commandExecution/requestApproval') {
     const detail = [params?.command, params?.cwd ? `cwd: ${params.cwd}` : '', params?.reason].filter(Boolean).join('\n');
-    return { type: 'permission-request', requestId, title: 'Approve command', toolName: 'exec_command', detail };
+    return { type: 'permission-request', requestId, title: 'Approve command', toolName: 'exec_command', detail, options };
   }
   if (method === 'execCommandApproval') {
     const cmd = Array.isArray(params?.command) ? params.command.join(' ') : params?.command;
     const detail = [cmd, params?.cwd ? `cwd: ${params.cwd}` : '', params?.reason].filter(Boolean).join('\n');
-    return { type: 'permission-request', requestId, title: 'Approve command', toolName: 'exec_command', detail };
+    return { type: 'permission-request', requestId, title: 'Approve command', toolName: 'exec_command', detail, options };
   }
   if (method === 'item/fileChange/requestApproval') {
     const detail = [params?.grantRoot ? `root: ${params.grantRoot}` : '', params?.reason].filter(Boolean).join('\n');
-    return { type: 'permission-request', requestId, title: 'Approve file change', toolName: 'apply_patch', detail };
+    return { type: 'permission-request', requestId, title: 'Approve file change', toolName: 'apply_patch', detail, options };
   }
   if (method === 'applyPatchApproval') {
     const paths = Object.keys(params?.fileChanges ?? {});
     const detail = [paths.join('\n'), params?.grantRoot ? `root: ${params.grantRoot}` : '', params?.reason].filter(Boolean).join('\n');
-    return { type: 'permission-request', requestId, title: 'Approve file change', toolName: 'apply_patch', detail };
+    return { type: 'permission-request', requestId, title: 'Approve file change', toolName: 'apply_patch', detail, options };
   }
   const detail = [params?.cwd ? `cwd: ${params.cwd}` : '', params?.reason, safeStringify(params?.permissions)].filter(Boolean).join('\n');
-  return { type: 'permission-request', requestId, title: 'Approve permissions', toolName: 'permissions', detail };
+  return { type: 'permission-request', requestId, title: 'Approve permissions', toolName: 'permissions', detail, options };
 }
 
 function approvalResponse(method: string, params: any, decision: PermissionDecision): unknown {
-  if (method === 'item/commandExecution/requestApproval') {
+  const sessionScoped = decision === 'approve-session' && codexApprovalOptions(method, params).includes('approve-session');
+  if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
     if (decision === 'reject') return { decision: 'decline' };
-    if (decision === 'approve-session') {
-      if ((params?.availableDecisions ?? []).includes('acceptForSession')) return { decision: 'acceptForSession' };
-      if (params?.proposedExecpolicyAmendment) {
-        return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: params.proposedExecpolicyAmendment } } };
-      }
+    if (decision === 'approve-rule') {
+      const amendment = method === 'item/commandExecution/requestApproval'
+        ? codexExecpolicyAmendment(params)
+        : undefined;
+      if (!amendment) throw new Error('Codex did not offer an execpolicy amendment for this request');
+      return {
+        decision: {
+          acceptWithExecpolicyAmendment: { execpolicy_amendment: amendment },
+        },
+      };
     }
-    return { decision: 'accept' };
+    return { decision: sessionScoped ? 'acceptForSession' : 'accept' };
   }
-  if (method === 'item/fileChange/requestApproval') {
-    return { decision: decision === 'reject' ? 'decline' : decision === 'approve-session' ? 'acceptForSession' : 'accept' };
+  if (decision === 'approve-rule') {
+    const amendment = method === 'execCommandApproval'
+      ? codexExecpolicyAmendment(params)
+      : undefined;
+    if (!amendment) throw new Error('Codex did not offer an execpolicy amendment for this request');
+    return {
+      decision: {
+        approved_execpolicy_amendment: {
+          proposed_execpolicy_amendment: amendment,
+        },
+      },
+    };
   }
   if (method === 'item/permissions/requestApproval') {
     const req = decision === 'reject' ? {} : {
       network: params?.permissions?.network ?? undefined,
       fileSystem: params?.permissions?.fileSystem ?? undefined,
     };
-    return { permissions: req, scope: decision === 'approve-session' ? 'session' : 'turn', strictAutoReview: decision === 'reject' };
+    return { permissions: req, scope: sessionScoped ? 'session' : 'turn', strictAutoReview: decision === 'reject' };
   }
-  return { decision: decision === 'reject' ? 'denied' : decision === 'approve-session' ? 'approved_for_session' : 'approved' };
+  return { decision: decision === 'reject' ? 'denied' : sessionScoped ? 'approved_for_session' : 'approved' };
 }
 
 function codexQuestionMessage(method: string, requestId: string, params: any): Extract<AgentMessage, { type: 'question-request' }> {
@@ -9610,7 +10225,7 @@ function fileHistorySourceIdentity(path: string): HistorySourceIdentity | undefi
 function resolveBin(bin: string): string | null {
   try {
     const override = bin === 'codex' ? process.env.COSYNCING_CODEX_BIN : undefined;
-    if (override && existsSync(override)) return override;
+    if (override?.trim()) return existsSync(override) ? override : null;
     return Bun.which(bin);
   } catch {
     return null;

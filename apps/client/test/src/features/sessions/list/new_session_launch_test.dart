@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('holds Creating, Opening, and Connecting independently', (
+  testWidgets('opens after connection starts without waiting for bootstrap', (
     tester,
   ) async {
     final creation = Completer<SessionInfo>();
@@ -44,7 +44,11 @@ void main() {
       find.byKey(const Key('new-session-launch-connecting')),
       findsOneWidget,
     );
-    expect(completed, isNull);
+    expect(
+      completed?.id,
+      'created',
+      reason: 'the destination owns the visible connection progress',
+    );
 
     connecting.complete(NewSessionConnectionHandoff(() {}));
     await tester.pump();

@@ -202,13 +202,24 @@ class _ToolFileReadSection extends StatelessWidget {
           children: [
             Expanded(
               child: SelectionArea(
-                child: Text(
-                  presentation.path,
-                  key: const Key('tool-read-path'),
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
-                  ),
-                ),
+                // The reference is carried as data beside the display string:
+                // never re-parsed from what is on screen.
+                child: presentation.reference == null
+                    ? Text(
+                        presentation.path,
+                        key: const Key('tool-read-path'),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                        ),
+                      )
+                    : _TranscriptFileLink(
+                        linkKey: const Key('tool-read-path'),
+                        reference: presentation.reference!,
+                        text: presentation.path,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                        ),
+                      ),
               ),
             ),
             _ToolCopyButton(
@@ -350,13 +361,14 @@ class _ToolSearchSection extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 SelectionArea(
-                  child: Text(
-                    group.matchCount == null
-                        ? group.path
-                        : l10n.toolSearchGroupHeader(
-                            group.path,
-                            group.matchCount!,
-                          ),
+                  // The header is one localized message (`{path} ({count})`,
+                  // full-width parentheses in zh), so the link spans the whole
+                  // run rather than splitting a composed string. The reference,
+                  // the tooltip, and the screen-reader label all name the path
+                  // alone.
+                  child: _searchGroupHeader(
+                    l10n: l10n,
+                    group: group,
                     style: theme.textTheme.labelMedium?.copyWith(
                       fontFamily: 'monospace',
                       color: tokens.textPrimary,
@@ -396,6 +408,26 @@ class _ToolSearchSection extends StatelessWidget {
       ],
     );
   }
+}
+
+/// One search group's header, linked to the matched file when it can resolve.
+Widget _searchGroupHeader({
+  required AppLocalizations l10n,
+  required ToolSearchGroupPresentation group,
+  required TextStyle? style,
+}) {
+  final label = group.matchCount == null
+      ? group.path
+      : l10n.toolSearchGroupHeader(group.path, group.matchCount!);
+  final reference = group.reference;
+  if (reference == null) {
+    return Text(label, style: style);
+  }
+  return _TranscriptFileLink(
+    reference: reference,
+    text: label,
+    style: style,
+  );
 }
 
 /// Expanded body for the web family.

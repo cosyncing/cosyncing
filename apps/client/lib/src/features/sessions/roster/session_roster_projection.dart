@@ -287,10 +287,10 @@ final class SessionRosterLineage {
       }
     }
 
-    // Siblings are appended while walking `orderedKeys`, so each list already
-    // holds the broker's status/recency order. `orderedKeys` is deduplicated by
-    // composite identity, which makes that insertion order total and stable
-    // across rebuilds — no sort, so this stays one linear pass.
+    // Provisional sibling lists, in input order. They exist only so the rollup
+    // pass below can read each parent's children; both this map and
+    // `keysByDepth` are re-derived from the banded key order once the rollup is
+    // known, so no structure downstream inherits the broker's order.
     final childKeysByParentKey = <String, List<String>>{};
     for (final key in orderedKeys) {
       final parentKey = parentKeyByKey[key];
@@ -348,6 +348,40 @@ final class SessionRosterLineage {
       }
     }
 
+    // ONE comparator for the whole forest (working-band order). It is applied
+    // here, not to the raw input, because the bands are judged on the DISPLAY
+    // status — rolled up for a logical root, canonical for every other row —
+    // and that is only known once the pass above has run.
+    SessionStatus effectiveStatusOf(String key) => depthByKey[key] == 0
+        ? _statusForPriority(subtreePriority[key] ?? 0)
+        : sessionByKey[key]!.status;
+    orderedKeys.sort(
+      (a, b) => compareRosterSessions(
+        sessionByKey[a]!,
+        sessionByKey[b]!,
+        effectiveStatusOfA: effectiveStatusOf(a),
+        effectiveStatusOfB: effectiveStatusOf(b),
+      ),
+    );
+
+    // Re-derive every order-carrying structure from the banded key order, so
+    // roots and sibling lists are ordered by that one comparator and nothing
+    // downstream sorts again. `orderedKeys` is deduplicated by composite
+    // identity and the comparator's last tie-break IS that identity, so the
+    // order is total and reproduces exactly across rebuilds.
+    childKeysByParentKey.clear();
+    for (final key in orderedKeys) {
+      final parentKey = parentKeyByKey[key];
+      if (parentKey == null) continue;
+      childKeysByParentKey.putIfAbsent(parentKey, () => <String>[]).add(key);
+    }
+    for (final keys in keysByDepth) {
+      keys.clear();
+    }
+    for (final key in orderedKeys) {
+      keysByDepth[depthByKey[key]!].add(key);
+    }
+
     return SessionRosterLineage._(
       List<String>.unmodifiable(orderedKeys),
       Map<String, SessionInfo>.unmodifiable(sessionByKey),
@@ -378,7 +412,10 @@ final class SessionRosterLineage {
     this._namesAParent,
   );
 
-  /// Every roster key in broker order, deduplicated by identity.
+  /// Every roster key in working-band order, deduplicated by identity.
+  ///
+  /// See [compareRosterSessions]: attention rows first by recency, then the
+  /// working band by creation anchor, then everything settled by recency.
   final List<String> orderedKeys;
 
   final Map<String, SessionInfo> _sessionByKey;
@@ -393,13 +430,13 @@ final class SessionRosterLineage {
   /// Deepest display depth present, used to drive bottom-up passes.
   int get maxDepth => _keysByDepth.length - 1;
 
-  /// Keys at [depth], in broker order.
+  /// Keys at [depth], in working-band order.
   List<String> keysAtDepth(int depth) =>
       depth < 0 || depth >= _keysByDepth.length
       ? const <String>[]
       : _keysByDepth[depth];
 
-  /// Logical roots in broker order.
+  /// Logical roots in working-band order.
   Iterable<String> get rootKeys => keysAtDepth(0);
 
   /// Canonical row for [key].
@@ -681,6 +718,90 @@ String sessionRosterKey(SessionInfo session) => '${session.tool}/${session.id}';
 /// Cross-machine roster identity used for grouping and live projection.
 String sessionCompositeRosterKey(SessionInfo session) =>
     '${session.machine ?? ''}/${session.tool}/${session.id}';
+
+/// Sort band a roster row falls into. Lower sorts first.
+const int _bandAttention = 0;
+const int _bandWorking = 1;
+const int _bandSettled = 2;
+
+int _rosterBand(SessionStatus status) => switch (status) {
+  SessionStatus.needsInput => _bandAttention,
+  SessionStatus.working => _bandWorking,
+  SessionStatus.idle => _bandSettled,
+};
+
+/// Orders two roster rows into a stable working band.
+///
+/// Three bands, in this order:
+///
+/// * **attention** (`needsInput`) — `updatedAt` descending. A row awaiting
+///   input is not running, so its `updatedAt` is frozen and cannot churn.
+/// * **working** — `createdAt` descending, newest-created first. `updatedAt` is
+///   NOT consulted here, and that is the whole point: `updatedAt` is a
+///   live-turn timestamp that every adapter advances on each write, so ordering
+///   the working band by it made running sessions compete for the top on every
+///   publish. `createdAt` is immutable for the life of a session, so nothing in
+///   a working row's sort key can move while it works — the band holds its
+///   order across every activity update, delta and rebuild, and a row entering
+///   or leaving the band moves no other row.
+/// * **settled** (`idle`) — `updatedAt` descending: the "N minutes ago"
+///   temporal order. A finishing row re-enters this band at the `updatedAt` the
+///   turn just advanced, so it lands at or near the top of the settled rows.
+///
+/// Every band tie-breaks on [sessionCompositeRosterKey] ascending, and a row
+/// missing its band anchor sorts after every row that has one (the dsh case for
+/// `createdAt`), so the total order is reproducible from the rows alone — no
+/// client-side memory of any kind, which is what makes it survive a rebuild, an
+/// invalidate, a reconnect and a full reload identically.
+///
+/// [effectiveStatusOfA] / [effectiveStatusOfB] supply the display status the
+/// bands are judged on. [SessionRosterLineage.build] passes the rolled-up
+/// status for a logical root and the canonical one for every other row; callers
+/// that only know canonical status may omit them, because the lineage re-sorts
+/// on effective status downstream.
+int compareRosterSessions(
+  SessionInfo a,
+  SessionInfo b, {
+  SessionStatus? effectiveStatusOfA,
+  SessionStatus? effectiveStatusOfB,
+}) {
+  final band = _rosterBand(effectiveStatusOfA ?? a.status);
+  final otherBand = _rosterBand(effectiveStatusOfB ?? b.status);
+  if (band != otherBand) return band.compareTo(otherBand);
+  final byAnchor = band == _bandWorking
+      ? _compareAnchorDescending(a.createdAt, b.createdAt)
+      : _compareAnchorDescending(a.updatedAt, b.updatedAt);
+  if (byAnchor != 0) return byAnchor;
+  return sessionCompositeRosterKey(a).compareTo(sessionCompositeRosterKey(b));
+}
+
+/// Returns [sessions] in working-band order. The input is never mutated.
+///
+/// [statusOf] supplies the display status each row is banded by; it defaults to
+/// the row's own canonical status.
+List<SessionInfo> orderRosterSessions(
+  List<SessionInfo> sessions, {
+  SessionStatus Function(SessionInfo session)? statusOf,
+}) => List<SessionInfo>.of(sessions)
+  ..sort(
+    (a, b) => compareRosterSessions(
+      a,
+      b,
+      effectiveStatusOfA: statusOf?.call(a),
+      effectiveStatusOfB: statusOf?.call(b),
+    ),
+  );
+
+/// Newest anchor first, with an absent anchor sorting after every present one.
+///
+/// Absent on both sides is a tie, so the caller's identity tie-break decides —
+/// which is what keeps rows with no `createdAt` in a stable order rather than
+/// falling back to `updatedAt` and re-introducing the churn this rule removes.
+int _compareAnchorDescending(int? a, int? b) {
+  if (a == null) return b == null ? 0 : 1;
+  if (b == null) return -1;
+  return b.compareTo(a);
+}
 
 bool _originVisible(
   SessionOrigin? origin,

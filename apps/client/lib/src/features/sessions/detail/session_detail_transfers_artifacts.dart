@@ -524,84 +524,307 @@ Future<void> _showSessionFilePreviewDialog(
   BuildContext context,
   SessionFilePreview preview,
 ) async {
-  final l10n = AppLocalizations.of(context);
   await showDialog<void>(
     context: context,
-    builder: (context) {
-      return AlertDialog(
-        title: Text(
-          l10n.transferPreviewTitle(preview.displayName),
-          key: ValueKey(
-            'session-detail-files-preview-title-${preview.path}',
-          ),
-        ),
-        content: SizedBox(
-          width: 420,
-          child: SingleChildScrollView(
-            child: SelectionArea(
-              child: DefaultTextStyle(
-                style: Theme.of(context).textTheme.bodySmall!,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      '${l10n.fileNameLabel}: ${preview.displayName}',
-                      key: ValueKey(
-                        'session-detail-files-preview-filename-${preview.path}',
-                      ),
+    builder: (context) => _SessionFilePreviewDialog(preview: preview),
+  );
+}
+
+/// Lines the viewer materializes at once.
+///
+/// `/fs/read` caps at 1 MiB, which is ~20k lines of source — building all of
+/// them costs a visibly slow first frame for content nobody scrolls to. The
+/// window is CENTERED on the line anchor when there is one, so a mention at
+/// line 12,000 still lands on line 12,000 and the gutter numbers stay absolute.
+const int _sessionFilePreviewWindowLines = 2000;
+
+/// The read-only file viewer, with a line gutter and a scroll-to-line anchor.
+class _SessionFilePreviewDialog extends StatefulWidget {
+  const _SessionFilePreviewDialog({required this.preview});
+
+  final SessionFilePreview preview;
+
+  @override
+  State<_SessionFilePreviewDialog> createState() =>
+      _SessionFilePreviewDialogState();
+}
+
+class _SessionFilePreviewDialogState extends State<_SessionFilePreviewDialog> {
+  final ScrollController _vertical = ScrollController();
+  final GlobalKey _anchorKey = GlobalKey(
+    debugLabel: 'session-file-preview-anchor',
+  );
+  late final List<String> _lines = widget.preview.text.isEmpty
+      ? const <String>[]
+      : widget.preview.text.split('\n');
+  late final int _windowStart = _resolveWindowStart();
+  bool _anchorSettled = false;
+
+  /// 1-based line the mention asked for, when the broker actually delivered it.
+  int? get _anchorLine {
+    final line = widget.preview.anchorLine;
+    if (line == null || line < 1 || line > _lines.length) return null;
+    return line;
+  }
+
+  int _resolveWindowStart() {
+    if (_lines.length <= _sessionFilePreviewWindowLines) return 0;
+    final anchor = widget.preview.anchorLine;
+    if (anchor == null || anchor < 1 || anchor > _lines.length) return 0;
+    final centered = anchor - 1 - _sessionFilePreviewWindowLines ~/ 2;
+    final last = _lines.length - _sessionFilePreviewWindowLines;
+    if (centered < 0) return 0;
+    return centered > last ? last : centered;
+  }
+
+  int get _windowEnd {
+    final end = _windowStart + _sessionFilePreviewWindowLines;
+    return end > _lines.length ? _lines.length : end;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (_anchorLine != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _revealAnchor());
+    }
+  }
+
+  @override
+  void dispose() {
+    _vertical.dispose();
+    super.dispose();
+  }
+
+  void _revealAnchor() {
+    if (!mounted || _anchorSettled) return;
+    final target = _anchorKey.currentContext;
+    if (target == null) return;
+    _anchorSettled = true;
+    // No animation: the reader asked for a specific line, so the viewer opens
+    // there rather than scrolling past everything above it.
+    unawaited(Scrollable.ensureVisible(target, alignment: 0.25));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final theme = Theme.of(context);
+    final preview = widget.preview;
+    final start = _windowStart;
+    final end = _windowEnd;
+    // Gutter width from the widest number actually rendered, so a file at line
+    // 4 and one at line 120,000 both align without a fixed guess.
+    final gutterSample = end == 0 ? '' : '$end';
+    final anchor = _anchorLine;
+    final mono = theme.textTheme.bodySmall?.copyWith(
+      fontFamily: 'monospace',
+      height: 1.35,
+    );
+
+    return AlertDialog(
+      title: Text(
+        l10n.transferPreviewTitle(preview.displayName),
+        key: ValueKey('session-detail-files-preview-title-${preview.path}'),
+      ),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: SelectionArea(
+            child: DefaultTextStyle(
+              style: theme.textTheme.bodySmall!,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '${l10n.fileNameLabel}: ${preview.displayName}',
+                    key: ValueKey(
+                      'session-detail-files-preview-filename-${preview.path}',
                     ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${l10n.pathLabel}: ${preview.path}',
+                    key: ValueKey(
+                      'session-detail-files-preview-path-${preview.path}',
+                    ),
+                  ),
+                  if (preview.mimeType != null) ...[
                     const SizedBox(height: 8),
                     Text(
-                      '${l10n.pathLabel}: ${preview.path}',
+                      '${l10n.mimeTypeLabel}: ${preview.mimeType}',
                       key: ValueKey(
-                        'session-detail-files-preview-path-${preview.path}',
+                        'session-detail-files-preview-mime-${preview.path}',
                       ),
                     ),
-                    if (preview.mimeType != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        '${l10n.mimeTypeLabel}: ${preview.mimeType}',
-                        key: ValueKey(
-                          'session-detail-files-preview-mime-${preview.path}',
-                        ),
-                      ),
-                    ],
+                  ],
+                  if (anchor != null) ...[
                     const SizedBox(height: 8),
                     Text(
-                      preview.text,
+                      l10n.sessionFilePreviewAnchorLine(anchor),
                       key: ValueKey(
-                        'session-detail-files-preview-content-${preview.path}',
+                        'session-detail-files-preview-anchor-${preview.path}',
                       ),
-                      style: const TextStyle(fontFamily: 'monospace'),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                      ),
                     ),
-                    if (preview.truncated) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        l10n.sessionFilesPreviewTruncated(
-                          preview.limit.toString(),
-                        ),
+                  ],
+                  // The anchor is past what the Server delivered. Saying so is
+                  // the whole point: silently landing on line 1 would read as
+                  // "the mention was wrong" rather than "the read was bounded".
+                  if (preview.anchorBeyondPreview) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      l10n.sessionFilePreviewAnchorBeyond(
+                        preview.anchorLine!,
+                        _lines.length,
+                      ),
+                      key: ValueKey(
+                        'session-detail-files-preview-anchor-beyond-'
+                        '${preview.path}',
+                      ),
+                    ),
+                  ],
+                  if (start > 0 || end < _lines.length) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      l10n.sessionFilePreviewLineWindow(start + 1, end),
+                      key: ValueKey(
+                        'session-detail-files-preview-window-${preview.path}',
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: IntrinsicWidth(
+                      child: Column(
                         key: ValueKey(
-                          'session-detail-files-preview-truncated-'
+                          'session-detail-files-preview-content-'
                           '${preview.path}',
                         ),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (var index = start; index < end; index++)
+                            _SessionFilePreviewLine(
+                              key: index + 1 == anchor ? _anchorKey : null,
+                              number: index + 1,
+                              text: _lines[index],
+                              gutterSample: gutterSample,
+                              style: mono,
+                              highlighted: index + 1 == anchor,
+                              column: index + 1 == anchor
+                                  ? preview.anchorColumn
+                                  : null,
+                            ),
+                        ],
                       ),
-                    ],
+                    ),
+                  ),
+                  if (preview.truncated) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      l10n.sessionFilesPreviewTruncated(
+                        preview.limit.toString(),
+                      ),
+                      key: ValueKey(
+                        'session-detail-files-preview-truncated-'
+                        '${preview.path}',
+                      ),
+                    ),
                   ],
-                ),
+                ],
               ),
             ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text(l10n.close),
-          ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(l10n.close),
+        ),
+      ],
+    );
+  }
+}
+
+/// One numbered viewer row, optionally the anchored line.
+class _SessionFilePreviewLine extends StatelessWidget {
+  const _SessionFilePreviewLine({
+    required this.number,
+    required this.text,
+    required this.gutterSample,
+    required this.style,
+    this.highlighted = false,
+    this.column,
+    super.key,
+  });
+
+  final int number;
+  final String text;
+
+  /// Widest number in this window; sizes the gutter so digits stay aligned.
+  final String gutterSample;
+  final TextStyle? style;
+  final bool highlighted;
+
+  /// 1-based column to mark inside [text], when the mention carried one.
+  final int? column;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final mark = column;
+    final body = mark == null || mark < 1 || mark > text.length
+        ? Text(text, style: style, softWrap: false)
+        : Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: text.substring(0, mark - 1)),
+                TextSpan(
+                  text: text.substring(mark - 1, mark),
+                  style: style?.copyWith(
+                    backgroundColor: theme.colorScheme.primary.withValues(
+                      alpha: 0.35,
+                    ),
+                  ),
+                ),
+                TextSpan(text: text.substring(mark)),
+              ],
+            ),
+            style: style,
+            softWrap: false,
+          );
+    return ColoredBox(
+      color: highlighted
+          ? theme.colorScheme.primary.withValues(alpha: 0.12)
+          : Colors.transparent,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (gutterSample.isNotEmpty) ...[
+            SizedBox(
+              width: gutterSample.length * 8.0,
+              child: Text(
+                // A line number, not copy: formatted, never localized.
+                number.toString(),
+                textAlign: TextAlign.right,
+                style: style?.copyWith(color: tokens.textTertiary),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          body,
         ],
-      );
-    },
-  );
+      ),
+    );
+  }
 }
 
 String? _sessionDetailTransferLocalPath(SessionArtifactTransfer transfer) {

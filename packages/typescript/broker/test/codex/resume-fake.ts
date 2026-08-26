@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   AgentRegistry,
   isNativeSessionUnresumableError,
@@ -27,6 +27,13 @@ import {
   CodexAdapter,
   type CodexAttachDiagnostic,
 } from '../../../adapters/codex/src/index.ts';
+import {
+  codexModelCatalogSources,
+  codexProviderConfigOverride,
+  codexThreadConfigOverride,
+  resolveCodexProfile,
+  resolveCodexModelProvider,
+} from '../../../adapters/codex/src/provider-resolver.ts';
 import { AttentionService } from '../../src/attention/attention-service.ts';
 import { driveAttachRefusalCode } from '../../src/sessions/client-message-policy.ts';
 import { Hub, ManagedConn } from '../../src/sessions/hub.ts';
@@ -130,7 +137,8 @@ async function withFakeCodex<T>(scriptBody: string, fn: (rollout: string, dir: s
 }
 
 await test('pre-session Codex catalog is native, exact, and bounded', async () => {
-  return await withFakeCodex(`#!/usr/bin/env bun
+  return await withCodexHome({ 'config.toml': 'model = "gpt-test"\n' }, async () => {
+    return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
 let buf = '';
 const send = (o) => console.log(JSON.stringify(o));
@@ -159,15 +167,16 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `, async () => {
-    const models = await new CodexAdapter().listModels();
-    return [
-      models.length === 256 &&
-        models[0]?.providerID === 'azure-openai' &&
-        models[0]?.modelID === 'model-0' &&
-        models[0]?.reasoningEfforts?.[0]?.effort === 'high' &&
-        models[255]?.modelID === 'model-255',
-      `count=${models.length} first=${JSON.stringify(models[0])} last=${models.at(-1)?.modelID}`,
-    ];
+      const models = await new CodexAdapter().listModels();
+      return [
+        models.length === 256 &&
+          models[0]?.providerID === 'azure-openai' &&
+          models[0]?.modelID === 'model-0' &&
+          models[0]?.reasoningEfforts?.[0]?.effort === 'high' &&
+          models[255]?.modelID === 'model-255',
+        `count=${models.length} first=${JSON.stringify(models[0])} last=${models.at(-1)?.modelID}`,
+      ];
+    });
   });
 });
 
@@ -204,7 +213,14 @@ for await (const chunk of Bun.stdin.stream()) {
     }
     else if (msg.method === 'thread/start') {
       const unknown = Object.keys(msg.params || {}).filter(
-        (key) => !['cwd', 'serviceName', 'model', 'modelProvider'].includes(key),
+        (key) =>
+          ![
+            'cwd',
+            'serviceName',
+            'model',
+            'modelProvider',
+            'allowProviderModelFallback',
+          ].includes(key),
       );
       if (unknown.length) {
         send({ id: msg.id, error: { message: 'unknown thread/start field: ' + unknown.join(',') } });
@@ -834,7 +850,11 @@ for await (const chunk of Bun.stdin.stream()) {
 });
 
 await test('CR3 preserves model-scoped native Ultra through exact send, settings updates, and reconnect', async () => {
-  return await withFakeCodex(`#!/usr/bin/env bun
+  // Isolate the fake native catalog from the developer's real CODEX_HOME. A host-level custom
+  // catalog is intentionally preferred by the adapter and would make this native-model test depend
+  // on whichever models happen to be installed on the machine running it.
+  return await withCodexHome({ 'config.toml': 'model = "gpt-5.6-sol"\n' }, async () => {
+    return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
 let buf = '';
 const { appendFileSync, existsSync, readFileSync } = require('node:fs');
@@ -950,6 +970,7 @@ for await (const chunk of Bun.stdin.stream()) {
     } finally {
       await first.close().catch(() => {});
     }
+    });
   });
 });
 
@@ -3612,6 +3633,870 @@ await test('CR4 an agent-owned thread loaded in the SAME daemon offers neither D
         await conn.close().catch(() => {});
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex non-default profile sessions (`codex -p vllm-hpc`) + approval advertisement.
+//
+// A profile is an OVERLAY FILE: `-p vllm-hpc` layers `$CODEX_HOME/vllm-hpc.config.toml` over the
+// base config. A `[model_providers.*]` table defined only there does not exist for a broker-spawned
+// app-server, so native `thread/resume` refuses the session and the row is permanently Observe.
+// These cases fix the fake app-server to that native behaviour and assert the adapter sends the
+// per-thread `config` override exactly when the provider is profile-only — never for a base-config
+// provider, never when nobody defines it.
+//
+// The fixture home is a real temp `$CODEX_HOME`, read by the resolver per call, so nothing here
+// depends on the developer's own `~/.codex`.
+// ---------------------------------------------------------------------------
+
+/** Distinctive on purpose: every hygiene assertion below is "this string appears nowhere else". */
+const FIXTURE_PROFILE_TOKEN = 'Bearer fixture-only-secret-9c1f4d';
+
+const PROFILE_PROVIDER_TOML = [
+  'model = "qwen3.8-27B-FP8"',
+  'model_provider = "vllm-hpc"',
+  'model_reasoning_effort = "xhigh"',
+  'model_catalog_json = "vllm-hpc-models.json"',
+  '',
+  '[model_providers.vllm-hpc]',
+  'name = "vLLM HPC"',
+  'base_url = "http://hpc.invalid:8000/v1"',
+  'wire_api = "responses"',
+  '',
+  '[model_providers.vllm-hpc.http_headers]',
+  `Authorization = "${FIXTURE_PROFILE_TOKEN}"`,
+  '',
+].join('\n');
+
+const PROFILE_CATALOG_JSON = JSON.stringify({
+  models: [
+    {
+      id: 'qwen3.8-27B-FP8',
+      display_name: 'Qwen 3.8 27B FP8',
+      supported_reasoning_levels: ['high', 'xhigh'],
+      default_reasoning_level: 'xhigh',
+    },
+  ],
+});
+
+const BASE_CONFIG_TOML = [
+  'model = "gpt-5.6-sol"',
+  '',
+  '[model_providers.volcengine-coding-plan]',
+  'name = "Volcengine"',
+  'base_url = "https://ark.invalid/api/v3"',
+  'wire_api = "chat"',
+  '',
+].join('\n');
+
+async function withCodexHome<T>(files: Record<string, string>, fn: (home: string) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-codex-home-'));
+  for (const [name, body] of Object.entries(files)) {
+    const path = join(home, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, body);
+  }
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    return await fn(home);
+  } finally {
+    if (previous == null) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+await test('custom Codex catalogs keep official models and attribute inherited profile defaults exactly', async () => {
+  const mergedCatalog = JSON.stringify({
+    models: [
+      { id: 'qwen3.8-27B-FP8', display_name: 'Qwen 3.8 27B FP8' },
+      { id: 'glm-5.3', display_name: 'GLM 5.3' },
+    ],
+  });
+  const officialCache = JSON.stringify({
+    models: [
+      {
+        slug: 'gpt-5.6-sol',
+        display_name: 'GPT-5.6 Sol',
+        supported_reasoning_levels: ['medium', 'high'],
+        default_reasoning_level: 'medium',
+      },
+    ],
+  });
+  return await withCodexHome(
+    {
+      'config.toml': [
+        'model = "gpt-5.6-sol"',
+        'model_catalog_json = "merged.json"',
+        '',
+      ].join('\n'),
+      'vllm-hpc.config.toml': [
+        'model = "qwen3.8-27B-FP8"',
+        'model_provider = "vllm-hpc"',
+        '',
+      ].join('\n'),
+      'volcengine.config.toml': [
+        'model = "glm-5.3"',
+        'model_provider = "volcengine-coding-plan"',
+        '',
+      ].join('\n'),
+      // Route-A homes retain these deterministic profile catalogs even after the overlay pointer is
+      // removed in favor of one merged base catalog. The resolver must use them before the merge.
+      'model-catalogs/vllm-hpc.json': JSON.stringify({
+        models: [{ id: 'qwen3.8-27B-FP8', display_name: 'Qwen 3.8 27B FP8' }],
+      }),
+      'model-catalogs/volcengine.json': JSON.stringify({
+        models: [
+          { id: 'glm-5.3', display_name: 'GLM 5.3' },
+          { id: 'deepseek-v3.2', display_name: 'DeepSeek V3.2' },
+          { id: 'kimi-k2.5', display_name: 'Kimi K2.5' },
+        ],
+      }),
+      'merged.json': mergedCatalog,
+      'models_cache.json': officialCache,
+    },
+    async () => {
+      return await withFakeCodex(`#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const send = (o) => console.log(JSON.stringify(o));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'config/read') send({ id: msg.id, result: { config: { model_provider: 'openai', model_catalog_json: 'merged.json' } } });
+    else if (msg.method === 'model/list') send({ id: msg.id, result: { data: [
+      { id: 'qwen3.8-27B-FP8', displayName: 'Qwen incorrectly stamped by native list' },
+      { id: 'glm-5.3', displayName: 'GLM incorrectly stamped by native list' }
+    ] } });
+  }
+}
+`, async () => {
+        const sources = codexModelCatalogSources();
+        const models = await new CodexAdapter().listModels();
+        const byKey = new Map(
+          models.map((model) => [
+            `${model.providerID}/${model.modelID}/${model.variant ?? ''}`,
+            model,
+          ]),
+        );
+        return [
+          sources.length === 3 &&
+            models.length === 5 &&
+            byKey.has('openai/gpt-5.6-sol/') &&
+            byKey.has('vllm-hpc/qwen3.8-27B-FP8/vllm-hpc') &&
+            byKey.has('volcengine-coding-plan/glm-5.3/volcengine') &&
+            byKey.has('volcengine-coding-plan/deepseek-v3.2/volcengine') &&
+            byKey.has('volcengine-coding-plan/kimi-k2.5/volcengine') &&
+            byKey.get('openai/gpt-5.6-sol/')?.providerLabel === 'Default' &&
+            byKey.get('volcengine-coding-plan/glm-5.3/volcengine')?.providerLabel === 'volcengine' &&
+            !byKey.has('openai/qwen3.8-27B-FP8/'),
+          `sources=${JSON.stringify(sources.map((source) => ({ profile: source.profile, providerID: source.providerID, count: source.models.length })))} models=${JSON.stringify(models)}`,
+        ];
+      });
+    },
+  );
+});
+
+function profileRollout(dir: string, provider: string | undefined, model: string): string[] {
+  return [
+    JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        id: 'fake-thread',
+        cwd: dir,
+        originator: 'codex-tui',
+        ...(provider ? { model_provider: provider } : {}),
+      },
+    }),
+    // turn_context carries the model and the mode but NEVER the provider — that is the whole point
+    // of reading session_meta for it.
+    JSON.stringify({
+      type: 'turn_context',
+      payload: {
+        turn_id: 't0',
+        approval_policy: 'on-request',
+        approvals_reviewer: 'auto_review',
+        sandbox_policy: { type: 'workspace-write', network_access: false },
+        model,
+        effort: 'xhigh',
+      },
+    }),
+    '',
+  ];
+}
+
+await test('provider resolver: base config wins over a profile that redefines the same provider', async () => {
+  return await withCodexHome(
+    {
+      'config.toml': BASE_CONFIG_TOML,
+      'shadow.config.toml': ['[model_providers.volcengine-coding-plan]', 'base_url = "http://shadow.invalid/v1"', ''].join('\n'),
+    },
+    async () => {
+      const resolved = resolveCodexModelProvider('volcengine-coding-plan');
+      const override = codexProviderConfigOverride('volcengine-coding-plan');
+      return [
+        resolved?.source === 'base' &&
+          resolved.file === 'config.toml' &&
+          String(resolved.definition.base_url) === 'https://ark.invalid/api/v3' &&
+          // Already resolvable by the app-server: sending an override would be a no-op that also put
+          // a credential on a wire that does not need one.
+          override === undefined,
+        `resolved=${JSON.stringify(resolved)} override=${JSON.stringify(override)}`,
+      ];
+    },
+  );
+});
+
+await test('provider resolver: a profile-only provider resolves to its exact definition and is injectable', async () => {
+  return await withCodexHome(
+    {
+      'config.toml': BASE_CONFIG_TOML,
+      'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML,
+      'vllm-hpc-models.json': PROFILE_CATALOG_JSON,
+    },
+    async () => {
+      const resolved = resolveCodexModelProvider('vllm-hpc');
+      const override = codexProviderConfigOverride('vllm-hpc');
+      const profile = resolveCodexProfile('vllm-hpc', 'qwen3.8-27B-FP8');
+      const threadConfig = codexThreadConfigOverride(
+        'vllm-hpc',
+        'qwen3.8-27B-FP8',
+        'vllm-hpc',
+      );
+      const injected = override?.model_providers['vllm-hpc'] as Record<string, unknown> | undefined;
+      const headers = injected?.http_headers as Record<string, unknown> | undefined;
+      return [
+        resolved?.source === 'profile' &&
+          resolved.file === 'vllm-hpc.config.toml' &&
+          String(injected?.base_url) === 'http://hpc.invalid:8000/v1' &&
+          String(injected?.wire_api) === 'responses' &&
+          // Nested table, which is exactly why this parses with Bun.TOML instead of a scoped scanner.
+          String(headers?.Authorization) === FIXTURE_PROFILE_TOKEN &&
+          Object.keys(override?.model_providers ?? {}).length === 1 &&
+          profile?.name === 'vllm-hpc' &&
+          String(threadConfig?.model_catalog_json).endsWith('/vllm-hpc-models.json'),
+        `resolved=${JSON.stringify(resolved)} profile=${JSON.stringify(profile)} override=${JSON.stringify(override)}`,
+      ];
+    },
+  );
+});
+
+await test('provider resolver: an undefined provider resolves to nothing, so the row stays honestly Observe', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML }, async () => {
+    const missing = resolveCodexModelProvider('not-configured-anywhere');
+    const empty = resolveCodexModelProvider('');
+    const undef = resolveCodexModelProvider(undefined);
+    return [
+      missing === undefined && empty === undefined && undef === undefined && codexProviderConfigOverride('not-configured-anywhere') === undefined,
+      `missing=${JSON.stringify(missing)} empty=${JSON.stringify(empty)} undefined=${JSON.stringify(undef)}`,
+    ];
+  });
+});
+
+await test('provider resolver: malformed TOML fails safe — no partial config, later files still readable', async () => {
+  const brokenBase = ['[model_providers.vllm-hpc]', 'base_url = "http://broken.invalid', 'wire_api = '].join('\n');
+  const withBrokenBase = await withCodexHome(
+    { 'config.toml': brokenBase, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML },
+    async () => resolveCodexModelProvider('vllm-hpc'),
+  );
+  const onlyBrokenProfile = await withCodexHome(
+    { 'config.toml': BASE_CONFIG_TOML, 'broken.config.toml': brokenBase },
+    async () => resolveCodexModelProvider('vllm-hpc'),
+  );
+  const brokenThenGood = await withCodexHome(
+    { 'config.toml': BASE_CONFIG_TOML, 'aaa-broken.config.toml': brokenBase, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML },
+    async () => resolveCodexModelProvider('vllm-hpc'),
+  );
+  return [
+    // A half-parsed base file must not be mistaken for a base definition (which would suppress the
+    // override) and must not contribute a partial provider.
+    withBrokenBase?.source === 'profile' &&
+      withBrokenBase.file === 'vllm-hpc.config.toml' &&
+      onlyBrokenProfile === undefined &&
+      brokenThenGood?.file === 'vllm-hpc.config.toml',
+    `brokenBase=${JSON.stringify(withBrokenBase)} onlyBrokenProfile=${JSON.stringify(onlyBrokenProfile)} brokenThenGood=${JSON.stringify(brokenThenGood)}`,
+  ];
+});
+
+const PROFILE_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/resume') {
+      const config = msg.params && msg.params.config ? msg.params.config : null;
+      mark({ kind: 'thread/resume', config });
+      const providers = config && config.model_providers ? config.model_providers : {};
+      if (!providers['vllm-hpc']) {
+        // Native 0.149.0 refuses exactly here, at thread-creation config load.
+        send({ id: msg.id, error: { code: -32600, message: "Model provider 'vllm-hpc' not found" } });
+      } else {
+        send({ id: msg.id, result: { thread: { name: 'profile session' }, model: 'qwen3.8-27B-FP8', modelProvider: 'vllm-hpc' } });
+      }
+    }
+  }
+}
+`;
+
+await test('profile-only provider: resume carries the config override, restores the provider, and leaks no credential', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML }, async () => {
+    return await withFakeCodex(PROFILE_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'vllm-hpc', 'qwen3.8-27B-FP8').join('\n'));
+      const rolloutBefore = readFileSync(rollout, 'utf8');
+      const diagnostics: CodexAttachDiagnostic[] = [];
+      const messages: any[] = [];
+      const adapter = new CodexAdapter({ reportAttachDiagnostic: (event) => diagnostics.push(event) });
+      const conn = await adapter.attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      conn.subscribe((m: any) => messages.push(m));
+      try {
+        const models = await conn.listModels?.() ?? [];
+        const records = readMarkers(marker);
+        const resume = records.find((r) => r.kind === 'thread/resume');
+        const settings = records.find((r) => r.kind === 'thread/settings/update');
+        const injected = resume?.config?.model_providers?.['vllm-hpc'];
+        const rolloutAfter = readFileSync(rollout, 'utf8');
+        // Credential hygiene: the definition rides local stdio only. Nothing the app can surface —
+        // messages, attach diagnostics, session info — and nothing durable may contain the token.
+        const surfaced = JSON.stringify({ diagnostics, messages, info: conn.info });
+        return [
+          injected?.base_url === 'http://hpc.invalid:8000/v1' &&
+            injected?.wire_api === 'responses' &&
+            injected?.http_headers?.Authorization === FIXTURE_PROFILE_TOKEN &&
+            conn.info.currentModel?.providerID === 'vllm-hpc' &&
+            conn.info.currentModel?.modelID === 'qwen3.8-27B-FP8' &&
+            conn.info.currentModel?.variant === 'vllm-hpc' &&
+            models.length === 1 &&
+            models[0]?.providerID === 'vllm-hpc' &&
+            models[0]?.providerLabel === 'vllm-hpc' &&
+            models[0]?.variant === 'vllm-hpc' &&
+            conn.info.terminalSyncHint?.command.includes('codex -p vllm-hpc resume --remote') === true &&
+            conn.info.terminalSyncHint.command.includes('-m qwen3.8-27B-FP8') &&
+            settings?.params?.modelProvider === 'vllm-hpc' &&
+            rolloutAfter === rolloutBefore &&
+            !rolloutAfter.includes(FIXTURE_PROFILE_TOKEN) &&
+            !surfaced.includes(FIXTURE_PROFILE_TOKEN),
+          `resume=${JSON.stringify(resume)} settings=${JSON.stringify(settings?.params)} model=${JSON.stringify(conn.info.currentModel)} catalog=${JSON.stringify(models)} rolloutUnchanged=${rolloutAfter === rolloutBefore} tokenSurfaced=${surfaced.includes(FIXTURE_PROFILE_TOKEN)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+await test('profile-only provider: an unresolvable provider sends no override and leaves the refusal standing', async () => {
+  // No profile file at all: the provider is nobody's. Inventing a definition would be worse than the
+  // Observe row the refusal produces.
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
+    return await withFakeCodex(PROFILE_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'vllm-hpc', 'qwen3.8-27B-FP8').join('\n'));
+      let refused = false;
+      try {
+        const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+        await conn.close().catch(() => {});
+      } catch {
+        refused = true;
+      }
+      const resume = readMarkers(marker).find((r) => r.kind === 'thread/resume');
+      return [
+        refused && resume !== undefined && resume.config === null,
+        `refused=${refused} resume=${JSON.stringify(resume)}`,
+      ];
+    });
+  });
+});
+
+const BASE_PROVIDER_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/resume') {
+      const config = msg.params && msg.params.config ? msg.params.config : null;
+      mark({ kind: 'thread/resume', config });
+      if (config) {
+        send({ id: msg.id, error: { code: -32600, message: 'a base-config provider must never be re-sent as an override' } });
+      } else {
+        // A cold resume initializes from the process config default — the masquerade the restore exists to undo.
+        send({ id: msg.id, result: { thread: { name: 'base provider session' }, model: 'gpt-5.6-sol', modelProvider: 'openai' } });
+      }
+    }
+  }
+}
+`;
+
+await test('a base-config provider gets no override, and cold restore stops labelling it openai', async () => {
+  // Reproduces with NO profile involved: turn_context never records the provider, so the old
+  // `?? 'openai'` mislabelled every cold-restored non-OpenAI session on this host.
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
+    return await withFakeCodex(BASE_PROVIDER_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'volcengine-coding-plan', 'volc-model').join('\n'));
+      const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      try {
+        const records = readMarkers(marker);
+        const resume = records.find((r) => r.kind === 'thread/resume');
+        const settings = records.find((r) => r.kind === 'thread/settings/update');
+        return [
+          resume?.config === null &&
+            settings?.params?.model === 'volc-model' &&
+            settings?.params?.modelProvider === 'volcengine-coding-plan' &&
+            conn.info.currentModel?.providerID === 'volcengine-coding-plan' &&
+            conn.info.currentModel?.modelID === 'volc-model' &&
+            conn.info.currentMode === 'approve-for-me',
+          `resume=${JSON.stringify(resume)} settings=${JSON.stringify(settings?.params)} model=${JSON.stringify(conn.info.currentModel)} mode=${conn.info.currentMode}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+const EMPTY_APP_MODEL_RESUME_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      send({ id: msg.id, result: {} });
+    } else if (msg.method === 'thread/resume') {
+      mark({ kind: 'thread/resume', config: msg.params.config || null });
+      send({ id: msg.id, result: { thread: { name: 'empty app session' }, model: 'gpt-5.6-sol', modelProvider: 'openai' } });
+    }
+  }
+}
+`;
+
+await test('empty app-created rollout reapplies its stored non-default model after Codex resumes the process default', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML, 'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML }, async () => {
+    return await withFakeCodex(EMPTY_APP_MODEL_RESUME_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, JSON.stringify({
+        type: 'session_meta',
+        payload: { id: 'fake-thread', cwd: dir, model_provider: 'vllm-hpc', originator: 'cosyncing' },
+      }) + '\n');
+      const encoded = Buffer.from(rollout, 'utf8').toString('base64url');
+      const adapter = new CodexAdapter({
+        resolveStoredCurrentModel: (info) => info.nativeId === 'fake-thread'
+          ? { providerID: 'vllm-hpc', modelID: 'qwen3.8-27B-FP8', variant: 'vllm-hpc', reasoningEffort: 'high' }
+          : undefined,
+      });
+      const conn = await adapter.attach(encoded, 'resume');
+      try {
+        const records = readMarkers(marker);
+        const resume = records.find((record) => record.kind === 'thread/resume');
+        const modelUpdate = records.find((record) => record.kind === 'thread/settings/update' && record.params?.modelProvider);
+        return [
+          String(resume?.config?.model_catalog_json).endsWith('/vllm-hpc-models.json') &&
+            modelUpdate?.params?.modelProvider === 'vllm-hpc' &&
+            modelUpdate?.params?.model === 'qwen3.8-27B-FP8' &&
+            modelUpdate?.params?.effort === 'high' &&
+            conn.info.currentModel?.providerID === 'vllm-hpc' &&
+            conn.info.currentModel?.modelID === 'qwen3.8-27B-FP8' &&
+            conn.info.currentModel?.variant === 'vllm-hpc',
+          `resume=${JSON.stringify(resume)} update=${JSON.stringify(modelUpdate)} model=${JSON.stringify(conn.info.currentModel)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+const OLD_SETTINGS_SERVER_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') {
+      mark({ kind: 'thread/settings/update', params: msg.params });
+      if (Object.prototype.hasOwnProperty.call(msg.params || {}, 'modelProvider')) {
+        send({ id: msg.id, error: { code: -32602, message: 'unknown field: modelProvider' } });
+      } else {
+        send({ id: msg.id, result: {} });
+      }
+    } else if (msg.method === 'thread/resume') {
+      send({ id: msg.id, result: { thread: { name: 'old server' }, model: 'gpt-5.6-sol', modelProvider: 'openai' } });
+    }
+  }
+}
+`;
+
+await test('thread/settings/update modelProvider is a probe: an older server keeps the mode and model restore', async () => {
+  return await withCodexHome({ 'config.toml': BASE_CONFIG_TOML }, async () => {
+    return await withFakeCodex(OLD_SETTINGS_SERVER_FAKE, async (rollout, dir, marker) => {
+      writeFileSync(rollout, profileRollout(dir, 'volcengine-coding-plan', 'volc-model').join('\n'));
+      const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+      try {
+        const updates = readMarkers(marker).filter((r) => r.kind === 'thread/settings/update');
+        const probe = updates[0]?.params ?? {};
+        const accepted = updates[1]?.params ?? {};
+        return [
+          updates.length === 2 &&
+            probe.modelProvider === 'volcengine-coding-plan' &&
+            !Object.prototype.hasOwnProperty.call(accepted, 'modelProvider') &&
+            accepted.model === 'volc-model' &&
+            accepted.approvalsReviewer === 'auto_review' &&
+            conn.info.currentMode === 'approve-for-me' &&
+            // Display truth still comes from the rollout, not from the process default.
+            conn.info.currentModel?.providerID === 'volcengine-coding-plan',
+          `updates=${JSON.stringify(updates.map((u) => u.params))} mode=${conn.info.currentMode} model=${JSON.stringify(conn.info.currentModel)}`,
+        ];
+      } finally {
+        await conn.close().catch(() => {});
+      }
+    });
+  });
+});
+
+const PROFILE_CREATE_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/name/set') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/start') {
+      const config = msg.params && msg.params.config ? msg.params.config : null;
+      mark({ kind: 'thread/start', provider: msg.params.modelProvider, model: msg.params.model, config, allowProviderModelFallback: msg.params.allowProviderModelFallback });
+      const providers = config && config.model_providers ? config.model_providers : {};
+      if (msg.params.modelProvider === 'vllm-hpc' && !providers['vllm-hpc']) {
+        send({ id: msg.id, error: { code: -32600, message: "Model provider 'vllm-hpc' not found" } });
+      } else {
+        send({ id: msg.id, result: {
+          thread: { id: 'created-thread', sessionId: 'created-thread', path: '__ROLLOUT__', cwd: msg.params.cwd, name: 'created', createdAt: 1800000000, updatedAt: 1800000001, turns: [] },
+          cwd: msg.params.cwd,
+          model: msg.params.model,
+          modelProvider: msg.params.modelProvider,
+        } });
+      }
+    }
+  }
+}
+`;
+
+await test('createSession materializes a profile-only provider on thread/start and sends nothing for a base one', async () => {
+  return await withCodexHome({
+    'config.toml': BASE_CONFIG_TOML,
+    'vllm-hpc.config.toml': PROFILE_PROVIDER_TOML,
+    'volcengine.config.toml': 'model = "glm-5.3"\nmodel_provider = "volcengine-coding-plan"\n',
+    'model-catalogs/volcengine.json': JSON.stringify({
+      models: [
+        { id: 'glm-5.3', display_name: 'GLM 5.3' },
+        { id: 'deepseek-v3.2', display_name: 'DeepSeek V3.2' },
+      ],
+    }),
+  }, async () => {
+    return await withFakeCodex(PROFILE_CREATE_FAKE, async (_rollout, dir, marker) => {
+      let presenceScans = 0;
+      const adapter = new CodexAdapter({
+        scanCodexTuiPresence: async () => {
+          presenceScans += 1;
+          return fakeTuiScan();
+        },
+      });
+      const profileSession = await adapter.createSession({
+        directory: dir,
+        title: 'Profile provider',
+        model: { providerID: 'vllm-hpc', modelID: 'qwen3.8-27B-FP8' },
+      });
+      const baseSession = await adapter.createSession({
+        directory: dir,
+        title: 'Base provider',
+        model: { providerID: 'volcengine-coding-plan', modelID: 'volc-model' },
+      });
+      const alternateProfileSession = await adapter.createSession({
+        directory: dir,
+        title: 'Alternate profile model',
+        model: {
+          providerID: 'volcengine-coding-plan',
+          modelID: 'deepseek-v3.2',
+          variant: 'volcengine',
+        },
+      });
+      const starts = readMarkers(marker).filter((r) => r.kind === 'thread/start');
+      const profileStart = starts.find((r) => r.provider === 'vllm-hpc');
+      const baseStart = starts.find((r) => r.model === 'volc-model');
+      const alternateProfileStart = starts.find((r) => r.model === 'deepseek-v3.2');
+      return [
+        profileStart?.config?.model_providers?.['vllm-hpc']?.base_url === 'http://hpc.invalid:8000/v1' &&
+          profileStart.config.model_providers['vllm-hpc'].http_headers?.Authorization === FIXTURE_PROFILE_TOKEN &&
+          profileStart.allowProviderModelFallback === false &&
+          String(profileStart.config.model_catalog_json).endsWith('/vllm-hpc-models.json') &&
+          baseStart?.config === null &&
+          baseStart?.allowProviderModelFallback === false &&
+          String(alternateProfileStart?.config?.model_catalog_json).endsWith('/model-catalogs/volcengine.json') &&
+          alternateProfileStart?.config?.model_providers === undefined &&
+          alternateProfileStart?.allowProviderModelFallback === false &&
+          profileSession.currentModel?.providerID === 'vllm-hpc' &&
+          profileSession.currentModel?.variant === 'vllm-hpc' &&
+          baseSession.currentModel?.providerID === 'volcengine-coding-plan' &&
+          alternateProfileSession.currentModel?.providerID === 'volcengine-coding-plan' &&
+          alternateProfileSession.currentModel?.modelID === 'deepseek-v3.2' &&
+          alternateProfileSession.currentModel?.variant === 'volcengine' &&
+          presenceScans === 0,
+        `starts=${JSON.stringify(starts)} profileInfo=${JSON.stringify(profileSession.currentModel)} baseInfo=${JSON.stringify(baseSession.currentModel)} alternateInfo=${JSON.stringify(alternateProfileSession.currentModel)} presenceScans=${presenceScans}`,
+      ];
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Approval advertisement: every shape offers the third option, and every shape answers it with the
+// session-scoped value. The request params below deliberately carry NO `availableDecisions` — that
+// field does not exist in 0.149's approval params, and gating on it silently degraded
+// "approve for this session" to "just this once" with no trace.
+// ---------------------------------------------------------------------------
+
+const APPROVAL_SHAPES_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+const requests = {
+  71: ['item/commandExecution/requestApproval', { threadId: 'fake-thread', turnId: 'turn1', itemId: 'cmd1', command: 'printf hi', cwd: '/tmp', reason: 'v2 command', proposedExecpolicyAmendment: ['printf'], availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['printf'] } }, 'decline'] }],
+  72: ['item/fileChange/requestApproval', { threadId: 'fake-thread', turnId: 'turn1', itemId: 'patch1', grantRoot: '/tmp', reason: 'v2 patch' }],
+  73: ['item/permissions/requestApproval', { threadId: 'fake-thread', turnId: 'turn1', itemId: 'perm1', cwd: '/tmp', reason: 'v2 permissions', permissions: { network: 'enabled' } }],
+  74: ['execCommandApproval', { threadId: 'fake-thread', turnId: 'turn1', callId: 'legacy-cmd', command: ['printf', 'hi'], cwd: '/tmp', reason: 'legacy command' }],
+  75: ['applyPatchApproval', { threadId: 'fake-thread', turnId: 'turn1', callId: 'legacy-patch', fileChanges: { '/tmp/a.txt': { add: {} } }, reason: 'legacy patch' }],
+};
+let answered = 0;
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'openai' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      for (const id of Object.keys(requests)) send({ id: Number(id), method: requests[id][0], params: requests[id][1] });
+    } else if (msg.id !== undefined && requests[msg.id] && msg.result !== undefined) {
+      mark({ kind: 'approval-response', method: requests[msg.id][0], result: msg.result });
+      if (++answered === 5) send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: 'turn1', status: 'completed' } } });
+    }
+  }
+}
+`;
+
+await test('codex advertises and returns each request-local approval scope exactly', async () => {
+  return await withFakeCodex(APPROVAL_SHAPES_FAKE, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'trigger every approval shape' });
+      const arrived = await waitFor(() => messages.filter((m) => m.type === 'permission-request').length === 5, 5000);
+      const requests = messages.filter((m) => m.type === 'permission-request');
+      const pending = await Promise.resolve(conn.getPending?.() ?? []);
+      const advertised = requests.every((m) => m.toolName === 'exec_command'
+        && m.detail?.includes('v2 command')
+        ? m.options?.join(',') === 'approve,approve-rule,reject'
+        : m.options?.join(',') === 'approve,approve-session,reject');
+      const pendingAdvertised = pending
+        .filter((m: any) => m.type === 'permission-request')
+        .every((m: any) => m.toolName === 'exec_command'
+          && m.detail?.includes('v2 command')
+          ? m.options?.join(',') === 'approve,approve-rule,reject'
+          : m.options?.join(',') === 'approve,approve-session,reject');
+      for (const request of requests) {
+        await conn.respondPermission(
+          request.requestId,
+          request.toolName === 'exec_command' && request.detail?.includes('v2 command')
+            ? 'approve-rule'
+            : 'approve-session',
+        );
+      }
+      const settled = await waitFor(() => readMarkers(marker).filter((r) => r.kind === 'approval-response').length === 5, 5000);
+      const answers = new Map<string, string>(
+        readMarkers(marker)
+          .filter((r) => r.kind === 'approval-response')
+          .map((r) => [String(r.method), JSON.stringify(r.result)] as const),
+      );
+      return [
+        arrived &&
+          settled &&
+          advertised &&
+          pendingAdvertised &&
+          pending.filter((m: any) => m.type === 'permission-request').length === 5 &&
+          // The exact bytes each button produces, pinned per method.
+          answers.get('item/commandExecution/requestApproval') ===
+            '{"decision":{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["printf"]}}}' &&
+          answers.get('item/fileChange/requestApproval') === '{"decision":"acceptForSession"}' &&
+          answers.get('execCommandApproval') === '{"decision":"approved_for_session"}' &&
+          answers.get('applyPatchApproval') === '{"decision":"approved_for_session"}' &&
+          answers.get('item/permissions/requestApproval') ===
+            '{"permissions":{"network":"enabled"},"scope":"session","strictAutoReview":false}',
+        `arrived=${arrived} settled=${settled} advertised=${advertised} pending=${pending.length} options=${JSON.stringify(requests.map((m) => m.options))} answers=${JSON.stringify([...answers])}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
+await test('approve-once and reject keep their turn-scoped bytes on every approval shape', async () => {
+  return await withFakeCodex(APPROVAL_SHAPES_FAKE, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'trigger every approval shape' });
+      await waitFor(() => messages.filter((m) => m.type === 'permission-request').length === 5, 5000);
+      const requests = messages.filter((m) => m.type === 'permission-request');
+      for (const request of requests) {
+        await conn.respondPermission(request.requestId, request.toolName === 'apply_patch' ? 'reject' : 'approve');
+      }
+      const settled = await waitFor(() => readMarkers(marker).filter((r) => r.kind === 'approval-response').length === 5, 5000);
+      const answers = new Map<string, string>(
+        readMarkers(marker)
+          .filter((r) => r.kind === 'approval-response')
+          .map((r) => [String(r.method), JSON.stringify(r.result)] as const),
+      );
+      return [
+        settled &&
+          answers.get('item/commandExecution/requestApproval') === '{"decision":"accept"}' &&
+          answers.get('execCommandApproval') === '{"decision":"approved"}' &&
+          answers.get('item/fileChange/requestApproval') === '{"decision":"decline"}' &&
+          answers.get('applyPatchApproval') === '{"decision":"denied"}' &&
+          answers.get('item/permissions/requestApproval') ===
+            '{"permissions":{"network":"enabled"},"scope":"turn","strictAutoReview":false}',
+        `settled=${settled} answers=${JSON.stringify([...answers])}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
+  });
+});
+
+const APPROVAL_PROBE_FAKE = `#!/usr/bin/env bun
+const enc = new TextDecoder();
+let buf = '';
+const { appendFileSync } = require('node:fs');
+const send = (o) => console.log(JSON.stringify(o));
+const mark = (entry) => appendFileSync('__MARKER__', JSON.stringify(entry) + String.fromCharCode(10));
+for await (const chunk of Bun.stdin.stream()) {
+  buf += enc.decode(chunk, { stream: true });
+  let nl;
+  while ((nl = buf.indexOf(String.fromCharCode(10))) !== -1) {
+    const raw = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    if (!raw.trim()) continue;
+    const msg = JSON.parse(raw);
+    if (msg.method === 'initialize') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/loaded/list') send({ id: msg.id, result: { data: [], nextCursor: null } });
+    else if (msg.method === 'thread/settings/update') send({ id: msg.id, result: {} });
+    else if (msg.method === 'thread/resume') send({ id: msg.id, result: { thread: { name: 'fake' }, model: 'fake-model', modelProvider: 'openai' } });
+    else if (msg.method === 'turn/start') {
+      send({ id: msg.id, result: { turn: { id: 'turn1' } } });
+      send({ method: 'turn/started', params: { threadId: 'fake-thread', turn: { id: 'turn1' } } });
+      // A hypothetical future server that DOES advertise its vocabulary, and excludes session scope.
+      send({ id: 81, method: 'item/commandExecution/requestApproval', params: { threadId: 'fake-thread', turnId: 'turn1', itemId: 'probe1', command: 'printf hi', availableDecisions: ['accept', 'decline'] } });
+    } else if (msg.id === 81 && msg.result !== undefined) {
+      mark({ kind: 'approval-response', result: msg.result });
+      send({ method: 'turn/completed', params: { threadId: 'fake-thread', turn: { id: 'turn1', status: 'completed' } } });
+    }
+  }
+}
+`;
+
+await test('availableDecisions is honored when a server actually sends it, and never invented when it does not', async () => {
+  return await withFakeCodex(APPROVAL_PROBE_FAKE, async (rollout, _dir, marker) => {
+    const conn = await new CodexAdapter().attach(Buffer.from(rollout, 'utf8').toString('base64url'), 'resume');
+    const messages: any[] = [];
+    conn.subscribe((m: any) => messages.push(m));
+    try {
+      await conn.sendPrompt({ text: 'trigger the advertised-vocabulary shape' });
+      await waitFor(() => messages.some((m) => m.type === 'permission-request'), 5000);
+      const request = messages.find((m) => m.type === 'permission-request');
+      // No dead button: a server that says session scope is unavailable gets two options.
+      const twoOptions = request?.options?.join(',') === 'approve,reject';
+      await conn.respondPermission(request.requestId, 'approve-session');
+      const settled = await waitFor(() => readMarkers(marker).some((r) => r.kind === 'approval-response'), 5000);
+      const answer = readMarkers(marker).find((r) => r.kind === 'approval-response');
+      return [
+        twoOptions && settled && JSON.stringify(answer?.result) === '{"decision":"accept"}',
+        `options=${JSON.stringify(request?.options)} answer=${JSON.stringify(answer?.result)}`,
+      ];
+    } finally {
+      await conn.close().catch(() => {});
+    }
   });
 });
 

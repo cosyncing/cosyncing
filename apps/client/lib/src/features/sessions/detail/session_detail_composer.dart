@@ -464,6 +464,7 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
           return model.label.toLowerCase().contains(query) ||
               model.modelID.toLowerCase().contains(query) ||
               model.providerID.toLowerCase().contains(query) ||
+              (model.providerLabel?.toLowerCase().contains(query) ?? false) ||
               (model.variant?.toLowerCase().contains(query) ?? false);
         })
         .toList(growable: false);
@@ -498,6 +499,10 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                         final model = visible[index];
                         final selected = _sameModel(model, widget.selected);
                         final variant = model.variant;
+                        final providerLabel =
+                            (model.providerLabel?.trim().isNotEmpty ?? false)
+                            ? model.providerLabel!.trim()
+                            : model.providerID;
                         return ListTile(
                           key: ValueKey(
                             'session-detail-model-option-'
@@ -512,9 +517,11 @@ class _ModelPickerSheetState extends State<_ModelPickerSheet> {
                           title: Text(model.label),
                           subtitle: Text(
                             [
-                              model.providerID,
+                              providerLabel,
                               model.modelID,
-                              if (variant != null && variant.isNotEmpty)
+                              if (variant != null &&
+                                  variant.isNotEmpty &&
+                                  variant != providerLabel)
                                 variant,
                             ].join(' · '),
                           ),

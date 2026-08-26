@@ -541,9 +541,10 @@ class _QuotaNotice extends StatelessWidget {
 enum _QuotaWindowKind { fiveHour, weekly, other }
 
 /// Canonical window kind from a Tokdash bucket id. Mirrors Tokdash's own
-/// client convention (`session`/`five_hour`/`5h` → 5-hour, `weekly*`/
-/// `seven_day`/`7d`/`plan` → weekly) without branching on provider names, so
-/// unknown future bucket types fall through to their server-provided label.
+/// client convention (`session`/`five_hour`/`5h` → 5-hour,
+/// `weekly_all`/`seven_day`/`7d`/`plan` → weekly) without branching on
+/// provider names. Scoped weekly buckets such as `weekly_scoped_fable` are
+/// distinct quota pools and fall through to their server-provided label.
 _QuotaWindowKind _quotaWindowKind(String bucketId) {
   final id = bucketId.toLowerCase();
   if (id == '5h' ||
@@ -555,7 +556,8 @@ _QuotaWindowKind _quotaWindowKind(String bucketId) {
   if (id == '7d' ||
       id == 'seven_day' ||
       id == 'plan' ||
-      id.startsWith('weekly') ||
+      id == 'weekly' ||
+      id == 'weekly_all' ||
       id.endsWith('_7d')) {
     return _QuotaWindowKind.weekly;
   }

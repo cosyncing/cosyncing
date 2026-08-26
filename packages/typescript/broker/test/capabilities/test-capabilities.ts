@@ -452,13 +452,15 @@ try {
   //   setup.ts  behavior[id]           per-agent managed-behavior prose, one entry per agent.
   //   setup.ts  agent.id === 'pi'      (x3) Pi bridge blocker + install step + known-legacy migration
   //                                    prompt; all require Pi to be `supported` and gate only its bridge file.
-  //   setup.ts  agent.id === 'codex'   records `agents.codex` support in persisted setup state.
+  //   setup.ts  agent.id === 'codex'   (x2) inspects the Codex-only legacy-daemon migration posture and
+  //                                    records `agents.codex` support in persisted setup state.
   const expectedBrokerBranches = [
     "packages/typescript/broker/src/installation/doctor.ts:diagnosis.agent === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'claude'",
     'packages/typescript/broker/src/installation/setup.ts:behavior[id]',
+    "packages/typescript/broker/src/installation/setup.ts:agent.id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:agent.id === 'pi'",

@@ -18,10 +18,12 @@ import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_pr
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/settings/controller/locale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
+import 'package:cosyncing_client/src/platform/startup/browser_close_protection.dart';
 import 'package:cosyncing_client/src/platform/startup/startup_shell.dart';
 import 'package:cosyncing_client/src/platform/update/web_client_update_provider.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_bridge.dart';
@@ -104,6 +106,8 @@ class _AppState extends ConsumerState<App> {
         ref.watch(uiScaleControllerProvider).valueOrNull ??
         kDefaultUiScaleSettings;
     final density = uiScale.density.visualDensity;
+    final openSessions = ref.watch(openSessionsControllerProvider).valueOrNull;
+    setBrowserCloseProtection(enabled: openSessions?.isEmpty == false);
     return MaterialApp.router(
       onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
       theme: buildAppTheme(spec.light, Brightness.light, density: density),

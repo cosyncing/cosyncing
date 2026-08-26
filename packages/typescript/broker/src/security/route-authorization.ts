@@ -55,6 +55,8 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/attention-events/{id}/ack', methods: ['POST'], policy: DRIVE },
   { route: '/api/attention-events/{id}/dismiss', methods: ['POST'], policy: DRIVE },
   { route: '/api/broker/health', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/features/workspace-browsing', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/broker/features/workspace-browsing', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/broker/restart', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/broker/restart-all', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/broker/update', methods: ['GET', 'POST'], policy: OWNER_ONLY },

@@ -43,6 +43,7 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   '/api/attention-events/{id}/ack': _adopted,
   '/api/attention-events/{id}/dismiss': _adopted,
   '/api/broker/health': _adopted,
+  '/api/broker/features/workspace-browsing': _adopted,
   '/api/broker/update': _adopted,
   '/api/broker/restart': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.deferred,

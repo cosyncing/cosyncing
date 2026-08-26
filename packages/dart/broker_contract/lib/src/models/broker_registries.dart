@@ -28,6 +28,7 @@ const List<String> brokerRoutes = <String>[
   '/api/attention-events/{id}/ack',
   '/api/attention-events/{id}/dismiss',
   '/api/broker/health',
+  '/api/broker/features/workspace-browsing',
   '/api/broker/restart',
   '/api/broker/restart-all',
   '/api/broker/update',

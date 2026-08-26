@@ -697,6 +697,85 @@ void main() {
     });
 
     testWidgets(
+      'workspace browsing requires owner confirmation before restart',
+      (tester) async {
+        managedRuntimeApi.workspaceBrowsingEnabled = false;
+        final profile = BrokerProfile(
+          id: 'workstation',
+          displayName: 'Workstation',
+          baseUri: Uri.parse('http://127.0.0.1:7734'),
+          createdAt: DateTime(2026),
+          incarnationId: 'workspace-test',
+        );
+        await tester.pumpWidget(
+          buildSubject(
+            home: const BrokerDevicesSettingsPage(),
+            activeProfile: profile,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final workspaceSwitch = find
+            .byKey(const Key('settings-workspace-browsing'))
+            .at(0);
+        await tester.drag(
+          find.byType(ListView).at(0),
+          const Offset(0, -600),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(workspaceSwitch);
+        await tester.pumpAndSettle();
+        expect(find.text('Enable workspace browsing?'), findsOneWidget);
+        expect(
+          find.textContaining('A proxy can make a remote request look local'),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.text('Enable and restart'));
+        await tester.pumpAndSettle();
+        expect(managedRuntimeApi.workspaceBrowsingWrites, [true]);
+      },
+    );
+
+    testWidgets('paired peers can inspect but not change workspace browsing', (
+      tester,
+    ) async {
+      managedRuntimeApi
+        ..workspaceBrowsingEnabled = true
+        ..principalKind = 'peer';
+      final profile = BrokerProfile(
+        id: 'paired-workstation',
+        displayName: 'Paired workstation',
+        baseUri: Uri.parse('https://broker.example'),
+        createdAt: DateTime(2026),
+        incarnationId: 'workspace-peer-test',
+      );
+      await tester.pumpWidget(
+        buildSubject(
+          home: const BrokerDevicesSettingsPage(),
+          activeProfile: profile,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final workspaceSwitch = find
+          .byKey(const Key('settings-workspace-browsing'))
+          .at(0);
+      await tester.drag(
+        find.byType(ListView).at(0),
+        const Offset(0, -600),
+      );
+      await tester.pumpAndSettle();
+
+      final workspaceTile = tester.widget<SwitchListTile>(workspaceSwitch);
+      expect(workspaceTile.value, isTrue);
+      expect(workspaceTile.onChanged, isNull);
+      expect(
+        find.text('Only a server owner credential can change this setting.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
       'shows profile-qualified client update fallback without a waiting build',
       (tester) async {
         final profile = BrokerProfile(
@@ -1624,6 +1703,8 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   Completer<void>? runtimeUpdatesGate;
   Error? runtimeUpdatesError;
   String principalKind = 'owner';
+  bool? workspaceBrowsingEnabled;
+  final List<bool> workspaceBrowsingWrites = [];
 
   @override
   Future<RuntimeUpdatesResponse> getRuntimeUpdates({bool fresh = false}) async {
@@ -1669,7 +1750,28 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
     status: 'healthy',
     checkedAt: 1,
     principalKind: principalKind,
+    raw: {
+      if (workspaceBrowsingEnabled != null)
+        'features': {
+          'httpWorkspaceBrowsing': workspaceBrowsingEnabled,
+        },
+    },
   );
+
+  @override
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  }) async {
+    workspaceBrowsingWrites.add(enabled);
+    workspaceBrowsingEnabled = enabled;
+    return WorkspaceBrowsingSettingsResponse(
+      enabled: enabled,
+      ok: true,
+      restartRequired: true,
+      message: 'restart scheduled',
+    );
+  }
 
   @override
   Future<HealthResponse> getProductHealth() async =>

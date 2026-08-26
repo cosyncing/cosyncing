@@ -18,6 +18,9 @@ interface SessionProvenanceRecord {
   launchSurface?: SessionLaunchSurface;
   appCreatedAt?: number;
   appMutatedPrivateAt?: number;
+  /** Last exact model selected through the app. Codex needs this for an empty
+   *  rollout because its session_meta records the provider but not the model. */
+  currentModel?: SessionInfo['currentModel'];
 }
 
 interface MetadataIndexV1 {
@@ -127,6 +130,12 @@ export class SessionMetadataStore {
     return isMetadataIndexV2(this.index) ? this.index.provenance[this.keyFor(info)] : undefined;
   }
 
+  /** Exact app-selected model to restore when an adapter's durable session has
+   *  not recorded a model yet. Callers must prefer native rollout evidence. */
+  currentModelHint(info: { tool: string; id: string; nativeId?: string }): SessionInfo['currentModel'] | undefined {
+    return cleanCurrentModel(this.getProvenance(info)?.currentModel);
+  }
+
   private writeAppProvenance(
     info: { tool: string; id: string; nativeId?: string },
     update: (record: SessionProvenanceRecord) => SessionProvenanceRecord,
@@ -171,23 +180,28 @@ export class SessionMetadataStore {
   }
 
   /** Record that the app created a durable session for provenance and fork-safety heuristics. */
-  recordAppCreatedSession(info: { tool: string; id: string; nativeId?: string }): void {
+  recordAppCreatedSession(info: { tool: string; id: string; nativeId?: string; currentModel?: SessionInfo['currentModel'] }): void {
     const now = Date.now();
+    const currentModel = cleanCurrentModel(info.currentModel);
     this.writeAppProvenance(info, (record) => ({
       launchSurface: 'app',
       appCreatedAt: record.appCreatedAt ?? now,
       appMutatedPrivateAt: record.appMutatedPrivateAt,
+      currentModel: currentModel ?? record.currentModel,
     }));
   }
 
   /** Record that the app has successfully injected/changed conversation state for this session. */
-  recordAppMutation(info: { tool: string; id: string; nativeId?: string; control?: SessionInfo['control'] }): boolean {
-    if (info.control?.terminalSync?.presence !== 'private') return false;
+  recordAppMutation(info: { tool: string; id: string; nativeId?: string; control?: SessionInfo['control']; currentModel?: SessionInfo['currentModel'] }): boolean {
+    const privateMutation = info.control?.terminalSync?.presence === 'private';
+    const currentModel = cleanCurrentModel(info.currentModel);
+    if (!privateMutation && !currentModel) return false;
     const now = Date.now();
     return this.writeAppProvenance(info, (record) => ({
       launchSurface: record.launchSurface,
       appCreatedAt: record.appCreatedAt,
-      appMutatedPrivateAt: record.appMutatedPrivateAt || now,
+      appMutatedPrivateAt: privateMutation ? record.appMutatedPrivateAt || now : record.appMutatedPrivateAt,
+      currentModel: currentModel ?? record.currentModel,
     }));
   }
 
@@ -201,6 +215,7 @@ export class SessionMetadataStore {
       launchSurface: record.launchSurface,
       appCreatedAt: record.appCreatedAt,
       appMutatedPrivateAt: undefined,
+      currentModel: record.currentModel,
     }));
   }
 
@@ -259,7 +274,26 @@ function provenanceEquals(a: SessionProvenanceRecord, b: SessionProvenanceRecord
   return (
     a.launchSurface === b.launchSurface &&
     a.appCreatedAt === b.appCreatedAt &&
-    a.appMutatedPrivateAt === b.appMutatedPrivateAt
+    a.appMutatedPrivateAt === b.appMutatedPrivateAt &&
+    currentModelEquals(a.currentModel, b.currentModel)
+  );
+}
+
+function cleanCurrentModel(value: SessionInfo['currentModel'] | undefined): SessionInfo['currentModel'] | undefined {
+  const providerID = cleanLabel(value?.providerID, 256);
+  const modelID = cleanLabel(value?.modelID, 256);
+  if (!providerID || !modelID) return undefined;
+  const variant = cleanLabel(value?.variant, 256) ?? undefined;
+  const reasoningEffort = cleanLabel(value?.reasoningEffort, 64) ?? undefined;
+  return { providerID, modelID, ...(variant ? { variant } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
+}
+
+function currentModelEquals(a: SessionInfo['currentModel'] | undefined, b: SessionInfo['currentModel'] | undefined): boolean {
+  return (
+    a?.providerID === b?.providerID &&
+    a?.modelID === b?.modelID &&
+    a?.variant === b?.variant &&
+    a?.reasoningEffort === b?.reasoningEffort
   );
 }
 

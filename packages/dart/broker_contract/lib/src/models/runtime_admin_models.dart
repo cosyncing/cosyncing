@@ -529,6 +529,14 @@ class BrokerHealthResponse {
   /// Whether owner-only administration should be presented by clients.
   bool get ownerOperationsAvailable => principalKind != 'peer';
 
+  /// Active HTTP workspace-browsing gate, when advertised by this broker.
+  bool? get httpWorkspaceBrowsingEnabled {
+    final features = raw['features'];
+    if (features is! Map) return null;
+    final value = features['httpWorkspaceBrowsing'];
+    return value is bool ? value : null;
+  }
+
   /// Overall broker health state.
   final String status;
 
@@ -570,6 +578,66 @@ class BrokerHealthResponse {
     }
     return output;
   }
+}
+
+/// Broker-wide workspace-browsing exposure state.
+class WorkspaceBrowsingSettingsResponse {
+  /// Creates a [WorkspaceBrowsingSettingsResponse].
+  const WorkspaceBrowsingSettingsResponse({
+    required this.enabled,
+    this.ok,
+    this.active,
+    this.ownerOperationsAvailable,
+    this.restartRequired,
+    this.message,
+    this.raw = const <String, dynamic>{},
+  });
+
+  /// Creates a response from broker JSON.
+  factory WorkspaceBrowsingSettingsResponse.fromJson(
+    Map<String, dynamic> json,
+  ) => WorkspaceBrowsingSettingsResponse(
+    ok: json['ok'] as bool?,
+    enabled: json['enabled'] as bool? ?? false,
+    active: json['active'] as bool?,
+    ownerOperationsAvailable: json['ownerOperationsAvailable'] as bool?,
+    restartRequired: json['restartRequired'] as bool?,
+    message: json['message'] as String?,
+    raw: Map<String, dynamic>.of(json),
+  );
+
+  /// Optional wrapper status flag.
+  final bool? ok;
+
+  /// Persisted target state.
+  final bool enabled;
+
+  /// State active in the currently running broker process.
+  final bool? active;
+
+  /// Whether this principal may change the setting.
+  final bool? ownerOperationsAvailable;
+
+  /// Whether the broker must restart before [enabled] becomes active.
+  final bool? restartRequired;
+
+  /// Human-readable broker outcome.
+  final String? message;
+
+  /// Forward-compatible payload.
+  final Map<String, dynamic> raw;
+
+  /// Converts this response to JSON.
+  Map<String, dynamic> toJson() => Map<String, dynamic>.of(raw)
+    ..['enabled'] = enabled
+    ..addAll({
+      if (ok != null) 'ok': ok,
+      if (active != null) 'active': active,
+      if (ownerOperationsAvailable != null)
+        'ownerOperationsAvailable': ownerOperationsAvailable,
+      if (restartRequired != null) 'restartRequired': restartRequired,
+      if (message != null) 'message': message,
+    });
 }
 
 /// Per-component broker health snapshot.

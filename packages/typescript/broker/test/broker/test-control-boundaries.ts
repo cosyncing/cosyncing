@@ -313,6 +313,20 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
     assert.equal((await fetch(`${base}/api/broker/restart`, {
       method: 'POST', headers: integrationHeaders,
     })).status, 401);
+    const workspaceEndpoint = `${base}/api/broker/features/workspace-browsing`;
+    const workspaceStateResponse = await fetch(workspaceEndpoint, { headers: sharedHeaders });
+    assert.equal(workspaceStateResponse.status, 200);
+    assert.equal((await workspaceStateResponse.json() as any).enabled, false);
+    assert.equal((await fetch(workspaceEndpoint, {
+      method: 'POST',
+      headers: { ...sharedHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    })).status, 400, 'enabling direct file access requires an explicit risk confirmation');
+    assert.equal((await fetch(workspaceEndpoint, {
+      method: 'POST',
+      headers: { ...sharedHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    })).status, 200, 'an unchanged owner setting must not schedule a restart');
 
     const shared = await openSocket(await fixtureWsUrl(
       base,
@@ -388,6 +402,13 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
     const peerHeaders = { 'x-cosyncing-peer-token': brokerPeerToken };
     assert.equal((await fetch(`${base}/api/machines`, { headers: peerHeaders })).status, 200,
       'a v1 peer token intentionally has full broker access');
+    assert.equal((await fetch(workspaceEndpoint, { headers: peerHeaders })).status, 200,
+      'paired devices may inspect the workspace exposure state');
+    assert.equal((await fetch(workspaceEndpoint, {
+      method: 'POST',
+      headers: { ...peerHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true, confirmRemoteFileAccess: true }),
+    })).status, 403, 'paired devices cannot widen the broker workspace exposure gate');
     const peer = await openSocket(await fixtureWsUrl(
       base,
       wsBase,

@@ -826,6 +826,84 @@ void main() {
       },
     );
 
+    test(
+      'a live status flip re-orders in the same frame the registry applies it',
+      () async {
+        // w1 is working with an OLDER creation anchor; i1 is settled and more
+        // recently touched, so it sits below the working band.
+        fakeRepo.sessions = const [
+          SessionInfo(
+            id: 'w1',
+            tool: 'codex',
+            title: 'Working',
+            status: SessionStatus.working,
+            createdAt: 100,
+            updatedAt: 100,
+            attachMode: AttachMode.live,
+          ),
+          SessionInfo(
+            id: 'i1',
+            tool: 'codex',
+            title: 'Settled',
+            status: SessionStatus.idle,
+            createdAt: 200,
+            updatedAt: 900,
+            attachMode: AttachMode.live,
+          ),
+        ];
+        // The registry only adopts observations for a real roster source, so
+        // this needs the active profile the default container leaves unset.
+        container.dispose();
+        container = ProviderContainer(
+          overrides: [
+            sessionListRepositoryProvider.overrideWith((ref) async => fakeRepo),
+            activeBrokerProfileHydrationProvider.overrideWith((ref) async {}),
+            activeBrokerProfileProvider.overrideWith((ref) => _profile),
+            rosterSnapshotRepositoryProvider.overrideWithValue(
+              InMemoryRosterSnapshotRepository(),
+            ),
+            sessionRosterWindowProvider.overrideWith(_FixedRosterWindow.new),
+          ],
+        );
+        await container.read(sessionListControllerProvider.notifier).load();
+        expect(container.read(rosterSessionsProvider).map((s) => s.id), [
+          'w1',
+          'i1',
+        ]);
+
+        final state = container.read(sessionListControllerProvider);
+        container
+            .read(sessionStatusRegistryProvider.notifier)
+            .publishLive(
+              source: state.source,
+              tool: 'codex',
+              sessionId: 'i1',
+              status: SessionStatus.working,
+              rosterRevisionFloor: state.revision,
+            );
+
+        // No roster publish happened: the controller's own rows are untouched.
+        expect(
+          container
+              .read(sessionListControllerProvider)
+              .sessions
+              .map((s) => s.id),
+          ['w1', 'i1'],
+        );
+        // The roster every surface reads has already moved i1 into the working
+        // band on its newer anchor, instead of leaving a working pill in a
+        // settled slot until the next publish.
+        expect(container.read(rosterSessionsProvider).map((s) => s.id), [
+          'i1',
+          'w1',
+        ]);
+        expect(
+          container.read(rosterSessionsProvider).first.status,
+          SessionStatus.working,
+        );
+      },
+    );
+
     test('hidden lifecycle cancels the feed and resume restarts it', () async {
       final live = _LiveSessionListRepository(
         _response(1, SessionStatus.idle),

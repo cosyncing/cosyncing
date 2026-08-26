@@ -45,6 +45,7 @@ export type SetupMutationStep =
   | { kind: 'service-install'; definitionPath: string }
   | { kind: 'service-remove'; provider: SetupServiceChoice; product: string }
   | { kind: 'binary-install'; version: string; path: string }
+  | { kind: 'codex-legacy-daemon-migration' }
   | { kind: 'commit-receipts'; installStatePath: string };
 
 /**
@@ -319,6 +320,9 @@ const en: SetupMessages = {
         return `Copy the running ${step.version} executable to owner-only ${step.path} and record its `
           + 'measured ownership receipt; the acquisition artifact (for example an npm package) is left '
           + 'untouched.';
+      case 'codex-legacy-daemon-migration':
+        return 'Stop the exact legacy unmanaged Codex app-server process, start it through the managed '
+          + 'daemon command, and record the new control-socket ownership. Attached Codex sessions will disconnect.';
       case 'commit-receipts':
         return `Commit owner receipts to ${step.installStatePath} only after verification.`;
     }
@@ -505,6 +509,9 @@ const zhHans: SetupMessages = {
       case 'binary-install':
         return `把正在运行的 ${step.version} 可执行文件复制到仅本人可读的 ${step.path}，`
           + '并记录其校验过的归属凭证；获取来源（例如 npm 包）不会被改动。';
+      case 'codex-legacy-daemon-migration':
+        return '停止身份已精确确认的旧版非托管 Codex app-server 进程，通过托管 daemon 命令重新启动，'
+          + '并记录新控制 socket 的归属。当前已连接的 Codex 会话会断开。';
       case 'commit-receipts':
         return `全部校验通过之后，才把归属凭证提交到 ${step.installStatePath}。`;
     }

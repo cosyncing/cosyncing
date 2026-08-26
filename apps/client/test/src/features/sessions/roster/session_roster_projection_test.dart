@@ -3,10 +3,16 @@ import 'package:cosyncing_client/src/features/sessions/roster/session_roster_pro
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  // These rows carry `updatedAt` because every authoritative roster row does,
+  // and because the projection now orders by the working-band comparator rather
+  // than trusting input order. The origin tests below still assert a definite
+  // sequence — it is just stated by the fixture's recency instead of by the
+  // position each row happens to occupy in the list literal.
   final parent = _session(
     id: 'parent',
     title: 'Same title',
     nativeId: 'native-parent',
+    updatedAt: 500,
   );
   final childOne = _session(
     id: 'child-1',
@@ -14,6 +20,7 @@ void main() {
     origin: SessionOrigin.subagent,
     nativeId: 'native-child-1',
     parentThreadId: 'native-parent',
+    updatedAt: 400,
   );
   final childTwo = _session(
     id: 'child-2',
@@ -21,21 +28,25 @@ void main() {
     origin: SessionOrigin.subagent,
     nativeId: 'native-child-2',
     parentThreadId: 'native-parent',
+    updatedAt: 300,
   );
   final exec = _session(
     id: 'exec',
     title: 'Exec run',
     origin: SessionOrigin.exec,
+    updatedAt: 200,
   );
   final vscode = _session(
     id: 'vscode',
     title: 'IDE session',
     origin: SessionOrigin.vscode,
+    updatedAt: 250,
   );
   final future = _session(
     id: 'future',
     title: 'Future origin',
     origin: SessionOrigin.unknown,
+    updatedAt: 100,
   );
 
   test('defaults hide auto origins, show VS Code, and fail open', () {
@@ -431,6 +442,8 @@ void main() {
       String tool = 'codex',
       String? machine,
       String? cwd = '/work/project',
+      int? updatedAt,
+      int? createdAt,
     }) => _session(
       id: id,
       title: 'Root $id',
@@ -439,6 +452,8 @@ void main() {
       cwd: cwd,
       nativeId: id,
       status: status,
+      updatedAt: updatedAt,
+      createdAt: createdAt,
     );
 
     SessionInfo child(
@@ -448,6 +463,8 @@ void main() {
       String tool = 'codex',
       String? machine,
       String? cwd = '/work/project',
+      int? updatedAt,
+      int? createdAt,
     }) => _session(
       id: id,
       title: 'Child $id',
@@ -458,6 +475,8 @@ void main() {
       nativeId: id,
       parentThreadId: parentId,
       status: status,
+      updatedAt: updatedAt,
+      createdAt: createdAt,
     );
 
     const showChildren = SessionVisibilityPreferences(
@@ -493,7 +512,10 @@ void main() {
     });
 
     test('a newer working child never sorts above its idle parent', () {
-      // Broker order is status then recency, so the working child leads.
+      // The child leads its parent in the input, and the comparator would band
+      // it above too — it is working while the parent is canonically idle. The
+      // pre-order walk is what keeps it underneath: a child is only reachable
+      // through its emitted parent, so depth outranks any sort key.
       final projection = project([
         child('c1', 'p1', status: SessionStatus.working),
         root('p1'),
@@ -533,7 +555,35 @@ void main() {
       );
     });
 
-    test('siblings keep broker order and stay stable across rebuilds', () {
+    // Re-anchored for the working-band rule. This test previously asserted
+    // `[c2, c1, c3]` — the raw input order — because the lineage took its input
+    // as truth and never sorted. It now asserts the one comparator instead:
+    // siblings are ordered by it exactly like roots, so an input order that
+    // disagrees with the timestamps loses.
+    test('siblings order by the comparator, not by input order', () {
+      final sessions = [
+        root('p1'),
+        child('c2', 'p1', updatedAt: 200),
+        child('c1', 'p1', updatedAt: 300),
+        child('c3', 'p1', updatedAt: 100),
+      ];
+      final first = project(sessions);
+      final second = project(sessions);
+
+      // All three are idle, so the settled band ranks them by recency.
+      expect(first.visibleSessions.map((s) => s.id), [
+        'p1',
+        'c1',
+        'c2',
+        'c3',
+      ]);
+      expect(
+        second.visibleSessions.map((s) => s.id),
+        first.visibleSessions.map((s) => s.id),
+      );
+    });
+
+    test('siblings with no timestamps hold a stable order across rebuilds', () {
       final sessions = [
         root('p1'),
         child('c2', 'p1'),
@@ -543,10 +593,12 @@ void main() {
       final first = project(sessions);
       final second = project(sessions);
 
+      // Nothing to rank on, so the composite-key tie-break decides — and it is
+      // the same decision every rebuild.
       expect(first.visibleSessions.map((s) => s.id), [
         'p1',
-        'c2',
         'c1',
+        'c2',
         'c3',
       ]);
       expect(
@@ -984,6 +1036,407 @@ void main() {
       expect(projection.groups.single.rootCount, 1);
     });
   });
+
+  // Working-band order. Before this the roster ranked by (status, updatedAt),
+  // and `updatedAt` is a live-turn timestamp every adapter advances on each
+  // write: with N sessions running, every publish re-permuted the whole working
+  // tier by whichever agent last touched disk. Working sessions therefore
+  // competed for the top. The band below anchors on `createdAt`, which is
+  // immutable for the life of a session, so a working row's sort key cannot
+  // move while it works. Every test in this group fails under (status,
+  // updatedAt).
+  group('working band order', () {
+    const showChildren = SessionVisibilityPreferences(
+      showBackgroundSessions: true,
+    );
+
+    SessionInfo row(
+      String id, {
+      SessionStatus status = SessionStatus.idle,
+      int? updatedAt,
+      int? createdAt,
+      String? cwd = '/work/project',
+      String? parentId,
+    }) => _session(
+      id: id,
+      title: 'Session $id',
+      cwd: cwd,
+      origin: parentId == null ? null : SessionOrigin.subagent,
+      nativeId: id,
+      parentThreadId: parentId,
+      status: status,
+      updatedAt: updatedAt,
+      createdAt: createdAt,
+    );
+
+    SessionRosterProjection project(List<SessionInfo> sessions) =>
+        SessionRosterProjection.build(
+          sessions: sessions,
+          preferences: showChildren,
+          now: DateTime(2026, 7, 27, 12),
+        );
+
+    List<String> orderOf(List<SessionInfo> sessions) =>
+        project(sessions).visibleSessions.map((s) => s.id).toList();
+
+    List<int> depthsOf(List<SessionInfo> sessions) =>
+        project(sessions).visibleRows.map((r) => r.depth).toList();
+
+    List<String> groupsOf(List<SessionInfo> sessions) =>
+        project(sessions).groups.map((g) => g.key).toList();
+
+    // The headline: the owner's "if all are actively working, they stay where
+    // they are".
+    test('several working sessions hold their relative order across activity '
+        'updates', () {
+      List<SessionInfo> roster(List<int> updates) => [
+        row(
+          'w1',
+          status: SessionStatus.working,
+          createdAt: 300,
+          updatedAt: updates[0],
+        ),
+        row(
+          'w2',
+          status: SessionStatus.working,
+          createdAt: 200,
+          updatedAt: updates[1],
+        ),
+        row(
+          'w3',
+          status: SessionStatus.working,
+          createdAt: 100,
+          updatedAt: updates[2],
+        ),
+      ];
+
+      // Each roster permutes the recency order upward; under the old rule these
+      // four projections give w1w2w3, w1w3w2, w2w1w3 and w3w2w1.
+      expect(orderOf(roster([10, 20, 30])), ['w1', 'w2', 'w3']);
+      expect(orderOf(roster([90, 20, 30])), ['w1', 'w2', 'w3']);
+      expect(orderOf(roster([90, 900, 30])), ['w1', 'w2', 'w3']);
+      expect(orderOf(roster([90, 900, 9000])), ['w1', 'w2', 'w3']);
+    });
+
+    test('a session starting work moves no already-working row', () {
+      SessionInfo w1() => row(
+        'w1',
+        status: SessionStatus.working,
+        createdAt: 300,
+        updatedAt: 10,
+      );
+      SessionInfo w2() => row(
+        'w2',
+        status: SessionStatus.working,
+        createdAt: 200,
+        updatedAt: 20,
+      );
+
+      expect(orderOf([w1(), w2(), row('i1', createdAt: 250, updatedAt: 500)]), [
+        'w1',
+        'w2',
+        'i1',
+      ]);
+      // i1 starts a turn. It takes the slot its anchor gives it, between w1 and
+      // w2, and neither of them moves.
+      expect(
+        orderOf([
+          w1(),
+          w2(),
+          row(
+            'i1',
+            status: SessionStatus.working,
+            createdAt: 250,
+            updatedAt: 900,
+          ),
+        ]),
+        ['w1', 'i1', 'w2'],
+      );
+    });
+
+    // R1 — the roster must keep re-deriving the band, not memoize a sort key.
+    test(
+      'a finished session leaves the working band on the next projection',
+      () {
+        final settled = row('i1', createdAt: 10, updatedAt: 50);
+        final w2 = row(
+          'w2',
+          status: SessionStatus.working,
+          createdAt: 200,
+          updatedAt: 110,
+        );
+
+        expect(
+          orderOf([
+            row(
+              'w1',
+              status: SessionStatus.working,
+              createdAt: 300,
+              updatedAt: 100,
+            ),
+            w2,
+            settled,
+          ]),
+          ['w1', 'w2', 'i1'],
+        );
+        // w1 finishes; the turn just advanced its updatedAt past i1's. It drops
+        // below the still-working w2 and lands at the top of the settled rows.
+        expect(
+          orderOf([
+            row('w1', createdAt: 300, updatedAt: 900),
+            w2,
+            settled,
+          ]),
+          ['w2', 'w1', 'i1'],
+        );
+      },
+    );
+
+    test('the same roster projected twice yields identical order', () {
+      final sessions = [
+        row('n1', status: SessionStatus.needsInput, updatedAt: 400),
+        row(
+          'w1',
+          status: SessionStatus.working,
+          createdAt: 100,
+          updatedAt: 700,
+        ),
+        row('i1', createdAt: 20, updatedAt: 300),
+        row(
+          'w2',
+          status: SessionStatus.working,
+          createdAt: 500,
+          updatedAt: 200,
+        ),
+        row('i2'),
+      ];
+      final first = orderOf(sessions);
+
+      expect(first, ['n1', 'w2', 'w1', 'i1', 'i2']);
+      expect(orderOf(sessions), first);
+      // Order is a function of the rows alone, so feeding them in any sequence
+      // reproduces it — no client-side memory to lose on a reload or reconnect.
+      expect(orderOf(sessions.reversed.toList()), first);
+    });
+
+    // R2 — a newly created session must land at the top of the working band,
+    // not wherever its (absent) activity history puts it.
+    test('a newly created working session leads the working band', () {
+      final order = orderOf([
+        row(
+          'w1',
+          status: SessionStatus.working,
+          createdAt: 200,
+          updatedAt: 900,
+        ),
+        row(
+          'w2',
+          status: SessionStatus.working,
+          createdAt: 100,
+          updatedAt: 800,
+        ),
+        // Newest created, and deliberately the OLDEST updatedAt: under the old
+        // rule this row lands last.
+        row('w3', status: SessionStatus.working, createdAt: 300, updatedAt: 1),
+      ]);
+
+      expect(order, ['w3', 'w1', 'w2']);
+    });
+
+    test('a newly created idle session leads the settled band', () {
+      expect(
+        orderOf([
+          row(
+            'w1',
+            status: SessionStatus.working,
+            createdAt: 100,
+            updatedAt: 10,
+          ),
+          row('i1', createdAt: 50, updatedAt: 500),
+          // Created but never started: newest on both clocks, still settled.
+          row('fresh', createdAt: 999, updatedAt: 999),
+        ]),
+        ['w1', 'fresh', 'i1'],
+      );
+    });
+
+    test('a session with no createdAt is placed deterministically', () {
+      // dsh emits no createdAt today. Such rows sort after every anchored row
+      // in the band and rank on identity among themselves — never on updatedAt,
+      // which would re-introduce exactly the churn this rule removes.
+      List<SessionInfo> roster(int churn) => [
+        row(
+          'anchored',
+          status: SessionStatus.working,
+          createdAt: 100,
+          updatedAt: 10,
+        ),
+        row('dsh-b', status: SessionStatus.working, updatedAt: 900 + churn),
+        row('dsh-a', status: SessionStatus.working, updatedAt: 800),
+      ];
+      final first = orderOf(roster(0));
+
+      expect(first, ['anchored', 'dsh-a', 'dsh-b']);
+      expect(orderOf(roster(0)), first);
+      expect(orderOf(roster(5000)), first);
+      expect(orderOf(roster(0).reversed.toList()), first);
+    });
+
+    // R3 — the settled band is the "N minutes ago" temporal order and must stay
+    // exactly that.
+    test('settled rows keep strict updatedAt-descending order', () {
+      expect(
+        orderOf([
+          row('i3', createdAt: 900, updatedAt: 300),
+          row('i1', createdAt: 100, updatedAt: 900),
+          row('i4', createdAt: 800, updatedAt: 100),
+          row('i2', createdAt: 200, updatedAt: 600),
+        ]),
+        ['i1', 'i2', 'i3', 'i4'],
+      );
+    });
+
+    test(
+      'a finished session takes its place by updatedAt among settled rows',
+      () {
+        // The finishing row lands between the right two neighbours, not on top
+        // by fiat and not held in place by the createdAt it used while working.
+        expect(
+          orderOf([
+            row('i1', createdAt: 10, updatedAt: 400),
+            row('i2', createdAt: 20, updatedAt: 200),
+            row('i3', createdAt: 30, updatedAt: 100),
+            row('done', createdAt: 999, updatedAt: 300),
+          ]),
+          ['i1', 'done', 'i2', 'i3'],
+        );
+      },
+    );
+
+    test(
+      'needs-input rows stay ahead of the working band in recency order',
+      () {
+        expect(
+          orderOf([
+            row(
+              'w1',
+              status: SessionStatus.working,
+              createdAt: 999,
+              updatedAt: 999,
+            ),
+            row('n1', status: SessionStatus.needsInput, updatedAt: 100),
+            row('n2', status: SessionStatus.needsInput, updatedAt: 200),
+            row('i1', updatedAt: 1000),
+          ]),
+          ['n2', 'n1', 'w1', 'i1'],
+        );
+      },
+    );
+
+    test('a project whose sessions are all working does not move', () {
+      List<SessionInfo> roster(int churn) => [
+        row(
+          'a1',
+          status: SessionStatus.working,
+          cwd: '/work/alpha',
+          createdAt: 300,
+          updatedAt: 10 + churn,
+        ),
+        row(
+          'b1',
+          status: SessionStatus.working,
+          cwd: '/work/beta',
+          createdAt: 200,
+          updatedAt: 500 + churn * 7,
+        ),
+        row(
+          'c1',
+          status: SessionStatus.working,
+          cwd: '/work/gamma',
+          createdAt: 100,
+          updatedAt: 900 + churn * 13,
+        ),
+      ];
+
+      // Groups keep first-appearance order, so a project's position is its
+      // top-most root's. Under the old rule these read gamma, beta, alpha and
+      // re-permuted on every churn step.
+      const expected = ['/work/alpha', '/work/beta', '/work/gamma'];
+      expect(groupsOf(roster(0)), expected);
+      expect(groupsOf(roster(1)), expected);
+      expect(groupsOf(roster(2)), expected);
+      expect(groupsOf(roster(3)), expected);
+    });
+
+    test('a project drops when its last working session finishes', () {
+      List<SessionInfo> roster({required bool alphaWorking}) => [
+        row(
+          'a1',
+          status: alphaWorking ? SessionStatus.working : SessionStatus.idle,
+          cwd: '/work/alpha',
+          createdAt: 300,
+          updatedAt: alphaWorking ? 10 : 20,
+        ),
+        row(
+          'b1',
+          status: SessionStatus.working,
+          cwd: '/work/beta',
+          createdAt: 200,
+          updatedAt: 500,
+        ),
+        row('c1', cwd: '/work/gamma', createdAt: 100, updatedAt: 900),
+      ];
+
+      expect(groupsOf(roster(alphaWorking: true)), [
+        '/work/alpha',
+        '/work/beta',
+        '/work/gamma',
+      ]);
+      // alpha's only session settles, so alpha drops into the temporal order —
+      // behind gamma, which was touched more recently.
+      expect(groupsOf(roster(alphaWorking: false)), [
+        '/work/beta',
+        '/work/gamma',
+        '/work/alpha',
+      ]);
+    });
+
+    test('children stay under their parent when the parent joins the working '
+        'band', () {
+      // `other` works throughout, with an OLDER anchor than p1.
+      SessionInfo other() => row(
+        'other',
+        status: SessionStatus.working,
+        createdAt: 50,
+        updatedAt: 999,
+      );
+      final parent = row('p1', createdAt: 100, updatedAt: 5);
+
+      final before = [
+        parent,
+        row('c1', parentId: 'p1', createdAt: 110),
+        other(),
+      ];
+      expect(orderOf(before), ['other', 'p1', 'c1']);
+      expect(depthsOf(before), [0, 0, 1]);
+
+      // The child starts a turn. p1 now DISPLAYS working, so it bands by its
+      // own anchor (100) and leads `other` (50) — and the child travels with
+      // it, never above it.
+      final promoted = [
+        parent,
+        row(
+          'c1',
+          parentId: 'p1',
+          status: SessionStatus.working,
+          createdAt: 110,
+        ),
+        other(),
+      ];
+      expect(orderOf(promoted), ['p1', 'c1', 'other']);
+      expect(depthsOf(promoted), [0, 1, 0]);
+    });
+  });
 }
 
 SessionInfo _session({
@@ -998,6 +1451,7 @@ SessionInfo _session({
   String? machine,
   SessionStatus status = SessionStatus.idle,
   int? updatedAt,
+  int? createdAt,
 }) => SessionInfo(
   id: id,
   tool: tool,
@@ -1010,5 +1464,6 @@ SessionInfo _session({
   machine: machine,
   status: status,
   updatedAt: updatedAt,
+  createdAt: createdAt,
   attachMode: AttachMode.live,
 );
