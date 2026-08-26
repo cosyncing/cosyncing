@@ -934,7 +934,12 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('bash'), findsOneWidget);
-        expect(find.textContaining('/workspace · bun test'), findsOneWidget);
+        expect(find.textContaining('/workspace · bun test'), findsNothing);
+        await tester.tap(
+          find.byKey(const Key('session-permission-detail-toggle')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('/workspace · bun test'), findsOneWidget);
         final alwaysFinder = find.byKey(
           const Key(
             'session-detail-permission-approve-session-perm-opencode',
@@ -948,6 +953,69 @@ void main() {
 
         expect(connection.lastPermissionDecisionRequestId, 'perm-opencode');
         expect(connection.lastPermissionDecision, 'approve-session');
+      },
+    );
+
+    testWidgets(
+      'shows full Codex command detail and sends the persistent rule decision',
+      (tester) async {
+        final connection = ScriptedSessionDetailConnection(
+          events: const [
+            MessageWireEvent(
+              seq: 1,
+              message: AgentMessage(
+                type: AgentMessageType.permissionRequest,
+                raw: {
+                  'type': 'permission-request',
+                  'requestId': 'perm-codex-rule',
+                  'title': 'Approve command',
+                  'detail':
+                      "/bin/bash -lc 'codex app-server daemon restart && "
+                      "codex app-server daemon version'\n"
+                      'cwd: /home/howard\n'
+                      'Reload corrected model catalog configuration',
+                  'options': ['approve', 'approve-rule', 'reject'],
+                },
+              ),
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: const [],
+            connection: connection,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('codex app-server daemon restart'),
+          findsNothing,
+        );
+        await tester.tap(
+          find.byKey(const Key('session-permission-detail-toggle')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('codex app-server daemon restart'),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('Reload corrected model catalog'),
+          findsOneWidget,
+        );
+
+        final ruleFinder = find.byKey(
+          const Key(
+            'session-detail-permission-approve-rule-perm-codex-rule',
+          ),
+        );
+        await tester.ensureVisible(ruleFinder);
+        tester.widget<FilledButton>(ruleFinder).onPressed?.call();
+        await tester.pumpAndSettle();
+
+        expect(connection.lastPermissionDecisionRequestId, 'perm-codex-rule');
+        expect(connection.lastPermissionDecision, 'approve-rule');
       },
     );
 
@@ -1013,20 +1081,20 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final approve = tester.widget<FilledButton>(
+      expect(
         find.byKey(
           const Key('session-detail-permission-approve-perm-read-only'),
         ),
+        findsNothing,
       );
-      final always = tester.widget<FilledButton>(
+      expect(
         find.byKey(
           const Key(
             'session-detail-permission-approve-session-perm-read-only',
           ),
         ),
+        findsNothing,
       );
-      expect(approve.onPressed, isNull);
-      expect(always.onPressed, isNull);
       expect(
         find.text(
           'This request is read-only. Answer where the agent is running.',

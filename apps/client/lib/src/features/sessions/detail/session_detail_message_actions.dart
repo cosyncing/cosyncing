@@ -63,7 +63,7 @@ class _MessageRow extends StatelessWidget {
       AgentMessageType.permissionRequest when requestId != null =>
         _PermissionRequestActions(
           requestId: requestId,
-          supportsSessionApproval: _supportsSessionApproval(message),
+          options: _permissionApprovalOptions(message),
           isReadOnly: message.requestIsReadOnly,
           onApprove: () => controller.sendPermissionDecision(
             requestId: requestId,
@@ -72,6 +72,10 @@ class _MessageRow extends StatelessWidget {
           onApproveSession: () => controller.sendPermissionDecision(
             requestId: requestId,
             decision: 'approve-session',
+          ),
+          onApproveRule: () => controller.sendPermissionDecision(
+            requestId: requestId,
+            decision: 'approve-rule',
           ),
           onReject: () => controller.sendPermissionDecision(
             requestId: requestId,
@@ -634,14 +638,56 @@ String _requestOutcomeLabel(
   };
 }
 
-bool _supportsSessionApproval(AgentMessage message) {
-  return message.permissionRequestOptions.any((option) {
-    final normalized = option.trim().toLowerCase().replaceAll('_', '-');
-    return normalized == 'approve-session' ||
-        normalized == 'always' ||
-        normalized == 'allow-session' ||
-        normalized == 'allow session';
-  });
+/// The permission answers this app can actually send.
+///
+/// Declaration order is render order. Every member is paired with a decision
+/// in [_PermissionRequestActionsState._optionButton] through an exhaustive
+/// switch, so a member added without a handler fails to compile.
+enum _PermissionApprovalOption { reject, approve, approveRule, approveSession }
+
+/// Resolves one advertised `permission-request.options` entry onto the answer
+/// this app sends for it, or `null` when the app has no decision for it.
+///
+/// The adapter states what the harness offers; the client renders what it is
+/// told, but only from the vocabulary above. Anything else is not our answer
+/// to give.
+_PermissionApprovalOption? _permissionApprovalOptionFor(String advertised) {
+  final normalized = advertised.trim().toLowerCase().replaceAll('_', '-');
+  return switch (normalized) {
+    'approve' => _PermissionApprovalOption.approve,
+    'reject' => _PermissionApprovalOption.reject,
+    'approve-session' ||
+    'always' ||
+    'allow-session' ||
+    'allow session' => _PermissionApprovalOption.approveSession,
+    'approve-rule' => _PermissionApprovalOption.approveRule,
+    _ => null,
+  };
+}
+
+/// The answer buttons to render for [message], in a fixed order.
+///
+/// `approve` and `reject` are the documented floor — `options` "defaults to
+/// approve/reject in the UI when absent" — so they always render and an
+/// adapter only has to advertise what it adds on top. An advertised option
+/// this app has no decision for is dropped: a harness that later offers a
+/// fourth answer degrades to the answers we can actually send instead of
+/// growing a button that does nothing.
+List<_PermissionApprovalOption> _permissionApprovalOptions(
+  AgentMessage message,
+) {
+  final rendered = <_PermissionApprovalOption>{
+    _PermissionApprovalOption.reject,
+    _PermissionApprovalOption.approve,
+  };
+  for (final advertised in message.permissionRequestOptions) {
+    final option = _permissionApprovalOptionFor(advertised);
+    if (option != null) rendered.add(option);
+  }
+  return [
+    for (final option in _PermissionApprovalOption.values)
+      if (rendered.contains(option)) option,
+  ];
 }
 
 class _RequestOutcomeBadge extends StatelessWidget {
@@ -694,10 +740,11 @@ ButtonStyle _transcriptActionButtonStyle(BuildContext context) {
 class _PermissionRequestActions extends StatefulWidget {
   const _PermissionRequestActions({
     required this.requestId,
-    required this.supportsSessionApproval,
+    required this.options,
     required this.isReadOnly,
     required this.onApprove,
     required this.onApproveSession,
+    required this.onApproveRule,
     required this.onReject,
     required this.isEnabled,
     required this.isResolved,
@@ -705,10 +752,13 @@ class _PermissionRequestActions extends StatefulWidget {
   });
 
   final String requestId;
-  final bool supportsSessionApproval;
+
+  /// The answers to offer, already filtered to the ones this app can send.
+  final List<_PermissionApprovalOption> options;
   final bool isReadOnly;
   final Future<bool> Function() onApprove;
   final Future<bool> Function() onApproveSession;
+  final Future<bool> Function() onApproveRule;
   final Future<bool> Function() onReject;
   final bool isEnabled;
 
@@ -761,6 +811,64 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
     });
   }
 
+  /// The single place an offered option is paired with the decision it sends.
+  ///
+  /// The switch is exhaustive on purpose: an option with no answer behind it
+  /// cannot reach this method, because [_permissionApprovalOptionFor] drops
+  /// every advertised string that does not resolve to a member.
+  Widget _optionButton(
+    BuildContext context,
+    _PermissionApprovalOption option, {
+    required bool canSubmit,
+    required AppLocalizations l10n,
+  }) {
+    final style = _transcriptActionButtonStyle(context);
+    return switch (option) {
+      _PermissionApprovalOption.reject => OutlinedButton(
+        key: ValueKey('session-detail-permission-reject-${widget.requestId}'),
+        style: style,
+        onPressed: canSubmit ? () => _send(widget.onReject) : null,
+        child: Text(l10n.sessionRequestReject),
+      ),
+      _PermissionApprovalOption.approve => FilledButton(
+        key: ValueKey('session-detail-permission-approve-${widget.requestId}'),
+        style: style,
+        onPressed: canSubmit ? () => _send(widget.onApprove) : null,
+        child: _isSubmitting
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Text(
+                widget.options.any(
+                      (candidate) =>
+                          candidate != _PermissionApprovalOption.reject &&
+                          candidate != _PermissionApprovalOption.approve,
+                    )
+                    ? l10n.sessionRequestApproveOnce
+                    : l10n.sessionRequestApprove,
+              ),
+      ),
+      _PermissionApprovalOption.approveRule => FilledButton.tonal(
+        key: ValueKey(
+          'session-detail-permission-approve-rule-${widget.requestId}',
+        ),
+        style: style,
+        onPressed: canSubmit ? () => _send(widget.onApproveRule) : null,
+        child: Text(l10n.sessionRequestApproveRule),
+      ),
+      _PermissionApprovalOption.approveSession => FilledButton.tonal(
+        key: ValueKey(
+          'session-detail-permission-approve-session-${widget.requestId}',
+        ),
+        style: style,
+        onPressed: canSubmit ? () => _send(widget.onApproveSession) : null,
+        child: Text(l10n.sessionRequestApproveSession),
+      ),
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -784,6 +892,7 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
             switch (widget.resolvedDecision) {
               'approve' => l10n.sessionRequestOutcomeApproved,
               'approve-session' => l10n.sessionRequestOutcomeApprovedSession,
+              'approve-rule' => l10n.sessionRequestOutcomeApprovedRule,
               'reject' => l10n.sessionRequestOutcomeRejected,
               _ => l10n.sessionRequestResolvedElsewhere,
             },
@@ -812,47 +921,24 @@ class _PermissionRequestActionsState extends State<_PermissionRequestActions> {
           ),
           const SizedBox(height: 4),
         ],
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: 8,
-          runSpacing: 4,
-          children: [
-            OutlinedButton(
-              key: ValueKey(
-                'session-detail-permission-reject-${widget.requestId}',
-              ),
-              style: _transcriptActionButtonStyle(context),
-              onPressed: canSubmit ? () => _send(widget.onReject) : null,
-              child: Text(l10n.sessionRequestReject),
-            ),
-            FilledButton(
-              key: ValueKey(
-                'session-detail-permission-approve-${widget.requestId}',
-              ),
-              style: _transcriptActionButtonStyle(context),
-              onPressed: canSubmit ? () => _send(widget.onApprove) : null,
-              child: _isSubmitting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Text(l10n.sessionRequestApproveOnce),
-            ),
-            if (widget.supportsSessionApproval)
-              FilledButton.tonal(
-                key: ValueKey(
-                  'session-detail-permission-approve-session-'
-                  '${widget.requestId}',
+        // A read-only request is non-actionable by design: it carries the
+        // notice above and no answer controls at all, so nothing an adapter
+        // advertises can grow a button on this path.
+        if (!widget.isReadOnly)
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final option in widget.options)
+                _optionButton(
+                  context,
+                  option,
+                  canSubmit: canSubmit,
+                  l10n: l10n,
                 ),
-                style: _transcriptActionButtonStyle(context),
-                onPressed: canSubmit
-                    ? () => _send(widget.onApproveSession)
-                    : null,
-                child: Text(l10n.sessionRequestApproveSession),
-              ),
-          ],
-        ),
+            ],
+          ),
         const SizedBox(height: 8),
         _RequestOutcomeBadge(
           state: _outcome,

@@ -128,7 +128,6 @@ Widget _permissionRequestMessageRenderer(
       message: message,
       preferredKeys: const [
         'title',
-        'detail',
         'permission',
         'reason',
         'tool',
@@ -146,7 +145,10 @@ Widget _permissionRequestMessageRenderer(
         ? l10n.sessionRequestAwaitingPermission
         : null,
     payloadAsChips: true,
-    detailContent: action,
+    detailContent: _PermissionRequestDetail(
+      detail: message.permissionRequestDetail,
+      action: action,
+    ),
   );
 }
 
@@ -159,6 +161,8 @@ Widget _permissionResolvedMessageRenderer(
     PermissionResolutionDecision.approve => l10n.permissionApproved,
     PermissionResolutionDecision.approveSession =>
       l10n.permissionApprovedSession,
+    PermissionResolutionDecision.approveRule =>
+      l10n.sessionRequestOutcomeApprovedRule,
     PermissionResolutionDecision.reject => l10n.permissionRejected,
     PermissionResolutionDecision.external =>
       l10n.sessionRequestResolvedElsewhere,

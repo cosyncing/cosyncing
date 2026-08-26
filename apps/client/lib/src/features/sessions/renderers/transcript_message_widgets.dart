@@ -236,6 +236,67 @@ class _TranscriptBoxMessage extends StatelessWidget {
   }
 }
 
+/// Permission details stay compact by default but remain fully inspectable.
+///
+/// Commands and reasons can be long and may contain newlines. A metadata chip
+/// intentionally ellipsizes that content, so permission cards use this explicit
+/// disclosure instead and keep the full text selectable.
+class _PermissionRequestDetail extends StatefulWidget {
+  const _PermissionRequestDetail({required this.detail, this.action});
+
+  final String? detail;
+  final Widget? action;
+
+  @override
+  State<_PermissionRequestDetail> createState() =>
+      _PermissionRequestDetailState();
+}
+
+class _PermissionRequestDetailState extends State<_PermissionRequestDetail> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final detail = widget.detail?.trim();
+    final hasDetail = detail != null && detail.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (hasDetail) ...[
+          TextButton.icon(
+            key: const Key('session-permission-detail-toggle'),
+            onPressed: () => setState(() => _expanded = !_expanded),
+            icon: Icon(
+              _expanded ? Icons.expand_less : Icons.expand_more,
+              size: 18,
+            ),
+            label: Text(
+              _expanded
+                  ? l10n.sessionRequestHideDetails
+                  : l10n.sessionRequestShowDetails,
+            ),
+          ),
+          if (_expanded) ...[
+            const SizedBox(height: 4),
+            SelectionArea(
+              child: Text(
+                detail,
+                key: const Key('session-permission-full-detail'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ),
+          ],
+        ],
+        if (hasDetail && widget.action != null) const SizedBox(height: 8),
+        if (widget.action != null) widget.action!,
+      ],
+    );
+  }
+}
+
 /// One-line file-artifact presentation with the existing download widget.
 ///
 /// An artifact the user SENT (one carrying a `userMessageKey`) reads user-side

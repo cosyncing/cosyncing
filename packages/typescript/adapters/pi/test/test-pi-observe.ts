@@ -277,6 +277,7 @@ try {
         (model) =>
           model.providerID === 'fake' &&
           model.modelID === 'pi-switch-test' &&
+          model.defaultReasoningEffort === 'off' &&
           model.reasoningEfforts?.some((effort) => effort.effort === 'high'),
       ),
     JSON.stringify(creationCatalog),

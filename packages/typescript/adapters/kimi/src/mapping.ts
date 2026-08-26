@@ -13,7 +13,12 @@
  */
 import {
   boundContextBody,
+  boundToolSemantic,
+  commandSemantic,
   CONTEXT_INJECTION_EVENT,
+  fileReadSemantic,
+  searchGroup,
+  searchSemantic,
   unwrapContextBlock,
 } from '@cosyncing/adapter-api';
 import type {
@@ -22,6 +27,9 @@ import type {
   ModelOption,
   SessionControlState,
   SessionInfo,
+  ToolDisplayClass,
+  ToolSearchGroup,
+  ToolSemantic,
 } from '@cosyncing/adapter-api';
 import type { KimiQuestionAnswer } from './drive-http.ts';
 import { basename } from 'node:path';
@@ -730,6 +738,18 @@ export interface KimiMappedRow {
 export interface KimiMappingState {
   /** Every tool_use's callId → toolName, so a correlated row can name its tool. */
   readonly toolNames: Map<string, string>;
+  /**
+   * Call id → the bounded facts that call published (see
+   * {@link KimiToolCallFacts}).
+   *
+   * The REST fold gives a RESULT part its output and nothing else — the path it
+   * read, the command it ran and the pattern it searched for live on the CALL —
+   * so this is the only way a result row can carry a canonical `path` or a
+   * completed semantic. Without it (a caller folding one message in isolation,
+   * or a pair straddling a page boundary) the result degrades to an unstamped
+   * row, which renders exactly as it did before any of this existed.
+   */
+  readonly toolCallFacts: Map<string, KimiToolCallFacts>;
   /** Call ids of TodoList calls THAT EMITTED the panel, so only their results are suppressed. */
   readonly todoListCallIds: Set<string>;
   /** Background task id → the callId of the tool call that spawned it. */
@@ -756,6 +776,7 @@ export interface KimiMappingState {
 export function createKimiMappingState(): KimiMappingState {
   return {
     toolNames: new Map(),
+    toolCallFacts: new Map(),
     todoListCallIds: new Set(),
     backgroundTasks: new Map(),
     agentActivities: new Map(),
@@ -1051,6 +1072,369 @@ function kimiTaskNotificationMessage(
   return rows;
 }
 
+// ── Tool rows: display class, semantics, and the paths they carry ───────────
+//
+// PROVENANCE. Everything in this section is keyed on Kimi's own registered tool
+// names and argument keys, MEASURED on 2026-08-23 over this host's Kimi Code
+// journals (`~/.kimi-code/sessions/*/*/agents/*/wire.jsonl`, 112 journals,
+// ~10.7k `tool.call` events; the same journal source that fixed `TodoList` and
+// `Agent` above). Argument keys per tool, with observed counts:
+//
+//   Read            path (2357), line_offset, n_lines
+//   ReadMediaFile   path (588), region
+//   Write           path + content (351), mode
+//   Edit            path + old_string + new_string (1929), replace_all
+//   Bash            command (3193), cwd, timeout, description, run_in_background
+//   Grep            pattern + path + output_mode (1436), -n/-i/-A/-B/-C, head_limit
+//   Glob            pattern (44), path
+//   TodoList        todos    Agent  description/prompt/subagent_type/run_in_background
+//   WebSearch       query    FetchURL  url    Task*/Cron*/Skill/GetGoal  (no path)
+//
+// The REST fold this mapper reads projects a call as `{tool_call_id, tool_name,
+// input}` with NO host-computed display payload (the journal's `display` object
+// stays server-side), so `tool_name` + `input` is the whole evidence base. A
+// name this table does not know is stamped with nothing at all — the client's
+// conservative fallback is the honest answer for a tool we have not measured.
+//
+// THE GREP TRAP, preserved deliberately: Grep/Glob's `path` argument is a
+// SEARCH SCOPE DIRECTORY, not a file. It rides `ToolSearchSemantic.scope`, and
+// it must never become a group path or a `tool-result.path`, or every grep in
+// the transcript becomes a bogus file link.
+
+/**
+ * Kimi's measured tool surface → the canonical display class.
+ *
+ * A closed table, not a name heuristic: these are the tools the harness
+ * registers, and an unmeasured name (an MCP tool, a plugin, a later release)
+ * gets NO class rather than a guessed one.
+ */
+const KIMI_TOOL_CLASSES: ReadonlyMap<string, ToolDisplayClass> = new Map([
+  ['Bash', 'execute'],
+  [KIMI_AGENT_SPAWN_TOOL, 'execute'],
+  ['Edit', 'edit'],
+  ['Write', 'edit'],
+  ['Read', 'lookup'],
+  ['ReadMediaFile', 'lookup'],
+  ['Grep', 'lookup'],
+  ['Glob', 'lookup'],
+  ['WebSearch', 'lookup'],
+  ['FetchURL', 'lookup'],
+  ['TaskList', 'lookup'],
+  ['TaskOutput', 'lookup'],
+  ['CronList', 'lookup'],
+  ['GetGoal', 'lookup'],
+  ['Skill', 'other'],
+  ['TaskStop', 'other'],
+  ['CronCreate', 'other'],
+  ['CronDelete', 'other'],
+  [KIMI_TODO_LIST_TOOL, 'other'],
+]);
+
+/** The measured display class for a Kimi tool, or UNDEFINED for a name this version has not seen. */
+function kimiToolDisplayClass(toolName: string | undefined): ToolDisplayClass | undefined {
+  return toolName === undefined ? undefined : KIMI_TOOL_CLASSES.get(toolName);
+}
+
+/**
+ * What one tool CALL published that its RESULT row needs.
+ *
+ * Only the derived, bounded fields are kept — never the raw input. A `Write`
+ * input carries an entire file body, and retaining one per in-flight call for
+ * the life of a connection is a memory leak with a file in it.
+ */
+export interface KimiToolCallFacts {
+  toolName: string;
+  /** The file the tool acted on — Read/ReadMediaFile/Edit/Write only. NEVER a search scope. */
+  path?: string;
+  command?: string;
+  cwd?: string;
+  /** Grep/Glob `pattern`. */
+  query?: string;
+  /** Grep/Glob `path` — a scope DIRECTORY (see the trap above). */
+  scope?: string;
+  /** Grep `output_mode`; it decides which shape the result output is parsed as. */
+  searchMode?: string;
+}
+// `Read`'s `line_offset` is deliberately NOT recorded here: the read's start
+// line comes from the first number in its own output, which is what the server
+// actually served (it may clamp the request). A second copy of that fact would
+// be the one that drifts.
+
+/** The bounded facts one tool call publishes, read from its declared argument keys. */
+function kimiToolCallFacts(toolName: string, input: unknown): KimiToolCallFacts {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { toolName };
+  const args = input as Record<string, unknown>;
+  switch (toolName) {
+    case 'Read':
+    case 'ReadMediaFile':
+    case 'Edit':
+    case 'Write':
+      return {
+        toolName,
+        ...(optionalString(args.path) ? { path: optionalString(args.path)! } : {}),
+      };
+    case 'Bash':
+      return {
+        toolName,
+        ...(optionalString(args.command) ? { command: optionalString(args.command)! } : {}),
+        ...(optionalString(args.cwd) ? { cwd: optionalString(args.cwd)! } : {}),
+      };
+    case 'Grep':
+    case 'Glob':
+      return {
+        toolName,
+        ...(optionalString(args.pattern) ? { query: optionalString(args.pattern)! } : {}),
+        // `path` is the SCOPE, and the only place it may land.
+        ...(optionalString(args.path) ? { scope: optionalString(args.path)! } : {}),
+        ...(optionalString(args.output_mode) ? { searchMode: optionalString(args.output_mode)! } : {}),
+      };
+    default:
+      return { toolName };
+  }
+}
+
+/**
+ * Bounded insertion-ordered map memory, the {@link rememberBounded} rule for a
+ * call→facts record. Eviction costs a long-lived connection the oldest call's
+ * facts, and its result then degrades to an unstamped row — the same safe
+ * direction every other guard here takes.
+ */
+function rememberBoundedFacts(
+  map: Map<string, KimiToolCallFacts>,
+  key: string,
+  value: KimiToolCallFacts,
+): void {
+  map.set(key, value);
+  if (map.size <= KIMI_GUARD_SET_LIMIT) return;
+  for (const oldest of map.keys()) {
+    map.delete(oldest);
+    if (map.size <= KIMI_GUARD_SET_LIMIT) break;
+  }
+}
+
+/**
+ * `Read` output → the preview the canonical file-read semantic wants.
+ *
+ * Kimi numbers every line as `<1-based number>\t<text>` (2329 of 2357 recorded
+ * reads; the rest are whole-output notices such as the 50 000-character
+ * ceiling). The FIRST NUMBER is the authoritative start — `line_offset` is what
+ * was asked for and the server may clamp it — and the prefixes are stripped
+ * here because the client draws its own gutter from `startLine`.
+ *
+ * STRICT ON PURPOSE: one unnumbered line and this returns undefined, which
+ * leaves the row on the generic fallback with its output intact. Claiming a
+ * file-read presentation the preview cannot fill would HIDE the very output the
+ * user is reading, so a partial parse is worse than none.
+ */
+function kimiReadPreview(output: unknown): { startLine: number; preview: string } | undefined {
+  if (typeof output !== 'string' || !output) return undefined;
+  const lines = output.split('\n');
+  // A trailing newline yields one empty tail element; it is the terminator, not
+  // a line that failed to parse.
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const texts: string[] = [];
+  let startLine: number | undefined;
+  for (const line of lines) {
+    const match = /^(\d+)\t/.exec(line);
+    if (!match) return undefined;
+    const number = Number(match[1]);
+    if (!Number.isSafeInteger(number) || number <= 0) return undefined;
+    if (startLine === undefined) startLine = number;
+    texts.push(line.slice(match[0].length));
+  }
+  if (startLine === undefined) return undefined;
+  return { startLine, preview: texts.join('\n') };
+}
+
+/**
+ * The tail line Kimi appends when it clipped a search: it reports the TOTAL, so
+ * the count survives even though the rows did not.
+ */
+const KIMI_SEARCH_TRUNCATION = /^Results truncated to \d+ lines \(total: (\d+)\)\./;
+
+/** `Grep -n` / default content row: `path:line:text`. Paths carrying a colon simply fail the parse. */
+const KIMI_GREP_MATCH_LINE = /^([^\s:]+):(\d+):(.*)$/;
+/** A `-A`/`-B`/`-C` context row: `path-line-text`. Recognized so it cannot fail the strict parse, never counted as a match. */
+const KIMI_GREP_CONTEXT_LINE = /^([^\s:]+)-(\d+)-/;
+
+interface KimiParsedSearch {
+  groups: ToolSearchGroup[];
+  matchCount?: number;
+  fileCount?: number;
+  truncated: boolean;
+}
+
+/**
+ * `Grep`/`Glob` output → bounded search groups, or UNDEFINED when the output is
+ * not the shape the call's `output_mode` declares.
+ *
+ * Two shapes, chosen by the CALL rather than by sniffing: `content` emits
+ * `path:line:text` rows, everything path-listing (`files_with_matches`, `Glob`)
+ * emits one path per line. `count_matches` and any later mode parse as neither
+ * and keep the raw output.
+ *
+ * Strict for the same reason {@link kimiReadPreview} is: Kimi's zero-result
+ * answer is the sentence "No non-sensitive matches found" — a real distinction
+ * (it filters sensitive files) that an empty search card would erase — and it
+ * fails both shapes, so it stays visible as itself.
+ */
+function kimiSearchResult(output: unknown, searchMode: string | undefined): KimiParsedSearch | undefined {
+  if (typeof output !== 'string' || !output.trim()) return undefined;
+  const contentMode = searchMode === 'content';
+  if (!contentMode && searchMode !== undefined && searchMode !== 'files_with_matches') return undefined;
+  const order: string[] = [];
+  const byPath = new Map<string, { matches: Array<{ line: number; text: string }>; count: number }>();
+  let truncatedTotal: number | undefined;
+  let matches = 0;
+  const lines = output.split('\n');
+  for (const [index, line] of lines.entries()) {
+    if (!line.trim()) {
+      // Only a trailing blank line is a terminator; a blank line between rows is
+      // a shape this parser does not know.
+      if (index === lines.length - 1) continue;
+      return undefined;
+    }
+    const clipped = KIMI_SEARCH_TRUNCATION.exec(line);
+    if (clipped) {
+      truncatedTotal = Number(clipped[1]);
+      continue;
+    }
+    if (contentMode) {
+      const match = KIMI_GREP_MATCH_LINE.exec(line);
+      if (!match) {
+        // A context row is understood — it is simply not a match.
+        if (KIMI_GREP_CONTEXT_LINE.test(line)) continue;
+        return undefined;
+      }
+      const path = match[1]!;
+      const entry = byPath.get(path) ?? { matches: [], count: 0 };
+      if (!byPath.has(path)) { byPath.set(path, entry); order.push(path); }
+      entry.matches.push({ line: Number(match[2]), text: match[3]! });
+      entry.count += 1;
+      matches += 1;
+      continue;
+    }
+    // Path-listing shape. Whitespace disqualifies the line: it is how a prose
+    // notice ("No matches found") is told apart from a path, at the cost of the
+    // rare path that contains a space falling back to the raw output.
+    if (/\s/.test(line)) return undefined;
+    if (byPath.has(line)) continue;
+    byPath.set(line, { matches: [], count: 0 });
+    order.push(line);
+  }
+  if (order.length === 0) return undefined;
+  if (contentMode && matches === 0) return undefined;
+  const groups: ToolSearchGroup[] = [];
+  for (const path of order) {
+    const entry = byPath.get(path)!;
+    const group = searchGroup({
+      path,
+      ...(entry.count > 0 ? { matchCount: entry.count } : {}),
+      ...(entry.matches.length > 0 ? { matches: entry.matches } : {}),
+    });
+    if (group) groups.push(group);
+  }
+  if (groups.length === 0) return undefined;
+  return {
+    groups,
+    // A clipped answer reports the source's own total; an unclipped one counts
+    // what it saw. Neither is invented, and the file count is claimed only when
+    // nothing was dropped.
+    ...(truncatedTotal !== undefined
+      ? { matchCount: truncatedTotal }
+      : contentMode
+        ? { matchCount: matches, fileCount: groups.length }
+        : { fileCount: groups.length }),
+    truncated: truncatedTotal !== undefined,
+  };
+}
+
+/**
+ * The canonical `tool-call` row for one `tool_use` part.
+ *
+ * Only `Bash` carries a CALL-time semantic. Every other family's semantic is
+ * completed by its result, and a call-time one would claim that presentation for
+ * the pair (the client resolves the family from `result ?? call`) — so a result
+ * whose output did not parse would render an empty card instead of its output.
+ * A command row does not have that failure mode: the client keeps presenting
+ * the result's text as the command's combined output.
+ */
+function kimiToolCallRow(
+  callId: string,
+  toolName: string,
+  input: unknown,
+  facts: KimiToolCallFacts,
+): AgentMessage {
+  const toolClass = kimiToolDisplayClass(toolName);
+  const semantic = facts.command !== undefined
+    ? commandSemantic({ command: facts.command, cwd: facts.cwd, state: 'running' })
+    : undefined;
+  const bounded = boundToolSemantic(semantic);
+  return {
+    type: 'tool-call',
+    callId,
+    toolName,
+    ...(toolClass ? { toolClass } : {}),
+    ...(input !== undefined ? { args: input } : {}),
+    ...(bounded ? { semantic: bounded } : {}),
+  };
+}
+
+/**
+ * The semantic a RESULT row carries, from its own output plus the facts its call
+ * recorded. Undefined whenever the output is not the shape the tool declares —
+ * the row then keeps the generic fallback, output and all.
+ */
+function kimiToolResultSemantic(
+  facts: KimiToolCallFacts | undefined,
+  output: unknown,
+  isError: boolean,
+): ToolSemantic | undefined {
+  if (!facts) return undefined;
+  switch (facts.toolName) {
+    case 'Bash':
+      // The output is ONE merged blob upstream, so `stdout`/`stderr` stay absent
+      // and the client labels the body honestly as combined output.
+      return commandSemantic({
+        command: facts.command,
+        cwd: facts.cwd,
+        state: isError ? 'failed' : 'completed',
+      });
+    case 'Read': {
+      // A failed read's output is the error sentence, not a preview; the row
+      // keeps `path` and shows the sentence.
+      if (isError) return undefined;
+      const preview = kimiReadPreview(output);
+      if (!preview) return undefined;
+      return fileReadSemantic({
+        path: facts.path,
+        startLine: preview.startLine,
+        preview: preview.preview,
+      });
+    }
+    case 'Grep':
+    case 'Glob': {
+      if (isError) return undefined;
+      const parsed = kimiSearchResult(output, facts.toolName === 'Glob' ? undefined : facts.searchMode);
+      if (!parsed) return undefined;
+      const semantic = searchSemantic({
+        query: facts.query,
+        scope: facts.scope,
+        ...(parsed.matchCount !== undefined ? { matchCount: parsed.matchCount } : {}),
+        ...(parsed.fileCount !== undefined ? { fileCount: parsed.fileCount } : {}),
+        groups: parsed.groups,
+      });
+      return parsed.truncated ? { ...semantic, truncated: true } : semantic;
+    }
+    default:
+      // ReadMediaFile returns content PARTS, not text, so it has no preview to
+      // carry; WebSearch/FetchURL answer in prose that only a scraper could turn
+      // into results, and scraping it would hide the prose the user is reading.
+      // Both keep their class (and ReadMediaFile its path) and nothing more.
+      return undefined;
+  }
+}
+
 /**
  * Map one native message into zero or more canonical rows.
  *
@@ -1228,6 +1612,10 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
         continue;
       }
       state?.toolNames.set(callId, toolName);
+      // Recorded BEFORE the TodoList and Agent branches: those return early, and
+      // a result whose call took an early path still needs the facts.
+      const callFacts = kimiToolCallFacts(toolName, part.input);
+      if (state) rememberBoundedFacts(state.toolCallFacts, callId, callFacts);
       // The todo ledger is SESSION STATE, not a tool invocation: ONE upserted
       // task-list-state panel keyed `kimi:todos`, never a stack of raw TodoList
       // cards — the same surface claude/codex/opencode/dsh already emit. A call
@@ -1259,23 +1647,13 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
         if (pending && !state.orphanedResultCallIds.has(callId)) {
           state.agentActivities.set(callId, pending);
           if (!pending.detached) {
-            out.push({
-              type: 'tool-call',
-              callId,
-              toolName,
-              ...(part.input !== undefined ? { args: part.input } : {}),
-            }, key);
+            out.push(kimiToolCallRow(callId, toolName, part.input, callFacts), key);
             out.push(kimiAgentActivityMessage(pending, 'running'), key);
             continue;
           }
         }
       }
-      out.push({
-        type: 'tool-call',
-        callId,
-        toolName,
-        ...(part.input !== undefined ? { args: part.input } : {}),
-      }, key);
+      out.push(kimiToolCallRow(callId, toolName, part.input, callFacts), key);
       continue;
     }
     if (kind === 'tool_result') {
@@ -1310,10 +1688,24 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
       // FAILED call keeps its error row. Without state the result renders,
       // which is the safe direction.
       if (part.is_error !== true && state?.todoListCallIds.has(callId)) continue;
+      // The REST fold usually gives a result NO tool name (only `tool_call_id`),
+      // so the stamping reads the name its CALL recorded. The emitted `toolName`
+      // is left exactly as it was: it is matched downstream, and widening it is
+      // a separate change from stamping.
+      const resultFacts = state?.toolCallFacts.get(callId);
+      const resultClass = kimiToolDisplayClass(optionalString(part.tool_name) ?? resultFacts?.toolName);
+      const resultSemantic = boundToolSemantic(
+        kimiToolResultSemantic(resultFacts, part.output, part.is_error === true),
+      );
       const resultRow: AgentMessage = {
         type: 'tool-result',
         callId,
         toolName: optionalString(part.tool_name) ?? '',
+        ...(resultClass ? { toolClass: resultClass } : {}),
+        ...(resultSemantic ? { semantic: resultSemantic } : {}),
+        // The file the tool acted on, from the call's declared argument key —
+        // read/edit/write only, never a Grep/Glob scope directory.
+        ...(resultFacts?.path ? { path: resultFacts.path } : {}),
         ...(part.output !== undefined ? { result: part.output } : {}),
         ...(part.is_error === true ? { isError: true } : {}),
       };
@@ -1711,6 +2103,22 @@ export function boundedKimiToolInput(value: unknown): string | undefined {
   return truncateToUtf8Budget(text, KIMI_APPROVAL_DETAIL_CAP_BYTES);
 }
 
+/**
+ * The decisions this adapter will actually honor for a Kimi approval, and the
+ * whole reason the card advertises anything at all.
+ *
+ * ADVERTISEMENT ONLY — nothing here changes what is sent. `respondPermission`
+ * already answers all three (`drive.ts`: `reject` → `{decision:'rejected'}`,
+ * `approve-session` → `{decision:'approved', scope:'session'}` — `'session'` is
+ * the only scope the schema accepts — and `approve` → `{decision:'approved'}`),
+ * and `mapKimiApprovalResolved` already reads the session scope back off the
+ * resolution. The client renders its third button only when `options` names
+ * `approve-session`, so without this list a supported answer was simply
+ * unreachable. The two must stay derived from the same table: an option with no
+ * working answer behind it is worse than no button.
+ */
+export const KIMI_APPROVAL_OPTIONS: readonly string[] = ['approve', 'approve-session', 'reject'];
+
 /** `event.approval.requested` → a canonical permission card. Undefined when the id is unusable. */
 export function mapKimiApprovalRequest(
   payload: unknown,
@@ -1729,7 +2137,10 @@ export function mapKimiApprovalRequest(
     title: toolName && action ? `${toolName} — ${action}` : toolName ?? action ?? 'Kimi needs approval',
     ...(toolName ? { toolName } : {}),
     ...(detail ? { detail } : {}),
-    ...(readOnly ? { readOnly: true } : {}),
+    // An observe-mode card is a NOTICE: it is non-actionable by design, this
+    // connection has no write door to answer it through, and advertising
+    // options on it would grow buttons that resolve nothing.
+    ...(readOnly ? { readOnly: true } : { options: [...KIMI_APPROVAL_OPTIONS] }),
   };
 }
 

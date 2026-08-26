@@ -18,6 +18,12 @@ abstract interface class ManagedRuntimeApi {
   /// Reads authenticated broker health.
   Future<BrokerHealthResponse> getHealth();
 
+  /// Changes the owner-only HTTP workspace-browsing exposure gate.
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  });
+
   /// Reads public broker version and contract identity.
   Future<HealthResponse> getProductHealth();
 
@@ -151,6 +157,15 @@ final class _BrokerManagedRuntimeApi implements ManagedRuntimeApi {
 
   @override
   Future<BrokerHealthResponse> getHealth() => client.getBrokerHealth();
+
+  @override
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  }) => client.setWorkspaceBrowsing(
+    enabled: enabled,
+    confirmRemoteFileAccess: confirmRemoteFileAccess,
+  );
 
   @override
   Future<HealthResponse> getProductHealth() => client.getHealth();

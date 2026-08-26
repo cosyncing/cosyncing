@@ -90,6 +90,9 @@ export default function (pi: ExtensionAPI) {
   const toolArgs = new Map<string, any>();
   const pendingPermissions = new Map<string, { resolve: (ok: boolean) => void; cleanup: () => void; scope: string }>();
   const pendingQuestions = new Map<string, { resolve: (answers: string[][] | null) => void; cleanup: () => void }>();
+  // A terminal answer can race an already-queued app answer. Remember settled bridge questions so
+  // the late command is ignored instead of being misclassified as an unresolvable native Pi dialog.
+  const settledQuestions = new Set<string>();
   const approvedScopes = new Set<string>();
 
   // Pi may make the first tool call immediately after session_start, while the asynchronous bridge
@@ -256,6 +259,8 @@ export default function (pi: ExtensionAPI) {
             const requestId = c.requestId ? String(c.requestId) : '';
             if (requestId && pendingQuestions.has(requestId)) {
               resolveQuestion(requestId, c.kind === 'reject-question' ? null : c.answers ?? []);
+            } else if (requestId && settledQuestions.has(requestId)) {
+              // The native Pi dialog won the race and already closed the app card.
             } else if (requestId) {
               // Pi native TUI select/input dialogs are still terminal-only because the extension API does
               // not receive those events. Only bridge-originated `ask_user` tool questions are resolvable.
@@ -295,36 +300,110 @@ export default function (pi: ExtensionAPI) {
     pending.resolve(answers);
   };
 
-  const askUserFromApp = (params: any, ctx: any): Promise<string[][] | null> => {
+  const canAskUserInTerminal = (params: any, ctx: any): boolean => {
+    if (ctx?.mode && ctx.mode !== 'tui') return false;
+    if (ctx?.hasUI === false) return false;
+    const options = Array.isArray(params?.options) ? params.options : [];
+    return options.length > 0
+      ? typeof ctx?.ui?.select === 'function'
+      : typeof ctx?.ui?.input === 'function';
+  };
+
+  const askUserInTerminal = async (params: any, ctx: any, signal: AbortSignal): Promise<string[][] | null> => {
+    const options = (Array.isArray(params?.options) ? params.options : []).map((option: any) => ({
+      label: typeof option === 'string' ? option : String(option?.label ?? ''),
+      description: typeof option === 'string' || option?.description == null ? undefined : String(option.description),
+    }));
+    const question = String(params?.question ?? 'Input requested');
+    const header = params?.header ? String(params.header) : '';
+    const title = header ? `${header}: ${question}` : question;
+
+    if (options.length === 0) {
+      const answer = await ctx.ui.input(title, undefined, { signal });
+      return answer === undefined ? null : [[answer]];
+    }
+
+    const usedDisplays = new Set<string>();
+    const choices = options.map((option: { label: string; description?: string }, index: number) => {
+      const base = option.description ? `${option.label} — ${option.description}` : option.label;
+      let display = base;
+      if (usedDisplays.has(display)) display = `${base} (${index + 1})`;
+      usedDisplays.add(display);
+      return { display, label: option.label };
+    });
+
+    if (params?.multiple !== true) {
+      const selected = await ctx.ui.select(title, choices.map((choice: { display: string }) => choice.display), { signal });
+      if (selected === undefined) return null;
+      return [[choices.find((choice: { display: string }) => choice.display === selected)?.label ?? selected]];
+    }
+
+    const selectedLabels: string[] = [];
+    const remaining = [...choices];
+    let doneLabel = 'Done';
+    while (usedDisplays.has(doneLabel)) doneLabel = `✓ ${doneLabel}`;
+    while (remaining.length > 0) {
+      const selected = await ctx.ui.select(
+        selectedLabels.length === 0 ? title : `${title} (${selectedLabels.length} selected)`,
+        [...remaining.map((choice: { display: string }) => choice.display), doneLabel],
+        { signal },
+      );
+      if (selected === undefined) return null;
+      if (selected === doneLabel) break;
+      const index = remaining.findIndex((choice: { display: string }) => choice.display === selected);
+      if (index < 0) continue;
+      selectedLabels.push(remaining[index]!.label);
+      remaining.splice(index, 1);
+    }
+    return [selectedLabels];
+  };
+
+  const askUser = (params: any, ctx: any, mirrorToApp: boolean): Promise<string[][] | null> => {
     const requestId = `ca-q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const options = Array.isArray(params?.options) ? params.options : [];
     return new Promise((resolve) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const dialogAbort = new AbortController();
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
         ctx?.signal?.removeEventListener?.('abort', onAbort);
+        dialogAbort.abort();
       };
       const finish = (answers: string[][] | null) => {
-        if (!pendingQuestions.has(requestId)) return;
-        pendingQuestions.delete(requestId);
+        if (settled) return;
+        settled = true;
+        if (mirrorToApp) {
+          pendingQuestions.delete(requestId);
+          settledQuestions.add(requestId);
+        }
         cleanup();
-        emit({ t: 'question-resolved', requestId });
+        if (mirrorToApp) emit({ t: 'question-resolved', requestId });
         resolve(answers);
       };
       const onAbort = () => finish(null);
       if (APPROVAL_TIMEOUT_MS > 0) timeout = setTimeout(() => finish(null), APPROVAL_TIMEOUT_MS);
       ctx?.signal?.addEventListener?.('abort', onAbort, { once: true });
-      pendingQuestions.set(requestId, { resolve: (answers) => finish(answers), cleanup });
-      emit({
-        t: 'question-request',
-        requestId,
-        questions: [{
-          header: params?.header ? String(params.header) : undefined,
-          question: String(params?.question ?? 'Input requested'),
-          options: options.map((o: any) => typeof o === 'string' ? { label: o } : { label: String(o?.label ?? ''), description: o?.description == null ? undefined : String(o.description) }),
-          multiple: params?.multiple === true,
-        }],
-      });
+      if (mirrorToApp) {
+        pendingQuestions.set(requestId, { resolve: (answers) => finish(answers), cleanup });
+        emit({
+          t: 'question-request',
+          requestId,
+          questions: [{
+            header: params?.header ? String(params.header) : undefined,
+            question: String(params?.question ?? 'Input requested'),
+            options: options.map((o: any) => typeof o === 'string' ? { label: o } : { label: String(o?.label ?? ''), description: o?.description == null ? undefined : String(o.description) }),
+            multiple: params?.multiple === true,
+          }],
+        });
+      }
+      if (canAskUserInTerminal(params, ctx)) {
+        void askUserInTerminal(params, ctx, dialogAbort.signal)
+          .then((answers) => finish(answers))
+          .catch(() => {
+            if (!mirrorToApp) finish(null);
+          });
+      }
     });
   };
 
@@ -701,7 +780,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'ask_user',
     label: 'Ask user',
-    description: 'Ask the user a question in their cosyncing app and wait for their answer. Use this for choices, confirmations, and short free-text input when the user is away from the terminal.',
+    description: 'Ask the user a question in Pi and their cosyncing app, then use the first answer. Use this for choices, confirmations, and short free-text input.',
     parameters: {
       type: 'object',
       properties: {
@@ -730,10 +809,12 @@ export default function (pi: ExtensionAPI) {
       required: ['question'],
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: any, ctx: any) {
-      if (!id && !(await waitForBridge())) return { content: [{ type: 'text', text: 'Not bridged to the app right now.' }], details: { cancelled: true } };
-      const answers = await askUserFromApp(params, ctx);
-      if (!answers) return { content: [{ type: 'text', text: 'User did not answer in cosyncing.' }], details: { cancelled: true } };
+    async execute(_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
+      const terminalAvailable = canAskUserInTerminal(params, ctx);
+      const bridgeAvailable = !!id || (!terminalAvailable && await waitForBridge());
+      if (!bridgeAvailable && !terminalAvailable) return { content: [{ type: 'text', text: 'No interactive user interface is available.' }], details: { cancelled: true } };
+      const answers = await askUser(params, ctx, bridgeAvailable);
+      if (!answers) return { content: [{ type: 'text', text: 'User did not answer.' }], details: { cancelled: true } };
       const flat = answers.flat().filter(Boolean);
       return { content: [{ type: 'text', text: flat.length ? flat.join('\n') : 'No answer provided.' }], details: { answers } };
     },

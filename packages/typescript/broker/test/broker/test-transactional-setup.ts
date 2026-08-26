@@ -673,6 +673,36 @@ try {
       choices: { language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
       now,
     });
+    const legacyPlan = buildSetupPlan({
+      inspection: {
+        ...inspection,
+        legacyCodexDaemon: {
+          state: 'detected',
+          pid: 123,
+          start: '456',
+          boot: 'fixture-boot',
+          executable: '/opt/codex',
+          managerExecutable: '/opt/codex-current',
+          argv: ['/opt/codex', 'app-server', '--remote-control', '--listen', 'unix://'],
+          socketPath: '/tmp/codex.sock',
+        },
+      },
+      choices: {
+        language: 'en',
+        service: 'foreground',
+        enableLingering: false,
+        quotaWarnings: true,
+        installAgentSkill: true,
+        installOpencodeShim: true,
+        migrateLegacyCodexDaemon: true,
+      },
+      now,
+    });
+    const legacyAction = legacyPlan.actions.find((action) => action.id === 'codex.daemon.migrate-legacy');
+    check('setup plans the legacy Codex takeover as explicit non-reversible work',
+      legacyAction?.reversible === false
+        && legacyPlan.mutationSummary.some((summary) => summary.includes('Attached Codex sessions will disconnect')),
+      JSON.stringify(legacyAction));
     const skillChecks = inspection.doctor.sections.flatMap((section) => section.checks)
       .filter((candidate) => candidate.id.startsWith('state.agent-skill.'));
     check('doctor sees both receipt-owned skill targets after setup',
@@ -1530,6 +1560,7 @@ try {
     mkdirSync(dirname(fakeCodex), { recursive: true });
     writeFileSync(fakeCodex, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const base = contextFor(machine);
+    let legacyInspectionBin: string | undefined;
     const inspection = await inspectSetupEnvironment({
       buildInfo: BUILD_INFO,
       executablePath: join(machine, 'bin', 'cosyncing'),
@@ -1538,6 +1569,10 @@ try {
         ...base,
         resolveExecutable: (command) => command === 'codex' ? fakeCodex : undefined,
         readPackageVersion: (_path, packages) => packages.includes('@openai/codex') ? '0.146.1' : undefined,
+      },
+      inspectLegacyCodexDaemon: async (codexBin) => {
+        legacyInspectionBin = codexBin;
+        return undefined;
       },
     });
     const codex = inspection.agents.find((agent) => agent.id === 'codex');
@@ -1553,6 +1588,8 @@ try {
         && chinese.includes('官方安装器会检测 npm 版 Codex，并询问是否移除')
         && chinese.includes('重新运行 `cosy setup`'),
       `${english}\n${chinese}`);
+    check('setup binds legacy-daemon inspection to the diagnosis-context Codex executable',
+      legacyInspectionBin === fakeCodex, String(legacyInspectionBin));
     let nonInteractive = '';
     createNonInteractiveSetupPresenter({ write: (value) => { nonInteractive += value; } }).intro(inspection);
     check('non-interactive setup carries the same standalone warning and recovery command',

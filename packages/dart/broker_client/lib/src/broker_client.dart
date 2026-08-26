@@ -127,6 +127,30 @@ class BrokerClient {
     return BrokerHealthResponse.fromJson(response);
   }
 
+  /// Gets the workspace-browsing exposure state.
+  Future<WorkspaceBrowsingSettingsResponse>
+  getWorkspaceBrowsingSettings() async {
+    final response = await _get<Map<String, dynamic>>(
+      _resolver.workspaceBrowsingSettingsEndpoint,
+    );
+    return WorkspaceBrowsingSettingsResponse.fromJson(response);
+  }
+
+  /// Changes workspace browsing and confirms its remote-file-access effect.
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  }) async {
+    final response = await _post<Map<String, dynamic>>(
+      _resolver.workspaceBrowsingSettingsEndpoint,
+      data: {
+        'enabled': enabled,
+        'confirmRemoteFileAccess': confirmRemoteFileAccess,
+      },
+    );
+    return WorkspaceBrowsingSettingsResponse.fromJson(response);
+  }
+
   /// Reads the signed stable broker release channel.
   ///
   /// `GET /api/broker/update`; `refresh=1` bypasses the broker cache.

@@ -35,6 +35,7 @@ import {
   migrateBrokerConfigV1,
   planRepoEraConfigurationMigration,
   resolveBrokerConfiguration,
+  setHttpWorkspaceBrowsingEnabled,
   validateBrokerConfig,
   writeBrokerConfig,
 } from '../../src/runtime/configuration.ts';
@@ -212,6 +213,16 @@ try {
       featureConfig.features?.httpWorkspaceBrowsing === true
         && featureConfig.features?.httpTranscriptExport === true
         && featureConfig.features?.futureFeature === 'preserved');
+
+    const changedFeature = setHttpWorkspaceBrowsingEnabled(true, home);
+    const changedFeatureInspection = inspectBrokerConfig(home);
+    check('workspace browsing mutation preserves additive config through the secure writer',
+      changedFeature.features?.httpWorkspaceBrowsing === true
+        && changedFeatureInspection.status === 'ok'
+        && changedFeatureInspection.config.features?.httpWorkspaceBrowsing === true
+        && (changedFeatureInspection.config.ownerExtension as any)?.preserved === true
+        && changedFeatureInspection.config.broker.nestedExtension === 'keep-me'
+        && ownerOnlyMode(join(home, 'config.json')) === 0o600);
 
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, port: 0 } }));
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), update: { channel: 'surprise' } }));

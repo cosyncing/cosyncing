@@ -703,6 +703,48 @@ void main() {
       },
     );
 
+    testWidgets(
+      'model picker shows provider label without changing wire identity',
+      (tester) async {
+        useRoomyTestViewport(tester);
+        const catalog = [
+          ModelOption(
+            providerID: 'openai',
+            providerLabel: 'Default',
+            modelID: 'gpt-5.6-sol',
+            label: 'GPT-5.6 Sol',
+          ),
+          ModelOption(
+            providerID: 'volcengine-coding-plan',
+            providerLabel: 'volcengine',
+            modelID: 'glm-5.3',
+            variant: 'volcengine',
+            label: 'GLM 5.3 · volcengine',
+          ),
+        ];
+        final connection = ScriptedSessionDetailConnection(
+          events: const [OptionsWireEvent(models: catalog, agents: [])],
+        );
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(events: const [], connection: connection),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const Key('session-detail-model-selector')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Default · gpt-5.6-sol'), findsOneWidget);
+        expect(find.text('volcengine · glm-5.3'), findsOneWidget);
+        expect(find.text('openai · gpt-5.6-sol'), findsNothing);
+        expect(
+          find.text('volcengine · glm-5.3 · volcengine'),
+          findsNothing,
+        );
+      },
+    );
+
     testWidgets('restores an exact model preference for the session lineage', (
       tester,
     ) async {

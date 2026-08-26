@@ -28,8 +28,10 @@
  *    `toolUseResult.interrupted`); we never fabricate an exitCode.
  *  - Compaction is split across two lines: a `system/compact_boundary` → history-reset, plus a fat
  *    injected `isCompactSummary` user string that we SUPPRESS (machine context, not a user turn).
- *  - Sub-agent (Task) transcripts live in a separate sibling tree (`<uuid>/subagents/agent-*.jsonl`);
- *    discovery walks DEPTH-1 `*.jsonl` only, so those are excluded; the main file shows just the Agent
+ *  - Sub-agent (Task) transcripts live in a separate sibling tree (`<uuid>/subagents/agent-*.jsonl`).
+ *    The session sweep itself stays DEPTH-1 `*.jsonl`, so they are never mistaken for sessions; they are
+ *    published separately as observe-only CHILD rows (`origin:'subagent'` + `parentThreadId`) by the
+ *    bounded depth-2 walk in {@link claudeSubagentTranscripts}. The main file shows just the Agent
  *    tool call/result.
  */
 import { homedir } from 'node:os';
@@ -1302,7 +1304,11 @@ export class ClaudeAdapter implements AgentBackend {
                 continue;
               }
               if (storeForPath(path).configDir !== store.configDir) continue;
-              const sessionUuid = basename(path).replace(/\.jsonl$/, '');
+              // A child row belongs to the watched session too: its status is derived from the PARENT's
+              // turn, so a bridge event for `uuid` must republish that session's subagents as well or a
+              // finished child would sit at 'working' until the next full roster poll.
+              const sessionUuid =
+                claudeSubagentPathInfo(path)?.parentUuid ?? basename(path).replace(/\.jsonl$/, '');
               if (uuid && sessionUuid !== uuid) continue;
               onChange(s);
             }
@@ -1382,7 +1388,8 @@ export class ClaudeAdapter implements AgentBackend {
         for (const ent of entries) {
           // DEPTH-1 files only: a `.jsonl` directly under the slug dir is a session. Sub-agent
           // transcripts live at `<slug>/<uuid>/subagents/agent-*.jsonl` (ent.isFile() === false for
-          // the `<uuid>` directory), so this naturally excludes them — never recurse here.
+          // the `<uuid>` directory), so this naturally excludes them — never recurse HERE. They are
+          // published as child rows further down, from the parent that survived the cutoff.
           if (!ent.isFile() || !ent.name.endsWith('.jsonl')) continue;
           // Cold authority recovery yields every 128 KiB. This outer yield still bounds metadata/
           // title work across many small transcripts that resolve without a long authority scan.
@@ -1428,11 +1435,20 @@ export class ClaudeAdapter implements AgentBackend {
           const conversationTs = lastConversationTs(full) ?? st.mtimeMs;
           const status = await claudeSessionStatus(full, raw, now);
           const rowId = enc(full); // base64url of the transcript path — attach re-opens the exact file (like Codex/Pi)
+          // DEPTH-2 roster lineage. Walked HERE and only here — after the cutoff `continue` above — so a
+          // windowed discovery never pays for a cold session's subagent tree, and the walk is the same
+          // bounded readdir the activity cards already do.
+          const subagents = claudeSubagentTranscripts(full);
+          // A child's parentThreadId must equal the parent's PUBLISHED nativeId. A parent with children
+          // and no bridge identity publishes its own session id instead; a parent with no children keeps
+          // exactly the row it had before this feature.
+          const parentLineageId = nativeId ?? claudeSessionNativeId(uuid);
+          const publishedNativeId = subagents.length ? parentLineageId : nativeId;
           out.push({
             id: rowId,
             lineageId: firstUserUuid,
             tool: this.id,
-            ...(nativeId ? { nativeId } : {}),
+            ...(publishedNativeId ? { nativeId: publishedNativeId } : {}),
             title,
             cwd,
             // Label by the producing model so wrapper sessions read e.g. 'MiniMax-M3' (Issue D).
@@ -1458,6 +1474,38 @@ export class ClaudeAdapter implements AgentBackend {
             })(),
             updatedAt: conversationTs,
           });
+          for (const child of subagents) {
+            // Same outer yield budget as the parent sweep — a fan-out session's children count toward
+            // the every-25-files yield instead of extending the sweep silently.
+            if (++scannedFiles % 25 === 0) await new Promise((r) => setTimeout(r, 0));
+            // A Task may select a different model from its parent, so model identity must come from
+            // the child's own transcript. Attach already performs this bounded tail/head lookup; doing
+            // it here too keeps the cold roster truthful without making users open every child first.
+            const childHeadModel = readHeadInfo(child.path).model;
+            const childModel = readLatestModel(child.path) ?? childHeadModel;
+            out.push({
+              id: enc(child.path), // parent id namespace ⇒ attach's realpath containment admits it unchanged
+              tool: this.id,
+              nativeId: claudeSubagentNativeId(uuid, child.agent),
+              origin: 'subagent',
+              parentThreadId: parentLineageId,
+              title: claudeSubagentTitle(child.agent, child.meta),
+              // A subagent runs in its parent's workspace; inheriting the already-read cwd keeps the child
+              // in the parent's project group; the child head read above is solely for its model identity.
+              cwd,
+              model: childModel,
+              currentModel: childModel
+                ? { providerID: store.isDefault ? 'anthropic' : 'wrapper', modelID: childModel, ...labelOf(childModel) }
+                : undefined,
+              status: claudeSubagentStatus(status, child.mtimeMs, now),
+              attachMode: 'observe',
+              control: claudeSubagentControl(),
+              // A subagent transcript has none of the timestamp-less sidecar churn the parent has
+              // (permission-mode/bridge-session lines are parent-only), so mtime IS its conversation
+              // recency — no tail read needed to order the row.
+              updatedAt: child.mtimeMs,
+            });
+          }
         }
       }
     }
@@ -1471,6 +1519,15 @@ export class ClaudeAdapter implements AgentBackend {
     const path = containedClaudePath(dec(sessionId));
 
     const store = storeForPath(path);
+    // A subagent transcript is a roster CHILD: observe-only, and its lineage pair has to survive the
+    // round-trip so an attached child still nests under its parent (the app reads origin/control off the
+    // attach frame, not off the roster row it clicked).
+    const subagent = claudeSubagentPathInfo(path);
+    if (subagent && mode !== undefined && mode !== 'observe') {
+      // A permanent capability boundary, not a contended owner — refused BEFORE any resume bookkeeping
+      // or process path, so a driving attach on a child can never reach a spawn.
+      throw new Error(`Claude subagent transcripts are Observe-only. ${CLAUDE_SUBAGENT_OWNED_REASON}`);
+    }
     const head = readHeadInfo(path);
     const attachUuid = basename(path).replace(/\.jsonl$/, '');
     // A deferred create has no transcript head to read cwd from — recover the create-time cwd (map),
@@ -1496,12 +1553,28 @@ export class ClaudeAdapter implements AgentBackend {
     // session to 'live'/synced. Claude attaches as resume (explicit take-over) or read-only observe.
     // `eligible` still tunes the control reason text (first-party check incl. this session's project settings).
     const eligible = eligibleForChannels(store, cwd);
+    // The child's own meta sidecar, read once so the attached row carries the SAME title the roster shows.
+    const subagentMeta = subagent
+      ? parseLineOrNull(readTextSafe(join(dirname(path), subagent.agent + '.meta.json')))
+      : undefined;
     const info: SessionInfo = {
       id: sessionId,
       lineageId: head.firstUserUuid,
       tool: this.id,
-      ...(nativeId ? { nativeId } : {}),
-      title: readTitle(path) ?? (cwd ? basename(cwd) : basename(path)),
+      // Lineage reproduced from the child path alone (same rule discovery applied), so an attach that
+      // never saw the parent row still publishes a joinable pair.
+      ...(subagent
+        ? {
+            nativeId: claudeSubagentNativeId(subagent.parentUuid, subagent.agent),
+            origin: 'subagent' as const,
+            parentThreadId: claudeParentLineageId(store, subagent.parentUuid, subagent.parentTranscript),
+          }
+        : nativeId
+          ? { nativeId }
+          : {}),
+      title: subagent
+        ? claudeSubagentTitle(subagent.agent, subagentMeta ?? undefined)
+        : readTitle(path) ?? (cwd ? basename(cwd) : basename(path)),
       cwd,
       model: liveModel,
       // currentModel is resolved-session identity, not the curated selection alias. A later selection may
@@ -1522,7 +1595,9 @@ export class ClaudeAdapter implements AgentBackend {
       attachMode: mode === 'resume' ? 'resume' : 'observe',
       // Explicit control state (never inferred from attachMode by the UI). Resume = driving; a
       // remote-controlled/cwd-gone session is unavailable for Drive. Channel sync is archived.
-      control: claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
+      control: subagent
+        ? claudeSubagentControl()
+        : claudeControl({ store, uuid, cwd, bridged, driving: mode === 'resume', channelsEligible: eligible }),
     };
     if (mode === 'resume') {
       // Single-writer rule (issue 15a — demote, never fork): a live terminal owner MID-TURN makes the
@@ -1549,6 +1624,17 @@ export class ClaudeAdapter implements AgentBackend {
       });
       this.drivenSessions.set(sessionId, conn);
       return conn;
+    }
+    if (subagent) {
+      // A child has no `agents --json` row of its own, so reproduce discovery's rule exactly (parent turn
+      // in flight AND a fresh child transcript) — otherwise opening a working child would flip it to idle.
+      const now = Date.now();
+      const parentRaw = (await liveStatusByStore(store)).get(subagent.parentUuid)?.status;
+      const parentStatus = existsSync(subagent.parentTranscript)
+        ? await claudeSessionStatus(subagent.parentTranscript, parentRaw, now)
+        : parentRaw;
+      info.status = claudeSubagentStatus(parentStatus, statSafe(path)?.mtimeMs, now);
+      return new ClaudeObserveConnection(path, info);
     }
     // Observe: surface WHY a session is blocked (its `<bin> agents --json` waiting reason) so the app
     // can render the real on-disk question, or an honest read-only notice, instead of a silent transcript. (Issue G.)
@@ -2127,6 +2213,9 @@ export class ClaudeLiveConnection implements SessionConnection {
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('Claude does not support persistent approval rules through this connection');
+    }
     this.pending.delete(requestId);
     this.write({ type: 'permission', request_id: requestId, behavior: decision === 'reject' ? 'deny' : 'allow' });
     // Broadcast resolution so every OTHER attached tab clears its now-stale permission card (the Resume
@@ -3311,6 +3400,9 @@ export class ClaudeResumeConnection implements SessionConnection {
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     if (!requestId) return;
+    if (decision === 'approve-rule') {
+      throw new Error('Claude does not support persistent approval rules through this connection');
+    }
     // Verified reply shapes (2.1.207 probe): allow echoes the tool input back as updatedInput and the
     // gated tool RUNS; deny carries a message the model reads as the refusal reason.
     const isDeny = decision === 'reject';
@@ -4771,6 +4863,164 @@ export function activityHeartbeatMs(transcriptPath: string): number {
   return hb;
 }
 
+// ── roster lineage: subagent transcripts as observe-only CHILD ROWS ─────────────────────────────────
+//
+// The tree above is not only progress-card material: `<uuid>/subagents/agent-<id>.jsonl` is a full
+// transcript in the SAME line schema as the parent, so a child roster row needs no new history source —
+// only an id, a lineage pair, and an honest control state. Discovery stays DEPTH-1 for *sessions*
+// (`<slug>/*.jsonl`); these rows are the deliberate depth-2 exception, walked only for a parent that
+// already survived the discovery cutoff.
+//
+// Identity. The client's roster join is `(machine, tool, nativeId)` and a child's `parentThreadId` must
+// equal the parent's PUBLISHED `nativeId`. Claude's `nativeId` is a bridge identity (`claude-bridge:…`)
+// that most transcripts never record, so a parent that actually HAS children and no bridge identity
+// publishes `claude-session:<uuid>` — its own real Claude session id, namespaced so it can never collide
+// with a bridge id or with a child id. A parent with no subagent tree keeps exactly the row it had
+// before this feature: no native identity is invented store-wide.
+//
+// Containment. A child id is `base64url(<abs path>)`, the SAME namespace parents use, and the file sits
+// inside the same `projectsRoot` — so `attach`'s realpath containment (`containedClaudePath`) admits it
+// unchanged, with no second path allowlist to keep in sync.
+
+/** Lineage namespace for a parent that has children but no bridge identity (see the section note). */
+export const CLAUDE_SESSION_NATIVE_PREFIX = 'claude-session:';
+/** Lineage namespace for a subagent child row. Distinct prefix ⇒ a child can never be mistaken for a
+ *  parent incarnation by the broker's `nativeId` retirement join. */
+export const CLAUDE_SUBAGENT_NATIVE_PREFIX = 'claude-subagent:';
+
+/** The parent's published lineage identity when it has no bridge identity of its own. */
+export function claudeSessionNativeId(uuid: string): string {
+  return CLAUDE_SESSION_NATIVE_PREFIX + uuid;
+}
+/** A child's OWN native id. Scoped by the parent uuid because Claude's `agent-<id>` stems are only
+ *  unique within one session's tree. */
+export function claudeSubagentNativeId(parentUuid: string, agent: string): string {
+  return `${CLAUDE_SUBAGENT_NATIVE_PREFIX}${parentUuid}/${agent}`;
+}
+
+/** Why a subagent row offers neither Drive nor take-over: the CLI owns the child, it lives and dies with
+ *  the parent's turn, and nothing in the app can ever become its writer. Single-sourced so the roster
+ *  control state and the attach refusal cannot drift apart. */
+export const CLAUDE_SUBAGENT_OWNED_REASON =
+  'This Claude subagent is owned by the session that spawned it; its parent session is where work happens.';
+
+/** Observe-only control for a child row. Deliberately carries NO terminalSync `label`/`command`: the
+ *  generic "Resume in terminal" tip would render `claude --resume agent-<id>`, a conversation id that
+ *  does not exist — an offer that cannot work is worse than no offer. */
+export function claudeSubagentControl(): SessionControlState {
+  const drive: SessionDriveControl = { state: 'unavailable', supported: false, reason: CLAUDE_SUBAGENT_OWNED_REASON };
+  const terminalSync: SessionTerminalSync = {
+    supported: false,
+    syncAvailable: false,
+    active: false,
+    reason: `Terminal sync is unavailable here: a subagent has no conversation of its own to rejoin. ${CLAUDE_SUBAGENT_OWNED_REASON}`,
+  };
+  return { drive, terminalSync };
+}
+
+/** One parent-spawned subagent transcript, as a roster candidate. */
+export interface ClaudeSubagentTranscript {
+  /** Absolute path of the child's own `agent-<id>.jsonl` — the row id encodes exactly this. */
+  path: string;
+  /** Claude's own `agent-<id>` filename stem. */
+  agent: string;
+  /** Parsed `agent-<id>.meta.json` sidecar (a parent-spawned Task subagent always writes one). */
+  meta: Record<string, any>;
+  mtimeMs: number;
+}
+
+/**
+ * The parent-spawned subagent transcripts under ONE session's activity tree.
+ *
+ * Reuses the bounded walk that already serves the activity cards ({@link buildActivitySnapshot} step 1),
+ * shape for shape: one `readdir` of `<uuid>/subagents` plus a small meta read + one stat per
+ * `agent-*.meta.json`. It does NOT recurse: the nested `subagents/workflows/<run>/` agents are not roster
+ * rows — they are summarized inside their workflow's activity card, and the very same `toolUseId == null`
+ * rule that keeps workflow-owned metas out of the standalone subagent cards keeps them out of the roster.
+ * A missing `subagents/` dir costs one failed readdir, the same as the heartbeat walk.
+ */
+export function claudeSubagentTranscripts(transcriptPath: string): ClaudeSubagentTranscript[] {
+  const subDir = join(claudeActivityDir(transcriptPath), 'subagents');
+  const out: ClaudeSubagentTranscript[] = [];
+  for (const name of safeReaddir(subDir)) {
+    if (!name.endsWith('.meta.json')) continue;
+    const meta = parseLineOrNull(readTextSafe(join(subDir, name)));
+    if (!meta || meta.toolUseId == null) continue;
+    const agent = name.replace(/\.meta\.json$/, '');
+    const path = join(subDir, agent + '.jsonl');
+    const st = statSafe(path);
+    if (!st?.isFile()) continue;
+    out.push({ path, agent, meta, mtimeMs: st.mtimeMs });
+  }
+  return out;
+}
+
+/**
+ * Read a path back as a subagent transcript — `<slug>/<uuid>/subagents/agent-<id>.jsonl`, or the nested
+ * `<uuid>/subagents/workflows/<run>/agent-<id>.jsonl` — or `undefined` for a normal session transcript.
+ *
+ * Recognizing the nested form too is deliberate defense: discovery never publishes those, but any id that
+ * decodes to an `agent-*.jsonl` inside a `subagents/` tree must land on the observe-only branch rather
+ * than be treated as a drivable conversation.
+ */
+export function claudeSubagentPathInfo(
+  path: string,
+): { parentTranscript: string; parentUuid: string; agent: string; workflowRun?: string } | undefined {
+  const file = basename(path);
+  if (!file.startsWith('agent-') || !file.endsWith('.jsonl')) return undefined;
+  let dir = dirname(path);
+  let workflowRun: string | undefined;
+  if (basename(dirname(dir)) === 'workflows' && basename(dirname(dirname(dir))) === 'subagents') {
+    workflowRun = basename(dir);
+    dir = dirname(dirname(dir)); // → <uuid>/subagents
+  }
+  if (basename(dir) !== 'subagents') return undefined;
+  const activityDir = dirname(dir); // → <slug>/<uuid>
+  const parentUuid = basename(activityDir);
+  if (!parentUuid || parentUuid === '.' || parentUuid === sep) return undefined;
+  return {
+    parentTranscript: activityDir + '.jsonl',
+    parentUuid,
+    agent: file.replace(/\.jsonl$/, ''),
+    ...(workflowRun ? { workflowRun } : {}),
+  };
+}
+
+/** The lineage id a parent transcript publishes: its bridge identity when it has one, else its own
+ *  session uuid, namespaced. Shared by discovery (which builds the pair) and attach (which must
+ *  reproduce it from the child alone). */
+export function claudeParentLineageId(store: ClaudeStore, parentUuid: string, parentTranscript: string): string {
+  return (
+    nativeIncarnations(store).bySessionId.get(parentUuid)?.nativeId
+    ?? transcriptNativeBridgeId(parentTranscript)
+    ?? claudeSessionNativeId(parentUuid)
+  );
+}
+
+/** Roster title for a child row — the SAME preference the activity card uses: the spawn description,
+ *  then the agent type, then Claude's own `agent-<id>` stem. Never a guess from transcript content. */
+export function claudeSubagentTitle(agent: string, meta: Record<string, any> | undefined): string {
+  const description = meta?.description;
+  if (typeof description === 'string' && description.trim()) return description.trim().slice(0, 120);
+  const agentType = meta?.agentType;
+  if (typeof agentType === 'string' && agentType.trim()) return agentType.trim();
+  return agent;
+}
+
+/** Status for a child row. A subagent has NO `agents --json` row of its own (the CLI reports the parent),
+ *  so 'working' requires both evidences at once: the parent has a turn in flight AND this child's own
+ *  transcript is still fresh. Anything else is idle — a fabricated 'working' would outlive the parent's
+ *  turn and never clear, since nothing ever "finishes" a child row. */
+export function claudeSubagentStatus(
+  parentStatus: RawStatus | undefined,
+  childMtimeMs: number | undefined,
+  now: number,
+): RawStatus {
+  return parentStatus === 'working' && childMtimeMs != null && now - childMtimeMs <= WORKING_FRESH_MS
+    ? 'working'
+    : 'idle';
+}
+
 /** Collect tool_use_ids the PARENT has already answered (a user-turn `tool_result`), so a subagent whose
  *  meta.toolUseId is resolved renders 'done' without re-reading the (multi-MB) parent on every sweep. */
 export interface ParentActivityState {
@@ -5857,8 +6107,9 @@ function rememberClaudeTurnAuthority(path: string, entry: ClaudeTurnAuthorityEnt
  *
  * Exact terminal transcript authority always wins. Exact active transcript authority preserves a
  * live process through arbitrarily quiet tools, but cannot manufacture Working after that process
- * has exited: it must be qualified by the current `agents --json` row. Background-task and freshness
- * fallbacks apply only when the transcript has no exact latest-turn evidence. */
+ * has exited: it must be qualified by the current `agents --json` row. The freshness fallback applies
+ * only when the transcript has no exact latest-turn evidence; the background-task fallback also
+ * upgrades an active turn that the live row leaves idle. */
 export async function claudeSessionStatus(
   path: string,
   raw: RawStatus | undefined,
@@ -5868,7 +6119,13 @@ export async function claudeSessionStatus(
   if (authority === 'terminal') return 'idle';
   if (authority === 'active') {
     if (raw === 'needs-input') return 'needs-input';
-    return raw === 'working' ? 'working' : 'idle';
+    if (raw === 'working') return 'working';
+    // Exact active evidence proves a turn was OPEN, not that the CLI is busy now, so this branch would
+    // otherwise settle to idle. A fresh unnotified background spawn is the one thing that still makes
+    // that verdict wrong: the spawning tool_use line is itself an exact active marker, so without this
+    // the background-pending fallback below is unreachable for every real transcript. Upgrade only —
+    // live busy/needs-input evidence above keeps its precedence.
+    return pendingBackgroundSpawnMs(path, now) != null ? 'working' : 'idle';
   }
   const st = statSafe(path);
   const conversationTs = lastConversationTs(path) ?? st?.mtimeMs ?? 0;

@@ -1,8 +1,9 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "b211719eb44f10798e5b16c1093f28e6899ce750",
+  "acceptedBase": "d16f10cf4b5c43ca966b4481acc42ea278b0626c",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
+    "broker.adapter-path-stamps",
     "broker.agent-create-readiness",
     "broker.application-identity",
     "broker.artifact-session-isolation",
@@ -12,6 +13,8 @@
     "broker.claude-driven-queue",
     "broker.claude-hooks",
     "broker.claude-hooks-surface",
+    "broker.claude-recency",
+    "broker.claude-roster-subagents",
     "broker.claude-transcript",
     "broker.cli-package-boundary",
     "broker.codex-loaded-watch",
@@ -85,6 +88,7 @@
     "broker.typecheck",
     "broker.update-contract",
     "broker.web-origin",
+    "broker.workspace-file-api",
     "browser.artifact-session-isolation",
     "browser.cache-model",
     "browser.client-platform",
@@ -121,7 +125,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:82344da086eff89c89cb18061090e5b2892435b6664ebe971c44faca8e3edc73"
+      "fingerprint": "sha256:92e1aee019a325e2c7f53a5e781fc7714d6c00fed5592f80a61a16b196f2029b"
     },
     {
       "id": "capabilities",
@@ -246,6 +250,10 @@
       "fingerprint": "sha256:148836c12a57ba0663024e7213c6aeb86e3104ceb2c901fd74bbc29ccc68fdd5"
     },
     {
+      "id": "adapter-path-stamps",
+      "fingerprint": "sha256:de88710cad3848473f0681f200a1ea01988506c8cfe1fb1587e50e3cb573afa7"
+    },
+    {
       "id": "agent-create-readiness",
       "fingerprint": "sha256:36de11384e1245765c2fb864076370b0d41d8e72216f9a360ef05f7cb542d344"
     },
@@ -292,6 +300,14 @@
     {
       "id": "claude-hooks-surface",
       "fingerprint": "sha256:4b17ed9f17b220690ca7078c58011c3f5d4034373641acffc8cc3ac7156f59c8"
+    },
+    {
+      "id": "claude-recency",
+      "fingerprint": "sha256:563582400b3a5548dddf797a372ab8fff65c4661c581f80ff251f5e153f3e291"
+    },
+    {
+      "id": "claude-roster-subagents",
+      "fingerprint": "sha256:6216ab4d0d3858909179d0477701b15d4a618e377a2c6a860f1253cd8fdac96d"
     },
     {
       "id": "claude-transcript-mapping",
@@ -608,6 +624,10 @@
     {
       "id": "windows-service",
       "fingerprint": "sha256:d9e68c68d7ec2bec4841da3763f394326e33b94e22a2f1b83ba9b77a726eb6c0"
+    },
+    {
+      "id": "workspace-file-api",
+      "fingerprint": "sha256:33f495a3adf23fd005430526089270da5cf26e6803077745ce60967e7dedd7ca"
     },
     {
       "id": "zero-agent-doctor",

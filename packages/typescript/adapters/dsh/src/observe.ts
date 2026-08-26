@@ -810,6 +810,9 @@ export class DshSessionConnection implements SessionConnection {
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
     this.assertMutable('answer an approval');
+    if (decision === 'approve-rule') {
+      throw new Error('dsh does not support persistent approval rules through this connection');
+    }
     const entry = this.pending.get(requestId);
     if (!entry || entry.kind !== 'approval') {
       throw new Error(`dsh approval ${requestId} is no longer pending`);

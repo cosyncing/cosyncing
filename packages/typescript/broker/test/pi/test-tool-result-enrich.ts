@@ -375,12 +375,39 @@ function check(name: string, ok: boolean, detail = ''): void {
     'bridge approval wire: request maps to card, replays pending, decision queues, resolution clears',
     req?.requestId === 'p1' &&
       req?.toolName === 'bash' &&
+      JSON.stringify(req?.options) === '["approve","approve-session","reject"]' &&
       pendingBeforeResolve.some((m) => m.type === 'permission-request' && m.requestId === 'p1') &&
       c?.kind === 'permission' &&
       c.decision === 'approve' &&
       resolved?.decision === 'approve' &&
       pendingAfterResolve.length === 0,
     `pendingBefore=${pendingBeforeResolve.length} cmd=${JSON.stringify(c)} pendingAfter=${pendingAfterResolve.length}`,
+  );
+}
+{
+  // Advertisement of the third answer on the BRIDGED card — live AND on the hello backfill, so a card
+  // still open when a phone attaches offers the same three buttons it would have offered live. The
+  // decision must cross to the extension verbatim; section 8 pins the extension's end of that promise.
+  const conn = new PiBridgeConnection({ id: 'q-permission-session', tool: 'pi', title: 'permission', status: 'idle', attachMode: 'live' });
+  const seen: any[] = [];
+  const unsub = conn.subscribe((m) => seen.push(m));
+  conn.ingestHistory([{ t: 'permission-request', requestId: 'p0', toolName: 'bash', title: 'Run shell command?', detail: 'sudo -n true' }]);
+  conn.ingest({ t: 'permission-request', requestId: 'p2', toolName: 'bash', title: 'Run shell command?', detail: 'sudo -n true' });
+  await conn.respondPermission('p2', 'approve-session');
+  const cmds = await conn.takeCommands();
+  const history = await conn.getHistory();
+  unsub();
+  await conn.close();
+  const live = seen.find((m) => m.type === 'permission-request');
+  const replayed = history.find((m: any) => m.type === 'permission-request');
+  const advertised = JSON.stringify(live?.options);
+  check(
+    'bridge approval advertisement: live + backfill cards offer approve/approve-session/reject and the session decision queues verbatim',
+    advertised === '["approve","approve-session","reject"]' &&
+      JSON.stringify((replayed as any)?.options) === advertised &&
+      cmds[0]?.kind === 'permission' &&
+      cmds[0]?.decision === 'approve-session',
+    `live=${advertised} backfill=${JSON.stringify((replayed as any)?.options)} cmd=${JSON.stringify(cmds[0])}`,
   );
 }
 {
@@ -576,6 +603,8 @@ try {
   const events: any[] = [];
   let requestId = '';
   let answered = false;
+  let terminalDismissed = false;
+  let bridgeReady = false;
   try {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
@@ -610,19 +639,34 @@ try {
       setThinkingLevel: () => undefined,
     };
     bridge.default(fakePi as any);
-    const signal = new EventTarget();
+    const signal = new AbortController().signal;
     const ctx = {
       cwd: '/tmp/pi-ask-user',
+      mode: 'tui',
+      hasUI: true,
       signal,
       sessionManager: { getSessionFile: () => '/tmp/pi-ask-user/session.jsonl', entries: [] },
       model: { provider: 'fake', id: 'reasoner', name: 'Reasoner', reasoning: true, thinkingLevelMap: {} },
       modelRegistry: { getAvailable: () => [], find: () => undefined },
-      ui: { setStatus: () => undefined },
+      ui: {
+        setStatus: (_key: string, value?: string) => {
+          if (value?.includes('bridged')) bridgeReady = true;
+        },
+        select: (_title: string, _options: string[], opts?: { signal?: AbortSignal }) => new Promise<string | undefined>((resolve) => {
+          const dismiss = () => {
+            terminalDismissed = true;
+            resolve(undefined);
+          };
+          if (opts?.signal?.aborted) dismiss();
+          else opts?.signal?.addEventListener('abort', dismiss, { once: true });
+        }),
+      },
       isIdle: () => true,
     };
     await handlers.get('session_start')?.({}, ctx);
+    while (!bridgeReady) await sleep(10);
     const askUser = tools.get('ask_user');
-    const result = await askUser.execute('tool-ask', { question: 'Continue?', options: ['Proceed'] }, ctx);
+    const result = await askUser.execute('tool-ask', { question: 'Continue?', options: ['Proceed'] }, signal, undefined, ctx);
     await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
     const question = events.find((ev) => ev.t === 'question-request');
     const resolved = events.find((ev) => ev.t === 'question-resolved' && ev.requestId === question?.requestId);
@@ -631,12 +675,243 @@ try {
       !!question &&
         question.questions?.[0]?.question === 'Continue?' &&
         resolved?.requestId === question.requestId &&
+        terminalDismissed &&
         result?.details?.answers?.[0]?.[0] === 'Proceed' &&
         /Proceed/.test(String(result?.content?.[0]?.text ?? '')),
       `question=${JSON.stringify(question)} result=${JSON.stringify(result)}`,
     );
   } catch (err) {
     check('Pi live bridge ask_user tool round-trips app question answers', false, String(err));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// ── 7b. Pi live bridge ask_user terminal answer ──────────────────────────────
+{
+  const originalFetch = globalThis.fetch;
+  const handlers = new Map<string, (event?: any, ctx?: any) => unknown>();
+  const tools = new Map<string, any>();
+  const events: any[] = [];
+  let terminalShown = false;
+  let bridgeReady = false;
+  try {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/pi/bridge/hello')) return Response.json({ id: 'bridge-terminal-answer' });
+      if (url.endsWith('/pi/bridge/events')) {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        events.push(...(body.events ?? []));
+        return Response.json({ ok: true });
+      }
+      if (url.includes('/pi/bridge/commands')) {
+        await sleep(10);
+        return Response.json({ commands: [] });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const bridge = await import(
+      freshModuleSpecifier(BRIDGE_MODULE_PATH, brokerFixtureRoot)
+    );
+    const fakePi = {
+      on(name: string, cb: (event?: any, ctx?: any) => unknown) { handlers.set(name, cb); },
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      getThinkingLevel() { return 'medium'; },
+      sendUserMessage: async () => undefined,
+      setModel: async () => true,
+      setThinkingLevel: () => undefined,
+    };
+    bridge.default(fakePi as any);
+    const signal = new AbortController().signal;
+    const ctx = {
+      cwd: '/tmp/pi-ask-user-terminal',
+      mode: 'tui',
+      hasUI: true,
+      signal,
+      sessionManager: { getSessionFile: () => '/tmp/pi-ask-user-terminal/session.jsonl', entries: [] },
+      model: { provider: 'fake', id: 'reasoner', name: 'Reasoner', reasoning: true, thinkingLevelMap: {} },
+      modelRegistry: { getAvailable: () => [], find: () => undefined },
+      ui: {
+        setStatus: (_key: string, value?: string) => {
+          if (value?.includes('bridged')) bridgeReady = true;
+        },
+        select: async (title: string, options: string[]) => {
+          terminalShown = title === 'Continue?' && options.includes('Proceed');
+          return 'Proceed';
+        },
+      },
+      isIdle: () => true,
+    };
+    await handlers.get('session_start')?.({}, ctx);
+    while (!bridgeReady) await sleep(10);
+    const askUser = tools.get('ask_user');
+    const result = await askUser.execute('tool-ask-terminal', { question: 'Continue?', options: ['Proceed'] }, signal, undefined, ctx);
+    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+    const question = events.find((ev) => ev.t === 'question-request');
+    const resolved = events.find((ev) => ev.t === 'question-resolved' && ev.requestId === question?.requestId);
+    check(
+      'Pi live bridge ask_user accepts the native terminal answer and closes the app card',
+      terminalShown &&
+        !!question &&
+        resolved?.requestId === question.requestId &&
+        result?.details?.answers?.[0]?.[0] === 'Proceed',
+      `terminalShown=${terminalShown} question=${JSON.stringify(question)} result=${JSON.stringify(result)}`,
+    );
+  } catch (err) {
+    check('Pi live bridge ask_user accepts the native terminal answer and closes the app card', false, String(err));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// ── 7c. Pi ask_user remains usable when the Cosyncing broker is unavailable ──
+{
+  const tools = new Map<string, any>();
+  try {
+    const bridge = await import(
+      freshModuleSpecifier(BRIDGE_MODULE_PATH, brokerFixtureRoot)
+    );
+    bridge.default({
+      on: () => undefined,
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    } as any);
+    const askUser = tools.get('ask_user');
+    const signal = new AbortController().signal;
+    const ctx = {
+      mode: 'tui',
+      hasUI: true,
+      signal,
+      ui: { input: async () => 'Howard' },
+    };
+    const result = await askUser.execute('tool-ask-offline', { question: 'Your name?' }, signal, undefined, ctx);
+    check(
+      'Pi ask_user falls back to the native terminal when the bridge is offline',
+      result?.details?.answers?.[0]?.[0] === 'Howard' && /Howard/.test(String(result?.content?.[0]?.text ?? '')),
+      `result=${JSON.stringify(result)}`,
+    );
+  } catch (err) {
+    check('Pi ask_user falls back to the native terminal when the bridge is offline', false, String(err));
+  }
+}
+
+// ── 8. Pi live bridge approve-session: the extension honors what the card advertises ──────────
+// The bridged card now offers a third button. Pi is the one adapter where the remembering is OURS,
+// so the promise behind that button is pinned here, against the REAL extension: the decision is
+// honored, its scope is the exact tool PLUS the exact input, and it lives only as long as this
+// bridge registration (a broker restart re-hellos, which clears the set).
+{
+  const originalFetch = globalThis.fetch;
+  const handlers = new Map<string, (event?: any, ctx?: any) => unknown>();
+  const events: any[] = [];
+  const answered = new Set<string>();
+  const nextDecisions: string[] = [];
+  // The extension only polls for commands once its registration id is SET, so a poll — not the hello
+  // response — is the signal that the bridge is live. Gating on the hello alone races: `tool_call`
+  // short-circuits on `!id` and silently asks for no approval at all.
+  const polledIds: string[] = [];
+  let helloCount = 0;
+  let forgetOnce = false;
+  const requests = () => events.filter((ev) => ev.t === 'permission-request');
+  const waitUntil = async (pred: () => boolean, ms = 5000): Promise<boolean> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (pred()) return true;
+      await sleep(25);
+    }
+    return pred();
+  };
+  try {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/pi/bridge/hello')) {
+        helloCount += 1;
+        return Response.json({ id: `bridge-approve-session-${helloCount}` });
+      }
+      if (url.endsWith('/pi/bridge/bye')) return Response.json({ ok: true });
+      if (url.endsWith('/pi/bridge/events')) {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        events.push(...(body.events ?? []));
+        return Response.json({ ok: true });
+      }
+      if (url.includes('/pi/bridge/commands')) {
+        polledIds.push(new URL(url).searchParams.get('id') ?? '');
+        if (forgetOnce) {
+          forgetOnce = false; // one 404 = the broker restarted and forgot this registration
+          return new Response('unknown bridge', { status: 404 });
+        }
+        await sleep(20); // stand in for the broker's long poll so the loop doesn't spin hot
+        const open = requests().find((ev) => !answered.has(ev.requestId));
+        if (open && nextDecisions.length) {
+          answered.add(String(open.requestId));
+          return Response.json({ commands: [{ kind: 'permission', requestId: open.requestId, decision: nextDecisions.shift() }] });
+        }
+        return Response.json({ commands: [] });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const bridge = await import(
+      freshModuleSpecifier(BRIDGE_MODULE_PATH, brokerFixtureRoot)
+    );
+    const fakePi = {
+      on(name: string, cb: (event?: any, ctx?: any) => unknown) { handlers.set(name, cb); },
+      registerTool() { /* not exercised here */ },
+      getThinkingLevel() { return 'medium'; },
+      sendUserMessage: async () => undefined,
+      setModel: async () => true,
+      setThinkingLevel: () => undefined,
+    };
+    (bridge as any).default(fakePi as any);
+    const ctx = {
+      cwd: '/tmp/pi-approve-session',
+      signal: new EventTarget(),
+      sessionManager: { getSessionFile: () => '/tmp/pi-approve-session/session.jsonl', entries: [] },
+      model: { provider: 'fake', id: 'reasoner', name: 'Reasoner', reasoning: true, thinkingLevelMap: {} },
+      modelRegistry: { getAvailable: () => [], find: () => undefined },
+      ui: { setStatus: () => undefined },
+      isIdle: () => true,
+    };
+    await handlers.get('session_start')?.({}, ctx);
+    const live = await waitUntil(() => polledIds.includes('bridge-approve-session-1'));
+    check('bridge extension: fake bridge registered and polling', live, `hellos=${helloCount} polls=${polledIds.length}`);
+    const toolCall = handlers.get('tool_call') as (event: any, c: any) => Promise<any>;
+    const danger = { toolName: 'bash', input: { command: 'sudo -n true' } };
+
+    nextDecisions.push('approve-session');
+    const first = await toolCall(danger, ctx);
+    const afterFirst = requests().length;
+    const second = await toolCall({ toolName: 'bash', input: { command: 'sudo -n true' } }, ctx);
+    await sleep(120); // a second card would have been flushed by now (60ms coalescing)
+    const afterSecond = requests().length;
+    await waitUntil(() => events.some((ev) => ev.t === 'permission-resolved'));
+    const resolved = events.find((ev) => ev.t === 'permission-resolved');
+    check(
+      'bridge extension: approve-session approves once, resolves with the session decision, and never prompts that exact call again',
+      first === undefined && second === undefined && afterFirst === 1 && afterSecond === 1 && resolved?.decision === 'approve-session',
+      `first=${JSON.stringify(first)} second=${JSON.stringify(second)} cards=${afterFirst}/${afterSecond} resolved=${JSON.stringify(resolved)}`,
+    );
+
+    // Exact-input scope: a DIFFERENT command is a different scope and prompts again.
+    nextDecisions.push('reject');
+    const other = await toolCall({ toolName: 'bash', input: { command: 'sudo -n false' } }, ctx);
+    check(
+      'bridge extension: the approved scope is tool + exact input — a different command prompts again',
+      requests().length === 2 && other?.block === true,
+      `cards=${requests().length} result=${JSON.stringify(other)}`,
+    );
+
+    // Lifetime: the memory is this registration's. A broker restart (404 → re-hello) clears it.
+    forgetOnce = true;
+    const reHelloed = await waitUntil(() => polledIds.includes('bridge-approve-session-2'), 10000);
+    nextDecisions.push('approve');
+    const afterRestart = await toolCall({ toolName: 'bash', input: { command: 'sudo -n true' } }, ctx);
+    check(
+      'bridge extension: session approval lasts only as long as this bridge registration (re-hello clears it)',
+      reHelloed && requests().length === 3 && afterRestart === undefined,
+      `hellos=${helloCount} cards=${requests().length} result=${JSON.stringify(afterRestart)}`,
+    );
+    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+  } catch (err) {
+    check('bridge extension: approve-session honored, exact-input scoped, registration-lived', false, String(err));
   } finally {
     globalThis.fetch = originalFetch;
   }

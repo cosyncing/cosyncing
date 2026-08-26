@@ -17,13 +17,13 @@ const tempRoot = (name: string): string => {
 const sessionKey = (tool: string, id: string): string => `${tool}\0${id}`;
 const readProvenance = (root: string): {
   version: number;
-  provenance?: Record<string, { launchSurface?: string; appCreatedAt?: number; appMutatedPrivateAt?: number }>;
+  provenance?: Record<string, { launchSurface?: string; appCreatedAt?: number; appMutatedPrivateAt?: number; currentModel?: SessionInfo['currentModel'] }>;
 } => {
   const path = join(root, 'session-metadata.json');
   if (!existsSync(path)) return { version: 2, provenance: {} };
   return JSON.parse(readFileSync(path, 'utf8')) as {
     version: number;
-    provenance?: Record<string, { launchSurface?: string; appCreatedAt?: number; appMutatedPrivateAt?: number }>;
+    provenance?: Record<string, { launchSurface?: string; appCreatedAt?: number; appMutatedPrivateAt?: number; currentModel?: SessionInfo['currentModel'] }>;
   };
 };
 
@@ -485,6 +485,45 @@ try {
     check('new private mutation after shared rejoin is recorded', laterMutation === true);
     const afterNewMutation = reloaded.apply(privateAgain);
     check('new private mutation re-enables behind true', afterNewMutation.control?.terminalSync?.behind === true);
+  }
+
+  // 12) exact app-selected model survives identity refresh and later app picks.
+  {
+    const root = tempRoot('model-hint');
+    const store = new SessionMetadataStore(root);
+    const created: SessionInfo = {
+      ...withControl('absent'),
+      id: 'encoded-path-a',
+      nativeId: 'native-model-session',
+      title: 'Model hint',
+      currentModel: {
+        providerID: 'vllm-hpc',
+        modelID: 'qwen3.8-27B-FP8',
+        variant: 'vllm-hpc',
+        reasoningEffort: 'high',
+      },
+    };
+    store.recordAppCreatedSession(created);
+    const reloaded = new SessionMetadataStore(root);
+    const initial = reloaded.currentModelHint({
+      tool: 'codex',
+      id: 'encoded-path-b',
+      nativeId: 'native-model-session',
+    });
+    check('create-time model hint survives native-id refresh', initial?.providerID === 'vllm-hpc' && initial.modelID === 'qwen3.8-27B-FP8' && initial.variant === 'vllm-hpc' && initial.reasoningEffort === 'high');
+
+    const changed: SessionInfo = {
+      ...created,
+      id: 'encoded-path-b',
+      currentModel: {
+        providerID: 'volcengine-coding-plan',
+        modelID: 'deepseek-v4-pro',
+        variant: 'volcengine',
+      },
+    };
+    check('non-private app model change updates durable hint', reloaded.recordAppMutation(changed) === true);
+    const updated = new SessionMetadataStore(root).currentModelHint(changed);
+    check('later app model selection replaces create-time hint', updated?.providerID === 'volcengine-coding-plan' && updated.modelID === 'deepseek-v4-pro' && updated.variant === 'volcengine');
   }
 } catch (err) {
   console.error('ERROR:', err);

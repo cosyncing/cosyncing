@@ -94,6 +94,13 @@
       "clientMinimumBrokerRevision": 16,
       "change": "Authenticated artifact downloads are principal-bound, and clients can refresh a short-lived artifact ticket through /api/sessions/{tool}/{session}/artifact/{artifact}/ticket.",
       "compatibilityChange": "The broker requires revision 17 clients because revision 16 clients do not attach their active credential to artifact downloads. The revision 17 client remains compatible with revision 16 brokers during the client-first rollout."
+    },
+    {
+      "revision": 18,
+      "surfaceHash": "fnv1a32:4531a029",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Owners can inspect and change the authenticated HTTP workspace-browsing exposure gate through /api/broker/features/workspace-browsing; enabling requires explicit remote-file-access confirmation and a broker restart. Model catalogs may advertise a human-facing provider/profile label while retaining the exact native provider identity. Permission requests may advertise a distinct persistent-rule approval decision."
     }
   ]
 }

@@ -27,10 +27,10 @@ enum NewSessionLaunchPhase {
 /// Full-page immediate-session launch flow.
 ///
 /// [onCreate], [onOpen], and [onConnect] are intentionally separate futures.
-/// Each boundary starts immediately when its phase begins, while one rendered
-/// frame is also awaited so even a synchronously-completing implementation
-/// cannot skip the phase visually. This is a paint boundary, not an artificial
-/// minimum spinner duration.
+/// Creation and destination preparation remain blocking boundaries. The live
+/// connection starts under a temporary controller lease, then the destination
+/// opens after one Connecting frame and renders its own connection state. A
+/// slow agent bootstrap therefore does not hold the full-page launch surface.
 class NewSessionLaunchPage extends StatefulWidget {
   /// Creates the launch flow and starts it on the first mount.
   const NewSessionLaunchPage({
@@ -71,7 +71,8 @@ class _NewSessionLaunchPageState extends State<NewSessionLaunchPage> {
   FailureKind? _failureKind;
   SessionInfo? _session;
   bool _openingComplete = false;
-  bool _connectingComplete = false;
+  bool _connectingStarted = false;
+  bool _destinationOpened = false;
   bool _running = false;
   NewSessionConnectionHandoff? _connectionHandoff;
 
@@ -109,25 +110,23 @@ class _NewSessionLaunchPageState extends State<NewSessionLaunchPage> {
         _openingComplete = true;
       }
 
-      if (!_connectingComplete) {
+      if (!_connectingStarted) {
         _setPhase(NewSessionLaunchPhase.connecting);
-        final values = await Future.wait<Object?>([
-          Future<NewSessionConnectionHandoff>.sync(
-            () => widget.onConnect(activeSession),
+        _connectingStarted = true;
+        unawaited(
+          _finishConnectionHandoff(
+            Future<NewSessionConnectionHandoff>.sync(
+              () => widget.onConnect(activeSession),
+            ),
           ),
-          _paintCurrentPhase(),
-        ]);
-        final handoff = values.first! as NewSessionConnectionHandoff;
-        if (!mounted) {
-          handoff.release();
-          return;
-        }
-        _connectionHandoff = handoff;
-        _connectingComplete = true;
+        );
+        await _paintCurrentPhase();
+        if (!mounted) return;
       }
 
       _running = false;
       try {
+        _destinationOpened = true;
         widget.onComplete(activeSession);
       } finally {
         _releaseConnectionAfterDestinationFrame();
@@ -148,6 +147,23 @@ class _NewSessionLaunchPageState extends State<NewSessionLaunchPage> {
   }
 
   Future<void> _paintCurrentPhase() => WidgetsBinding.instance.endOfFrame;
+
+  Future<void> _finishConnectionHandoff(
+    Future<NewSessionConnectionHandoff> pending,
+  ) async {
+    try {
+      final handoff = await pending;
+      if (!mounted) {
+        handoff.release();
+        return;
+      }
+      _connectionHandoff = handoff;
+      if (_destinationOpened) _releaseConnectionAfterDestinationFrame();
+    } on Object {
+      // Session Detail owns and renders the controller's connection failure.
+      // The launch page may already have been replaced by that destination.
+    }
+  }
 
   void _releaseConnectionAfterDestinationFrame() {
     final handoff = _connectionHandoff;

@@ -49,11 +49,18 @@ const oldTs = Date.parse('2026-07-01T10:59:00.000Z');
 // measured against Date.now() inside the adapter — a hard-coded "now" made these checks rot within
 // minutes of being written (passed for the author, failed on re-run).
 const now = Date.now();
+// The freshness gate is a FALLBACK: it decides only when the transcript carries no exact latest-turn
+// marker. Every ordinary conversation line is such a marker (a non-empty assistant turn, a plain user
+// turn, a tool_result), and exact `active` authority is qualified by the live `agents --json` row
+// rather than by recency — so a fixture built from ordinary lines reads Working off the busy row below
+// and never reaches the gate at all. To pin the gate this transcript must be markerless: `isMeta` and
+// `<command-name>` wrapper lines are timestamped conversation events (so `lastConversationTs` still
+// sees the OLD 10:59 event) that deliberately yield no turn authority.
 writeFileSync(
   transcript,
   [
-    JSON.stringify({ type: 'user', uuid: 'u1', timestamp: '2026-07-01T10:58:00.000Z', cwd, message: { content: 'Campus simulator plan' } }),
-    JSON.stringify({ type: 'assistant', uuid: 'a1', timestamp: '2026-07-01T10:59:00.000Z', message: { model: 'claude-haiku-4-5-20251001', content: [{ type: 'text', text: 'Plan saved.' }] } }),
+    JSON.stringify({ type: 'user', uuid: 'u1', isMeta: true, timestamp: '2026-07-01T10:58:00.000Z', cwd, message: { content: 'Caveat: this session was resumed.' } }),
+    JSON.stringify({ type: 'user', uuid: 'u2', timestamp: '2026-07-01T10:59:00.000Z', cwd, message: { content: '<command-name>/status</command-name>' } }),
     JSON.stringify({ type: 'permission-mode', permissionMode: 'default' }),
     JSON.stringify({ type: 'bridge-session', bridgeSessionId: 'sidecar-touch-without-conversation' }),
   ].join('\n') + '\n',

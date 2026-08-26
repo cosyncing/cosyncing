@@ -4,11 +4,20 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
-// The canonical renderer import exceeds the style line width; keep the stable
-// package path for boundary-safe package import resolution.
+// The canonical feature imports below exceed the style line width; keep the
+// stable package paths for boundary-safe package import resolution.
+// ignore: lines_longer_than_80_chars
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+// The line-width exception above applies to each canonical path that follows.
 // ignore: lines_longer_than_80_chars
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/transcript_markdown.dart';
+// The line-width exception above applies to each canonical path that follows.
+// ignore: lines_longer_than_80_chars
+import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
+// The line-width exception above applies to each canonical path that follows.
+// ignore: lines_longer_than_80_chars
+import 'package:cosyncing_client/src/features/sessions/transcript/session_file_link_scope.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -128,6 +137,57 @@ void main() {
         tester.widget<Text>(prose).textSpan!.toPlainText(),
         'open /repo/README.md now',
       );
+    });
+
+    testWidgets('a bare path in prose is never a file link, gate open or not', (
+      tester,
+    ) async {
+      // The v1 rule: only a path with PROVENANCE — one that arrived in a
+      // structured contract field — becomes a link. `src/main.rs` in a sentence
+      // may be a file the agent read, one it plans to create, one in another
+      // repo, or a quotation; resolving all four the same way produces dead
+      // links. This guards that decision against accidental regression.
+      final opened = <SessionFileReference>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: SessionFileLinkScope(
+              sessionKey: const SessionDetailKey(
+                tool: 'claude',
+                sessionId: 'session-1',
+              ),
+              gate: SessionFileLinkGate.open,
+              onOpen: opened.add,
+              onProbeNeeded: () {},
+              child: Builder(
+                builder: (context) => buildAgentMessageRenderer(
+                  context,
+                  AgentMessage.fromJson({
+                    'type': 'model-output',
+                    'text': 'I updated src/main.rs:42 and lib/other.dart.',
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final prose = find.textContaining('src/main.rs:42');
+      expect(prose, findsOneWidget);
+      expect(
+        _runStyle(
+          tester,
+          prose,
+          'I updated src/main.rs:42 and lib/other.dart.',
+        )?.decoration,
+        isNot(TextDecoration.underline),
+      );
+      await tester.tap(prose);
+      await tester.pump();
+      expect(opened, isEmpty);
     });
   });
 

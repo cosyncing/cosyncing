@@ -18,11 +18,13 @@ import { CONTEXT_INJECTION_BODY_MAX_UNITS, CONTEXT_INJECTION_EVENT } from '@cosy
 import type { ModelOption } from '@cosyncing/adapter-api';
 import {
   KIMI_APPROVAL_DETAIL_CAP_BYTES,
+  KIMI_APPROVAL_OPTIONS,
   KIMI_UNKEYABLE_QUESTION,
   KIMI_AMBIGUOUS_SINGLE_ANSWER,
   KIMI_UNREPRESENTABLE_ANSWER,
   boundedKimiToolInput,
   createKimiMappingState,
+  mapKimiApprovalRequest,
   kimiFallbackTitle,
   kimiForeignControlState,
   kimiOwnedControlState,
@@ -1594,6 +1596,310 @@ type ActivityRow = {
   check('an unresolvable image mints no empty user row',
     unresolvable.length === 1 && unresolvable[0]!.message.type === 'event',
     JSON.stringify(unresolvable.map((row) => row.message)));
+}
+
+// ── Approval options: advertising what the drive path already honors ───────
+//
+// Nothing here changes a byte on the wire. `respondPermission` has always
+// answered all three decisions (`reject` → `{decision:'rejected'}`,
+// `approve-session` → `{decision:'approved', scope:'session'}`, `approve` →
+// `{decision:'approved'}`), and `mapKimiApprovalResolved` has always read the
+// session scope back off the resolution — but the client renders its third
+// button only when `options` names `approve-session`, so the answer was
+// unreachable. These two checks pin the advertisement to that vocabulary, and
+// pin the observe-mode card to carrying none of it.
+{
+  const drivable = mapKimiApprovalRequest({
+    approval_id: 'ap_options', tool_name: 'Edit', action: 'write file',
+    tool_input_display: { path: '/repo/src/a.ts' },
+  }, false)!;
+  check('a drivable approval advertises every decision the drive path honors',
+    JSON.stringify(drivable.options) === JSON.stringify(['approve', 'approve-session', 'reject']),
+    JSON.stringify(drivable));
+  check('...and the advertised vocabulary IS the exported table, not a second copy',
+    JSON.stringify(drivable.options) === JSON.stringify([...KIMI_APPROVAL_OPTIONS]));
+
+  const observed = mapKimiApprovalRequest({
+    approval_id: 'ap_options_ro', tool_name: 'Edit', action: 'write file',
+  }, true)!;
+  check('an observe-mode card stays a non-actionable notice: readOnly, and NO options',
+    observed.readOnly === true && observed.options === undefined,
+    JSON.stringify(observed));
+}
+
+// ── Tool rows: display class, semantics, and the paths they carry ──────────
+//
+// Kimi's tool rows used to carry no `toolClass`, `semantic`, `path` or `diff`
+// at all, so every Kimi tool call rendered through the client's generic
+// fallback and no path on the row had provenance.
+//
+// The shapes below are Kimi's own registered tool names and argument keys,
+// MEASURED on 2026-08-23 across this host's Kimi Code journals (112 journals,
+// ~10.7k `tool.call` events): `Read{path,line_offset,n_lines}`,
+// `ReadMediaFile{path}`, `Write{path,content}`, `Edit{path,old_string,
+// new_string}`, `Bash{command,cwd,…}`, `Grep{pattern,path,output_mode,-n,…}`,
+// `Glob{pattern,path}`. The REST fold projects a call as `{tool_call_id,
+// tool_name, input}` with no host-computed display payload, so those keys are
+// the whole evidence base — and a tool name outside that measured set is
+// stamped with NOTHING rather than a guess.
+{
+  type ToolRow = {
+    type: string;
+    callId?: string;
+    toolName?: string;
+    toolClass?: string;
+    path?: string;
+    diff?: string;
+    fileChanges?: unknown;
+    args?: unknown;
+    result?: unknown;
+    isError?: boolean;
+    semantic?: {
+      kind?: string;
+      command?: string; cwd?: string; state?: string;
+      path?: string; startLine?: number; preview?: string;
+      query?: string; scope?: string; matchCount?: number; fileCount?: number; truncated?: boolean;
+      groups?: Array<{ path: string; matchCount?: number; matches?: Array<{ line?: number; text: string }> }>;
+    };
+  };
+  const toolState = createKimiMappingState();
+  const call = (id: string, toolName: string, input: unknown): ToolRow[] =>
+    mapKimiMessage({
+      id: `msg_${id}`, role: 'assistant',
+      content: [{ type: 'tool_use', tool_call_id: id, tool_name: toolName, input }],
+    } as never, toolState).map((row) => row.message) as ToolRow[];
+  const settle = (id: string, output: unknown, isError = false): ToolRow[] =>
+    mapKimiMessage({
+      id: `msg_${id}_result`, role: 'tool',
+      content: [{
+        type: 'tool_result', tool_call_id: id, output,
+        ...(isError ? { is_error: true } : {}),
+      }],
+    } as never, toolState).map((row) => row.message) as ToolRow[];
+
+  // ── Bash: the one family whose CALL carries a semantic ────────────────────
+  //
+  // Safe there and nowhere else: the client presents a command row's result
+  // text as combined output whatever the result's semantic says, so a call-time
+  // command semantic cannot swallow the output. Every other family's card is
+  // filled by its result, which is why nothing else is stamped at call time.
+  const bashCall = call('call_bash', 'Bash', { command: 'bun test', cwd: '/repo', timeout: 120000 });
+  check('a Bash call is an execution, with the command line and cwd the wire published',
+    bashCall.length === 1 && bashCall[0]!.toolClass === 'execute'
+      && bashCall[0]!.semantic?.kind === 'command'
+      && bashCall[0]!.semantic.command === 'bun test'
+      && bashCall[0]!.semantic.cwd === '/repo'
+      && bashCall[0]!.semantic.state === 'running',
+    JSON.stringify(bashCall[0]));
+  check('...and the raw args survive the stamping',
+    JSON.stringify((bashCall[0]!.args as { command?: string })?.command) === '"bun test"');
+  const bashResult = settle('call_bash', 'ok\n');
+  check('a Bash result closes the command with the call\'s command line, output intact',
+    bashResult[0]!.toolClass === 'execute' && bashResult[0]!.semantic?.kind === 'command'
+      && bashResult[0]!.semantic.command === 'bun test'
+      && bashResult[0]!.semantic.state === 'completed'
+      && bashResult[0]!.result === 'ok\n'
+      // ONE merged blob upstream: claiming a separated stream would be a lie.
+      && (bashResult[0]!.semantic as { stdout?: unknown }).stdout === undefined,
+    JSON.stringify(bashResult[0]));
+  call('call_bash_bad', 'Bash', { command: 'exit 1' });
+  const bashFailed = settle('call_bash_bad', 'boom', true);
+  check('a failed Bash result says failed rather than completed',
+    bashFailed[0]!.semantic?.state === 'failed' && bashFailed[0]!.isError === true,
+    JSON.stringify(bashFailed[0]));
+
+  // ── Read: path provenance, and the numbered preview ──────────────────────
+  const readCall = call('call_read', 'Read', { path: '/repo/src/a.ts', line_offset: 380, n_lines: 2 });
+  check('a Read call is a lookup and claims no read card its result has not filled',
+    readCall[0]!.toolClass === 'lookup' && readCall[0]!.semantic === undefined,
+    JSON.stringify(readCall[0]));
+  const readResult = settle('call_read', '380\tconst a = 1;\n381\tconst b = 2;\n');
+  check('a Read result carries the canonical path the call named',
+    readResult[0]!.path === '/repo/src/a.ts', JSON.stringify(readResult[0]));
+  check('...and a file-read semantic whose preview is the body WITHOUT Kimi\'s gutter',
+    readResult[0]!.semantic?.kind === 'file-read'
+      && readResult[0]!.semantic.path === '/repo/src/a.ts'
+      && readResult[0]!.semantic.startLine === 380
+      && readResult[0]!.semantic.preview === 'const a = 1;\nconst b = 2;',
+    JSON.stringify(readResult[0]!.semantic));
+
+  // The FIRST NUMBER is authoritative, not the requested offset: the server may
+  // clamp a read, and a gutter counted from the request would then misnumber
+  // every line on screen.
+  call('call_read_clamped', 'Read', { path: '/repo/src/b.ts', line_offset: 9999 });
+  const clamped = settle('call_read_clamped', '1\tonly line');
+  check('a clamped read numbers from the output, not from the requested offset',
+    clamped[0]!.semantic?.startLine === 1, JSON.stringify(clamped[0]!.semantic));
+
+  // A whole-output notice (Kimi's 50 000-character ceiling) is not a preview.
+  // Claiming a read card here would HIDE the notice behind an empty preview, so
+  // the row keeps its path and falls back to showing what the tool said.
+  call('call_read_notice', 'Read', { path: '/repo/src/huge.ts' });
+  const notice = settle('call_read_notice', 'Tool output exceeded 50000 characters; use line_offset.');
+  check('an unnumbered Read output keeps its path but claims no preview',
+    notice[0]!.path === '/repo/src/huge.ts' && notice[0]!.semantic === undefined
+      && notice[0]!.result === 'Tool output exceeded 50000 characters; use line_offset.',
+    JSON.stringify(notice[0]));
+  call('call_read_missing', 'Read', { path: '/repo/src/gone.ts' });
+  const missing = settle('call_read_missing', '"/repo/src/gone.ts" does not exist.', true);
+  check('a failed Read keeps the path and shows the error sentence, not an empty card',
+    missing[0]!.path === '/repo/src/gone.ts' && missing[0]!.semantic === undefined
+      && missing[0]!.isError === true,
+    JSON.stringify(missing[0]));
+
+  // ReadMediaFile answers in content PARTS, not text: there is no preview to
+  // carry, so it stamps the path and stops.
+  call('call_media', 'ReadMediaFile', { path: '/repo/shot.png' });
+  const media = settle('call_media', [{ type: 'text', text: '<image path="/repo/shot.png" />' }]);
+  check('a ReadMediaFile result carries its path and no invented preview',
+    media[0]!.path === '/repo/shot.png' && media[0]!.toolClass === 'lookup'
+      && media[0]!.semantic === undefined,
+    JSON.stringify(media[0]));
+
+  // ── Edit / Write: the path, and deliberately no diff ─────────────────────
+  //
+  // The REST projection publishes no unified diff, and `old_string`/`new_string`
+  // cannot be turned into one without the hunk's line numbers — which only the
+  // file itself holds, at a time after the event. So the row states the path it
+  // acted on and invents nothing.
+  call('call_edit', 'Edit', { path: '/repo/src/a.ts', old_string: 'a', new_string: 'b' });
+  const edit = settle('call_edit', 'Replaced 1 occurrence in src/a.ts');
+  check('an Edit result carries the acted-on path, classed as an edit',
+    edit[0]!.toolClass === 'edit' && edit[0]!.path === '/repo/src/a.ts',
+    JSON.stringify(edit[0]));
+  check('...and fabricates neither a diff nor a change set',
+    edit[0]!.diff === undefined && edit[0]!.fileChanges === undefined
+      && edit[0]!.semantic === undefined);
+  call('call_write', 'Write', { path: '/repo/docs/x.md', content: 'body' });
+  const write = settle('call_write', 'Wrote 4 bytes to /repo/docs/x.md');
+  check('a Write result carries its path the same way',
+    write[0]!.toolClass === 'edit' && write[0]!.path === '/repo/docs/x.md',
+    JSON.stringify(write[0]));
+
+  // A Write input is an entire file body. The correlation record keeps the
+  // DERIVED facts only, so an in-flight call cannot pin a file in memory.
+  const huge = 'x'.repeat(200_000);
+  call('call_write_huge', 'Write', { path: '/repo/big.bin', content: huge });
+  check('the call record keeps the derived facts, never the raw input',
+    JSON.stringify(toolState.toolCallFacts.get('call_write_huge'))
+      === JSON.stringify({ toolName: 'Write', path: '/repo/big.bin' }),
+    JSON.stringify(toolState.toolCallFacts.get('call_write_huge')));
+
+  // ── Grep / Glob: matches with provenance, and THE SCOPE TRAP ─────────────
+  const grepCall = call('call_grep', 'Grep', {
+    pattern: 'foo', path: 'packages', output_mode: 'content', '-n': true,
+  });
+  check('a Grep call is a lookup and claims no search card yet',
+    grepCall[0]!.toolClass === 'lookup' && grepCall[0]!.semantic === undefined,
+    JSON.stringify(grepCall[0]));
+  const grep = settle('call_grep',
+    'packages/a.ts:12:const foo = 1\npackages/a.ts:20:foo()\npackages/b.ts:3:foo\n');
+  const grepSemantic = grep[0]!.semantic!;
+  check('a Grep result groups its matches by file, with the line each match sits on',
+    grepSemantic.kind === 'search'
+      && grepSemantic.query === 'foo'
+      && grepSemantic.matchCount === 3 && grepSemantic.fileCount === 2
+      && grepSemantic.groups?.length === 2
+      && grepSemantic.groups[0]!.path === 'packages/a.ts'
+      && grepSemantic.groups[0]!.matchCount === 2
+      && grepSemantic.groups[0]!.matches?.[0]!.line === 12
+      && grepSemantic.groups[0]!.matches[0]!.text === 'const foo = 1'
+      && grepSemantic.groups[1]!.path === 'packages/b.ts',
+    JSON.stringify(grepSemantic));
+  // THE TRAP: Grep's `path` argument is a search SCOPE DIRECTORY. It rides
+  // `scope` and nothing else — as a group path or a `tool-result.path` it would
+  // turn every grep in the transcript into a bogus file link.
+  check('the Grep scope directory is a scope, never a file the tool acted on',
+    grepSemantic.scope === 'packages'
+      && grep[0]!.path === undefined
+      && grepSemantic.groups!.every((group) => group.path !== 'packages'),
+    JSON.stringify(grep[0]));
+
+  // `-A`/`-B`/`-C` context rows are `path-line-text`. They are UNDERSTOOD (so
+  // they cannot fail the strict parse) and are not matches.
+  call('call_grep_ctx', 'Grep', { pattern: 'foo', path: 'packages', output_mode: 'content', '-C': 1 });
+  const context = settle('call_grep_ctx', 'packages/a.ts:12:hit\npackages/a.ts-13-neighbour\n');
+  check('grep context rows are recognized without being counted as matches',
+    context[0]!.semantic?.matchCount === 1
+      && context[0]!.semantic.groups?.[0]!.matches?.length === 1,
+    JSON.stringify(context[0]!.semantic));
+
+  // Kimi reports the TOTAL when it clips its own answer, so the count survives
+  // even though the rows did not.
+  call('call_grep_clip', 'Grep', { pattern: 'foo', output_mode: 'content', head_limit: 1 });
+  const clipped = settle('call_grep_clip',
+    'packages/a.ts:1:foo\nResults truncated to 1 lines (total: 319). Use offset=1 to see more.');
+  check('a clipped Grep reports the source\'s own total and says it was clipped',
+    clipped[0]!.semantic?.matchCount === 319 && clipped[0]!.semantic.truncated === true
+      && clipped[0]!.semantic.fileCount === undefined,
+    JSON.stringify(clipped[0]!.semantic));
+
+  // Kimi's zero-result answer names its own sensitive-file filter. An empty
+  // search card would erase that distinction, so the sentence stays visible.
+  call('call_grep_none', 'Grep', { pattern: 'nope', output_mode: 'content' });
+  const none = settle('call_grep_none', 'No non-sensitive matches found');
+  check('a zero-result Grep keeps Kimi\'s own sentence instead of an empty card',
+    none[0]!.semantic === undefined && none[0]!.result === 'No non-sensitive matches found',
+    JSON.stringify(none[0]));
+
+  call('call_grep_files', 'Grep', { pattern: 'foo', output_mode: 'files_with_matches' });
+  const files = settle('call_grep_files', 'packages/a.ts\npackages/b.ts\n');
+  check('a files_with_matches Grep lists files with no invented match lines',
+    files[0]!.semantic?.groups?.length === 2
+      && files[0]!.semantic.fileCount === 2
+      && files[0]!.semantic.matchCount === undefined
+      && files[0]!.semantic.groups[0]!.matches === undefined,
+    JSON.stringify(files[0]!.semantic));
+
+  // A mode this parser does not read leaves the output exactly as it is.
+  call('call_grep_count', 'Grep', { pattern: 'foo', output_mode: 'count_matches' });
+  const counted = settle('call_grep_count', 'packages/a.ts:12');
+  check('a count_matches Grep is left on the raw output rather than mis-parsed',
+    counted[0]!.semantic === undefined && counted[0]!.result === 'packages/a.ts:12',
+    JSON.stringify(counted[0]));
+
+  call('call_glob', 'Glob', { pattern: '**/*.ts', path: 'packages' });
+  const glob = settle('call_glob', 'packages/a.ts\npackages/b.ts\n');
+  check('a Glob result carries each matched file, and its scope stays a scope',
+    glob[0]!.semantic?.kind === 'search' && glob[0]!.semantic.query === '**/*.ts'
+      && glob[0]!.semantic.scope === 'packages'
+      && glob[0]!.semantic.groups?.length === 2
+      && glob[0]!.path === undefined,
+    JSON.stringify(glob[0]));
+  call('call_glob_none', 'Glob', { pattern: '**/*.zzz' });
+  const globNone = settle('call_glob_none', 'No matches found');
+  check('an empty Glob keeps its notice',
+    globNone[0]!.semantic === undefined && globNone[0]!.result === 'No matches found',
+    JSON.stringify(globNone[0]));
+
+  // ── The floor: unmeasured names, and no correlation state ────────────────
+  const unknown = call('call_mcp', 'mcp__weather__forecast', { city: 'Cambridge' });
+  check('a tool this version has not measured is stamped with nothing at all',
+    unknown[0]!.toolClass === undefined && unknown[0]!.semantic === undefined,
+    JSON.stringify(unknown[0]));
+  const unknownResult = settle('call_mcp', '13°C');
+  check('...and neither is its result',
+    unknownResult[0]!.toolClass === undefined && unknownResult[0]!.semantic === undefined
+      && unknownResult[0]!.path === undefined,
+    JSON.stringify(unknownResult[0]));
+
+  // Without the correlation state a result has no call to read: the row keeps
+  // its output and degrades to exactly what it rendered before any stamping
+  // existed. The CALL still classes itself — its facts are in its own part.
+  const statelessCall = mapKimiMessage({
+    id: 'msg_stateless_call', role: 'assistant',
+    content: [{ type: 'tool_use', tool_call_id: 'call_lonely', tool_name: 'Read', input: { path: '/repo/x.ts' } }],
+  } as never).map((row) => row.message) as ToolRow[];
+  const statelessResult = mapKimiMessage({
+    id: 'msg_stateless_result', role: 'tool',
+    content: [{ type: 'tool_result', tool_call_id: 'call_lonely', output: '1\tx' }],
+  } as never).map((row) => row.message) as ToolRow[];
+  check('a stateless fold still classes the call, and leaves the orphan result unstamped',
+    statelessCall[0]!.toolClass === 'lookup'
+      && statelessResult[0]!.path === undefined
+      && statelessResult[0]!.semantic === undefined
+      && statelessResult[0]!.result === '1\tx',
+    JSON.stringify([statelessCall[0], statelessResult[0]]));
 }
 
 const failed = results.filter((r) => !r.ok).length;

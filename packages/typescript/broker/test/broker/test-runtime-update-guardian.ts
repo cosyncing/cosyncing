@@ -7,11 +7,13 @@
  *   bun run packages/typescript/broker/test/broker/test-runtime-update-guardian.ts
  */
 export {};
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CodexUnmanagedDaemonError,
   createCodexConfigFreshnessProbe,
+  inspectLegacyCodexDaemon,
   readCodexDaemonVersion,
   restartCodexDaemon,
 } from '../../../adapters/codex/src/index.ts';
@@ -41,6 +43,11 @@ const check = (name: string, ok: boolean, detail = '') => {
 };
 
 check('OpenCode CLI version normalization extracts the semantic version', normalizeOpencodeVersion('opencode 1.16.2\n') === '1.16.2');
+
+check(
+  'legacy Codex inspection never falls through to the host-global CLI without an explicit executable',
+  await inspectLegacyCodexDaemon() === undefined,
+);
 
 {
   const temp = mkdtempSync(join(tmpdir(), 'cosyncing-codex-config-freshness-'));
@@ -261,23 +268,53 @@ function fakeProvider(agent: string, safe: boolean): RuntimeUpdateProvider & { r
     cliVersion: '0.144.1',
     appServerVersion: '0.142.5',
     socketPath: '/tmp/app-server.sock',
+    backend: 'pid',
+    pid: 42,
   }));
-  check('Codex daemon version JSON preserves installed/running split', parsed?.cliVersion === '0.144.1' && parsed.appServerVersion === '0.142.5', JSON.stringify(parsed));
+  check('Codex daemon version JSON preserves installed/running split and management identity', parsed?.cliVersion === '0.144.1' && parsed.appServerVersion === '0.142.5' && parsed.backend === 'pid' && parsed.pid === 42, JSON.stringify(parsed));
 }
 
 {
   const temp = mkdtempSync(join(tmpdir(), 'cosyncing-codex-runtime-'));
   const fake = join(temp, 'codex');
-  const marker = join(temp, 'restart.txt');
-  writeFileSync(fake, `#!/bin/sh\nif [ "$2 $3" = "daemon version" ]; then\n  printf '%s\\n' '{"status":"running","cliVersion":"0.144.1","appServerVersion":"0.142.5"}'\n  exit 0\nfi\nif [ "$2 $3" = "daemon restart" ]; then\n  printf restarted > '${marker}'\n  exit 0\nfi\nexit 2\n`);
+  const restartAttempt = join(temp, 'restart-attempt.txt');
+  const stopped = join(temp, 'stopped.txt');
+  const started = join(temp, 'started.txt');
+  writeFileSync(fake, `#!/bin/sh\nif [ "$2 $3" = "daemon version" ]; then\n  if [ -f '${stopped}' ]; then exit 1; fi\n  if [ -f '${started}' ]; then running=0.144.1; else running=0.142.5; fi\n  printf '{"status":"running","cliVersion":"0.144.1","appServerVersion":"%s","backend":"pid","pid":123}\\n' "$running"\n  exit 0\nfi\nif [ "$2 $3" = "daemon restart" ]; then\n  printf attempted > '${restartAttempt}'\n  exit 0\nfi\nif [ "$2 $3" = "daemon stop" ]; then\n  printf stopped > '${stopped}'\n  exit 0\nfi\nif [ "$2 $3" = "daemon start" ]; then\n  rm -f '${stopped}'\n  printf started > '${started}'\n  exit 0\nfi\nexit 2\n`);
+  chmodSync(fake, 0o755);
+  const previous = process.env.COSYNCING_CODEX_BIN;
+  const previousVerifyMs = process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS;
+  process.env.COSYNCING_CODEX_BIN = fake;
+  process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS = '0';
+  try {
+    const version = await readCodexDaemonVersion();
+    await restartCodexDaemon();
+    const restartedVersion = await readCodexDaemonVersion();
+    check('Codex native version probe parses the managed-daemon command', version?.cliVersion === '0.144.1' && version.appServerVersion === '0.142.5', JSON.stringify(version));
+    check('Codex restart attempts the native daemon restart first', readFileSync(restartAttempt, 'utf8') === 'attempted');
+    check('Codex restart replaces a daemon when native restart falsely succeeds', readFileSync(started, 'utf8') === 'started' && restartedVersion?.appServerVersion === '0.144.1', JSON.stringify(restartedVersion));
+  } finally {
+    if (previous == null) delete process.env.COSYNCING_CODEX_BIN;
+    else process.env.COSYNCING_CODEX_BIN = previous;
+    if (previousVerifyMs == null) delete process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS;
+    else process.env.COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS = previousVerifyMs;
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+{
+  const temp = mkdtempSync(join(tmpdir(), 'cosyncing-codex-unmanaged-'));
+  const fake = join(temp, 'codex');
+  const mutationAttempt = join(temp, 'mutation-attempt.txt');
+  writeFileSync(fake, `#!/bin/sh\nif [ "$2 $3" = "daemon version" ]; then\n  printf '{"status":"running","cliVersion":"0.149.1","appServerVersion":"0.148.0"}\\n'\n  exit 0\nfi\nprintf attempted > '${mutationAttempt}'\nexit 1\n`);
   chmodSync(fake, 0o755);
   const previous = process.env.COSYNCING_CODEX_BIN;
   process.env.COSYNCING_CODEX_BIN = fake;
   try {
-    const version = await readCodexDaemonVersion();
-    await restartCodexDaemon();
-    check('Codex native version probe parses the managed-daemon command', version?.cliVersion === '0.144.1' && version.appServerVersion === '0.142.5', JSON.stringify(version));
-    check('Codex native restart uses daemon restart', readFileSync(marker, 'utf8') === 'restarted');
+    let error: unknown;
+    try { await restartCodexDaemon(); } catch (caught) { error = caught; }
+    check('Codex restart classifies a legacy unmanaged daemon explicitly', error instanceof CodexUnmanagedDaemonError, String(error));
+    check('Codex restart never sends lifecycle commands to an unmanaged daemon', !existsSync(mutationAttempt));
   } finally {
     if (previous == null) delete process.env.COSYNCING_CODEX_BIN;
     else process.env.COSYNCING_CODEX_BIN = previous;
@@ -470,6 +507,24 @@ function fakeProvider(agent: string, safe: boolean): RuntimeUpdateProvider & { r
   await coordinator.refresh('codex', { autoRestart: false });
   const status = await coordinator.restartNow('codex');
   check('manual restart bypasses the automatic safe gate and re-probes', provider.restarts === 1 && status?.state === 'current', JSON.stringify(status));
+}
+
+// A native restart must not be reported as successful when the follow-up inspection still sees the
+// same pending change. The route maps this rejection to a visible 502 instead of leaving the button
+// looking successful while the old version remains after refresh.
+{
+  const provider = fakeProvider('codex', false);
+  provider.restart = async function restartWithoutApplying() { this.restarts++; };
+  provider.inspect = async function inspectStillPending() { return inspection('codex', true, this.safe); };
+  const coordinator = new RuntimeUpdateCoordinator([provider]);
+  await coordinator.refresh('codex', { autoRestart: false });
+  let rejected = false;
+  try {
+    await coordinator.restartNow('codex');
+  } catch (error) {
+    rejected = String(error).includes('pending runtime change was not applied');
+  }
+  check('manual restart rejects a still-pending follow-up probe', rejected);
 }
 
 // Every stored inspection is observable by attention reconciliation, including the pending status

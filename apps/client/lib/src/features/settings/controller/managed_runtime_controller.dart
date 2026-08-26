@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/data/broker_identity_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/managed_runtime_api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,6 +22,7 @@ class ManagedRuntimeSettingsState {
     this.productHealth,
     this.brokerUpdate,
     this.actionMessage,
+    this.actionError,
     this.brokerScopeKey,
   });
 
@@ -48,6 +50,9 @@ class ManagedRuntimeSettingsState {
   /// Last explicit recovery result shown to the user.
   final String? actionMessage;
 
+  /// Last owner action failure. The valid status snapshot remains visible.
+  final String? actionError;
+
   /// `RosterSource.storageKey` of the broker this snapshot was read from.
   ///
   /// The exact source, not the profile id: a profile re-pointed at another
@@ -69,6 +74,21 @@ class ManagedRuntimeSettingsState {
       productHealth: productHealth,
       brokerUpdate: brokerUpdate,
       actionMessage: message,
+      brokerScopeKey: brokerScopeKey,
+    );
+  }
+
+  /// Returns a copy that keeps this snapshot while exposing an action failure.
+  ManagedRuntimeSettingsState withActionError(String error) {
+    return ManagedRuntimeSettingsState(
+      connected: connected,
+      updates: updates,
+      codexUpdatePolicy: codexUpdatePolicy,
+      quotaWarningsEnabled: quotaWarningsEnabled,
+      health: health,
+      productHealth: productHealth,
+      brokerUpdate: brokerUpdate,
+      actionError: error,
       brokerScopeKey: brokerScopeKey,
     );
   }
@@ -141,16 +161,41 @@ class ManagedRuntimeController
     if (_isCurrent(admission)) state = next;
   }
 
+  /// Changes workspace browsing after the view obtains explicit confirmation.
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+  }) async {
+    final admission = await _requireOwnerApiContext();
+    final result = await admission.context.api.setWorkspaceBrowsing(
+      enabled: enabled,
+      confirmRemoteFileAccess: enabled,
+    );
+    if (!_isCurrent(admission)) return result;
+    final current = state.valueOrNull;
+    if (current != null && current.brokerScopeKey == admission.brokerScopeKey) {
+      state = AsyncValue.data(current.withActionMessage(result.message));
+    }
+    return result;
+  }
+
   /// Restarts one runtime after the view obtains explicit confirmation.
   Future<void> restartRuntime(String agent) async {
     final admission = await _requireOwnerApiContext();
-    state = const AsyncValue.loading();
-    final next = await AsyncValue.guard(() async {
+    final current = state.valueOrNull;
+    try {
       await admission.context.api.restartRuntime(agent);
       _ensureCurrent(admission);
-      return _load(admission, freshRuntimeProbe: true);
-    });
-    if (_isCurrent(admission)) state = next;
+      final refreshed = await _load(admission, freshRuntimeProbe: true);
+      if (_isCurrent(admission)) state = AsyncValue.data(refreshed);
+    } on Object catch (error, stackTrace) {
+      if (!_isCurrent(admission)) return;
+      if (current != null &&
+          current.brokerScopeKey == admission.brokerScopeKey) {
+        state = AsyncValue.data(current.withActionError(failureDetail(error)));
+      } else {
+        state = AsyncValue.error(error, stackTrace);
+      }
+    }
   }
 
   /// Restarts all managed components after explicit view confirmation.

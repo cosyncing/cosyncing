@@ -1,40 +1,72 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:flutter/material.dart';
 
 /// Help screen documenting the app's real keyboard shortcuts.
 ///
-/// Every row here is checked against the code that binds it. A help page that
-/// lists bindings the app does not have is worse than no help page: it costs
-/// the reader the time to try each one and teaches them the page cannot be
-/// trusted. The sources of truth are:
+/// Every row is rendered from `kAppShortcuts`
+/// (`app/shortcuts/app_shortcuts.dart`), which is also what the binding sites
+/// read. That is deliberate: a help page listing bindings the app does not
+/// have is worse than no help page — it costs the reader the time to try each
+/// one and teaches them the page cannot be trusted — and hand-maintaining the
+/// rows made that a review obligation instead of a structural guarantee. Add a
+/// shortcut to the registry and it appears here; give it no live chord on a
+/// surface and its row disappears there.
 ///
-/// * navigation and text size — `_appRouteNavItems`, `_textScaleUpActivators`,
-///   `_textScaleDownActivators` and `_handlePointerSignal` in
-///   `app/router/router.dart`;
-/// * session list refresh — `sessions_page.dart`;
-/// * composer focus and prompt send — `session_detail_page.dart` and
-///   `session_detail_composer.dart`;
-/// * transfer selection and cancel — `transfer_manager_page.dart` and
-///   `session_detail_transfers_artifacts.dart`.
+/// The three surface-conditional cases the registry expresses:
 ///
-/// Most global bindings accept Control and Meta. Prompt send is intentionally
-/// platform-specific: Control on web/Windows/Linux and Meta on macOS.
+/// * text size is hidden on web, where the browser owns the whole zoom triad;
+/// * navigation is hidden on web, where Ctrl/Cmd+1..5 switch BROWSER tabs, so
+///   the five rows advertised bindings that never fired;
+/// * close and new session swap their plain Ctrl/Cmd form for the
+///   Ctrl/Cmd+Alt form, which is the one that survives a browser tab.
 ///
-/// The text-size group is hidden on web: there the browser owns zoom
-/// (Ctrl/Cmd +/- and Ctrl+wheel) and the app binds nothing, so the group would
-/// list shortcuts that do not exist. It stays on native desktop, where
-/// `UiTextScale` is the only zoom.
+/// Chord text stays an untranslated literal; only the descriptions are
+/// localized.
 ///
 /// See `docs/architecture/client-ui.md`.
 class KeyboardShortcutsPage extends StatelessWidget {
   /// Creates the [KeyboardShortcutsPage].
   const KeyboardShortcutsPage({super.key});
 
+  /// Group render order.
+  static const List<AppShortcutGroup> _groupOrder = [
+    AppShortcutGroup.navigation,
+    AppShortcutGroup.textSize,
+    AppShortcutGroup.sessionList,
+    AppShortcutGroup.openSessions,
+    AppShortcutGroup.sessionDetail,
+    AppShortcutGroup.transfers,
+  ];
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
+    final webReserved = appShortcutsWebReserved;
+
+    final groups = <Widget>[];
+    var showSafariNote = false;
+    for (final group in _groupOrder) {
+      final entries = <_ShortcutEntry>[];
+      for (final spec in kAppShortcuts) {
+        if (spec.group != group) continue;
+        final chord = spec.chordFor(webReserved: webReserved);
+        if (chord == null) continue;
+        if (spec.unavailableInSafari) showSafariNote = true;
+        entries.add(
+          _ShortcutEntry(
+            label: chord,
+            description: _shortcutDescription(l10n, spec.id),
+          ),
+        );
+      }
+      if (entries.isEmpty) continue;
+      if (groups.isNotEmpty) groups.add(const SizedBox(height: 12));
+      groups.add(
+        _ShortcutGroup(title: _groupTitle(l10n, group), entries: entries),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.keyboardShortcutsTitle)),
@@ -49,110 +81,71 @@ class KeyboardShortcutsPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 16),
-            _ShortcutGroup(
-              title: l10n.shortcutGroupNavigation,
-              entries: [
-                _ShortcutEntry(
-                  label: 'Ctrl+1 / ⌘1',
-                  description: l10n.shortcutGoToSessions,
+            ...groups,
+            // Safari claims Cmd+Opt+W for Close Other Tabs. The row stays,
+            // because the chord works in every other browser and on native
+            // desktop; the gap is documented instead of hidden.
+            if (showSafariNote) ...[
+              const SizedBox(height: 12),
+              SelectableText(
+                l10n.shortcutSafariGap,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
-                _ShortcutEntry(
-                  label: 'Ctrl+2 / ⌘2',
-                  description: l10n.shortcutGoToAttention,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+3 / ⌘3',
-                  description: l10n.shortcutGoToConnection,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+4 / ⌘4',
-                  description: l10n.shortcutGoToSettings,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+5 / ⌘5',
-                  description: l10n.shortcutGoToTransfers,
-                ),
-              ],
-            ),
-            // On web the browser owns zoom (Ctrl/Cmd +/- and Ctrl+wheel), so
-            // the app does not bind these; see `_browserOwnsZoom` in
-            // `app/router/router.dart`. The shortcuts still apply on native
-            // desktop, so the group is shown there and hidden only on web.
-            if (!kIsWeb) const SizedBox(height: 12),
-            if (!kIsWeb)
-              _ShortcutGroup(
-                title: l10n.shortcutGroupTextSize,
-                entries: [
-                  _ShortcutEntry(
-                    label: 'Ctrl+= / ⌘=',
-                    description: l10n.shortcutIncreaseTextSize,
-                  ),
-                  _ShortcutEntry(
-                    label: 'Ctrl+− / ⌘−',
-                    description: l10n.shortcutDecreaseTextSize,
-                  ),
-                  _ShortcutEntry(
-                    label: 'Ctrl+scroll',
-                    description: l10n.shortcutWheelTextSize,
-                  ),
-                ],
               ),
-            const SizedBox(height: 12),
-            _ShortcutGroup(
-              title: l10n.shortcutGroupSessions,
-              entries: [
-                _ShortcutEntry(
-                  label: 'F5',
-                  description: l10n.shortcutRefreshSessions,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+R / ⌘R',
-                  description: l10n.shortcutRefreshSessions,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _ShortcutGroup(
-              title: l10n.shortcutGroupSessionDetail,
-              entries: [
-                _ShortcutEntry(
-                  label: 'Ctrl+K / ⌘K',
-                  description: l10n.shortcutFocusComposer,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+Enter / ⌘Enter',
-                  description: l10n.shortcutSendPrompt,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _ShortcutGroup(
-              title: l10n.shortcutGroupTransfers,
-              entries: [
-                _ShortcutEntry(
-                  label: 'Ctrl+A / ⌘A',
-                  description: l10n.shortcutSelectAllTransfers,
-                ),
-                _ShortcutEntry(
-                  label: 'Ctrl+I / ⌘I',
-                  description: l10n.shortcutInvertTransferSelection,
-                ),
-                _ShortcutEntry(
-                  label: 'Esc',
-                  description: l10n.shortcutClearTransferSearch,
-                ),
-                _ShortcutEntry(
-                  label: 'Esc / Del',
-                  description: l10n.shortcutCancelTransfer,
-                ),
-              ],
-            ),
+            ],
           ],
         ),
       ),
     );
   }
 }
+
+/// Localized heading for a shortcut group.
+String _groupTitle(AppLocalizations l10n, AppShortcutGroup group) =>
+    switch (group) {
+      AppShortcutGroup.navigation => l10n.shortcutGroupNavigation,
+      AppShortcutGroup.textSize => l10n.shortcutGroupTextSize,
+      AppShortcutGroup.sessionList => l10n.shortcutGroupSessions,
+      AppShortcutGroup.openSessions => l10n.shortcutGroupOpenSessions,
+      AppShortcutGroup.sessionDetail => l10n.shortcutGroupSessionDetail,
+      AppShortcutGroup.transfers => l10n.shortcutGroupTransfers,
+    };
+
+/// Localized description for one shortcut.
+///
+/// The navigation arm is kept in destination order 1..5; the copy contract
+/// test (`test/src/s2_copy_contract_test.dart`) asserts that this file and the
+/// router's `_appRouteNavItems` name the same five destinations in the same
+/// sequence, so a remap breaks a test by design.
+String _shortcutDescription(AppLocalizations l10n, AppShortcutId id) =>
+    switch (id) {
+      AppShortcutId.goToSessions => l10n.shortcutGoToSessions,
+      AppShortcutId.goToNotifications => l10n.shortcutGoToAttention,
+      AppShortcutId.goToConnection => l10n.shortcutGoToConnection,
+      AppShortcutId.goToSettings => l10n.shortcutGoToSettings,
+      AppShortcutId.goToTransfers => l10n.shortcutGoToTransfers,
+      AppShortcutId.increaseTextSize => l10n.shortcutIncreaseTextSize,
+      AppShortcutId.decreaseTextSize => l10n.shortcutDecreaseTextSize,
+      AppShortcutId.resetTextSize => l10n.shortcutResetTextSize,
+      AppShortcutId.wheelTextSize => l10n.shortcutWheelTextSize,
+      AppShortcutId.refreshSessions ||
+      AppShortcutId.refreshSessionsChord => l10n.shortcutRefreshSessions,
+      AppShortcutId.focusRosterSearch => l10n.shortcutFocusRosterSearch,
+      AppShortcutId.jumpToSession => l10n.shortcutJumpToSession,
+      AppShortcutId.jumpToLastSession => l10n.shortcutJumpToLastSession,
+      AppShortcutId.nextSession => l10n.shortcutNextSession,
+      AppShortcutId.previousSession => l10n.shortcutPreviousSession,
+      AppShortcutId.closeSession => l10n.shortcutCloseSession,
+      AppShortcutId.newSession => l10n.shortcutNewSession,
+      AppShortcutId.focusComposer => l10n.shortcutFocusComposer,
+      AppShortcutId.sendPrompt => l10n.shortcutSendPrompt,
+      AppShortcutId.selectAllTransfers => l10n.shortcutSelectAllTransfers,
+      AppShortcutId.invertTransferSelection =>
+        l10n.shortcutInvertTransferSelection,
+      AppShortcutId.clearTransferSearch => l10n.shortcutClearTransferSearch,
+      AppShortcutId.cancelTransfer => l10n.shortcutCancelTransfer,
+    };
 
 class _ShortcutGroup extends StatelessWidget {
   const _ShortcutGroup({required this.title, required this.entries});

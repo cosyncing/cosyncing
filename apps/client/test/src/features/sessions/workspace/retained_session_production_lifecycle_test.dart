@@ -147,7 +147,7 @@ void main() {
 
       // Closing B is a lifecycle operation, not a cache operation: its
       // supervisor lease closes the socket and retires the provider once.
-      open.close(_b.key);
+      unawaited(open.close(_b.key));
       await _pumpUntil(
         tester,
         () => providers.disposals[bKey] == 1 && originalB.disposeCount == 1,
@@ -204,7 +204,7 @@ void main() {
       // Retire the eviction fixtures so source and credential transitions have
       // one exact key whose counts stay easy to audit.
       for (final session in _evictionRefs) {
-        open.close(session.key);
+        unawaited(open.close(session.key));
       }
       await _pumpUntil(
         tester,

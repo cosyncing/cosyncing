@@ -568,6 +568,50 @@ final class InMemorySessionTranscriptRepository
   }
 }
 
+/// A draft repository whose durable write always refuses.
+///
+/// The compact close path is the only close path that CAN report a refused
+/// write and abandon the close — `OpenSessionsController.close`'s own barrier
+/// is best effort by design, because a notifier has no surface to report on.
+/// Proving that abort needs a repository that genuinely refuses, not a slow
+/// one.
+///
+/// Reads still answer (with no stored row): the coordinator loads before it
+/// writes, so a failing load would abort the flush one step earlier, for a
+/// different reason than the one under test.
+final class FailingSessionDraftRepository implements SessionDraftRepository {
+  /// Creates a repository that throws [failure] from every [save].
+  FailingSessionDraftRepository({this.failure = 'draft store unavailable'});
+
+  /// Message carried by the thrown error.
+  final String failure;
+
+  /// How many durable writes were attempted.
+  int saveAttempts = 0;
+
+  @override
+  Future<SessionLocalDraft?> load({
+    required String brokerProfileId,
+    required SessionDetailKey sessionKey,
+  }) async => null;
+
+  @override
+  Future<SessionLocalDraft?> save(SessionLocalDraft draft) async {
+    saveAttempts++;
+    throw StateError(failure);
+  }
+
+  @override
+  Future<bool> delete({
+    required String brokerProfileId,
+    required SessionDetailKey sessionKey,
+    required int expectedMutationVersion,
+  }) async => false;
+
+  @override
+  Future<void> deleteForProfile(String brokerProfileId) async {}
+}
+
 final class RecordingSessionDetailTransferFileOpener
     implements LocalTransferFileOpener {
   RecordingSessionDetailTransferFileOpener({
@@ -670,6 +714,15 @@ class FakeBrokerClient extends BrokerClient {
     data: 'hello',
     mimeType: 'text/plain',
   );
+
+  /// Per-path stat/listing answers, which take precedence over [fsListing].
+  ///
+  /// A transcript file link stats the mention, then reads it, then lists its
+  /// containing directory — three different paths in one gesture, which a
+  /// single fixed answer cannot represent.
+  final Map<String, FsDirectoryResult> fsListingsByPath = {};
+  final List<String?> fsListedPaths = [];
+  final List<String?> fsReadPaths = [];
   int prepareTranscriptExportCount = 0;
   int exportTranscriptCount = 0;
   int forkSessionCount = 0;
@@ -722,11 +775,12 @@ class FakeBrokerClient extends BrokerClient {
     String id, {
     String? path,
   }) async {
+    fsListedPaths.add(path);
     final error = fsListError;
     if (error != null) {
       throw error;
     }
-    return fsListing;
+    return fsListingsByPath[path ?? ''] ?? fsListing;
   }
 
   @override
@@ -736,6 +790,7 @@ class FakeBrokerClient extends BrokerClient {
     String? path,
     int? maxBytes,
   }) async {
+    fsReadPaths.add(path);
     return fsReadResult;
   }
 

@@ -69,12 +69,12 @@ void main() {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);
       await container.read(openSessionsControllerProvider.future);
-      container.read(openSessionsControllerProvider.notifier)
+      final controller = container.read(openSessionsControllerProvider.notifier)
         ..open(_ref('claude', 'a'))
         ..open(_ref('codex', 'b'))
         ..open(_ref('pi', 'c'))
-        ..activate('codex/b')
-        ..close('codex/b');
+        ..activate('codex/b');
+      await controller.close('codex/b');
 
       final state = container.read(openSessionsControllerProvider).value!;
       expect(state.refs.map((ref) => ref.key), ['claude/a', 'pi/c']);
@@ -85,9 +85,10 @@ void main() {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);
       await container.read(openSessionsControllerProvider.future);
-      container.read(openSessionsControllerProvider.notifier)
-        ..open(_ref('claude', 'a'))
-        ..close('claude/a');
+      final controller = container.read(
+        openSessionsControllerProvider.notifier,
+      )..open(_ref('claude', 'a'));
+      await controller.close('claude/a');
 
       final state = container.read(openSessionsControllerProvider).value!;
       expect(state.isEmpty, isTrue);
@@ -98,11 +99,11 @@ void main() {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);
       await container.read(openSessionsControllerProvider.future);
-      container.read(openSessionsControllerProvider.notifier)
+      final controller = container.read(openSessionsControllerProvider.notifier)
         ..open(_ref('claude', 'a'))
         ..open(_ref('codex', 'b'))
-        ..open(_ref('pi', 'c'))
-        ..closeOthers('codex/b');
+        ..open(_ref('pi', 'c'));
+      await controller.closeOthers('codex/b');
 
       final state = container.read(openSessionsControllerProvider).value!;
       expect(state.refs.map((ref) => ref.key), ['codex/b']);
@@ -353,9 +354,9 @@ void main() {
         );
         expect(migrated.refs.map((ref) => ref.key), ['claude/a', 'codex/b']);
         expect(migrated.activeKey, 'codex/b');
-        first.read(openSessionsControllerProvider.notifier)
-          ..close('claude/a')
-          ..close('codex/b');
+        final firstOpen = first.read(openSessionsControllerProvider.notifier);
+        await firstOpen.close('claude/a');
+        await firstOpen.close('codex/b');
         await Future<void>.delayed(const Duration(milliseconds: 30));
         first.dispose();
 
@@ -506,9 +507,11 @@ void main() {
         ..open(_ref('codex', 'b'));
       await Future<void>.delayed(const Duration(milliseconds: 30));
 
-      firstController
-        ..close('claude/a')
-        ..reorder(0, 1);
+      await firstController.close('claude/a');
+      // `close` is awaited (it may barrier a draft), so the reorder cannot be
+      // a cascade section of it.
+      // ignore: cascade_invocations
+      firstController.reorder(0, 1);
       second
           .read(openSessionsControllerProvider.notifier)
           .open(_ref('pi', 'c'));

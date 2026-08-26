@@ -5,6 +5,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/router.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/design/ui_scale.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
@@ -17,6 +18,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profi
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
@@ -392,6 +394,77 @@ void main() {
         expect(find.text('Ctrl+I / \u2318I'), findsOneWidget);
         expect(find.text('Esc'), findsOneWidget);
         expect(find.text('Esc / Del'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'help page documents the opened-session chords on native desktop',
+      (tester) async {
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(600, 900),
+          initialLocation: '/settings/keyboard-shortcuts',
+        );
+
+        Future<void> scrollTo(String label) async {
+          await tester.scrollUntilVisible(
+            find.text(label),
+            500,
+            scrollable: find.byType(Scrollable).last,
+          );
+          await tester.pumpAndSettle();
+        }
+
+        // The zoom triad is complete now that reset exists.
+        await scrollTo('Text size');
+        expect(find.text('Ctrl+0 / ⌘0'), findsOneWidget);
+
+        await scrollTo('Open sessions');
+        expect(find.text('1 … 8'), findsOneWidget);
+        expect(find.text('9'), findsOneWidget);
+        expect(find.text('] / Ctrl+Tab'), findsOneWidget);
+        expect(find.text('[ / Ctrl+Shift+Tab'), findsOneWidget);
+        expect(find.text('Ctrl+W / ⌘W'), findsOneWidget);
+        expect(find.text('Ctrl+T / ⌘T'), findsOneWidget);
+        // The web forms are not live here, so they must not be advertised.
+        expect(find.text('Ctrl+Alt+W / ⌘⌥W'), findsNothing);
+        expect(find.text('Ctrl+Alt+N / ⌘⌥N'), findsNothing);
+      },
+    );
+
+    // The page's own rule: a row listing a binding the app does not have is
+    // worse than no row. On web Ctrl/Cmd+1..5 switch BROWSER tabs and the
+    // browser owns the zoom triad, so both groups have to disappear there.
+    testWidgets(
+      'help page hides navigation and text size on web, keeps the web chords',
+      (tester) async {
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(600, 900),
+          initialLocation: '/settings/keyboard-shortcuts',
+        );
+
+        expect(find.text('Navigation'), findsNothing);
+        expect(find.text('Ctrl+1 / ⌘1'), findsNothing);
+        expect(find.text('Text size'), findsNothing);
+        expect(find.text('Ctrl+0 / ⌘0'), findsNothing);
+        expect(find.text('Ctrl+scroll'), findsNothing);
+
+        await tester.scrollUntilVisible(
+          find.text('Open sessions'),
+          500,
+          scrollable: find.byType(Scrollable).last,
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Ctrl+Alt+W / ⌘⌥W'), findsOneWidget);
+        expect(find.text('Ctrl+Alt+N / ⌘⌥N'), findsOneWidget);
+        expect(find.text(']'), findsOneWidget);
+        expect(find.text('['), findsOneWidget);
+        expect(find.text('Ctrl+W / ⌘W'), findsNothing);
+        expect(find.text('Ctrl+T / ⌘T'), findsNothing);
       },
     );
 
@@ -899,6 +972,97 @@ void main() {
       expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
     });
 
+    // The third of the zoom triad. Chrome's Ctrl+0 had no equivalent: the app
+    // could only step, so a user who had walked the ladder had no way back to
+    // the standard rung from the keyboard.
+    testWidgets('Ctrl+0 resets the app text size to standard', (tester) async {
+      final store = _InMemoryUiPreferencesStore();
+      await pumpApp(
+        tester,
+        surfaceSize: const Size(600, 900),
+        overrides: [uiPreferencesStoreProvider.overrideWithValue(store)],
+      );
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.equal,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.digit0,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.standard.token);
+    });
+
+    testWidgets('Cmd+0 and numpad 0 reset the app text size', (tester) async {
+      final store = _InMemoryUiPreferencesStore();
+      await pumpApp(
+        tester,
+        surfaceSize: const Size(600, 900),
+        overrides: [uiPreferencesStoreProvider.overrideWithValue(store)],
+      );
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.numpadSubtract,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.small.token);
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.metaLeft,
+        digit: LogicalKeyboardKey.digit0,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.standard.token);
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.numpadAdd,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.large.token);
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.numpad0,
+      );
+      await tester.pumpAndSettle();
+      expect(store.values[uiTextScaleSettingKey], UiTextScale.standard.token);
+    });
+
+    testWidgets('web does not bind Ctrl+0 so the browser owns zoom reset', (
+      tester,
+    ) async {
+      debugWebReservedChordsOverride = true;
+      addTearDown(() => debugWebReservedChordsOverride = null);
+      final store = _InMemoryUiPreferencesStore();
+      await pumpApp(
+        tester,
+        surfaceSize: const Size(600, 900),
+        overrides: [uiPreferencesStoreProvider.overrideWithValue(store)],
+      );
+
+      await _sendAppShortcut(
+        tester: tester,
+        modifier: LogicalKeyboardKey.controlLeft,
+        digit: LogicalKeyboardKey.digit0,
+      );
+      await tester.pumpAndSettle();
+
+      expect(store.values.containsKey(uiTextScaleSettingKey), isFalse);
+    });
+
     testWidgets('Ctrl+wheel steps the app text size in both directions', (
       tester,
     ) async {
@@ -994,13 +1158,13 @@ void main() {
     // On web the browser owns zoom, so the shell must not bind the text-scale
     // keyboard activators nor install the Ctrl/Cmd+wheel step. `kIsWeb` is a
     // compile-time constant that is always false under the VM test runner, so
-    // these drive the web branch through the `debugBrowserOwnsZoomOverride`
+    // these drive the web branch through the `debugWebReservedChordsOverride`
     // seam in router.dart.
     testWidgets(
       'web does not bind Ctrl+= so the browser owns text zoom',
       (tester) async {
-        debugBrowserOwnsZoomOverride = true;
-        addTearDown(() => debugBrowserOwnsZoomOverride = null);
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
         final store = _InMemoryUiPreferencesStore();
         await pumpApp(
           tester,
@@ -1022,8 +1186,8 @@ void main() {
     testWidgets(
       'web does not step text size on Ctrl+wheel so the browser owns zoom',
       (tester) async {
-        debugBrowserOwnsZoomOverride = true;
-        addTearDown(() => debugBrowserOwnsZoomOverride = null);
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
         final store = _InMemoryUiPreferencesStore();
         await pumpApp(
           tester,
@@ -1041,8 +1205,8 @@ void main() {
     testWidgets(
       'web keeps app-level navigation shortcuts working',
       (tester) async {
-        debugBrowserOwnsZoomOverride = true;
-        addTearDown(() => debugBrowserOwnsZoomOverride = null);
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
         await pumpApp(
           tester,
           surfaceSize: const Size(600, 900),
@@ -1167,6 +1331,222 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       },
     );
+
+    group('opened-session chords in the wide workspace', () {
+      final profile = BrokerProfile(
+        id: 'p1',
+        displayName: 'p1',
+        baseUri: Uri.parse('http://127.0.0.1:7734'),
+        createdAt: DateTime(2026),
+      );
+
+      Future<void> pumpWorkspace(WidgetTester tester) async {
+        await pumpApp(
+          tester,
+          surfaceSize: const Size(1200, 900),
+          overrides: [
+            activeBrokerProfileProvider.overrideWith((_) => profile),
+            openSessionsStoreProvider.overrideWithValue(
+              _InMemoryOpenSessionsStore(
+                const OpenSessionsSnapshot(
+                  refs: [
+                    SessionRef(
+                      tool: 'claude',
+                      id: 'session-a',
+                      title: 'First',
+                      status: SessionStatus.idle,
+                    ),
+                    SessionRef(
+                      tool: 'claude',
+                      id: 'session-b',
+                      title: 'Second',
+                      status: SessionStatus.idle,
+                    ),
+                    SessionRef(
+                      tool: 'claude',
+                      id: 'session-c',
+                      title: 'Third',
+                      status: SessionStatus.idle,
+                    ),
+                  ],
+                  activeKey: 'claude/session-a',
+                ),
+              ),
+            ),
+            brokerClientProvider.overrideWith((_) async => null),
+            sessionArtifactTransferRepositoryProvider.overrideWithValue(
+              InMemorySessionArtifactTransferRepository(),
+            ),
+          ],
+        );
+        expect(find.byType(SessionsWorkspace), findsOneWidget);
+      }
+
+      String? activeTab(WidgetTester tester) => tester
+          .widget<OpenSessionsTabStrip>(find.byType(OpenSessionsTabStrip))
+          .activeKey;
+
+      testWidgets('bare digits activate by strip position', (tester) async {
+        await pumpWorkspace(tester);
+        expect(activeTab(tester), 'claude/session-a');
+
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.digit2,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-b');
+
+        // 9 is the LAST session, Chrome's rule — not the ninth.
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.digit9,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-c');
+
+        // Past the end is a no-op, not an error and not a clamp.
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.digit5,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-c');
+      });
+
+      testWidgets('bare brackets cycle and wrap at both ends', (tester) async {
+        await pumpWorkspace(tester);
+
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.bracketLeft,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-c');
+
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.bracketRight,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-a');
+      });
+
+      testWidgets('Ctrl+Tab and Ctrl+Shift+Tab cycle on native desktop', (
+        tester,
+      ) async {
+        await pumpWorkspace(tester);
+
+        await _sendAppShortcut(
+          tester: tester,
+          modifier: LogicalKeyboardKey.controlLeft,
+          digit: LogicalKeyboardKey.tab,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-b');
+
+        await _sendAppShortcut(
+          tester: tester,
+          modifiers: const [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.shiftLeft,
+          ],
+          digit: LogicalKeyboardKey.tab,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-a');
+      });
+
+      testWidgets('Ctrl+W closes the active tab and activates a neighbour', (
+        tester,
+      ) async {
+        await pumpWorkspace(tester);
+
+        await _sendAppShortcut(
+          tester: tester,
+          modifier: LogicalKeyboardKey.controlLeft,
+          digit: LogicalKeyboardKey.keyW,
+        );
+        await tester.pumpAndSettle();
+
+        final strip = tester.widget<OpenSessionsTabStrip>(
+          find.byType(OpenSessionsTabStrip),
+        );
+        expect(strip.refs.map((entry) => entry.key), [
+          'claude/session-b',
+          'claude/session-c',
+        ]);
+        expect(strip.activeKey, 'claude/session-b');
+      });
+
+      testWidgets('Ctrl+Alt+W closes on native too, so one help line is true', (
+        tester,
+      ) async {
+        await pumpWorkspace(tester);
+
+        await _sendAppShortcut(
+          tester: tester,
+          modifiers: const [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.altLeft,
+          ],
+          digit: LogicalKeyboardKey.keyW,
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          tester
+              .widget<OpenSessionsTabStrip>(find.byType(OpenSessionsTabStrip))
+              .refs,
+          hasLength(2),
+        );
+      });
+
+      testWidgets('web binds the +Alt close and the ordinals, not Ctrl+W', (
+        tester,
+      ) async {
+        debugWebReservedChordsOverride = true;
+        addTearDown(() => debugWebReservedChordsOverride = null);
+        await pumpWorkspace(tester);
+
+        // The browser eats this one, so the app must not claim it.
+        await _sendAppShortcut(
+          tester: tester,
+          modifier: LogicalKeyboardKey.controlLeft,
+          digit: LogicalKeyboardKey.keyW,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<OpenSessionsTabStrip>(find.byType(OpenSessionsTabStrip))
+              .refs,
+          hasLength(3),
+        );
+
+        await _sendAppShortcut(
+          tester: tester,
+          digit: LogicalKeyboardKey.digit3,
+        );
+        await tester.pumpAndSettle();
+        expect(activeTab(tester), 'claude/session-c');
+
+        await _sendAppShortcut(
+          tester: tester,
+          modifiers: const [
+            LogicalKeyboardKey.controlLeft,
+            LogicalKeyboardKey.altLeft,
+          ],
+          digit: LogicalKeyboardKey.keyW,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<OpenSessionsTabStrip>(find.byType(OpenSessionsTabStrip))
+              .refs,
+          hasLength(2),
+        );
+      });
+    });
   });
 }
 
@@ -1353,15 +1733,26 @@ Future<void> _sendScroll(
   await tester.pump();
 }
 
+/// Presses [modifiers] in order, taps [digit], then releases in reverse.
+///
+/// [modifiers] is a list rather than a single key because the `Ctrl/Cmd+Alt`
+/// family needs two held modifiers, and because the bare-key layer needs none:
+/// an empty list sends the key on its own.
 Future<void> _sendAppShortcut({
   required WidgetTester tester,
-  required LogicalKeyboardKey modifier,
   required LogicalKeyboardKey digit,
+  LogicalKeyboardKey? modifier,
+  List<LogicalKeyboardKey> modifiers = const [],
 }) async {
-  await tester.sendKeyDownEvent(modifier);
+  final held = [if (modifier != null) modifier, ...modifiers];
+  for (final key in held) {
+    await tester.sendKeyDownEvent(key);
+  }
   await tester.sendKeyDownEvent(digit);
   await tester.sendKeyUpEvent(digit);
-  await tester.sendKeyUpEvent(modifier);
+  for (final key in held.reversed) {
+    await tester.sendKeyUpEvent(key);
+  }
   await tester.pump();
 }
 

@@ -312,9 +312,11 @@ class _MarkdownBody extends StatelessWidget {
 
 /// A tappable http(s) link rendered inline via a [WidgetSpan].
 ///
-/// Uses a [GestureDetector] rather than a `TapGestureRecognizer` so the render
-/// layer needs nothing beyond `package:flutter/material.dart`; the actual open
-/// is delegated to [transcriptLinkOpener], which the app wires to a launcher.
+/// Shares [_TranscriptLinkBase] with the workspace file link, so both kinds
+/// carry the same `Semantics(link: true)`, focus traversal, and Enter/Space
+/// activation — the accessibility contract is one widget, not two that can
+/// drift. The actual open is delegated to [transcriptLinkOpener], which the app
+/// wires to a launcher, so the render layer stays dependency-free.
 class _TranscriptLink extends StatelessWidget {
   const _TranscriptLink({
     required this.uri,
@@ -328,12 +330,13 @@ class _TranscriptLink extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: () => transcriptLinkOpener?.call(uri),
-        child: Text(text, style: style),
-      ),
+    return _TranscriptLinkBase(
+      semanticsLabel: AppLocalizations.of(
+        context,
+      ).transcriptWebLinkSemantics(uri.toString()),
+      tooltip: uri.toString(),
+      onActivate: () => transcriptLinkOpener?.call(uri),
+      child: Text(text, style: style),
     );
   }
 }

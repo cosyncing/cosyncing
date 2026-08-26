@@ -20,6 +20,17 @@ void main() {
   ).readAsStringSync();
 
   group('index.html shell', () {
+    test('protects open session tabs from accidental browser close', () {
+      expect(indexHtml, contains("addEventListener('beforeunload'"));
+      expect(indexHtml, contains('cosyncingSetBrowserCloseProtection'));
+      expect(indexHtml, contains("event.returnValue = ''"));
+      expect(indexHtml, contains('cosyncingAllowIntentionalUnload'));
+      expect(
+        indexHtml.indexOf('cosyncingAllowIntentionalUnload();'),
+        lessThan(indexHtml.indexOf('location.replace(handoffHref')),
+      );
+    });
+
     test('paints a branded shell in the initial HTML body', () {
       final bodyStart = indexHtml.indexOf('<body>');
       expect(bodyStart, greaterThan(0));

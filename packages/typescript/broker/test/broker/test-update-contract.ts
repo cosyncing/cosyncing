@@ -44,10 +44,14 @@ const equal = evaluateBrokerClientCompatibility({
   minimumBrokerRevision: 0,
   surfaceHash: BROKER_CONTRACT.surfaceHash,
 });
-const clientBehind = evaluateBrokerClientCompatibility({
+const previousRevisionClient = evaluateBrokerClientCompatibility({
   revision: BROKER_CONTRACT.revision - 1,
   minimumBrokerRevision: 0,
   surfaceHash: 'fnv1a32:revision-1-client',
+});
+const belowClientFloor = evaluateBrokerClientCompatibility({
+  revision: BROKER_CONTRACT.minimumClientRevision - 1,
+  minimumBrokerRevision: 0,
 });
 const brokerBehind = evaluateBrokerClientCompatibility({
   revision: BROKER_CONTRACT.revision + 1,
@@ -74,8 +78,8 @@ check('published build/schema metadata carries the exact current contract identi
     && PUBLISHED_BROKER_CONTRACT.surfaceHash === BROKER_CONTRACT.surfaceHash
     && PUBLISHED_BROKER_CONTRACT.minimumClientRevision === BROKER_CONTRACT.minimumClientRevision);
 check('equal revisions are compatible', equal.status === 'compatible' && !equal.readOnly);
-check('revision-15 client fails closed after the ticket-only stream boundary',
-  clientBehind.status === 'hard-incompatible' && clientBehind.readOnly);
+check('a client below the revision-17 security floor still fails closed',
+  belowClientFloor.status === 'hard-incompatible' && belowClientFloor.readOnly);
 // The literal is a deliberate tripwire, not a duplicate of the constant: every
 // revision bump must land here and re-argue its compatibility boundary.
 // Revision 13 added only additive owner, authority, capability, attach-reason,
@@ -117,13 +121,18 @@ check('revision-15 client fails closed after the ticket-only stream boundary',
 // and retain a revision-16 broker fallback; once this broker ships, its
 // minimum-client floor makes stale clients visibly read-only instead of letting
 // downloads fail later with an unexplained 401.
-check('the current broker declares the intentional revision-17 client floor',
-  BROKER_CONTRACT.revision === 17
+//
+// Revision 18 is additive. It adds one owner-authenticated HTTP route and
+// optional health data for a feature that remains default-off. Revision-17
+// clients do not call the route and ignore the extra health field, so the
+// security floor remains 17 and the normal one-revision overlap applies.
+check('the current revision-18 broker retains the intentional revision-17 client floor',
+  BROKER_CONTRACT.revision === 18
     && BROKER_CONTRACT.minimumClientRevision === 17
-    && clientBehind.status === 'hard-incompatible'
-    && clientBehind.readOnly);
+    && previousRevisionClient.status === 'client-behind'
+    && !previousRevisionClient.readOnly);
 check('the overlap window never overrides the explicit security floor',
-  clientBehind.status === 'hard-incompatible' && clientBehind.readOnly);
+  belowClientFloor.status === 'hard-incompatible' && belowClientFloor.readOnly);
 check('one overlap revision ahead nudges the broker without disabling control', brokerBehind.status === 'broker-behind' && !brokerBehind.readOnly);
 check('a revision outside the one-version overlap window fails closed',
   beyondOverlap.status === 'hard-incompatible' && beyondOverlap.readOnly);
@@ -384,7 +393,11 @@ try {
   // re-pinning a literal on every contract bump.
   const previousRevisionHello = await firstWsFrame(piHello.id,
     `contractRevision=${BROKER_CONTRACT.revision - 1}&minimumBrokerRevision=2`
-    + '&contractSurfaceHash=fnv1a32%3A095f3c3c&clientVersion=0.9.8',
+    + '&contractSurfaceHash=fnv1a32%3A3ff9de78&clientVersion=0.9.8',
+  );
+  const belowFloorHello = await firstWsFrame(piHello.id,
+    `contractRevision=${BROKER_CONTRACT.minimumClientRevision - 1}&minimumBrokerRevision=2`
+    + '&clientVersion=0.9.7',
   );
   const hardHello = await firstWsFrame(piHello.id,
     `contractRevision=${BROKER_CONTRACT.revision + 1}&minimumBrokerRevision=${BROKER_CONTRACT.revision + 1}&clientVersion=2.0.0`,
@@ -393,10 +406,14 @@ try {
   check('WebSocket hello advertises broker identity and equal compatibility',
     hello.kind === 'hello' && hello.broker?.version === BUILD_INFO.version
       && hello.compatibility?.status === 'compatible');
-  check('a previous-revision WebSocket client is explicitly read-only at the ticket floor',
+  check('an additive previous-revision WebSocket client remains writable',
     previousRevisionHello.kind === 'hello'
-      && previousRevisionHello.compatibility?.status === 'hard-incompatible'
-      && previousRevisionHello.compatibility?.readOnly === true);
+      && previousRevisionHello.compatibility?.status === 'client-behind'
+      && previousRevisionHello.compatibility?.readOnly === false);
+  check('a WebSocket client below the ticket floor is explicitly read-only',
+    belowFloorHello.kind === 'hello'
+      && belowFloorHello.compatibility?.status === 'hard-incompatible'
+      && belowFloorHello.compatibility?.readOnly === true);
   check('hard WebSocket mismatch explicitly degrades to read-only',
     hardHello.kind === 'hello' && hardHello.compatibility?.status === 'hard-incompatible'
       && hardHello.compatibility?.readOnly === true);

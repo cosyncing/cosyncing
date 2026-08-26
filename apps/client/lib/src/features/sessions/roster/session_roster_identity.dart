@@ -9,7 +9,12 @@ import 'package:flutter/foundation.dart';
 /// understands. Reading it as if it were the current shape is how a cache
 /// starts inventing fields, so a mismatch fails open to normal loading and the
 /// row is deleted rather than guessed at.
-const int rosterSnapshotPayloadVersion = 1;
+///
+/// Version 2 added [SessionRosterIdentity.createdAt], the anchor the
+/// authoritative roster orders its working band by. A version-1 row has no
+/// anchor at all, so it is dropped rather than rendered in an order this build
+/// no longer produces.
+const int rosterSnapshotPayloadVersion = 2;
 
 /// Maximum broker profiles that may retain a roster snapshot.
 ///
@@ -79,7 +84,13 @@ const int rosterSnapshotCleanupBatchLimit = 100;
 /// * [title] — session title;
 /// * [cwd], [projectName] — project/cwd display identity;
 /// * [modelLabel], [modelId] — model label/identity;
-/// * [updatedAt] — last authoritative update time.
+/// * [updatedAt] — last authoritative update time;
+/// * [createdAt] — when the session was created.
+///
+/// [createdAt] is identity, not activity: it is fixed when the session is
+/// created and never moves again, which is exactly why the authoritative
+/// roster orders its working band by it. Carrying it costs nothing and lets
+/// the cached pane rank a row that has never been updated.
 ///
 /// Status, ownership, Terminal Sync, permissions, control capabilities,
 /// telemetry, prompts and transcript content are absent by construction.
@@ -99,6 +110,7 @@ final class SessionRosterIdentity {
     this.modelLabel,
     this.modelId,
     this.updatedAt,
+    this.createdAt,
   });
 
   /// Projects the identity fields of an authoritative roster row.
@@ -116,6 +128,7 @@ final class SessionRosterIdentity {
       modelLabel: session.currentModel?.label ?? session.model,
       modelId: session.currentModel?.modelID,
       updatedAt: session.updatedAt,
+      createdAt: session.createdAt,
     );
   }
 
@@ -143,6 +156,7 @@ final class SessionRosterIdentity {
       modelLabel: _optionalString(json['modelLabel']),
       modelId: _optionalString(json['modelId']),
       updatedAt: _optionalInt(json['updatedAt']),
+      createdAt: _optionalInt(json['createdAt']),
     );
   }
 
@@ -183,6 +197,17 @@ final class SessionRosterIdentity {
   /// Last authoritative update time, epoch milliseconds.
   final int? updatedAt;
 
+  /// Session creation time, epoch milliseconds.
+  ///
+  /// Absent for any adapter that does not report one (dsh today).
+  final int? createdAt;
+
+  /// Recency this row is ranked by, falling back to creation.
+  ///
+  /// A session created but never updated has no `updatedAt`, and ranking it at
+  /// zero buried the newest row in the roster at the bottom of the cached pane.
+  int? get recencyAnchor => updatedAt ?? createdAt;
+
   /// Stable routing key, matching `sessionRosterKey` for the same session.
   String get rosterKey => '$tool/$sessionId';
 
@@ -203,6 +228,7 @@ final class SessionRosterIdentity {
     if (modelLabel != null) 'modelLabel': modelLabel,
     if (modelId != null) 'modelId': modelId,
     if (updatedAt != null) 'updatedAt': updatedAt,
+    if (createdAt != null) 'createdAt': createdAt,
   };
 }
 
@@ -268,8 +294,9 @@ final class BoundedRosterSnapshotPayload {
 ///
 /// Retention rules, in order:
 ///
-/// 1. Rows are ranked newest-`updatedAt` first, so the identities most likely
-///    to matter on the next start survive.
+/// 1. Rows are ranked newest-activity first — `updatedAt`, or `createdAt` for a
+///    session that has never been updated — so the identities most likely to
+///    matter on the next start survive.
 /// 2. A resolved parent is pulled in with its child whenever the child is
 ///    retained, so R1c adjacency still holds in the cached projection. The
 ///    parent is not counted twice and cannot push the list past the bounds.
@@ -310,15 +337,7 @@ BoundedRosterSnapshotPayload boundRosterSnapshotPayload(
   }
 
   final ranked = [...order]
-    ..sort((a, b) {
-      final left = identities[a]!.updatedAt ?? 0;
-      final right = identities[b]!.updatedAt ?? 0;
-      final byRecency = right.compareTo(left);
-      // Ties resolve on identity so the retained set is deterministic across
-      // runs; an unstable set would make the bound tests flaky rather than
-      // load-bearing.
-      return byRecency != 0 ? byRecency : a.compareTo(b);
-    });
+    ..sort((a, b) => compareRosterIdentities(identities[a]!, identities[b]!));
 
   final retainedKeys = <String>{};
   final retained = <SessionRosterIdentity>[];
@@ -379,6 +398,28 @@ BoundedRosterSnapshotPayload boundRosterSnapshotPayload(
     omittedRowCount: identities.length - rows.length,
     newestSessionUpdatedAt: newest,
   );
+}
+
+/// Orders cached identity rows newest-activity first, ties on identity.
+///
+/// The cache holds no status by construction, so it cannot reproduce the
+/// authoritative roster's status bands and never will. What it can do is stop
+/// inventing an order of its own: this is the same rule the authoritative
+/// roster applies to its settled rows, so the cached pane and the live pane
+/// that replaces it agree about every row that is not currently working.
+///
+/// Ties resolve on composite identity, matching the authoritative comparator,
+/// so both the retained set and the displayed order are deterministic across
+/// runs. An unstable set would make the bound tests flaky rather than
+/// load-bearing.
+int compareRosterIdentities(SessionRosterIdentity a, SessionRosterIdentity b) {
+  final left = a.recencyAnchor;
+  final right = b.recencyAnchor;
+  // An unranked row sorts after every ranked one, never at epoch zero.
+  if (left == null && right != null) return 1;
+  if (right == null && left != null) return -1;
+  final byRecency = left == null || right == null ? 0 : right.compareTo(left);
+  return byRecency != 0 ? byRecency : a.compositeKey.compareTo(b.compositeKey);
 }
 
 /// Decodes a stored rows payload.

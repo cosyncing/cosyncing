@@ -112,7 +112,11 @@ export class RuntimeUpdateCoordinator {
     if (current && !current.updateAvailable) return current;
     if (!(this.options.restartAllowed?.() ?? true)) return current;
     await provider.restart();
-    return this.refresh(agent, { autoRestart: false });
+    const refreshed = await this.refresh(agent, { autoRestart: false });
+    if (refreshed?.updateAvailable) {
+      throw new Error(`${refreshed.displayName} restart completed but the pending runtime change was not applied.`);
+    }
+    return refreshed;
   }
 
   private async storeStatus(status: RuntimeUpdateInspection): Promise<void> {

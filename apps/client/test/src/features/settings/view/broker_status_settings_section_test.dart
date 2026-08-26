@@ -441,6 +441,12 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
       BrokerHealthResponse(status: healthStatus, checkedAt: 1);
 
   @override
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  }) async => WorkspaceBrowsingSettingsResponse(enabled: enabled, ok: true);
+
+  @override
   Future<HealthResponse> getProductHealth() async =>
       HealthResponse(ok: true, version: brokerVersion);
 

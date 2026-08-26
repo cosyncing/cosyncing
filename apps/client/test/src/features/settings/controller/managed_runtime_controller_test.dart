@@ -385,6 +385,29 @@ void main() {
     expect(result.message, 'Recovery scheduled');
   });
 
+  test('targeted restart failure preserves the last valid snapshot', () async {
+    final before = await container.read(
+      managedRuntimeControllerProvider.future,
+    );
+    apiA.restartError = const BrokerException(
+      message: 'Restart failed',
+      statusCode: 502,
+      error: BrokerError(
+        error: 'The running Codex app server is unmanaged.',
+        code: 'runtime_restart_failed',
+      ),
+    );
+
+    await container
+        .read(managedRuntimeControllerProvider.notifier)
+        .restartRuntime('codex');
+
+    final after = container.read(managedRuntimeControllerProvider).requireValue;
+    expect(after.updates, same(before.updates));
+    expect(after.codexUpdatePolicy, before.codexUpdatePolicy);
+    expect(after.actionError, contains('unmanaged'));
+  });
+
   test(
     'peer capability omits owner reads and blocks owner mutations',
     () async {
@@ -428,6 +451,7 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   String policy;
   bool quotaEnabled = false;
   bool quotaThrows = false;
+  BrokerException? restartError;
   int quotaReads = 0;
   int restartEverythingCalls = 0;
   int brokerUpdateReads = 0;
@@ -474,6 +498,12 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
       principalKind: principalKind,
     );
   }
+
+  @override
+  Future<WorkspaceBrowsingSettingsResponse> setWorkspaceBrowsing({
+    required bool enabled,
+    required bool confirmRemoteFileAccess,
+  }) async => WorkspaceBrowsingSettingsResponse(enabled: enabled, ok: true);
 
   @override
   Future<HealthResponse> getProductHealth() async =>
@@ -561,6 +591,8 @@ final class _FakeManagedRuntimeApi implements ManagedRuntimeApi {
   @override
   Future<RuntimeUpdateRestartResponse> restartRuntime(String agent) async {
     restartedAgents.add(agent);
+    final error = restartError;
+    if (error != null) throw error;
     return const RuntimeUpdateRestartResponse(ok: true);
   }
 

@@ -195,6 +195,8 @@ class _BrokerDevicesSettingsPageState
             const _ClientCompatibilityFallback(),
             const BrokerStatusSettingsSection(),
             const SizedBox(height: 16),
+            const WorkspaceBrowsingSettingsSection(),
+            const SizedBox(height: 16),
             SettingsSection(
               title: l10n.settingsSectionBrokerCredentials,
               // No loopback branch: a broker on 127.0.0.1 still requires a

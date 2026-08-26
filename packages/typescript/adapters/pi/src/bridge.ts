@@ -21,6 +21,7 @@
  *          {t:'token',  input, output, cost}                 → token-count
  *          {t:'final',  key, kind:'text'|'thinking', text}   → finalized message (for history)
  *          {t:'permission-request', requestId, title, detail?, toolName?} → approval card
+ *                                   (the broker fills in `options`; see BRIDGED_APPROVAL_OPTIONS)
  *          {t:'permission-resolved', requestId, decision}     → approval card resolved
  *          {t:'question-request', requestId, questions}       → structured question card
  *          {t:'question-resolved', requestId}                 → question card resolved
@@ -130,6 +131,28 @@ function bridgeToolCall(ev: any): AgentMessage {
 function normalizePermissionDecision(v: unknown): PermissionDecision {
   return v === 'approve-session' || v === 'reject' || v === 'approve' ? v : 'reject';
 }
+
+/**
+ * Options advertised on the BRIDGED tool-approval card. Advertisement ONLY: the extension has always
+ * honored `approve-session` (`agent-extensions/cosyncing-bridge/index.ts` `resolvePermission`, and
+ * identically in the frozen v0.1.0 legacy asset), so no installable bridge version can be handed a
+ * decision it doesn't understand. Nothing on this path changes behaviour — without `options` the
+ * client just hid a third button that already worked end to end.
+ *
+ * Pi is the odd adapter: the remembering is OURS, not the harness's, and the button must not promise
+ * more than the extension actually keeps.
+ *  - **Scope is the exact tool plus the exact input** — `approvalScope = toolName:stableInput(input)`.
+ *    Approving `bash: ls` does NOT cover `bash: ls -la`. Narrower than codex's session cache, far
+ *    narrower than an execpolicy prefix.
+ *  - **Lifetime is this bridge registration** — `approvedScopes.clear()` runs on every hello, and
+ *    hello re-runs after a broker restart or an extension reload. "For this session" is true only for
+ *    as long as this registration lives.
+ *
+ * The resume path is a DIFFERENT card: an `extension_ui_request` with `method:'confirm'`
+ * (`implementation.ts`), a yes/no dialog with no third answer. It deliberately sends no `options`, so
+ * the client's approve/reject default renders it correctly. Do not widen it here.
+ */
+const BRIDGED_APPROVAL_OPTIONS: readonly PermissionDecision[] = ['approve', 'approve-session', 'reject'];
 
 function normalizePiThinkingLevel(value: unknown): string | undefined {
   const level = typeof value === 'string' ? value.trim() : '';
@@ -348,6 +371,7 @@ export class PiBridgeConnection implements SessionConnection {
           title: String(ev.title ?? 'Permission request'),
           detail: ev.detail == null ? undefined : String(ev.detail),
           toolName: ev.toolName == null ? undefined : String(ev.toolName),
+          options: [...BRIDGED_APPROVAL_OPTIONS],
         });
         return;
       case 'permission-resolved':
@@ -431,6 +455,9 @@ export class PiBridgeConnection implements SessionConnection {
           title: String(ev.title ?? 'Permission request'),
           detail: ev.detail == null ? undefined : String(ev.detail),
           toolName: ev.toolName == null ? undefined : String(ev.toolName),
+          // Same advertisement on the hello backfill: a card still pending when a phone attaches must
+          // offer the same three answers it would have offered live.
+          options: [...BRIDGED_APPROVAL_OPTIONS],
         };
       case 'question-request':
         return { type: 'question-request', requestId: String(ev.requestId ?? ev.id ?? ''), questions: normalizeQuestions(ev.questions) };
@@ -580,6 +607,9 @@ export class PiBridgeConnection implements SessionConnection {
 
   /** Queue the app's decision for the extension's long-poll so it can resolve a blocked `tool_call`. */
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('Pi does not support persistent approval rules through this connection');
+    }
     this.enqueue({ kind: 'permission', requestId, decision });
   }
 

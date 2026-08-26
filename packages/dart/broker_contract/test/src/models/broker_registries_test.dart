@@ -4,7 +4,7 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(55));
+      expect(brokerRoutes, hasLength(56));
     });
 
     test('contains the fs and upload routes', () {
@@ -33,6 +33,7 @@ void main() {
           '/api/agent-runtime-updates',
           '/api/agent-runtime-update-policy',
           '/api/agent-runtime-updates/{id}/restart',
+          '/api/broker/features/workspace-browsing',
           '/api/attention-events',
           '/api/attention-events/dismiss-batch',
           '/api/attention-events/{id}/ack',

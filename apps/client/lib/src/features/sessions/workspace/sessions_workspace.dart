@@ -4,6 +4,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/nav_badge_label.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -136,6 +137,10 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   /// rather than the floor the pointer dragged through.
   double _dragStartWidth = SessionsWorkspace.defaultListPaneWidth;
 
+  /// Owned here, handed to the roster pane, so the search chord has something
+  /// to focus.
+  final FocusNode _searchFocusNode = FocusNode(debugLabel: 'roster-search');
+
   @override
   void initState() {
     super.initState();
@@ -155,6 +160,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   void dispose() {
     _pollTimer?.cancel();
     _persistTimer?.cancel();
+    _searchFocusNode.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -302,6 +308,101 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     unawaited(ref.read(sessionRosterResumeRefreshProvider)());
   }
 
+  /// Activates the open session at [index] (0-based, strip order).
+  ///
+  /// Past the end is a no-op, matching Chrome: the ordinal names a position
+  /// that may simply not be there.
+  void _activateOrdinal(OpenSessionsState open, int index) {
+    if (index < 0 || index >= open.refs.length) return;
+    ref
+        .read(openSessionsControllerProvider.notifier)
+        .activate(open.refs[index].key);
+  }
+
+  /// Activates the LAST open session — Chrome's rule for `9`.
+  void _activateLastSession(OpenSessionsState open) {
+    if (open.refs.isEmpty) return;
+    ref
+        .read(openSessionsControllerProvider.notifier)
+        .activate(open.refs.last.key);
+  }
+
+  /// Moves [delta] tabs along the strip, wrapping at both ends.
+  void _cycleSession(OpenSessionsState open, int delta) {
+    if (open.refs.length < 2) return;
+    final current = open.refs.indexWhere(
+      (entry) => entry.key == open.activeKey,
+    );
+    final from = current < 0 ? 0 : current;
+    // Dart's `%` is non-negative for a positive divisor, so this wraps both
+    // ways without a sign fix.
+    final next = (from + delta) % open.refs.length;
+    ref
+        .read(openSessionsControllerProvider.notifier)
+        .activate(open.refs[next].key);
+  }
+
+  /// Closes the active tab, the same working-set-only close the tab strip's
+  /// button performs. The agent keeps running.
+  ///
+  /// Unawaited on purpose: the close is fire-and-forget from a keystroke, and
+  /// the draft-durability barrier it waits on lives inside the controller, so
+  /// nothing here has to sequence after it.
+  void _closeActiveSession(OpenSessionsState open) {
+    final key = open.activeKey;
+    if (key == null) return;
+    unawaited(ref.read(openSessionsControllerProvider.notifier).close(key));
+  }
+
+  /// The opened-sessions chords for the wide layout.
+  ///
+  /// Wide and compact bind the same registry specs to different handlers,
+  /// because close already means two different things in the two layouts:
+  /// here the detail pane is embedded and the controller call is the whole
+  /// action, while the compact page must also route to a neighbour. The
+  /// draft-durability barrier is NOT one of those differences — it lives
+  /// inside `OpenSessionsController.close`, so both layouts get it.
+  Map<ShortcutActivator, VoidCallback> _workspaceShortcuts(
+    OpenSessionsState open, {
+    required bool canCreateSession,
+  }) => {
+    ...appShortcutBindings(
+      specs: appShortcutsForScope(AppShortcutScope.workspace),
+      handlers: {
+        AppShortcutId.closeSession: () => _closeActiveSession(open),
+        AppShortcutId.nextSession: () => _cycleSession(open, 1),
+        AppShortcutId.previousSession: () => _cycleSession(open, -1),
+        AppShortcutId.jumpToLastSession: () => _activateLastSession(open),
+        if (canCreateSession)
+          AppShortcutId.newSession: () => unawaited(_openNewSession()),
+      },
+    ),
+    ...appShortcutOrdinalBindings(
+      kSessionOrdinalActivators,
+      (index) => _activateOrdinal(open, index),
+    ),
+    // The roster is mounted in this layout too, so the search chord is bound
+    // here as well — a help-page row that works in one width and not the
+    // other is the defect the registry exists to prevent.
+    ...appShortcutBindings(
+      specs: appShortcutsForScope(AppShortcutScope.sessionList),
+      handlers: {AppShortcutId.focusRosterSearch: _focusRosterSearch},
+    ),
+  };
+
+  /// Puts the caret in the roster's search field, opening the roster first.
+  ///
+  /// The pane is collapsed by default here, and focusing a field inside a
+  /// zero-width pane would consume the chord and show nothing.
+  void _focusRosterSearch() {
+    if (!mounted) return;
+    if (_collapsed) {
+      setState(() => _collapsed = false);
+      unawaited(_persistSplit());
+    }
+    _searchFocusNode.requestFocus();
+  }
+
   /// The shared status slot's explicit user action.
   ///
   /// Deliberately not [_refreshNow]: a background tick is silent by contract,
@@ -374,6 +475,42 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     final active = open.active;
     final buildDetail = widget.detailBuilder ?? _defaultDetail;
 
+    return CallbackShortcuts(
+      bindings: _workspaceShortcuts(
+        open,
+        canCreateSession: canCreateSession,
+      ),
+      child: _buildSplit(
+        tokens: tokens,
+        l10n: l10n,
+        listState: listState,
+        open: open,
+        active: active,
+        activeSource: activeSource,
+        buildDetail: buildDetail,
+        unreadCount: unreadCount,
+        hasActiveBrokerClient: hasActiveBrokerClient,
+        hasCompletedEmptyRoster: hasCompletedEmptyRoster,
+        canCreateSession: canCreateSession,
+        emptyRosterMessage: emptyRosterMessage,
+      ),
+    );
+  }
+
+  Widget _buildSplit({
+    required AppTokens tokens,
+    required AppLocalizations l10n,
+    required SessionListState listState,
+    required OpenSessionsState open,
+    required SessionRef? active,
+    required RosterSource? activeSource,
+    required SessionDetailPaneBuilder buildDetail,
+    required int unreadCount,
+    required bool hasActiveBrokerClient,
+    required bool hasCompletedEmptyRoster,
+    required bool canCreateSession,
+    required String emptyRosterMessage,
+  }) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final available = constraints.maxWidth;
@@ -428,9 +565,11 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                         onSelect: (key) => ref
                             .read(openSessionsControllerProvider.notifier)
                             .activate(key),
-                        onClose: (key) => ref
-                            .read(openSessionsControllerProvider.notifier)
-                            .close(key),
+                        onClose: (key) => unawaited(
+                          ref
+                              .read(openSessionsControllerProvider.notifier)
+                              .close(key),
+                        ),
                       ),
                       Expanded(
                         child: active == null
@@ -567,6 +706,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         ),
         Expanded(
           child: SessionListPane(
+            searchFocusNode: _searchFocusNode,
             queryWindow:
                 ref.watch(sessionRosterWindowProvider).valueOrNull ??
                 SessionRosterQueryWindow.last7Days,

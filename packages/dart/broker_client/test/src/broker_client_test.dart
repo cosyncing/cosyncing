@@ -231,6 +231,44 @@ void main() {
         ]);
       });
 
+      test('gets and confirms workspace browsing exposure', () async {
+        const endpoint =
+            'http://127.0.0.1:7734/api/broker/features/workspace-browsing';
+        dioAdapter
+          ..onGet(
+            endpoint,
+            (server) => server.reply(200, {
+              'ok': true,
+              'enabled': false,
+              'ownerOperationsAvailable': true,
+            }),
+          )
+          ..onPost(
+            endpoint,
+            data: <String, dynamic>{
+              'enabled': true,
+              'confirmRemoteFileAccess': true,
+            },
+            (server) => server.reply(202, {
+              'ok': true,
+              'enabled': true,
+              'active': false,
+              'restartRequired': true,
+            }),
+          );
+
+        final current = await client.getWorkspaceBrowsingSettings();
+        final changed = await client.setWorkspaceBrowsing(
+          enabled: true,
+          confirmRemoteFileAccess: true,
+        );
+        expect(current.enabled, isFalse);
+        expect(current.ownerOperationsAvailable, isTrue);
+        expect(changed.enabled, isTrue);
+        expect(changed.active, isFalse);
+        expect(changed.restartRequired, isTrue);
+      });
+
       test('posts confirmed restart-all request', () async {
         dioAdapter.onPost(
           'http://127.0.0.1:7734/api/broker/restart-all',

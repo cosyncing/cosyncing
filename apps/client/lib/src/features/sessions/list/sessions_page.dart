@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_profile_manager_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
@@ -45,6 +46,17 @@ class SessionsPage extends ConsumerStatefulWidget {
 
 class _SessionsPageState extends ConsumerState<SessionsPage> {
   NewSessionLaunchRequest? _newSessionLaunch;
+
+  /// Owned here, handed to the roster pane, so the search chord has something
+  /// to focus. The pane rebuilds constantly; a node owned by it would be
+  /// unreachable from the binding site.
+  final FocusNode _searchFocusNode = FocusNode(debugLabel: 'roster-search');
+
+  @override
+  void dispose() {
+    _searchFocusNode.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -101,6 +113,21 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
             _loadSessions,
         const SingleActivator(LogicalKeyboardKey.keyR, meta: true):
             _loadSessions,
+        ...appShortcutBindings(
+          specs: appShortcutsForScope(AppShortcutScope.sessionList),
+          handlers: {AppShortcutId.focusRosterSearch: _focusRosterSearch},
+        ),
+        // The compact roster is a place a new session is started from, so it
+        // binds the registry's new-session chord to the same sheet the button
+        // opens. The wide workspace already did; compact advertised the chord
+        // on the help page and did nothing with it.
+        ...appShortcutBindings(
+          specs: appShortcutsForScope(AppShortcutScope.workspace),
+          handlers: {
+            if (canCreateSession && _newSessionLaunch == null)
+              AppShortcutId.newSession: () => unawaited(_openNewSession()),
+          },
+        ),
       },
       child: Focus(
         autofocus: true,
@@ -158,6 +185,7 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                               unawaited(_openNewSession(project: project))
                         : null,
                     onRetry: _loadSessions,
+                    searchFocusNode: _searchFocusNode,
                   ),
                   (SessionListStatus.loading, _) => const _LoadingView(),
                   // A failed refresh never discards rows the user can still
@@ -173,6 +201,7 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                                 unawaited(_openNewSession(project: project))
                           : null,
                       onRetry: _loadSessions,
+                      searchFocusNode: _searchFocusNode,
                     ),
                   (SessionListStatus.error, _) => _ErrorView(
                     onRetry: _loadSessions,
@@ -193,11 +222,21 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                                   )
                                 : null,
                             onRetry: _loadSessions,
+                            searchFocusNode: _searchFocusNode,
                           ),
                 },
         ),
       ),
     );
+  }
+
+  /// Puts the caret in the roster's search field.
+  ///
+  /// Focus only — the query is never cleared. A user reaching for search
+  /// mid-filter wants to refine what they typed, not start over.
+  void _focusRosterSearch() {
+    if (!mounted) return;
+    _searchFocusNode.requestFocus();
   }
 
   void _loadSessions() {
@@ -613,6 +652,7 @@ class _SessionList extends ConsumerWidget {
     this.status = SessionListStatus.loaded,
     this.cachedRoster,
     this.onRetry,
+    this.searchFocusNode,
   });
 
   final List<SessionInfo> sessions;
@@ -620,6 +660,7 @@ class _SessionList extends ConsumerWidget {
   final SessionListStatus status;
   final CachedRosterPresentation? cachedRoster;
   final VoidCallback? onRetry;
+  final FocusNode? searchFocusNode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -628,6 +669,7 @@ class _SessionList extends ConsumerWidget {
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 720),
         child: SessionListPane(
+          searchFocusNode: searchFocusNode,
           queryWindow:
               ref.watch(sessionRosterWindowProvider).valueOrNull ??
               SessionRosterQueryWindow.last7Days,

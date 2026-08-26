@@ -425,62 +425,74 @@ class _Tab extends StatelessWidget {
             : l10n.sessionDetailTitleUntitled);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
-      child: Material(
-        color: selected ? tokens.surface : Colors.transparent,
-        borderRadius: BorderRadius.circular(tokens.radiusSm),
-        child: InkWell(
-          onTap: onSelect,
-          onLongPress: onClose,
+      // Middle-click closes the tab — the one Chrome tab affordance that needs
+      // no chord and no reservation, so it works identically on native and on
+      // web. A `Listener` rather than a gesture recognizer because Flutter's
+      // tap recognizers only report the primary button; the auxiliary button
+      // is readable on the raw pointer event and nowhere else.
+      child: Listener(
+        onPointerDown: (event) {
+          if (event.kind != PointerDeviceKind.mouse) return;
+          if (event.buttons & kMiddleMouseButton == 0) return;
+          onClose();
+        },
+        child: Material(
+          color: selected ? tokens.surface : Colors.transparent,
           borderRadius: BorderRadius.circular(tokens.radiusSm),
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 220),
-            padding: const EdgeInsets.only(left: 10, right: 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(tokens.radiusSm),
-              border: Border.all(
-                color: selected ? tokens.separator : Colors.transparent,
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                StatusDot(
-                  color: tokens.toolColor(ref.tool),
-                  ringColor: needsInput ? tokens.statusNeedsInput : null,
-                  ringGapColor: needsInput ? tokens.surface : null,
-                  pulse: ref.status == SessionStatus.working,
+          child: InkWell(
+            onTap: onSelect,
+            onLongPress: onClose,
+            borderRadius: BorderRadius.circular(tokens.radiusSm),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 220),
+              padding: const EdgeInsets.only(left: 10, right: 4),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(tokens.radiusSm),
+                border: Border.all(
+                  color: selected ? tokens.separator : Colors.transparent,
                 ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: selected
-                          ? tokens.textPrimary
-                          : tokens.textSecondary,
-                      fontWeight: needsInput || selected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  StatusDot(
+                    color: tokens.toolColor(ref.tool),
+                    ringColor: needsInput ? tokens.statusNeedsInput : null,
+                    ringGapColor: needsInput ? tokens.surface : null,
+                    pulse: ref.status == SessionStatus.working,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: selected
+                            ? tokens.textPrimary
+                            : tokens.textSecondary,
+                        fontWeight: needsInput || selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 2),
-                IconButton(
-                  key: Key('open-session-tab-close-${ref.key}'),
-                  onPressed: onClose,
-                  icon: const Icon(Icons.close, size: 14),
-                  tooltip: AppLocalizations.of(context).close,
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 48,
-                    minHeight: 48,
+                  const SizedBox(width: 2),
+                  IconButton(
+                    key: Key('open-session-tab-close-${ref.key}'),
+                    onPressed: onClose,
+                    icon: const Icon(Icons.close, size: 14),
+                    tooltip: AppLocalizations.of(context).close,
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
+                    ),
+                    color: tokens.textTertiary,
                   ),
-                  color: tokens.textTertiary,
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

@@ -236,6 +236,38 @@
   </script>
 
   <!--
+    Accidental browser-close protection.
+
+    Ctrl/Cmd+W is owned by the browser and cannot be made a dependable Flutter
+    shortcut. `beforeunload` is the browser-native protection layer: Dart turns
+    it on while this window has open Cosyncing session tabs, and the browser
+    shows its standard confirmation for close, reload, or leave actions. The
+    text is intentionally browser-owned; modern browsers ignore custom copy.
+
+    The coordinated web-update handoff is a deliberate document replacement,
+    so it raises the one-shot bypass immediately before `location.replace`.
+  -->
+  <script>
+    (function () {
+      'use strict';
+      var protectedByOpenSessions = false;
+      var intentionalUnload = false;
+
+      window.cosyncingSetBrowserCloseProtection = function (enabled) {
+        protectedByOpenSessions = enabled === true;
+      };
+      window.cosyncingAllowIntentionalUnload = function () {
+        intentionalUnload = true;
+      };
+      window.addEventListener('beforeunload', function (event) {
+        if (!protectedByOpenSessions || intentionalUnload) return;
+        event.preventDefault();
+        event.returnValue = '';
+      });
+    }());
+  </script>
+
+  <!--
     Startup shell controller (N3).
 
     Contract:
@@ -1178,6 +1210,9 @@
         var next = attemptsFor(version) + 1;
         recordAttempt(version, next);
         note('move', { v: version, attempt: next });
+        if (typeof window.cosyncingAllowIntentionalUnload === 'function') {
+          window.cosyncingAllowIntentionalUnload();
+        }
         location.replace(handoffHref(version, currentRoute()));
       }
 

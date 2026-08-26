@@ -397,6 +397,29 @@ export function writeBrokerConfig(config: BrokerConfig, home = setupStateHome())
   return validated;
 }
 
+/** Persist the HTTP workspace-browsing exposure gate without disturbing additive config fields. */
+export function setHttpWorkspaceBrowsingEnabled(
+  enabled: boolean,
+  home = setupStateHome(),
+): BrokerConfig {
+  const inspection = inspectBrokerConfig(home);
+  if (inspection.status !== 'ok') {
+    throw new BrokerConfigurationError(
+      inspection.status === 'error' ? inspection.detailCode : 'config-missing',
+    );
+  }
+  return writeBrokerConfig(
+    {
+      ...inspection.config,
+      features: {
+        ...inspection.config.features,
+        httpWorkspaceBrowsing: enabled,
+      },
+    },
+    home,
+  );
+}
+
 function envInteger(env: NodeJS.ProcessEnv, name: string): number | undefined {
   const raw = env[name]?.trim();
   if (!raw) return undefined;

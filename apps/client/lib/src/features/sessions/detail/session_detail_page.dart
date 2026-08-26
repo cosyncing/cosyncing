@@ -6,6 +6,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
+import 'package:cosyncing_client/src/app/shortcuts/app_shortcuts.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
@@ -52,8 +53,10 @@ import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_command_args_codec.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/file_reference.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_conversation_turns.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_draft_store.dart';
+import 'package:cosyncing_client/src/features/sessions/transcript/session_file_link_scope.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_progress.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
@@ -218,6 +221,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   bool _terminalFresh = false;
   bool _terminalTabVisible = false;
   bool _terminalTabUpdateScheduled = false;
+  bool _fileLinkGateProbeScheduled = false;
   _SessionDetailView _view = _SessionDetailView.chat;
   final GlobalKey _statusTabFlightTargetKey = GlobalKey(
     debugLabel: 'session-detail-status-flight-target',
@@ -1262,14 +1266,74 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     }
   }
 
+  /// This session's file browser on the broker that is active RIGHT NOW.
+  ///
+  /// Read at every use rather than cached on the state: the gate verdict and
+  /// the listing are facts about a host, so a profile switch has to land on
+  /// that host's browser instead of the retired one's.
+  SessionFileBrowserKey get _fileBrowserKey =>
+      ref.read(sessionFileBrowserKeyProvider(_key));
+
   Future<void> _previewSessionFile(FsDirEntry entry) async {
     final preview = await ref
-        .read(sessionFileBrowserControllerProvider(_key).notifier)
+        .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
         .previewFile(entry);
     if (!mounted || preview == null) {
       return;
     }
     await _showSessionFilePreviewDialog(context, preview);
+  }
+
+  /// Stable identity so the link scope only notifies on a real gate change.
+  void _onOpenFileReference(SessionFileReference reference) {
+    unawaited(_openFileReference(reference));
+  }
+
+  /// Opens one transcript file mention in this session's Files surface.
+  ///
+  /// The view switches only once the broker has actually resolved the path. A
+  /// failure is stated in place, where the tap happened, and the transcript
+  /// keeps its scroll position — switching to an empty Files tab to show an
+  /// error would cost the reader their place for nothing.
+  Future<void> _openFileReference(SessionFileReference reference) async {
+    final browserKey = _fileBrowserKey;
+    final preview = await ref
+        .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+        .openReference(reference);
+    if (!mounted) return;
+    final browser = ref.read(sessionFileBrowserControllerProvider(browserKey));
+    if (browser.phase == SessionFileBrowserPhase.error ||
+        browser.phase == SessionFileBrowserPhase.remoteDisabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          key: const Key('session-file-link-failed'),
+          content: Text(
+            _sessionFileBrowserNotice(AppLocalizations.of(context), browser),
+          ),
+        ),
+      );
+      return;
+    }
+    _selectView(_SessionDetailView.files);
+    if (preview == null || !mounted) return;
+    await _showSessionFilePreviewDialog(context, preview);
+  }
+
+  /// Probes the workspace-file gate once per attach.
+  ///
+  /// The gate is a property of this session's host connection, not of any one
+  /// mention, so it is asked once and cached — never per link, and never again
+  /// on scroll. Until it answers, mentions stay plain text. Raised by the first
+  /// mention that reaches the screen: a session that shows none never spends a
+  /// request learning whether links it will not draw would have worked.
+  void _probeFileLinkGate() {
+    if (!mounted || _fileLinkGateProbeScheduled) return;
+    _fileLinkGateProbeScheduled = true;
+    unawaited(
+      ref
+          .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
+          .probeGate(),
+    );
   }
 
   /// Commits an inline title edit. The strip's title *is* the rename control
@@ -1856,10 +1920,14 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   Future<void> _closeOpenSession(String key) async {
     final currentKey = '${widget.tool}/${widget.sessionId}';
     if (key == currentKey) {
+      // Kept even though `close` now barriers too: only this page can read the
+      // live composer, and only this page can REPORT a refused write and
+      // abandon the close. The controller's own barrier coalesces with this
+      // one — the value it flushes is already durable, so it writes nothing.
       if (!await _establishDraftDurabilityBarrier() || !mounted) return;
     }
-    ref.read(openSessionsControllerProvider.notifier).close(key);
-    if (key != currentKey) {
+    await ref.read(openSessionsControllerProvider.notifier).close(key);
+    if (key != currentKey || !mounted) {
       return;
     }
     _suppressedSessionTabKey = currentKey;
@@ -1873,6 +1941,78 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     }
     context.go(sessionDetailLocation(tool: next.tool, sessionId: next.id));
   }
+
+  /// Whether an opened-sessions chord may act right now.
+  ///
+  /// Mirrors [_interruptFromShortcut]'s modal guard: a sheet or dialog over
+  /// this page owns the keyboard, and a keystroke behind it must not tear the
+  /// view down.
+  bool _sessionTabShortcutAllowed() {
+    final route = ModalRoute.of(context);
+    return route != null && route.isCurrent;
+  }
+
+  /// Closes THIS session's tab from the keyboard.
+  ///
+  /// Routed through [_closeOpenSession] rather than the controller so the
+  /// keystroke gets exactly what the close button gets: the draft-durability
+  /// barrier first (a chord must never silently drop an unsent prompt), then
+  /// the `_suppressedSessionTabKey` handshake that stops
+  /// [_ensureCurrentSessionTab] re-adding the tab on the next frame.
+  void _closeSessionFromShortcut() {
+    if (!_sessionTabShortcutAllowed()) return;
+    unawaited(_closeOpenSession('${widget.tool}/${widget.sessionId}'));
+  }
+
+  void _activateOrdinalFromShortcut(OpenSessionsState open, int index) {
+    if (!_sessionTabShortcutAllowed()) return;
+    if (index < 0 || index >= open.refs.length) return;
+    unawaited(_selectOpenSession(open.refs[index].key, open.refs));
+  }
+
+  void _activateLastSessionFromShortcut(OpenSessionsState open) {
+    if (!_sessionTabShortcutAllowed()) return;
+    if (open.refs.isEmpty) return;
+    unawaited(_selectOpenSession(open.refs.last.key, open.refs));
+  }
+
+  void _cycleSessionFromShortcut(OpenSessionsState open, int delta) {
+    if (!_sessionTabShortcutAllowed()) return;
+    if (open.refs.length < 2) return;
+    final current = open.refs.indexWhere(
+      (entry) => entry.key == open.activeKey,
+    );
+    final from = current < 0 ? 0 : current;
+    // Dart's `%` is non-negative for a positive divisor, so this wraps both
+    // ways without a sign fix.
+    final next = (from + delta) % open.refs.length;
+    unawaited(_selectOpenSession(open.refs[next].key, open.refs));
+  }
+
+  /// The opened-sessions chords for the compact single-pane layout.
+  ///
+  /// Same registry specs as `SessionsWorkspace`, different handlers: here
+  /// every selection also flushes the draft and routes, because the tab strip
+  /// and the detail are the same screen.
+  Map<ShortcutActivator, VoidCallback> _openSessionShortcuts(
+    OpenSessionsState open,
+  ) => {
+    ...appShortcutBindings(
+      specs: appShortcutsForScope(AppShortcutScope.workspace),
+      handlers: {
+        AppShortcutId.closeSession: _closeSessionFromShortcut,
+        AppShortcutId.nextSession: () => _cycleSessionFromShortcut(open, 1),
+        AppShortcutId.previousSession: () =>
+            _cycleSessionFromShortcut(open, -1),
+        AppShortcutId.jumpToLastSession: () =>
+            _activateLastSessionFromShortcut(open),
+      },
+    ),
+    ...appShortcutOrdinalBindings(
+      kSessionOrdinalActivators,
+      (index) => _activateOrdinalFromShortcut(open, index),
+    ),
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -1986,6 +2126,18 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     final hasActiveBrokerClient = ref
         .watch(brokerClientProvider)
         .maybeWhen(data: (client) => client != null, orElse: () => false);
+    // "Once per attach": losing the connection re-arms the probe, so a session
+    // that reattaches asks its host again rather than trusting an answer that
+    // belonged to a previous connection.
+    if (!isConnected) _fileLinkGateProbeScheduled = false;
+    // Only the gate is selected: the browser's listings and previews change
+    // often, and rebuilding the whole page for a directory listing would be a
+    // needless cost on a surface that only needs the yes/no.
+    final fileLinkGate = ref.watch(
+      sessionFileBrowserControllerProvider(
+        ref.watch(sessionFileBrowserKeyProvider(_key)),
+      ).select((it) => it.gate),
+    );
     final commands = state.commands;
     final models = state.models;
     _scheduleModelPreferenceRestore(state, models);
@@ -2106,6 +2258,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
             _focusPromptComposer,
         const SingleActivator(LogicalKeyboardKey.escape):
             _interruptFromShortcut,
+        // Only the compact single-pane layout owns the working set here. When
+        // embedded, `SessionsWorkspace` is the layout owner and binds these
+        // itself; binding them twice would give one keystroke two handlers.
+        if (showSinglePaneSessionStrip && openSessions != null)
+          ..._openSessionShortcuts(openSessions),
       },
       child: Focus(
         autofocus: true,
@@ -2197,58 +2354,68 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                           // bottom inset (see [kComposerBottomInset]).
                           fullBleed: true,
                           bottomPadding: kComposerBottomInset,
-                          child: _ChatPanel(
-                            key: const Key('session-detail-tab-panel-chat'),
+                          // Per-session, never a global opener: the workspace
+                          // can hold two session pages at once, and a global
+                          // would send this transcript's tap to the other
+                          // session's Files surface.
+                          child: SessionFileLinkScope(
                             sessionKey: _key,
-                            state: state,
-                            controller: controller,
-                            commands: commands,
-                            models: models,
-                            modes: state.modes,
-                            effectiveModel: effectiveModel,
-                            selectedPermissionMode:
-                                _selectedPermissionModeOverride ??
-                                state.sessionInfo?.currentMode,
-                            selectedCommand: selectedCommand,
-                            isConnected: isConnected,
-                            hasActiveBrokerClient: hasActiveBrokerClient,
-                            commandArgsController: _commandArgsController,
-                            hasModelOverride: _selectedModelOverride != null,
-                            isSendingPrompt: _isSendingPrompt,
-                            isPickingAttachments: _isPickingAttachments,
-                            isAttachmentIntakeBusy:
-                                _attachmentIntakeLeases.isNotEmpty,
-                            promptController: _promptController,
-                            promptFocusNode: _promptFocusNode,
-                            stagedAttachments: state.stagedAttachments,
-                            archivedLiveState: archivedLiveState,
-                            onArchiveLiveState: _archiveLiveStateItem,
-                            archiveTargetKey: _statusTabFlightTargetKey,
-                            reportView: _reportView,
-                            toolsExpanded: _toolsExpanded,
-                            toolExpansionRevision: _toolExpansionRevision,
-                            onSendCommand: () => _sendCommand(commands),
-                            onCommandSelected: (name) {
-                              setState(() {
-                                _selectedCommandName = name;
-                                _setCommandArgsFromSelection(
-                                  _resolveSelectedCommand(commands),
-                                );
-                              });
-                            },
-                            onAttachFiles: _pickAttachments,
-                            onBeginAttachmentIntake: _beginAttachmentIntake,
-                            onReplaceAttachment: _replaceAttachment,
-                            onRemoveAttachment: _removeAttachment,
-                            onSendPrompt: _sendPrompt,
-                            onInterrupt: _interruptCurrentTurn,
-                            bootstrapRetrying: _isRetryingBootstrap,
-                            onRetryBootstrap: _retryBootstrap,
-                            onAttach: () => unawaited(controller.attach()),
-                            onForkFromMessage: (messageId) =>
-                                unawaited(_forkSession(messageId: messageId)),
-                            onModelAndEffortSelected: _selectModelAndEffort,
-                            onPermissionModeSelected: _selectPermissionMode,
+                            gate: fileLinkGate,
+                            onOpen: _onOpenFileReference,
+                            onProbeNeeded: _probeFileLinkGate,
+                            child: _ChatPanel(
+                              key: const Key('session-detail-tab-panel-chat'),
+                              sessionKey: _key,
+                              state: state,
+                              controller: controller,
+                              commands: commands,
+                              models: models,
+                              modes: state.modes,
+                              effectiveModel: effectiveModel,
+                              selectedPermissionMode:
+                                  _selectedPermissionModeOverride ??
+                                  state.sessionInfo?.currentMode,
+                              selectedCommand: selectedCommand,
+                              isConnected: isConnected,
+                              hasActiveBrokerClient: hasActiveBrokerClient,
+                              commandArgsController: _commandArgsController,
+                              hasModelOverride: _selectedModelOverride != null,
+                              isSendingPrompt: _isSendingPrompt,
+                              isPickingAttachments: _isPickingAttachments,
+                              isAttachmentIntakeBusy:
+                                  _attachmentIntakeLeases.isNotEmpty,
+                              promptController: _promptController,
+                              promptFocusNode: _promptFocusNode,
+                              stagedAttachments: state.stagedAttachments,
+                              archivedLiveState: archivedLiveState,
+                              onArchiveLiveState: _archiveLiveStateItem,
+                              archiveTargetKey: _statusTabFlightTargetKey,
+                              reportView: _reportView,
+                              toolsExpanded: _toolsExpanded,
+                              toolExpansionRevision: _toolExpansionRevision,
+                              onSendCommand: () => _sendCommand(commands),
+                              onCommandSelected: (name) {
+                                setState(() {
+                                  _selectedCommandName = name;
+                                  _setCommandArgsFromSelection(
+                                    _resolveSelectedCommand(commands),
+                                  );
+                                });
+                              },
+                              onAttachFiles: _pickAttachments,
+                              onBeginAttachmentIntake: _beginAttachmentIntake,
+                              onReplaceAttachment: _replaceAttachment,
+                              onRemoveAttachment: _removeAttachment,
+                              onSendPrompt: _sendPrompt,
+                              onInterrupt: _interruptCurrentTurn,
+                              bootstrapRetrying: _isRetryingBootstrap,
+                              onRetryBootstrap: _retryBootstrap,
+                              onAttach: () => unawaited(controller.attach()),
+                              onForkFromMessage: (messageId) =>
+                                  unawaited(_forkSession(messageId: messageId)),
+                              onModelAndEffortSelected: _selectModelAndEffort,
+                              onPermissionModeSelected: _selectPermissionMode,
+                            ),
                           ),
                         ),
                       ),

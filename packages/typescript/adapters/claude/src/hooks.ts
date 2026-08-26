@@ -202,6 +202,9 @@ export class ClaudeHooksConnection implements SessionConnection {
   }
 
   async respondPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+    if (decision === 'approve-rule') {
+      throw new Error('Claude does not support persistent approval rules through this connection');
+    }
     this.settle(requestId, { kind: 'permission', decision });
     this.emit({ type: 'permission-resolved', requestId, decision });
   }

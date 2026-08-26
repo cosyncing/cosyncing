@@ -217,6 +217,7 @@ import {
   BROKER_LISTEN_HOST,
   inspectBrokerConfig,
   resolveBrokerConfiguration,
+  setHttpWorkspaceBrowsingEnabled,
 } from './configuration.ts';
 import { loadOrCreateBrokerInstance } from './broker-instance.ts';
 import { resolveRuntimeCredentials, safeCredentialEqual } from '../security/credentials.ts';
@@ -689,6 +690,7 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
   process.env.COSYNCING_CODEX_SYNC_SERVER = enabled ? '1' : '0';
 }
 
+const sessionMetadata = new SessionMetadataStore();
 const registry = new AgentRegistry();
 registry.register(new OpenCodeAdapter({
   waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
@@ -698,6 +700,7 @@ registry.register(new PiAdapter({
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.piIntegrationSource === 'file',
 }));
 registry.register(new CodexAdapter({
+  resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
   reportManagedStart: (failure) => {
     try {
       if (failure) {
@@ -849,7 +852,6 @@ const runtimeUpdates = new RuntimeUpdateCoordinator([
   restartAllowed: () => !shuttingDown,
 });
 const runtimeUpdateStatusTtlMs = Math.max(0, envNumber('COSYNCING_RUNTIME_UPDATE_STATUS_TTL_MS', 60_000));
-const sessionMetadata = new SessionMetadataStore();
 const authFailureAttention = new AuthFailureAttentionTracker();
 const BROKER_DESCRIPTOR = Object.freeze({
   version: BUILD_INFO.version,
@@ -5670,8 +5672,76 @@ server = Bun.serve<WsData>({
         principal: principal?.kind === 'peer'
           ? { kind: 'peer', roles: [...principal.roles].sort() }
           : { kind: 'owner' },
+        features: {
+          httpWorkspaceBrowsing: HTTP_WORKSPACE_BROWSING_ENABLED,
+        },
         ...healthWithSecurityState(),
       });
+    }
+
+    if (
+      path === '/api/broker/features/workspace-browsing' &&
+      req.method === 'GET'
+    ) {
+      return json({
+        ok: true,
+        enabled: HTTP_WORKSPACE_BROWSING_ENABLED,
+        ownerOperationsAvailable: principal?.kind !== 'peer',
+      });
+    }
+
+    if (
+      path === '/api/broker/features/workspace-browsing' &&
+      req.method === 'POST'
+    ) {
+      const body = await req.json().catch(() => ({})) as any;
+      if (typeof body?.enabled !== 'boolean') {
+        return json({
+          ok: false,
+          code: 'BAD_PARAM',
+          error: 'enabled must be a boolean',
+        }, 400);
+      }
+      if (body.enabled && body.confirmRemoteFileAccess !== true) {
+        return json({
+          ok: false,
+          code: 'BAD_PARAM',
+          error: 'confirmRemoteFileAccess:true is required when enabling workspace browsing',
+        }, 400);
+      }
+      if (body.enabled === HTTP_WORKSPACE_BROWSING_ENABLED) {
+        return json({
+          ok: true,
+          enabled: body.enabled,
+          active: HTTP_WORKSPACE_BROWSING_ENABLED,
+          restartRequired: false,
+          message: 'Workspace browsing setting is unchanged.',
+        });
+      }
+      try {
+        setHttpWorkspaceBrowsingEnabled(body.enabled);
+      } catch (error) {
+        return json({
+          ok: false,
+          code: 'PERSISTENCE_FAILED',
+          error: error instanceof Error
+            ? error.message
+            : 'broker configuration could not be updated',
+        }, 409);
+      }
+      const restart = scheduleBrokerRestart();
+      return json(
+        {
+          ok: true,
+          enabled: body.enabled,
+          active: HTTP_WORKSPACE_BROWSING_ENABLED,
+          ...restart,
+          message: body.enabled
+            ? 'Workspace browsing enabled; broker restart scheduled.'
+            : 'Workspace browsing disabled; broker restart scheduled.',
+        },
+        restart.dryRun ? 200 : 202,
+      );
     }
 
     if (path === '/api/broker/update' && req.method === 'GET') {

@@ -21,7 +21,7 @@ const socketPath = join(temp, 'app-server-control', 'app-server-control.sock');
 mkdirSync(join(temp, 'app-server-control'), { recursive: true });
 writeFileSync(socketPath, 'daemon-generation-1');
 
-writeFileSync(fake, `#!/bin/sh\nif [ "$2 $3" = "daemon version" ]; then\n  printf v >> '${versionProbes}'\n  if [ -f '${stopped}' ]; then exit 1; fi\n  if [ -f '${marker}' ]; then running=0.144.1; else running=0.142.5; fi\n  printf '{"status":"running","cliVersion":"0.144.1","appServerVersion":"%s","socketPath":"${socketPath}"}\\n' "$running"\n  exit 0\nfi\nif [ "$2 $3" = "daemon restart" ]; then\n  : > '${marker}'\n  printf generation-2 > '${socketPath}'\n  exit 0\nfi\nif [ "$2 $3" = "daemon start" ]; then exit 0; fi\nexit 2\n`);
+writeFileSync(fake, `#!/bin/sh\nif [ "$2 $3" = "daemon version" ]; then\n  printf v >> '${versionProbes}'\n  if [ -f '${stopped}' ]; then exit 1; fi\n  if [ -f '${marker}' ]; then running=0.144.1; else running=0.142.5; fi\n  printf '{"status":"running","cliVersion":"0.144.1","appServerVersion":"%s","socketPath":"${socketPath}","backend":"pid","pid":123}\\n' "$running"\n  exit 0\nfi\nif [ "$2 $3" = "daemon restart" ]; then\n  exit 0\nfi\nif [ "$2 $3" = "daemon stop" ]; then\n  : > '${stopped}'\n  exit 0\nfi\nif [ "$2 $3" = "daemon start" ]; then\n  rm -f '${stopped}'\n  : > '${marker}'\n  printf generation-2 > '${socketPath}'\n  exit 0\nfi\nexit 2\n`);
 chmodSync(fake, 0o755);
 
 async function freePort(): Promise<number> {
@@ -60,8 +60,12 @@ const broker = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'
     COSYNCING_OPENCODE_NO_AUTOSERVE: '1',
     COSYNCING_CLAUDE_HOOKS: '0',
     COSYNCING_TOKEN: '',
+    COSYNCING_TOKEN_FILE: '',
+    COSYNCING_PI_INTEGRATION_FILE: '',
+    COSYNCING_PI_INTEGRATION_TOKEN: '',
     COSYNCING_RUNTIME_UPDATE_POLL_MS: '600000',
     COSYNCING_RUNTIME_UPDATE_STATUS_TTL_MS: '600000',
+    COSYNCING_CODEX_DAEMON_RESTART_VERIFY_MS: '0',
     COSYNCING_RESTART_DRY_RUN: '1',
   },
   stdin: 'ignore',

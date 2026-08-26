@@ -452,6 +452,12 @@ class _ToolDiffSection extends StatelessWidget {
   final List<_FileChangeView>? fileChanges;
   final _DiffBodyRefView? diffRef;
 
+  /// The reference behind a single inline diff's header path.
+  ///
+  /// Built from the canonical `tool-result.path` the card already read, not
+  /// from the header string, which a rename renders as `old → new`.
+  SessionFileReference? get _reference => SessionFileReference.parse(path);
+
   @override
   Widget build(BuildContext context) {
     if (diffRef != null) {
@@ -470,12 +476,16 @@ class _ToolDiffSection extends StatelessWidget {
                   ? 'Binary files a/${changes[i].path} and b/${changes[i].path} differ'
                   : (changes[i].diff ?? ''),
               path: changes[i].label,
+              // The NEW path, never the `old → new` label a rename displays.
+              reference: SessionFileReference.parse(changes[i].path),
             ),
           ],
         ],
       );
     }
-    if (diff != null) return _DiffView(diff: diff!, path: path);
+    if (diff != null) {
+      return _DiffView(diff: diff!, path: path, reference: _reference);
+    }
     return const SizedBox.shrink();
   }
 }
@@ -721,10 +731,13 @@ class _DiffRefViewState extends ConsumerState<_DiffRefView> {
 /// tool row is expanded — and cached for this widget's lifetime. Colours come
 /// from the dedicated diff tokens, never hard-coded hues.
 class _DiffView extends StatefulWidget {
-  const _DiffView({required this.diff, this.path, super.key});
+  const _DiffView({required this.diff, this.path, this.reference, super.key});
 
   final String diff;
   final String? path;
+
+  /// The resolvable file behind [path], when the change set named one.
+  final SessionFileReference? reference;
 
   @override
   State<_DiffView> createState() => _DiffViewState();
@@ -898,12 +911,21 @@ class _DiffViewState extends State<_DiffView> {
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              widget.path ?? '',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: mono?.copyWith(color: tokens.textSecondary),
-            ),
+            child: widget.reference == null
+                ? Text(
+                    widget.path ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: mono?.copyWith(color: tokens.textSecondary),
+                  )
+                : _TranscriptFileLink(
+                    linkKey: const Key('tool-diff-path'),
+                    reference: widget.reference!,
+                    text: widget.path ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: mono?.copyWith(color: tokens.textSecondary),
+                  ),
           ),
           Tooltip(
             message: l10n.sessionToolDiffCopy,
