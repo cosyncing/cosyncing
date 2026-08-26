@@ -1,5 +1,6 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_freshness.dart';
 import 'package:flutter/material.dart';
 
@@ -40,8 +41,10 @@ class RosterFreshnessSlot extends StatelessWidget {
       SessionFreshness.initialLoading => l10n.rosterFreshnessLoading,
       SessionFreshness.refreshing => l10n.rosterFreshnessRefreshing,
       SessionFreshness.reconnecting => l10n.rosterFreshnessReconnecting,
-      SessionFreshness.failed =>
-        presentation.error ?? l10n.rosterFreshnessFailed,
+      SessionFreshness.failed => switch (presentation.error) {
+        final failure? => localizedFailureText(l10n, failure),
+        null => l10n.rosterFreshnessFailed,
+      },
       SessionFreshness.current => l10n.rosterRefresh,
     };
     // A failure whose recovery belongs to the content on screen keeps the slot

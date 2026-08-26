@@ -1,4 +1,5 @@
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/url_normalizer.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
@@ -186,7 +187,7 @@ class SessionListState {
   final List<SessionInfo> sessions;
 
   /// Error message, if [status] is [SessionListStatus.error].
-  final String? error;
+  final LocalizedFailure? error;
 
   /// Machine hostname from the broker, if available.
   final String? machine;
@@ -214,7 +215,7 @@ class SessionListState {
   SessionListState copyWith({
     SessionListStatus? status,
     List<SessionInfo>? sessions,
-    String? error,
+    LocalizedFailure? error,
     String? machine,
     int? revision,
     CachedRosterPresentation? cachedRoster,

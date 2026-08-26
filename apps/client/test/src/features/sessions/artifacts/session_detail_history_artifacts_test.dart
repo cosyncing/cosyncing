@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -914,8 +915,8 @@ void main() {
         expect(fakeConnection.sendNackCount, 1);
         expect(fakeConnection.lastProtocolTicket, 'ticket-failed');
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains("Couldn't save this transcript on the device."),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.saveTranscript,
         );
       });
 
@@ -1339,7 +1340,10 @@ void main() {
 
           final state = container.read(sessionDetailControllerProvider(key));
           expect(state.historyPageLoading, isFalse);
-          expect(state.historyPageError, contains('malformed'));
+          expect(
+            state.historyPageError?.lead,
+            FailureLead.historyPageMalformed,
+          );
           expect(state.olderHistoryCursor, 'page-2');
           expect(state.hasEarlierHistory, isTrue);
           expect(
@@ -1575,7 +1579,7 @@ void main() {
             sessionDetailControllerProvider(key),
           );
           expect(state.historyPageLoading, isFalse);
-          expect(state.historyPageError, contains('timed out'));
+          expect(state.historyPageError?.lead, FailureLead.historyPageTimeout);
           // The cursor and hasEarlier survive so retry stays possible.
           expect(state.olderHistoryCursor, 'page-2');
           expect(state.hasEarlierHistory, isTrue);

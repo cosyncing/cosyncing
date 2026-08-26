@@ -36,7 +36,10 @@
   <a href="#客户端">客户端</a> ·
   <a href="docs/README.md">文档</a> ·
   <a href="docs/CONTRIBUTING.md">参与贡献</a> ·
-  <a href="README.md">English</a>
+  <a href="README.md">English</a> ·
+  <a href="README.ja.md">日本語</a> ·
+  <a href="README.ko.md">한국어</a> ·
+  <a href="README.es.md">Español</a>
 </p>
 
 ---
@@ -150,7 +153,7 @@ setup 完成后，`cosy doctor` 只诊断、不改动机器；`cosy status` 汇�
 iOS 客户端将在后续通过 TestFlight 发布。
 
 <p align="center">
-  <a href="https://cosyncing.com/demo/">
+  <a href="https://cosyncing.com/zh/demo/">
     <picture>
       <source media="(prefers-color-scheme: dark)"
               srcset="https://cosyncing.com/assets/shots/demo/real/dark/workspace.png">

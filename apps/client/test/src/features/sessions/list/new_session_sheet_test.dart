@@ -724,7 +724,11 @@ void main() {
         .read(newSessionControllerProvider.notifier)
         .loadModels('codex');
     await tester.pumpAndSettle();
-    expect(find.text(en.newSessionModelStale), findsOneWidget);
+    expect(
+      find.textContaining(en.failureLeadRefreshModelCatalog),
+      findsOneWidget,
+    );
+    expect(find.textContaining(en.newSessionModelStaleNote), findsOneWidget);
     expect(
       container.read(newSessionControllerProvider).models.single.label,
       'GPT Test',
@@ -739,6 +743,20 @@ void main() {
     expect(container.read(newSessionControllerProvider).models, isEmpty);
   });
 
+  testWidgets('a typed agent-load failure keeps its own lead sentence', (
+    tester,
+  ) async {
+    final fake = _FakeBrokerClient(failAgentList: true);
+    await tester.pumpWidget(_host(fake));
+    await tester.tap(find.byKey(const Key('open-project-new')));
+    await tester.pumpAndSettle();
+
+    // The controller classified this as a load failure. Collapsing it to the
+    // create-failed sentence would name the wrong operation.
+    expect(find.textContaining(en.failureLeadLoadAgents), findsOneWidget);
+    expect(find.textContaining(en.failureLeadCreateSession), findsNothing);
+  });
+
   testWidgets('initial catalog failure is localized and retryable', (
     tester,
   ) async {
@@ -747,7 +765,11 @@ void main() {
     await tester.tap(find.byKey(const Key('open-project-new')));
     await tester.pumpAndSettle();
     final zh = await AppLocalizations.delegate.load(const Locale('zh'));
-    expect(find.text(zh.newSessionModelFailed), findsOneWidget);
+    expect(
+      find.textContaining(zh.failureLeadRefreshModelCatalog),
+      findsOneWidget,
+    );
+    expect(find.textContaining(zh.newSessionModelStaleNote), findsNothing);
     expect(find.text(zh.newSessionModelRefresh), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('new-session-model-refresh')));
@@ -779,7 +801,10 @@ void main() {
 
       expect(find.text(en.newSessionModelDefault), findsOneWidget);
       expect(find.text(en.newSessionModelUnavailable), findsOneWidget);
-      expect(find.text(en.newSessionModelFailed), findsNothing);
+      expect(
+        find.textContaining(en.failureLeadRefreshModelCatalog),
+        findsNothing,
+      );
       expect(find.text(en.newSessionModelLoading), findsNothing);
       expect(fake.modelCatalogCalls, 0);
       final container = ProviderScope.containerOf(
@@ -1253,6 +1278,7 @@ final class _FakeBrokerClient extends BrokerClient {
     this.catalogGate,
     this.failCreatesRemaining = 0,
     this.failCatalogsRemaining = 0,
+    this.failAgentList = false,
     this.agents = const [_AgentFixture('codex', 'Codex')],
     Map<String, List<ModelOption>>? catalogs,
   }) : catalogs =
@@ -1276,6 +1302,9 @@ final class _FakeBrokerClient extends BrokerClient {
   /// Number of leading `createSession` calls that throw before one succeeds.
   int failCreatesRemaining;
   int failCatalogsRemaining;
+
+  /// When true, every `listAgents` call throws.
+  final bool failAgentList;
   final List<_AgentFixture> agents;
   final Map<String, List<ModelOption>> catalogs;
 
@@ -1286,15 +1315,18 @@ final class _FakeBrokerClient extends BrokerClient {
   int modelCatalogCalls = 0;
 
   @override
-  Future<List<AgentInfo>> listAgents() async => agents
-      .map(
-        (fixture) => _agent(
-          fixture.id,
-          fixture.displayName,
-          fixture.canSelectModelAtCreation,
-        ),
-      )
-      .toList();
+  Future<List<AgentInfo>> listAgents() async {
+    if (failAgentList) throw Exception('agents unavailable');
+    return agents
+        .map(
+          (fixture) => _agent(
+            fixture.id,
+            fixture.displayName,
+            fixture.canSelectModelAtCreation,
+          ),
+        )
+        .toList();
+  }
 
   @override
   Future<ModelCatalogResponse> listAgentModels(String tool) async {

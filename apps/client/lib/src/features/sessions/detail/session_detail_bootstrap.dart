@@ -48,7 +48,7 @@ extension _SessionDetailBootstrap on SessionDetailController {
           source: SessionDetailBootstrapFailureSource.noProfile,
           hasCachedMessages: hasVisibleTranscript,
         ),
-        error: 'Connect to a server before attaching to a session.',
+        error: const LocalizedFailure.notice(FailureLead.attachRequiresServer),
         clearSessionInfo: true,
       );
       return;
@@ -111,10 +111,10 @@ extension _SessionDetailBootstrap on SessionDetailController {
           hasCachedMessages: hasVisibleTranscript,
         ),
         error: clientError == null
-            ? 'Connect to a server before attaching to a session.'
-            : userFacingMessage(
+            ? const LocalizedFailure.notice(FailureLead.attachRequiresServer)
+            : LocalizedFailure.from(
                 clientError!,
-                lead: "Couldn't connect to this session.",
+                lead: FailureLead.connectSession,
               ),
         clearSessionInfo: true,
       );
@@ -302,10 +302,7 @@ extension _SessionDetailBootstrap on SessionDetailController {
           // A transient attach failure ends the bounded Restoring claim but
           // preserves provenance; the next attach re-runs arbitration.
           driveRestorePhase: SessionDriveRestorePhase.idle,
-          error: userFacingMessage(
-            error,
-            lead: "Couldn't connect to this session.",
-          ),
+          error: LocalizedFailure.from(error, lead: FailureLead.connectSession),
         );
         _abandonBootstrapConnection(connection, attempt);
       }

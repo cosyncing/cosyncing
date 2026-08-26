@@ -23,24 +23,26 @@ extension _SessionDetailSessionActions on SessionDetailController {
       final client = await ref.read(brokerClientProvider.future);
       if (!_canPublishRenameFor(source)) return false;
       if (client == null) {
-        const message = 'Connect to a server before renaming this session.';
+        const lead = FailureLead.renameRequiresServer;
+        const refusal = SessionActionRefusal.renameRequiresServer;
         state = state.copyWith(
-          error: message,
+          error: const LocalizedFailure.notice(lead),
           renameSessionActionState: const SessionActionState(
             phase: SessionActionPhase.failed,
-            message: message,
+            refusal: refusal,
           ),
         );
         return false;
       }
 
       if (state.agentActions?.canRenameNative != true) {
-        const message = 'Rename is not available for this agent.';
+        const lead = FailureLead.renameUnsupported;
+        const refusal = SessionActionRefusal.renameUnsupported;
         state = state.copyWith(
-          error: message,
+          error: const LocalizedFailure.notice(lead),
           renameSessionActionState: const SessionActionState(
             phase: SessionActionPhase.failed,
-            message: message,
+            refusal: refusal,
           ),
         );
         return false;
@@ -53,7 +55,6 @@ extension _SessionDetailSessionActions on SessionDetailController {
       state = state.copyWith(
         renameSessionActionState: const SessionActionState(
           phase: SessionActionPhase.inProgress,
-          message: 'Renaming session...',
         ),
         clearError: true,
       );
@@ -87,7 +88,6 @@ extension _SessionDetailSessionActions on SessionDetailController {
         sessionInfo: updated,
         renameSessionActionState: const SessionActionState(
           phase: SessionActionPhase.success,
-          message: 'Session title updated.',
         ),
         clearError: true,
       );
@@ -120,15 +120,15 @@ extension _SessionDetailSessionActions on SessionDetailController {
       return true;
     } on Object catch (error) {
       if (!_canPublishRenameFor(source)) return false;
-      final message = userFacingMessage(
+      final failure = LocalizedFailure.from(
         error,
-        lead: "Couldn't rename this session.",
+        lead: FailureLead.renameSession,
       );
       state = state.copyWith(
-        error: message,
+        error: failure,
         renameSessionActionState: SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          failure: failure,
         ),
       );
       return false;
@@ -152,24 +152,26 @@ extension _SessionDetailSessionActions on SessionDetailController {
   Future<SessionInfo?> _forkSessionCoordinated({String? messageId}) async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a server before forking this session.';
+      const lead = FailureLead.forkRequiresServer;
+      const refusal = SessionActionRefusal.forkRequiresServer;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         forkSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
     }
 
     if (state.agentActions?.canFork != true) {
-      const message = 'Fork is not available for this agent.';
+      const lead = FailureLead.forkUnsupported;
+      const refusal = SessionActionRefusal.forkUnsupported;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         forkSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
@@ -202,12 +204,13 @@ extension _SessionDetailSessionActions on SessionDetailController {
     }
 
     if (state.forkSessionActionState.isBusy) {
-      const message = 'Fork is already in progress.';
+      const lead = FailureLead.forkAlreadyRunning;
+      const refusal = SessionActionRefusal.forkAlreadyRunning;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         forkSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
@@ -216,7 +219,6 @@ extension _SessionDetailSessionActions on SessionDetailController {
     state = state.copyWith(
       forkSessionActionState: const SessionActionState(
         phase: SessionActionPhase.inProgress,
-        message: 'Creating forked session...',
       ),
       clearError: true,
     );
@@ -229,22 +231,21 @@ extension _SessionDetailSessionActions on SessionDetailController {
       );
       final created = response.session;
       if (created == null) {
-        const message = 'Fork returned no new session.';
+        const lead = FailureLead.forkReturnedNothing;
+        const refusal = SessionActionRefusal.forkReturnedNothing;
         state = state.copyWith(
-          error: message,
+          error: const LocalizedFailure.notice(lead),
           forkSessionActionState: const SessionActionState(
             phase: SessionActionPhase.failed,
-            message: message,
+            refusal: refusal,
           ),
         );
         return null;
       }
 
-      final title = created.title.isNotEmpty ? created.title : created.id;
       state = state.copyWith(
         forkSessionActionState: SessionActionState(
           phase: SessionActionPhase.success,
-          message: 'Forked session: $title',
           createdSessionId: created.id,
           createdSessionTitle: created.title,
         ),
@@ -256,21 +257,18 @@ extension _SessionDetailSessionActions on SessionDetailController {
       // local gate above gives, reached whenever the local lineage was missing
       // or stale. Falling through to `userFacingMessage` would write the
       // broker's English sentence into `state.error` as primary UI copy, in a
-      // client that ships two languages. Convert it to the typed refusal the
+      // client that ships multiple locales. Convert it to the typed refusal the
       // view already localizes.
       if (isAgentOwnedForkRefusal(e)) {
         _recordAgentOwnedForkRefusal();
         return null;
       }
-      final message = userFacingMessage(
-        e,
-        lead: "Couldn't fork this session.",
-      );
+      final failure = LocalizedFailure.from(e, lead: FailureLead.forkSession);
       state = state.copyWith(
-        error: message,
+        error: failure,
         forkSessionActionState: SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          failure: failure,
         ),
       );
       return null;
@@ -303,36 +301,39 @@ extension _SessionDetailSessionActions on SessionDetailController {
   Future<SessionInfo?> _cloneSessionCoordinated() async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a server before cloning this session.';
+      const lead = FailureLead.cloneRequiresServer;
+      const refusal = SessionActionRefusal.cloneRequiresServer;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         cloneSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
     }
 
     if (state.agentActions?.canClone != true) {
-      const message = 'Clone is not available for this agent.';
+      const lead = FailureLead.cloneUnsupported;
+      const refusal = SessionActionRefusal.cloneUnsupported;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         cloneSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
     }
 
     if (state.cloneSessionActionState.isBusy) {
-      const message = 'Clone is already in progress.';
+      const lead = FailureLead.cloneAlreadyRunning;
+      const refusal = SessionActionRefusal.cloneAlreadyRunning;
       state = state.copyWith(
-        error: message,
+        error: const LocalizedFailure.notice(lead),
         cloneSessionActionState: const SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          refusal: refusal,
         ),
       );
       return null;
@@ -341,7 +342,6 @@ extension _SessionDetailSessionActions on SessionDetailController {
     state = state.copyWith(
       cloneSessionActionState: const SessionActionState(
         phase: SessionActionPhase.inProgress,
-        message: 'Creating cloned session...',
       ),
       clearError: true,
     );
@@ -350,22 +350,21 @@ extension _SessionDetailSessionActions on SessionDetailController {
       final response = await client.cloneSession(arg.tool, arg.sessionId);
       final created = response.session;
       if (created == null) {
-        const message = 'Clone returned no new session.';
+        const lead = FailureLead.cloneReturnedNothing;
+        const refusal = SessionActionRefusal.cloneReturnedNothing;
         state = state.copyWith(
-          error: message,
+          error: const LocalizedFailure.notice(lead),
           cloneSessionActionState: const SessionActionState(
             phase: SessionActionPhase.failed,
-            message: message,
+            refusal: refusal,
           ),
         );
         return null;
       }
 
-      final title = created.title.isNotEmpty ? created.title : created.id;
       state = state.copyWith(
         cloneSessionActionState: SessionActionState(
           phase: SessionActionPhase.success,
-          message: 'Cloned session: $title',
           createdSessionId: created.id,
           createdSessionTitle: created.title,
         ),
@@ -373,15 +372,12 @@ extension _SessionDetailSessionActions on SessionDetailController {
       );
       return created;
     } on Object catch (e) {
-      final message = userFacingMessage(
-        e,
-        lead: "Couldn't clone this session.",
-      );
+      final failure = LocalizedFailure.from(e, lead: FailureLead.cloneSession);
       state = state.copyWith(
-        error: message,
+        error: failure,
         cloneSessionActionState: SessionActionState(
           phase: SessionActionPhase.failed,
-          message: message,
+          failure: failure,
         ),
       );
       return null;
@@ -409,27 +405,28 @@ extension _SessionDetailSessionActions on SessionDetailController {
     if (error is BrokerException) {
       final code = error.error?.code;
       final message = switch (code) {
-        'CONFIRMATION_STALE' =>
-          'Transcript export confirmation expired or changed. Try again.',
-        'RATE_LIMITED' => 'Transcript export is rate limited. Try again later.',
-        'R2_DISABLED' =>
-          'Transcript export is disabled for this server or client.',
-        'BAD_PARAM' => 'Transcript export request was rejected by the server.',
-        _ when error.statusCode == 501 =>
-          'Transcript export is not available for this agent.',
-        _ => userFacingMessage(
-          error,
-          lead: "Couldn't export this transcript.",
+        'CONFIRMATION_STALE' => const LocalizedFailure.notice(
+          FailureLead.exportConfirmationStale,
         ),
+        'RATE_LIMITED' => const LocalizedFailure.notice(
+          FailureLead.exportRateLimited,
+        ),
+        'R2_DISABLED' => const LocalizedFailure.notice(
+          FailureLead.exportDisabled,
+        ),
+        'BAD_PARAM' => const LocalizedFailure.notice(
+          FailureLead.exportBadParam,
+        ),
+        _ when error.statusCode == 501 => const LocalizedFailure.notice(
+          FailureLead.exportUnsupported,
+        ),
+        _ => LocalizedFailure.from(error, lead: FailureLead.exportTranscript),
       };
       return _TranscriptExportFailure(message: message, code: code);
     }
 
     return _TranscriptExportFailure(
-      message: userFacingMessage(
-        error,
-        lead: "Couldn't export this transcript.",
-      ),
+      message: LocalizedFailure.from(error, lead: FailureLead.exportTranscript),
     );
   }
 

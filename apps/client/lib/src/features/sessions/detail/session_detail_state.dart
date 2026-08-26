@@ -1,6 +1,7 @@
 import 'dart:collection';
 
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/attachments/session_attachment_picker.dart';
@@ -378,7 +379,7 @@ class SessionDetailState {
   final SessionAgentActions? agentActions;
 
   /// Last controller-level error, if any.
-  final String? error;
+  final LocalizedFailure? error;
 
   /// Current native session rename action state.
   final SessionActionState renameSessionActionState;
@@ -424,7 +425,7 @@ class SessionDetailState {
   final bool historyPageLoading;
 
   /// Typed paging failure for the current cursor chain.
-  final String? historyPageError;
+  final LocalizedFailure? historyPageError;
 
   /// Machine-readable paging failure. Resource/source failures are terminal
   /// for this cursor epoch; transport/malformed failures remain retryable.
@@ -726,7 +727,7 @@ class SessionDetailState {
     SessionConnectionAuthority? connectionAuthority,
     SessionJoinExistingAction? joinExisting,
     SessionAgentActions? agentActions,
-    String? error,
+    LocalizedFailure? error,
     SessionActionState? renameSessionActionState,
     SessionActionState? forkSessionActionState,
     SessionActionState? cloneSessionActionState,
@@ -738,7 +739,7 @@ class SessionDetailState {
     SessionInterruptPhase? interruptPhase,
     SessionCommandProgress? commandProgress,
     bool? historyPageLoading,
-    String? historyPageError,
+    LocalizedFailure? historyPageError,
     String? historyPageErrorCode,
     bool? historyStartReached,
     int? transcriptResetGeneration,
@@ -3207,7 +3208,7 @@ class TranscriptExportActionState {
   const TranscriptExportActionState({
     required this.phase,
     this.preflight,
-    this.message,
+    this.failure,
     this.errorCode,
   });
 
@@ -3215,7 +3216,7 @@ class TranscriptExportActionState {
   const TranscriptExportActionState.idle()
     : phase = TranscriptExportActionPhase.idle,
       preflight = null,
-      message = null,
+      failure = null,
       errorCode = null;
 
   /// Current phase.
@@ -3224,8 +3225,12 @@ class TranscriptExportActionState {
   /// Last successful preflight response, if confirmation is pending.
   final TranscriptExportPreflightResponse? preflight;
 
-  /// User-visible status/error text.
-  final String? message;
+  /// Classified failure behind an error phase, or null.
+  ///
+  /// Typed rather than a finished sentence: the status line is derived from
+  /// [phase] by the export status mapper, and this carries the diagnostic
+  /// for the "Technical details" disclosure.
+  final LocalizedFailure? failure;
 
   /// Broker machine-readable error code, if any.
   final String? errorCode;
@@ -3258,13 +3263,46 @@ enum SessionActionPhase {
 /// localized text without resolving a locale outside the widget tree, and text
 /// baked into state at refusal time would keep the language it was written in
 /// after the user switches languages. Broker-relayed text keeps using
-/// [SessionActionState.message], which the client does not author.
+/// `SessionActionState.failure`, which carries a caught exception.
 enum SessionActionRefusal {
   /// The session was spawned by another agent session, so it has no
   /// user-initiated fork point — its only writer is the parent session's run.
   ///
   /// Mirrors the broker's `SESSION_AGENT_OWNED` fork gate.
   agentOwnedSession,
+
+  /// Rename attempted with no server connection.
+  renameRequiresServer,
+
+  /// The session's agent does not support native rename.
+  renameUnsupported,
+
+  /// The broker refused the rename.
+  renameRejected,
+
+  /// Fork attempted with no server connection.
+  forkRequiresServer,
+
+  /// The session's agent does not support fork.
+  forkUnsupported,
+
+  /// A fork is already running for this session.
+  forkAlreadyRunning,
+
+  /// The broker accepted the fork but named no new session.
+  forkReturnedNothing,
+
+  /// Clone attempted with no server connection.
+  cloneRequiresServer,
+
+  /// The session's agent does not support clone.
+  cloneUnsupported,
+
+  /// A clone is already running for this session.
+  cloneAlreadyRunning,
+
+  /// The broker accepted the clone but named no new session.
+  cloneReturnedNothing,
 }
 
 /// Session action lifecycle for rename/fork/clone session operations.
@@ -3272,7 +3310,7 @@ class SessionActionState {
   /// Creates a [SessionActionState].
   const SessionActionState({
     required this.phase,
-    this.message,
+    this.failure,
     this.refusal,
     this.createdSessionId,
     this.createdSessionTitle,
@@ -3281,7 +3319,7 @@ class SessionActionState {
   /// Creates an idle action state.
   const SessionActionState.idle()
     : phase = SessionActionPhase.idle,
-      message = null,
+      failure = null,
       refusal = null,
       createdSessionId = null,
       createdSessionTitle = null;
@@ -3289,15 +3327,16 @@ class SessionActionState {
   /// Current action phase.
   final SessionActionPhase phase;
 
-  /// User-visible status message.
+  /// Classified failure behind a [SessionActionPhase.failed] action.
   ///
-  /// Not localized: it exists for text the client did not author. Prefer
-  /// [refusal] for anything this client decides itself.
-  final String? message;
+  /// Typed rather than a finished sentence so the view renders it in the
+  /// active locale. Anything this client decides itself belongs in [refusal];
+  /// this field is only for a caught exception.
+  final LocalizedFailure? failure;
 
   /// Typed reason this action was refused locally, if it was.
   ///
-  /// Takes precedence over [message] when the view renders a status line.
+  /// Takes precedence over [failure] when the view renders a status line.
   final SessionActionRefusal? refusal;
 
   /// Created session id from fork/clone actions.

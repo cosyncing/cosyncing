@@ -5,13 +5,15 @@ part of '../detail/session_detail_controller.dart';
 
 extension _SessionDetailArtifactActions on SessionDetailController {
   void _reportAttachmentIntakeFailureCoordinated() {
-    state = state.copyWith(error: sessionAttachmentIntakeErrorKey);
+    state = state.copyWith(
+      error: const LocalizedFailure.notice(FailureLead.attachmentIntake),
+    );
   }
 
   Future<bool> _pickAttachmentsCoordinated() async {
     if (state.agentActions?.canAttachFiles != true) {
       state = state.copyWith(
-        error: sessionAttachmentUnsupportedErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentUnsupported),
       );
       return false;
     }
@@ -22,7 +24,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
           .pickAttachments();
     } on Object {
       state = state.copyWith(
-        error: sessionAttachmentSelectionErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentSelection),
       );
       return false;
     }
@@ -34,7 +36,9 @@ extension _SessionDetailArtifactActions on SessionDetailController {
     List<SessionAttachment> selected,
   ) async {
     if (state.agentActions?.canAttachFiles != true) {
-      state = state.copyWith(error: sessionAttachmentUnsupportedErrorKey);
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.attachmentUnsupported),
+      );
       return false;
     }
     if (selected.isEmpty) return false;
@@ -52,7 +56,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         count > promptAttachmentMaxFiles ||
         bytes > promptAttachmentMaxPromptBytes) {
       state = state.copyWith(
-        error: sessionAttachmentLimitErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentLimit),
       );
       return false;
     }
@@ -83,7 +87,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
           .pickAttachments(allowMultiple: false);
     } on Object {
       state = state.copyWith(
-        error: sessionAttachmentReplacementErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentReplacement),
       );
       return false;
     }
@@ -98,7 +102,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
     if (retainedBytes + replacement.byteLength >
         promptAttachmentMaxPromptBytes) {
       state = state.copyWith(
-        error: sessionAttachmentLimitErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentLimit),
       );
       return false;
     }
@@ -173,7 +177,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
             .toList(growable: false);
         state = state.copyWith(
           stagedAttachments: attachments,
-          error: sessionAttachmentStagingErrorKey,
+          error: const LocalizedFailure.notice(FailureLead.attachmentStaging),
         );
         throw StateError(result.message);
       }
@@ -358,24 +362,24 @@ extension _SessionDetailArtifactActions on SessionDetailController {
   _prepareTranscriptExportCoordinated() async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a server before exporting transcripts.';
+      const message = LocalizedFailure.notice(FailureLead.exportRequiresServer);
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: message,
+          failure: message,
         ),
       );
       return null;
     }
 
     if (state.agentActions?.canTranscriptExport != true) {
-      const message = 'Transcript export is not available for this agent.';
+      const message = LocalizedFailure.notice(FailureLead.exportUnsupported);
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: message,
+          failure: message,
         ),
       );
       return null;
@@ -384,7 +388,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
     state = state.copyWith(
       transcriptExportActionState: const TranscriptExportActionState(
         phase: TranscriptExportActionPhase.preflighting,
-        message: 'Preparing transcript export...',
       ),
       clearError: true,
     );
@@ -398,7 +401,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         transcriptExportActionState: TranscriptExportActionState(
           phase: TranscriptExportActionPhase.awaitingConfirmation,
           preflight: preflight,
-          message: preflight.confirm.message,
         ),
         clearError: true,
       );
@@ -409,7 +411,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         error: failure.message,
         transcriptExportActionState: TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: failure.message,
+          failure: failure.message,
           errorCode: failure.code,
         ),
       );
@@ -421,12 +423,12 @@ extension _SessionDetailArtifactActions on SessionDetailController {
   Future<bool> _exportTranscriptCoordinated({required String nonce}) async {
     final client = await ref.read(brokerClientProvider.future);
     if (client == null) {
-      const message = 'Connect to a server before exporting transcripts.';
+      const message = LocalizedFailure.notice(FailureLead.exportRequiresServer);
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: message,
+          failure: message,
         ),
       );
       return false;
@@ -434,12 +436,14 @@ extension _SessionDetailArtifactActions on SessionDetailController {
 
     final trimmedNonce = nonce.trim();
     if (trimmedNonce.isEmpty) {
-      const message = 'Transcript export confirmation is missing.';
+      const message = LocalizedFailure.notice(
+        FailureLead.exportConfirmationMissing,
+      );
       state = state.copyWith(
         error: message,
         transcriptExportActionState: const TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: message,
+          failure: message,
         ),
       );
       return false;
@@ -448,7 +452,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
     state = state.copyWith(
       transcriptExportActionState: const TranscriptExportActionState(
         phase: TranscriptExportActionPhase.exporting,
-        message: 'Exporting transcript...',
       ),
       clearError: true,
     );
@@ -461,12 +464,12 @@ extension _SessionDetailArtifactActions on SessionDetailController {
       );
       final artifact = response.artifact;
       if (artifact == null) {
-        const message = 'Transcript export completed without an artifact.';
+        const message = LocalizedFailure.notice(FailureLead.exportNoArtifact);
         state = state.copyWith(
           error: message,
           transcriptExportActionState: const TranscriptExportActionState(
             phase: TranscriptExportActionPhase.error,
-            message: message,
+            failure: message,
           ),
         );
         return false;
@@ -476,7 +479,6 @@ extension _SessionDetailArtifactActions on SessionDetailController {
       state = state.copyWith(
         transcriptExportActionState: const TranscriptExportActionState(
           phase: TranscriptExportActionPhase.exported,
-          message: 'Transcript export ready in Files.',
         ),
         clearError: true,
       );
@@ -487,7 +489,7 @@ extension _SessionDetailArtifactActions on SessionDetailController {
         error: failure.message,
         transcriptExportActionState: TranscriptExportActionState(
           phase: TranscriptExportActionPhase.error,
-          message: failure.message,
+          failure: failure.message,
           errorCode: failure.code,
         ),
       );

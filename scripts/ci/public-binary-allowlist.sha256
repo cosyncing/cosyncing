@@ -176,3 +176,15 @@ a17980598f4784d3c4a4ad96eb0263106d773ced1bafcb67ba88ceaac6365767  apps/client/te
 fd28f042b735c0d59cf8c969fb389e61daec65e24b3224dfe162d5e19953424a  apps/client/test/src/features/sessions/renderers/goldens/transcript_box_artifact_dark_roomy_en.png
 fde93c5ea39a25a509bace22e77ec6c2bcbe3c43d636e45891b46b8f99aa7ef6  apps/client/assets/brand/marketing/social-banner-white-2400x1260.png
 ffdc0b47aa0508d6db93fd377bc1c42f73888c43a1bb5834681c774ab95fe250  apps/client/ios/Runner/Assets.xcassets/AppIcon.appiconset/Icon-App-20x20@3x.png
+89f099eb273414ea2a48d847e097e5812eabbdaa00f1ff143263697c038feafa  apps/client/assets/brand/marketing/social-banner-es-1280x640.png
+9f3e3ca8fb489202a9cc32c488e6b29ff987cb582cc88a69c24c426bf3f36993  apps/client/assets/brand/marketing/social-banner-es-2400x1260.png
+add33220f822e7bb42e1c1ac376b4efa109ed3aac3c2b0983a381e6aee009f8d  apps/client/assets/brand/marketing/social-banner-ja-1280x640.png
+bc97ded98dc9dc0dea0cbd4b5931f0bb9a42b444582e18eec73a486f5edd95f4  apps/client/assets/brand/marketing/social-banner-ja-2400x1260.png
+ab0ca930e430aa62a3fc767b650d57cdb9d4e0366d7c0d25fba23865bacb9f7f  apps/client/assets/brand/marketing/social-banner-ko-1280x640.png
+8c400a25f6c1bb58898f2153f52ff1403d55fef934b2a18a85bd15dca033224c  apps/client/assets/brand/marketing/social-banner-ko-2400x1260.png
+31d3f72efae552e673ac68d1bf56467880ee9eab3553d766797325e3c1b7d46c  apps/client/assets/brand/marketing/social-banner-light-es-1280x640.png
+cd0e31c4c405bb00ac6d75762d72eff1dfc9da1557ac4801eacecf1c5beff84e  apps/client/assets/brand/marketing/social-banner-light-es-2400x1260.png
+001ef377c8bf5a375b6f4034ee1539b4fd61e616b595560f55154355b845d6b5  apps/client/assets/brand/marketing/social-banner-light-ja-1280x640.png
+fce3967fe844e82595193ea7a06954c624ddee101f2db8f131e0009844d81799  apps/client/assets/brand/marketing/social-banner-light-ja-2400x1260.png
+a1c345991c8553472dfec320d58816f54be79677a4b003383692c40b55ecb010  apps/client/assets/brand/marketing/social-banner-light-ko-1280x640.png
+2ffdd64142d88e3c40b9ed9649ee427b03313352ad97f6d24ba565da2deff1c6  apps/client/assets/brand/marketing/social-banner-light-ko-2400x1260.png

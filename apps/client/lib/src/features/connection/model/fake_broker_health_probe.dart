@@ -1,3 +1,4 @@
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/model/broker_health_probe.dart';
 import 'package:cosyncing_client/src/features/connection/model/health_probe_result.dart';
 
@@ -37,7 +38,8 @@ class FakeBrokerHealthProbe implements BrokerHealthProbe {
       return HealthProbeResult.success(machine: machineName);
     }
     return const HealthProbeResult.failure(
-      error: 'Connection refused — is the server running?',
+      error: LocalizedFailure.notice(FailureLead.reachServer),
+      detail: 'Connection refused — is the server running?',
     );
   }
 }

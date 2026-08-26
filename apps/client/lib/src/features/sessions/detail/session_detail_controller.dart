@@ -655,10 +655,7 @@ class SessionDetailController
       state = state.copyWith(
         connectionStatus: connection.state,
         driveRestorePhase: SessionDriveRestorePhase.idle,
-        error: userFacingMessage(
-          error,
-          lead: "Couldn't restore control of this session.",
-        ),
+        error: LocalizedFailure.from(error, lead: FailureLead.restoreControl),
       );
     }
   }
@@ -769,10 +766,7 @@ class SessionDetailController
       state = state.copyWith(
         connectionStatus: connection.state,
         driveRestorePhase: SessionDriveRestorePhase.idle,
-        error: userFacingMessage(
-          error,
-          lead: "Couldn't restore control of this session.",
-        ),
+        error: LocalizedFailure.from(error, lead: FailureLead.restoreControl),
       );
     }
   }
@@ -933,13 +927,13 @@ class SessionDetailController
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Reconnect before taking over this session.',
+        error: const LocalizedFailure.notice(FailureLead.takeOverDisconnected),
       );
       return false;
     }
     if (!control.canTakeOver) {
       state = state.copyWith(
-        error: 'Session control changed; review its current status first.',
+        error: const LocalizedFailure.notice(FailureLead.controlChangedReview),
       );
       return false;
     }
@@ -974,7 +968,11 @@ class SessionDetailController
         _requestedDriveReason = null;
         connection.disarmDriveAuthority();
         _completeTakeover(false);
-        state = state.copyWith(error: 'Take over could not reconnect.');
+        state = state.copyWith(
+          error: const LocalizedFailure.notice(
+            FailureLead.takeOverReconnectFailed,
+          ),
+        );
         return false;
       }
       return await result.future.timeout(
@@ -1023,7 +1021,7 @@ class SessionDetailController
       connection.disarmDriveAuthority();
       _completeTakeover(false);
       state = state.copyWith(
-        error: userFacingMessage(e, lead: "Couldn't take over this session."),
+        error: LocalizedFailure.from(e, lead: FailureLead.takeOverSession),
       );
       return false;
     }
@@ -1039,13 +1037,13 @@ class SessionDetailController
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Reconnect before handing control back to the terminal.',
+        error: const LocalizedFailure.notice(FailureLead.handBackDisconnected),
       );
       return false;
     }
     if (control.action != SessionControlAction.handoff) {
       state = state.copyWith(
-        error: 'Session control changed; review its current status first.',
+        error: const LocalizedFailure.notice(FailureLead.controlChangedReview),
       );
       return false;
     }
@@ -1066,7 +1064,11 @@ class SessionDetailController
       await connection.sendHandoff(clientMessageId: clientMessageId);
       if (connection.state != SessionDetailConnectionStatus.connected) {
         _completeHandoff(false);
-        state = state.copyWith(error: 'Terminal handoff could not reconnect.');
+        state = state.copyWith(
+          error: const LocalizedFailure.notice(
+            FailureLead.handBackReconnectFailed,
+          ),
+        );
         return false;
       }
       final confirmed = await result.future.timeout(
@@ -1081,7 +1083,7 @@ class SessionDetailController
       );
       if (!confirmed) {
         state = state.copyWith(
-          error: 'The server did not confirm terminal handoff.',
+          error: const LocalizedFailure.notice(FailureLead.handBackUnconfirmed),
         );
         return false;
       }
@@ -1095,10 +1097,7 @@ class SessionDetailController
     } on Object catch (e) {
       _completeHandoff(false);
       state = state.copyWith(
-        error: userFacingMessage(
-          e,
-          lead: "Couldn't hand control back to the terminal.",
-        ),
+        error: LocalizedFailure.from(e, lead: FailureLead.handBackControl),
       );
       return false;
     }
@@ -1405,10 +1404,7 @@ class SessionDetailController
       }
       if (_brokerScopeKey == snapshot.brokerProfileId) {
         state = state.copyWith(
-          error: userFacingMessage(
-            error,
-            lead: "Couldn't save this transcript on the device.",
-          ),
+          error: LocalizedFailure.from(error, lead: FailureLead.saveTranscript),
         );
       }
       return;
@@ -1430,11 +1426,9 @@ class SessionDetailController
       } on Object catch (error) {
         if (_brokerScopeKey == ticket.brokerScopeKey) {
           state = state.copyWith(
-            error: userFacingMessage(
+            error: LocalizedFailure.from(
               error,
-              lead:
-                  'The transcript was saved, but its receipt could not be '
-                  'sent.',
+              lead: FailureLead.sendTranscriptReceipt,
             ),
           );
         }
@@ -1481,10 +1475,19 @@ class SessionDetailController
         unawaited(_restoreLocalDraftForConnection());
         _scheduleLocalMaintenance();
       }
-      final connectionError =
+      final connectionErrorText =
           status == SessionDetailConnectionStatus.reconnecting
           ? connection.lastConnectionErrorMessage
           : null;
+      // Transport text is broker- or platform-authored, so it stays in the
+      // disclosure while the sentence the user reads comes from the lead.
+      final connectionError = connectionErrorText == null
+          ? null
+          : LocalizedFailure(
+              lead: FailureLead.connectSession,
+              kind: FailureKind.offline,
+              detail: boundedTechnicalDetail(connectionErrorText),
+            );
       state = state.copyWith(
         connectionStatus: status,
         interruptPhase: status == SessionDetailConnectionStatus.connected
@@ -1634,7 +1637,7 @@ class SessionDetailController
       _updateTranscriptCacheTail(event);
       final requestedHistoryCursor = _historyPageCursorInFlight;
       var historyPageLoading = state.historyPageLoading;
-      String? historyPageError;
+      LocalizedFailure? historyPageError;
       String? historyPageErrorCode;
       var clearHistoryPageError = false;
       var transcriptWindow = state.transcriptWindow;
@@ -1671,8 +1674,9 @@ class SessionDetailController
           clearHistoryPageError = true;
         } else {
           historyPageErrorCode = 'HISTORY_PAGE_CLIENT_RESOURCE_LIMIT';
-          historyPageError =
-              'This history page exceeds the active decoded-memory budget.';
+          historyPageError = const LocalizedFailure.notice(
+            FailureLead.historyPageMemoryBudget,
+          );
         }
       } else if (event is NackWireEvent &&
           event.clientMessageId != null &&
@@ -1680,13 +1684,18 @@ class SessionDetailController
         historyPageLoading = false;
         _clearHistoryPageTracking();
         historyPageErrorCode = event.code;
-        historyPageError = '${event.code}: ${event.message}';
+        historyPageError = LocalizedFailure(
+          lead: FailureLead.loadEarlierHistory,
+          detail: boundedTechnicalDetail('${event.code}: ${event.message}'),
+        );
       } else if (event is UnknownWireEvent &&
           event.kind == 'history-page' &&
           _historyPageRequestId != null) {
         historyPageLoading = false;
         _clearHistoryPageTracking();
-        historyPageError = 'The server returned a malformed history page.';
+        historyPageError = const LocalizedFailure.notice(
+          FailureLead.historyPageMalformed,
+        );
       }
       // A standing agent-owned refusal is a claim about the session this frame
       // just re-described. `sessionInfo` is replaced wholesale here, so once an
@@ -2117,8 +2126,11 @@ class SessionDetailController
         _scheduleLocalMaintenance();
         state = state.copyWith(
           error: isAttachmentFailure
-              ? sessionAttachmentDeliveryErrorKey
-              : detail,
+              ? const LocalizedFailure.notice(FailureLead.attachmentDelivery)
+              : LocalizedFailure(
+                  lead: FailureLead.sendPrompt,
+                  detail: boundedTechnicalDetail(detail),
+                ),
         );
       case _:
         return;

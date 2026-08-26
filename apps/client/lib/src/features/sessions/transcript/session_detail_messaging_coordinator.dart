@@ -91,7 +91,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     if (attachmentSnapshot.isNotEmpty &&
         state.agentActions?.canAttachFiles != true) {
       state = state.copyWith(
-        error: sessionAttachmentUnsupportedErrorKey,
+        error: const LocalizedFailure.notice(FailureLead.attachmentUnsupported),
       );
       return false;
     }
@@ -100,7 +100,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Cannot send prompt until the session is connected.',
+        error: const LocalizedFailure.notice(FailureLead.promptDisconnected),
       );
       return false;
     }
@@ -125,7 +125,9 @@ extension _SessionDetailMessaging on SessionDetailController {
     if (promptFiles.length > promptAttachmentMaxFiles ||
         inlineDecodedBytes > promptAttachmentInlineDecodedMaxBytes ||
         inlineEncodedBytes > promptAttachmentInlineEncodedMaxBytes) {
-      state = state.copyWith(error: sessionAttachmentLimitErrorKey);
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.attachmentLimit),
+      );
       return false;
     }
 
@@ -246,8 +248,10 @@ extension _SessionDetailMessaging on SessionDetailController {
       // the prompt and its terminal receipt settles the draft.
       state = state.copyWith(
         error: stagedAttachments.isEmpty
-            ? userFacingMessage(e, lead: "Couldn't send the prompt.")
-            : sessionAttachmentDeliveryErrorKey,
+            ? LocalizedFailure.from(e, lead: FailureLead.sendPrompt)
+            : const LocalizedFailure.notice(
+                FailureLead.attachmentDelivery,
+              ),
         stagedAttachments: state.stagedAttachments
             .map(
               (attachment) => attachment.copyWith(
@@ -271,17 +275,25 @@ extension _SessionDetailMessaging on SessionDetailController {
   /// it from a task title, source label, agent, or tool name.
   Future<bool> _sendPlanActionCoordinated(PlanActionRequest request) async {
     if (request.planKey.trim().isEmpty || request.planRevision.trim().isEmpty) {
-      state = state.copyWith(error: 'Plan action is missing plan identity.');
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(
+          FailureLead.planActionMissingIdentity,
+        ),
+      );
       return false;
     }
     if (request.action == PlanActionKind.edit &&
         (request.text == null || request.text!.trim().isEmpty)) {
-      state = state.copyWith(error: 'A plan revision cannot be empty.');
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.planRevisionEmpty),
+      );
       return false;
     }
     if (!request.isValidBrokerRequest) {
       state = state.copyWith(
-        error: 'Plan action does not match the current server policy.',
+        error: const LocalizedFailure.notice(
+          FailureLead.planActionPolicyMismatch,
+        ),
       );
       return false;
     }
@@ -291,7 +303,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         state.connectionStatus != SessionDetailConnectionStatus.connected ||
         !control.canPrompt) {
       state = state.copyWith(
-        error: 'Plan actions require a prompt-capable Drive or sync session.',
+        error: const LocalizedFailure.notice(
+          FailureLead.planActionRequiresDrive,
+        ),
       );
       return false;
     }
@@ -308,7 +322,7 @@ extension _SessionDetailMessaging on SessionDetailController {
       return true;
     } on Object catch (error) {
       state = state.copyWith(
-        error: userFacingMessage(error, lead: "Couldn't update the plan."),
+        error: LocalizedFailure.from(error, lead: FailureLead.updatePlan),
       );
       return false;
     }
@@ -322,7 +336,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         request.interactionRef.trim().isEmpty ||
         request.interaction.isEmpty) {
       state = state.copyWith(
-        error: 'Artifact interaction is missing trusted artifact context.',
+        error: const LocalizedFailure.notice(
+          FailureLead.artifactInteractionMissingContext,
+        ),
       );
       return false;
     }
@@ -332,9 +348,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         state.connectionStatus != SessionDetailConnectionStatus.connected ||
         !control.canPrompt) {
       state = state.copyWith(
-        error:
-            'Artifact interactions require a prompt-capable Drive or '
-            'sync session.',
+        error: const LocalizedFailure.notice(
+          FailureLead.artifactInteractionRequiresDrive,
+        ),
       );
       return false;
     }
@@ -351,9 +367,9 @@ extension _SessionDetailMessaging on SessionDetailController {
       return true;
     } on Object catch (error) {
       state = state.copyWith(
-        error: userFacingMessage(
+        error: LocalizedFailure.from(
           error,
-          lead: "Couldn't send the artifact interaction.",
+          lead: FailureLead.sendArtifactInteraction,
         ),
       );
       return false;
@@ -385,9 +401,9 @@ extension _SessionDetailMessaging on SessionDetailController {
       return true;
     } on Object catch (error) {
       state = state.copyWith(
-        error: userFacingMessage(
+        error: LocalizedFailure.from(
           error,
-          lead: "Couldn't acknowledge the attached history.",
+          lead: FailureLead.acknowledgeHistory,
         ),
       );
       return false;
@@ -415,8 +431,9 @@ extension _SessionDetailMessaging on SessionDetailController {
       state = state.copyWith(
         historyPageLoading: false,
         historyPageErrorCode: 'HISTORY_PAGE_TIMEOUT',
-        historyPageError:
-            'Loading earlier history timed out. Reconnect or try again.',
+        historyPageError: const LocalizedFailure.notice(
+          FailureLead.historyPageTimeout,
+        ),
       );
     });
   }
@@ -442,7 +459,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
         historyPageErrorCode: 'HISTORY_PAGE_OFFLINE',
-        historyPageError: 'Reconnect before loading earlier history.',
+        historyPageError: const LocalizedFailure.notice(
+          FailureLead.historyPageOffline,
+        ),
       );
       return false;
     }
@@ -467,9 +486,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         state = state.copyWith(
           historyPageLoading: false,
           historyPageErrorCode: 'HISTORY_PAGE_TRANSPORT',
-          historyPageError: userFacingMessage(
+          historyPageError: LocalizedFailure.from(
             error,
-            lead: "Couldn't load earlier history.",
+            lead: FailureLead.loadEarlierHistory,
           ),
         );
       }
@@ -517,14 +536,13 @@ extension _SessionDetailMessaging on SessionDetailController {
     });
     if (normalizedName.isEmpty || !advertised) {
       state = state.copyWith(
-        error: 'This session does not advertise that action command.',
+        error: const LocalizedFailure.notice(FailureLead.commandUnadvertised),
       );
       return false;
     }
     if (!SessionControlView.fromSessionDetailState(state).canPrompt) {
       state = state.copyWith(
-        error:
-            'Action commands require a prompt-capable Drive or sync session.',
+        error: const LocalizedFailure.notice(FailureLead.commandRequiresDrive),
       );
       return false;
     }
@@ -545,7 +563,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     final trimmedName = name.trim();
     if (trimmedName.isEmpty) {
       state = state.copyWith(
-        error: 'Cannot send an empty command name.',
+        error: const LocalizedFailure.notice(FailureLead.commandNameEmpty),
       );
       return false;
     }
@@ -555,7 +573,9 @@ extension _SessionDetailMessaging on SessionDetailController {
       hasModelOverride: model != null,
     );
     if (modelArgError != null) {
-      state = state.copyWith(error: modelArgError);
+      state = state.copyWith(
+        error: const LocalizedFailure.notice(FailureLead.commandModelArgument),
+      );
       return false;
     }
     final normalizedPermissionMode = permissionMode?.trim();
@@ -563,9 +583,9 @@ extension _SessionDetailMessaging on SessionDetailController {
         normalizedPermissionMode.isNotEmpty &&
         (args?.containsKey('permissionMode') ?? false)) {
       state = state.copyWith(
-        error:
-            'Remove "permissionMode" from command arguments. Use the '
-            'permission selector instead.',
+        error: const LocalizedFailure.notice(
+          FailureLead.commandPermissionModeArgument,
+        ),
       );
       return false;
     }
@@ -581,7 +601,7 @@ extension _SessionDetailMessaging on SessionDetailController {
     if (connection == null ||
         state.connectionStatus != SessionDetailConnectionStatus.connected) {
       state = state.copyWith(
-        error: 'Cannot send command until the session is connected.',
+        error: const LocalizedFailure.notice(FailureLead.commandDisconnected),
       );
       return false;
     }
@@ -615,7 +635,7 @@ extension _SessionDetailMessaging on SessionDetailController {
         _clearCommandProgress();
       }
       state = state.copyWith(
-        error: userFacingMessage(e, lead: "Couldn't send the command."),
+        error: LocalizedFailure.from(e, lead: FailureLead.sendCommand),
       );
       return false;
     }

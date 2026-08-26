@@ -5,6 +5,8 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/errors/localized_user_facing_error.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/list/relative_time.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
@@ -186,8 +188,8 @@ class SessionListPane extends ConsumerStatefulWidget {
   /// Retries a failed initial fetch.
   final Future<void> Function()? onRetry;
 
-  /// Fetch failure text when [status] is [SessionListStatus.error].
-  final String? error;
+  /// Fetch failure when [status] is [SessionListStatus.error].
+  final LocalizedFailure? error;
 
   /// Optional widget shown when the authoritative roster is empty.
   final Widget? emptyState;
@@ -527,7 +529,7 @@ class _RosterLoading extends StatelessWidget {
 class _RosterError extends StatelessWidget {
   const _RosterError({required this.message, required this.onRetry});
 
-  final String? message;
+  final LocalizedFailure? message;
   final Future<void> Function()? onRetry;
 
   @override
@@ -544,7 +546,9 @@ class _RosterError extends StatelessWidget {
             Icon(Icons.cloud_off_outlined, color: tokens.textTertiary),
             const SizedBox(height: 12),
             SelectableText(
-              message ?? l10n.sessionRosterLoadFailed,
+              message == null
+                  ? l10n.sessionRosterLoadFailed
+                  : localizedFailureText(l10n, message!),
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: tokens.textSecondary,

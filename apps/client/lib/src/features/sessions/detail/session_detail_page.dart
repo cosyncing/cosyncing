@@ -2323,7 +2323,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                 if (state.error != null && !state.bootstrapState.hasFailed)
                   _PageTabContent(
                     bottomPadding: 0,
-                    child: _ErrorBanner(message: state.error!),
+                    child: _ErrorBanner(failure: state.error!),
                   ),
                 if (state.draftConflict != null)
                   _PageTabContent(

@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -163,7 +164,7 @@ void main() {
         state.connectionStatus,
         SessionDetailConnectionStatus.disconnected,
       );
-      expect(state.error, contains('Connect to a server'));
+      expect(state.error?.lead, FailureLead.attachRequiresServer);
     });
 
     test('takeOver re-attaches in resume (Drive) mode', () async {
@@ -1685,8 +1686,8 @@ void main() {
       expect(succeeded, isFalse);
       expect(fakeConnection.reattachModes, isEmpty);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('Reconnect before taking over'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.takeOverDisconnected,
       );
     });
 
@@ -1712,8 +1713,8 @@ void main() {
 
       expect(succeeded, isFalse);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains("Couldn't take over this session."),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.takeOverSession,
       );
       // The one-shot takeover request must not survive on the transport,
       // where a later automatic reconnect would silently retry it.
@@ -1959,8 +1960,8 @@ void main() {
           'CONFIRMATION_STALE',
         );
         expect(
-          state.error,
-          contains('confirmation expired or changed'),
+          state.error?.lead,
+          FailureLead.exportConfirmationStale,
         );
       },
     );
@@ -1987,7 +1988,7 @@ void main() {
         expect(actionState.phase, SessionActionPhase.success);
         expect(actionState.createdSessionId, 'session-1-fork');
         expect(actionState.createdSessionTitle, 'Forked Session');
-        expect(actionState.message, contains('Forked session'));
+        expect(actionState.failure, isNull);
       },
     );
 
@@ -2051,7 +2052,7 @@ void main() {
         // language (`AppLocalizations.sessionForkAgentOwnedRefusal`), so state
         // must carry the reason rather than the words.
         expect(actionState.refusal, SessionActionRefusal.agentOwnedSession);
-        expect(actionState.message, isNull);
+        expect(actionState.failure, isNull);
       },
     );
 
@@ -2179,7 +2180,7 @@ void main() {
         // view resolves the typed refusal in the user's own language. A
         // non-null `message` here would be exactly that leak, because the view
         // falls back to it whenever there is no refusal.
-        expect(state.forkSessionActionState.message, isNull);
+        expect(state.forkSessionActionState.failure, isNull);
         expect(state.error, isNull);
 
         // The refusal stands until an authoritative frame invalidates it, so a
@@ -2630,7 +2631,7 @@ void main() {
         expect(actionState.phase, SessionActionPhase.success);
         expect(actionState.createdSessionId, 'session-1-clone');
         expect(actionState.createdSessionTitle, 'Cloned Session');
-        expect(actionState.message, contains('Cloned session'));
+        expect(actionState.failure, isNull);
       },
     );
 
@@ -2701,8 +2702,8 @@ void main() {
           SessionActionPhase.failed,
         );
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('not available for this agent'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.forkUnsupported,
         );
       },
     );
@@ -2774,8 +2775,8 @@ void main() {
           SessionActionPhase.failed,
         );
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('not available for this agent'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.cloneUnsupported,
         );
       },
     );
@@ -2842,8 +2843,11 @@ void main() {
         SessionActionPhase.failed,
       );
       expect(
-        disconnectedContainer.read(sessionDetailControllerProvider(key)).error,
-        contains('Connect to a server before forking'),
+        disconnectedContainer
+            .read(sessionDetailControllerProvider(key))
+            .error
+            ?.lead,
+        FailureLead.forkRequiresServer,
       );
     });
 
@@ -2863,8 +2867,8 @@ void main() {
 
       expect(created, isNull);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains("Couldn't fork this session."),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.forkSession,
       );
       expect(
         container.read(sessionDetailControllerProvider(key)).error,
@@ -2889,8 +2893,8 @@ void main() {
 
       expect(created, isNull);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains("Couldn't clone this session."),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.cloneSession,
       );
       expect(
         container.read(sessionDetailControllerProvider(key)).error,

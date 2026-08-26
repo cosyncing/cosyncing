@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/sessions/requests/session_request_action_helpers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter/gestures.dart';
@@ -70,7 +71,9 @@ final class _GapPagingController extends SeededSessionDetailController {
   void failHistoryRequestRetryably() {
     state = state.copyWith(
       historyPageLoading: false,
-      historyPageError: 'The source changed while paging.',
+      historyPageError: const LocalizedFailure.notice(
+        FailureLead.loadEarlierHistory,
+      ),
       historyPageErrorCode: 'HISTORY_PAGE_SOURCE_CHANGED',
     );
   }

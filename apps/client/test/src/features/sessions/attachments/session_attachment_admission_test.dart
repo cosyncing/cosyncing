@@ -1,5 +1,6 @@
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -143,7 +144,7 @@ void main() {
         state.stagedAttachments.map((item) => item.attachment.name),
         before.map((item) => item.attachment.name),
       );
-      expect(state.error, sessionAttachmentLimitErrorKey);
+      expect(state.error?.lead, FailureLead.attachmentLimit);
       expect(fakeConnection.sendPromptCount, 0);
     },
   );

@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_client_flutter/broker_client_flutter.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_feed_runtime.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -137,8 +138,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.sendPermissionDecisionCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('without a request id'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.permissionDecisionMissingRequestId,
       );
     });
 
@@ -157,8 +158,8 @@ void main() {
         expect(sent, isFalse);
         expect(fakeConnection.sendPermissionDecisionCount, 0);
         expect(
-          container.read(sessionDetailControllerProvider(key)).error,
-          contains('until the session is connected'),
+          container.read(sessionDetailControllerProvider(key)).error?.lead,
+          FailureLead.permissionDecisionDisconnected,
         );
       },
     );
@@ -239,8 +240,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.sendQuestionAnswerCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('without a request id'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.questionAnswerMissingRequestId,
       );
     });
 
@@ -260,8 +261,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.sendQuestionAnswerCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('Cannot send empty question answers.'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.questionAnswerEmpty,
       );
     });
 
@@ -280,8 +281,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.sendQuestionAnswerCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('until the session is connected'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.questionAnswerDisconnected,
       );
     });
 
@@ -343,8 +344,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.rejectQuestionCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('until the session is connected'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.questionRejectDisconnected,
       );
     });
 
@@ -358,8 +359,8 @@ void main() {
       expect(sent, isFalse);
       expect(fakeConnection.rejectQuestionCount, 0);
       expect(
-        container.read(sessionDetailControllerProvider(key)).error,
-        contains('without a request id'),
+        container.read(sessionDetailControllerProvider(key)).error?.lead,
+        FailureLead.questionRejectMissingRequestId,
       );
     });
 
@@ -448,7 +449,7 @@ void main() {
           .attach();
 
       final state = container.read(sessionDetailControllerProvider(key));
-      expect(state.error, 'Connect to a server before attaching to a session.');
+      expect(state.error?.lead, FailureLead.attachRequiresServer);
       expect(
         state.connectionStatus,
         SessionDetailConnectionStatus.disconnected,

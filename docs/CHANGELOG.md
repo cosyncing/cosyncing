@@ -13,6 +13,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- The client now offers Japanese, Korean, and Spanish UI locales, with matching
+  localized READMEs and social banners. Typed connection, session, and schedule
+  errors render in the active locale and update after a language change.
 - Gated native-Windows broker foundations now cover command invocation,
   owner-only state, process ownership, Task Scheduler service management, and
   native qualification harnesses. Windows broker hosting remains disabled

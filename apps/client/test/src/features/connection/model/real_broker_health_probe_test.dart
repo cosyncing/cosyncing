@@ -1,5 +1,6 @@
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/connection/model/real_broker_health_probe.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -46,7 +47,7 @@ void main() {
     final result = await probe.probe(Uri.parse('http://127.0.0.1:7734'));
 
     expect(result.isSuccess, isFalse);
-    expect(result.error, contains('reported itself unhealthy'));
+    expect(result.error?.lead, FailureLead.serverUnhealthy);
     verify(() => client.close()).called(1);
   });
 
@@ -60,9 +61,11 @@ void main() {
     expect(result.isSuccess, isFalse);
     // The broker's own 5xx text is diagnostic, not instruction: it moves to
     // `detail` and the user reads a classified message instead.
-    expect(result.error, contains("Couldn't reach the server"));
-    expect(result.error, contains('on its end'));
-    expect(result.error, isNot(contains('broker unavailable')));
+    expect(result.error?.lead, FailureLead.reachServer);
+    expect(result.error?.kind, FailureKind.brokerFault);
+    // The typed pair carries no prose, so the 5xx text cannot leak into the
+    // sentence a user reads; it survives only in the disclosure fields.
+    expect(result.error?.detail, contains('broker unavailable'));
     expect(result.detail, contains('broker unavailable'));
     verify(() => client.close()).called(1);
   });
@@ -73,8 +76,9 @@ void main() {
     final result = await probe.probe(Uri.parse('http://127.0.0.1:7734'));
 
     expect(result.isSuccess, isFalse);
-    expect(result.error, contains("Couldn't reach the server"));
-    expect(result.error, isNot(contains('network down')));
+    expect(result.error?.lead, FailureLead.reachServer);
+    expect(result.error?.kind, FailureKind.unknown);
+    expect(result.error?.detail, contains('network down'));
     expect(result.detail, contains('network down'));
     verify(() => client.close()).called(1);
   });
