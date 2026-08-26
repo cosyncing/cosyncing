@@ -50,6 +50,24 @@ assert(
   baselineErrors.length === 0,
   `committed verification graph is invalid: ${baselineErrors.join('; ')}`,
 );
+const brokerSuites = graph.gates.find((gate) => gate.id === 'broker-deterministic')!
+  .subSuites!;
+assert(
+  brokerSuites.find((suite) => suite.id === 'state-security')?.timeoutClass === 'medium',
+  'state-security must allow a hosted runner more than the short 30-second budget',
+);
+assert(
+  brokerSuites.find((suite) => suite.id === 'npm-package')?.timeoutClass === 'long',
+  'npm-package must use the long budget because its build stages allow up to five minutes',
+);
+const acceptanceRunnerSource = readFileSync(
+  join(ROOT, 'scripts/broker/acceptance/deterministic-broker.ts'),
+  'utf8',
+);
+assert(
+  /long:\s*300_000/.test(acceptanceRunnerSource),
+  'the long broker-suite timeout must provide the declared five-minute ceiling',
+);
 const fixtureIsolationErrors = validateFixtureIsolationSources(ROOT);
 assert(
   fixtureIsolationErrors.length === 0,
