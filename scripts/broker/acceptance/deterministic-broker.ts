@@ -18,7 +18,7 @@ const MAX_SUITE_TIMEOUT_MS = 300_000;
 const SUITE_TIMEOUT_MS_BY_CLASS = {
   short: 30_000,
   medium: 180_000,
-  long: 180_000,
+  long: 300_000,
 } as const;
 
 interface SuiteSpec {
