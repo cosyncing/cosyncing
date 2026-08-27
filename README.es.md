@@ -63,6 +63,7 @@ cliente y el broker.
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
 Un solo protocolo cubre los siete. Lo que puedes controlar cambia según el agente, y las sesiones de

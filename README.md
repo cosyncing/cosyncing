@@ -67,6 +67,7 @@ hosted service between the client and the broker.
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
 One protocol covers all seven. Per-agent control differs, and Claude Code sessions open read-only

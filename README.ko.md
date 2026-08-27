@@ -63,6 +63,7 @@ Broker는 에이전트가 실행되는 컴퓨터에서 동작합니다. 각 세�
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
 일곱 가지 모두를 하나의 프로토콜로 다룹니다. 조작할 수 있는 범위는 에이전트마다 다르며,
