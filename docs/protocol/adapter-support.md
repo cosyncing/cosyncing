@@ -1,9 +1,10 @@
 # Adapter support and evidence
 
 The broker presents one protocol across Claude Code, Codex, OpenCode, Pi, Kimi
-Code, and DeepSeek Harness. The generated matrix below covers the four whose
-claims carry the required evidence; Kimi Code and DeepSeek Harness are
-provisional and are described under [experimental adapters](#experimental-adapters).
+Code, DeepSeek Harness, and Antigravity. The generated matrix below covers the
+four whose claims carry the required evidence; Kimi Code, DeepSeek Harness, and
+Antigravity are provisional and are described under
+[experimental adapters](#experimental-adapters).
 Support claims are generated from `support-matrix-claims.ts` and must have the
 evidence level required by `trace-manifest.ts`.
 
@@ -57,10 +58,11 @@ adapter is registered by default and served to any client that can decode its
 integration kind. It connects to the local server `kimi web` starts, which
 cosyncing never installs, and currently covers discovery and read-only observe
 for every session on that server, plus Drive — prompts, approvals, question
-replies, interruption, and model selection — for the sessions cosyncing created,
-explicit takeover for the ones it did not, and returning Drive to the terminal.
-Native file and image input, agent and mode switching, and the physical
-acceptance its claims will rest on remain follow-up work. See
+replies, interruption, model selection, file and image attachments, and the
+server's own slash commands — for the sessions cosyncing created, session
+creation and rename, explicit takeover for the ones it did not, and returning
+Drive to the terminal. Agent and mode switching and the physical acceptance its
+claims will rest on remain follow-up work. See
 [Kimi Code setup](../supported_agents/kimi.md).
 
 DeepSeek Harness is not yet part of the generated stable support matrix. Its
@@ -75,6 +77,17 @@ final UI presentation remain follow-up work.
 An installed service may start and restart a locally launchable host, acting
 only on a process it can prove it started. See
 [DeepSeek Harness setup](../supported_agents/dsh.md).
+
+Antigravity is not yet part of the generated stable support matrix. Its source
+adapter is registered by default and served to any client that can decode its
+integration kind. It reads the `agy` CLI's own conversation store — there is no
+server, and nothing to install beyond the CLI — and currently covers discovery
+and read-only observe for every stored conversation, Drive through a
+broker-owned `agy` child that starts on the first prompt, a cross-client join
+that shares one Drive between two clients, release to a terminal writer,
+session creation, and model selection with reasoning efforts read from the
+CLI's live catalog. Image and file input remain follow-up work. See
+[Antigravity setup](../supported_agents/antigravity.md).
 
 ## Context window reporting
 

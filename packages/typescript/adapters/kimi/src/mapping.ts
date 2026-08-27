@@ -1131,7 +1131,7 @@ const KIMI_TOOL_CLASSES: ReadonlyMap<string, ToolDisplayClass> = new Map([
 ]);
 
 /** The measured display class for a Kimi tool, or UNDEFINED for a name this version has not seen. */
-function kimiToolDisplayClass(toolName: string | undefined): ToolDisplayClass | undefined {
+export function kimiToolDisplayClass(toolName: string | undefined): ToolDisplayClass | undefined {
   return toolName === undefined ? undefined : KIMI_TOOL_CLASSES.get(toolName);
 }
 
@@ -1536,6 +1536,27 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
           }, key);
           continue;
         }
+      }
+      // A compaction summary is the harness REPLACING earlier conversation
+      // with a machine-written note — `origin.kind: 'compaction_summary'`,
+      // first captured on the 0.38.0 REST surface. The row rides `role: 'user'`
+      // like every other server insertion, but by construction it is never
+      // words the operator typed, so it renders through the same
+      // context-injection event as `injection` rows (reflection §10: machine
+      // text must never become "the user said this"). The origin kind is the
+      // source label, so the client can say WHAT replaced the history rather
+      // than showing an anonymous injection. No wrapper is expected: the
+      // summary text IS the body.
+      if (role === 'user' && originKind === 'compaction_summary') {
+        out.push({
+          type: 'event',
+          name: CONTEXT_INJECTION_EVENT,
+          payload: {
+            source: 'compaction_summary',
+            ...boundContextBody(text),
+          } satisfies ContextInjectionPayload,
+        }, key);
+        continue;
       }
       // Injected context is recognized on the USER row as well as the system
       // one, because the user row is where Kimi actually delivers it: every
@@ -2069,8 +2090,12 @@ export const KIMI_TRUNCATION_MARKER = '\n… (truncated)';
  * Iterating the string yields whole code points (a pair arrives as one
  * two-unit string), so the cut can never fall inside one, and the running byte
  * total is what the budget is spent against.
+ *
+ * Exported because it is the package's ONE truncation rule: the subagent
+ * history reader shortens journal bodies too, and a second implementation there
+ * reintroduced exactly the bug this comment describes.
  */
-function truncateToUtf8Budget(text: string, capBytes: number): string {
+export function truncateToUtf8Budget(text: string, capBytes: number): string {
   const budget = capBytes - Buffer.byteLength(KIMI_TRUNCATION_MARKER, 'utf8');
   // A cap smaller than its own marker has no room to say anything; the marker
   // alone is still the honest answer, and no caller sets one that small.

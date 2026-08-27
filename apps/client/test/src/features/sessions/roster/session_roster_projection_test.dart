@@ -105,10 +105,14 @@ void main() {
       ),
     );
 
+    // The background preference surfaces top-level background rows (exec),
+    // but a subagent subtree still defaults closed — only the parent's toggle
+    // opens it.
     expect(
       projection.visibleSessions.map((session) => session.id),
-      ['parent', 'child-1', 'exec'],
+      ['parent', 'exec'],
     );
+    expect(projection.childCountFor(parent), 1);
   });
 
   test('groups OpenCode sub-agent sessions under their spawning parent', () {
@@ -490,10 +494,20 @@ void main() {
       Map<String, SessionChildExpansion> revealChildExpansion = const {},
       SessionRosterFilters filters = const SessionRosterFilters(),
       Set<String> readyToReviewKeys = const {},
+      // Subagent subtrees default closed, so structure-focused tests open
+      // every parent explicitly instead of leaning on the old auto default.
+      bool openParents = false,
     }) => SessionRosterProjection.build(
       sessions: sessions,
       preferences: preferences,
-      childExpansion: childExpansion,
+      childExpansion: openParents
+          ? {
+              for (final session in sessions)
+                sessionCompositeRosterKey(session):
+                    SessionChildExpansion.expanded,
+              ...childExpansion,
+            }
+          : childExpansion,
       revealChildExpansion: revealChildExpansion,
       filters: filters,
       readyToReviewKeys: readyToReviewKeys,
@@ -501,7 +515,10 @@ void main() {
     );
 
     test('a child arriving before its parent still renders after it', () {
-      final projection = project([child('c1', 'p1'), root('p1')]);
+      final projection = project([
+        child('c1', 'p1'),
+        root('p1'),
+      ], openParents: true);
 
       expect(projection.visibleSessions.map((s) => s.id), ['p1', 'c1']);
       expect(projection.visibleRows.map((row) => row.depth), [0, 1]);
@@ -519,7 +536,7 @@ void main() {
       final projection = project([
         child('c1', 'p1', status: SessionStatus.working),
         root('p1'),
-      ]);
+      ], openParents: true);
 
       expect(projection.visibleSessions.map((s) => s.id), ['p1', 'c1']);
       expect(
@@ -539,7 +556,7 @@ void main() {
         child('c1', 'p1'),
         child('g1', 'c1'),
         child('g2', 'c1'),
-      ]);
+      ], openParents: true);
 
       expect(projection.visibleSessions.map((s) => s.id), [
         'p1',
@@ -567,8 +584,8 @@ void main() {
         child('c1', 'p1', updatedAt: 300),
         child('c3', 'p1', updatedAt: 100),
       ];
-      final first = project(sessions);
-      final second = project(sessions);
+      final first = project(sessions, openParents: true);
+      final second = project(sessions, openParents: true);
 
       // All three are idle, so the settled band ranks them by recency.
       expect(first.visibleSessions.map((s) => s.id), [
@@ -590,8 +607,8 @@ void main() {
         child('c1', 'p1'),
         child('c3', 'p1'),
       ];
-      final first = project(sessions);
-      final second = project(sessions);
+      final first = project(sessions, openParents: true);
+      final second = project(sessions, openParents: true);
 
       // Nothing to rank on, so the composite-key tie-break decides — and it is
       // the same decision every rebuild.
@@ -637,7 +654,7 @@ void main() {
         parentThreadId: 'a',
         origin: SessionOrigin.subagent,
       );
-      final projection = project([a, b]);
+      final projection = project([a, b], openParents: true);
 
       // One edge is cut, so the pair renders rather than vanishing or hanging.
       expect(projection.visibleRows, hasLength(2));
@@ -685,8 +702,12 @@ void main() {
       );
       expect(hidden.visibleSessions.map((s) => s.id), ['p1', 'p2']);
 
+      // Even with background sessions on, a subagent subtree defaults
+      // closed; the global preference no longer opens it.
       final byGlobal = project(sessions);
-      expect(byGlobal.visibleSessions.map((s) => s.id), ['p1', 'c1', 'p2']);
+      expect(byGlobal.visibleSessions.map((s) => s.id), ['p1', 'p2']);
+      expect(byGlobal.visibleRows.first.childCount, 1);
+      expect(byGlobal.visibleRows.first.childrenRevealed, isFalse);
 
       final byPeek = project(
         sessions,
@@ -701,8 +722,10 @@ void main() {
     });
 
     test('effective root status is needs input over working over idle', () {
-      SessionStatus statusOf(List<SessionInfo> sessions) =>
-          project(sessions).visibleRows.first.effectiveStatus;
+      SessionStatus statusOf(List<SessionInfo> sessions) => project(
+        sessions,
+        openParents: true,
+      ).visibleRows.first.effectiveStatus;
 
       expect(statusOf([root('p1'), child('c1', 'p1')]), SessionStatus.idle);
       expect(
@@ -725,7 +748,7 @@ void main() {
         root('p1'),
         child('c1', 'p1'),
         child('g1', 'c1', status: SessionStatus.needsInput),
-      ]);
+      ], openParents: true);
       expect(nested.visibleRows[0].effectiveStatus, SessionStatus.needsInput);
       // The intermediate parent and the child keep their own status.
       expect(nested.visibleRows[1].effectiveStatus, SessionStatus.idle);
@@ -795,7 +818,7 @@ void main() {
         sessions,
         preferences: const SessionVisibilityPreferences(),
       ).groups.single;
-      final expanded = project(sessions).groups.single;
+      final expanded = project(sessions, openParents: true).groups.single;
 
       for (final group in [collapsed, expanded]) {
         expect(group.rootCount, 2);
@@ -820,7 +843,7 @@ void main() {
       final projection = project([
         root('p1', cwd: '/work/parent'),
         child('c1', 'p1', cwd: '/work/elsewhere'),
-      ]);
+      ], openParents: true);
 
       expect(projection.groups, hasLength(1));
       expect(projection.groups.single.cwd, '/work/parent');
@@ -863,32 +886,69 @@ void main() {
     });
 
     test('the child control hides and reshows while background is enabled', () {
-      // Regression: the control used to read only an "explicitly peeked" set,
-      // so with showBackgroundSessions on it claimed the children were hidden
-      // while they were on screen, and toggling it changed nothing.
+      // A subagent subtree defaults closed even with showBackgroundSessions
+      // on: the control reports the truth (children present, not revealed)
+      // and the per-parent toggle is what opens and re-closes it.
       final parent = root('p1');
       final sessions = [parent, child('c1', 'p1')];
       final parentKey = sessionCompositeRosterKey(parent);
 
       final auto = project(sessions);
-      expect(auto.visibleSessions.map((s) => s.id), ['p1', 'c1']);
-      expect(auto.visibleRows.first.childrenRevealed, isTrue);
+      expect(auto.visibleSessions.map((s) => s.id), ['p1']);
+      expect(auto.visibleRows.single.childCount, 1);
+      expect(auto.visibleRows.single.childrenRevealed, isFalse);
 
-      // Toggling from that revealed state must actually hide the subtree.
-      final hidden = project(
-        sessions,
-        childExpansion: {parentKey: SessionChildExpansion.collapsed},
-      );
-      expect(hidden.visibleSessions.map((s) => s.id), ['p1']);
-      expect(hidden.visibleRows.single.childrenRevealed, isFalse);
-
-      // And toggling back reshows it.
+      // The toggle opens the subtree.
       final reshown = project(
         sessions,
         childExpansion: {parentKey: SessionChildExpansion.expanded},
       );
       expect(reshown.visibleSessions.map((s) => s.id), ['p1', 'c1']);
       expect(reshown.visibleRows.first.childrenRevealed, isTrue);
+
+      // Toggling from that revealed state hides it again.
+      final hidden = project(
+        sessions,
+        childExpansion: {parentKey: SessionChildExpansion.collapsed},
+      );
+      expect(hidden.visibleSessions.map((s) => s.id), ['p1']);
+      expect(hidden.visibleRows.single.childrenRevealed, isFalse);
+    });
+
+    test('the standing activity window alone does not reveal subtrees', () {
+      // The live pane always carries the broker query window (7 days by
+      // default), so this filter is in force on every real build. It scopes
+      // which rows exist; it must not act like a search that force-opens
+      // every subagent subtree.
+      final base = DateTime(2026, 7, 27, 12).millisecondsSinceEpoch;
+      final parent = root('p1', updatedAt: base - 1000);
+      final sessions = [parent, child('c1', 'p1', updatedAt: base - 2000)];
+      final parentKey = sessionCompositeRosterKey(parent);
+      const window = SessionRosterFilters(
+        activity: SessionActivityWindow.last7Days,
+      );
+
+      final scoped = project(sessions, filters: window);
+      expect(scoped.visibleSessions.map((s) => s.id), ['p1']);
+      expect(scoped.visibleRows.single.childCount, 1);
+      expect(scoped.visibleRows.single.childrenRevealed, isFalse);
+
+      // With only the window set the SAVED map governs, so a toggle opens the
+      // subtree and would survive filter rebuilds.
+      final opened = project(
+        sessions,
+        filters: window,
+        childExpansion: {parentKey: SessionChildExpansion.expanded},
+      );
+      expect(opened.visibleSessions.map((s) => s.id), ['p1', 'c1']);
+
+      // An actual search layered on the window still reveals the match path
+      // through the transient machinery.
+      final searched = project(
+        sessions,
+        filters: window.copyWith(query: 'Child c1'),
+      );
+      expect(searched.visibleSessions.map((s) => s.id), ['p1', 'c1']);
     });
 
     test('the child control reports hidden while background is disabled', () {
@@ -1030,7 +1090,10 @@ void main() {
 
     test('a duplicated roster row is projected exactly once', () {
       final parent = root('p1');
-      final projection = project([parent, parent, child('c1', 'p1')]);
+      final projection = project(
+        [parent, parent, child('c1', 'p1')],
+        openParents: true,
+      );
 
       expect(projection.visibleSessions.map((s) => s.id), ['p1', 'c1']);
       expect(projection.groups.single.rootCount, 1);
@@ -1069,18 +1132,31 @@ void main() {
       createdAt: createdAt,
     );
 
-    SessionRosterProjection project(List<SessionInfo> sessions) =>
-        SessionRosterProjection.build(
-          sessions: sessions,
-          preferences: showChildren,
-          now: DateTime(2026, 7, 27, 12),
-        );
+    SessionRosterProjection project(
+      List<SessionInfo> sessions, {
+      Map<String, SessionChildExpansion> childExpansion = const {},
+    }) => SessionRosterProjection.build(
+      sessions: sessions,
+      preferences: showChildren,
+      childExpansion: childExpansion,
+      now: DateTime(2026, 7, 27, 12),
+    );
 
-    List<String> orderOf(List<SessionInfo> sessions) =>
-        project(sessions).visibleSessions.map((s) => s.id).toList();
+    List<String> orderOf(
+      List<SessionInfo> sessions, {
+      Map<String, SessionChildExpansion> childExpansion = const {},
+    }) => project(
+      sessions,
+      childExpansion: childExpansion,
+    ).visibleSessions.map((s) => s.id).toList();
 
-    List<int> depthsOf(List<SessionInfo> sessions) =>
-        project(sessions).visibleRows.map((r) => r.depth).toList();
+    List<int> depthsOf(
+      List<SessionInfo> sessions, {
+      Map<String, SessionChildExpansion> childExpansion = const {},
+    }) => project(
+      sessions,
+      childExpansion: childExpansion,
+    ).visibleRows.map((r) => r.depth).toList();
 
     List<String> groupsOf(List<SessionInfo> sessions) =>
         project(sessions).groups.map((g) => g.key).toList();
@@ -1411,14 +1487,17 @@ void main() {
         updatedAt: 999,
       );
       final parent = row('p1', createdAt: 100, updatedAt: 5);
+      final open = {
+        sessionCompositeRosterKey(parent): SessionChildExpansion.expanded,
+      };
 
       final before = [
         parent,
         row('c1', parentId: 'p1', createdAt: 110),
         other(),
       ];
-      expect(orderOf(before), ['other', 'p1', 'c1']);
-      expect(depthsOf(before), [0, 0, 1]);
+      expect(orderOf(before, childExpansion: open), ['other', 'p1', 'c1']);
+      expect(depthsOf(before, childExpansion: open), [0, 0, 1]);
 
       // The child starts a turn. p1 now DISPLAYS working, so it bands by its
       // own anchor (100) and leads `other` (50) — and the child travels with
@@ -1433,8 +1512,8 @@ void main() {
         ),
         other(),
       ];
-      expect(orderOf(promoted), ['p1', 'c1', 'other']);
-      expect(depthsOf(promoted), [0, 1, 0]);
+      expect(orderOf(promoted, childExpansion: open), ['p1', 'c1', 'other']);
+      expect(depthsOf(promoted, childExpansion: open), [0, 1, 0]);
     });
   });
 }

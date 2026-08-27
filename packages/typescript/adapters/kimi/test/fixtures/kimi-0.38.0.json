@@ -1,0 +1,1043 @@
+{
+ "_note": "Sanitized capture from a real Kimi Code 0.38.0 `kimi web --no-open` server started in an ISOLATED KIMI_CODE_HOME holding one COPIED session and NO credential material (credentials/, oauth/, device_id and every api_key/oauth field of config.toml were excluded by construction; the server minted its own token in the isolated home). No model turn was run and no quota was spent. Sanitization goes beyond kimi-0.35.0.json: that capture came from a purpose-built throwaway session whose content was synthetic from birth, whereas this one came from a real working session, so EVERY textual payload — prompts, replies, thinking, tool inputs and tool outputs — is replaced with synthetic text, and image data: URIs are dropped entirely. What this fixture is evidence for is the envelope, the field names, the part types and the id correlation; never the prose. Ids, paths, ULIDs and upstream stack traces are replaced; tool_call_id mapping is stable so call/result pairs still correlate.",
+ "kimiVersion": "0.38.0",
+ "sourceRefs": [
+  "kimi-openapi-0.38.0"
+ ],
+ "capturedAt": "2026-08-25",
+ "sessionId": "session_fixture-0038",
+ "openapiInfo": {
+  "title": "Kimi Code Server API",
+  "version": "0.38.0",
+  "pathCount": 90
+ },
+ "rest": {
+  "healthz": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "ok": true
+   },
+   "request_id": "01FIXTUREREQ00000000001"
+  },
+  "meta": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "server_version": "0.38.0",
+    "capabilities": {
+     "websocket": true,
+     "file_upload": true,
+     "fs_query": true,
+     "mcp": true,
+     "tasks": true,
+     "terminal": true
+    },
+    "server_id": "01FIXTURE000000000000000002",
+    "started_at": "2026-08-25T22:55:57.756Z",
+    "open_in_apps": [],
+    "dangerous_bypass_auth": false,
+    "backend": "v2",
+    "experimental_flags": {
+     "secondary-model": false,
+     "auto_session_title": false,
+     "wait_for": true,
+     "tool-select": false,
+     "persistence_minidb_readmodel": true,
+     "search_worker": true
+    },
+    "features": [
+     {
+      "name": "btw",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "plan",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "externalHooks",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "debugEvents",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "swarm",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "goal",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "staleGuard",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "tower",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "usage",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "dateChange",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "tokenCounting",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "sessionInit",
+      "state": "Active",
+      "meta": {}
+     },
+     {
+      "name": "todo",
+      "state": "Active",
+      "meta": {}
+     }
+    ]
+   },
+   "request_id": "01FIXTUREREQ00000000002"
+  },
+  "metaUnauthorized": {
+   "code": 40101,
+   "msg": "Unauthorized",
+   "data": null,
+   "request_id": "01FIXTUREREQ00000000003"
+  },
+  "v2Sessions": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "items": [
+     {
+      "id": "session_fixture-0038",
+      "workspace": {
+       "id": "wd_ws_fixture",
+       "cwd": "/fixture/workspace"
+      },
+      "meta": {
+       "title": "Fixture session title",
+       "last_prompt": "Fixture user turn 1: describe the change you want.",
+       "created_at": 1787061064346,
+       "updated_at": 1787328692701,
+       "archived": false,
+       "archived_at": null
+      },
+      "activity": {
+       "status": "idle"
+      }
+     }
+    ],
+    "total": 1,
+    "has_more": false,
+    "next_page_token": null
+   },
+   "request_id": "01FIXTUREREQ00000000004"
+  },
+  "messagesPage1": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "items": [
+     {
+      "id": "msg_01M0AJ8X2GDKDHQ5MDKPTZKB1J",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Fixture user turn 1: describe the change you want."
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.751Z",
+      "metadata": {
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000001",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "<system-reminder>\nFixture injected context block 1.\n</system-reminder>"
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.753Z",
+      "metadata": {
+       "origin": {
+        "kind": "injection",
+        "variant": "permission_mode"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000002",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Fixture reasoning 1: decide which tool to call, then call it."
+       },
+       {
+        "type": "text",
+        "text": "Fixture assistant reply 1: the requested change is complete."
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000013",
+        "tool_name": "Bash",
+        "input": {
+         "command": "ls /fixture/workspace/src",
+         "description": "List fixture sources"
+        }
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000014",
+        "tool_name": "Read",
+        "input": {
+         "path": "/fixture/workspace/src/fixture.ts"
+        }
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.759Z"
+     }
+    ],
+    "has_more": true
+   },
+   "request_id": "01FIXTUREREQ00000000005"
+  },
+  "messagesAll": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "items": [
+     {
+      "id": "msg_01M0AJ8X2GDKDHQ5MDKPTZKB1J",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Fixture user turn 1: describe the change you want."
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.751Z",
+      "metadata": {
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000001",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "<system-reminder>\nFixture injected context block 1.\n</system-reminder>"
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.753Z",
+      "metadata": {
+       "origin": {
+        "kind": "injection",
+        "variant": "permission_mode"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000002",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Fixture reasoning 1: decide which tool to call, then call it."
+       },
+       {
+        "type": "text",
+        "text": "Fixture assistant reply 1: the requested change is complete."
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000013",
+        "tool_name": "Bash",
+        "input": {
+         "command": "ls /fixture/workspace/src",
+         "description": "List fixture sources"
+        }
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000014",
+        "tool_name": "Read",
+        "input": {
+         "path": "/fixture/workspace/src/fixture.ts"
+        }
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.759Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000003",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000013",
+        "output": "fixture-file-a.ts\nfixture-file-b.ts\n"
+       }
+      ],
+      "created_at": "2026-08-18T13:52:13.342Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000004",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000014",
+        "output": "     1\texport const fixture = 1;\n     2\t"
+       }
+      ],
+      "created_at": "2026-08-18T13:52:13.343Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000011",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Fixture reasoning 2: decide which tool to call, then call it."
+       },
+       {
+        "type": "text",
+        "text": "Fixture assistant reply 2: the requested change is complete."
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000015",
+        "tool_name": "Write",
+        "input": {
+         "path": "/fixture/workspace/src/fixture.ts",
+         "content": "export const fixture = 1;\n"
+        }
+       }
+      ],
+      "created_at": "2026-08-18T13:53:02.412Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000012",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000015",
+        "output": "Wrote /fixture/workspace/src/fixture.ts"
+       }
+      ],
+      "created_at": "2026-08-18T13:54:06.898Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000013",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000016",
+        "tool_name": "Edit",
+        "input": {
+         "path": "/fixture/workspace/src/fixture.ts",
+         "old_string": "const a = 1;",
+         "new_string": "const a = 2;"
+        }
+       }
+      ],
+      "created_at": "2026-08-18T13:54:06.899Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000014",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000016",
+        "output": "Edited /fixture/workspace/src/fixture.ts"
+       }
+      ],
+      "created_at": "2026-08-18T13:54:26.815Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000018",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Fixture reasoning 3: decide which tool to call, then call it."
+       },
+       {
+        "type": "text",
+        "text": "Fixture assistant reply 3: the requested change is complete."
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000017",
+        "tool_name": "TodoList",
+        "input": {
+         "todos": [
+          {
+           "status": "done",
+           "title": "Fixture step one"
+          },
+          {
+           "status": "todo",
+           "title": "Fixture step two"
+          }
+         ]
+        }
+       }
+      ],
+      "created_at": "2026-08-20T13:11:40.886Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000019",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000017",
+        "output": "Todo list updated.\nCurrent todo list:\n  [done] Fixture step one\n  [todo] Fixture step two\n"
+       }
+      ],
+      "created_at": "2026-08-20T13:12:20.785Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000041",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Fixture reasoning 4: decide which tool to call, then call it."
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000018",
+        "tool_name": "Grep",
+        "input": {
+         "pattern": "fixture",
+         "path": "/fixture/workspace/src",
+         "output_mode": "content"
+        }
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000019",
+        "tool_name": "Grep",
+        "input": {
+         "pattern": "fixture",
+         "path": "/fixture/workspace/src",
+         "output_mode": "content"
+        }
+       }
+      ],
+      "created_at": "2026-08-20T13:13:46.902Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000042",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000018",
+        "output": "/fixture/workspace/src/fixture.ts:1:export const fixture = 1;"
+       }
+      ],
+      "created_at": "2026-08-20T13:14:11.519Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000043",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000019",
+        "output": "/fixture/workspace/src/fixture.ts:1:export const fixture = 1;"
+       }
+      ],
+      "created_at": "2026-08-20T13:14:11.520Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000046",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000020",
+        "tool_name": "Agent",
+        "input": {
+         "description": "Fixture subagent task",
+         "subagent_type": "coder"
+        }
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000021",
+        "tool_name": "Agent",
+        "input": {
+         "description": "Fixture subagent task",
+         "subagent_type": "coder"
+        }
+       }
+      ],
+      "created_at": "2026-08-20T13:15:12.243Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000047",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000021",
+        "output": "fixture tool failure: the command exited non-zero",
+        "is_error": true
+       }
+      ],
+      "created_at": "2026-08-20T13:20:26.236Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000048",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000020",
+        "output": "fixture tool failure: the command exited non-zero",
+        "is_error": true
+       }
+      ],
+      "created_at": "2026-08-20T13:20:26.356Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000075",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000022",
+        "tool_name": "ReadMediaFile",
+        "input": {
+         "path": "/fixture/workspace/fixture.png"
+        }
+       },
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000023",
+        "tool_name": "ReadMediaFile",
+        "input": {
+         "path": "/fixture/workspace/fixture.png"
+        }
+       }
+      ],
+      "created_at": "2026-08-20T16:58:08.995Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000076",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000022",
+        "output": [
+         {
+          "type": "text",
+          "text": "<image path=\"/fixture/workspace/fixture.png\">"
+         },
+         {
+          "type": "image_url",
+          "imageUrl": {
+           "url": "data:image/png;base64,FIXTUREPNGBYTES"
+          }
+         }
+        ]
+       }
+      ],
+      "created_at": "2026-08-20T16:58:14.774Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000077",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000023",
+        "output": [
+         {
+          "type": "text",
+          "text": "<image path=\"/fixture/workspace/fixture.png\">"
+         },
+         {
+          "type": "image_url",
+          "imageUrl": {
+           "url": "data:image/png;base64,FIXTUREPNGBYTES"
+          }
+         }
+        ]
+       }
+      ],
+      "created_at": "2026-08-20T16:58:14.775Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000206",
+      "session_id": "session_fixture-0038",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "tool_call_id": "tool_fixture0000000024",
+        "tool_name": "TaskOutput",
+        "input": {
+         "task_id": "bash-fixture01"
+        }
+       }
+      ],
+      "created_at": "2026-08-20T17:37:59.440Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000207",
+      "session_id": "session_fixture-0038",
+      "role": "tool",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_call_id": "tool_fixture0000000024",
+        "output": "fixture task output line\n"
+       }
+      ],
+      "created_at": "2026-08-20T17:38:08.651Z"
+     },
+     {
+      "id": "msg_session_fixture-0038_000213",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "<notification id=\"task:fixture-1\" category=\"task\" type=\"task.completed\">\nFixture background task 1 completed.\n</notification>"
+       }
+      ],
+      "created_at": "2026-08-20T17:46:30.754Z",
+      "metadata": {
+       "origin": {
+        "kind": "task",
+        "taskId": "bash-jue8iqhx",
+        "status": "timed_out",
+        "notificationId": "task:bash-jue8iqhx:timed_out"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000380",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Fixture compaction summary 1: the earlier conversation was folded into this note."
+       }
+      ],
+      "created_at": "2026-08-21T15:44:10.708Z",
+      "metadata": {
+       "origin": {
+        "kind": "compaction_summary"
+       }
+      }
+     }
+    ],
+    "has_more": false
+   },
+   "request_id": "01FIXTUREREQ00000000006"
+  },
+  "messagesUnknownSession": {
+   "code": 40401,
+   "msg": "session session_does-not-exist does not exist",
+   "data": null,
+   "request_id": "01FIXTUREREQ00000000007"
+  },
+  "snapshot": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "as_of_seq": 0,
+    "epoch": "ep_01M0XJEF22V5ZQYN7YRVGFTNH5",
+    "session": {
+     "id": "session_fixture-0038",
+     "workspace_id": "wd_ws_fixture",
+     "title": "Fixture session title",
+     "created_at": "2026-08-18T13:51:04.346Z",
+     "updated_at": "2026-08-21T16:11:32.701Z",
+     "busy": false,
+     "main_turn_active": false,
+     "pending_interaction": "none",
+     "last_turn_reason": "completed",
+     "archived": false,
+     "last_prompt": "Fixture user turn 1: describe the change you want.",
+     "metadata": {
+      "cwd": "/fixture/workspace"
+     },
+     "agent_config": {
+      "model": "kimi-code/k3-256k"
+     },
+     "usage": {
+      "input_tokens": 960874,
+      "output_tokens": 129759,
+      "cache_read_tokens": 30837273,
+      "cache_creation_tokens": 0,
+      "context_tokens": 133762,
+      "context_limit": 262144
+     },
+     "permission_rules": [],
+     "message_count": 0,
+     "last_seq": 0
+    },
+    "messages": [
+     {
+      "id": "msg_01M0AJ8X2GDKDHQ5MDKPTZKB1J",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Fixture user turn 1: describe the change you want."
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.751Z",
+      "metadata": {
+       "origin": {
+        "kind": "user"
+       }
+      }
+     },
+     {
+      "id": "msg_session_fixture-0038_000001",
+      "session_id": "session_fixture-0038",
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "<system-reminder>\nFixture injected context block 1.\n</system-reminder>"
+       }
+      ],
+      "created_at": "2026-08-18T13:51:45.753Z",
+      "metadata": {
+       "origin": {
+        "kind": "injection",
+        "variant": "permission_mode"
+       }
+      }
+     }
+    ],
+    "in_flight_turn": null,
+    "subagents": [],
+    "pending_approvals": [],
+    "pending_questions": []
+   },
+   "request_id": "01FIXTUREREQ00000000008"
+  },
+  "status": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "busy": false,
+    "model": "kimi-code/k3-256k",
+    "thinking_level": "high",
+    "permission": "auto",
+    "plan_mode": false,
+    "swarm_mode": false,
+    "context_tokens": 133762,
+    "max_context_tokens": 262144,
+    "context_usage": 0.5102615356445312
+   },
+   "request_id": "01FIXTUREREQ00000000009"
+  },
+  "models": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "items": [
+     {
+      "provider": "managed:kimi-code",
+      "model": "kimi-code/kimi-for-coding",
+      "display_name": "K2.7 Coding",
+      "max_context_size": 262144,
+      "capabilities": [
+       "thinking",
+       "always_thinking",
+       "image_in",
+       "video_in",
+       "tool_use"
+      ]
+     },
+     {
+      "provider": "managed:kimi-code",
+      "model": "kimi-code/kimi-for-coding-highspeed",
+      "display_name": "K2.7 Coding Highspeed",
+      "max_context_size": 262144,
+      "capabilities": [
+       "thinking",
+       "always_thinking",
+       "image_in",
+       "video_in",
+       "tool_use"
+      ]
+     },
+     {
+      "provider": "managed:kimi-code",
+      "model": "kimi-code/k3",
+      "display_name": "K3",
+      "max_context_size": 1048576,
+      "capabilities": [
+       "thinking",
+       "always_thinking",
+       "image_in",
+       "video_in",
+       "tool_use"
+      ],
+      "support_efforts": [
+       "low",
+       "high",
+       "max"
+      ],
+      "default_effort": "high"
+     },
+     {
+      "provider": "managed:kimi-code",
+      "model": "kimi-code/k3-256k",
+      "display_name": "K3-256k",
+      "max_context_size": 262144,
+      "capabilities": [
+       "thinking",
+       "always_thinking",
+       "image_in",
+       "tool_use"
+      ],
+      "support_efforts": [
+       "low",
+       "high",
+       "max"
+      ],
+      "default_effort": "high"
+     }
+    ]
+   },
+   "request_id": "01FIXTUREREQ00000000010"
+  },
+  "tasks": {
+   "code": 0,
+   "msg": "success",
+   "data": {
+    "items": [],
+    "has_more": false
+   },
+   "request_id": "01FIXTUREREQ00000000011"
+  }
+ },
+ "ws": {
+  "frames": [
+   {
+    "at": 2,
+    "dir": "open"
+   },
+   {
+    "at": 2,
+    "dir": "out",
+    "frame": {
+     "type": "client_hello",
+     "id": "hello",
+     "payload": {
+      "client_id": "cosyncing"
+     }
+    }
+   },
+   {
+    "at": 2,
+    "dir": "out",
+    "frame": {
+     "type": "subscribe",
+     "id": "subscribe",
+     "payload": {
+      "session_ids": [
+       "session_fixture-0038"
+      ],
+      "cursors": {}
+     }
+    }
+   },
+   {
+    "at": 2,
+    "dir": "out",
+    "frame": {
+     "type": "subscribe_v2",
+     "id": "subscribe-v2",
+     "payload": {
+      "session_id": "session_fixture-0038",
+      "transcript": {
+       "*": "off"
+      }
+     }
+    }
+   },
+   {
+    "at": 3,
+    "dir": "in",
+    "frame": {
+     "type": "server_hello",
+     "timestamp": "2026-08-25T23:00:55.581Z",
+     "payload": {
+      "ws_connection_id": "conn_01M0XJFFMXBQB3A40SJXMEQJSA",
+      "protocol_version": 2,
+      "heartbeat_ms": 10000,
+      "max_event_buffer_size": 1000,
+      "capabilities": {
+       "event_batching": false,
+       "compression": false
+      }
+     }
+    }
+   },
+   {
+    "at": 3,
+    "dir": "in",
+    "frame": {
+     "type": "ack",
+     "id": "hello",
+     "code": 0,
+     "msg": "success",
+     "payload": {
+      "accepted_subscriptions": [],
+      "resync_required": [],
+      "cursors": {}
+     }
+    }
+   },
+   {
+    "at": 3,
+    "dir": "in",
+    "frame": {
+     "type": "ack",
+     "id": "subscribe",
+     "code": 0,
+     "msg": "success",
+     "payload": {
+      "accepted": [
+       "session_fixture-0038"
+      ],
+      "not_found": [],
+      "resync_required": [],
+      "cursors": {
+       "session_fixture-0038": {
+        "seq": 0,
+        "epoch": "ep_01M0XJEF22V5ZQYN7YRVGFTNH5"
+       }
+      }
+     }
+    }
+   },
+   {
+    "at": 62,
+    "dir": "in",
+    "frame": {
+     "type": "ack",
+     "id": "subscribe-v2",
+     "code": 0,
+     "msg": "success",
+     "payload": {
+      "accepted": [
+       "session_fixture-0038"
+      ],
+      "not_found": [],
+      "resync_required": [],
+      "cursors": {
+       "session_fixture-0038": {
+        "seq": 0,
+        "epoch": "ep_01M0XJEF22V5ZQYN7YRVGFTNH5"
+       }
+      }
+     }
+    }
+   },
+   {
+    "at": 10004,
+    "dir": "in",
+    "frame": {
+     "type": "ping",
+     "timestamp": "2026-08-25T23:01:05.582Z",
+     "payload": {
+      "nonce": "01FIXTURE000000000000001"
+     }
+    }
+   },
+   {
+    "at": 14005,
+    "dir": "close",
+    "code": 1000
+   }
+  ]
+ },
+ "instanceRecord": {
+  "server_id": "01FIXTURE000000000000000001",
+  "pid": 424242,
+  "host": "127.0.0.1",
+  "port": 58731,
+  "started_at": 1787698557410,
+  "heartbeat_at": 1787698572419,
+  "host_version": "0.38.0"
+ },
+ "routesAbsent": {
+  "_note": "GET routes probed on 0.38.0 that answered 404 — recorded so an adapter never assumes them. The subagent question is settled by `rest.snapshot.data.subagents` instead, which this server answered as an EMPTY array for a session holding two real on-disk subagent journals.",
+  "sessionAgents": 404,
+  "sessionSubagents": 404,
+  "sessionCommands": 404
+ }
+}

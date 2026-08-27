@@ -1,0 +1,794 @@
+{
+ "_provenance": {
+  "capturedAgainst": "agy 1.1.17",
+  "capturedOn": "2026-08-25",
+  "sanitized": true,
+  "note": "Every SHAPE here was taken from the real Antigravity CLI store on the probe host, read-only. Every VALUE is substituted: the conversation ids, titles, paths, prompts and tool output are invented so no real session content ships in the repo. The (source, type) inventory, the tool_calls args encoding (an object whose values are JSON-encoded strings), the Created At/Completed At content preamble, the user-row wrapper tags, the truncated_fields shape, the settlement-message shape and the summaries column set are all reproduced exactly as measured. Host at capture time reported 29 transcripts / 2,664 lines / 0 unparseable / exactly 16 (source, type) pairs.",
+  "hostBinaryDriftedTo": "1.1.20 on 2026-08-25 14:38, after this capture — see the head comment of src/implementation.ts"
+ },
+ "conversationIds": {
+  "withTranscript": "11111111-1111-4111-8111-111111111111",
+  "withoutTranscript": "22222222-2222-4222-8222-222222222222",
+  "ideRow": "33333333-3333-4333-8333-333333333333",
+  "stale": "44444444-4444-4444-8444-444444444444",
+  "subagentChild": "55555555-5555-4555-8555-555555555555",
+  "supplementary": "66666666-6666-4666-8666-666666666666"
+ },
+ "summaryRows": [
+  {
+   "conversation_id": "11111111-1111-4111-8111-111111111111",
+   "title": "",
+   "preview": "Demo Project Review",
+   "step_count": 25,
+   "last_modified_time": "2026-08-20 10:15:46.027884138+00:00",
+   "workspace_uris": "[\"file:///fixture/demo-project\"]",
+   "status": "",
+   "source": "",
+   "project_id": "aaaaaaaa-0000-4000-8000-000000000001",
+   "agent_name": "",
+   "parent_conversation_id": "",
+   "nesting_depth": 0,
+   "battle_id": "",
+   "winning_conversation_id": "",
+   "not_fully_idle": 0,
+   "killed": 0,
+   "last_user_input_time": "0001-01-01 00:00:00+00:00",
+   "last_user_input_step_index": -1,
+   "app_data_dir": "antigravity-cli"
+  },
+  {
+   "conversation_id": "22222222-2222-4222-8222-222222222222",
+   "title": "",
+   "preview": "Conversation With No Transcript",
+   "step_count": 4,
+   "last_modified_time": "2026-08-19 08:00:00.000000000+00:00",
+   "workspace_uris": "[\"file:///fixture/other-project\"]",
+   "status": "",
+   "source": "",
+   "project_id": "aaaaaaaa-0000-4000-8000-000000000002",
+   "agent_name": "",
+   "parent_conversation_id": "",
+   "nesting_depth": 0,
+   "battle_id": "",
+   "winning_conversation_id": "",
+   "not_fully_idle": 0,
+   "killed": 0,
+   "last_user_input_time": "0001-01-01 00:00:00+00:00",
+   "last_user_input_step_index": -1,
+   "app_data_dir": "antigravity-cli"
+  },
+  {
+   "conversation_id": "33333333-3333-4333-8333-333333333333",
+   "title": "",
+   "preview": "An IDE Conversation That Must Never Reach The Roster",
+   "step_count": 99,
+   "last_modified_time": "2026-08-21 11:00:00.000000000+00:00",
+   "workspace_uris": "[\"file:///fixture/ide-project\"]",
+   "status": "",
+   "source": "",
+   "project_id": "aaaaaaaa-0000-4000-8000-000000000003",
+   "agent_name": "",
+   "parent_conversation_id": "",
+   "nesting_depth": 0,
+   "battle_id": "",
+   "winning_conversation_id": "",
+   "not_fully_idle": 0,
+   "killed": 0,
+   "last_user_input_time": "0001-01-01 00:00:00+00:00",
+   "last_user_input_step_index": -1,
+   "app_data_dir": "antigravity"
+  },
+  {
+   "conversation_id": "44444444-4444-4444-8444-444444444444",
+   "title": "",
+   "preview": "Stale Conversation Older Than Any Cutoff",
+   "step_count": 2,
+   "last_modified_time": "2026-01-02 09:30:00.000000000+00:00",
+   "workspace_uris": "",
+   "status": "",
+   "source": "",
+   "project_id": "",
+   "agent_name": "",
+   "parent_conversation_id": "",
+   "nesting_depth": 0,
+   "battle_id": "",
+   "winning_conversation_id": "",
+   "not_fully_idle": 0,
+   "killed": 0,
+   "last_user_input_time": "0001-01-01 00:00:00+00:00",
+   "last_user_input_step_index": -1,
+   "app_data_dir": "antigravity-cli"
+  }
+ ],
+ "conversationMetadata": {
+  "conversations": {
+   "11111111-1111-4111-8111-111111111111": {
+    "summary": {
+     "ID": "11111111-1111-4111-8111-111111111111",
+     "Title": "",
+     "Preview": "Demo Project Review",
+     "NumSteps": 25,
+     "Loaded": true,
+     "UpdatedAt": "2026-08-20T10:15:46.027884138Z",
+     "WorkspaceURIs": null,
+     "AppDataDir": "antigravity-cli",
+     "ProjectID": "aaaaaaaa-0000-4000-8000-000000000001",
+     "AgentName": ""
+    },
+    "is_internal": false,
+    "last_modified_time": "2026-08-20T11:15:46.058109768+01:00"
+   },
+   "22222222-2222-4222-8222-222222222222": {
+    "summary": {
+     "ID": "22222222-2222-4222-8222-222222222222",
+     "Title": "",
+     "Preview": "Conversation With No Transcript",
+     "NumSteps": 4,
+     "Loaded": true,
+     "UpdatedAt": "2026-08-19T08:00:00.000000000Z",
+     "WorkspaceURIs": null,
+     "AppDataDir": "antigravity-cli",
+     "ProjectID": "aaaaaaaa-0000-4000-8000-000000000002",
+     "AgentName": ""
+    },
+    "is_internal": false,
+    "last_modified_time": "2026-08-19T09:00:00.000000000+01:00"
+   },
+   "33333333-3333-4333-8333-333333333333": {
+    "summary": {
+     "ID": "33333333-3333-4333-8333-333333333333",
+     "Title": "",
+     "Preview": "An IDE Conversation That Must Never Reach The Roster",
+     "NumSteps": 99,
+     "Loaded": true,
+     "UpdatedAt": "2026-08-21T11:00:00.000000000Z",
+     "WorkspaceURIs": null,
+     "AppDataDir": "antigravity",
+     "ProjectID": "aaaaaaaa-0000-4000-8000-000000000003",
+     "AgentName": ""
+    },
+    "is_internal": false,
+    "last_modified_time": "2026-08-21T12:00:00.000000000+01:00"
+   }
+  }
+ },
+ "availableModels": {
+  "version": 1,
+  "updatedAt": 1786793503393,
+  "models": [
+   {
+    "id": "gemini-3.7-flash-high",
+    "displayName": "Gemini 3.7 Flash (High)",
+    "modelConstant": "MODEL_PLACEHOLDER_M80"
+   },
+   {
+    "id": "gemini-3.5-flash-low",
+    "displayName": "Gemini 3.5 Flash (Low)",
+    "modelConstant": "MODEL_PLACEHOLDER_M60"
+   },
+   {
+    "id": "claude-sonnet-4-6",
+    "displayName": "Claude Sonnet 4.6 (Thinking)",
+    "modelConstant": "MODEL_PLACEHOLDER_M35"
+   },
+   {
+    "id": "gemini-2.5-flash",
+    "displayName": "Gemini 3.1 Flash Lite",
+    "modelConstant": "MODEL_GOOGLE_GEMINI_2_5_FLASH"
+   },
+   {
+    "id": "gemini-2.5-flash-thinking",
+    "displayName": "Gemini 3.1 Flash Lite",
+    "modelConstant": "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING"
+   },
+   {
+    "id": "gemini-3.1-flash-lite",
+    "displayName": "Gemini 3.1 Flash Lite",
+    "modelConstant": "MODEL_PLACEHOLDER_M50"
+   },
+   {
+    "id": "tab_jump_flash_lite_preview",
+    "displayName": "tab_jump_flash_lite_preview",
+    "modelConstant": "MODEL_PLACEHOLDER_M28"
+   },
+   {
+    "id": "gemini-3.7-flash-low",
+    "displayName": "Gemini 3.7 Flash (Low)",
+    "modelConstant": "MODEL_PLACEHOLDER_M78"
+   },
+   {
+    "id": "gemini-3.7-flash-medium",
+    "displayName": "Gemini 3.7 Flash (Medium)",
+    "modelConstant": "MODEL_PLACEHOLDER_M79"
+   },
+   {
+    "id": "gemini-3.5-flash-medium",
+    "displayName": "Gemini 3.5 Flash (Medium)",
+    "modelConstant": "MODEL_PLACEHOLDER_M61"
+   },
+   {
+    "id": "gemini-3-flash-agent",
+    "displayName": "Gemini 3.5 Flash (Low)",
+    "modelConstant": "MODEL_PLACEHOLDER_M84"
+   }
+  ]
+ },
+ "settings": {
+  "allowNonWorkspaceAccess": false,
+  "colorScheme": "dark",
+  "enableTelemetry": false,
+  "model": "Gemini 3.7 Flash (High)",
+  "permissions": {
+   "allow": [
+    "command(ls)",
+    "command(cat)",
+    "command(grep)"
+   ]
+  },
+  "trustedWorkspaces": [
+   "/fixture/demo-project"
+  ]
+ },
+ "transcript": [
+  {
+   "step_index": 0,
+   "source": "USER_EXPLICIT",
+   "type": "USER_INPUT",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:00Z",
+   "content": "<USER_REQUEST>\n/plan review the demo project and report\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-08-20T11:10:00+01:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.7 Flash (High).\n</USER_SETTINGS_CHANGE>"
+  },
+  {
+   "step_index": 1,
+   "source": "SYSTEM",
+   "type": "CONVERSATION_HISTORY",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:00Z"
+  },
+  {
+   "step_index": 2,
+   "source": "SYSTEM",
+   "type": "CHECKPOINT",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:01Z",
+   "content": "{{ CHECKPOINT 0 }}\n **The earlier parts of this conversation have been truncated due to its long length. The following content summarizes the truncated context so that you may continue your work. **\n\n\n# USER Objective:\nReview the demo project."
+  },
+  {
+   "step_index": 3,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:02Z",
+   "thinking": "**Planning the review**\n\nI will start by listing the repository contents.",
+   "content": "I'll start by checking the project layout.",
+   "tool_calls": [
+    {
+     "name": "run_command",
+     "args": {
+      "CommandLine": "\"ls -la\"",
+      "Cwd": "\"/fixture/demo-project\"",
+      "WaitMsBeforeAsync": "5000",
+      "toolAction": "\"Listing the project root\"",
+      "toolSummary": "\"List project root\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 4,
+   "source": "MODEL",
+   "type": "RUN_COMMAND",
+   "status": "DONE",
+   "exit_code": 0,
+   "created_at": "2026-08-20T10:10:03Z",
+   "content": "Created At: 2026-08-20T11:10:03+01:00\nCompleted At: 2026-08-20T11:10:05+01:00\n\n\t\t\t\tThe command exited with code 0.\n\t\t\t\tOutput:\n\t\t\t\ttotal 12\r\ndrwxr-xr-x src\r\n-rw-r--r-- README.md\r\n"
+  },
+  {
+   "step_index": 5,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:06Z",
+   "tool_calls": [
+    {
+     "name": "view_file",
+     "args": {
+      "AbsolutePath": "\"/fixture/demo-project/README.md\"",
+      "ContentOffset": "0",
+      "StartLine": "1",
+      "EndLine": "40",
+      "toolAction": "\"Reading README.md\"",
+      "toolSummary": "\"Read README.md\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 6,
+   "source": "MODEL",
+   "type": "VIEW_FILE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:07Z",
+   "content": "Created At: 2026-08-20T11:10:07+01:00\nCompleted At: 2026-08-20T11:10:07+01:00\nFile Path: `file:///fixture/demo-project/README.md`\nTotal Lines: 40\nTotal Bytes: 900\nShowing lines 1-",
+   "truncated_fields": [
+    "content"
+   ]
+  },
+  {
+   "step_index": 7,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:08Z",
+   "tool_calls": [
+    {
+     "name": "grep_search",
+     "args": {
+      "CaseInsensitive": "true",
+      "MatchPerLine": "true",
+      "Query": "\"TODO\"",
+      "SearchPath": "\"/fixture/demo-project\"",
+      "toolAction": "\"Searching for TODOs\"",
+      "toolSummary": "\"Search TODOs\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 8,
+   "source": "MODEL",
+   "type": "GREP_SEARCH",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:09Z",
+   "content": "Created At: 2026-08-20T11:10:09+01:00\nCompleted At: 2026-08-20T11:10:09+01:00\n{\"File\":\"/fixture/demo-project/src/app.ts\",\"LineNumber\":12,\"LineContent\":\"  // TODO: handle the empty case\"}"
+  },
+  {
+   "step_index": 9,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:10Z",
+   "tool_calls": [
+    {
+     "name": "write_to_file",
+     "args": {
+      "TargetFile": "\"/fixture/demo-project/NOTES.md\"",
+      "CodeContent": "\"# Notes\\n\\nReviewed on 2026-08-20.\\n\"",
+      "Description": "\"Write a short review note\"",
+      "IsArtifact": "false",
+      "Overwrite": "false",
+      "toolAction": "\"Writing NOTES.md\"",
+      "toolSummary": "\"Write NOTES.md\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 10,
+   "source": "MODEL",
+   "type": "CODE_ACTION",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:11Z",
+   "content": "Created At: 2026-08-20T11:10:11+01:00\nCompleted At: 2026-08-20T11:10:11+01:00\nCreated file file:///fixture/demo-project/NOTES.md"
+  },
+  {
+   "step_index": 11,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:12Z",
+   "tool_calls": [
+    {
+     "name": "list_dir",
+     "args": {
+      "DirectoryPath": "\"/fixture/demo-project/src\"",
+      "toolAction": "\"Listing src\"",
+      "toolSummary": "\"List src\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 12,
+   "source": "MODEL",
+   "type": "LIST_DIRECTORY",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:13Z",
+   "content": "Created At: 2026-08-20T11:10:13+01:00\nCompleted At: 2026-08-20T11:10:13+01:00\n{\"name\":\"app.ts\", \"isDir\":false}\n{\"name\":\"util.ts\", \"isDir\":false}"
+  },
+  {
+   "step_index": 13,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:14Z",
+   "tool_calls": [
+    {
+     "name": "manage_task",
+     "args": {
+      "Action": "\"status\"",
+      "TaskId": "\"11111111-1111-4111-8111-111111111111/task-7\"",
+      "toolAction": "\"Checking task status\"",
+      "toolSummary": "\"Check task status\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 14,
+   "source": "MODEL",
+   "type": "GENERIC",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:15Z",
+   "content": "Created At: 2026-08-20T11:10:15+01:00\nCompleted At: 2026-08-20T11:10:15+01:00\nTask: 11111111-1111-4111-8111-111111111111/task-7\nStatus: RUNNING\nLog: /fixture/.gemini/antigravity-cli/brain/11111111-1111-4111-8111-111111111111/.system_generated/tasks/task-7.log"
+  },
+  {
+   "step_index": 15,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:16Z",
+   "tool_calls": [
+    {
+     "name": "search_web",
+     "args": {
+      "query": "\"typescript project layout conventions\"",
+      "toolAction": "\"Searching the web\"",
+      "toolSummary": "\"Search project conventions\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 16,
+   "source": "MODEL",
+   "type": "SEARCH_WEB",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:17Z",
+   "content": "Created At: 2026-08-20T11:10:17+01:00\nCompleted At: 2026-08-20T11:10:19+01:00\nThe search for \"typescript project layout conventions\" returned the following summary:\nCommon layouts place sources under src/."
+  },
+  {
+   "step_index": 17,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:20Z",
+   "tool_calls": [
+    {
+     "name": "read_url_content",
+     "args": {
+      "Url": "\"https://example.invalid/docs/layout\"",
+      "toolAction": "\"Reading the docs page\"",
+      "toolSummary": "\"Read layout docs\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 18,
+   "source": "MODEL",
+   "type": "READ_URL_CONTENT",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:21Z",
+   "content": "Created At: 2026-08-20T11:10:21+01:00\nCompleted At: 2026-08-20T11:10:22+01:00\nTitle: Layout Docs\n\nOG Description: Project layout guidance"
+  },
+  {
+   "step_index": 19,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:23Z",
+   "tool_calls": [
+    {
+     "name": "ask_question",
+     "args": {
+      "questions": "\"[{\\\"question\\\":\\\"Should I also update the changelog?\\\"}]\"",
+      "toolAction": "\"Asking the user\"",
+      "toolSummary": "\"Ask about the changelog\""
+     }
+    }
+   ]
+  },
+  {
+   "step_index": 20,
+   "source": "MODEL",
+   "type": "ASK_QUESTION",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:24Z",
+   "content": "Created At: 2026-08-20T11:10:24+01:00\nCompleted At: 2026-08-20T11:12:00+01:00\nA1: No, the changelog is fine."
+  },
+  {
+   "step_index": 21,
+   "source": "SYSTEM",
+   "type": "SYSTEM_MESSAGE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:12:05Z",
+   "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-08-20T10:12:00Z sender=11111111-1111-4111-8111-111111111111/task-7 A background task finished.\n</SYSTEM_MESSAGE>"
+  },
+  {
+   "step_index": 22,
+   "source": "SYSTEM",
+   "type": "DIRECTORY_RULES",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:12:06Z",
+   "content": "You have viewed or edited files, which are associated with the following rules files:\n- /fixture/demo-project/AGENTS.md\n\nThese rules provide important context when working with this part of the codebase."
+  },
+  {
+   "step_index": 23,
+   "source": "SYSTEM",
+   "type": "ERROR_MESSAGE",
+   "status": "ERROR",
+   "created_at": "2026-08-20T10:12:07Z",
+   "error": "There was a problem parsing the tool call. \nError Message: model output error: invalid tool call error (invalid_signature)",
+   "content": "Created At: 2026-08-20T11:12:07+01:00\nError invalid tool call: There was a problem parsing the tool call."
+  },
+  {
+   "step_index": 24,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "RUNNING",
+   "created_at": "2026-08-20T10:15:46Z",
+   "content": "Summarising the review now",
+   "tool_calls": [
+    {
+     "name": "run_command",
+     "args": {
+      "CommandLine": "\"git status\"",
+      "Cwd": "\"/fixture/demo-project\"",
+      "toolAction": "\"Checking git status\"",
+      "toolSummary": "\"Check git status\""
+     }
+    }
+   ]
+  }
+ ],
+ "transcriptFull": [
+  {
+   "step_index": 6,
+   "source": "MODEL",
+   "type": "VIEW_FILE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:10:07Z",
+   "content": "Created At: 2026-08-20T11:10:07+01:00\nCompleted At: 2026-08-20T11:10:07+01:00\nFile Path: `file:///fixture/demo-project/README.md`\nTotal Lines: 40\nTotal Bytes: 900\nShowing lines 1-40:\n# Demo Project\n\nA small example used by the adapter test fixtures.\n"
+  }
+ ],
+ "appendedSteps": [
+  {
+   "step_index": 25,
+   "source": "MODEL",
+   "type": "RUN_COMMAND",
+   "status": "DONE",
+   "exit_code": 1,
+   "created_at": "2026-08-20T10:16:00Z",
+   "content": "Created At: 2026-08-20T11:16:00+01:00\nCompleted At: 2026-08-20T11:16:00+01:00\n\n\t\t\t\tThe command exited with code 1.\n\t\t\t\tOutput:\n\t\t\t\tfatal: not a git repository\r\n"
+  },
+  {
+   "step_index": 26,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:16:01Z",
+   "content": "The review is complete."
+  }
+ ],
+ "unknownPairStep": {
+  "step_index": 99,
+  "source": "MODEL",
+  "type": "FUTURE_STEP_TYPE_ADDED_BY_AN_AUTO_UPDATE",
+  "status": "DONE",
+  "created_at": "2026-08-25T09:00:00Z",
+  "content": "A step type this build has never seen."
+ },
+ "settlement": {
+  "id": "cccccccc-0000-4000-8000-00000000000a",
+  "recipient": "11111111-1111-4111-8111-111111111111",
+  "sender": "11111111-1111-4111-8111-111111111111/task-7",
+  "priority": "MESSAGE_PRIORITY_HIGH",
+  "timestamp": "2026-08-20T10:12:00.566635120Z",
+  "renderDetails": {
+   "messageTitle": "Demo background task finished"
+  },
+  "content": "Task id \"11111111-1111-4111-8111-111111111111/task-7\" finished with result:\n\n\t\t\t\tThe command exited with code 0.\n\t\t\t\tOutput:\n\t\t\t\tdone\n",
+  "sourceMetadata": {
+   "tool": {
+    "conversationId": "11111111-1111-4111-8111-111111111111",
+    "stepIndex": 14,
+    "toolCall": {
+     "id": "call_000123",
+     "name": "run_command",
+     "argumentsJson": "{\"CommandLine\":\"echo done\",\"Cwd\":\"/fixture/demo-project\"}",
+     "originalName": "run_command"
+    }
+   }
+  }
+ },
+ "streamEvents": {
+  "_note": "Drive-stream step_update events, agy 1.1.17 (spec §7.C1). P0 does not consume these; the normalization table that turns them into transcript-shaped records is asserted here so P1 inherits a proven boundary.",
+  "init": {
+   "init": {},
+   "conversation_id": "11111111-1111-4111-8111-111111111111",
+   "model": "gemini-3.5-flash-low",
+   "cwd": "/fixture/demo-project",
+   "permission_mode": "request-review",
+   "tools": [
+    "run_command",
+    "view_file",
+    "grep_search"
+   ]
+  },
+  "stepUpdates": [
+   {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "step_index": 0,
+    "state": "STEP_DONE",
+    "step_type": "user_input"
+   },
+   {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "step_index": 1,
+    "state": "STEP_DONE",
+    "step_type": "checkpoint"
+   },
+   {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "step_index": 2,
+    "state": "STEP_DONE",
+    "step_type": "agent_response",
+    "text_delta": "ok",
+    "duration_seconds": 1.2,
+    "usage": {
+     "input": 12,
+     "output": 3,
+     "thinking": 0,
+     "cache_read": 0
+    }
+   }
+  ],
+  "result": {
+   "conversation_id": "11111111-1111-4111-8111-111111111111",
+   "status": "SUCCESS",
+   "response": "ok",
+   "duration_seconds": 1.4,
+   "num_turns": 1,
+   "usage": {
+    "input": 12,
+    "output": 3,
+    "thinking": 0,
+    "cache_read": 0
+   }
+  },
+  "_canceledNote": "CONSTRUCTED, NOT MEASURED. Only STEP_DONE was ever captured on this wire, so the cancel-shaped pair below is a probe for a mapping invariant rather than a recording: every state the terminal-state predicate accepts must map to a terminal status. Kept out of `stepUpdates` so nothing here can be mistaken for an observed 1.1.17 envelope.",
+  "canceledStepUpdates": [
+   {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "step_index": 600,
+    "state": "STEP_RUNNING",
+    "step_type": "agent_response",
+    "text_delta": "half an answ"
+   },
+   {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "step_index": 600,
+    "state": "STEP_CANCELED",
+    "step_type": "agent_response"
+   }
+  ]
+ },
+ "round2b": {
+  "_note": "Round 2b (P2a-P2f). SHAPES measured on the live agy 1.1.20 store 2026-08-25; VALUES substituted like the rest of this fixture. The four settlement senders reproduce the measured taxonomy exactly (29 <uuid>/task-N, 2 bare <uuid>, 3 'system', 1 absent). CONSTRUCTED, and marked so: the four catalog rows appended to availableModels. The real host publishes one 'Gemini 3.7 Flash (High)' and one 'Gemini 3.5 Flash (Low)'; effort siblings and a colliding duplicate are needed to exercise family grouping and the collision path, which no single-variant catalog can. Their SHAPE is the measured one, and the real catalog does carry both a three-variant family and a duplicate label.",
+  "cancelledTaskSettlement": {
+   "id": "cccccccc-0000-4000-8000-00000000000b",
+   "recipient": "11111111-1111-4111-8111-111111111111",
+   "sender": "11111111-1111-4111-8111-111111111111/task-9",
+   "priority": "MESSAGE_PRIORITY_HIGH",
+   "timestamp": "2026-08-20T10:13:00.100000000Z",
+   "renderDetails": {
+    "messageTitle": "Demo background task was canceled"
+   },
+   "content": "Task id \"11111111-1111-4111-8111-111111111111/task-9\" was canceled.\n",
+   "sourceMetadata": {
+    "tool": {
+     "conversationId": "11111111-1111-4111-8111-111111111111",
+     "stepIndex": 13,
+     "toolCall": {
+      "id": "toolu_fixture_task9",
+      "name": "manage_task"
+     }
+    }
+   }
+  },
+  "subagentSettlement": {
+   "id": "cccccccc-0000-4000-8000-00000000000c",
+   "recipient": "11111111-1111-4111-8111-111111111111",
+   "sender": "55555555-5555-4555-8555-555555555555",
+   "priority": "MESSAGE_PRIORITY_HIGH",
+   "timestamp": "2026-08-20T10:14:00.200000000Z",
+   "renderDetails": {
+    "messageTitle": "Subagent finished"
+   },
+   "content": "ok\n",
+   "sourceMetadata": {
+    "tool": {
+     "conversationId": "11111111-1111-4111-8111-111111111111",
+     "stepIndex": 21,
+     "toolCall": {
+      "id": "toolu_fixture_sub",
+      "name": "invoke_subagent"
+     }
+    }
+   }
+  },
+  "systemSettlement": {
+   "id": "cccccccc-0000-4000-8000-00000000000d",
+   "recipient": "11111111-1111-4111-8111-111111111111",
+   "sender": "system",
+   "priority": "MESSAGE_PRIORITY_HIGH",
+   "timestamp": "2026-08-20T10:15:00.300000000Z",
+   "renderDetails": {
+    "messageTitle": "All your subagents have been stopped"
+   },
+   "content": "All your subagents have been stopped.\n"
+  },
+  "senderlessSettlement": {
+   "id": "cccccccc-0000-4000-8000-00000000000e",
+   "recipient": "11111111-1111-4111-8111-111111111111",
+   "priority": "MESSAGE_PRIORITY_HIGH",
+   "timestamp": "2026-08-20T10:16:00.400000000Z",
+   "renderDetails": {
+    "messageTitle": "A notice with no sender"
+   },
+   "content": "no sender\n"
+  },
+  "taskLog": "Starting the demo task...\r\nStep 1 of 2 complete.\r\nStep 2 of 2 complete.\r\ndone\r\n",
+  "taskLogId": "task-7",
+  "killStep": {
+   "step_index": 21,
+   "source": "MODEL",
+   "type": "PLANNER_RESPONSE",
+   "status": "DONE",
+   "created_at": "2026-08-20T10:12:30Z",
+   "tool_calls": [
+    {
+     "name": "manage_task",
+     "args": {
+      "Action": "\"kill\"",
+      "TaskId": "\"11111111-1111-4111-8111-111111111111/task-9\"",
+      "toolAction": "\"Stopping the demo task\"",
+      "toolSummary": "\"Stop demo task\""
+     }
+    }
+   ]
+  },
+  "childTranscript": [
+   {
+    "step_index": 0,
+    "source": "USER_EXPLICIT",
+    "type": "USER_INPUT",
+    "status": "DONE",
+    "created_at": "2026-08-20T10:14:00Z",
+    "content": "Reply with the single word ok."
+   },
+   {
+    "step_index": 1,
+    "source": "MODEL",
+    "type": "PLANNER_RESPONSE",
+    "status": "DONE",
+    "created_at": "2026-08-20T10:14:02Z",
+    "content": "ok"
+   }
+  ],
+  "supplementaryTranscript": [
+   {
+    "step_index": 0,
+    "source": "USER_EXPLICIT",
+    "type": "USER_INPUT",
+    "status": "DONE",
+    "created_at": "2026-08-20T11:00:00Z",
+    "content": "A conversation the summaries table never learned about."
+   }
+  ],
+  "lastConversations": {
+   "/fixture/supp-project": "66666666-6666-4666-8666-666666666666"
+  }
+ }
+}

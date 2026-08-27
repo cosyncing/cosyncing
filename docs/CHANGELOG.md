@@ -47,9 +47,34 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Server owners can enable authenticated workspace browsing from Settings
   after confirming the remote file-access risk. The broker persists the gate
   and restarts; paired devices can inspect it but cannot change it.
+- Antigravity (`agy`) is a shipped agent. Conversations are discovered from the
+  CLI's own store and replayed read-only; `?mode=resume` drives one through a
+  broker-owned `agy` child that starts on the first prompt rather than on
+  attach. Two clients can share one Drive — the second is offered the join,
+  receives the same connection, and sees prompts the transcript has not
+  recorded yet — and a write from a terminal releases the session to it and
+  says so. New sessions can be created from the app with directory and model
+  choice; the pending roster row resolves to the CLI's own record on the first
+  prompt. Model selection reads the CLI's live catalog: reasoning-effort
+  variants collapse into one model with selectable low, medium, and high
+  efforts, shown in the roster and the composer. Checkpoint summaries and
+  stripped user-row metadata replay as decodable context events, and an
+  attached session reports its control state. Doctor diagnoses it. Seven gated
+  suites cover the store, the mapper, observe, drive, replay identity,
+  registration, and the cross-client join.
+- Kimi subagent sessions appear in the roster as observe-only child rows under
+  the session that spawned them, replaying the child's own journal. A detached
+  child that is still writing its journal shows as working — the child's own
+  turn lifecycle decides — and an active child keeps its parent marked
+  working.
 
 ### Changed
 
+- Subagent subtrees in the session roster default to closed. The parent keeps
+  its linked-session count chip, opening one is a saved per-parent choice, a
+  search still reveals a matching child under its parent, and a working child
+  still rolls its status up to the parent row. The cached startup pane folds
+  the same children.
 - New sessions open as soon as creation succeeds and the protected Drive attach
   starts. Slow agent bootstrap continues in Session Detail instead of holding
   the full-page creation spinner.
@@ -101,6 +126,9 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Kimi and DeepSeek Harness roster rows show their model before the session is
+  opened: kimi rows read their own journal head, and DeepSeek Harness rows use
+  a bounded per-session model read cached by row freshness.
 - Claude child rows show their model before the session is opened. Web tabs
   with open sessions request browser close confirmation for Ctrl/Cmd+W and
   other accidental unloads.

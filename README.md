@@ -67,9 +67,10 @@ hosted service between the client and the broker.
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
-One protocol covers all six. Per-agent control differs, and Claude Code sessions open read-only
+One protocol covers all seven. Per-agent control differs, and Claude Code sessions open read-only
 until you take over. See [supported-agent setup](docs/supported_agents/README.md) for versions and
 installation, and [adapter support](docs/protocol/adapter-support.md) for the capability matrix.
 
@@ -77,16 +78,20 @@ Foreground clients can join the same broker-owned Codex or Pi Drive session with
 second native Resume. Claude Code keeps its Observe/Take-over flow on another client, while OpenCode
 keeps its shared-live behavior. Background Observe connections stay read-only.
 
-**Experimental:** Two provisional adapters are available to source contributors, both talking to a
-local server rather than a CLI. [Kimi Code](docs/supported_agents/kimi.md) observes every session on a
+**Experimental:** Three provisional adapters are available to source contributors.
+[Kimi Code](docs/supported_agents/kimi.md) observes every session on a
 `kimi web` server read-only, drives the ones cosyncing created — prompts, approvals, model selection —
 and takes over the ones it did not, explicitly. [DeepSeek Harness](docs/supported_agents/dsh.md)
 connects to a `dsh web` host and gives active foreground clients a shared transcript and control
 surface, with model and reasoning-effort selection, permission presets, the host's own slash commands,
 and image attachments. General file attachments are not supported — the host accepts image content
 only — and background resident subscriptions and some message presentation remain follow-up work.
+[Antigravity](docs/supported_agents/antigravity.md) reads the Antigravity CLI's own conversation
+store — no server involved — replays every conversation read-only, and drives one through a
+broker-owned `agy` child; two clients can share a Drive, and a write from a terminal hands the
+session back.
 
-Neither needs a rollout flag, and neither needs a terminal left open: an installed cosyncing service
+None needs a rollout flag. Neither server-backed adapter needs a terminal left open: an installed cosyncing service
 starts a host when none is running, restarts one that crashes, and stops the one it started. A host you
 started yourself is never stopped, replaced, or reconfigured, and setup names both hosts before you
 agree to manage them. Install DeepSeek Harness globally with `npm install -g @deepseek-ai/dsh` —

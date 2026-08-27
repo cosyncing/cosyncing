@@ -1,7 +1,7 @@
 # Kimi Code (experimental)
 
 cosyncing talks to the local server Kimi Code starts with `kimi web --no-open`,
-over its REST and WebSocket API. It was verified against Kimi Code 0.35.0; the
+over its REST and WebSocket API. It was verified against Kimi Code 0.38.0; the
 server API is marked experimental upstream, so the floor is the exact tested
 version rather than an inferred earlier one.
 
@@ -18,8 +18,14 @@ cannot decode would cost them their whole agent list.
 - A session cosyncing did not create can be taken over explicitly. That is a
   decision you make, not something cosyncing infers.
 - Model selection is offered at creation time and while driving.
+- File and image attachments are supported: images go inline as vision input,
+  other files upload through the server's own file API.
+- The server's slash commands are offered, including `/goal` and its skills as
+  prompt commands.
+- Subagent runs appear as observe-only child rows under the session that
+  spawned them, with live activity while a child is still writing.
 
-Native file and image input, and agent/mode switching, are not implemented yet.
+Agent and mode switching are not implemented yet.
 
 ## Why a session you started elsewhere is read-only
 

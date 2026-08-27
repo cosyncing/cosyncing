@@ -63,9 +63,10 @@ Broker는 에이전트가 실행되는 컴퓨터에서 동작합니다. 각 세�
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
-여섯 가지 모두를 하나의 프로토콜로 다룹니다. 조작할 수 있는 범위는 에이전트마다 다르며,
+일곱 가지 모두를 하나의 프로토콜로 다룹니다. 조작할 수 있는 범위는 에이전트마다 다르며,
 Claude Code 세션은 제어권을 가져오기 전까지 읽기 전용으로 열립니다. 버전과 설치 방법은
 [지원 에이전트 설정](docs/supported_agents/README.md)을, 기능 대응표는
 [어댑터 지원 현황](docs/protocol/adapter-support.md)을 참고하세요.
@@ -75,16 +76,19 @@ Pi 조작 세션에 참여할 수 있습니다. Claude Code는 다른 클라이�
 유지하고, OpenCode는 공유 라이브 동작을 유지합니다. 백그라운드 보기 연결은 읽기 전용으로
 유지됩니다.
 
-**실험적:** 소스 기여자를 위한 잠정 어댑터가 두 개 있습니다. 둘 다 CLI가 아니라 로컬 서버와
-통신합니다. [Kimi Code](docs/supported_agents/kimi.md)는 `kimi web` 서버의 모든 세션을 읽기
+**실험적:** 소스 기여자를 위한 잠정 어댑터가 세 개 있습니다.
+[Kimi Code](docs/supported_agents/kimi.md)는 `kimi web` 서버의 모든 세션을 읽기
 전용으로 관찰하고, cosyncing이 만든 세션은 직접 조작하며(프롬프트, 승인, 모델 선택), 그렇지 않은
 세션은 명시적으로 제어권을 가져옵니다. [DeepSeek Harness](docs/supported_agents/dsh.md)는
 `dsh web` 호스트에 연결해, 활성 포그라운드 클라이언트에 공유 대화 기록과 조작 화면을 제공합니다.
 모델과 추론 강도 선택, 권한 프리셋, 호스트 자체의 슬래시 명령, 이미지 첨부를 지원합니다. 일반
 파일 첨부는 지원하지 않으며(호스트가 이미지만 받습니다), 백그라운드 상주 구독과 일부 메시지
-표시는 후속 작업으로 남아 있습니다.
+표시는 후속 작업으로 남아 있습니다. [Antigravity](docs/supported_agents/antigravity.md)는
+Antigravity CLI 자체의 대화 저장소를 읽고(서버가 없습니다) 모든 대화를 읽기 전용으로 재생하며,
+Broker가 소유한 `agy` 자식 프로세스를 통해 조작합니다. 두 클라이언트가 하나의 Drive를 공유할 수
+있고, 터미널에서 쓰기가 일어나면 세션을 돌려줍니다.
 
-둘 다 롤아웃 플래그가 필요 없고, 터미널을 열어 둘 필요도 없습니다. 설치된 cosyncing 서비스가
+셋 다 롤아웃 플래그가 필요 없습니다. 서버를 쓰는 두 어댑터는 터미널을 열어 둘 필요도 없습니다. 설치된 cosyncing 서비스가
 호스트가 실행 중이 아니면 시작하고, 죽으면 다시 시작하며, 자신이 시작한 것만 중지합니다.
 사용자가 직접 시작한 호스트는 중지되거나 교체되거나 재설정되지 않으며, 설정 과정에서 관리에
 동의하기 전에 두 호스트의 이름을 모두 알려 줍니다. DeepSeek Harness는

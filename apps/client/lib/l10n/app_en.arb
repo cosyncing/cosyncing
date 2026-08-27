@@ -2721,6 +2721,7 @@
   "sessionRosterAgentCodex": "Codex",
   "sessionRosterAgentOpenCode": "OpenCode",
   "sessionRosterAgentPi": "Pi",
+  "sessionRosterAgentAntigravity": "Antigravity",
   "sessionRosterOriginVscode": "VS Code",
   "sessionRosterOtherSessions": "Other sessions",
   "sessionRosterCachedReconnecting": "Showing last known sessions while reconnecting. Activity isn't current.",

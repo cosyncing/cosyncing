@@ -216,12 +216,13 @@ void main() {
             presentation: presentation(
               rows: [
                 identity(id: 'parent', title: 'Parent', nativeId: 'n-parent'),
+                // Origin-null lineage: a subagent child would be folded
+                // away, since the cached pane mirrors the live closed default.
                 identity(
                   id: 'child',
                   title: 'Child',
                   nativeId: 'n-child',
                   parentThreadId: 'n-parent',
-                  origin: SessionOrigin.subagent,
                 ),
               ],
             ),

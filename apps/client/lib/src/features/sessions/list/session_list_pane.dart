@@ -401,10 +401,14 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
             final activityChanged = filters.activity != _filters.activity;
             setState(() {
               _filters = filters;
-              // Leaving the reveal restores the saved presentation exactly,
-              // for projects and for child subtrees alike.
+              // Leaving the reveal restores the saved presentation exactly.
+              // Projects reveal under any narrowing; child subtrees reveal
+              // only under an active search, never under the standing
+              // activity window alone.
               if (!filters.isNarrowing) {
                 _revealCollapsedProjectKeys.clear();
+              }
+              if (!filters.isSearching) {
                 _revealChildExpansion.clear();
               }
             });
@@ -485,7 +489,7 @@ class _SessionListPaneState extends ConsumerState<SessionListPane> {
   void _toggleChildren(SessionInfo parent, {required bool revealed}) {
     final key = sessionCompositeRosterKey(parent);
     setState(() {
-      final target = _filters.isNarrowing
+      final target = _filters.isSearching
           ? _revealChildExpansion
           : _childExpansion;
       target[key] = revealed
@@ -1409,6 +1413,9 @@ String _toolLabel(AppLocalizations l10n, String tool) =>
       'codex' => l10n.sessionRosterAgentCodex,
       'opencode' => l10n.sessionRosterAgentOpenCode,
       'pi' => l10n.sessionRosterAgentPi,
+      // The backend id and the product name differ here, so the fallback below
+      // would render the command (`agy`) where every other row renders a name.
+      'agy' => l10n.sessionRosterAgentAntigravity,
       _ => tool,
     };
 

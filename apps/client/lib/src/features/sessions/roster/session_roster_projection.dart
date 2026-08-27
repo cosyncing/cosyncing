@@ -76,11 +76,21 @@ final class SessionRosterFilters {
   ///
   /// Roster presentation uses this to temporarily reveal matching groups
   /// without writing to the user's saved project-expansion set.
-  bool get isNarrowing =>
+  bool get isNarrowing => isSearching || activity != SessionActivityWindow.any;
+
+  /// Whether the user is actively seeking sessions — query text, a status or
+  /// tool chip, or the age filter. Only these gestures reveal match paths and
+  /// route expansion toggles to the transient reveal maps.
+  ///
+  /// The activity window is deliberately not counted: the pane mirrors it
+  /// from the broker query window on every build (7 days in the live app),
+  /// so a reveal keyed on [isNarrowing] held the roster permanently in
+  /// search-reveal mode — every subagent subtree forced open past both the
+  /// closed default and any saved collapse.
+  bool get isSearching =>
       query.trim().isNotEmpty ||
       status != null ||
       tool != null ||
-      activity != SessionActivityWindow.any ||
       olderThanDays != null;
 
   /// Returns a copy with selected values replaced or cleared.
@@ -613,11 +623,13 @@ final class SessionRosterProjection {
         return tree.isOrphanChildKey(key) ||
             _originVisible(session.origin, preferences);
       }
-      // While a search or filter narrows the roster the saved overrides are
-      // ignored outright and only the transient map is consulted, exactly like
-      // R1b's project expansion. A saved collapse therefore cannot defeat the
-      // reveal, and nothing written during the reveal touches the saved state.
-      final override = filters.isNarrowing
+      // While the user is actively searching, the saved overrides are ignored
+      // outright and only the transient map is consulted, exactly like R1b's
+      // project expansion. A saved collapse therefore cannot defeat the
+      // reveal, and nothing written during the reveal touches the saved
+      // state. The standing activity window is not a search: with only the
+      // window set, the saved map and the closed default govern as usual.
+      final override = filters.isSearching
           ? revealChildExpansion[parentKey]
           : childExpansion[parentKey];
       return switch (override ?? SessionChildExpansion.auto) {
@@ -625,9 +637,17 @@ final class SessionRosterProjection {
         SessionChildExpansion.collapsed => false,
         // With no override in force, narrowing reveals the path down to a
         // matching descendant — only kept keys reach here, so that is the match
-        // path and nothing else. Otherwise the global preference decides.
+        // path and nothing else. Otherwise a SUBAGENT subtree defaults CLOSED:
+        // the global background preference decides whether child rows are
+        // reachable at all, not whether every parent starts open — a roster
+        // where each delegating session unfolds its children by default is all
+        // children. The parent's child-count affordance is the reveal, and an
+        // explicit expansion is saved per parent. Other child origins keep the
+        // preference as their default.
         SessionChildExpansion.auto =>
-          filters.isNarrowing || _originVisible(session.origin, preferences),
+          filters.isSearching ||
+              (session.origin != SessionOrigin.subagent &&
+                  _originVisible(session.origin, preferences)),
       };
     }
 

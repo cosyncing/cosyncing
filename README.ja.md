@@ -63,9 +63,10 @@ Broker の間に当方が運用するサービスは一切入りません。
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
-6 つすべてを 1 つのプロトコルでカバーします。操作できる範囲はエージェントごとに異なり、
+7 つすべてを 1 つのプロトコルでカバーします。操作できる範囲はエージェントごとに異なり、
 Claude Code のセッションは引き継ぐまで読み取り専用で開きます。バージョンとインストール方法は
 [対応エージェントのセットアップ](docs/supported_agents/README.md)、機能の対応表は
 [アダプターの対応状況](docs/protocol/adapter-support.md) を参照してください。
@@ -75,17 +76,21 @@ Claude Code のセッションは引き継ぐまで読み取り専用で開き�
 「閲覧・引き継ぎ」の流れを維持し、OpenCode は共有ライブの挙動を維持します。バックグラウンドの
 閲覧接続は読み取り専用のままです。
 
-**実験的:** ソースからのコントリビューター向けに、暫定のアダプターが 2 つあります。どちらも
-CLI ではなくローカルサーバーと通信します。[Kimi Code](docs/supported_agents/kimi.md) は
+**実験的:** ソースからのコントリビューター向けに、暫定のアダプターが 3 つあります。
+[Kimi Code](docs/supported_agents/kimi.md) は
 `kimi web` サーバー上のすべてのセッションを読み取り専用で監視し、cosyncing が作成した
 セッションは操作でき（プロンプト、承認、モデル選択）、そうでないものは明示的に引き継ぎます。
 [DeepSeek Harness](docs/supported_agents/dsh.md) は `dsh web` ホストに接続し、アクティブな
 フォアグラウンドのクライアントに共有トランスクリプトと操作画面を提供します。モデルと推論の深さの
 選択、権限プリセット、ホスト自身のスラッシュコマンド、画像の添付に対応します。一般的なファイル
 添付は未対応で（ホストは画像のみ受け付けます）、バックグラウンドの常駐購読と一部のメッセージ表示は
-今後の課題です。
+今後の課題です。[Antigravity](docs/supported_agents/antigravity.md) は Antigravity CLI 自身の
+会話ストアを読み取り（サーバーは介在しません）、すべての会話を読み取り専用で再生し、Broker が
+所有する `agy` 子プロセスを通じて操作します。2 つのクライアントが 1 つの Drive を共有でき、
+ターミナルからの書き込みがあればセッションを返します。
 
-どちらもロールアウトフラグは不要で、ターミナルを開いたままにしておく必要もありません。
+いずれもロールアウトフラグは不要です。サーバーを使う 2 つのアダプターは、ターミナルを開いた
+ままにしておく必要もありません。
 インストール済みの cosyncing サービスが、ホストが動いていなければ起動し、落ちれば再起動し、
 自分が起動したものだけを停止します。あなた自身が起動したホストは、停止も置き換えも再設定も
 されません。セットアップでは、管理を許可する前に両方のホスト名を提示します。DeepSeek Harness は

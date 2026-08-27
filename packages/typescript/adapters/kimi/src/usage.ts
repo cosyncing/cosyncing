@@ -140,7 +140,7 @@ export interface KimiWireDiscovery {
  * segment address something other than a child — `../../etc` walks out of the
  * home entirely — and this reader opens whatever the join produces.
  */
-function isSafePathComponent(name: string): boolean {
+export function isSafePathComponent(name: string): boolean {
   if (!name) return false;
   // Both separators, on every platform: a Windows-shaped id must not become a
   // traversal on a POSIX host merely because `join` there treats `\` as text.
@@ -154,7 +154,7 @@ function isSafePathComponent(name: string): boolean {
 }
 
 /** Is `target` the root itself or something beneath it? The containment half of the check above. */
-function isWithinRoot(root: string, target: string): boolean {
+export function isWithinRoot(root: string, target: string): boolean {
   return target === root || target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 

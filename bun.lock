@@ -26,6 +26,13 @@
         "@cosyncing/protocol": "workspace:*",
       },
     },
+    "packages/typescript/adapters/antigravity": {
+      "name": "@cosyncing/adapter-antigravity",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+      },
+    },
     "packages/typescript/adapters/claude": {
       "name": "@cosyncing/adapter-claude",
       "version": "0.0.0",
@@ -71,6 +78,7 @@
     "packages/typescript/broker": {
       "name": "@cosyncing/broker",
       "dependencies": {
+        "@cosyncing/adapter-antigravity": "workspace:*",
         "@cosyncing/adapter-api": "workspace:*",
         "@cosyncing/adapter-claude": "workspace:*",
         "@cosyncing/adapter-codex": "workspace:*",
@@ -109,6 +117,8 @@
     "@clack/core": ["@clack/core@1.4.3", "", { "dependencies": { "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-/kr3UWNtdJfxZtPgDqUOmG2pvwlmcLGheex5yiZKdwbzZJxhV+HMNR9QNmyY5cGwTNV6LrR7Jtp+KjhUAP1qBQ=="],
 
     "@clack/prompts": ["@clack/prompts@1.7.0", "", { "dependencies": { "@clack/core": "1.4.3", "fast-string-width": "^3.0.2", "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-y7/yvZ2TPAnR9+jnc00klvNNLkJiXFFrQA/hlLCcxA9a2A4zQIOimyFQ9XfwYKiGD1fb5GY8vbKIIgO8d5Tb2A=="],
+
+    "@cosyncing/adapter-antigravity": ["@cosyncing/adapter-antigravity@workspace:packages/typescript/adapters/antigravity"],
 
     "@cosyncing/adapter-api": ["@cosyncing/adapter-api@workspace:packages/typescript/adapter-api"],
 

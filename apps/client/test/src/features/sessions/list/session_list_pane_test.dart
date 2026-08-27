@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/platform/update/web_handoff_participants.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -1282,6 +1283,7 @@ void main() {
       SessionStatus status = SessionStatus.idle,
       String title = '',
       String tool = 'opencode',
+      int? updatedAt,
     }) => SessionInfo(
       id: id,
       tool: tool,
@@ -1292,6 +1294,7 @@ void main() {
       nativeId: id,
       parentThreadId: parentId,
       origin: parentId == null ? null : SessionOrigin.subagent,
+      updatedAt: updatedAt,
     );
 
     Widget roster(
@@ -1301,12 +1304,14 @@ void main() {
       Brightness brightness = Brightness.light,
       Locale locale = const Locale('en'),
       Future<void> Function()? onRefresh,
+      SessionRosterQueryWindow queryWindow = SessionRosterQueryWindow.any,
     }) {
       final pane = SessionListPane(
         sessions: sessions,
         activeKey: null,
         onOpen: (_) {},
         onRefresh: onRefresh,
+        queryWindow: queryWindow,
         visibilityPreferences: SessionVisibilityPreferences(
           showBackgroundSessions: showBackground,
         ),
@@ -1320,6 +1325,15 @@ void main() {
 
     Future<void> openProject(WidgetTester tester) =>
         expandProject(tester, projectKey);
+
+    // Subagent subtrees default closed, so tests about the open tree tap the
+    // per-parent chip explicitly, level by level.
+    Future<void> openChildren(WidgetTester tester, String id) async {
+      await tester.tap(
+        find.byKey(ValueKey('session-children-opencode/$id')),
+      );
+      await tester.pumpAndSettle();
+    }
 
     double rowIndent(WidgetTester tester, String id) {
       final row = find.byKey(Key('session-row-opencode/$id'));
@@ -1338,6 +1352,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      await openChildren(tester, 'p1');
 
       final parent = find.byKey(const Key('session-row-opencode/p1'));
       final child = find.byKey(const Key('session-row-opencode/c1'));
@@ -1357,6 +1372,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      await openChildren(tester, 'p1');
 
       // 12 dp per depth, on the 4-point grid.
       expect(rowIndent(tester, 'c1') - rowIndent(tester, 'p1'), 12);
@@ -1387,6 +1403,9 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      for (final id in ['p1', 'd1', 'd2', 'd3']) {
+        await openChildren(tester, id);
+      }
 
       final base = rowIndent(tester, 'p1');
       expect(rowIndent(tester, 'd1') - base, 12);
@@ -1420,6 +1439,9 @@ void main() {
         );
         await tester.pumpAndSettle();
         await openProject(tester);
+        for (final id in ['p1', 'd1', 'd2']) {
+          await openChildren(tester, id);
+        }
 
         expect(
           find.byKey(const Key('session-row-opencode/d3')),
@@ -1440,6 +1462,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      await openChildren(tester, 'p1');
+      await openChildren(tester, 'd1');
 
       expect(rowIndent(tester, 'd2') - rowIndent(tester, 'p1'), 24);
       expect(tester.takeException(), isNull);
@@ -1456,6 +1480,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      await openChildren(tester, 'p1');
 
       // Parent displays Working; the child keeps its own pill.
       final parentPill = find.descendant(
@@ -1627,6 +1652,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await openProject(tester);
+      await openChildren(tester, 'p1');
 
       // The child announces whose subagent it is now that the chip is gone.
       expect(
@@ -1638,8 +1664,8 @@ void main() {
         contains('Subagent of Build the thing'),
       );
       // The affordance keeps a localized, counted label that states what it
-      // will do next — here the child is already revealed by the global
-      // background preference, so it offers to hide it.
+      // will do next — here the subtree was just opened, so it offers to
+      // hide it again.
       expect(
         tester
             .widget<ActionChip>(
@@ -1682,9 +1708,9 @@ void main() {
     testWidgets('the child chip hides and reshows with background enabled', (
       tester,
     ) async {
-      // Regression: with showBackgroundSessions on, the chip used to read
-      // "Show 1 linked session" while the child was already on screen, and
-      // tapping it never hid anything.
+      // A subagent subtree defaults closed even with showBackgroundSessions
+      // on, so the chip starts by offering to show — and it must keep telling
+      // the truth through a full open/close round trip.
       await tester.pumpWidget(
         roster([node('p1'), node('c1', parentId: 'p1')]),
       );
@@ -1699,12 +1725,7 @@ void main() {
       Finder chip() =>
           find.byKey(const ValueKey('session-children-opencode/p1'));
 
-      // Children are visible, so the affordance must offer to hide them.
-      expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
-      expect(chipTooltip(), 'Hide 1 linked session');
-
-      await tester.tap(chip());
-      await tester.pumpAndSettle();
+      // Children start hidden, so the affordance must offer to show them.
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
       expect(chipTooltip(), 'Show 1 linked session');
 
@@ -1712,6 +1733,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
       expect(chipTooltip(), 'Hide 1 linked session');
+
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
+      expect(chipTooltip(), 'Show 1 linked session');
     });
 
     testWidgets('searching a hidden child reveals it under its parent', (
@@ -1771,8 +1797,11 @@ void main() {
           find.byKey(const ValueKey('session-children-opencode/p1'));
       Finder childRow() => find.byKey(const Key('session-row-opencode/c1'));
 
-      // Save an explicit collapse (background visibility is on, so this is a
-      // real user choice against the global preference).
+      // Save an explicit collapse: the subtree starts closed by default, so
+      // open it first, then close it as a real per-parent user choice.
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+      expect(childRow(), findsOneWidget);
       await tester.tap(chip());
       await tester.pumpAndSettle();
       expect(childRow(), findsNothing);
@@ -1840,11 +1869,57 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // R1b survives R1c: the tree is behind a collapsed project header.
+      // R1b survives R1c: the tree is behind a collapsed project header, and
+      // opening the project reveals the parent but not its closed subtree.
       expect(find.byKey(const Key('session-row-opencode/p1')), findsNothing);
       expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
       await openProject(tester);
       expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
+      await openChildren(tester, 'p1');
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
+    });
+
+    testWidgets('the live 7-day window keeps subtrees closed and saves the '
+        'toggle', (tester) async {
+      // The live app always runs with the broker query window mirrored into
+      // the activity filter, which counts as narrowing. That standing state
+      // must not force subagent subtrees open, and a chip toggle made under
+      // it must land in the SAVED map — surviving a search round trip.
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      await tester.pumpWidget(
+        roster(
+          [
+            node('p1', updatedAt: nowMs),
+            node('c1', parentId: 'p1', updatedAt: nowMs),
+          ],
+          queryWindow: SessionRosterQueryWindow.last7Days,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Narrowing auto-reveals the project group, so the parent is already
+      // on screen — but its subagent subtree stays closed.
+      expect(find.byKey(const Key('session-row-opencode/p1')), findsOneWidget);
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsNothing);
+
+      await tester.tap(
+        find.byKey(const ValueKey('session-children-opencode/p1')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
+
+      // A search and its clearing must not eat the saved expansion.
+      await tester.enterText(
+        find.byKey(const Key('session-roster-search')),
+        'Session p1',
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('session-roster-search')),
+        '',
+      );
+      await tester.pumpAndSettle();
       expect(find.byKey(const Key('session-row-opencode/c1')), findsOneWidget);
     });
 

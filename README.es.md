@@ -63,9 +63,10 @@ cliente y el broker.
   <a href="https://pi.dev/" title="Pi"><img src="docs/assets/agents/pills/pi.png" alt="Pi" height="34"></a>
   <a href="https://www.kimi.com/code" title="Kimi CLI"><img src="docs/assets/agents/pills/kimi.png" alt="Kimi CLI" height="34"></a>
   <a href="https://github.com/deepseek-ai/deepseek-harness" title="DeepSeek Harness"><img src="docs/assets/agents/pills/dsh.png" alt="DeepSeek Harness" height="34"></a>
+  <a href="https://antigravity.google/" title="Antigravity"><img src="docs/assets/agents/pills/antigravity.png" alt="Antigravity" height="34"></a>
 </p>
 
-Un solo protocolo cubre los seis. Lo que puedes controlar cambia según el agente, y las sesiones de
+Un solo protocolo cubre los siete. Lo que puedes controlar cambia según el agente, y las sesiones de
 Claude Code se abren en solo lectura hasta que tomas el control. Consulta la
 [configuración de agentes compatibles](docs/supported_agents/README.md) para versiones e instalación,
 y el [soporte de adaptadores](docs/protocol/adapter-support.md) para la tabla de capacidades.
@@ -75,8 +76,8 @@ lanzar un segundo Resume nativo. Claude Code mantiene su flujo de Observar/Tomar
 cliente, y OpenCode mantiene su comportamiento compartido en vivo. Las conexiones de observación en
 segundo plano siguen siendo de solo lectura.
 
-**Experimental:** hay dos adaptadores provisionales para quienes trabajan desde el código fuente;
-ambos hablan con un servidor local en lugar de con un CLI. [Kimi Code](docs/supported_agents/kimi.md)
+**Experimental:** hay tres adaptadores provisionales para quienes trabajan desde el código fuente.
+[Kimi Code](docs/supported_agents/kimi.md)
 observa en solo lectura todas las sesiones de un servidor `kimi web`, controla las que creó cosyncing
 —mensajes, aprobaciones, elección de modelo— y toma el control de las demás de forma explícita.
 [DeepSeek Harness](docs/supported_agents/dsh.md) se conecta a un host `dsh web` y da a los clientes
@@ -84,8 +85,13 @@ activos en primer plano una transcripción compartida y una superficie de contro
 modelo y de esfuerzo de razonamiento, ajustes de permisos, los propios comandos de barra del host y
 adjuntos de imagen. No admite adjuntos de archivo genéricos —el host solo acepta imágenes— y las
 suscripciones residentes en segundo plano y parte de la presentación de mensajes quedan pendientes.
+[Antigravity](docs/supported_agents/antigravity.md) lee el almacén de conversaciones del propio CLI
+de Antigravity —sin servidor de por medio—, reproduce cada conversación en solo lectura y la controla
+a través de un proceso hijo `agy` propiedad del broker; dos clientes pueden compartir un Drive, y una
+escritura desde la terminal devuelve la sesión.
 
-Ninguno necesita un indicador de despliegue ni una terminal abierta: un servicio cosyncing instalado
+Ninguno necesita un indicador de despliegue. Los dos adaptadores con servidor tampoco necesitan una
+terminal abierta: un servicio cosyncing instalado
 arranca un host si no hay ninguno en marcha, reinicia el que se cae y detiene solo el que él mismo
 inició. Un host que hayas arrancado tú nunca se detiene, se sustituye ni se reconfigura, y la
 configuración nombra ambos hosts antes de que aceptes gestionarlos. Instala DeepSeek Harness de forma

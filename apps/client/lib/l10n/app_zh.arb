@@ -1005,6 +1005,7 @@
   "sessionRosterAgentCodex": "Codex",
   "sessionRosterAgentOpenCode": "OpenCode",
   "sessionRosterAgentPi": "Pi",
+  "sessionRosterAgentAntigravity": "Antigravity",
   "sessionRosterOriginVscode": "VS Code",
   "sessionRosterOtherSessions": "其他会话",
   "sessionRosterCachedReconnecting": "正在重新连接，先显示上次已知的会话。活动状态并非当前状态。",

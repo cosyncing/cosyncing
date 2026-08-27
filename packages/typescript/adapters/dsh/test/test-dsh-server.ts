@@ -659,10 +659,24 @@ class FakeSocket implements DshSocketLike {
     'session.list': FIXTURE.sessionList.body.result.value,
     'workspace.list': FIXTURE.workspaceList.body.result.value,
     'session.history': { events: [], hasMore: false },
+    // The per-session model read the roster overlay and the attach seed share,
+    // in the measured wire shape (2026-08-27 live probe).
+    'session.models': {
+      current: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' },
+      routable: true,
+      groups: [{
+        id: 'deepseek-official',
+        name: 'DeepSeek',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
+      }],
+      failures: [],
+    },
   };
+  const routeCounts = new Map<string, number>();
   const fetchImpl: DshFetch = async (url, init) => {
     const body = JSON.parse(init.body) as { rpcId: string };
     const route = new URL(url).pathname.replace('/api/', '');
+    routeCounts.set(route, (routeCounts.get(route) ?? 0) + 1);
     return {
       status: 200,
       text: async () => JSON.stringify({
@@ -712,6 +726,25 @@ class FakeSocket implements DshSocketLike {
       && sessions[0]!.attachMode === 'live',
     JSON.stringify(sessions[0]),
   );
+
+  // The roster model overlay (2026-08-27 physical pass): `session.list`
+  // carries no model field, so the sweep asks `session.models` per row and the
+  // client renders the authored name — a raw provider-qualified id would be
+  // refused inline by policy.
+  check('a roster row carries the session model with the host-authored label before any attach',
+    sessions[0]!.model === 'deepseek-v4-flash'
+      && sessions[0]!.currentModel?.providerID === 'deepseek-official'
+      && sessions[0]!.currentModel?.label === 'DeepSeek-V4-Flash'
+      && sessions[0]!.currentModel?.reasoningEffort === 'high',
+    JSON.stringify({ model: sessions[0]!.model, currentModel: sessions[0]!.currentModel }));
+  const modelReadsAfterFirst = routeCounts.get('session.models') ?? 0;
+  check('the sweep paid exactly one session.models read for the one row',
+    modelReadsAfterFirst === 1, String(modelReadsAfterFirst));
+  const again = await adapter.discoverSessions();
+  check('an unchanged idle row answers from the cache — the second sweep pays no model read',
+    (routeCounts.get('session.models') ?? 0) === modelReadsAfterFirst
+      && again[0]!.currentModel?.label === 'DeepSeek-V4-Flash',
+    `reads=${routeCounts.get('session.models')}`);
 
   const bounded = await adapter.discoverSessions({ updatedAfter: Date.now() });
   check('an idle session older than the discovery bound is filtered out', bounded.length === 0);
