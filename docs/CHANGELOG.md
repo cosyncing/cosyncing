@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.0 — 2026-08-27
+
+This release raises the minimum client contract revision to 17, so a 0.4.1 or
+older client cannot drive a 0.5.0 broker — the pairing negotiates read-only and
+session controls stay disabled. Update the client on every device. The web
+client ships inside the broker package and always matches it.
+
 ### Added
 
 - The client now offers Japanese, Korean, and Spanish UI locales, with matching

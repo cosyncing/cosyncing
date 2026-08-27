@@ -3,29 +3,49 @@
 These are broker-independent Flutter clients. Install and run the broker first,
 then use `cosy pair` to authorize the client.
 
-## What's new in 0.4.1
+## Update your client with this release
 
-- **Claude Code:** take-over resumes the existing session instead of forking
-  it. A prompt accepted while Claude is busy keeps its queued row through a
-  reload, and another authorized client can join the broker's existing Claude
-  Drive without starting a second writer.
-- **Kimi Code:** file and image attachments, `/goal` and skill commands,
-  session rename, and a copyable resume-in-terminal command are available from
-  the session UI. Images echo inside the sender's message, model names come from
-  the server, and server-authored harness rows no longer trigger a false
-  foreign-writer demotion.
-- **DeepSeek Harness:** model selection is available during session creation;
-  foreground subagent and workflow runs show live activity; subagent sessions
-  nest under their parent; and the selected model and permission mode appear as
-  soon as the session attaches.
-- The expanded task list is taller, uses transcript body text, and stays visible
-  until you archive it. Finished cards no longer disappear after three seconds.
-- Windows no longer leaves Ctrl latched after Ctrl+Win+Arrow, which previously
-  made the next plain wheel gesture change text zoom.
-- Claude and Kimi session rows show provider-authored model names, including
-  Claude Fable and the Kimi server's display names.
+0.5.0 raises the minimum client the broker accepts. A 0.4.1 or older client
+cannot drive a 0.5.0 broker: the pairing negotiates read-only and session
+controls stay disabled. This is deliberate — the broker no longer accepts the
+public artifact download capability older clients rely on — and it cannot be
+worked around from the server side.
 
-For the complete behavior above, use a 0.4.1 client with a 0.4.1 broker.
+Update the client on every device you use before, or together with, the broker.
+The web client needs nothing: it ships inside the broker package and always
+matches it.
+
+## What's new in 0.5.0
+
+- **Antigravity (`agy`) is a supported agent.** Conversations are discovered
+  from the CLI's own store and replayed read-only; `?mode=resume` drives one
+  through a broker-owned `agy` child that starts on the first prompt rather than
+  on attach. Two clients can share one Drive, and a write from a terminal
+  releases the session back. New sessions can be created from the app with a
+  directory and model, and model selection reads the CLI's live catalog, so a
+  model with reasoning efforts offers low, medium, and high instead of a fixed
+  variant.
+- **Pi:** `ask_user` prompts now appear in both the native terminal and
+  cosyncing — the first answer closes the other surface, and the terminal stays
+  usable when the broker is unavailable. New Pi sessions expose the model's
+  native thinking levels and apply the selected level at creation.
+- **Connectivity is transport-agnostic.** The broker has a strict loopback-only
+  listener and no longer configures, diagnoses, repairs, or removes remote
+  connectivity. Operator-owned proxy and tunnel guides, including Tailscale
+  Serve, EasyTier, and WireGuard, live under `docs/connectivity/`.
+- **Kimi Code:** subagent sessions appear in the roster as observe-only child
+  rows under the session that spawned them. A detached child still writing its
+  journal shows as working and keeps its parent marked working.
+- **Roster:** subagent subtrees start closed. The parent row keeps its
+  linked-session count, opening one is remembered per parent, and a search still
+  reveals a matching child. Kimi and DeepSeek Harness rows show their model
+  before the session is opened.
+- Japanese, Korean, and Spanish UI locales, with typed connection, session, and
+  schedule errors rendering in the active locale.
+- Keyboard shortcuts drive the session workspace, and file paths in tool cards
+  are clickable — a mention opens the session's Files tab at that file.
+
+For the complete behavior above, use a 0.5.0 client with a 0.5.0 broker.
 
 ## Known issue
 
