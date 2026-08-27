@@ -60,12 +60,9 @@ import {
 } from './drive-http.ts';
 import {
   KIMI_FOREIGN_WRITER_REASON,
-  boundedKimiErrorMessage,
   kimiDemotedControlState,
   mapKimiQuestionAnswers,
-  mapKimiRunState,
   type KimiMappedRow,
-  type KimiV1Session,
 } from './mapping.ts';
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -428,8 +425,6 @@ export class KimiDriveConnection extends KimiObserveConnection {
    */
   private readonly unresolvedSuspects = new Map<string, number>();
 
-  /** One repair at a time; a burst of discontinuities is one incoherent state, not N. */
-  private repairing = false;
   /** One interaction reconciliation at a time; see {@link reconcileInteractions}. */
   private reconciling = false;
   /**
@@ -1181,8 +1176,16 @@ export class KimiDriveConnection extends KimiObserveConnection {
     // (what is the turn doing / what is it waiting for) and a session can be
     // blocked on an approval with no prompt of ours outstanding at all.
     void this.reconcileInteractions();
-    if (this.pendingPrompts.size === 0) return;
-    void this.repairRunState();
+    // The RUN-STATE repair now lives on the observe base, where the hazard
+    // actually lives: `working` has one clearing signal on this transport and a
+    // discontinuity is where it is lost, which is as true of a foreign session
+    // this connection only watches as of one it drives. This override adds the
+    // drive layer's own reason to re-read — a standing completion fence, which
+    // is outstanding work the base cannot see — and the base's own rule (repair
+    // whenever the badge is not idle) still applies. `repairRunState` coalesces,
+    // so both asking costs one read.
+    super.onStreamRestored();
+    if (this.pendingPrompts.size > 0) void this.repairRunState();
   }
 
   /**
@@ -1450,52 +1453,6 @@ export class KimiDriveConnection extends KimiObserveConnection {
       // Dropping it makes a late answer refuse as unknown, which is the truth.
       this.questionRecords.delete(requestId);
       this.emit({ type: 'question-resolved', requestId }, `question-resolved:${requestId}`);
-    }
-  }
-
-  private async repairRunState(): Promise<void> {
-    if (this.repairing || this.closed || this.pendingPrompts.size === 0) return;
-    this.repairing = true;
-    try {
-      if (this.transportInvalid && !(await this.ensureTransport())) return;
-      const result = await this.transport.http.getJson<KimiV1Session>(
-        `/api/v1/sessions/${encodeURIComponent(this.info.id)}`,
-      );
-      if (!result.ok) {
-        this.noteUnauthorized(result.reason);
-        return;
-      }
-      if (this.closed) return;
-      const row = result.data ?? {};
-      const status = mapKimiRunState(row.busy, row.pending_interaction);
-      // A row whose liveness fields are not readable is not a session that is
-      // idle: it is a repair that found no evidence. The fence STAYS standing —
-      // clearing it here would end a turn on the strength of a drifted payload,
-      // which is exactly the failure the fence exists to survive. The repair has
-      // already run for this discontinuity, so this returns rather than retrying
-      // and cannot loop; the next discontinuity reads again.
-      if (status === undefined) return;
-      if (status === 'idle') {
-        // `last_turn_reason` is the only trace a killed turn leaves. Saying so
-        // is the difference between a turn that ended and a turn that vanished.
-        if (row.last_turn_reason === 'failed') {
-          this.emit(
-            {
-              type: 'error',
-              message: boundedKimiErrorMessage(row.last_turn_reason) === undefined
-                ? 'The Kimi turn failed.'
-                : 'The Kimi turn failed while the live stream was down.',
-            },
-            `error:kimi-repair-failed:${this.streamMark}`,
-          );
-        }
-      }
-      // `applyRunState` clears the fences on idle and dedupes an unchanged
-      // status, so a repair that finds the server still busy costs one read and
-      // changes nothing.
-      this.applyRunState(status);
-    } finally {
-      this.repairing = false;
     }
   }
 

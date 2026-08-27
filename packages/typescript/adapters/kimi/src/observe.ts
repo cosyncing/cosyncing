@@ -63,6 +63,7 @@ import {
   mapKimiMessagePage,
   mapKimiModelCatalog,
   mapKimiQuestionRequest,
+  mapKimiRunState,
   mapKimiSessionStatus,
   mapKimiTurnFailure,
   mapKimiWorkChanged,
@@ -84,6 +85,7 @@ import {
   KIMI_ACTIVE_TIME_METHOD,
   activeTimeAccount,
 } from './timing.ts';
+import { readKimiLastTurnOutcome, type KimiTurnOutcome } from './turn-outcome.ts';
 
 /**
  * How often an open observe session re-reads REST history.
@@ -95,6 +97,27 @@ import {
  * value and is the ONLY polling constant in this adapter.
  */
 export const KIMI_OBSERVE_POLL_INTERVAL_MS = 10_000;
+
+/**
+ * How long a connection may claim a non-idle run state with NO fresh run-state
+ * evidence before it re-reads the session row.
+ *
+ * The watchdog behind {@link KimiObserveConnection.repairRunState}, and it
+ * exists because `working` has exactly one clearing signal on this transport —
+ * `event.session.work_changed` with `busy:false` — and that signal is not
+ * redelivered. Every way of losing it leaves the badge standing forever: a
+ * socket that died across the turn boundary, a Kimi restart, a conceded resync
+ * gap, or a turn whose ending the server never followed with a busy edge. The
+ * roster then PINS it — `overlayAuthoritativeOwner` assigns the live owner's
+ * status over the discovery row unconditionally — so a sweep that correctly
+ * reads `activity: 'idle'` cannot undo it either.
+ *
+ * Sized against the cost, which is one bounded session-row read: paid only
+ * while this connection claims non-idle AND somebody is watching, so an idle
+ * session (the overwhelming majority) pays nothing at all, and a genuinely long
+ * turn pays one row read a minute against the ten-second poll it already funds.
+ */
+export const KIMI_RUN_STATE_REPAIR_AFTER_MS = 60_000;
 
 /** Messages per history page. Kimi caps `page_size` at 100. */
 export const KIMI_HISTORY_PAGE_SIZE = 100;
@@ -508,6 +531,8 @@ export class KimiObserveConnection implements SessionConnection {
   private primingIdentities = new Set<string>();
   private primingStartedAt?: number;
   private readonly nowImpl: () => number;
+  /** When this connection was constructed. See the constructor for why. */
+  private readonly startedAtMs: number;
   /** `/api/v1/models` as this connection last read it; see {@link KimiModelCatalogCache}. */
   private readonly modelCatalog: KimiModelCatalogCache;
   /**
@@ -673,6 +698,29 @@ export class KimiObserveConnection implements SessionConnection {
    */
   private readonly closedTurnRefs = new Set<string>();
 
+  // ── Run-state repair ──────────────────────────────────────────────────────
+  /** One repair read in flight at a time; a second request while it runs is dropped. */
+  private runStateRepairing = false;
+  /**
+   * When this connection last had FRESH evidence of its run state — a derived
+   * `work_changed` frame, or a repair read that answered. Undefined until the
+   * first one; the attach's own seed is discovery's reading, which is evidence
+   * of the same age as the connection.
+   */
+  private runStateEvidenceAt?: number;
+  /**
+   * When the last repair READ was attempted, whatever it returned.
+   *
+   * Distinct from {@link runStateEvidenceAt} on purpose. That stamp records an
+   * ANSWER, so a read that failed or returned a drifted row leaves it alone —
+   * which is right for "do we know the run state" and wrong for "may we read
+   * again": the watchdog's window would already be expired on the very next
+   * tick, turning a sustained outage or a persistently drifted row into one
+   * read every poll interval instead of the one-a-minute bound
+   * {@link KIMI_RUN_STATE_REPAIR_AFTER_MS} documents. Only the watchdog
+   * consults this; the evidence-driven triggers are never throttled.
+   */
+  private runStateReadAt?: number;
   // ── Telemetry (the wire-journal sidecar) ──────────────────────────────────
   private readonly wireRoot?: string;
   private readonly wireIo: KimiWireIo;
@@ -743,6 +791,11 @@ export class KimiObserveConnection implements SessionConnection {
       ?? ((handler, ms) => setInterval(handler, ms));
     this.clearIntervalImpl = options.clearInterval ?? ((handle) => clearInterval(handle as never));
     this.nowImpl = options.now ?? (() => Date.now());
+    // The run-state watchdog's zero point. The attach seeded `info.status` from
+    // discovery, which is evidence of exactly this age; without a stamp the
+    // first staleness test would have nothing to measure against and a
+    // connection born `working` would never be checked at all.
+    this.startedAtMs = this.nowImpl();
     if (options.wireRoot) this.wireRoot = options.wireRoot;
     this.wireIo = options.wireIo ?? defaultKimiWireIo;
     this.modelCatalog = options.modelCatalog ?? new KimiModelCatalogCache();
@@ -885,11 +938,186 @@ export class KimiObserveConnection implements SessionConnection {
   /**
    * The connection re-entered a coherent state after a discontinuity.
    *
-   * Base does nothing: an observe connection has no in-flight state to repair.
-   * The drive connection overrides it to reconcile its completion fences, whose
-   * terminal events a server restart or a resync gap can destroy.
+   * This USED to do nothing on the observe class, on the reasoning that an
+   * observe connection has no in-flight state to repair. It has one, and it is
+   * the run state: `working` is cleared by exactly one signal on this transport
+   * (`work_changed` with `busy:false`), that signal is not redelivered, and a
+   * discontinuity is precisely the window in which it is lost. The drive
+   * subclass had a repair for the same hazard, but gated on its completion
+   * fences — which only ever exist for prompts THIS process sent — so a foreign
+   * session driven from a terminal, the only kind an observe connection ever
+   * watches, could never satisfy the gate.
+   *
+   * Idle needs no repair: a stale IDLE self-corrects on the next busy edge,
+   * while a stale WORKING has nothing left to correct it.
    */
-  protected onStreamRestored(): void {}
+  protected onStreamRestored(): void {
+    if (this.info.status !== 'idle') void this.repairRunState();
+  }
+
+  /**
+   * Re-read the session row and adopt the run state it reports.
+   *
+   * The authority is `/api/v1/sessions/{id}`, which carries BOTH liveness
+   * fields: `busy` and `pending_interaction`. The `/status` overlay the poll
+   * already reads carries `busy` alone, so adopting from it would flatten a
+   * session genuinely blocked on an approval into `idle` — a worse error than
+   * the stale badge this repairs.
+   *
+   * NEVER FABRICATES. {@link mapKimiRunState} answers `undefined` for a payload
+   * whose liveness fields are not readable, and that is not a session that
+   * happens to be idle; it is a repair that found no evidence. The held state
+   * stands, and the next trigger reads again.
+   *
+   * Coalesced to one read in flight, and deliberately NOT gated on
+   * {@link hasSubscribers}. That gate exists for the reads that FORCE-LOAD the
+   * session into the Kimi server — `/messages`, `/approvals`, `/questions` —
+   * making it a second live owner beside any terminal holding it. The session
+   * ROW is a plain projection that loads nothing (measured: `message_count: 0`
+   * after the read), every trigger here is evidence rather than speculation,
+   * and a drive connection's standing completion fence has to be reconciled
+   * whether or not anyone is currently watching. The one speculative trigger,
+   * {@link maybeRepairRunState}, carries the gate itself.
+   */
+  protected async repairRunState(): Promise<void> {
+    if (this.runStateRepairing || this.closed) return;
+    this.runStateRepairing = true;
+    // Stamped at the ATTEMPT, before anything can fail: every exit below —
+    // a transport that will not resolve, a refused read, an unclassifiable row
+    // — has to spend the watchdog's window, or the cheapest possible outcome
+    // becomes the most frequently repeated one.
+    this.runStateReadAt = this.nowImpl();
+    try {
+      if (this.transportInvalid && !(await this.ensureTransport())) return;
+      const result = await this.transport.http.getJson<{ busy?: unknown; pending_interaction?: unknown }>(
+        `/api/v1/sessions/${encodeURIComponent(this.info.id)}`,
+      );
+      if (!result.ok) {
+        this.noteUnauthorized(result.reason);
+        return;
+      }
+      if (this.closed) return;
+      const row = result.data ?? {};
+      const status = mapKimiRunState(row.busy, row.pending_interaction);
+      if (status === undefined) return;
+      // Stamped on an ANSWER, not on an attempt: a read that could not be
+      // classified has not refreshed the evidence, and the watchdog must be
+      // free to ask again on its next tick rather than treating the failed
+      // read as a whole window's worth of proof.
+      this.runStateEvidenceAt = this.nowImpl();
+      // The turn this connection was watching is over, and it may have been
+      // KILLED rather than finished — the case the whole repair exists for.
+      // The live `turn.ended` that would have said so is exactly what the
+      // discontinuity swallowed, so the journal is asked instead. Surfaced
+      // BEFORE the idle status, so the reason lands ahead of the fence the
+      // client renders the end of the turn against, and under the shared
+      // identity so a `turn.ended` that arrives late is not a second row.
+      if (status === 'idle' && this.info.status !== 'idle') {
+        const failure = this.readLastTurnFailure();
+        if (failure) this.surfaceTurnFailure(failure.turnRef, failure.message);
+      }
+      this.applyRunState(status);
+    } finally {
+      this.runStateRepairing = false;
+    }
+  }
+
+  /**
+   * The poll-tick half of the repair: heal a stale badge even when the socket
+   * never broke.
+   *
+   * A discontinuity is not the only way the clearing edge is lost — a turn that
+   * ends without one, or a frame dropped between a live socket's own reads,
+   * leaves `working` standing with nothing to reconcile against. So staleness
+   * itself is the trigger: non-idle for longer than
+   * {@link KIMI_RUN_STATE_REPAIR_AFTER_MS} with no run-state evidence in that
+   * window costs one session-row read.
+   */
+  private maybeRepairRunState(): void {
+    if (this.closed || !this.hasSubscribers || this.info.status === 'idle') return;
+    // The LATER of the two: fresh evidence and a recent attempt each buy a full
+    // window, so a repair that answered and a repair that could not both leave
+    // exactly one read per window behind them.
+    const since = Math.max(this.runStateEvidenceAt ?? this.startedAtMs, this.runStateReadAt ?? 0);
+    if (this.nowImpl() - since < KIMI_RUN_STATE_REPAIR_AFTER_MS) return;
+    void this.repairRunState();
+  }
+
+  /**
+   * Put one turn's failure in the transcript.
+   *
+   * Both routes to a failure end up under {@link kimiTurnFailureIdentity} — the
+   * live `turn.ended` frame here, and the journal recovery at history time —
+   * so a failure seen live and then replayed after a history reset is one row
+   * and not two.
+   */
+  private surfaceTurnFailure(turnRef: string, message: string): void {
+    this.emit({ type: 'error', message }, kimiTurnFailureIdentity(turnRef));
+  }
+
+  /**
+   * The failure row a history read cannot fold, recovered from the journal.
+   *
+   * A Kimi turn that fails says why exactly once, on the live stream. Nothing
+   * durable repeats it: the REST fold writes an assistant row with EMPTY
+   * content for that turn, `/status` has no outcome field, and the session
+   * row's `last_turn_reason` is not evidence — measured 2026-08-27, it reported
+   * `completed` for a session whose last two turns both died on a 403 quota
+   * refusal. So a user who was not watching at that instant saw an empty bubble
+   * and no reason, and any resync erased the row from a user who was.
+   *
+   * {@link readKimiLastTurnOutcome} reads the session's own `agents/main`
+   * journal, where the ending is recorded verbatim, and answers nothing at all
+   * unless the LAST lifecycle statement in its window is that ending — so a
+   * session mid-turn never has a previous turn's failure replayed over work
+   * that is running.
+   *
+   * Two callers, one reading: {@link getHistory} appends it to the
+   * authoritative reset, and {@link repairRunState} emits it live when a repair
+   * finds the turn it was watching already over.
+   */
+  private readLastTurnFailure(): { turnRef: string; message: string } | undefined {
+    if (!this.wireRoot) return undefined;
+    let outcome: KimiTurnOutcome | undefined;
+    try {
+      outcome = readKimiLastTurnOutcome(this.wireRoot, this.info.id, this.wireIo);
+    } catch {
+      return undefined;
+    }
+    if (!outcome || outcome.reason !== 'failed') return undefined;
+    return { turnRef: outcome.turnRef, message: mapKimiTurnFailure(outcome) };
+  }
+
+  /**
+   * The recovered failure as a history row, or nothing.
+   *
+   * ONLY FOR A SETTLED CONNECTION. The journal's open-marker rule assumes a
+   * turn that started has already written its `turn.prompt`, and there is a
+   * window at the head of every turn where the server has flipped `busy:true`
+   * but that line has not been flushed — so the reader would fall through to
+   * the PREVIOUS ending and this would append a stale failure to the bottom of
+   * a session that is running right now. The run state is the second,
+   * independent witness that closes that window: the reader guards the instant
+   * (an unterminated trailing line) and this guards the turn.
+   *
+   * Costs nothing real. A connection wrongly stuck non-idle is exactly what
+   * {@link repairRunState} now heals, and the heal itself surfaces the failure;
+   * a genuinely running session gets the row on the next reset after it
+   * settles. Withholding it for one turn is strictly better than asserting an
+   * ending that has been superseded.
+   *
+   * Remembers the identity BEFORE handing the row back: the caller puts it in
+   * the authoritative reset, a delivery this connection's own dedupe never
+   * sees, so the live path has to be told here or a replayed `turn.ended` for
+   * the same turn would add a second copy.
+   */
+  private recoverLastTurnFailure(): AgentMessage | undefined {
+    if (this.info.status !== 'idle') return undefined;
+    const failure = this.readLastTurnFailure();
+    if (!failure) return undefined;
+    this.remember(kimiTurnFailureIdentity(failure.turnRef));
+    return { type: 'error', message: failure.message };
+  }
 
   /**
    * Rows a bounded walk gathered, before they reach {@link emit}.
@@ -1051,13 +1279,24 @@ export class KimiObserveConnection implements SessionConnection {
     if (readFailed && pagesRead === 0) {
       return [{ type: 'notice', message: KIMI_HISTORY_UNAVAILABLE_NOTICE }];
     }
+    // The failure the REST fold cannot carry, appended LAST because that is
+    // where it belongs: it is the ending of the final turn this read just
+    // delivered. A read that failed or was aborted is not the place for it —
+    // the transcript above is already incomplete, and a terminal outcome
+    // pinned to the end of a partial view would claim the session stopped
+    // where the READ stopped.
+    const failure = this.closed || readFailed ? undefined : this.recoverLastTurnFailure();
     if (readFailed) {
       return [{ type: 'notice', message: KIMI_HISTORY_PARTIAL_NOTICE }, ...messages];
     }
     if (reachedCeiling) {
-      return [{ type: 'notice', message: KIMI_HISTORY_TRUNCATED_NOTICE }, ...messages];
+      return [
+        { type: 'notice', message: KIMI_HISTORY_TRUNCATED_NOTICE },
+        ...messages,
+        ...(failure ? [failure] : []),
+      ];
     }
-    return messages;
+    return failure ? [...messages, failure] : messages;
   }
 
   /**
@@ -1450,6 +1689,9 @@ export class KimiObserveConnection implements SessionConnection {
       // session-force-loading job, and a coalesced tick would otherwise silently
       // stop refreshing the context reading and the usage account too.
       void this.refreshOverlays();
+      // Cheap and usually free: it reads nothing at all unless this connection
+      // has been claiming a non-idle state with no evidence behind it.
+      this.maybeRepairRunState();
       this.updateTelemetry();
     }, this.pollIntervalMs);
   }
@@ -2146,11 +2388,17 @@ export class KimiObserveConnection implements SessionConnection {
           ? String(payload.turnId)
           : undefined;
         if (payload.reason === 'failed') {
-          this.emit(
-            { type: 'error', message: mapKimiTurnFailure(payload) },
-            `error:kimi-turn-failed:${String(payload.turnId ?? 'unknown')}`,
+          this.surfaceTurnFailure(
+            String(payload.turnId ?? 'unknown'),
+            mapKimiTurnFailure(payload),
           );
           if (turnRef) this.closeTurnRun('error', turnRef);
+          // A FAILED ending is the one this transport cannot be trusted to
+          // follow with a busy edge — the turn did not end, it was killed — so
+          // the run state is confirmed against the server rather than waited
+          // for. See repairRunState; a server still busy costs one read and
+          // changes nothing.
+          void this.repairRunState();
           return;
         }
         // The non-failed endings close the run-summary ONLY. `prompt.completed`
@@ -2228,6 +2476,11 @@ export class KimiObserveConnection implements SessionConnection {
    */
   protected applyRunState(status: SessionInfo['status']): void {
     if (this.closed) return;
+    // Every path into here carries FRESH evidence — a derived `work_changed`
+    // frame or a repair read that answered — so this is the one place the
+    // watchdog's clock is reset, whether or not the status actually changed:
+    // a server that keeps saying `busy:true` is evidence, not staleness.
+    this.runStateEvidenceAt = this.nowImpl();
     // Drive overrides this hook to settle its completion fences BEFORE the idle
     // status escapes, so a client never sees idle ahead of the turn's rows.
     this.beforeRunState(status);
@@ -2593,6 +2846,15 @@ export class KimiObserveConnection implements SessionConnection {
  * The three-state session status → the two-state RUN status the transcript
  * carries. `needs-input` is not running; the card is what says why it stopped.
  */
+/**
+ * The ONE identity a turn's failure row is delivered under, wherever it came
+ * from — the live `turn.ended` frame or the journal recovery. Two spellings of
+ * this would put the same failure on screen twice after a resync.
+ */
+function kimiTurnFailureIdentity(turnRef: string): string {
+  return `error:kimi-turn-failed:${turnRef}`;
+}
+
 function runStatusOf(status: SessionInfo['status']): 'running' | 'idle' {
   return status === 'working' ? 'running' : 'idle';
 }
