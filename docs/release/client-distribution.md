@@ -30,18 +30,38 @@ requires the exact tag plus typed `PROMOTE` confirmation. It verifies the same
 five remote assets and promotes them stable without rebuilding or replacing
 anything.
 
-## Pairing protocol rollout order
+## Client-first rollout order
 
-Pairing payload version 3 is a client-first change because broker and client
-releases use separate channels. Before publishing an npm broker that emits v3:
+Broker and client releases use separate publication channels, and no workflow
+gates one on the other. A release is client-first whenever a client that is
+already published cannot fully drive the new broker. Before publishing the npm
+broker for such a release:
 
 1. publish and physically accept the matching client release;
 2. promote that client release stable;
-3. confirm every supported client download includes the v3 parser; and
+3. confirm every supported client download carries the new behavior; and
 4. only then publish the npm broker release.
 
-Do not reverse these steps. A v1/v2 client cannot parse a v3 pairing offer.
-The updated client remains able to pair with v1/v2 brokers during the rollout.
+Do not reverse these steps. Holding this order is a manual responsibility; the
+release workflows do not enforce it.
+
+The order is mandatory whenever a release raises the broker's minimum client
+contract revision. Past that floor an older client does not merely miss new
+features — the pairing negotiates read-only and session controls stay disabled,
+so a user whose broker updates first cannot drive their sessions until they
+install a new client. A minimum-revision bump is therefore always at least a
+minor version, and its release notes say so. The web client is exempt in both
+directions because it ships inside the broker package and always matches it;
+the ordering protects native desktop and mobile installs.
+
+Release 0.5.0 raised the minimum client contract revision to 17. A 0.4.1 or
+older client is read-only against a 0.5.0 broker.
+
+### Pairing payload version 3
+
+Pairing payload version 3 was the first change published under this rule. A
+v1/v2 client cannot parse a v3 pairing offer. The updated client remains able
+to pair with v1/v2 brokers during the rollout.
 While connected to a revision-15 broker, that client also retains the old
 WebSocket query credential path. It selects the fallback only after an
 authenticated health response identifies revision 15; current brokers always
