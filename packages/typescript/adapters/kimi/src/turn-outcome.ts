@@ -108,6 +108,18 @@ export function readKimiTurnOutcomeFromJournal(
 ): KimiTurnOutcome | undefined {
   const window = readTail(io, wirePath, KIMI_TURN_OUTCOME_TAIL_BYTES);
   if (window === undefined) return undefined;
+  // A JOURNAL CAUGHT MID-APPEND ANSWERS NOTHING, and this is the guard that
+  // makes the open-marker rule below actually hold. The rule assumes a turn
+  // that started has written its `turn.prompt`; a line still being flushed has
+  // not, so the walk would fall through to the PREVIOUS turn's ending and
+  // report a finished — possibly failed — turn for a session that is running
+  // right now. An incomplete trailing line is the one observable sign of that
+  // window.
+  //
+  // Safe because the host terminates every line it writes: 127 of 127 journals
+  // on the measured 0.38.0 home end on a newline, so this rejects the
+  // mid-append instant and nothing else.
+  if (!window.text.endsWith('\n')) return undefined;
   return classifyOutcome(window.text, window.complete);
 }
 

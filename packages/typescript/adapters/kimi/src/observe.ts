@@ -708,6 +708,19 @@ export class KimiObserveConnection implements SessionConnection {
    * of the same age as the connection.
    */
   private runStateEvidenceAt?: number;
+  /**
+   * When the last repair READ was attempted, whatever it returned.
+   *
+   * Distinct from {@link runStateEvidenceAt} on purpose. That stamp records an
+   * ANSWER, so a read that failed or returned a drifted row leaves it alone —
+   * which is right for "do we know the run state" and wrong for "may we read
+   * again": the watchdog's window would already be expired on the very next
+   * tick, turning a sustained outage or a persistently drifted row into one
+   * read every poll interval instead of the one-a-minute bound
+   * {@link KIMI_RUN_STATE_REPAIR_AFTER_MS} documents. Only the watchdog
+   * consults this; the evidence-driven triggers are never throttled.
+   */
+  private runStateReadAt?: number;
   // ── Telemetry (the wire-journal sidecar) ──────────────────────────────────
   private readonly wireRoot?: string;
   private readonly wireIo: KimiWireIo;
@@ -969,6 +982,11 @@ export class KimiObserveConnection implements SessionConnection {
   protected async repairRunState(): Promise<void> {
     if (this.runStateRepairing || this.closed) return;
     this.runStateRepairing = true;
+    // Stamped at the ATTEMPT, before anything can fail: every exit below —
+    // a transport that will not resolve, a refused read, an unclassifiable row
+    // — has to spend the watchdog's window, or the cheapest possible outcome
+    // becomes the most frequently repeated one.
+    this.runStateReadAt = this.nowImpl();
     try {
       if (this.transportInvalid && !(await this.ensureTransport())) return;
       const result = await this.transport.http.getJson<{ busy?: unknown; pending_interaction?: unknown }>(
@@ -1017,7 +1035,10 @@ export class KimiObserveConnection implements SessionConnection {
    */
   private maybeRepairRunState(): void {
     if (this.closed || !this.hasSubscribers || this.info.status === 'idle') return;
-    const since = this.runStateEvidenceAt ?? this.startedAtMs;
+    // The LATER of the two: fresh evidence and a recent attempt each buy a full
+    // window, so a repair that answered and a repair that could not both leave
+    // exactly one read per window behind them.
+    const since = Math.max(this.runStateEvidenceAt ?? this.startedAtMs, this.runStateReadAt ?? 0);
     if (this.nowImpl() - since < KIMI_RUN_STATE_REPAIR_AFTER_MS) return;
     void this.repairRunState();
   }
@@ -1070,12 +1091,28 @@ export class KimiObserveConnection implements SessionConnection {
   /**
    * The recovered failure as a history row, or nothing.
    *
+   * ONLY FOR A SETTLED CONNECTION. The journal's open-marker rule assumes a
+   * turn that started has already written its `turn.prompt`, and there is a
+   * window at the head of every turn where the server has flipped `busy:true`
+   * but that line has not been flushed — so the reader would fall through to
+   * the PREVIOUS ending and this would append a stale failure to the bottom of
+   * a session that is running right now. The run state is the second,
+   * independent witness that closes that window: the reader guards the instant
+   * (an unterminated trailing line) and this guards the turn.
+   *
+   * Costs nothing real. A connection wrongly stuck non-idle is exactly what
+   * {@link repairRunState} now heals, and the heal itself surfaces the failure;
+   * a genuinely running session gets the row on the next reset after it
+   * settles. Withholding it for one turn is strictly better than asserting an
+   * ending that has been superseded.
+   *
    * Remembers the identity BEFORE handing the row back: the caller puts it in
    * the authoritative reset, a delivery this connection's own dedupe never
    * sees, so the live path has to be told here or a replayed `turn.ended` for
    * the same turn would add a second copy.
    */
   private recoverLastTurnFailure(): AgentMessage | undefined {
+    if (this.info.status !== 'idle') return undefined;
     const failure = this.readLastTurnFailure();
     if (!failure) return undefined;
     this.remember(kimiTurnFailureIdentity(failure.turnRef));

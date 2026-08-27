@@ -2632,8 +2632,27 @@ try {
       clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
       repairTick?.();
       await Bun.sleep(50);
+      const readsAfterDrift = sessionRowReads;
       check('a repair that reads a drifted row keeps the state it holds',
         conn.info.status === 'working', conn.info.status);
+      // THE CADENCE BOUND, and the reason the attempt is stamped separately
+      // from the evidence: a drifted row (or a refused read) never refreshes
+      // the evidence stamp, so a watchdog gated on evidence alone would find
+      // its window already expired and read again on EVERY 10-second poll for
+      // as long as the drift lasts.
+      repairTick?.();
+      await Bun.sleep(50);
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS - 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('an unclassifiable repair still spends its window instead of retrying every poll',
+        sessionRowReads === readsAfterDrift, `${sessionRowReads - readsAfterDrift} extra reads`);
+      clock += 2;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('once the window is up the drifted connection tries exactly once more',
+        sessionRowReads === readsAfterDrift + 1 && conn.info.status === 'working',
+        `reads=${sessionRowReads - readsAfterDrift} status=${conn.info.status}`);
 
       // ── A blocked session is not an idle one ──────────────────────────────
       sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'approval' };
@@ -2642,6 +2661,43 @@ try {
       await Bun.sleep(50);
       check('a repair adopts needs-input rather than flattening a blocked turn to idle',
         conn.info.status === 'needs-input', conn.info.status);
+
+      // ── A live turn is never overwritten by a previous turn's ending ──────
+      //
+      // The head of a turn is a real window: the server flips `busy:true`
+      // before the host has flushed the `turn.prompt` that would close the
+      // journal's open-marker rule. Appending there would put a stale — and in
+      // the case that started this, a QUOTA — failure at the bottom of a
+      // session that is running.
+      writeJournal(
+        journalLine({ type: 'turn.prompt', agentId: 'main', turnId: 8, time: 20 })
+        + failedTurn(8),
+      );
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: true, pending_interaction: 'none' };
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      const duringTurn = await conn.getHistory();
+      check('history appends no failure while the connection claims a live turn',
+        conn.info.status === 'working' && duringTurn.every((message) => message.type !== 'error'),
+        `status=${conn.info.status} rows=${duringTurn.length}`);
+
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      const afterTurn = await conn.getHistory();
+      check('the same journal yields the failure once the session settles',
+        conn.info.status === 'idle' && afterTurn.at(-1)?.type === 'error',
+        `status=${conn.info.status} last=${afterTurn.at(-1)?.type}`);
+
+      // A journal caught MID-APPEND says nothing at all: the trailing line is
+      // unterminated, so the `turn.prompt` that would reopen the turn may
+      // simply not be on disk yet.
+      writeJournal(`${failedTurn(9)}{"type":"turn.pro`);
+      const midAppend = await conn.getHistory();
+      check('a journal caught mid-append is not evidence of a settled turn',
+        midAppend.every((message) => message.type !== 'error'), `${midAppend.length} rows`);
 
       await conn.close();
 
