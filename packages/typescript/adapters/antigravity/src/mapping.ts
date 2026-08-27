@@ -33,7 +33,7 @@ import {
   type ToolDisplayClass,
   type ToolSemantic,
 } from '@cosyncing/adapter-api';
-import type { AgyTraceSink } from './store.ts';
+import { isAgyConversationId, type AgyTraceSink } from './store.ts';
 
 // ── The step record ──────────────────────────────────────────────────────────
 
@@ -163,11 +163,36 @@ export const AGY_STREAM_STEP_NAMES: Readonly<Record<string, string>> = Object.fr
   read_url_content: 'READ_URL_CONTENT',
   ask_question: 'ASK_QUESTION',
   generic: 'GENERIC',
+  // MEASURED 2026-08-25 (1.1.20). Both are UMBRELLA step types: the stream says
+  // only "this step ran a tool" and names the actual one in a sibling
+  // `tool_name`, where the transcript writes `MODEL/GENERIC` carrying
+  // `tool_calls[]`. So both fold to GENERIC — an existing measured pair — and
+  // {@link agyStreamStepTypeFor} refines them when `tool_name` is a step type the
+  // transcript spells out on its own.
+  //   subagent → tool_name "invoke_subagent", payload in `subagent_info`
+  //   tool     → tool_name e.g. "find_by_name", payload in `tool_info`
+  subagent: 'GENERIC',
+  tool: 'GENERIC',
 });
 
 /** Normalize a drive-stream `step_type` into the transcript's own vocabulary. */
 export function normalizeAgyStreamStepType(streamStepType: string): string {
   return AGY_STREAM_STEP_NAMES[streamStepType] ?? streamStepType.toUpperCase();
+}
+
+/**
+ * The transcript step type for a stream step, refined by `tool_name`.
+ *
+ * `tool` and `subagent` do not say what happened — `tool_name` does. When that
+ * name is one the transcript has its own step type for, use it, so a live row
+ * folds exactly like the replayed row it will be deduplicated against. Otherwise
+ * GENERIC, which is what the transcript writes for the rest.
+ */
+export function agyStreamStepTypeFor(streamStepType: string, toolName?: string): string {
+  if ((streamStepType === 'tool' || streamStepType === 'subagent') && toolName) {
+    return AGY_STREAM_STEP_NAMES[toolName] ?? 'GENERIC';
+  }
+  return normalizeAgyStreamStepType(streamStepType);
 }
 
 /**
@@ -192,7 +217,6 @@ export type AgyStepCategory =
   | 'tool'
   | 'question'
   | 'context-injection'
-  | 'notice'
   | 'history-reset'
   | 'error'
   | 'unmapped-step';
@@ -227,7 +251,7 @@ export interface AgyInventoryRow {
  *   USER_EXPLICIT  USER_INPUT                70  user-message        the ONLY human bubble
  *   MODEL          GENERIC                   48  tool                manage_task/schedule/permissions
  *   SYSTEM         CONVERSATION_HISTORY      36  history-reset       compaction boundary
- *   SYSTEM         CHECKPOINT                34  notice              truncation checkpoint
+ *   SYSTEM         CHECKPOINT                34  context-injection   truncation-checkpoint summary
  *   SYSTEM         SYSTEM_MESSAGE            26  context-injection   NEVER a user row
  *   MODEL          SEARCH_WEB                26  tool                web semantic
  *   SYSTEM         DIRECTORY_RULES            9  context-injection   AGENTS.md-class injection
@@ -258,7 +282,7 @@ export const AGY_STEP_INVENTORY: readonly AgyInventoryRow[] = Object.freeze([
   { source: 'MODEL', type: 'READ_URL_CONTENT', category: 'tool', toolNames: ['read_url_content'], toolClass: 'lookup', note: 'web semantic' },
   { source: 'MODEL', type: 'ASK_QUESTION', category: 'question', toolNames: ['ask_question'], toolClass: 'other', note: 'a replayed question is settled' },
   { source: 'SYSTEM', type: 'CONVERSATION_HISTORY', category: 'history-reset', note: 'compaction boundary; carries no content' },
-  { source: 'SYSTEM', type: 'CHECKPOINT', category: 'notice', note: 'context truncation checkpoint' },
+  { source: 'SYSTEM', type: 'CHECKPOINT', category: 'context-injection', note: 'truncation checkpoint; the machine summary is agent-handed context, not something the user should be made to read raw' },
   { source: 'SYSTEM', type: 'SYSTEM_MESSAGE', category: 'context-injection', note: 'agent-visible material, never typed' },
   { source: 'SYSTEM', type: 'DIRECTORY_RULES', category: 'context-injection', note: 'rules-file injection' },
   { source: 'SYSTEM', type: 'ERROR_MESSAGE', category: 'error', note: 'the `error` field is the message' },
@@ -316,8 +340,14 @@ const AGY_MODE_TOKENS = ['plan', 'accept-edits', 'full-access'] as const;
 export interface AgyUserText {
   /** What the human actually typed. */
   text: string;
-  /** Wrapper tags that were removed, in the order they appeared. Diagnostic + context surfacing. */
-  removed: string[];
+  /**
+   * Wrapper blocks that were removed, in the order they appeared — the tag AND
+   * its material. Carrying only the names was the defect the physical pass
+   * found: the context event it fed had an empty body, which the client's
+   * `contextInjection` decoder rightly refuses, so every user row grew a raw
+   * "Event context.injection" chip and the removed material itself was gone.
+   */
+  removed: Array<{ tag: string; body: string }>;
   /** The `--mode` token stripped from the head of the request, when there was one. */
   mode?: string;
 }
@@ -330,7 +360,7 @@ export interface AgyUserText {
  * older rows in the corpus are bare — rather than rendering empty.
  */
 export function stripAgyUserWrappers(content: string): AgyUserText {
-  const removed: string[] = [];
+  const removed: Array<{ tag: string; body: string }> = [];
   let request: string | undefined;
   let rest = content;
 
@@ -338,13 +368,13 @@ export function stripAgyUserWrappers(content: string): AgyUserText {
     const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g');
     rest = rest.replace(pattern, (_match, inner: string) => {
       if (tag === 'USER_REQUEST') request = (request ?? '') + inner;
-      else removed.push(tag);
+      else removed.push({ tag, body: inner.trim() });
       return '';
     });
   }
 
   let text = (request !== undefined ? request : rest).trim();
-  if (request !== undefined && rest.trim()) removed.push('trailing-text');
+  if (request !== undefined && rest.trim()) removed.push({ tag: 'trailing-text', body: rest.trim() });
 
   // A leading `/<mode>` is the launch mode, not something the user typed. Only the
   // three modes `--mode` actually accepts are stripped: a real slash COMMAND the
@@ -601,8 +631,6 @@ export function mapAgyStep(step: AgyStep, state: AgyMapState): AgentMessage[] {
       return mapQuestionStep(step, state, key);
     case 'context-injection':
       return mapContextInjection(step, truncated);
-    case 'notice':
-      return [{ type: 'notice', message: agyNoticeText(step, truncated) }];
     case 'history-reset':
       return [{ type: 'history-reset', semantic: { kind: 'compaction' } }];
     case 'error':
@@ -671,13 +699,28 @@ function mapUserStep(step: AgyStep, state: AgyMapState, key: string, truncated: 
   ];
   // What was stripped is agent-visible material the user did not type. It is
   // surfaced as context rather than deleted, so nothing the agent was handed
-  // vanishes from the record (reflection §9: collapse, never delete).
+  // vanishes from the record (reflection §9: collapse, never delete). The BODY
+  // carries the material itself: an empty-body event is undecodable on the
+  // client (`contextInjection` requires a non-empty body) and rendered as a raw
+  // event chip, so when the removed blocks hold no text there is nothing to
+  // surface and no event is emitted.
   if (stripped.removed.length > 0) {
-    out.push({
-      type: 'event',
-      name: CONTEXT_INJECTION_EVENT,
-      payload: { source: `agy user-row metadata (${stripped.removed.join(', ')})`, body: '' },
-    });
+    const material = stripped.removed
+      .filter((block) => block.body)
+      .map((block) => (stripped.removed.length > 1 ? `### ${block.tag}\n${block.body}` : block.body))
+      .join('\n\n');
+    if (material) {
+      const bounded = boundContextBody(material);
+      out.push({
+        type: 'event',
+        name: CONTEXT_INJECTION_EVENT,
+        payload: {
+          source: `agy user-row metadata (${stripped.removed.map((block) => block.tag).join(', ')})`,
+          body: bounded.body,
+          ...(bounded.truncated ? { truncated: true } : {}),
+        },
+      });
+    }
   }
   return out;
 }
@@ -809,17 +852,13 @@ function mapContextInjection(step: AgyStep, truncated: boolean): AgentMessage[] 
 }
 
 function agyInjectionSource(type: string): string {
-  return type === 'DIRECTORY_RULES' ? 'agy directory rules' : 'agy system message';
+  if (type === 'DIRECTORY_RULES') return 'agy directory rules';
+  if (type === 'CHECKPOINT') return 'agy checkpoint summary';
+  return 'agy system message';
 }
 
 /** The stated-truncation marker. Never silently short — spec §4 "Failure traces". */
 export const AGY_TRUNCATION_NOTE = '[agy truncated this field in transcript.jsonl and no transcript_full.jsonl was available]';
-
-function agyNoticeText(step: AgyStep, truncated: boolean): string {
-  const body = agyBodyOf(step) ?? 'Antigravity recorded a checkpoint.';
-  const head = body.split('\n').slice(0, 3).join('\n');
-  return truncated ? `${head}\n${AGY_TRUNCATION_NOTE}` : head;
-}
 
 function agyBodyOf(step: AgyStep): string | undefined {
   const { body } = splitAgyToolContent(step.content);
@@ -923,7 +962,11 @@ function agyToolSemantic(
 export interface AgySettlement {
   id: string;
   recipient: string;
-  /** `<conversationId>/task-<N>` — the key this block is rendered under. */
+  /** `<conversationId>/task-<N>` — the key this block is rendered under. Empty
+   *  string when the file carries no sender at all (MEASURED: 1 of 35), which
+   *  {@link classifyAgySettlementSender} classifies `unknown` — parsed rather
+   *  than rejected, because a rejected record silently disappears from history
+   *  and the file still holds words the host wrote. */
   sender: string;
   timestamp: string;
   messageTitle: string;
@@ -940,10 +983,9 @@ export function parseAgySettlement(text: string): AgySettlement | undefined {
   } catch {
     return undefined;
   }
-  if (!parsed || typeof parsed !== 'object') return undefined;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
   const row = parsed as Record<string, unknown>;
   const sender = typeof row.sender === 'string' ? row.sender : '';
-  if (!sender) return undefined;
   const render = (row.renderDetails ?? {}) as Record<string, unknown>;
   const tool = (((row.sourceMetadata ?? {}) as Record<string, unknown>).tool ?? {}) as Record<string, unknown>;
   const call = (tool.toolCall ?? {}) as Record<string, unknown>;
@@ -960,6 +1002,67 @@ export function parseAgySettlement(text: string): AgySettlement | undefined {
 }
 
 /**
+/**
+ * What a settlement's `sender` says it came from.
+ *
+ * MEASURED 2026-08-25 over all 35 settlement files on the developer host:
+ *
+ *   `<uuid>/task-<N>`  29  a BACKGROUND TASK settling in its own conversation
+ *   `<uuid>`            2  a SUBAGENT — a spawned child conversation replying home
+ *   `system`            3  a host notice ("All your subagents … have been stopped")
+ *   absent              1  no sender at all
+ *
+ * The trap this closes: "not a task" is NOT "a subagent". Four of the six
+ * non-task senders are `system` or missing, and treating those as subagents would
+ * invent child sessions that never existed and hang roster rows off them. A
+ * subagent has to present a FULL conversation uuid and nothing else.
+ */
+export type AgySettlementCategory = 'task' | 'subagent' | 'system' | 'unknown';
+
+/**
+ * A DISCRIMINATED union, not one shape with optional fields.
+ *
+ * Optional fields would let `category: 'system'` carry a `conversationId` and let
+ * a caller read one off a `task` row without proving it is there — exactly the
+ * confusion the taxonomy exists to prevent. Here the compiler enforces that only
+ * a task has a `taskId`, and only a task or a subagent has a conversation.
+ */
+export type AgySettlementSource =
+  /** The owning conversation, and the `task-<N>` component kept whole so it can name a log file. */
+  | { category: 'task'; conversationId: string; taskId: string }
+  /** The CHILD conversation's own id. */
+  | { category: 'subagent'; conversationId: string }
+  | { category: 'system' }
+  | { category: 'unknown' };
+
+const AGY_TASK_SENDER = /^([0-9a-fA-F-]{36})\/(task-\d+)$/;
+
+export function classifyAgySettlementSender(sender: string | undefined): AgySettlementSource {
+  const value = (sender ?? '').trim();
+  if (!value) return { category: 'unknown' };
+  const task = AGY_TASK_SENDER.exec(value);
+  if (task && isAgyConversationId(task[1]!)) {
+    return { category: 'task', conversationId: task[1]!, taskId: task[2]! };
+  }
+  if (isAgyConversationId(value)) return { category: 'subagent', conversationId: value };
+  if (value === 'system') return { category: 'system' };
+  return { category: 'unknown' };
+}
+
+/**
+ * A settled task's outcome, read from the title the host wrote.
+ *
+ * MEASURED titles end in `finished`, `was canceled`, or — for timers — `Timer has
+ * expired`. This is TEXT, not a status field: the host publishes no structured
+ * one. So an unrecognized ending yields `done` rather than a guess at failure —
+ * the settlement's existence proves the task ended, and only the WAY it ended is
+ * uncertain.
+ */
+export function agySettlementOutcome(messageTitle: string): 'done' | 'cancelled' {
+  return /\bwas cancell?ed\b/i.test(messageTitle) ? 'cancelled' : 'done';
+}
+
+/**
  * A finished background task, as a self-contained tool block keyed by its sender.
  *
  * dsh's `subagent-settled` decision (reflection §12): the settlement is a
@@ -967,8 +1070,21 @@ export function parseAgySettlement(text: string): AgySettlement | undefined {
  * It is keyed by `sender` (`<conversationId>/task-<N>`) — the child's own id —
  * and correlated to the step that spawned it through
  * `sourceMetadata.tool.stepIndex`, which is a MEASURED join and not a guess.
+ *
+ * DELIBERATELY still a tool block rather than an `agent-activity` card. A
+ * settlement only exists because the work ENDED, so every one of them would be
+ * emitted with a terminal status — and the protocol says a terminal
+ * `agent-activity` REMOVES the live surface "so completed subagents do not stack
+ * in history". Promoting these wholesale would therefore delete the only durable
+ * record the user has of what their background tasks did. Reflection §9:
+ * collapse, never delete. Live progress for tasks that have NOT settled is a
+ * separate, additive surface — see `agyTaskLedger`.
  */
-export function mapAgySettlement(settlement: AgySettlement, conversationId: string): AgentMessage[] {
+export function mapAgySettlement(
+  settlement: AgySettlement,
+  conversationId: string,
+  log?: AgyTaskLog,
+): AgentMessage[] {
   const callId = `agy:${conversationId}:task:${settlement.sender}`;
   const toolName = settlement.toolName ?? 'background-task';
   const spawnedBy = settlement.stepIndex !== undefined
@@ -989,7 +1105,180 @@ export function mapAgySettlement(settlement: AgySettlement, conversationId: stri
       toolName,
       toolClass: 'execute',
       title: settlement.messageTitle || settlement.sender,
-      result: settlement.content,
+      // The settlement's own text is what the host wrote as the OUTCOME; the log
+      // is what the task PRINTED. Two different facts, so two fields — folding
+      // the log into the summary string would make the host's sentence and a
+      // process's stdout indistinguishable once rendered.
+      result: log ? { summary: settlement.content, log: log.text } : settlement.content,
+      ...(log?.truncated ? { truncated: true } : {}),
     },
   ];
+}
+
+/**
+ * A settlement that names no task and no conversation, as a stated notice.
+ *
+ * These are the `system` and `unknown` taxonomy categories — a `system`
+ * sender, an absent one, or a nonempty sender the taxonomy does not recognize
+ * ({@link classifyAgySettlementSender}). Sending one through
+ * {@link mapAgySettlement} would fabricate a background-task tool call —
+ * `args: {task: 'system'}` — for a task that never existed, and dropping it
+ * would erase a record the host thought worth writing: the measured `system`
+ * settlement is "All your subagents … have been stopped", which the user should
+ * read. So: a notice carrying the host's own words, never an invented tool
+ * invocation, never silence.
+ */
+export function mapAgyUnmappedSettlement(settlement: AgySettlement): Extract<AgentMessage, { type: 'notice' }> {
+  const sender = settlement.sender.trim();
+  // Exactly `system`, never "any nonempty sender": `classifyAgySettlementSender`
+  // routes unrecognized senders here too, and labelling future sender drift a
+  // "system notice" would claim provenance the file does not carry. An
+  // unrecognized sender is NAMED (bounded), so the drift is visible.
+  const label = sender === 'system'
+    ? 'Antigravity system notice'
+    : sender === ''
+      ? 'Antigravity wrote an inbox message with no sender'
+      : `Antigravity wrote an inbox message from an unrecognized sender (${JSON.stringify(sender.slice(0, 80))})`;
+  const title = settlement.messageTitle.trim();
+  const content = settlement.content.trim();
+  // The host often writes the title again as the content's first sentence;
+  // repeating it back-to-back would read as a stutter, not as two facts.
+  const detail = title === '' || content.startsWith(title)
+    ? content
+    : content === '' ? title : `${title} — ${content}`;
+  return { type: 'notice', message: detail ? `${label}: ${detail}` : `${label}.` };
+}
+
+/** A background task's captured output, and whether the reader stopped short of the end. */
+export interface AgyTaskLog {
+  text: string;
+  truncated: boolean;
+}
+
+// ── The background-task ledger ───────────────────────────────────────────────
+
+/** One `manage_task` reference pulled out of a transcript step. */
+export interface AgyTaskReference {
+  /** Normalized to the bare `task-<N>` form; the host writes it both ways. */
+  taskId: string;
+  /** MEASURED vocabulary: `status` (32), `kill` (6), `list` (2). */
+  action: string;
+  stepIndex: number;
+  /** The host's own one-line summary of why it touched the task. */
+  summary?: string;
+}
+
+const AGY_TASK_ID_TAIL = /(task-\d+)\s*$/;
+
+/** `<uuid>/task-7` and `task-7` are the same task; the host writes both. */
+export function normalizeAgyTaskId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const match = AGY_TASK_ID_TAIL.exec(raw.trim());
+  return match ? match[1]! : undefined;
+}
+
+/**
+ * Every `manage_task` call this step made.
+ *
+ * The args arrive JSON-ENCODED (`"Action": "\"status\""`), which is the same
+ * quirk {@link decodeAgyToolArgs} already exists to undo — so it is reused here
+ * rather than re-implemented, and a future change to that encoding has one place
+ * to be fixed.
+ */
+export function collectAgyTaskReferences(step: AgyStep): AgyTaskReference[] {
+  const out: AgyTaskReference[] = [];
+  for (const call of step.tool_calls ?? []) {
+    if (call?.name !== 'manage_task') continue;
+    const args = decodeAgyToolArgs(call.args);
+    const taskId = normalizeAgyTaskId(args.TaskId);
+    if (!taskId) continue;
+    const summary = typeof args.toolSummary === 'string' ? args.toolSummary : undefined;
+    out.push({
+      taskId,
+      action: typeof args.Action === 'string' ? args.Action : '',
+      stepIndex: step.step_index,
+      ...(summary ? { summary } : {}),
+    });
+  }
+  return out;
+}
+
+export interface AgyTaskLedgerEntry {
+  taskId: string;
+  status: 'open' | 'in-progress' | 'done' | 'cancelled';
+  title: string;
+}
+
+/**
+ * Fold task references and settlements into one ledger.
+ *
+ * A task is DONE when its settlement is in the inbox — that is the only positive
+ * proof the files carry. `kill` marks it cancelled even without a settlement,
+ * because the host was told to stop it. Everything else is `in-progress`: the
+ * conversation asked about a task, and nothing has since said it ended.
+ *
+ * Deliberately NOT inferred: that a task is still RUNNING right now. A settled
+ * task proves it ended; an unsettled one proves only that this transcript never
+ * recorded an ending, which after a crash or a `--print` run that exited looks
+ * exactly the same. `in-progress` is the honest word for "last seen running".
+ */
+export function foldAgyTaskLedger(
+  references: readonly AgyTaskReference[],
+  settled: ReadonlyMap<string, { outcome: 'done' | 'cancelled'; title: string }>,
+): AgyTaskLedgerEntry[] {
+  const order: string[] = [];
+  const byId = new Map<string, AgyTaskLedgerEntry>();
+
+  const upsert = (taskId: string): AgyTaskLedgerEntry => {
+    let entry = byId.get(taskId);
+    if (!entry) {
+      entry = { taskId, status: 'in-progress', title: taskId };
+      byId.set(taskId, entry);
+      order.push(taskId);
+    }
+    return entry;
+  };
+
+  for (const reference of references) {
+    const entry = upsert(reference.taskId);
+    if (reference.summary) entry.title = reference.summary;
+    if (reference.action === 'kill') entry.status = 'cancelled';
+  }
+  // Settlements win: they are the host's own record that the work ended.
+  for (const [taskId, record] of settled) {
+    const entry = upsert(taskId);
+    entry.status = record.outcome;
+    if (record.title) entry.title = record.title;
+  }
+  return order.map((taskId) => byId.get(taskId)!);
+}
+
+/**
+ * The ledger as one upserted panel, or nothing when there are no tasks.
+ *
+ * `source: 'transcript'` because that is literally where it came from, and
+ * `sourceTool: 'manage_task'` names the host's own tool rather than a label
+ * invented here (reflection §3).
+ */
+export function agyTaskListState(
+  conversationId: string,
+  entries: readonly AgyTaskLedgerEntry[],
+  updatedAt?: number,
+): AgentMessage | undefined {
+  if (entries.length === 0) return undefined;
+  const live = entries.some((entry) => entry.status === 'open' || entry.status === 'in-progress');
+  return {
+    type: 'task-list-state',
+    key: `agy:${conversationId}:tasks`,
+    title: 'Background tasks',
+    status: live ? 'running' : 'done',
+    source: 'transcript',
+    sourceTool: 'manage_task',
+    ...(updatedAt !== undefined ? { updatedAt } : {}),
+    items: entries.map((entry) => ({
+      id: entry.taskId,
+      title: entry.title,
+      status: entry.status,
+    })),
+  };
 }

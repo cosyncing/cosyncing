@@ -23,6 +23,10 @@ export interface AgyFixture {
     withoutTranscript: string;
     ideRow: string;
     stale: string;
+    /** A subagent child: it has a brain dir and a transcript, and NO summaries row. */
+    subagentChild: string;
+    /** A conversation the frozen summaries table never learned about. */
+    supplementary: string;
   };
   summaryRows: Array<Record<string, string | number>>;
   conversationMetadata: unknown;
@@ -39,6 +43,19 @@ export interface AgyFixture {
     result: Record<string, unknown>;
     /** CONSTRUCTED, not measured — see `_canceledNote` in the fixture. A step the stream cancels. */
     canceledStepUpdates: Array<Record<string, unknown>>;
+  };
+  /** Round 2b (P2a–P2f). See `_note` in the fixture for what is measured and what is constructed. */
+  round2b: {
+    cancelledTaskSettlement: Record<string, unknown>;
+    subagentSettlement: Record<string, unknown>;
+    systemSettlement: Record<string, unknown>;
+    senderlessSettlement: Record<string, unknown>;
+    taskLog: string;
+    taskLogId: string;
+    killStep: Record<string, unknown>;
+    childTranscript: Array<Record<string, unknown>>;
+    supplementaryTranscript: Array<Record<string, unknown>>;
+    lastConversations: Record<string, string>;
   };
 }
 
@@ -57,6 +74,23 @@ export interface AgyFixtureOptions {
   withoutSettlement?: boolean;
   /** Write only the first N transcript steps, so a test can append the rest. */
   transcriptSteps?: number;
+  /**
+   * Add the other three MEASURED settlement senders beside the task one: a bare
+   * conversation id (a subagent), `system`, and a row with no sender at all. The
+   * whole point of the taxonomy is that these are NOT tasks and NOT each other,
+   * so a suite asserting it needs all four present at once.
+   */
+  withSettlementTaxonomy?: boolean;
+  /** Write `…/tasks/task-7.log` for the settled task. */
+  withTaskLog?: boolean;
+  /**
+   * Give the live conversation a subagent CHILD — a brain dir with its own
+   * transcript, a settlement in the parent's inbox naming it, and deliberately NO
+   * summaries row, which is how both real children were found (MEASURED).
+   */
+  withSubagentChild?: boolean;
+  /** A brain dir with a transcript and no summaries row, plus the `last_conversations` cwd for it. */
+  withSupplementaryConversation?: boolean;
 }
 
 export function jsonl(rows: Array<Record<string, unknown>>): string {
@@ -88,13 +122,44 @@ export function buildAgyFixtureTree(options: AgyFixtureOptions = {}): AgyFixture
   if (!options.withoutTranscriptFull) {
     writeFileSync(join(logs, 'transcript_full.jsonl'), jsonl(FIXTURE.transcriptFull));
   }
+  const inbox = join(appData, 'brain', live, '.system_generated', 'messages');
   if (!options.withoutSettlement) {
-    const inbox = join(appData, 'brain', live, '.system_generated', 'messages');
     mkdirSync(inbox, { recursive: true });
     writeFileSync(join(inbox, `${String(FIXTURE.settlement.id)}.json`), JSON.stringify(FIXTURE.settlement, null, 1));
-    // Siblings the reader must NOT mistake for messages.
+    // Siblings the reader must NOT mistake for messages: the delivered-set, the
+    // read watermark, and the undelivered spool. All three are real (MEASURED).
     writeFileSync(join(inbox, 'read.json'), JSON.stringify({ [String(FIXTURE.settlement.id)]: true }));
+    writeFileSync(join(inbox, 'cursor.json'), JSON.stringify({ last_read_unix_nano: 1779364802373827874 }));
     mkdirSync(join(inbox, 'undelivered'), { recursive: true });
+  }
+
+  const writeSettlement = (row: Record<string, unknown>) => {
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, `${String(row.id)}.json`), JSON.stringify(row, null, 1));
+  };
+  if (options.withSettlementTaxonomy) {
+    writeSettlement(FIXTURE.round2b.cancelledTaskSettlement);
+    writeSettlement(FIXTURE.round2b.subagentSettlement);
+    writeSettlement(FIXTURE.round2b.systemSettlement);
+    writeSettlement(FIXTURE.round2b.senderlessSettlement);
+  }
+  if (options.withTaskLog) {
+    const tasks = join(appData, 'brain', live, '.system_generated', 'tasks');
+    mkdirSync(tasks, { recursive: true });
+    writeFileSync(join(tasks, `${FIXTURE.round2b.taskLogId}.log`), FIXTURE.round2b.taskLog);
+  }
+  if (options.withSubagentChild) {
+    // The settlement is what NAMES the child — the parent's `invoke_subagent`
+    // step never does (MEASURED) — so the link exists only when this is written.
+    writeSettlement(FIXTURE.round2b.subagentSettlement);
+    writeBrainTranscript(appData, FIXTURE.conversationIds.subagentChild, FIXTURE.round2b.childTranscript);
+  }
+  if (options.withSupplementaryConversation) {
+    writeBrainTranscript(appData, FIXTURE.conversationIds.supplementary, FIXTURE.round2b.supplementaryTranscript);
+    writeFileSync(
+      join(appData, 'cache', 'last_conversations.json'),
+      JSON.stringify(FIXTURE.round2b.lastConversations, null, 1),
+    );
   }
 
   // The conversation with a store and NO transcript: a brain dir exists, the
@@ -109,6 +174,14 @@ export function buildAgyFixtureTree(options: AgyFixtureOptions = {}): AgyFixture
   };
 }
 
+/** A brain dir with nothing but its own transcript — the shape a conversation the
+ *  summaries table never learned about actually has on disk. */
+function writeBrainTranscript(appData: string, conversationId: string, steps: Array<Record<string, unknown>>): void {
+  const logs = join(appData, 'brain', conversationId, '.system_generated', 'logs');
+  mkdirSync(logs, { recursive: true });
+  writeFileSync(join(logs, 'transcript.jsonl'), jsonl(steps));
+}
+
 // ── The fake `agy` child ─────────────────────────────────────────────────────
 
 /**
@@ -120,6 +193,8 @@ export function buildAgyFixtureTree(options: AgyFixtureOptions = {}): AgyFixture
  * drive suite asserts that this surfaces instead.
  */
 export interface AgyFakeScript {
+  /** \`agy models\` lines (\`id\\tdisplayName\`) the fake serves to the catalog probe. */
+  models?: string[];
   /** Emitted once at startup, before any stdin arrives. */
   init?: Record<string, unknown>;
   /** Events to emit per received stdin line; `'silent'` emits nothing and exits. */
@@ -186,6 +261,14 @@ export function writeFakeAgyBinary(dir: string, script: AgyFakeScript): AgyFakeB
     `#!/usr/bin/env bun
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const script = JSON.parse(readFileSync(${JSON.stringify(scriptPath)}, 'utf8'));
+// The read-only \`agy models\` catalog probe is NOT a conversation child. It is
+// answered and forgotten BEFORE any recording: writing it into the argv/launch
+// ledger would clobber the record these suites use to pin that attach spawns
+// nothing and that a turn spawns exactly one child.
+if (process.argv[2] === 'models') {
+  for (const line of script.models ?? []) process.stdout.write(line + '\\n');
+  process.exit(0);
+}
 writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
 // Which launch this is. The turn counter is per-process, so a relaunch would
 // otherwise replay the previous generation's script from the top.

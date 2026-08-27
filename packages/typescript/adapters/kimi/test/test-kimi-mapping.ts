@@ -1902,6 +1902,186 @@ type ActivityRow = {
     JSON.stringify([statelessCall[0], statelessResult[0]]));
 }
 
+// ── 0.38.0 — the refreshed capture, and the drift it proves ─────────────────
+//
+// `kimi-0.38.0.json` is a second sanitized capture, taken 2026-08-25 from an
+// isolated `KIMI_CODE_HOME` holding ONE copied session and no credential
+// material. 0.35.0 is RETAINED beside it on purpose: it is the minimum-version
+// evidence, and a mapper that only ever sees the newest payload stops proving
+// it still reads the oldest one.
+//
+// The refresh was worth taking because 0.35.0's session was a throwaway that
+// only ever exchanged text — its whole transcript is `text` and `thinking`
+// parts. It contains NO `tool_use`, NO `tool_result` and no `role: 'tool'`, so
+// every tool assertion above this line runs on hand-built input. The 0.38.0
+// capture carries all three from a real server.
+
+const FIXTURE_38 = await Bun.file(new URL('./fixtures/kimi-0.38.0.json', import.meta.url)).json() as {
+  kimiVersion: string;
+  sessionId: string;
+  openapiInfo: { pathCount: number };
+  rest: Record<string, { code: number; msg: string; data: unknown }>;
+  routesAbsent: Record<string, unknown>;
+};
+
+check('0.38.0 fixture is the newer capture, and 0.35.0 is still present',
+  FIXTURE_38.kimiVersion === '0.38.0' && FIXTURE.kimiVersion === '0.35.0');
+
+// The SAME assertions the 0.35.0 rows get, on the 0.38.0 payload.
+{
+  const listing38 = FIXTURE_38.rest.v2Sessions!.data as { items: unknown[] };
+  const session38 = mapKimiSession(listing38.items[0] as never);
+  check('0.38.0 session row maps through the same mapper',
+    !!session38 && session38.id === FIXTURE_38.sessionId
+      && session38.attachMode === 'observe'
+      && session38.control?.drive.supported === false
+      && session38.cwd === '/fixture/workspace'
+      && typeof session38.updatedAt === 'number',
+    JSON.stringify({ id: session38?.id, mode: session38?.attachMode }));
+
+  const page38 = mapKimiMessagePage(FIXTURE_38.rest.messagesAll!.data as never);
+  check('0.38.0 message page folds with no thrown row',
+    page38.rows.length > 0, `rows=${page38.rows.length}`);
+  const ids = page38.rows.map((r) => r.identity);
+  check('0.38.0 row identities stay unique across the page',
+    new Set(ids).size === ids.length, `${new Set(ids).size}/${ids.length}`);
+
+  const overlays38 = mapKimiSessionStatus(FIXTURE_38.rest.status!.data);
+  check('0.38.0 /status folds to the same overlay shape',
+    overlays38.length > 0, `overlays=${overlays38.length}`);
+
+  // 0.35.0 never captured /api/v1/models; 0.38.0 does, so the catalog join that
+  // reflection §3 requires is now backed by a real payload.
+  const catalog = mapKimiModelCatalog(FIXTURE_38.rest.models!.data);
+  const k3 = catalog.find((m) => m.modelID === 'kimi-code/k3-256k');
+  check('0.38.0 model catalog supplies the HOST display name, never a derived one',
+    catalog.length === 4 && k3?.label === 'K3-256k',
+    JSON.stringify(catalog.map((m) => `${m.modelID}:${m.label}`)));
+
+  // ── measured DRIFT 0.35.0 → 0.38.0 ────────────────────────────────────────
+
+  check('DRIFT: the openapi surface grew from 77 to 90 paths',
+    (FIXTURE as unknown as { openapiInfo: { pathCount: number } }).openapiInfo.pathCount === 77
+      && FIXTURE_38.openapiInfo.pathCount === 90,
+    `77 -> ${FIXTURE_38.openapiInfo.pathCount}`);
+
+  const meta35 = FIXTURE.rest.meta!.data as Record<string, unknown>;
+  const meta38 = FIXTURE_38.rest.meta!.data as Record<string, unknown>;
+  check('DRIFT: /meta gains a `features` array; capabilities are unchanged',
+    meta35.features === undefined && Array.isArray(meta38.features)
+      && JSON.stringify(meta35.capabilities) === JSON.stringify(meta38.capabilities),
+    JSON.stringify(Object.keys(meta38)));
+  const flags35 = Object.keys((meta35.experimental_flags ?? {}) as object);
+  const flags38 = Object.keys((meta38.experimental_flags ?? {}) as object);
+  check('DRIFT: two experimental flags appear (auto_session_title, wait_for)',
+    flags38.includes('auto_session_title') && flags38.includes('wait_for')
+      && !flags35.includes('auto_session_title') && !flags35.includes('wait_for'),
+    JSON.stringify(flags38));
+
+  // The shapes the mapper actually depends on did NOT drift — the point worth
+  // proving, because it is what lets one mapper serve both versions.
+  const parts = (fixture: typeof FIXTURE_38 | typeof FIXTURE): Set<string> => {
+    const out = new Set<string>();
+    for (const m of (fixture.rest.messagesAll!.data as { items: Array<Record<string, unknown>> }).items) {
+      for (const p of (m.content as Array<Record<string, unknown>> | undefined) ?? []) {
+        if (p && typeof p === 'object') out.add(String(p.type));
+      }
+    }
+    return out;
+  };
+  const p35 = parts(FIXTURE);
+  const p38 = parts(FIXTURE_38);
+  check('NO DRIFT: every 0.35.0 content part type still appears in 0.38.0',
+    [...p35].every((t) => p38.has(t)), `${[...p35]} ⊆ ${[...p38]}`);
+  check('0.38.0 adds the tool parts 0.35.0 never captured',
+    p38.has('tool_use') && p38.has('tool_result') && !p35.has('tool_use'),
+    JSON.stringify([...p38]));
+
+  // Real captured tool pairs, folded through the stateful path.
+  const state38 = createKimiMappingState();
+  const rows38 = (FIXTURE_38.rest.messagesAll!.data as { items: unknown[] }).items
+    .flatMap((m) => mapKimiMessage(m as never, state38));
+  const calls = rows38.filter((r) => r.message.type === 'tool-call');
+  const toolResults = rows38.filter((r) => r.message.type === 'tool-result');
+  check('captured tool_use rows fold to tool-call rows carrying a display class',
+    calls.length > 0
+      && calls.every((r) => (r.message as { callId?: string }).callId !== undefined)
+      && calls.some((r) => (r.message as { toolClass?: string }).toolClass !== undefined),
+    `calls=${calls.length}`);
+  const callIds = new Set(calls.map((r) => (r.message as { callId: string }).callId));
+  check('every captured tool_result correlates to a captured call by callId',
+    toolResults.length > 0
+      && toolResults.every((r) => callIds.has((r.message as { callId: string }).callId)),
+    `results=${toolResults.length} calls=${callIds.size}`);
+  check('a captured is_error result is carried as isError, not swallowed',
+    toolResults.some((r) => (r.message as { isError?: boolean }).isError === true),
+    JSON.stringify(toolResults.map((r) => (r.message as { isError?: boolean }).isError)));
+
+  // ── DRIFT that matters most: a provenance kind outside the measured set ───
+  //
+  // The subagent wire-facts sweep enumerated SEVEN `origin.kind` values across
+  // 70,001 journal lines: injection, user, background_task, task,
+  // system_trigger, skill_activation, cron_job. The 0.38.0 REST capture carries
+  // an EIGHTH — `compaction_summary` — which no earlier capture contained.
+  //
+  // A compaction summary is machine-written by construction — it is the
+  // harness replacing earlier conversation — so it must NEVER render as
+  // something the user typed (reflection §10: "never to 'the user said
+  // this'"). It renders as the same context-injection event `injection` rows
+  // use, with the origin kind as the source label, and it keeps its origin
+  // kind on the row so the drive-side divergence detector still reads it as
+  // the server writing to its own session.
+  const compaction = (FIXTURE_38.rest.messagesAll!.data as {
+    items: Array<{ metadata?: { origin?: { kind?: string } } }>;
+  }).items.find((m) => m.metadata?.origin?.kind === 'compaction_summary');
+  check('DRIFT: 0.38.0 carries an eighth origin kind, `compaction_summary`',
+    compaction !== undefined, JSON.stringify(compaction?.metadata));
+  const compactionRows = compaction ? mapKimiMessage(compaction as never) : [];
+  check('a compaction_summary is NEVER a user-message',
+    compactionRows.length > 0
+      && compactionRows.every((r) => r.message.type !== 'user-message'),
+    JSON.stringify(compactionRows.map((r) => r.message.type)));
+  const compactionEvent = compactionRows[0]?.message as
+    { type?: string; name?: string; payload?: { source?: string; body?: string } } | undefined;
+  check('...it renders as a context-injection event whose source names the compaction',
+    compactionRows.length === 1
+      && compactionEvent?.type === 'event'
+      && compactionEvent?.name === 'context.injection'
+      && compactionEvent?.payload?.source === 'compaction_summary'
+      && typeof compactionEvent?.payload?.body === 'string'
+      && compactionEvent.payload.body.includes('folded into this note')
+      && compactionRows[0]!.originKind === 'compaction_summary',
+    JSON.stringify(compactionEvent));
+
+  // ── the subagent question, answered by the capture ────────────────────────
+  //
+  // The wire-facts doc left §U2 open: does the REST surface expose subagents at
+  // all? The refresh settles it for an IDLE session. The copied session holds
+  // two real on-disk subagent journals (agents/agent-0, agents/agent-1, both
+  // `type: 'sub'` in state.json), and the server still answered an EMPTY
+  // `subagents` array — while `/agents` and `/subagents` are not routes at all.
+  // So the file-backed child source is not a workaround for a route we missed;
+  // it is the only thing that finds these rows.
+  const snap38 = FIXTURE_38.rest.snapshot!.data as { subagents?: unknown[] };
+  check('§U2 ANSWERED: snapshot.subagents is EMPTY for a session with two on-disk children',
+    Array.isArray(snap38.subagents) && snap38.subagents.length === 0,
+    JSON.stringify(snap38.subagents));
+  check('§U2 ANSWERED: 0.38.0 serves no /agents and no /subagents route',
+    FIXTURE_38.routesAbsent.sessionAgents === 404
+      && FIXTURE_38.routesAbsent.sessionSubagents === 404,
+    JSON.stringify(FIXTURE_38.routesAbsent));
+  check('NO DRIFT: the snapshot envelope keys are identical across versions',
+    JSON.stringify(Object.keys(FIXTURE.rest.snapshot!.data as object).sort())
+      === JSON.stringify(Object.keys(FIXTURE_38.rest.snapshot!.data as object).sort()),
+    JSON.stringify(Object.keys(FIXTURE_38.rest.snapshot!.data as object).sort()));
+
+  // Totality still holds on the newer payload.
+  check('0.38.0 unknown-session error keeps the envelope and carries no stack',
+    (FIXTURE_38.rest.messagesUnknownSession!.code) === 40401
+      && !('stack' in (FIXTURE_38.rest.messagesUnknownSession as object)),
+    JSON.stringify(FIXTURE_38.rest.messagesUnknownSession!.msg));
+}
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

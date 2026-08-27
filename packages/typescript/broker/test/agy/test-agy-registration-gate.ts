@@ -64,6 +64,8 @@ import {
   FIXTURE,
 } from '../../../adapters/antigravity/test/fixtures/tree.ts';
 import { shippedAdapters } from '../../src/installation/shipped-adapters.ts';
+import { agentSummaries } from '../../src/installation/setup.ts';
+import { setupMessages } from '../../src/installation/setup-i18n.ts';
 import { defaultDoctorAdapters } from '../../src/installation/doctor.ts';
 import { managedHostGateEnv } from '../../src/runtime/managed-host.ts';
 import { brokerServiceEnvironmentEntries } from '../../src/installation/service-manager.ts';
@@ -298,16 +300,21 @@ try {
       && capabilities?.supportsNativeFileInput === false
       && capabilities?.supportsNativeArtifact === false,
     JSON.stringify(capabilities));
-  // P0/P1 build no create, no rename, no fork, no clone and no export, and the
-  // row must say so rather than offering a button that throws. These are derived
-  // from HOOK PRESENCE in `runtime.ts`, so this asserts which hooks exist.
-  check('the served row offers NO write-class action, because the adapter defines none of those hooks',
-    row?.canCreateSession === false
-      && row?.canSelectModelAtCreation === false
+  // The action surface is derived from HOOK PRESENCE in `runtime.ts`, so this
+  // asserts which hooks exist. P2 added transcript export (adapter-built JSON,
+  // no upstream export command) and model selection (the catalog + `--model`
+  // relaunch); P3 added create (a minted conversation id whose first resume
+  // prompt launches the CLI — the 2026-08-27 physical pass found the app could
+  // not start an agy session at all, and this row is the whole gate for the
+  // create flow). Rename, fork and clone remain absent — the row must say so
+  // rather than offering a button that throws.
+  check('the served row offers exactly the P3 action surface: create, export and model selection',
+    row?.canCreateSession === true
+      && row?.canSelectModelAtCreation === true
       && row?.canRenameNative === false
       && row?.canFork === false
       && row?.canClone === false
-      && row?.canTranscriptExport === false,
+      && row?.canTranscriptExport === true,
     JSON.stringify(row));
 
   // ── The evidence for carrying NO minimum revision ─────────────────────────
@@ -431,6 +438,37 @@ try {
 
   // ── Refusing a drive this machine cannot deliver ─────────────────────────
   //
+  // Setup's agent preflight LISTS agy. It is delivered by the broker itself —
+  // observe reads the store, resume spawns per prompt — so it belongs on the
+  // delivered list the way claude does, not behind the managed-host filter:
+  // there is no daemon, so no managed-host declaration will ever add it. The
+  // physical 0.4.1 pass found exactly this hole: every check in this file was
+  // green while `cosy setup` showed six agents and no Antigravity.
+  {
+    const summaryFor = (agents: string[]) => agentSummaries({
+      minimumVersions: agents.map((agent) => ({
+        agent, displayName: agent, version: '0.0.0',
+        requiredFeature: 'fixture', evidenceUrl: '', evidenceNote: 'fixture',
+      })),
+      sections: [{ id: 'agents', title: 'Agents', checks: [] }],
+    } as never).map((row) => row.id as string);
+    check('setup lists agy on the delivered-agents preflight',
+      summaryFor(['codex', 'opencode', 'pi', 'claude']).includes('agy'),
+      summaryFor(['codex', 'opencode', 'pi', 'claude']).join(','));
+    for (const language of ['en', 'zh-Hans'] as const) {
+      const copy = setupMessages(language).agentBehavior('agy');
+      check(`the preflight behavior line is agy's own, not the managed-host fallback (${language})`,
+        /Antigravity/.test(copy) && !/external host|外部 host/.test(copy), copy);
+    }
+    // No daemon means no managed-runtime consent: the disclosure names the
+    // hosts the service will start and stop, and agy has none.
+    for (const language of ['en', 'zh-Hans'] as const) {
+      const body = setupMessages(language).managedRuntimeBody('cosyncing');
+      check(`the managed-runtime consent does NOT name agy (${language})`,
+        !/agy/.test(body), body.slice(0, 160));
+    }
+  }
+
   // A normal attach refusal, not a crash: handing back a Drive that can never
   // spawn would fail on the first prompt, after the client had been told it was
   // driving.

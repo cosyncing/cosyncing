@@ -325,6 +325,62 @@ const RUN_STREAM: Array<Record<string, unknown>> = [
     keysOf(mapped).join('|'));
 }
 
+// ── 3. Lineage does not re-key anything (P2d) ──────────────────────────────
+//
+// A subagent row is still a session in its own right: `id === nativeId === its
+// OWN conversation UUID`, and the parent's id rides `parentThreadId` beside it
+// rather than replacing either. Q4's one-id rule has to survive lineage, because
+// the alternative — a composite `parent/child` id — is precisely the path
+// encoding this adapter deliberately does not have.
+{
+  const tree = buildAgyFixtureTree({ withSubagentChild: true });
+  const binDir = join(tree.dir, 'bin');
+  writeFakeAgyBinary(binDir, {});
+  try {
+    const adapter = new AgyAdapter({ roots: tree.roots, env: { PATH: binDir }, trace: () => {} });
+    const rows = await adapter.discoverSessions();
+    const child = FIXTURE.conversationIds.subagentChild;
+    const parent = FIXTURE.conversationIds.withTranscript;
+    const childRow = rows.find((row) => row.id === child)!;
+
+    check('a child row keeps ONE id: its own, on both `id` and `nativeId`',
+      childRow.id === child && childRow.nativeId === child,
+      JSON.stringify({ id: childRow.id, nativeId: childRow.nativeId }));
+    check('the parent is named beside the child\'s id, never folded into it',
+      childRow.parentThreadId === parent && !childRow.id.includes('/'),
+      String(childRow.parentThreadId));
+    check('the parent row is not marked as its own child',
+      rows.find((row) => row.id === parent)?.origin === undefined);
+
+    // The child replays its OWN transcript, so its message keys are namespaced by
+    // its own conversation id — a child and its parent can never collide.
+    const connection = await adapter.attach(child, 'observe');
+    const history = await connection.getHistory();
+    const keys = history
+      .map((message) => (message as { key?: string }).key)
+      .filter((key): key is string => typeof key === 'string');
+    check('a child\'s rows are keyed by the CHILD\'s conversation id',
+      keys.length > 0 && keys.every((key) => key.includes(child) && !key.includes(parent)),
+      keys.join('|'));
+    check('the same row keys the same on a re-read',
+      JSON.stringify((await connection.getHistory())
+        .map((message) => (message as { key?: string }).key)) === JSON.stringify(
+        history.map((message) => (message as { key?: string }).key)),
+      keys.join('|'));
+    await connection.close();
+
+    // Two sweeps, same answer: lineage is read from files each time, so it must
+    // not drift with sweep order or with what is already cached.
+    const again = await adapter.discoverSessions();
+    check('a second sweep reports the same lineage',
+      JSON.stringify(again.filter((row) => row.origin === 'subagent').map((row) => [row.id, row.parentThreadId]))
+        === JSON.stringify(rows.filter((row) => row.origin === 'subagent').map((row) => [row.id, row.parentThreadId])),
+      JSON.stringify(again.filter((row) => row.origin === 'subagent').map((row) => row.id)));
+  } finally {
+    tree.cleanup();
+  }
+}
+
 const failed = results.filter((result) => !result.ok).length;
 console.log(`\n${results.length - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

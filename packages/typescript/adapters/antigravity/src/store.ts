@@ -22,6 +22,7 @@ import { Database, constants as sqliteConstants } from 'bun:sqlite';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
+import type { ModeOption, ModelOption } from '@cosyncing/adapter-api';
 import {
   AGY_METADATA_MAX_BYTES,
   AGY_SETTLEMENT_MAX_FILES,
@@ -98,6 +99,31 @@ export function agyTranscriptFullPath(roots: AgyRoots, conversationId: string): 
 export function agySettlementDir(roots: AgyRoots, conversationId: string): string {
   return join(agyBrainDir(roots, conversationId), '.system_generated', 'messages');
 }
+
+/**
+ * A background task's captured output: `…/tasks/task-<N>.log`.
+ *
+ * MEASURED 2026-08-25 (agy 1.1.20, 33 logs on this host): plain text, CRLF line
+ * endings, median 1,189 bytes — and a 3,099,335-byte maximum. That spread is the
+ * whole reason for {@link AGY_TASK_LOG_MAX_BYTES}: the typical log is nothing,
+ * and one of them alone is larger than the settlement cap.
+ *
+ * `taskId` is validated by the caller against {@link AGY_TASK_ID_SEGMENT} before
+ * it reaches a path, so a sender id from disk cannot become a traversal.
+ */
+export function agyTaskLogPath(roots: AgyRoots, conversationId: string, taskId: string): string {
+  return join(agyBrainDir(roots, conversationId), '.system_generated', 'tasks', `${taskId}.log`);
+}
+
+/** The ONLY shape a task id may take on its way into a path. */
+export const AGY_TASK_ID_SEGMENT = /^task-\d{1,10}$/;
+
+/** Per-log ceiling. Above the 1,189-byte median by three orders of magnitude, below the
+ *  3 MB outlier, so the ordinary log is whole and the pathological one is stated-truncated. */
+export const AGY_TASK_LOG_MAX_BYTES = 256 * 1024;
+
+/** Total log bytes ONE history replay may read, across all of its settled tasks. */
+export const AGY_TASK_LOG_BUDGET_BYTES = 2 * 1024 * 1024;
 
 /**
  * Reject a path string that leaves the app-data root. A PRE-gate, not the gate.
@@ -245,6 +271,13 @@ export interface AgySummaryQuery {
   updatedAfter?: number;
   /** Hard ceiling on rows decoded in one sweep. */
   limit?: number;
+  /**
+   * Look at ONLY these conversations. The post-limit enrichment fetch: a
+   * conversation that won its roster slot through the brain scan still owns
+   * whatever summary row the frozen table holds, however old, and recency-capped
+   * queries cannot see it. Non-uuid entries are dropped before they reach SQL.
+   */
+  ids?: readonly string[];
   onWork?: (work: { kind: 'sqlite-query'; source: string; bounded: boolean; cutoff?: number }) => void;
   trace?: AgyTraceSink;
 }
@@ -288,6 +321,12 @@ export function readAgySummaries(roots: AgyRoots, query: AgySummaryQuery = {}): 
     if (query.updatedAfter !== undefined) {
       where.push('last_modified_time >= ?');
       params.push(goTimeLiteral(query.updatedAfter));
+    }
+    if (query.ids !== undefined) {
+      const ids = query.ids.filter((id) => isAgyConversationId(id));
+      if (ids.length === 0) return [];
+      where.push(`conversation_id in (${ids.map(() => '?').join(', ')})`);
+      params.push(...ids);
     }
     const limit = query.limit !== undefined ? ` limit ${Math.max(0, Math.trunc(query.limit))}` : '';
     const sql =
@@ -519,6 +558,340 @@ export function resolveAgyModel(
 /** Provider id for every agy model row. One product, one provider namespace. */
 export const AGY_PROVIDER_ID = 'google-antigravity';
 
+// ── Subagent lineage (P2d) ───────────────────────────────────────────────────
+
+/** Settlement files ONE discovery sweep may open looking for lineage. The whole live store
+ *  holds 36 of them (MEASURED 2026-08-25), so this is a wide margin, not a working limit. */
+export const AGY_LINEAGE_MAX_FILES = 256;
+
+/**
+ * childConversationId → parentConversationId, for every link the files prove.
+ *
+ * ── WHAT NAMES A CHILD (MEASURED 2026-08-25, agy 1.1.20, C5 capture) ─────────
+ * ONLY the settlement sender. A child conversation reports home by writing a
+ * settlement into its PARENT's inbox whose `sender` is the child's own bare
+ * conversation UUID — as opposed to a background task, whose sender is
+ * `<parentId>/task-<N>`. Both parents on this host carry exactly one such
+ * settlement, and both named ids are real `brain/` directories with real
+ * transcripts. Two independent facts, agreeing.
+ *
+ * The parent's own `invoke_subagent` step does NOT name the child, which is worth
+ * stating because the obvious design assumes it does. Its args are `Subagents` (a
+ * JSON array of `{Model, Prompt, Role, TypeName}`), `toolAction` and
+ * `toolSummary` — a role and a prompt, never an id. So the step can prove THAT a
+ * subagent was spawned; it can never say WHICH conversation is that subagent. Any
+ * join from step to child would be positional, and a positional join is a guess.
+ * The settlement is used because it is the only proof.
+ *
+ * Nor does the SCHEMA help: `conversation_summaries.parent_conversation_id` and
+ * `.nesting_depth` exist, are empty/zero on every row, and neither parent nor
+ * child appears in that table AT ALL — the summaries store has not been written
+ * since Aug 15 (see `supplementaryRows`). A lineage built on those columns would
+ * have found nothing here and looked correct doing it.
+ *
+ * Bounded twice over: the caller passes the conversations to look at, and
+ * {@link AGY_LINEAGE_MAX_FILES} caps how many settlement files the whole sweep
+ * may open regardless of how many that is.
+ */
+export function scanAgySubagentLinks(
+  roots: AgyRoots,
+  parentIds: readonly string[],
+  query: {
+    onWork?: (work: { kind: 'decode-file'; source: string }) => void;
+    trace?: AgyTraceSink;
+    budget?: number;
+  } = {},
+): Map<string, string> {
+  const links = new Map<string, string>();
+  let budget = query.budget ?? AGY_LINEAGE_MAX_FILES;
+  for (const parentId of parentIds) {
+    if (budget <= 0) {
+      query.trace?.({ op: 'lineage-budget-exhausted', detail: `stopped before ${parentId}` });
+      break;
+    }
+    for (const file of listAgySettlementFiles(roots, parentId, query.trace)) {
+      if (budget <= 0) break;
+      budget -= 1;
+      query.onWork?.({ kind: 'decode-file', source: file });
+      const read = readAgyTextFile(roots.appData, file, AGY_SMALL_JSON_MAX_BYTES, query.trace);
+      if (read === undefined || read.truncated) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(read.text);
+      } catch {
+        continue;
+      }
+      const sender = (parsed as { sender?: unknown } | undefined)?.sender;
+      // A BARE conversation id, and nothing else. `<id>/task-N` is a background
+      // task, `system` is a host notice, and an absent sender is neither — three
+      // of the six non-task senders on this host. Treating any of them as a child
+      // would hang a roster row off a session that does not exist.
+      if (typeof sender !== 'string' || !isAgyConversationId(sender.trim())) continue;
+      const childId = sender.trim();
+      if (childId === parentId) continue;
+      const held = links.get(childId);
+      if (held && held !== parentId) {
+        query.trace?.({ op: 'lineage-conflict', detail: `${childId}: keeping parent ${held}, ignoring ${parentId}` });
+        continue;
+      }
+      links.set(childId, parentId);
+    }
+  }
+  return links;
+}
+
+// ── The model picker (P2a) ───────────────────────────────────────────────────
+
+/**
+ * The host's effort vocabulary, in the host's own order.
+ *
+ * MEASURED 2026-08-25 from the 1.1.20 binary's own flag help: "Reasoning effort
+ * for the current CLI session (low|medium|high)". Not three values chosen here.
+ */
+export const AGY_REASONING_EFFORTS = ['low', 'medium', 'high'] as const;
+export type AgyReasoningEffort = (typeof AGY_REASONING_EFFORTS)[number];
+
+/**
+ * `Gemini 3.6 Flash (High)` → base `Gemini 3.6 Flash`, effort `high`.
+ *
+ * Parsed from the host's own displayName parenthetical and NEVER from the id,
+ * because the catalog disagrees with itself on exactly that point: id
+ * `gemini-3.5-flash-low` publishes displayName "Gemini 3.5 Flash (Medium)", and
+ * `gemini-3.5-flash-extra-low` publishes "Gemini 3.5 Flash (Low)" (MEASURED
+ * 2026-08-25). An id-derived effort would be wrong on two of 25 rows. The
+ * displayName is the host's published fact; the id is an opaque handle.
+ *
+ * `(Thinking)` deliberately does not match — it is not an effort level, and
+ * "Claude Sonnet 4.6 (Thinking)" is one whole model name.
+ */
+const AGY_EFFORT_SUFFIX = /^(.*?)\s*\((Low|Medium|High)\)$/;
+
+export interface AgyModelVariant {
+  baseLabel: string;
+  effort: AgyReasoningEffort;
+}
+
+export function parseAgyModelVariant(displayName: string): AgyModelVariant | undefined {
+  const match = AGY_EFFORT_SUFFIX.exec(displayName.trim());
+  if (!match) return undefined;
+  const baseLabel = match[1]!.trim();
+  if (!baseLabel) return undefined;
+  return { baseLabel, effort: match[2]!.toLowerCase() as AgyReasoningEffort };
+}
+
+/** A base model and the concrete catalog ids that implement each of its efforts. */
+export interface AgyModelFamily {
+  baseLabel: string;
+  /** effort → the catalog id that IS that effort variant. */
+  byEffort: Map<AgyReasoningEffort, string>;
+}
+
+/**
+ * Group the catalog the way the host's own picker groups it.
+ *
+ * The 1.1.20 changelog (read out of the binary, not off a website) says the
+ * `/model` picker was "redesigned … to group models by their base model and
+ * choose reasoning effort from a timeline gauge". This is that grouping, rebuilt
+ * from the same data the picker reads.
+ *
+ * A base label may be claimed twice for one effort — `gemini-3.1-pro-high` and
+ * `gemini-pro-agent` both publish "Gemini 3.1 Pro (High)" (MEASURED). FIRST WINS
+ * and the collision is traced: the alternative is picking arbitrarily between two
+ * ids at launch time, which is the same mistake {@link resolveAgyModel} refuses
+ * to make for the settings label.
+ */
+export function groupAgyModelFamilies(
+  catalog: AgyModelCatalog,
+  trace?: AgyTraceSink,
+): Map<string, AgyModelFamily> {
+  const families = new Map<string, AgyModelFamily>();
+  for (const entry of catalog.byId.values()) {
+    const variant = parseAgyModelVariant(entry.displayName);
+    if (!variant) continue;
+    let family = families.get(variant.baseLabel);
+    if (!family) {
+      family = { baseLabel: variant.baseLabel, byEffort: new Map() };
+      families.set(variant.baseLabel, family);
+    }
+    const held = family.byEffort.get(variant.effort);
+    if (held) {
+      trace?.({
+        op: 'model-variant-collision',
+        detail: `${variant.baseLabel} ${variant.effort}: keeping ${held}, ignoring ${entry.id}`,
+      });
+      continue;
+    }
+    family.byEffort.set(variant.effort, entry.id);
+  }
+  return families;
+}
+
+/**
+ * The model picker's rows.
+ *
+ * ONE ROW PER LAUNCHABLE THING, and every `modelID` is an id the catalog
+ * actually publishes — never a base id synthesized by stripping a suffix. That
+ * restraint is not stylistic: no base id exists in the catalog at all
+ * (`gemini-3.6-flash-high`/`-medium`/`-low` are there; `gemini-3.6-flash` is
+ * not, MEASURED 2026-08-25), so a stripped id would name a model the host
+ * rejects with its own "invalid model selection" error.
+ *
+ * A base model with TWO OR MORE measured effort variants collapses into a single
+ * row carrying `reasoningEfforts`; the adapter re-expands (row, effort) back to
+ * the sibling id at launch — see {@link resolveAgyLaunchModel}. A base with ONE
+ * variant stays a plain row, because a picker offering a choice of one is a
+ * control that does nothing.
+ *
+ * `--effort` IS A REAL FLAG (MEASURED: "Added an `--effort` flag to select a
+ * model's reasoning-effort variant when launching the CLI") and is deliberately
+ * NEVER PASSED. The same binary carries "--model %s conflicts with --effort=%s"
+ * and "--effort is not supported for model %q", and every id in this catalog is
+ * already a concrete effort variant — so naming the sibling id is the launch that
+ * cannot be refused, while `--model <variant> --effort <same>` is the launch that
+ * can. The effort still reaches the user as a picker; only the wire differs.
+ *
+ * A collision LOSER is not lost either: it never joins a family, so it falls
+ * through to the flat branch and appears under its own full label with its own id
+ * in `description`. 25 ids in, 20 rows out, every id still launchable.
+ *
+ * Ambiguous labels STAY LISTED. Four ids publish "Gemini 3.1 Flash Lite"
+ * (MEASURED) and each is separately launchable, so all four appear, each carrying
+ * its own id in `description` — the only thing that tells them apart, and the
+ * host's own string rather than a name invented here. What never happens is the
+ * reverse join: a label is never resolved back to "the" id.
+ */
+export function agyModelOptions(
+  catalog: AgyModelCatalog,
+  options: { settingsLabel?: string; trace?: AgyTraceSink } = {},
+): ModelOption[] {
+  const families = groupAgyModelFamilies(catalog, options.trace);
+  const grouped = new Set<string>();
+  for (const family of families.values()) {
+    if (family.byEffort.size < 2) continue;
+    for (const id of family.byEffort.values()) grouped.add(id);
+  }
+  // The host's globally-selected label, split the same way, so a family whose
+  // effort the user has actually chosen can preselect it. A settings label that
+  // names no family simply yields no default — never a guessed one.
+  const selected = options.settingsLabel ? parseAgyModelVariant(options.settingsLabel) : undefined;
+
+  const out: ModelOption[] = [];
+  const emittedFamilies = new Set<string>();
+  for (const entry of catalog.byId.values()) {
+    if (!grouped.has(entry.id)) {
+      const ambiguous = (catalog.byLabel.get(entry.displayName)?.length ?? 0) > 1;
+      out.push({
+        providerID: AGY_PROVIDER_ID,
+        modelID: entry.id,
+        label: entry.displayName,
+        ...(ambiguous ? { description: entry.id } : {}),
+      });
+      continue;
+    }
+    const variant = parseAgyModelVariant(entry.displayName)!;
+    if (emittedFamilies.has(variant.baseLabel)) continue;
+    emittedFamilies.add(variant.baseLabel);
+    const family = families.get(variant.baseLabel)!;
+    // Ordered by the host's own low→medium→high rather than by catalog order, so
+    // the client's gauge runs the direction its labels imply.
+    const efforts = AGY_REASONING_EFFORTS.filter((effort) => family.byEffort.has(effort));
+    const preselected = selected?.baseLabel === variant.baseLabel ? selected.effort : undefined;
+    const defaultEffort = preselected && family.byEffort.has(preselected) ? preselected : undefined;
+    out.push({
+      providerID: AGY_PROVIDER_ID,
+      // The row's own id is a REAL variant id, so a client that ignores
+      // `reasoningEfforts` entirely still sends something launchable.
+      modelID: family.byEffort.get(defaultEffort ?? efforts[0]!)!,
+      label: variant.baseLabel,
+      reasoningEfforts: efforts.map((effort) => ({ effort, label: effort })),
+      ...(defaultEffort ? { defaultReasoningEffort: defaultEffort } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Turn a client's `{modelID, reasoningEffort}` back into ONE launchable id.
+ *
+ * The picker collapsed a family's effort variants into one row; this re-expands
+ * it. An effort that names no sibling — a stale client, a catalog that changed
+ * underneath — falls back to the id the client sent, which is itself a real
+ * catalog id, rather than failing the send or passing an `--effort` the host may
+ * reject. Degrading, and saying so.
+ */
+export function resolveAgyLaunchModel(
+  catalog: AgyModelCatalog,
+  selection: { modelID?: string; reasoningEffort?: string } | undefined,
+  trace?: AgyTraceSink,
+): string | undefined {
+  const modelID = selection?.modelID;
+  if (!modelID) return undefined;
+  const effort = selection?.reasoningEffort;
+  if (!effort) return modelID;
+  const entry = catalog.byId.get(modelID);
+  const variant = entry ? parseAgyModelVariant(entry.displayName) : undefined;
+  if (!variant) {
+    trace?.({ op: 'model-effort-unmapped', detail: `${modelID} is not an effort variant; ignoring effort=${effort}` });
+    return modelID;
+  }
+  const sibling = groupAgyModelFamilies(catalog).get(variant.baseLabel)?.byEffort.get(effort as AgyReasoningEffort);
+  if (!sibling) {
+    trace?.({ op: 'model-effort-unmapped', detail: `${variant.baseLabel} has no ${effort} variant; keeping ${modelID}` });
+    return modelID;
+  }
+  return sibling;
+}
+
+// ── The mode picker (P2b) ────────────────────────────────────────────────────
+
+/**
+ * The `--mode` vocabulary, verbatim from the 1.1.20 binary (MEASURED 2026-08-25).
+ *
+ * The flag's own help string enumerates exactly three: `default` ("standard
+ * behavior"), `accept-edits` ("auto-approve file edits, prompt for commands")
+ * and `plan` ("research and plan without making changes"). The TUI's hint agrees
+ * — "Press shift+tab to cycle modes (default, accept-edits, plan)."
+ *
+ * `full-access` IS NOT ONE OF THEM: that string does not occur anywhere in the
+ * binary. Neither are `always-proceed`, `request-review` or `strict`, which DO
+ * occur but on a DIFFERENT AXIS — they are the auto-execution/approval policy
+ * ("In request-review mode, file edits are shown for approval before being
+ * applied"), which is precisely why a child launched with `--mode=plan` reports
+ * `permission_mode: "request-review"` in its `init` event. That measurement
+ * already forced `handleInit` to ignore the reported value; this is the reason it
+ * had to. Two axes, and agy exposes a flag for only one of them.
+ *
+ * The descriptions are the host's own words, one clause each — no copy invented
+ * here (reflection §3).
+ */
+export const AGY_MODES: ModeOption[] = [
+  {
+    value: 'default',
+    label: 'Default',
+    description: 'Standard behavior.',
+    category: 'ask-permission',
+  },
+  {
+    value: 'accept-edits',
+    label: 'Accept edits',
+    description: 'Auto-approve file edits, prompt for commands.',
+    category: 'approve-for-me',
+  },
+  {
+    value: 'plan',
+    label: 'Plan',
+    // Not a permission posture at all, so it is not filed as one: it changes what
+    // the agent DOES, not what it may do without asking.
+    description: 'Research and plan without making changes.',
+    category: 'custom',
+  },
+];
+
+/** Is this a `--mode` value the host actually accepts? Guards the launch argv. */
+export function isAgyMode(value: string | undefined): boolean {
+  return value !== undefined && AGY_MODES.some((mode) => mode.value === value);
+}
+
 // ── Small shared readers ─────────────────────────────────────────────────────
 
 /** What a bounded read returned. `truncated` is load-bearing: the caller must say so. */
@@ -586,8 +959,186 @@ export function listAgySettlementFiles(
   const dir = agySettlementDir(roots, conversationId);
   const listed = listContainedDirectory(roots.appData, dir, AGY_SETTLEMENT_MAX_FILES, trace);
   if (isAgyReadRefusal(listed)) return [];
+  // `read.json` and `cursor.json` are the inbox's own bookkeeping — a delivered-set
+  // and a `{last_read_unix_nano}` watermark. Both parse as JSON and neither has a
+  // `sender`, so leaving them in made every sweep report a `settlement-unparseable`
+  // for a file that is not a settlement and never was (MEASURED on the live store).
+  // A trace that cries wolf on healthy state is worse than no trace.
   return listed.names
-    .filter((name) => name.endsWith('.json') && name !== 'read.json')
+    .filter((name) => name.endsWith('.json') && name !== 'read.json' && name !== 'cursor.json')
     .sort()
     .map((name) => join(dir, name));
+}
+
+// ── The brain scan: conversations the summaries store forgot ─────────────────
+
+/**
+ * Bytes of a transcript read to find its first user prompt. ~10× the largest
+ * observed first line; a title is not worth a whole-file read on every row.
+ */
+export const AGY_BRAIN_HEAD_BYTES = 64 * 1024;
+
+/** Ceiling on brain dirs examined in one sweep. ~9× the 56 dirs on the measured host. */
+export const AGY_BRAIN_SCAN_MAX_DIRS = 512;
+
+/** `cache/last_conversations.json` is a flat `cwd -> conversationId` map (MEASURED: 15 entries). */
+export function readAgyLastConversations(
+  roots: AgyRoots,
+  trace?: AgyTraceSink,
+): Map<string, string> {
+  const parsed = readJsonFile(
+    roots.appData,
+    join(roots.appData, 'cache', 'last_conversations.json'),
+    AGY_SMALL_JSON_MAX_BYTES,
+    trace,
+    'last-conversations',
+  );
+  const out = new Map<string, string>();
+  if (!parsed || typeof parsed !== 'object') return out;
+  // Inverted on the way out: callers hold a conversation id and want its cwd.
+  for (const [cwd, id] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof id === 'string' && isAgyConversationId(id) && isAbsolute(cwd)) out.set(id, cwd);
+  }
+  return out;
+}
+
+/** A conversation found on disk rather than in the summaries table. */
+export interface AgyBrainRow {
+  conversationId: string;
+  /** Transcript mtime. The only timestamp a brain dir offers. */
+  updatedAt: number;
+  /** Raw first `USER_INPUT` content, wrappers still on. The caller strips them. */
+  firstUserContent?: string;
+  /** From `cache/last_conversations.json`, when that map still names this conversation. */
+  cwd?: string;
+}
+
+export interface AgyBrainScanQuery {
+  updatedAfter?: number;
+  limit?: number;
+  /** Ids already covered by the summaries table; skipped without any io. */
+  exclude?: ReadonlySet<string>;
+  /**
+   * Look at ONLY these ids. What `attach()` uses to resolve one conversation the
+   * summaries table does not know: the same scan, the same title derivation and
+   * the same timestamp as the roster row the user clicked, rather than a second
+   * path that could describe the session differently.
+   */
+  only?: readonly string[];
+  /**
+   * Skip the per-row HEAD read that derives a title. For callers that need ids
+   * and mtimes only — the lineage-parent universe — where paying a capped read
+   * per row would buy nothing.
+   */
+  skipHeadRead?: boolean;
+  /**
+   * Reported per transcript actually opened, using the protocol's own
+   * `decode-file` kind — which is precisely what a head read is. The directory
+   * listing itself is not reported: it is one bounded `opendir`, not a decode.
+   */
+  onWork?: (work: { kind: 'decode-file'; source: string }) => void;
+  trace?: AgyTraceSink;
+}
+
+/**
+ * Discover conversations from `brain/` when the summaries table cannot.
+ *
+ * WHY THIS EXISTS — measured on the developer host, 2026-08-25:
+ * `conversation_summaries.db` has not been written since Aug 15. Six
+ * conversations created that day (print-mode, stream-json, a clean interactive
+ * session, and a fresh TUI boot) added ZERO rows to it, and
+ * `cache/conversation_metadata.json` is equally frozen. Meanwhile `brain/` holds
+ * 56 conversation directories against the table's 27 CLI rows. Discovery that
+ * trusts the table alone therefore cannot see anything the user has done in the
+ * last ten days — a roster that is silently, permanently out of date.
+ *
+ * WHAT IT WILL NOT DO: invent rows. Of the 29 brain dirs absent from the table,
+ * only 12 hold a transcript; the other 19 contain nothing but an empty
+ * `.user_uploaded/` and `scratch/`. Those are conversations that never ran, and a
+ * row for one would open to a permanent "no transcript" notice. A directory
+ * earns a row by having something to replay, and nothing else does.
+ *
+ * IDE ROWS STAY OUT, and this is verified rather than assumed: the IDE keeps its
+ * own tree at `~/.gemini/antigravity/` with its own `brain/` (5 dirs), and NO
+ * summaries row marked `app_data_dir = 'antigravity'` has a directory under the
+ * CLI's `brain/`. The two trees do not cross-contaminate, so everything scanned
+ * here is CLI-owned by construction.
+ *
+ * Bounded three ways: the directory listing is entry-capped, each transcript is
+ * touched with one `stat` plus a capped HEAD read for its title, and the cutoff
+ * is applied against the mtime BEFORE that read so a cold conversation costs a
+ * stat and nothing more.
+ */
+export function scanAgyBrainDirs(roots: AgyRoots, query: AgyBrainScanQuery = {}): AgyBrainRow[] {
+  const brainRoot = join(roots.appData, 'brain');
+  const listed = listContainedDirectory(roots.appData, brainRoot, AGY_BRAIN_SCAN_MAX_DIRS, query.trace);
+  if (isAgyReadRefusal(listed)) {
+    query.trace?.({ op: 'brain-scan-unreadable', detail: `${brainRoot}: ${listed}` });
+    return [];
+  }
+  if (listed.truncated) {
+    query.trace?.({
+      op: 'brain-scan-truncated',
+      detail: `${brainRoot} holds more than ${AGY_BRAIN_SCAN_MAX_DIRS} directories`,
+    });
+  }
+
+  const rows: AgyBrainRow[] = [];
+  for (const name of listed.names) {
+    // A non-uuid directory cannot be a conversation, and costs no io to reject.
+    if (!isAgyConversationId(name)) continue;
+    if (query.exclude?.has(name)) continue;
+    if (query.only && !query.only.includes(name)) continue;
+
+    const transcript = join(brainRoot, name, '.system_generated', 'logs', 'transcript.jsonl');
+    let updatedAt: number;
+    try {
+      const stat = statSync(transcript);
+      if (!stat.isFile()) continue;
+      updatedAt = stat.mtimeMs;
+    } catch {
+      // No transcript: a directory that never became a conversation. 19 of 56 on
+      // the measured host. Not a row.
+      continue;
+    }
+    if (query.updatedAfter !== undefined && updatedAt < query.updatedAfter) continue;
+    rows.push({ conversationId: name, updatedAt });
+  }
+
+  // Newest first, then bound, so a budget keeps the MOST RELEVANT rows rather
+  // than whichever ones the filesystem happened to name first.
+  rows.sort((a, b) => b.updatedAt - a.updatedAt);
+  const capped = query.limit !== undefined ? rows.slice(0, Math.max(0, Math.trunc(query.limit))) : rows;
+
+  // The head read happens only for rows that survived the cutoff and the budget.
+  if (!query.skipHeadRead) {
+    for (const row of capped) {
+      const path = join(brainRoot, row.conversationId, '.system_generated', 'logs', 'transcript.jsonl');
+      query.onWork?.({ kind: 'decode-file', source: path });
+      const head = readContainedText(roots.appData, path, AGY_BRAIN_HEAD_BYTES, query.trace);
+      if (isAgyReadRefusal(head)) continue;
+      const first = firstUserContent(head.text);
+      if (first !== undefined) row.firstUserContent = first;
+    }
+  }
+  return capped;
+}
+
+/** The `content` of the first `USER_EXPLICIT`/`USER_INPUT` line in a transcript head. */
+function firstUserContent(headText: string): string | undefined {
+  for (const line of headText.split('\n')) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A truncated final line is expected: this is a capped HEAD read.
+      continue;
+    }
+    const step = parsed as Record<string, unknown>;
+    if (step.source === 'USER_EXPLICIT' && step.type === 'USER_INPUT' && typeof step.content === 'string') {
+      return step.content;
+    }
+  }
+  return undefined;
 }

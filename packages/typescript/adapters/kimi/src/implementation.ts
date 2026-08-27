@@ -129,8 +129,10 @@ import { kimiSessionWireRoot } from './usage.ts';
 import {
   kimiSessionNativeId,
   kimiSubagentIdInfo,
+  kimiModelIdentityFromAlias,
   kimiSubagentRow,
   listKimiSubagents,
+  readKimiParentModelAlias,
   locateKimiSessionDirectory,
   readKimiAgentsMap,
   readKimiChildJournalHead,
@@ -140,6 +142,7 @@ import {
   kimiSubagentTitle,
   KIMI_SUBAGENT_NATIVE_PREFIX,
   KIMI_SUBAGENT_OWNED_REASON,
+  type KimiSubagentChild,
 } from './subagents.ts';
 import { KimiSubagentConnection } from './subagent-history.ts';
 
@@ -816,7 +819,7 @@ export class KimiAdapter implements AgentBackend {
       if (!mapped.hasMore || !mapped.nextPageToken) break;
       pageToken = mapped.nextPageToken;
     }
-    return this.withSubagentRows(sessions, options);
+    return this.withSubagentRows(sessions, http, options);
   }
 
   /**
@@ -842,7 +845,8 @@ export class KimiAdapter implements AgentBackend {
    * IDENTITY. The parent's `nativeId` is set HERE and only here, and only for a
    * parent with at least one child — reflection §2: a lineage id invented
    * store-wide would attach an identity to every Kimi session in the roster for
-   * the benefit of the handful that need one. A childless parent keeps exactly
+   * the benefit of the handful that need one. Beyond `nativeId` and the model
+   * identity read from its own journal head, a childless parent keeps exactly
    * the row {@link mapKimiSession} built.
    *
    * TOTAL BY CONSTRUCTION. Every failure inside the walk (no journal tree, an
@@ -850,34 +854,103 @@ export class KimiAdapter implements AgentBackend {
    * rather than an exception: discovery must not fail because another product's
    * directory is missing.
    */
-  private withSubagentRows(parents: SessionInfo[], options?: SessionDiscoveryOptions): SessionInfo[] {
-    let budget = DISCOVERY_MAX_ROWS - parents.length;
-    if (budget <= 0) return parents;
+  /** Positive `agents/main` head answers, per session id. See withSubagentRows. */
+  private readonly parentModelAliasCache = new Map<string, string>();
+
+  private async withSubagentRows(
+    parents: SessionInfo[],
+    http: KimiReadOnlyHttp,
+    options?: SessionDiscoveryOptions,
+  ): Promise<SessionInfo[]> {
     const wireRoot = kimiSessionWireRoot(this.home());
     const now = Date.now();
-    const children: SessionInfo[] = [];
+
+    // The PARENT's own launch model, from its `agents/main` journal head.
+    // `/api/v2/sessions` carries no model field, so before this an unopened
+    // parent showed no model on the roster while its own children did (the
+    // 2026-08-27 physical pass). Positive answers are cached per session id —
+    // the head's `config.update` is launch evidence and does not change — so
+    // steady-state sweeps pay a head read only for sessions never answered.
+    const aliasByParent = new Map<string, string>();
     for (const parent of parents) {
-      if (budget <= 0) break;
-      let scan;
+      const held = this.parentModelAliasCache.get(parent.id);
+      if (held !== undefined) {
+        aliasByParent.set(parent.id, held);
+        continue;
+      }
+      let alias: string | undefined;
       try {
-        scan = listKimiSubagents({
-          wireRoot,
-          parentSessionId: parent.id,
-          ...(options?.updatedAfter !== undefined ? { updatedAfter: options.updatedAfter } : {}),
-          yieldBudget: budget,
-        });
+        alias = readKimiParentModelAlias({ wireRoot, parentSessionId: parent.id });
       } catch {
         continue;
       }
-      if (scan.children.length === 0) continue;
-      // The one parent-side emission this feature adds.
-      parent.nativeId = kimiSessionNativeId(parent.id);
-      for (const child of scan.children) {
-        children.push(kimiSubagentRow(child, parent, now));
-        budget -= 1;
+      if (alias === undefined) continue;
+      // Bounded like every other held map: the roster is capped per sweep, but
+      // ids accumulate across a long broker life. A rare wholesale reset costs
+      // one extra head read per live session on the next sweep.
+      if (this.parentModelAliasCache.size >= 2048) this.parentModelAliasCache.clear();
+      this.parentModelAliasCache.set(parent.id, alias);
+      aliasByParent.set(parent.id, alias);
+    }
+
+    let budget = DISCOVERY_MAX_ROWS - parents.length;
+    const found: Array<{ child: KimiSubagentChild; parent: SessionInfo }> = [];
+    if (budget > 0) {
+      for (const parent of parents) {
+        if (budget <= 0) break;
+        let scan;
+        try {
+          scan = listKimiSubagents({
+            wireRoot,
+            parentSessionId: parent.id,
+            ...(options?.updatedAfter !== undefined ? { updatedAfter: options.updatedAfter } : {}),
+            yieldBudget: budget,
+          });
+        } catch {
+          continue;
+        }
+        if (scan.children.length === 0) continue;
+        // The one parent-side emission the SUBAGENT feature adds.
+        parent.nativeId = kimiSessionNativeId(parent.id);
+        for (const child of scan.children) {
+          found.push({ child, parent });
+          budget -= 1;
+        }
       }
     }
-    return children.length === 0 ? parents : [...parents, ...children];
+
+    // ONE catalog read per sweep, and only when some row recorded a model
+    // alias: the join is what turns `kimi-code/k3-256k` into the host's own
+    // `display_name` on the roster — the client (by policy) never renders a
+    // bare provider-qualified alias inline. A failed read keeps alias-only
+    // rows rather than failing discovery: total by construction, like the
+    // rest of this walk.
+    const needCatalog = aliasByParent.size > 0 || found.some(({ child }) => child.modelAlias !== undefined);
+    const catalog = needCatalog ? await this.readCatalogFrom(http).catch(() => undefined) : undefined;
+
+    for (const parent of parents) {
+      const alias = aliasByParent.get(parent.id);
+      if (alias === undefined) continue;
+      // The raw alias is tooltip material; the label is what renders. Neither
+      // overwrites what a later status overlay may already have put there.
+      parent.model ??= alias;
+      if (parent.currentModel === undefined) {
+        const identity = kimiModelIdentityFromAlias(alias, catalog);
+        if (identity) parent.currentModel = identity;
+      }
+    }
+
+    if (found.length === 0) return parents;
+    const childRows = found.map(({ child, parent }) => kimiSubagentRow(child, parent, now, catalog));
+    // The wire's `activity.status` tracks the MAIN agent only, so a session
+    // whose detached subagent is still running reports idle (measured
+    // 2026-08-27: server idle, child appending). The roster's status is
+    // session-scoped: a running child makes the session working. Only an idle
+    // parent is bumped — `needs-input` outranks a background child.
+    for (const [index, { parent }] of found.entries()) {
+      if (parent.status === 'idle' && childRows[index]!.status === 'working') parent.status = 'working';
+    }
+    return [...parents, ...childRows];
   }
 
   /**
@@ -1100,7 +1173,7 @@ export class KimiAdapter implements AgentBackend {
       origin: 'subagent',
       parentThreadId: kimiSessionNativeId(handle.parentSessionId),
       ...(head.cwd !== undefined ? { cwd: head.cwd } : {}),
-      status: kimiSubagentStatus(undefined, { updatedAt: head.mtimeMs, ...(task ? { task } : {}) }, Date.now()),
+      status: kimiSubagentStatus({ updatedAt: head.mtimeMs, tailEvidence: head.tailEvidence, ...(task ? { task } : {}) }, Date.now()),
       launchSurface: 'unknown',
       attachMode: 'observe',
       ...(head.modelAlias !== undefined ? { model: head.modelAlias } : {}),

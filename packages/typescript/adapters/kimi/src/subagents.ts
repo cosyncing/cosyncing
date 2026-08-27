@@ -73,7 +73,7 @@
 import { closeSync, fstatSync, readSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import type { SessionControlState, SessionInfo } from '@cosyncing/adapter-api';
+import type { ModelOption, SessionControlState, SessionInfo } from '@cosyncing/adapter-api';
 
 import { boundedDirectoryListing, openRegularFileSync, type KimiRegistryListing } from './server.ts';
 import { isSafePathComponent, isWithinRoot, kimiSessionWireRoot } from './usage.ts';
@@ -116,6 +116,46 @@ export const KIMI_SUBAGENT_STATE_MAX_BYTES = 256 * 1024;
  * only because `config.update` embeds the whole system prompt.
  */
 export const KIMI_SUBAGENT_HEAD_BYTES = 64 * 1024;
+
+/**
+ * Bytes of the journal TAIL one settlement classification may read.
+ *
+ * MEASURED 2026-08-27 on the live 0.38.0 host (protocol 1.5): a 64 KiB tail
+ * window held 50–104 complete lines on every child journal (largest single
+ * line 26 KiB), and each of the 3 finished children carried `turn.ended` +
+ * `token_counting.turn_recorded` in its LAST lines — so the settle marker of a
+ * finished journal is always inside this window, and a running journal needs
+ * nothing found at all.
+ */
+export const KIMI_SUBAGENT_TAIL_BYTES = 64 * 1024;
+
+/**
+ * Line types that record a turn settling. `turn.ended` and `turn.cancel` are
+ * the host's own lifecycle statements; `token_counting.turn_recorded` is the
+ * accounting line written with them (3/3 finished children, 2026-08-27).
+ */
+const KIMI_TURN_SETTLE_TYPES = new Set(['turn.ended', 'turn.cancel', 'token_counting.turn_recorded']);
+
+/**
+ * Line types that record a turn OPEN: a prompt began it, or a model request is
+ * awaiting its response. Deliberately narrow — `context.append_loop_event` is
+ * ambient on any active journal and would widen the claim to journals whose
+ * protocol never writes a settle.
+ */
+const KIMI_TURN_OPEN_TYPES = new Set(['turn.prompt', 'llm.request']);
+
+/**
+ * How stale an OPEN-turn journal may go before the row stops claiming working.
+ *
+ * Wider than {@link KIMI_SUBAGENT_WORKING_FRESH_MS} on measurement: the live
+ * running child (2026-08-27) sat 108 s past its last write while its
+ * `llm.request` was still generating, and its bash task records were minutes
+ * apart — a journal is appended in bursts, and the quiet stretch between them
+ * is the model thinking, not the child finishing. Ten minutes is the crash
+ * decay: a child that dies without its settle line stops claiming working
+ * within this window, on its own.
+ */
+export const KIMI_SUBAGENT_OPEN_TURN_FRESH_MS = 10 * 60_000;
 
 /**
  * Longest single line assembled from a head read. A line past the ceiling is
@@ -289,6 +329,8 @@ export interface KimiSubagentChild {
   headComplete: boolean;
   /** Over-long lines dropped from the head read. Non-zero means the head was not fully decodable. */
   droppedLines: number;
+  /** The journal's own turn-lifecycle statement — see {@link KimiChildJournalHead.tailEvidence}. */
+  tailEvidence: 'settled' | 'open' | 'none';
 }
 
 /** A `kind: 'agent'` spawn record from `agents/main/tasks/agent-*.json` (§5). */
@@ -365,7 +407,7 @@ function readHead(
   io: KimiSubagentIo,
   path: string,
   maxBytes: number,
-): { text: string; size: number; mtimeMs: number; complete: boolean } | undefined {
+): { text: string; size: number; mtimeMs: number; complete: boolean; tailText?: string } | undefined {
   let fd: number;
   try {
     fd = io.openRead(path);
@@ -384,17 +426,54 @@ function readHead(
       if (n <= 0) break;
       filled += n;
     }
+    // The settlement window, read on the SAME descriptor. Only paid when the
+    // head did not already cover the whole file — a small journal's head IS its
+    // tail, and reading it twice would say nothing new.
+    let tailText: string | undefined;
+    if (size > want) {
+      const tailWant = Math.min(size, KIMI_SUBAGENT_TAIL_BYTES);
+      const tail = Buffer.alloc(tailWant);
+      let tailFilled = 0;
+      while (tailFilled < tailWant) {
+        const n = io.readAt(fd, tail, tailFilled, tailWant - tailFilled, size - tailWant + tailFilled);
+        if (n <= 0) break;
+        tailFilled += n;
+      }
+      tailText = tail.subarray(0, tailFilled).toString('utf8');
+    }
     return {
       text: buffer.subarray(0, filled).toString('utf8'),
       size,
       mtimeMs,
       complete: filled >= size,
+      ...(tailText !== undefined ? { tailText } : {}),
     };
   } catch {
     return undefined;
   } finally {
     io.close(fd);
   }
+}
+
+/**
+ * What a journal's own lines say about its last turn.
+ *
+ * Walks whole lines in order and keeps the LAST lifecycle statement: a settle
+ * line after the last open marker means the turn ended; an open marker after
+ * the last settle means one is in flight. Activity lines, unparseable
+ * fragments, and an empty window say nothing.
+ */
+function classifyTailEvidence(lines: readonly string[]): 'settled' | 'open' | 'none' {
+  let evidence: 'settled' | 'open' | 'none' = 'none';
+  for (const line of lines) {
+    const record = parseOrNull(line);
+    if (!record) continue;
+    const type = str(record.type);
+    if (type === undefined) continue;
+    if (KIMI_TURN_SETTLE_TYPES.has(type)) evidence = 'settled';
+    else if (KIMI_TURN_OPEN_TYPES.has(type)) evidence = 'open';
+  }
+  return evidence;
 }
 
 /**
@@ -607,6 +686,15 @@ export interface KimiChildJournalHead {
   bytesRead: number;
   complete: boolean;
   droppedLines: number;
+  /**
+   * What the journal's own lines say about its last turn. `settled`: a settle
+   * line with nothing reopening it after — the child finished. `open`: a
+   * `turn.prompt` or `llm.request` stands unanswered — a turn is in flight.
+   * `none`: no lifecycle line in the window at all (a protocol-1.4 journal
+   * that never writes them, or a window swallowed by one giant line) — absence
+   * of evidence, decided by freshness alone.
+   */
+  tailEvidence: 'settled' | 'open' | 'none';
 }
 
 /**
@@ -634,11 +722,20 @@ export function readKimiChildJournalHead(
   const head = readHead(io, wirePath, maxBytes);
   if (!head) return undefined;
   const { lines, dropped } = completeLines(head.text, head.complete);
+  // Lifecycle evidence is read from the TAIL window when the head did not
+  // reach EOF — the settle line of a finished journal is in its last lines
+  // (measured) — and from the head's own lines when it did. A tail read starts
+  // mid-line by construction, so its first fragment is dropped the same way
+  // completeLines drops the head's last one.
+  const tailEvidence = head.complete
+    ? classifyTailEvidence(lines)
+    : classifyTailEvidence(head.tailText !== undefined ? head.tailText.split('\n').slice(1) : []);
   const out: KimiChildJournalHead & { mtimeMs: number } = {
     bytesRead: Buffer.byteLength(head.text, 'utf8'),
     complete: head.complete,
     droppedLines: dropped,
     mtimeMs: head.mtimeMs,
+    tailEvidence,
   };
   for (const line of lines) {
     const record = parseOrNull(line);
@@ -694,30 +791,40 @@ export function kimiSubagentTitle(agentDir: string, task?: KimiSubagentTask, fir
 }
 
 /**
- * Status for a child row — round 1's claude rule, unchanged, and for the reason
- * §8 makes unavoidable.
+ * Status for a child row.
  *
- * A subagent has no status route of its own (the host reports the parent), and
- * on `protocol_version` 1.4 its journal carries NO completion evidence at all
- * (0 of 23 measured 1.4 children had a single `turn.ended` line). So `working`
- * requires BOTH evidences at once: the parent has a turn in flight AND this
- * child's own journal is still fresh. Anything else is idle. A fabricated
- * `working` would outlive the parent's turn and never clear, because nothing
- * ever "finishes" a child row.
+ * Round 1 used the claude conjunction — parent working AND journal fresh —
+ * because the 1.4 measurement found no completion evidence in any child
+ * journal. The 2026-08-27 physical pass broke that rule on the live 0.38.0
+ * host: a DETACHED protocol-1.5 child kept working after the parent's turn
+ * settled (server `activity: idle`, main journal quiet 17 minutes, the child
+ * appending `llm.request` lines while this was measured), and that session
+ * carried no `agents/main/tasks` spawn records at all — so both of round 1's
+ * evidences said idle about a child that was demonstrably running.
  *
- * A spawn record that says the task ended settles it outright — that is a
- * statement, not a proxy — but it exists for only 7/53 children (§5.3), so it
- * can strengthen the answer and never weaken it.
+ * Protocol 1.5 journals record their own lifecycle (`turn.ended` /
+ * `turn.cancel` / `token_counting.turn_recorded`; 3/3 finished children carried
+ * one in their last lines), so the child's own record replaces the parent
+ * proxy:
+ *
+ *  1. a spawn record with `endedAt` settles it — a statement, kept from round 1;
+ *  2. a tail whose last lifecycle line is a settle settles it — the journal's
+ *     own statement;
+ *  3. a tail whose last lifecycle line leaves a turn OPEN claims working while
+ *     the journal stays within {@link KIMI_SUBAGENT_OPEN_TURN_FRESH_MS} — the
+ *     quiet stretch of a generating model is minutes, not seconds (measured);
+ *  4. a journal with no lifecycle evidence at all falls back to the short
+ *     {@link KIMI_SUBAGENT_WORKING_FRESH_MS} window, so a protocol-1.4 file
+ *     that merely got touched cannot claim working for long.
  */
 export function kimiSubagentStatus(
-  parentStatus: string | undefined,
-  child: Pick<KimiSubagentChild, 'updatedAt' | 'task'>,
+  child: Pick<KimiSubagentChild, 'updatedAt' | 'task' | 'tailEvidence'>,
   now: number,
 ): 'working' | 'idle' {
   if (child.task?.endedAt !== undefined) return 'idle';
-  return parentStatus === 'working' && now - child.updatedAt <= KIMI_SUBAGENT_WORKING_FRESH_MS
-    ? 'working'
-    : 'idle';
+  if (child.tailEvidence === 'settled') return 'idle';
+  const window = child.tailEvidence === 'open' ? KIMI_SUBAGENT_OPEN_TURN_FRESH_MS : KIMI_SUBAGENT_WORKING_FRESH_MS;
+  return now - child.updatedAt <= window ? 'working' : 'idle';
 }
 
 // ── The enumerator ──────────────────────────────────────────────────────────
@@ -832,6 +939,7 @@ export function listKimiSubagents(options: KimiSubagentScanOptions): KimiSubagen
       headBytesRead: head.bytesRead,
       headComplete: head.complete,
       droppedLines: head.droppedLines,
+      tailEvidence: head.tailEvidence,
     });
     budget -= 1;
   }
@@ -904,6 +1012,54 @@ export function kimiSubagentControlState(): SessionControlState {
 }
 
 /**
+ * The roster's model identity for a provider-qualified alias.
+ *
+ * The alias joins `GET /api/v1/models` on `modelID` exactly — the same join
+ * `mapKimiSessionStatus` documents. The join is what puts a model on the
+ * ROSTER: the client refuses (by policy) to render a bare provider-qualified
+ * alias inline, so a row without `currentModel.label` shows no model at all —
+ * the raw alias lives only in the tooltip. An alias the catalog does not know,
+ * or no catalog at all, yields nothing rather than inventing a name.
+ */
+export function kimiModelIdentityFromAlias(
+  alias: string,
+  catalog: readonly ModelOption[] | undefined,
+): SessionInfo['currentModel'] | undefined {
+  const entry = catalog?.find((option) => option.modelID === alias);
+  return entry
+    ? { providerID: entry.providerID, modelID: alias, label: entry.label }
+    : undefined;
+}
+
+/**
+ * The PARENT session's own launch model, from its `agents/main/wire.jsonl` head.
+ *
+ * `/api/v2/sessions` — the discovery endpoint — carries no model field at all,
+ * and the only server surface that does (`/api/v1/sessions/{id}/status`) is
+ * per-session and paid only on attach. So an unopened parent showed no model on
+ * the roster (2026-08-27 physical pass) while its children did — the children's
+ * aliases come free from the journal walk. The parent's own journal head
+ * carries the same `config.update` evidence (MEASURED 2026-08-27: 6/6 recent
+ * main journals on the live host yielded `modelAlias` within the head cap), so
+ * the parent pays the same bounded head read, through the same io, under the
+ * same ceilings. A missing tree, map, or journal yields `undefined` — never a
+ * throw, and never a directory guess: `main` is the same literal spelling the
+ * task-record reader already uses.
+ */
+export function readKimiParentModelAlias(options: {
+  wireRoot: string;
+  parentSessionId: string;
+  io?: KimiSubagentIo;
+}): string | undefined {
+  const io = options.io ?? defaultKimiSubagentIo;
+  const located = locateKimiSessionDirectory(options.wireRoot, options.parentSessionId, io);
+  if (located.sessionDir === undefined) return undefined;
+  const wirePath = join(located.sessionDir, 'agents', 'main', 'wire.jsonl');
+  if (!isWithinRoot(resolve(located.sessionDir), resolve(wirePath))) return undefined;
+  return readKimiChildJournalHead(wirePath, io)?.modelAlias;
+}
+
+/**
  * One child slot as a roster row.
  *
  * The lineage pair is the whole point: `parentThreadId` equals the parent's
@@ -916,12 +1072,24 @@ export function kimiSubagentControlState(): SessionControlState {
  * and only 23 of 53 measured children recorded one of their own. `model` is the
  * host's provider-qualified alias verbatim — never a label this adapter
  * invented (reflection §3).
+ *
+ * `catalog` is `GET /api/v1/models` as the SWEEP read it, and the alias joins
+ * it on `modelID` exactly — the same join `mapKimiSessionStatus` documents for
+ * the parent row. The join is what puts a model on the ROSTER: the client
+ * refuses (by policy) to render a bare provider-qualified alias inline, so a
+ * child row without `currentModel.label` shows no model at all — the raw alias
+ * lives only in the tooltip. An alias the catalog does not know, or no catalog
+ * at all, keeps exactly that behaviour rather than inventing a name.
  */
 export function kimiSubagentRow(
   child: KimiSubagentChild,
-  parent: Pick<SessionInfo, 'cwd' | 'status'>,
+  parent: Pick<SessionInfo, 'cwd'>,
   now: number,
+  catalog?: readonly ModelOption[],
 ): SessionInfo {
+  const identity = child.modelAlias !== undefined
+    ? kimiModelIdentityFromAlias(child.modelAlias, catalog)
+    : undefined;
   return {
     id: child.nativeId,
     tool: 'kimi',
@@ -930,10 +1098,11 @@ export function kimiSubagentRow(
     origin: 'subagent',
     parentThreadId: child.parentThreadId,
     ...(child.cwd ?? parent.cwd ? { cwd: child.cwd ?? parent.cwd } : {}),
-    status: kimiSubagentStatus(parent.status, child, now),
+    status: kimiSubagentStatus(child, now),
     launchSurface: 'unknown',
     attachMode: 'observe',
     ...(child.modelAlias !== undefined ? { model: child.modelAlias } : {}),
+    ...(identity ? { currentModel: identity } : {}),
     ...(child.createdAt !== undefined ? { createdAt: child.createdAt } : {}),
     updatedAt: child.updatedAt,
     control: kimiSubagentControlState(),

@@ -21,7 +21,9 @@ import { appendFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import type { AgentMessage } from '@cosyncing/adapter-api';
 import {
+  AGY_MODES,
   AGY_TAIL_READ_MAX_BYTES,
+  AGY_TASK_LOG_MAX_BYTES,
   AGY_TRANSCRIPT_MAX_BYTES,
   AGY_TRUNCATION_NOTE,
   AgyObserveConnection,
@@ -719,6 +721,159 @@ function duplicates(messages: AgentMessage[]): string[] {
     check('the production drain bound is what a default connection uses',
       connection.tailReadMaxBytes === AGY_TAIL_READ_MAX_BYTES,
       `${connection.tailReadMaxBytes} vs ${AGY_TAIL_READ_MAX_BYTES}`);
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── The background-task ledger reaches history (P2c) ───────────────────────
+//
+// The panel is built from two sources that live in different files: the
+// conversation's own `manage_task` calls, and the settlements in its inbox. Only
+// the settlement proves an ending, so the fold has to read the inbox FIRST — and
+// a second `getHistory()` has to produce the same rows, not doubled ones.
+{
+  const tree = buildAgyFixtureTree({ withSettlementTaxonomy: true, withTaskLog: true });
+  try {
+    const connection = new AgyObserveConnection({
+      roots: tree.roots,
+      conversationId: CONVERSATION,
+      info: infoFor(CONVERSATION),
+    });
+    const history = await connection.getHistory();
+    const panels = history.filter((message) => message.type === 'task-list-state') as Array<{
+      key: string;
+      status: string;
+      items: Array<{ id?: string; status: string; title: string }>;
+    }>;
+    check('history carries exactly one background-task panel', panels.length === 1, String(panels.length));
+    const items = new Map(panels[0]!.items.map((item) => [item.id!, item]));
+    check('the settled task reports the outcome the settlement recorded',
+      items.get('task-7')?.status === 'done', JSON.stringify(items.get('task-7')));
+    check('a task the host said it CANCELED reports cancelled, not done',
+      items.get('task-9')?.status === 'cancelled', JSON.stringify(items.get('task-9')));
+
+    // The taxonomy, end to end: five settlements are in the inbox and only the
+    // two task ones may become ledger entries.
+    check('the subagent, `system` and senderless settlements produce no ledger entries',
+      panels[0]!.items.length === 2, JSON.stringify(panels[0]!.items.map((item) => item.id)));
+    // Rendering follows the taxonomy (round-2b review finding 4): a tool block
+    // is a record of WORK — the two tasks and the subagent — while `system` and
+    // senderless settlements name no task and no conversation, so a tool block
+    // for one would invent a background task that never existed.
+    const settlementBlocks = history.filter((message) => message.type === 'tool-result'
+      && String((message as { callId: string }).callId).includes(':task:'));
+    check('the two task settlements and the subagent settlement render as durable tool blocks',
+      settlementBlocks.length === 3,
+      JSON.stringify(settlementBlocks.map((message) => (message as { callId: string }).callId)));
+    check('no tool block was invented for the `system` settlement',
+      !settlementBlocks.some((message) =>
+        String((message as { callId: string }).callId).endsWith(':task:system')),
+      JSON.stringify(settlementBlocks.map((message) => (message as { callId: string }).callId)));
+    const notices = history.filter((message) => message.type === 'notice') as Array<{ message: string }>;
+    check('the `system` settlement renders as a notice carrying the host\'s own words',
+      notices.some((notice) => notice.message.includes('All your subagents have been stopped')),
+      JSON.stringify(notices.map((notice) => notice.message)));
+    check('the senderless settlement is stated as a notice, never silently dropped',
+      notices.some((notice) => notice.message.includes('A notice with no sender')),
+      JSON.stringify(notices.map((notice) => notice.message)));
+
+    // The settled task's captured output rides its tool-result, read lazily —
+    // at attach, not at discovery — through the safe-read caps.
+    const withBody = history.filter((message) => message.type === 'tool-result'
+      && typeof (message as { result: unknown }).result === 'object') as Array<{ result: { log: string } }>;
+    check('exactly the task WITH a log on disk carries a log body', withBody.length === 1, String(withBody.length));
+    check('the body is the log file\'s own bytes, CRLF and all',
+      withBody[0]!.result.log.includes('Step 2 of 2 complete.\r\n'),
+      JSON.stringify(withBody[0]!.result.log).slice(0, 80));
+
+    const again = await connection.getHistory();
+    check('a second replay produces the same panel, not a second one',
+      again.filter((message) => message.type === 'task-list-state').length === 1);
+    check('a second replay does not double the ledger\'s entries',
+      JSON.stringify((again.find((message) => message.type === 'task-list-state') as { items: unknown[] }).items)
+        === JSON.stringify(panels[0]!.items));
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── A conversation with no tasks gets no panel ─────────────────────────────
+{
+  const tree = buildAgyFixtureTree({ transcriptSteps: 3, withoutSettlement: true });
+  try {
+    const connection = new AgyObserveConnection({
+      roots: tree.roots,
+      conversationId: CONVERSATION,
+      info: infoFor(CONVERSATION),
+    });
+    const history = await connection.getHistory();
+    check('no `manage_task` call and no settlement means no panel at all',
+      !history.some((message) => message.type === 'task-list-state'));
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── A task log past the cap is stated, never silently short ────────────────
+{
+  const tree = buildAgyFixtureTree({ withTaskLog: true });
+  try {
+    const tasks = join(tree.roots.appData, 'brain', CONVERSATION, '.system_generated', 'tasks');
+    // One byte past the ceiling, so the reader must stop and say it did.
+    writeFileSync(join(tasks, 'task-7.log'), 'x'.repeat(AGY_TASK_LOG_MAX_BYTES + 1));
+    const traces: AgyTrace[] = [];
+    const connection = new AgyObserveConnection({
+      roots: tree.roots,
+      conversationId: CONVERSATION,
+      info: infoFor(CONVERSATION),
+      trace: (trace) => traces.push(trace),
+    });
+    const history = await connection.getHistory();
+    const row = history.find((message) => message.type === 'tool-result'
+      && typeof (message as { result: unknown }).result === 'object') as { truncated?: boolean };
+    check('an oversized task log is delivered truncated AND flagged', row?.truncated === true, JSON.stringify(row));
+    check('the truncation is traced, so a silent short read is impossible',
+      traces.some((trace) => trace.op === 'task-log-oversized'),
+      traces.map((trace) => trace.op).join(','));
+    await connection.close();
+  } finally {
+    tree.cleanup();
+  }
+}
+
+// ── The pickers are available on OBSERVE (P2a/P2b) ─────────────────────────
+//
+// Listing is a read. An observe connection that answered nothing would render an
+// EMPTY picker, which reads as "no models" rather than "not available here" —
+// reflection §2. Choosing one is still refused, because that is the mutation.
+{
+  const tree = buildAgyFixtureTree();
+  try {
+    const connection = new AgyObserveConnection({
+      roots: tree.roots,
+      conversationId: CONVERSATION,
+      info: infoFor(CONVERSATION),
+    });
+    const models = await connection.listModels();
+    check('an observe connection lists models rather than an empty picker', models.length > 0, String(models.length));
+    check('the observe list carries the same effort grouping the adapter publishes',
+      models.some((model) => (model.reasoningEfforts?.length ?? 0) >= 2),
+      models.map((model) => `${model.label}:${model.reasoningEfforts?.length ?? 0}`).join(' | '));
+    const modes = await connection.listModes();
+    check('an observe connection lists the three modes',
+      JSON.stringify(modes) === JSON.stringify(AGY_MODES), modes.map((mode) => mode.value).join(','));
+
+    let refused = false;
+    try {
+      await connection.sendPrompt({ text: 'hello' });
+    } catch {
+      refused = true;
+    }
+    check('listing a model does not make an observe connection writable', refused);
     await connection.close();
   } finally {
     tree.cleanup();

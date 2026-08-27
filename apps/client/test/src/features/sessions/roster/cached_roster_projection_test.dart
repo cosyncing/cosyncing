@@ -41,6 +41,28 @@ void main() {
         rows: [
           identity(id: 'parent', nativeId: 'n-parent', updatedAt: 300),
           identity(id: 'other', updatedAt: 100),
+          // No stamped origin: the fail-open lineage path (unknown origins,
+          // cut cycle edges) still renders adjacent under its parent.
+          identity(
+            id: 'child',
+            nativeId: 'n-child',
+            parentThreadId: 'n-parent',
+            updatedAt: 200,
+          ),
+        ],
+        preferences: showAll,
+      );
+
+      final ids = projection.rows.map((row) => row.identity.sessionId).toList();
+      expect(ids, ['parent', 'child', 'other']);
+      expect(projection.rows[1].depth, 1);
+      expect(projection.rows[1].parent?.sessionId, 'parent');
+    });
+
+    test('a subagent child is folded away like the live closed default', () {
+      final projection = CachedRosterProjection.build(
+        rows: [
+          identity(id: 'parent', nativeId: 'n-parent', updatedAt: 300),
           identity(
             id: 'child',
             nativeId: 'n-child',
@@ -52,10 +74,10 @@ void main() {
         preferences: showAll,
       );
 
-      final ids = projection.rows.map((row) => row.identity.sessionId).toList();
-      expect(ids, ['parent', 'child', 'other']);
-      expect(projection.rows[1].depth, 1);
-      expect(projection.rows[1].parent?.sessionId, 'parent');
+      // This pane has no per-parent toggle, and the live roster now opens a
+      // subagent subtree only through one — emitting the child here would
+      // flash a row the authoritative projection immediately folds away.
+      expect(projection.rows.map((row) => row.identity.sessionId), ['parent']);
     });
 
     test('parent linkage never crosses a machine boundary', () {
@@ -159,7 +181,6 @@ void main() {
             cwd: '/tmp/elsewhere',
             nativeId: 'n-child',
             parentThreadId: 'n-parent',
-            origin: SessionOrigin.subagent,
           ),
         ],
         preferences: showAll,
@@ -264,7 +285,6 @@ void main() {
             id: 'c2',
             nativeId: 'n-c2',
             parentThreadId: 'n-p1',
-            origin: SessionOrigin.subagent,
             updatedAt: 300,
           ),
           identity(id: 'r1', updatedAt: 900),
@@ -272,7 +292,6 @@ void main() {
             id: 'c1',
             nativeId: 'n-c1',
             parentThreadId: 'n-p1',
-            origin: SessionOrigin.subagent,
             updatedAt: 400,
           ),
         ],

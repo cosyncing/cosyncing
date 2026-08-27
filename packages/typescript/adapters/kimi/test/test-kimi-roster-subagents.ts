@@ -36,6 +36,7 @@ import {
   kimiSubagentIdInfo,
   kimiSubagentNativeId,
   kimiSubagentRow,
+  KIMI_SUBAGENT_OPEN_TURN_FRESH_MS,
   kimiSubagentStatus,
   listKimiSubagents,
   readKimiAgentsMap,
@@ -131,6 +132,11 @@ function childJournal(opts: {
   promptText: string;
   createdAt?: number;
   extra?: unknown[];
+  /**
+   * Omit the settle lines a finished 1.5 journal always carries (measured
+   * 3/3, 2026-08-27) — the shape of a child still running RIGHT NOW.
+   */
+  running?: boolean;
 }): string {
   const createdAt = opts.createdAt ?? NOW - 3_000_000;
   const out = [
@@ -169,6 +175,11 @@ function childJournal(opts: {
     }),
   ];
   for (const record of opts.extra ?? []) out.push(line(record));
+  if (!opts.running) {
+    // The lifecycle statement a finished protocol-1.5 journal ends with.
+    out.push(line({ type: 'turn.ended', time: createdAt + 60_000 }));
+    out.push(line({ type: 'token_counting.turn_recorded', time: createdAt + 60_001 }));
+  }
   return out.join('');
 }
 
@@ -181,12 +192,17 @@ function writeChild(id: string, agentDir: string, journal: string, mtimeMs: numb
   return path;
 }
 
-function writeMain(id: string): void {
+function writeMain(id: string, modelAlias?: string): void {
   const dir = join(sessionDir(id), 'agents', 'main');
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, 'wire.jsonl'),
     line({ type: 'metadata', protocol_version: '1.5', created_at: NOW - 3_600_000 })
+      // The parent's own launch model, in the same `config.update` head shape
+      // the children carry (MEASURED 2026-08-27 on 6/6 live main journals).
+      + (modelAlias !== undefined
+        ? line({ type: 'config.update', cwd: CWD, modelAlias, thinkingEffort: 'high', time: NOW - 3_600_000 })
+        : '')
       + line({
         type: 'context.append_message',
         message: {
@@ -216,7 +232,7 @@ function writeSpawn(id: string, taskId: string, agentDir: string, description: s
 
 // PARENT: agent-0 (no record), agent-1 (one record), agent-2 (explore profile)
 writeState(PARENT, ['agent-0', 'agent-1', 'agent-2']);
-writeMain(PARENT);
+writeMain(PARENT, 'kimi-code/k3-256k');
 writeChild(PARENT, 'agent-0', childJournal({ promptText: 'Fixture brief zero for the roster suite.' }), FRESH);
 writeChild(PARENT, 'agent-1', childJournal({ promptText: 'Fixture brief one for the roster suite.' }), FRESH);
 writeChild(PARENT, 'agent-2', childJournal({ promptText: 'Fixture brief two.', profileName: 'explore', modelAlias: 'kimi-code/k3' }), FRESH);
@@ -248,6 +264,15 @@ writeChild(COLD, 'agent-0', childJournal({ promptText: 'A stale child.' }), STAL
 writeState(GHOST, ['agent-0'], { omitFromMap: ['agent-0'] });
 writeMain(GHOST);
 writeChild(GHOST, 'agent-0', childJournal({ promptText: 'Unlisted slot.' }), FRESH);
+
+// RUNNING: the 2026-08-27 live shape — the parent's wire reports idle (the
+// v2 activity tracks the MAIN agent only), agents/main/tasks does not exist,
+// and one detached child journal is fresh and carries NO settle line: it is
+// being appended right now.
+const RUNNING = 'session_88888888-8888-4888-8888-888888888888';
+writeState(RUNNING, ['agent-0']);
+writeMain(RUNNING);
+writeChild(RUNNING, 'agent-0', childJournal({ promptText: 'A detached child, mid-run.', running: true }), FRESH);
 
 // F5: two parents whose agents map claims far more children than the
 // examination cap allows, so the WORK ceiling is the only thing bounding them.
@@ -423,7 +448,7 @@ const SERVER_META = {
 };
 const ok = (data: unknown) => ({ code: 0, msg: 'success', data, request_id: 'req_fixture' });
 const requests: string[] = [];
-const rosterIds = [PARENT, REUSED, PLAIN];
+const rosterIds = [PARENT, REUSED, PLAIN, RUNNING];
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
@@ -433,6 +458,15 @@ const server = Bun.serve({
     const path = decodeURIComponent(url.pathname);
     requests.push(`${request.method} ${path}`);
     if (path === '/api/v1/healthz') return Response.json(ok({ ok: true }));
+    if (path === '/api/v1/models') {
+      return Response.json(ok({
+        items: [
+          { provider: 'managed:kimi-code', model: 'kimi-code/k3-256k', display_name: 'K3-256k' },
+          // Deliberately NOT the `kimi-code/k3` alias agent-2 records: an alias
+          // the catalog does not know must stay unlabelled on the roster.
+        ],
+      }));
+    }
     if (path === '/api/v1/meta') return Response.json(ok(SERVER_META));
     if (path === '/api/v2/sessions') {
       return Response.json(ok({
@@ -472,9 +506,20 @@ try {
   const plainRow = byId.get(PLAIN);
   const childRows = roster.filter((row) => row.origin === 'subagent');
 
-  check('discovery yields the three parents plus their four children',
-    roster.length === 7 && childRows.length === 4,
+  check('discovery yields the four parents plus their five children',
+    roster.length === 9 && childRows.length === 5,
     `rows=${roster.length} children=${childRows.length}`);
+
+  // The 2026-08-27 regression repro, end to end: the server said idle about
+  // both rows while the detached child was demonstrably running.
+  const runningChild = byId.get(kimiSubagentNativeId(RUNNING, 'agent-0'));
+  const runningParent = byId.get(RUNNING);
+  check('a fresh unsettled child journal is a WORKING row, whatever the parent wire says',
+    runningChild?.status === 'working', String(runningChild?.status));
+  check('a running detached child bumps its idle parent to working — the roster status is session-scoped',
+    runningParent?.status === 'working', String(runningParent?.status));
+  check('a parent whose children all settled keeps the wire status',
+    parentRow?.status === 'idle', String(parentRow?.status));
 
   check('a parent WITH children publishes a namespaced nativeId',
     parentRow?.nativeId === kimiSessionNativeId(PARENT), String(parentRow?.nativeId));
@@ -495,8 +540,25 @@ try {
     child0?.origin === 'subagent' && child0.nativeId === child0.id,
     `${child0?.origin} ${child0?.id}`);
   check('a child inherits the parent workspace cwd', child0?.cwd === CWD, String(child0?.cwd));
-  check('a child row publishes the host model alias verbatim, unlabelled',
-    child0?.model === 'kimi-code/k3-256k' && child0?.currentModel === undefined, String(child0?.model));
+  check('a child row publishes the raw alias AND the catalog label the sweep joined',
+    child0?.model === 'kimi-code/k3-256k' && child0?.currentModel?.label === 'K3-256k',
+    JSON.stringify({ model: child0?.model, currentModel: child0?.currentModel }));
+  const child2 = byId.get(kimiSubagentNativeId(PARENT, 'agent-2'));
+  check('a child alias the live catalog does not know stays unlabelled, never invented',
+    child2?.model === 'kimi-code/k3' && child2?.currentModel === undefined,
+    JSON.stringify({ model: child2?.model, currentModel: child2?.currentModel }));
+
+  // The PARENT's own roster model (2026-08-27 physical pass): the discovery
+  // endpoint carries no model field, so the sweep reads the parent's
+  // `agents/main` journal head and joins the same catalog. Without this an
+  // unopened parent showed no model while its own children did.
+  check('a parent row carries its launch alias and the joined catalog label before any attach',
+    parentRow?.model === 'kimi-code/k3-256k' && parentRow?.currentModel?.label === 'K3-256k'
+      && parentRow?.currentModel?.providerID === 'managed:kimi-code',
+    JSON.stringify({ model: parentRow?.model, currentModel: parentRow?.currentModel }));
+  check('a parent whose main journal records no alias gets NO model fields — nothing is invented',
+    plainRow?.model === undefined && plainRow?.currentModel === undefined,
+    JSON.stringify({ model: plainRow?.model, currentModel: plainRow?.currentModel }));
   check('a child row is observe-only in its advertised control',
     child0?.attachMode === 'observe'
       && child0.control?.drive.supported === false
@@ -510,15 +572,25 @@ try {
   check('a child row is idle while the parent has no turn in flight',
     child0?.status === 'idle', String(child0?.status));
 
-  // Status rule, measured: BOTH evidences or idle.
-  const fresh = { updatedAt: NOW, task: undefined };
-  check('status is working only when the parent works AND the child journal is fresh',
-    kimiSubagentStatus('working', fresh, NOW) === 'working'
-      && kimiSubagentStatus('idle', fresh, NOW) === 'idle'
-      && kimiSubagentStatus('working', { updatedAt: STALE, task: undefined }, NOW) === 'idle',
-    'conjunction holds');
-  check('a settled spawn record makes a child idle even under a working parent',
-    kimiSubagentStatus('working', { updatedAt: NOW, task: { taskId: 't', agentId: 'agent-0', endedAt: NOW } }, NOW) === 'idle');
+  // Status rule, measured 2026-08-27: the child's OWN record decides. The old
+  // parent-working conjunction could never see a detached child that outlives
+  // the parent's turn (server idle, child appending — the live repro), and the
+  // live child sat 108s past its last write mid-generation, so an OPEN turn
+  // gets the wide window and no-evidence journals keep the short one.
+  const open = { updatedAt: NOW, task: undefined, tailEvidence: 'open' as const };
+  check('an open turn is working; a settled one is idle; a long-dead one is idle',
+    kimiSubagentStatus(open, NOW) === 'working'
+      && kimiSubagentStatus({ ...open, tailEvidence: 'settled' }, NOW) === 'idle'
+      && kimiSubagentStatus({ ...open, updatedAt: NOW - KIMI_SUBAGENT_OPEN_TURN_FRESH_MS - 1 }, NOW) === 'idle',
+    'rule holds');
+  check('an open turn survives a quiet stretch the short window would kill',
+    kimiSubagentStatus({ ...open, updatedAt: NOW - 108_000 }, NOW) === 'working'
+      && kimiSubagentStatus({ updatedAt: NOW - 108_000, task: undefined, tailEvidence: 'none' }, NOW) === 'idle');
+  check('a no-evidence journal only claims working within the short window',
+    kimiSubagentStatus({ updatedAt: NOW, task: undefined, tailEvidence: 'none' }, NOW) === 'working'
+      && kimiSubagentStatus({ updatedAt: STALE, task: undefined, tailEvidence: 'none' }, NOW) === 'idle');
+  check('a settled spawn record makes a child idle even while its journal looks live',
+    kimiSubagentStatus({ updatedAt: NOW, tailEvidence: 'open', task: { taskId: 't', agentId: 'agent-0', endedAt: NOW } }, NOW) === 'idle');
 
   // ── 4. Observe-only, ENFORCED at attach ──────────────────────────────────
 
@@ -770,12 +842,60 @@ try {
       headBytesRead: 1,
       headComplete: true,
       droppedLines: 0,
+      tailEvidence: 'settled' as const,
     },
-    { cwd: '/parent/cwd', status: 'idle' },
+    { cwd: '/parent/cwd' },
     NOW,
   );
   check('a child with no cwd of its own inherits the parent workspace',
     row.cwd === '/parent/cwd' && row.parentThreadId === kimiSessionNativeId(PARENT), String(row.cwd));
+
+  // ── The roster model label (physical 0.4.1 pass) ──────────────────────────
+  //
+  // The alias joins the host catalog on `modelID` EXACTLY — the same join
+  // `mapKimiSessionStatus` performs for the parent row — because the client
+  // (by policy) never renders a bare provider-qualified alias inline: a child
+  // row without `currentModel.label` shows NO model on the roster, which is
+  // what the physical pass observed.
+  const aliasChild = {
+    agentDir: 'agent-1',
+    nativeId: kimiSubagentNativeId(PARENT, 'agent-1'),
+    parentThreadId: kimiSessionNativeId(PARENT),
+    parentSessionId: PARENT,
+    wirePath: '/x/wire.jsonl',
+    title: 't',
+    modelAlias: 'kimi-code/k3-256k',
+    updatedAt: NOW,
+    headBytesRead: 1,
+    headComplete: true,
+    droppedLines: 0,
+    tailEvidence: 'settled' as const,
+  };
+  const catalog = [
+    { providerID: 'managed:kimi-code', modelID: 'kimi-code/k3-256k', label: 'K3-256k' },
+    { providerID: 'managed:kimi-code', modelID: 'kimi-code/kimi-for-coding', label: 'K2.7 Coding' },
+  ];
+  const labelled = kimiSubagentRow(aliasChild, { cwd: '/parent/cwd' }, NOW, catalog);
+  check('a child alias the catalog knows publishes currentModel with the host display_name',
+    labelled.currentModel?.label === 'K3-256k'
+      && labelled.currentModel.modelID === 'kimi-code/k3-256k'
+      && labelled.currentModel.providerID === 'managed:kimi-code',
+    JSON.stringify(labelled.currentModel));
+  check('...and the raw alias stays in `model` for the tooltip',
+    labelled.model === 'kimi-code/k3-256k', String(labelled.model));
+  const unknownAlias = kimiSubagentRow(
+    { ...aliasChild, modelAlias: 'kimi-code/never-heard-of-it' },
+    { cwd: '/parent/cwd' }, NOW, catalog,
+  );
+  check('an alias the catalog does NOT know publishes no currentModel — never an invented label',
+    !('currentModel' in unknownAlias) && unknownAlias.model === 'kimi-code/never-heard-of-it',
+    JSON.stringify({ currentModel: unknownAlias.currentModel, model: unknownAlias.model }));
+  const noCatalog = kimiSubagentRow(aliasChild, { cwd: '/parent/cwd' }, NOW);
+  check('no catalog at all keeps the alias-only row rather than failing or guessing',
+    !('currentModel' in noCatalog) && noCatalog.model === 'kimi-code/k3-256k',
+    JSON.stringify({ currentModel: noCatalog.currentModel, model: noCatalog.model }));
+  check('a child with NO alias gets no currentModel from any catalog',
+    !('currentModel' in row), JSON.stringify(row.currentModel));
 }
 
 // ── Summary ─────────────────────────────────────────────────────────────────

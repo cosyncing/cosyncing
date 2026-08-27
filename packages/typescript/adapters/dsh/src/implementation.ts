@@ -59,6 +59,13 @@ import {
   type DshSocketFactory,
 } from './server.ts';
 
+/**
+ * How many roster rows one sweep may ask `session.models` about, newest first.
+ * The read is one local unary RPC (~tens of ms) and answers are cached by
+ * (id, updatedAt), so the cap only bites on a cold sweep of a very large host.
+ */
+const DSH_ROSTER_MODEL_MAX = 64;
+
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;
 
 /** Mux frame types that address one session and must reach its connection. */
@@ -406,6 +413,19 @@ export class DshAdapter implements AgentBackend {
   private readonly env: Readonly<Record<string, string | undefined>>;
   private rpcClient?: DshRpcClient;
   private link?: DshHostLink;
+  /**
+   * sessionId → the model identity the last sweep resolved, keyed by the row's
+   * `updatedAt`. `session.list` carries no model field of any kind (MEASURED
+   * 2026-08-27: 13 projection keys on the live host, none model-bearing), so the
+   * roster's only source is a per-session `session.models` read. The cache keeps
+   * the steady state at zero extra RPCs: a row whose `updatedAt` moved — or that
+   * is running — is re-read, everything else reuses the held answer.
+   */
+  private readonly rosterModelCache = new Map<string, {
+    updatedAt?: number;
+    model: string;
+    currentModel: NonNullable<SessionInfo['currentModel']>;
+  }>();
 
   constructor(options: DshAdapterOptions = {}) {
     this.options = options;
@@ -614,7 +634,68 @@ export class DshAdapter implements AgentBackend {
       }
       sessions.push(mapped);
     }
+    await this.overlayRosterModels(sessions, options?.signal);
     return sessions;
+  }
+
+  /**
+   * Seed each roster row's model identity from `session.models`.
+   *
+   * The client (by policy) never renders a raw provider-qualified model id
+   * inline, and before this only the ATTACH path paid the per-session read —
+   * so an unopened dsh session showed no model at all on the roster (the
+   * 2026-08-27 physical pass). Bounded: the newest {@link DSH_ROSTER_MODEL_MAX}
+   * rows are eligible, reads run concurrently against the local host, a failed
+   * read reuses the held answer rather than blanking the row, and the cache
+   * answers unchanged idle rows without any RPC.
+   */
+  private async overlayRosterModels(sessions: SessionInfo[], signal?: AbortSignal): Promise<void> {
+    if (sessions.length === 0) return;
+    const eligible = [...sessions]
+      .sort((a, b) => (b.updatedAt ?? -1) - (a.updatedAt ?? -1))
+      .slice(0, DSH_ROSTER_MODEL_MAX);
+    await Promise.all(eligible.map(async (row) => {
+      const held = this.rosterModelCache.get(row.id);
+      const fresh = held !== undefined && row.status === 'idle' && held.updatedAt === row.updatedAt;
+      if (!fresh && !signal?.aborted) {
+        const identity = await this.sessionModelIdentity(row.id);
+        if (identity) {
+          if (this.rosterModelCache.size >= 2048) this.rosterModelCache.clear();
+          this.rosterModelCache.set(row.id, { updatedAt: row.updatedAt, ...identity });
+          row.model = identity.model;
+          row.currentModel = identity.currentModel;
+          return;
+        }
+      }
+      if (held) {
+        row.model = held.model;
+        row.currentModel = held.currentModel;
+      }
+    }));
+  }
+
+  /** One `session.models` read folded to the two info fields, or nothing. Never a throw. */
+  private async sessionModelIdentity(sessionId: string): Promise<{
+    model: string;
+    currentModel: NonNullable<SessionInfo['currentModel']>;
+  } | undefined> {
+    try {
+      const catalog = await new DshDriver(this.rpc()).models(sessionId);
+      const current = catalog.current;
+      if (!current) return undefined;
+      const label = dshModelDisplayName(catalog.groups, current.provider, current.model);
+      return {
+        model: current.model,
+        currentModel: {
+          providerID: current.provider,
+          modelID: current.model,
+          ...(label ? { label } : {}),
+          ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}),
+        },
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /** sessionId → its workspace's display title, for sessions with no title projection yet. */
@@ -703,21 +784,10 @@ export class DshAdapter implements AgentBackend {
     // Best effort by design: a host that cannot answer leaves both fields
     // absent and the `request/header` path stays the fallback. An attach must
     // not fail over a picker seed.
-    try {
-      const catalog = await new DshDriver(this.rpc()).models(sessionId);
-      const current = catalog.current;
-      if (current) {
-        const label = dshModelDisplayName(catalog.groups, current.provider, current.model);
-        info.model = current.model;
-        info.currentModel = {
-          providerID: current.provider,
-          modelID: current.model,
-          ...(label ? { label } : {}),
-          ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}),
-        };
-      }
-    } catch {
-      /* no authoritative model right now; request/header still publishes one */
+    const identity = await this.sessionModelIdentity(sessionId);
+    if (identity) {
+      info.model = identity.model;
+      info.currentModel = identity.currentModel;
     }
     const link = this.hostLink();
     let connection: DshSessionConnection;

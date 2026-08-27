@@ -219,6 +219,10 @@ final class CachedRosterProjection {
         final children = childKeysByParentKey[key] ?? const <String>[];
         for (var index = children.length - 1; index >= 0; index -= 1) {
           final childKey = children[index];
+          // A subagent subtree defaults CLOSED in the authoritative roster,
+          // and this pane has no toggle to open one — emitting the children
+          // here would flash rows the live projection is about to fold away.
+          if (byKey[childKey]!.origin == SessionOrigin.subagent) continue;
           if (visible(childKey)) stack.add(childKey);
         }
       }

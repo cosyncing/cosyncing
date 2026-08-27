@@ -19,14 +19,33 @@
  * Input is one NDJSON line per turn: `{"event":"user","message":{"role":"user",
  * "content":"…"}}` — `event`, not claude's `type`.
  *
- * Output is `init` (carrying `conversation_id` as a SIBLING, plus `model`, `cwd`,
- * `permission_mode`, `tools[]`), `step_update` (`conversation_id`, `step_index`,
- * `state`, `step_type`, `text_delta?`, `duration_seconds?`, `usage?` on the final
- * `agent_response` update), and exactly one `result` per turn (`status`,
- * `response`, `duration_seconds`, `num_turns`, `usage{input,output,thinking,
- * cache_read}`). A second invocation with `--conversation` resumes in place:
- * `step_index` continues, `num_turns` increments, and the pre-response system step
- * is `system_message` rather than `checkpoint`.
+ * ── The output envelope (RE-MEASURED 2026-08-25 on 1.1.20, 76 events) ────────
+ * Every envelope NESTS its payload under a key equal to its own `event` tag. The
+ * round-1 note recorded this as a flat shape, and the handlers were written that
+ * way — so on real output they matched nothing at all. See {@link agyStreamBody}.
+ *
+ *   {"event":"init","conversation_id":…,"init":{model,cwd,permission_mode,tools[]}}
+ *   {"event":"step_update","step_update":{conversation_id,step_index,state,
+ *      step_type,text_delta?,duration_seconds?,tool_name?,tool_info?,
+ *      subagent_info?,usage?}}
+ *   {"event":"result","result":{status,response,duration_seconds,num_turns,usage}}
+ *
+ * `conversation_id` is a SIBLING on `init` and NESTED on the other two, so the
+ * nesting is per-envelope rather than uniform.
+ *
+ * MEASURED vocabularies: `state` ∈ {ACTIVE, DONE, ERROR} — no cancel state has
+ * ever been observed; `step_type` ∈ {user_input, checkpoint, system_message,
+ * agent_response, tool, subagent}; `status` ∈ {SUCCESS}. Usage buckets are
+ * `input_tokens`, `output_tokens`, `cache_read_tokens`, `thinking_tokens`,
+ * `total_tokens` — NOT the bare `input`/`output`/`cache_read` first recorded.
+ *
+ * `init.permission_mode` is `"request-review"` under `--mode=plan`,
+ * `--mode=accept-edits` AND no `--mode` at all: it does NOT echo the launch flag,
+ * so it can never be the source of `currentMode` (C2, settled 2026-08-25).
+ *
+ * A second invocation with `--conversation` resumes in place: `step_index`
+ * continues, `num_turns` increments, and the pre-response system step is
+ * `system_message` rather than `checkpoint`.
  *
  * ── EXIT CODES ARE DIAGNOSTIC ONLY ──────────────────────────────────────────
  * 1.1.18 and 1.1.20 both changed print-mode exit semantics: benign tool errors and
@@ -59,7 +78,7 @@ import {
   createAgyMapState,
   createAgyQueuedSends,
   mapAgyStep,
-  normalizeAgyStreamStepType,
+  agyStreamStepTypeFor,
   pushAgyQueuedSend,
   retireAgyQueuedSend,
   type AgyMapState,
@@ -67,6 +86,8 @@ import {
   type AgyStep,
 } from './mapping.ts';
 import { AGY_MAX_LINE_BYTES, AgyLineFramer, truncateToUtf8Bytes } from './safe-read.ts';
+import { cachedAgyCliCatalog } from './cli-catalog.ts';
+import { AGY_PROVIDER_ID, isAgyMode, readAgyModelCatalog, resolveAgyLaunchModel } from './store.ts';
 
 /**
  * Ceiling on ONE step's accumulated `text_delta`s. ~4× the largest whole
@@ -171,8 +192,32 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.binary = options.binary;
     if (options.onClose) this.onCloseHook = options.onClose;
     if (options.model) this.launchModel = options.model;
-    if (options.mode) this.launchMode = options.mode;
+    // Same guard as `relaunch`: a mode the host would silently drop must never
+    // become the `currentMode` this connection advertises.
+    if (isAgyMode(options.mode)) this.launchMode = options.mode;
     this.info.control = this.controlState();
+    this.publishCurrentMode();
+  }
+
+  /**
+   * Publish the posture this connection is actually driving in.
+   *
+   * The launch mode is the ONLY thing that knows it. The host records no
+   * per-conversation mode anywhere (C2, settled 2026-08-25: `--mode=accept-edits`
+   * leaves no trace at all, `--mode=plan` shows only as a `/plan` prefix on user
+   * rows, the default writes nothing), and `init.permission_mode` reports
+   * `"request-review"` under every launch. So a DRIVE connection knows its mode
+   * because it chose it, and nothing else can be asked.
+   *
+   * Cleared EXPLICITLY when we launched without a mode — reflection §2: an absent
+   * key leaves whatever the row had before, which after a mode switch is the
+   * previous posture, still displayed as if it were current.
+   */
+  private publishCurrentMode(): void {
+    const mode = this.launchMode;
+    if (this.info.currentMode === mode) return;
+    this.info.currentMode = mode;
+    this.emit({ type: 'metadata-update', key: 'sessionInfo', value: { currentMode: mode } });
   }
 
   /** The fold runs with THIS connection's queued-send table and knows a child may own the session. */
@@ -385,7 +430,14 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // Relaunch for a cold start or an EXPLICIT per-turn model/mode switch only —
     // never merely because a configured default differs from what the warm child
     // was launched with, which would kill a live turn mid-conversation.
-    const explicitModel = input.model?.modelID;
+    //
+    // The requested model is resolved through the catalog FIRST, because the
+    // picker collapses a family's effort variants into ONE row: `{modelID:
+    // 'gemini-3.6-flash-low', reasoningEffort: 'high'}` names
+    // `gemini-3.6-flash-high`, and comparing the unresolved id against
+    // `launchModel` would both miss that switch and then relaunch onto the wrong
+    // model. Resolve, then compare, then launch — all on the same value.
+    const explicitModel = this.resolveModelSelection(input.model);
     const explicitMode = input.permissionMode;
     if (
       !this.proc
@@ -417,6 +469,24 @@ export class AgyDriveConnection extends AgyObserveConnection {
     // returns — so the claim has to exist first.
     this.mintPendingRow(text, wasRunning);
     this.writeLine({ event: 'user', message: { role: 'user', content: text } });
+  }
+
+  /**
+   * One launchable model id from what the picker sent back.
+   *
+   * The catalog is read only when an effort is actually in play, so an ordinary
+   * send — the overwhelming majority — still touches no disk. A selection with
+   * no effort needs no lookup at all: its `modelID` is already a real catalog id,
+   * because that is the only kind of id `agyModelOptions` ever emits.
+   */
+  private resolveModelSelection(selection: PromptInput['model']): string | undefined {
+    if (!selection?.modelID) return undefined;
+    if (!selection.reasoningEffort) return selection.modelID;
+    return resolveAgyLaunchModel(
+      cachedAgyCliCatalog(this.binary) ?? readAgyModelCatalog(this.roots, this.trace),
+      selection,
+      this.trace,
+    );
   }
 
   /**
@@ -486,7 +556,21 @@ export class AgyDriveConnection extends AgyObserveConnection {
    * self-corrects: an un-decremented turn poisons every later one. So the
    * accounting is closed explicitly, here, before the old child goes.
    */
-  private relaunch(model?: string, mode?: string): boolean {
+  private relaunch(model?: string, requestedMode?: string): boolean {
+    // A `--mode` agy does not recognize is SILENTLY DROPPED by the host — its own
+    // 1.1.20 changelog records fixing "an unrecognized value produced no warning
+    // at all". Passing one would leave the child in `default` while
+    // `publishCurrentMode` advertised the mode that was asked for, which is
+    // exactly the "the client believes X, the session is Y, nothing says so"
+    // shape reflection §11 is about. So an off-vocabulary mode is dropped HERE,
+    // with a trace, and never becomes `currentMode`.
+    const mode = isAgyMode(requestedMode) ? requestedMode : undefined;
+    if (requestedMode !== undefined && mode === undefined) {
+      this.trace?.({
+        op: 'drive-mode-rejected',
+        detail: `agy has no --mode ${JSON.stringify(requestedMode)}; launching without one`,
+      });
+    }
     // Before the old child is unreachable: whatever it owed is not coming.
     // A cold start settles nothing, because nothing is in flight.
     this.settleGeneration({
@@ -523,6 +607,8 @@ export class AgyDriveConnection extends AgyObserveConnection {
     this.proc = proc;
     this.launchModel = model;
     this.launchMode = mode;
+    // The posture changed with the child, so the row must change with it.
+    this.publishCurrentMode();
     proc.stdout.on('data', (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr.on('data', (chunk: Buffer) => {
       // stderr carries the "ignoring unsupported stream input message event" warning
@@ -645,11 +731,11 @@ export class AgyDriveConnection extends AgyObserveConnection {
     const kind = classifyAgyStreamEvent(event);
     switch (kind) {
       case 'init':
-        return this.handleInit(event);
+        return this.handleInit(agyStreamBody(event, 'init'));
       case 'step_update':
-        return this.handleStepUpdate(event);
+        return this.handleStepUpdate(agyStreamBody(event, 'step_update'));
       case 'result':
-        return this.handleResult(event);
+        return this.handleResult(agyStreamBody(event, 'result'));
       case 'unknown':
         this.trace?.({
           op: 'drive-stream-unknown-event',
@@ -660,25 +746,44 @@ export class AgyDriveConnection extends AgyObserveConnection {
   }
 
   /**
-   * `init` names the conversation, the model and the permission mode.
+   * `init` names the conversation, the model and a permission mode we must ignore.
    *
-   * The model is re-derived HERE rather than trusted from whatever the attach
+   * The MODEL is re-derived here rather than trusted from whatever the attach
    * decided: a value a create returned and nothing re-reads is not state
-   * (reflection §5, dsh P9a). `permission_mode` is published as `currentMode` —
-   * the contract field — and never as `permissionMode`, which is the
-   * `PromptInput` key whose misuse blanked kimi's picker.
+   * (reflection §5, dsh P9a).
+   *
+   * `permission_mode` is deliberately NOT published. MEASURED 2026-08-25 across
+   * all three launches — `--mode=plan`, `--mode=accept-edits`, and no flag — it
+   * reports `"request-review"` every time. It describes how the host asks for
+   * approval, not which posture the session is in, so publishing it as
+   * `currentMode` would put a value on the row that contradicts what the user
+   * chose and make the picker show the wrong posture on every driven session.
+   * The mode we launched with is the only thing that knows the answer, and it is
+   * already held in `launchMode` (see {@link currentModeForInfo}).
    */
   private handleInit(event: Record<string, unknown>): void {
     const patch: Partial<SessionInfo> = {};
     const model = typeof event.model === 'string' ? event.model : undefined;
     if (model) {
       this.launchModel = model;
-      patch.currentModel = { providerID: 'google-antigravity', modelID: model };
+      // The label rides along when the catalog knows the id — the client never
+      // renders a raw id inline, so an unlabelled patch left the composer's
+      // model chip blank even mid-drive.
+      const entry = (cachedAgyCliCatalog(this.binary) ?? readAgyModelCatalog(this.roots, this.trace)).byId.get(model);
+      patch.currentModel = {
+        providerID: AGY_PROVIDER_ID,
+        modelID: model,
+        ...(entry ? { label: entry.displayName } : {}),
+      };
     }
-    const mode = typeof event.permission_mode === 'string' ? event.permission_mode : undefined;
-    if (mode) {
-      this.launchMode = mode;
-      patch.currentMode = mode;
+    const reported = typeof event.permission_mode === 'string' ? event.permission_mode : undefined;
+    if (reported && this.launchMode && reported !== this.launchMode) {
+      // Not an error — just the fact, recorded once, so the next person reading a
+      // log does not re-derive C2 from scratch.
+      this.trace?.({
+        op: 'drive-init-permission-mode-ignored',
+        detail: `init reported "${reported}" while launched with --mode=${this.launchMode}; it does not echo the flag`,
+      });
     }
     if (Object.keys(patch).length === 0) return;
     Object.assign(this.info, patch);
@@ -701,8 +806,9 @@ export class AgyDriveConnection extends AgyObserveConnection {
       this.trace?.({ op: 'drive-step-update-unindexed', detail: JSON.stringify(event).slice(0, 200) });
       return;
     }
-    const stepType = normalizeAgyStreamStepType(
+    const stepType = agyStreamStepTypeFor(
       typeof event.step_type === 'string' ? event.step_type : '',
+      typeof event.tool_name === 'string' ? event.tool_name : undefined,
     );
     const open = this.openSteps.get(stepIndex) ?? {
       type: stepType,
@@ -813,15 +919,21 @@ export class AgyDriveConnection extends AgyObserveConnection {
   private handleResult(event: Record<string, unknown>): void {
     for (const stepIndex of [...this.openSteps.keys()]) this.flushStep(stepIndex);
 
+    // MEASURED 2026-08-25 (1.1.20): the buckets are `input_tokens`,
+    // `output_tokens`, `cache_read_tokens`, `thinking_tokens`, `total_tokens` —
+    // NOT the bare `input`/`output`/`cache_read` the round-1 note recorded. Read
+    // under both spellings so a capture in either shape still reports usage,
+    // rather than swapping one unverified guess for another.
     const usage = (event.usage ?? {}) as Record<string, unknown>;
-    const input = numberOrUndefined(usage.input);
-    const output = numberOrUndefined(usage.output);
-    const cacheRead = numberOrUndefined(usage.cache_read);
+    const input = numberOrUndefined(usage.input_tokens) ?? numberOrUndefined(usage.input);
+    const output = numberOrUndefined(usage.output_tokens) ?? numberOrUndefined(usage.output);
+    const cacheRead = numberOrUndefined(usage.cache_read_tokens) ?? numberOrUndefined(usage.cache_read);
     if (input !== undefined || output !== undefined || cacheRead !== undefined) {
-      // `usage.thinking` is a fourth bucket agy reports and the protocol has no
-      // field for. It is deliberately NOT folded into `output`: inventing a sum
-      // is exactly the class of error the token-count contract warns about, and a
-      // reading nobody can attribute is worse than one field being absent.
+      // `thinking_tokens` is a fourth bucket agy reports and the protocol has no
+      // field for, and `total_tokens` is agy's own sum across all four. Neither is
+      // folded into `output`: inventing a sum is exactly the class of error the
+      // token-count contract warns about, and a reading nobody can attribute is
+      // worse than one field being absent.
       this.emit({
         type: 'token-count',
         ...(input !== undefined ? { input } : {}),
@@ -897,6 +1009,37 @@ export function classifyAgyStreamEvent(
   if ('num_turns' in event) return 'result';
   if ('tools' in event && 'cwd' in event) return 'init';
   return 'unknown';
+}
+
+/**
+ * Unwrap a stream envelope's payload.
+ *
+ * MEASURED 2026-08-25 on agy 1.1.20, across 76 captured events: every envelope
+ * NESTS its payload under a key equal to its own `event` tag —
+ *
+ *   {"event":"init","conversation_id":…,"init":{model,cwd,permission_mode,tools}}
+ *   {"event":"step_update","step_update":{conversation_id,step_index,state,step_type,…}}
+ *   {"event":"result","result":{status,num_turns,response,usage,…}}
+ *
+ * The round-1 probe recorded this loosely — it showed `conversation_id` beside an
+ * `init` object, which reads equally well as a flat envelope carrying a tag — and
+ * the handlers were written against the FLAT reading. They therefore found none
+ * of their fields on real output: no model, no permission mode, no usage, no step
+ * rows from the stream, and no error on a non-success result. The transcript tail
+ * still rendered the conversation, which is exactly why nothing looked broken.
+ *
+ * Note the nesting is per-envelope, not uniform: `conversation_id` really is a
+ * sibling on `init` and really is nested on the other two. So the body is merged
+ * OVER the envelope rather than replacing it — nested fields win, siblings stay
+ * reachable, and a flat envelope still reads correctly.
+ */
+export function agyStreamBody(
+  event: Record<string, unknown>,
+  kind: 'init' | 'step_update' | 'result',
+): Record<string, unknown> {
+  const nested = event[kind];
+  if (!nested || typeof nested !== 'object' || Array.isArray(nested)) return event;
+  return { ...event, ...(nested as Record<string, unknown>) };
 }
 
 /**

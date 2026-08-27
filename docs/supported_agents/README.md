@@ -26,10 +26,14 @@ supported.
 
 | Agent | Verified upstream version | Activation | Current surface |
 | --- | ---: | --- | --- |
-| [Kimi Code](kimi.md) | 0.35.0 | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, model selection |
+| [Kimi Code](kimi.md) | 0.38.0 | Registered by default; uses a `kimi web` host cosyncing can start | Discovery, observe, Drive and takeover, create/rename, prompts, file and image attachments, slash commands, model selection |
 | [DeepSeek Harness](dsh.md) | 0.1.0-rc.6 | Registered by default; uses a `dsh web` host cosyncing can start | Discovery, history, shared live control, create/rename, prompts, models, permission presets, native commands, image input, reconnect, and removal |
+| [Antigravity](antigravity.md) | 1.1.22 | Registered by default; reads the `agy` CLI's own store and drives through a broker-owned `agy` child | Discovery, observe, Drive with cross-client join and terminal handback, create, prompts, model and reasoning-effort selection |
 
-Both are provisional and both talk to a local server rather than a CLI. Setup
+All three are provisional. Kimi Code and DeepSeek Harness talk to a local
+server rather than a CLI; Antigravity needs no host at all — cosyncing reads
+the `agy` CLI's own conversation store and starts a broker-owned `agy` child
+only when you drive a session. Setup
 does not install those servers, but an installed cosyncing service starts,
 supervises, and stops one it owns, so the agents work without keeping a terminal
 open — setup lists both and names their hosts in the consent it asks you for.

@@ -185,7 +185,7 @@ export interface OpencodeShimInspection {
 }
 
 export interface SetupAgentSummary {
-  id: 'codex' | 'opencode' | 'pi' | 'claude' | 'kimi' | 'dsh';
+  id: 'codex' | 'opencode' | 'pi' | 'claude' | 'agy' | 'kimi' | 'dsh';
   displayName: string;
   state: 'missing' | 'supported' | 'unsupported' | 'runtime-unavailable';
   installedVersion?: string;
@@ -425,7 +425,7 @@ function installedVersion(report: DoctorReport, id: string): string | undefined 
 }
 
 /** Agents the installed service delivers itself, with no external host involved. */
-const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'claude'] as const;
+const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'claude', 'agy'] as const;
 
 /**
  * Setup advertises what the SERVICE IT INSTALLS can actually deliver.
@@ -456,6 +456,7 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
+    agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
     dsh: 'Managed `dsh web` host; one you started yourself, or one on another machine, is never touched.',
   };

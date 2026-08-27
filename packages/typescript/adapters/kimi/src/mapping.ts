@@ -1537,6 +1537,27 @@ export function mapKimiMessage(raw: KimiMessage, state?: KimiMappingState): Kimi
           continue;
         }
       }
+      // A compaction summary is the harness REPLACING earlier conversation
+      // with a machine-written note — `origin.kind: 'compaction_summary'`,
+      // first captured on the 0.38.0 REST surface. The row rides `role: 'user'`
+      // like every other server insertion, but by construction it is never
+      // words the operator typed, so it renders through the same
+      // context-injection event as `injection` rows (reflection §10: machine
+      // text must never become "the user said this"). The origin kind is the
+      // source label, so the client can say WHAT replaced the history rather
+      // than showing an anonymous injection. No wrapper is expected: the
+      // summary text IS the body.
+      if (role === 'user' && originKind === 'compaction_summary') {
+        out.push({
+          type: 'event',
+          name: CONTEXT_INJECTION_EVENT,
+          payload: {
+            source: 'compaction_summary',
+            ...boundContextBody(text),
+          } satisfies ContextInjectionPayload,
+        }, key);
+        continue;
+      }
       // Injected context is recognized on the USER row as well as the system
       // one, because the user row is where Kimi actually delivers it: every
       // `<system-reminder>` block a live server returns arrives as

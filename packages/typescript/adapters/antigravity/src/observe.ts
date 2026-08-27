@@ -15,6 +15,8 @@ import type {
   AgentMessage,
   AgentMessageHandler,
   HistoryQuery,
+  ModeOption,
+  ModelOption,
   PermissionDecision,
   PromptInput,
   SessionConnection,
@@ -22,13 +24,21 @@ import type {
   Unsubscribe,
 } from '@cosyncing/adapter-api';
 import {
+  agySettlementOutcome,
+  agyTaskListState,
+  classifyAgySettlementSender,
+  collectAgyTaskReferences,
   createAgyMapState,
+  foldAgyTaskLedger,
   mapAgySettlement,
   mapAgyStep,
+  mapAgyUnmappedSettlement,
   parseAgySettlement,
   parseAgyStep,
   type AgyMapState,
   type AgyStep,
+  type AgyTaskLog,
+  type AgyTaskReference,
 } from './mapping.ts';
 import {
   AGY_MAX_LINE_BYTES,
@@ -41,10 +51,19 @@ import {
   readContainedThroughLastNewline,
   type AgyFrame,
 } from './safe-read.ts';
+import { ensureAgyCliCatalog } from './cli-catalog.ts';
 import {
+  AGY_MODES,
+  AGY_TASK_ID_SEGMENT,
+  AGY_TASK_LOG_BUDGET_BYTES,
+  AGY_TASK_LOG_MAX_BYTES,
+  agyModelOptions,
+  agyTaskLogPath,
   agyTranscriptFullPath,
   agyTranscriptPath,
   listAgySettlementFiles,
+  readAgyModelCatalog,
+  readAgySettingsModelLabel,
   readAgyTextFile,
   type AgyRoots,
   type AgyTraceSink,
@@ -68,6 +87,12 @@ export interface AgyObserveOptions {
    * the shrunken bound cannot drift away from what ships.
    */
   tailReadMaxBytes?: number;
+  /**
+   * Absolute path to the `agy` binary, when the adapter found one. The picker
+   * uses it to await the live `agy models` list; without it the frozen cockpit
+   * file is the only catalog (the drive subclass always has one).
+   */
+  binary?: string;
 }
 
 export class AgyObserveConnection implements SessionConnection {
@@ -76,6 +101,7 @@ export class AgyObserveConnection implements SessionConnection {
   protected readonly roots: AgyRoots;
   protected readonly conversationId: string;
   protected readonly trace?: AgyTraceSink;
+  private readonly catalogBinary?: string;
   private readonly handlers = new Set<AgentMessageHandler>();
   protected readonly path: string;
 
@@ -89,6 +115,10 @@ export class AgyObserveConnection implements SessionConnection {
   private readonly tailFramer = new AgyLineFramer(AGY_MAX_LINE_BYTES);
   /** Per-drain read ceiling. The production value unless a test injects a reachable one. */
   readonly tailReadMaxBytes: number;
+  /** `manage_task` references seen while folding, in transcript order. */
+  private readonly taskReferences: AgyTaskReference[] = [];
+  /** Tasks whose settlement is already in the inbox — the only proof a task ended. */
+  private readonly settledTasks = new Map<string, { outcome: 'done' | 'cancelled'; title: string }>();
   /** The tail stays inert until `getHistory()` has partitioned the file. */
   private primed = false;
   protected state: AgyMapState;
@@ -100,6 +130,7 @@ export class AgyObserveConnection implements SessionConnection {
     this.conversationId = options.conversationId;
     this.info = options.info;
     if (options.trace) this.trace = options.trace;
+    if (options.binary) this.catalogBinary = options.binary;
     this.tailReadMaxBytes = options.tailReadMaxBytes ?? AGY_TAIL_READ_MAX_BYTES;
     this.path = agyTranscriptPath(options.roots, options.conversationId);
     this.state = this.buildMapState();
@@ -163,6 +194,10 @@ export class AgyObserveConnection implements SessionConnection {
     // the deliberate exception — it is per-connection live state the drive
     // subclass owns, and `buildMapState` re-attaches the SAME object.
     this.state = this.buildMapState();
+    // The ledger is rebuilt from the file for the same reason the fold is: a
+    // second `getHistory()` must produce the same rows, not doubled ones.
+    this.taskReferences.length = 0;
+    this.settledTasks.clear();
 
     if (!existsSync(this.path)) {
       this.trace?.({ op: 'transcript-missing', detail: `no transcript.jsonl for ${this.conversationId}` });
@@ -177,6 +212,7 @@ export class AgyObserveConnection implements SessionConnection {
             + 'The conversation itself is intact in the CLI — resume it in a terminal to read it.',
         },
         ...this.settlementMessages(),
+        ...this.taskListMessages(),
         ...this.extraHistoryRows(),
       ];
     }
@@ -202,6 +238,7 @@ export class AgyObserveConnection implements SessionConnection {
             + `The file at the expected path was refused (${read}).`,
         },
         ...this.settlementMessages(),
+        ...this.taskListMessages(),
         ...this.extraHistoryRows(),
       ];
     }
@@ -227,6 +264,7 @@ export class AgyObserveConnection implements SessionConnection {
       if (this.state.seenSteps.has(step.step_index)) continue;
       this.state.seenSteps.add(step.step_index);
       const mapped = this.withTruncationFallback(step);
+      this.taskReferences.push(...collectAgyTaskReferences(step));
       this.onStepAdmitted(step, mapped, 'replay');
       out.push(...mapped);
     }
@@ -255,7 +293,7 @@ export class AgyObserveConnection implements SessionConnection {
     // everything past the cap.
     if (this.watcher) this.scheduleDrain(0);
 
-    return [...out, ...this.settlementMessages(), ...this.extraHistoryRows()];
+    return [...out, ...this.settlementMessages(), ...this.taskListMessages(), ...this.extraHistoryRows()];
   }
 
   protected emit(message: AgentMessage): void {
@@ -388,8 +426,15 @@ export class AgyObserveConnection implements SessionConnection {
         if (this.state.seenSteps.has(step.step_index)) continue;
         this.state.seenSteps.add(step.step_index);
         const mapped = this.withTruncationFallback(step);
+        const tasks = collectAgyTaskReferences(step);
+        this.taskReferences.push(...tasks);
         this.onStepAdmitted(step, mapped, 'tail');
         for (const message of mapped) this.emit(message);
+        // A `task-list-state` row is an UPSERT keyed by id, so re-emitting it
+        // replaces the panel rather than stacking a second one. Only on a step
+        // that actually touched a task: an unconditional re-emit would republish
+        // the same panel for every ordinary assistant line in the drain.
+        if (tasks.length > 0) for (const message of this.taskListMessages()) this.emit(message);
       }
     } finally {
       this.draining = false;
@@ -473,6 +518,8 @@ export class AgyObserveConnection implements SessionConnection {
    */
   private settlementMessages(): AgentMessage[] {
     const out: AgentMessage[] = [];
+    // One budget for the whole pass, shared by every task log it reads.
+    const budget = { remaining: AGY_TASK_LOG_BUDGET_BYTES };
     for (const file of listAgySettlementFiles(this.roots, this.conversationId, this.trace)) {
       const read = readAgyTextFile(this.roots.appData, file, AGY_SETTLEMENT_MAX_BYTES, this.trace);
       if (read === undefined) continue;
@@ -490,9 +537,121 @@ export class AgyObserveConnection implements SessionConnection {
         this.trace?.({ op: 'settlement-unparseable', detail: file });
         continue;
       }
-      out.push(...mapAgySettlement(settlement, this.conversationId));
+      const source = classifyAgySettlementSender(settlement.sender);
+      // A TASK settlement records an ending, which the ledger needs. A SUBAGENT
+      // settlement records a child conversation, which discovery needs (see the
+      // adapter's lineage scan). Both are durable tool blocks. `system` notices
+      // and senderless rows are NEITHER: a tool block for one would invent a
+      // background task named "system", and dropping one would erase a host
+      // message the user should read — so they render as stated notices.
+      if (source.category === 'system' || source.category === 'unknown') {
+        out.push(mapAgyUnmappedSettlement(settlement));
+        continue;
+      }
+      let log: AgyTaskLog | undefined;
+      if (source.category === 'task') {
+        this.settledTasks.set(source.taskId, {
+          outcome: agySettlementOutcome(settlement.messageTitle),
+          title: settlement.messageTitle,
+        });
+        log = this.readTaskLog(source.conversationId, source.taskId, budget);
+      }
+      out.push(...mapAgySettlement(settlement, this.conversationId, log));
     }
     return out;
+  }
+
+  /**
+   * A settled task's captured output, or nothing.
+   *
+   * Deferred to history replay rather than done at discovery: a roster listing 39
+   * conversations must not read anyone's task logs, and this path runs only when
+   * a session is actually opened. The protocol has no expand-time fetch — a
+   * `tool-result` body travels with the row — so "lazily" means per-attach and
+   * per-budget, and the budget is what keeps the pathological 3 MB log from
+   * dominating an attach.
+   *
+   * The id is re-validated HERE even though it came from a matched regex: it
+   * arrives from a file on disk, and the rule is that a value only becomes a path
+   * segment after the code that builds the path has checked it itself.
+   */
+  private readTaskLog(
+    conversationId: string,
+    taskId: string,
+    budget: { remaining: number },
+  ): AgyTaskLog | undefined {
+    if (!AGY_TASK_ID_SEGMENT.test(taskId)) {
+      this.trace?.({ op: 'task-log-rejected', detail: `unusable task id ${JSON.stringify(taskId)}` });
+      return undefined;
+    }
+    if (budget.remaining <= 0) {
+      this.trace?.({
+        op: 'task-log-budget-exhausted',
+        detail: `${taskId}: ${AGY_TASK_LOG_BUDGET_BYTES}-byte per-replay budget spent`,
+      });
+      return undefined;
+    }
+    // A settlement's sender names the conversation that OWNS the task, which for
+    // this connection's own inbox is this conversation — but reading it from the
+    // sender rather than assuming keeps one fact on one code path.
+    const path = agyTaskLogPath(this.roots, conversationId, taskId);
+    const cap = Math.min(AGY_TASK_LOG_MAX_BYTES, budget.remaining);
+    const read = readAgyTextFile(this.roots.appData, path, cap, this.trace);
+    if (read === undefined) return undefined;
+    budget.remaining -= Buffer.byteLength(read.text, 'utf8');
+    if (read.truncated) {
+      this.trace?.({ op: 'task-log-oversized', detail: `${path} exceeds the ${cap}-byte cap` });
+    }
+    return { text: read.text, truncated: read.truncated };
+  }
+
+  /**
+   * The background-task panel, or nothing.
+   *
+   * Built AFTER the settlements are read, because a settlement is the only
+   * positive proof that a task ended — fold it first and every task reports as
+   * still in progress.
+   */
+  private taskListMessages(): AgentMessage[] {
+    const ledger = foldAgyTaskLedger(this.taskReferences, this.settledTasks);
+    const message = agyTaskListState(this.conversationId, ledger);
+    return message ? [message] : [];
+  }
+
+  // ── Pickers (P2a/P2b) ──────────────────────────────────────────────────────
+
+  /**
+   * The model picker's rows. Available on OBSERVE too, deliberately.
+   *
+   * Listing models is a read, and a client that is only observing still shows the
+   * picker; an observe connection that answered nothing would render an empty one
+   * — the exact shape reflection §2 warns about, where a missing answer reads as
+   * "no models" rather than "not available here". Sending a chosen model is the
+   * mutation, and that is still refused by `sendPrompt`.
+   *
+   * Read per call rather than cached at attach: a picker opened an hour into a
+   * session should show what is installed now. The LIVE `agy models` list is
+   * preferred (awaited, once per TTL — the picker open is user-initiated); the
+   * cockpit file froze on 2026-08-15 and is only the no-binary fallback.
+   */
+  async listModels(): Promise<ModelOption[]> {
+    const catalog = (this.catalogBinary
+      ? await ensureAgyCliCatalog(this.catalogBinary, { ...(this.trace ? { trace: this.trace } : {}) })
+      : undefined)
+      ?? readAgyModelCatalog(this.roots, this.trace);
+    const settingsLabel = readAgySettingsModelLabel(this.roots, this.trace);
+    return agyModelOptions(catalog, {
+      ...(settingsLabel ? { settingsLabel } : {}),
+      ...(this.trace ? { trace: this.trace } : {}),
+    });
+  }
+
+  /**
+   * The three `--mode` values agy accepts. Static because the host's list is:
+   * they are compiled into the binary's flag help, not published in any file.
+   */
+  async listModes(): Promise<ModeOption[]> {
+    return AGY_MODES;
   }
 
   // ── Observe is read-only ───────────────────────────────────────────────────

@@ -122,7 +122,7 @@ interface Harness {
 
 function newDrive(
   script: AgyFakeScript,
-  options: { transcriptSteps?: number; noSubscribe?: boolean; tailReadMaxBytes?: number } = {},
+  options: { transcriptSteps?: number; noSubscribe?: boolean; tailReadMaxBytes?: number; mode?: string } = {},
 ): Harness {
   const tree = buildAgyFixtureTree({
     transcriptSteps: options.transcriptSteps ?? 3,
@@ -144,6 +144,7 @@ function newDrive(
     info,
     binary: fake.path,
     trace: (trace) => traces.push(trace),
+    ...(options.mode !== undefined ? { mode: options.mode } : {}),
     ...(options.tailReadMaxBytes !== undefined ? { tailReadMaxBytes: options.tailReadMaxBytes } : {}),
   });
   const messages: AgentMessage[] = [];
@@ -517,9 +518,16 @@ function newDrive(
   }
 }
 
-// ── 11. init re-derives model and mode onto the contract fields ─────────────
+// ── 11. init re-derives the MODEL; the mode comes from the launch ───────────
+//
+// TWO AXES, and `init` answers the wrong one. `--mode` takes `default`,
+// `accept-edits` or `plan`; `init.permission_mode` reports `request-review`
+// under ALL THREE and under no `--mode` at all (MEASURED 2026-08-25, 1.1.20) —
+// it is the auto-approval policy, which has no flag. So the model IS re-derived
+// from the live child and the mode is NOT: `currentMode` is the posture this
+// connection launched with, because nothing else knows it.
 {
-  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] });
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] }, { mode: 'plan' });
   try {
     await h.connection.getHistory();
     await h.connection.sendPrompt({ text: 'go' });
@@ -529,15 +537,110 @@ function newDrive(
     check('the live init re-derives the model rather than trusting what attach decided',
       h.connection.info.currentModel?.modelID === 'gemini-3.5-flash-low',
       JSON.stringify(h.connection.info.currentModel));
-    check('permission_mode is published as `currentMode`, never as `permissionMode`',
-      h.connection.info.currentMode === 'request-review'
-        && !('permissionMode' in h.connection.info),
-      JSON.stringify({ currentMode: h.connection.info.currentMode }));
-    check('the re-derived values are broadcast, not merely stored',
-      h.messages.some((m) => m.type === 'metadata-update'
+    check('the mode published is the one we LAUNCHED with, not the one init reported',
+      h.connection.info.currentMode === 'plan',
+      JSON.stringify({ currentMode: h.connection.info.currentMode, initReported: INIT_EVENT.permission_mode }));
+    check('the contract field is `currentMode`; `permissionMode` never appears on info',
+      !('permissionMode' in h.connection.info));
+    check('init reporting a different value is TRACED rather than silently ignored',
+      h.traces.some((trace) => trace.op === 'drive-init-permission-mode-ignored'),
+      h.traces.map((trace) => trace.op).join(','));
+    // The LAUNCH mode is on `info` before anyone can subscribe, which is what the
+    // attach snapshot carries. A mid-session CHANGE is the case that needs a
+    // broadcast, because by then the clients are already watching — and a mode
+    // switch is exactly what would otherwise leave every row on the old posture.
+    await h.connection.sendPrompt({ text: 'switch posture', permissionMode: 'accept-edits' });
+    check('a mid-session mode change is BROADCAST, not merely stored',
+      await waitFor(() => h.messages.some((m) => m.type === 'metadata-update'
         && (m as { key: string }).key === 'sessionInfo'
-        && JSON.stringify((m as { value: unknown }).value).includes('request-review')),
+        && JSON.stringify((m as { value: unknown }).value).includes('"currentMode":"accept-edits"'))),
       h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+    // The child writes its argv on startup, so this is read AFTER the spawn lands
+    // rather than immediately after the parent-side broadcast.
+    check('the switched-to mode is one agy accepts, and reaches the argv',
+      await waitFor(() => (h.fake.argv() ?? []).join(' ').includes('--mode accept-edits')),
+      (h.fake.argv() ?? []).join(' '));
+    check('the re-derived model is broadcast too',
+      h.messages.some((m) => m.type === 'metadata-update'
+        && JSON.stringify((m as { value: unknown }).value).includes('gemini-3.5-flash-low')),
+      h.messages.filter((m) => m.type === 'metadata-update').map((m) => JSON.stringify(m)).join(' | '));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 11b. A mode agy would silently drop never becomes `currentMode` ─────────
+//
+// The host's own 1.1.20 changelog records fixing "`--mode` being ignored … an
+// unrecognized value produced no warning at all". So passing one leaves the
+// child in `default` while the row advertises the mode that was asked for: the
+// client believes X, the session is Y, and nothing says so (reflection §11).
+{
+  const h = newDrive({ init: INIT_EVENT, defaultTurn: [RESULT_OK] }, { mode: 'request-review' });
+  try {
+    check('an off-vocabulary launch mode is refused before it can be advertised',
+      h.connection.info.currentMode === undefined,
+      JSON.stringify({ currentMode: h.connection.info.currentMode }));
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'go', permissionMode: 'full-access' });
+    await waitFor(() => h.fake.launches() === 1);
+    await settle(200);
+    const launched = h.fake.argv() ?? [];
+    check('a per-turn mode agy does not have is dropped from the argv, with a trace',
+      !launched.includes('--mode') && h.traces.some((trace) => trace.op === 'drive-mode-rejected'),
+      `${launched.join(' ')} / ${h.traces.map((trace) => trace.op).join(',')}`);
+    check('the dropped mode never reaches `currentMode` either',
+      h.connection.info.currentMode === undefined,
+      String(h.connection.info.currentMode));
+  } finally {
+    h.cleanup();
+  }
+}
+
+// ── 11c. A per-turn EFFORT switch launches the sibling id (P2a + F1) ────────
+//
+// The picker collapses a family's effort variants into one row, so the client
+// sends `{modelID: <some variant>, reasoningEffort: 'low'}`. The switch must
+// resolve to the SIBLING id before it is compared to the launch model and before
+// it reaches the argv — and `--effort` must never be passed, because every
+// catalog id is already a variant and the binary rejects the pair. The relaunch
+// still obeys the F1 settlement rules: the abandoned turn is named and the
+// session returns to idle.
+{
+  const h = newDrive({
+    init: INIT_EVENT,
+    turnsByLaunch: [[[]], [[RESULT_OK]]],
+    defaultTurn: [],
+  });
+  try {
+    await h.connection.getHistory();
+    await h.connection.sendPrompt({ text: 'first, which never answers' });
+    await waitFor(() => h.fake.stdin().length === 1);
+
+    await h.connection.sendPrompt({
+      text: 'second, at a different effort',
+      model: { providerID: 'google-antigravity', modelID: 'gemini-3.7-flash-high', reasoningEffort: 'low' },
+    });
+    check('an effort switch relaunches the child',
+      await waitFor(() => h.fake.launches() === 2), `${h.fake.launches()} launches`);
+    const argv = h.fake.argv() ?? [];
+    check('the relaunch names the SIBLING id rather than the id the client sent',
+      argv.includes('gemini-3.7-flash-low') && !argv.includes('gemini-3.7-flash-high'),
+      argv.join(' '));
+    check('`--effort` is never passed — the id already carries the effort',
+      !argv.includes('--effort'), argv.join(' '));
+    check('`--print` is still absent from the relaunched argv', !argv.includes('--print'), argv.join(' '));
+
+    // F1, unchanged by the model resolution in front of it.
+    check('the turn the effort switch abandoned is named to the user',
+      h.errors().some((message) => /cancelled without a result/i.test(message)),
+      h.errors().join(' | '));
+    check('the effort switch settles the abandoned generation exactly once',
+      h.traces.filter((trace) => trace.op === 'drive-turn-abandoned-by-relaunch').length === 1,
+      h.traces.filter((trace) => trace.op === 'drive-turn-abandoned-by-relaunch').length.toString());
+    check('the replacement turn CAN return the session to idle',
+      await waitFor(() => h.statuses()[h.statuses().length - 1] === 'idle'),
+      h.statuses().join(','));
   } finally {
     h.cleanup();
   }
