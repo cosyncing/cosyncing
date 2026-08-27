@@ -2022,8 +2022,16 @@ export const KIMI_APPROVAL_DETAIL_CAP_BYTES = 2 * 1024;
  * The first line only, capped: `turn.ended` carries another product's error
  * payload, and a stack trace pasted into a chat transcript is noise, not
  * information.
+ *
+ * MEASURED against the message this cap exists to deliver. The host's quota
+ * refusal is ONE line of 217 characters whose last 55 are the subscription URL
+ * — the only actionable part of it — so a 200-character cut landed mid-URL and
+ * turned the one provider message a user must act on into a message they
+ * cannot act on. 400 keeps the first-line rule that actually excludes stack
+ * traces (a trace is excluded by being multi-line, not by being long) while
+ * letting a real provider sentence through whole.
  */
-export const KIMI_ERROR_MESSAGE_CAP = 200;
+export const KIMI_ERROR_MESSAGE_CAP = 400;
 
 /** The main agent's id upstream (`MAIN_AGENT_ID`); subagent frames carry their own. */
 export const KIMI_MAIN_AGENT_ID = 'main';

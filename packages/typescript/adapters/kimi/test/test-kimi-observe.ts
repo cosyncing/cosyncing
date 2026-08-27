@@ -36,6 +36,7 @@ import {
   type KimiWireIo,
 } from '../src/usage.ts';
 import { KIMI_ACTIVE_GAP_CAP_MS, KIMI_ACTIVE_TIME_METHOD } from '../src/timing.ts';
+import { KIMI_ERROR_MESSAGE_CAP } from '../src/mapping.ts';
 import {
   KimiObserveConnection,
   KIMI_HISTORY_MAX_PAGES,
@@ -48,6 +49,7 @@ import {
   KIMI_RESYNC_GAP_NOTICE,
   KIMI_RESYNC_MAX_PAGES,
   KIMI_RESYNC_RECOVERY_PASS_MAX,
+  KIMI_RUN_STATE_REPAIR_AFTER_MS,
   KIMI_REFRESH_PAGE_SIZE,
   KIMI_WS_FRAME_MAX_BYTES,
   kimiMessageIdentity,
@@ -105,6 +107,9 @@ let holdNextMessages: Promise<void> | undefined;
  * reproduce a stream that keeps overtaking its own catch-up.
  */
 let onMessagesRequest: ((beforeId: string | null) => void) | undefined;
+/** The current session-row answer and how many times it was read. See the route below. */
+let sessionRowPayload: Record<string, unknown> = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+let sessionRowReads = 0;
 /** The current `/status` answer, so a reading can CHANGE between poll ticks. */
 let statusPayload: { code: number; msg: string; data: unknown } = FIXTURE.rest.status!;
 /**
@@ -127,6 +132,14 @@ const server = Bun.serve({
     if (url.pathname === '/api/v2/sessions') return Response.json(FIXTURE.rest.v2Sessions);
     if (url.pathname === `/api/v1/sessions/${FIXTURE.sessionId}/status`) {
       return Response.json(statusPayload);
+    }
+    // The SESSION ROW, the run-state repair's authority. Distinct from
+    // `/status` on purpose: only this projection carries `pending_interaction`
+    // alongside `busy`, which is what keeps a repair from flattening a session
+    // blocked on an approval into idle.
+    if (url.pathname === `/api/v1/sessions/${FIXTURE.sessionId}`) {
+      sessionRowReads += 1;
+      return Response.json({ code: 0, msg: 'success', data: sessionRowPayload, request_id: 'fixture' });
     }
     if (url.pathname === '/api/v1/models') {
       modelReads += 1;
@@ -2446,6 +2459,225 @@ try {
       `resubs=${stormResubs.length - subscribesBefore} frames=${injected}`
       + ` ${JSON.stringify(stormResubs[stormResubs.length - 1]?.payload)}`);
     await stormConn.close();
+  }
+
+  // ── Run-state repair, and the failure a history read cannot fold ──────────
+  //
+  // The two defects this block guards, both seen on the live 0.38.0 host:
+  //
+  //  1. `working` STUCK FOREVER. Its only clearing signal on this transport is
+  //     `event.session.work_changed` with `busy:false`, and that frame is not
+  //     redelivered — so a socket that died across the turn boundary, a Kimi
+  //     restart, a conceded resync gap, or a turn killed rather than finished
+  //     left the badge standing for the life of the connection. The roster then
+  //     PINNED it: the broker assigns the live owner's status over the
+  //     discovery row unconditionally, so a sweep correctly reading
+  //     `activity: 'idle'` could not undo it either. The repair that existed
+  //     was on the drive class and gated on its completion fences, which only
+  //     exist for prompts THIS process sent — a condition a foreign,
+  //     terminal-driven session can never satisfy, which is the only kind an
+  //     observe connection watches.
+  //
+  //  2. A FAILED TURN THAT NEVER SAYS WHY. The reason is on the live frame and
+  //     nowhere durable: the REST fold writes an assistant row with EMPTY
+  //     content for that turn, and the session row's `last_turn_reason` is not
+  //     evidence — measured, it reported `completed` for a session whose last
+  //     two turns both died on a 403 quota refusal. So a user who was not
+  //     watching at that instant saw an empty bubble, and a resync erased the
+  //     row from a user who was.
+
+  {
+    const repairHome = mkdtempSync(join(tmpdir(), 'kimi-observe-repair-'));
+    const repairRoot = join(repairHome, 'sessions');
+    const mainDirectory = join(repairRoot, 'wd_repair_0001', FIXTURE.sessionId, 'agents', 'main');
+    mkdirSync(mainDirectory, { recursive: true });
+    const mainJournal = join(mainDirectory, 'wire.jsonl');
+    // The host's real refusal, verbatim: ONE line of 217 characters whose last
+    // 55 are the subscription URL. It is the reason KIMI_ERROR_MESSAGE_CAP is
+    // not 200 — that cut landed mid-URL and removed the only actionable part.
+    const QUOTA_MESSAGE = "403 You've reached your 5-hour usage limit."
+      + ' Your quota will reset when the current 5-hour window ends.'
+      + ' To continue now, purchase extra usage or upgrade your plan:'
+      + ' https://www.kimi.com/membership/subscription?tab=quota';
+    const journalLine = (row: Record<string, unknown>) => `${JSON.stringify(row)}\n`;
+    const failedTurn = (turnId: number) => journalLine({
+      type: 'turn.ended', agentId: 'main', turnId, reason: 'failed',
+      error: { code: 'provider.auth_error', message: QUOTA_MESSAGE, retryable: false },
+      durationMs: 1049, time: 1_787_849_212_791,
+    });
+    const writeJournal = (body: string) => writeFileSync(mainJournal, body);
+    writeJournal(
+      journalLine({ type: 'turn.prompt', agentId: 'main', turnId: 6, time: 1 })
+      + journalLine({ type: 'llm.request', agentId: 'main', time: 2 })
+      + failedTurn(6),
+    );
+
+    let clock = 5_000_000;
+    let repairTick: (() => void) | undefined;
+    const repairAdapter = new KimiAdapter({
+      env: {}, homeDir: '/fixture/home',
+      instanceScan: () => scan,
+      readToken: () => 'fixture-token',
+      observe: {
+        socketFactory: () => new FakeSocket(),
+        setInterval: (handler) => { repairTick = handler; return 1; },
+        clearInterval: () => { repairTick = undefined; },
+        now: () => clock,
+        wireRoot: repairRoot,
+      },
+    });
+
+    try {
+      const conn = await repairAdapter.attach(FIXTURE.sessionId) as KimiObserveConnection;
+      const rows: AgentMessage[] = [];
+      const errorRows = () => rows.filter(
+        (message): message is Extract<AgentMessage, { type: 'error' }> => message.type === 'error');
+
+      // ── The failure row, recovered from the journal ────────────────────────
+      const historyRows = await conn.getHistory();
+      const recovered = historyRows.at(-1);
+      check('history ends with the failed turn the REST fold cannot carry',
+        recovered?.type === 'error' && recovered.message === QUOTA_MESSAGE,
+        recovered?.type === 'error' ? `${recovered.message.length} chars` : String(recovered?.type));
+      check('the recovered reason keeps the actionable URL the old 200-char cap removed',
+        recovered?.type === 'error' && recovered.message.endsWith('?tab=quota'),
+        `cap=${KIMI_ERROR_MESSAGE_CAP} message=${QUOTA_MESSAGE.length}`);
+
+      conn.subscribe((message) => rows.push(message));
+      const repairSocket = sockets[sockets.length - 1]!;
+      repairSocket.fire('open', {});
+      await Bun.sleep(50);
+      // The envelope shape the socket path actually reads: the type is at the
+      // top level AND inside the payload, and only this session's `session_id`
+      // may move the cursor.
+      let repairSeq = 9_000;
+      const repairEnvelope = (type: string, payload: Record<string, unknown>) => ({
+        type, seq: (repairSeq += 1), epoch: 'ep_repair', session_id: FIXTURE.sessionId, timestamp: 't',
+        payload: { type, agentId: 'main', sessionId: FIXTURE.sessionId, ...payload },
+      });
+      const busyEdge = (busy: boolean) => repairEnvelope(
+        'event.session.work_changed', { busy, pending_interaction: 'none' });
+
+      // The same ending arriving live is ONE row, not two: both routes key the
+      // same identity, and history remembered it on the way out.
+      repairSocket.deliver(repairEnvelope(
+        'turn.ended', { turnId: 6, reason: 'failed', error: { message: QUOTA_MESSAGE } }));
+      await Bun.sleep(50);
+      check('a live turn.ended for a turn history already recovered adds no second row',
+        errorRows().length === 0, `${errorRows().length} live error rows`);
+
+      // ── A stale `working` heals on a stream restore ────────────────────────
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: true, pending_interaction: 'none' };
+      repairSocket.deliver(busyEdge(true));
+      await Bun.sleep(50);
+      check('a busy edge still puts the connection in working',
+        conn.info.status === 'working', conn.info.status);
+
+      // The turn ends while the stream is down: the clearing edge is never
+      // delivered to anyone, which is the whole failure mode. A NEW turn fails
+      // here — turn 6's reason is already in the transcript history recovered,
+      // and re-emitting that one is exactly what the shared identity prevents.
+      writeJournal(
+        journalLine({ type: 'turn.prompt', agentId: 'main', turnId: 7, time: 10 })
+        + journalLine({ type: 'llm.request', agentId: 'main', time: 11 })
+        + failedTurn(7),
+      );
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+      const readsBeforeRestore = sessionRowReads;
+      repairSocket.close();
+      await Bun.sleep(50);
+      repairTick?.();
+      await Bun.sleep(50);
+      sockets[sockets.length - 1]!.fire('open', {});
+      await Bun.sleep(50);
+      check('a stream restore repairs a stale working from the session row',
+        conn.info.status === 'idle' && sessionRowReads > readsBeforeRestore,
+        `status=${conn.info.status} reads=${sessionRowReads - readsBeforeRestore}`);
+      check('the repair surfaces the reason the lost frame would have carried',
+        errorRows().length === 1 && errorRows()[0]!.message === QUOTA_MESSAGE,
+        `${errorRows().length} error rows`);
+
+      // ── An idle connection pays nothing ───────────────────────────────────
+      const readsWhileIdle = sessionRowReads;
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS * 4;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('an idle connection reads no session row however long it sits',
+        sessionRowReads === readsWhileIdle, `${sessionRowReads - readsWhileIdle} reads`);
+
+      // ── The watchdog: a healthy socket that simply lost the edge ───────────
+      const liveSocket = sockets[sockets.length - 1]!;
+      liveSocket.deliver(busyEdge(true));
+      await Bun.sleep(50);
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+      const readsBeforeWatchdog = sessionRowReads;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('the watchdog does not fire inside its own window',
+        conn.info.status === 'working' && sessionRowReads === readsBeforeWatchdog,
+        `status=${conn.info.status} reads=${sessionRowReads - readsBeforeWatchdog}`);
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('a working badge with no evidence behind it heals on the poll tick',
+        conn.info.status === 'idle' && sessionRowReads > readsBeforeWatchdog,
+        `status=${conn.info.status} reads=${sessionRowReads - readsBeforeWatchdog}`);
+
+      // ── Never fabricate: a drifted row leaves the held state alone ─────────
+      liveSocket.deliver(busyEdge(true));
+      await Bun.sleep(50);
+      // `busy` is a REQUIRED boolean upstream, so a string is drift — a payload
+      // this reader cannot read, not a session that happens to be idle.
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: 'false', pending_interaction: 'none' };
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('a repair that reads a drifted row keeps the state it holds',
+        conn.info.status === 'working', conn.info.status);
+
+      // ── A blocked session is not an idle one ──────────────────────────────
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'approval' };
+      clock += KIMI_RUN_STATE_REPAIR_AFTER_MS + 1;
+      repairTick?.();
+      await Bun.sleep(50);
+      check('a repair adopts needs-input rather than flattening a blocked turn to idle',
+        conn.info.status === 'needs-input', conn.info.status);
+
+      await conn.close();
+
+      // ── The journal reader only speaks when the journal does ──────────────
+      const settledConn = async (body: string) => {
+        writeJournal(body);
+        const next = await repairAdapter.attach(FIXTURE.sessionId) as KimiObserveConnection;
+        const out = await next.getHistory();
+        await next.close();
+        return out;
+      };
+      const completed = await settledConn(
+        journalLine({ type: 'turn.prompt', agentId: 'main', turnId: 7, time: 1 })
+        + journalLine({ type: 'turn.ended', agentId: 'main', turnId: 7, reason: 'completed', time: 2 }),
+      );
+      check('a turn that completed adds no error row',
+        completed.every((message) => message.type !== 'error'), `${completed.length} rows`);
+
+      const reopened = await settledConn(
+        failedTurn(6) + journalLine({ type: 'turn.prompt', agentId: 'main', turnId: 7, time: 3 }),
+      );
+      check('a failure with a turn open after it is history, not the current outcome',
+        reopened.every((message) => message.type !== 'error'), `${reopened.length} rows`);
+
+      const foreign = await settledConn(
+        journalLine({
+          type: 'turn.ended', agentId: 'agent-3', turnId: 2, reason: 'failed',
+          error: { message: 'a subagent died' }, time: 4,
+        }),
+      );
+      check("a subagent's ending in the main journal is not the session's outcome",
+        foreign.every((message) => message.type !== 'error'), `${foreign.length} rows`);
+    } finally {
+      sessionRowPayload = { id: FIXTURE.sessionId, busy: false, pending_interaction: 'none' };
+      rmSync(repairHome, { recursive: true, force: true });
+    }
   }
 
   // ── Teardown + the mutation ban ───────────────────────────────────────────
