@@ -39,17 +39,26 @@
  */
 export {};
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
-import { ClaudeAdapter, mapTranscript } from '../../../adapters/claude/src/index.ts';
-import { CodexAdapter, mapRollout } from '../../../adapters/codex/src/index.ts';
-import { DshAdapter } from '../../../adapters/dsh/src/index.ts';
+// The adapter LIST comes from the production shipped-adapters source, so an
+// adapter cannot register without this suite seeing it. The per-package
+// imports below are only the mappers each probe drives.
+import { shippedAdapters } from '../../src/installation/shipped-adapters.ts';
+import { mapTranscript } from '../../../adapters/claude/src/index.ts';
+import { mapRollout } from '../../../adapters/codex/src/index.ts';
 // dsh and kimi publish NARROW broker-facing facades: the mapping stays
 // package-internal by design, and their own suites reach it by module path.
 // This one does the same rather than widening either facade for a test.
 import { createDshMapState, mapDshEvent } from '../../../adapters/dsh/src/mapping.ts';
-import { KimiAdapter } from '../../../adapters/kimi/src/index.ts';
 import { createKimiMappingState, mapKimiMessage } from '../../../adapters/kimi/src/mapping.ts';
-import { mapOpenCodePart, OpenCodeAdapter } from '../../../adapters/opencode/src/index.ts';
-import { mapPiJsonlText, PiAdapter } from '../../../adapters/pi/src/index.ts';
+import { mapOpenCodePart } from '../../../adapters/opencode/src/index.ts';
+import { mapPiJsonlText } from '../../../adapters/pi/src/index.ts';
+import { createAgyMapState, mapAgyStep, type AgyStep } from '../../../adapters/antigravity/src/index.ts';
+// agy's probe replays the package's recorded 1.1.17 fixture rather than an
+// inline reconstruction: the call row and the result row come from two
+// DIFFERENT transcript steps (PLANNER_RESPONSE carries the tool_calls, the
+// VIEW_FILE/CODE_ACTION step carries the result), and that cross-step pairing
+// is exactly what the fixture pins.
+import { FIXTURE as AGY_FIXTURE } from '../../../adapters/antigravity/test/fixtures/tree.ts';
 
 const results: Array<{ name: string; ok: boolean; detail: string }> = [];
 function check(name: string, ok: boolean, detail = ''): void {
@@ -171,6 +180,16 @@ const DECLARED: Record<string, Record<Family, Answer>> = {
     // `card:'diff'` names the file it rewrote. Only the result's own field:
     // dsh renders the diff as one unified string and publishes no per-file
     // `fileChanges[]`, so there is no second place the path could land.
+    edit: { status: 'supported', fields: ['result.path'] },
+  },
+  agy: {
+    // `view_file`'s result decodes `AbsolutePath` off the call's JSON-encoded
+    // args and lands it on the file-read semantic and the result's own field —
+    // both asserted with unquoted values in test-agy-mapping.ts.
+    read: { status: 'supported', fields: ['semantic.path', 'result.path'] },
+    // CODE_ACTION names the file it acted on; the transcript records prose
+    // ("Created file file://…"), not a unified diff, so the row states
+    // `result.path` and fabricates no change set — dsh's situation exactly.
     edit: { status: 'supported', fields: ['result.path'] },
   },
 };
@@ -368,6 +387,24 @@ PROBES.dsh = {
   }),
 };
 
+// agy: the recorded 1.1.17 transcript fixture through the package's one
+// mapper, exactly as replay and live tail run it. The pair is located by tool
+// name because the callId embeds the fixture's conversation uuid and step
+// index — deriving it here would re-implement the key function under test.
+function agyPair(toolName: string): RowPair {
+  const state = createAgyMapState(AGY_FIXTURE.conversationIds.withTranscript, { liveChild: false });
+  const messages = (AGY_FIXTURE.transcript as unknown as AgyStep[]).flatMap((step) =>
+    mapAgyStep(step, state));
+  const result = messages.find(
+    (m) => m.type === 'tool-result' && (m as { toolName?: string }).toolName === toolName,
+  ) as { callId?: string } | undefined;
+  return pair(messages, result?.callId ?? '');
+}
+PROBES.agy = {
+  read: () => agyPair('view_file'),
+  edit: () => agyPair('write_to_file'),
+};
+
 // ── The observation ─────────────────────────────────────────────────────────
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -405,18 +442,13 @@ function observedFields(rows: RowPair): PathField[] {
 
 // ── 1. Completeness: silence fails ──────────────────────────────────────────
 //
-// The ids come from the adapter classes the broker registers, not from a list
-// maintained beside them, so a new adapter cannot join the roster without
-// answering both questions here.
+// The ids come from the PRODUCTION shipped-adapter list, not from imports
+// maintained beside this suite: a hand-kept import block let a seventh adapter
+// register and pass here silently unanswered, which is the exact failure this
+// section exists to prevent. The direct class imports above remain only
+// because the probes need each package's mapper.
 
-const ADAPTER_IDS: string[] = [
-  new ClaudeAdapter().id,
-  new CodexAdapter({}).id,
-  new OpenCodeAdapter({}).id,
-  new PiAdapter({}).id,
-  new KimiAdapter().id,
-  new DshAdapter().id,
-];
+const ADAPTER_IDS: string[] = shippedAdapters().map((adapter) => adapter.id);
 
 const FAMILIES: readonly Family[] = ['read', 'edit'];
 

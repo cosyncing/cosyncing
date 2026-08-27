@@ -11,6 +11,7 @@
     "@cosyncing/adapter-claude": "workspace:*",
     "@cosyncing/adapter-kimi": "workspace:*",
     "@cosyncing/adapter-dsh": "workspace:*",
+    "@cosyncing/adapter-antigravity": "workspace:*",
     "@cosyncing/crypto": "workspace:*",
     "@cosyncing/transport": "workspace:*",
     "@cosyncing/transport-wire": "workspace:*"

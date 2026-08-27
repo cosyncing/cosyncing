@@ -79,6 +79,15 @@
         "replacement": ["dsh-observe", "dsh-attach-priming"],
         "hub-authority": ["dsh-attach-priming"]
       }
+    },
+    "AgyAdapter": {
+      "coverage": {
+        "native-identity": ["agy-store", "agy-identity"],
+        "terminal-authority": ["agy-drive", "agy-observe"],
+        "history-live-chronology": ["agy-identity", "agy-observe"],
+        "replacement": ["agy-identity"],
+        "hub-authority": ["agy-cross-client-join", "agy-registration-gate"]
+      }
     }
   }
 }

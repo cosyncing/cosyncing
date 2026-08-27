@@ -47,6 +47,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Server owners can enable authenticated workspace browsing from Settings
   after confirming the remote file-access risk. The broker persists the gate
   and restarts; paired devices can inspect it but cannot change it.
+- Antigravity (`agy`) is a shipped agent. Conversations are discovered from the
+  CLI's own store and replayed read-only; `?mode=resume` drives one through a
+  broker-owned `agy` child that starts on the first prompt rather than on
+  attach. Two clients can share one Drive — the second is offered the join,
+  receives the same connection, and sees prompts the transcript has not
+  recorded yet — and a write from a terminal releases the session to it and
+  says so. Doctor diagnoses it. Seven gated suites cover the store, the mapper,
+  observe, drive, replay identity, registration, and the cross-client join.
+- Kimi subagent sessions appear in the roster as observe-only child rows under
+  the session that spawned them, replaying the child's own journal.
 
 ### Changed
 

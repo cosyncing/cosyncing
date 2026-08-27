@@ -16,6 +16,7 @@ import { PiAdapter } from '@cosyncing/adapter-pi';
 import { ClaudeAdapter } from '@cosyncing/adapter-claude';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
+import { AgyAdapter } from '@cosyncing/adapter-antigravity';
 import { managedHostGateEnv } from '../runtime/managed-host.ts';
 
 /**
@@ -30,6 +31,7 @@ export function shippedAdapters(): readonly AgentBackend[] {
     new ClaudeAdapter(),
     new KimiAdapter(),
     new DshAdapter(),
+    new AgyAdapter(),
   ];
 }
 

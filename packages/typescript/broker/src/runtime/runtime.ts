@@ -61,6 +61,7 @@ import {
 import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHooks, claudeHooksInstalled, claudeHooksSettingsPath, isClaudeTranscriptPathAllowed, readLatestModel, readLatestPermissionMode, modelAlias } from '@cosyncing/adapter-claude';
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
+import { AgyAdapter } from '@cosyncing/adapter-antigravity';
 import { Hub, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
 import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../roster/roster-overlay.ts';
 import {
@@ -768,6 +769,17 @@ registry.register(new KimiAdapter());
 // better served by an agent that says so than by one that stays invisible
 // unless they already knew to set a variable.
 registry.register(new DshAdapter());
+// Antigravity — observe (transcript-JSONL replay + tail) for every conversation,
+// plus Drive on an explicit `?mode=resume`: a broker-owned
+// `agy --conversation <id> --input-format stream-json` child that starts on the
+// FIRST prompt and never on attach, because every `agy` invocation pays a full
+// workspace init. Discovery is FILE-BACKED — there is no daemon, no socket and
+// nothing listening between invocations — so there is no managed host to start,
+// supervise or stop, and no host address to configure. Registered
+// UNCONDITIONALLY and with no `minimumClientRevision`: its integration kind and
+// both its attach modes predate every client-decode tolerance, so no released
+// client loses its roster over this row.
+registry.register(new AgyAdapter());
 
 let latestBrokerHealth: BrokerHealthSnapshot;
 let attentionService: AttentionService;

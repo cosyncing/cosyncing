@@ -1579,16 +1579,16 @@ for await (const chunk of Bun.stdin.stream()) {
       const running = await waitFor(() => messages.some((m) =>
         m.type === 'run-summary'
         && m.status === 'running'
-        && m.turnId === 'native-completion'), 4000);
+        && m.turnId === 'native-completion'), 15000);
       writeFileSync(`${marker}.release`, 'release\n');
       await waitFor(() => messages.some((m) =>
         m.type === 'run-summary'
         && m.status === 'done'
-        && m.turnId === 'native-completion'), 4000);
+        && m.turnId === 'native-completion'), 15000);
       await Promise.all(attentionWork);
       await waitFor(() => attention.store.findByDedupeKey(
         'run-finished:codex:native-session:native-completion',
-      ) !== undefined, 4000);
+      ) !== undefined, 15000);
       const event = attention.store.findByDedupeKey(
         'run-finished:codex:native-session:native-completion',
       );

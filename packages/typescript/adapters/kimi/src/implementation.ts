@@ -126,12 +126,39 @@ import {
 import { KimiObserveConnection, type KimiObserveOptions } from './observe.ts';
 import { KimiDriveConnection, type KimiDriveOptions } from './drive.ts';
 import { kimiSessionWireRoot } from './usage.ts';
+import {
+  kimiSessionNativeId,
+  kimiSubagentIdInfo,
+  kimiSubagentRow,
+  listKimiSubagents,
+  locateKimiSessionDirectory,
+  readKimiAgentsMap,
+  readKimiChildJournalHead,
+  readKimiSpawnRecords,
+  kimiSubagentControlState,
+  kimiSubagentStatus,
+  kimiSubagentTitle,
+  KIMI_SUBAGENT_NATIVE_PREFIX,
+  KIMI_SUBAGENT_OWNED_REASON,
+} from './subagents.ts';
+import { KimiSubagentConnection } from './subagent-history.ts';
 
 /** Sessions per discovery page. Kimi caps `page_size` at 100. */
 const DISCOVERY_PAGE_SIZE = 50;
 
 /** Discovery pages per sweep, so an enormous store cannot become unbounded roster work. */
 const DISCOVERY_MAX_PAGES = 4;
+
+/**
+ * Rows ONE sweep may yield in total — parents and their subagent children
+ * together.
+ *
+ * This ceiling always existed; it was simply implicit in the page bounds above,
+ * because parents were the only rows a sweep could produce. Naming it is what
+ * lets child rows spend from the SAME allowance instead of from a second one:
+ * a session with twenty slots must not be able to double the roster.
+ */
+const DISCOVERY_MAX_ROWS = DISCOVERY_MAX_PAGES * DISCOVERY_PAGE_SIZE;
 
 /**
  * How long a broker-started `kimi web` has to answer its own health probe.
@@ -789,7 +816,68 @@ export class KimiAdapter implements AgentBackend {
       if (!mapped.hasMore || !mapped.nextPageToken) break;
       pageToken = mapped.nextPageToken;
     }
-    return sessions;
+    return this.withSubagentRows(sessions, options);
+  }
+
+  /**
+   * Append observe-only CHILD rows for every parent that actually has
+   * subagents, and give exactly those parents a published lineage identity.
+   *
+   * DISCOVERY IS DEPTH-1 FOR SESSIONS; this is the deliberate depth-2
+   * exception, and it is walked only for a parent the sweep ALREADY yielded.
+   * The REST query above carries `meta.updated_after`, so every row in
+   * `parents` is inside the roster cutoff by construction — round 1's rule
+   * ("walk children only for a parent already inside the cutoff") needs no
+   * second filter here, and a cold session's child tree is never touched.
+   *
+   * BUDGET. The sweep's row ceiling was already
+   * `DISCOVERY_MAX_PAGES × DISCOVERY_PAGE_SIZE`, spent entirely on parents.
+   * Children now spend from the SAME ceiling
+   * ({@link DISCOVERY_MAX_ROWS}) rather than from a second allowance of their
+   * own — otherwise one session with twenty slots could double the roster a
+   * client has to render. The remainder after the parents is what the walk may
+   * yield, and it is threaded through the loop so an earlier parent's children
+   * reduce what a later parent may add.
+   *
+   * IDENTITY. The parent's `nativeId` is set HERE and only here, and only for a
+   * parent with at least one child — reflection §2: a lineage id invented
+   * store-wide would attach an identity to every Kimi session in the roster for
+   * the benefit of the handful that need one. A childless parent keeps exactly
+   * the row {@link mapKimiSession} built.
+   *
+   * TOTAL BY CONSTRUCTION. Every failure inside the walk (no journal tree, an
+   * unreadable `state.json`, a home that does not exist) yields no children
+   * rather than an exception: discovery must not fail because another product's
+   * directory is missing.
+   */
+  private withSubagentRows(parents: SessionInfo[], options?: SessionDiscoveryOptions): SessionInfo[] {
+    let budget = DISCOVERY_MAX_ROWS - parents.length;
+    if (budget <= 0) return parents;
+    const wireRoot = kimiSessionWireRoot(this.home());
+    const now = Date.now();
+    const children: SessionInfo[] = [];
+    for (const parent of parents) {
+      if (budget <= 0) break;
+      let scan;
+      try {
+        scan = listKimiSubagents({
+          wireRoot,
+          parentSessionId: parent.id,
+          ...(options?.updatedAfter !== undefined ? { updatedAfter: options.updatedAfter } : {}),
+          yieldBudget: budget,
+        });
+      } catch {
+        continue;
+      }
+      if (scan.children.length === 0) continue;
+      // The one parent-side emission this feature adds.
+      parent.nativeId = kimiSessionNativeId(parent.id);
+      for (const child of scan.children) {
+        children.push(kimiSubagentRow(child, parent, now));
+        budget -= 1;
+      }
+    }
+    return children.length === 0 ? parents : [...parents, ...children];
   }
 
   /**
@@ -811,6 +899,28 @@ export class KimiAdapter implements AgentBackend {
    *  - `resume`    → refused. Nothing here owns a Kimi process to resume into.
    */
   async attach(sessionId: string, mode?: AttachMode, opts?: AttachOptions): Promise<SessionConnection> {
+    // ── Subagent rows, decided FIRST ────────────────────────────────────────
+    //
+    // Before the takeover latch, before `verifiedInstance`, before any socket,
+    // HTTP request or process probe. The id alone identifies a child (the
+    // `kimi-subagent:` namespace can never name a real `session_<uuid>`), so a
+    // drive request on one is refused with nothing having been contacted and
+    // nothing having been written — which is what "enforce at attach, not just
+    // advertise" has to mean. Advertising observe-only in `control` and then
+    // discovering the refusal three awaits deep would leave a promotion latch
+    // and a verified instance behind it.
+    // Keyed on the PREFIX, not on a successful parse. An id inside the
+    // subagent namespace that does not decode — a traversal-shaped slot, a
+    // missing separator — must be REFUSED here, never fall through to the
+    // ordinary session path, where the unknown-id fallback would happily
+    // synthesize a foreign-shaped row and hand back a real observe connection
+    // for an id that names nothing.
+    if (sessionId.startsWith(KIMI_SUBAGENT_NATIVE_PREFIX)) {
+      const subagent = kimiSubagentIdInfo(sessionId);
+      if (!subagent) throw new Error(`'${sessionId}' is not a valid Kimi subagent id.`);
+      return this.attachSubagent(sessionId, subagent, mode);
+    }
+
     const takeover = mode === 'live' && opts?.reason === 'takeover';
     // Only an UNOWNED takeover is a promotion. A takeover of a session already
     // owned is an ordinary live attach that happens to carry the reason, and
@@ -931,6 +1041,76 @@ export class KimiAdapter implements AgentBackend {
    * Split from {@link attach} so the latch has exactly one acquisition and one
    * release around every exit path, including the throws.
    */
+  /**
+   * Attach to a subagent row: refuse anything but observe, then replay the
+   * child's own journal.
+   *
+   * NO TRANSPORT ON THIS PATH AT ALL. A child is a file; the connection reads
+   * it and holds nothing. Re-deriving the row from the id (rather than trusting
+   * a roster row the caller may have cached) is reflection §5 — attach and
+   * discovery must agree about what a row IS, so both build it from the same
+   * three reads through the same functions.
+   *
+   * STATUS IS `idle` HERE, and that is the measured answer rather than a
+   * shortcut. `working` requires BOTH the parent having a turn in flight and
+   * the child's journal being fresh (wire-facts §8); this path has no parent
+   * status — reading one would mean an HTTP call on a path that otherwise makes
+   * none — so the conjunction cannot be satisfied and the honest result is
+   * idle. The roster sweep, which holds the parent row beside the child, is
+   * where a child's status actually moves.
+   */
+  private async attachSubagent(
+    sessionId: string,
+    handle: { parentSessionId: string; agentDir: string },
+    mode: AttachMode | undefined,
+  ): Promise<SessionConnection> {
+    // `undefined` is Observe for Kimi (see `attach`'s header): a missing mode
+    // never grants authority, so it is admitted here exactly as `'observe'` is.
+    if (mode !== undefined && mode !== 'observe') {
+      throw new Error(
+        `Kimi subagent rows are Observe-only; '${mode}' is not available. ${KIMI_SUBAGENT_OWNED_REASON}`,
+      );
+    }
+    const wireRoot = kimiSessionWireRoot(this.home());
+    const located = locateKimiSessionDirectory(wireRoot, handle.parentSessionId);
+    if (located.sessionDir === undefined) {
+      throw new Error(`Kimi subagent ${handle.agentDir} has no journal on this machine any more.`);
+    }
+    const sessionDir = located.sessionDir;
+    // The agents map is the authority on what a child IS. A directory that is
+    // not `type: 'sub'` must never open through this path, or a crafted id
+    // could aim the journal reader at `agents/main` — the PARENT's transcript,
+    // which is exactly what a child row must never replay.
+    const entry = readKimiAgentsMap(sessionDir)?.find((row) => row.agentId === handle.agentDir);
+    if (entry?.type !== 'sub') {
+      throw new Error(`Kimi subagent ${handle.agentDir} is not a subagent of ${handle.parentSessionId}.`);
+    }
+    const wirePath = join(sessionDir, 'agents', handle.agentDir, 'wire.jsonl');
+    const head = readKimiChildJournalHead(wirePath);
+    if (head === undefined) {
+      throw new Error(`Kimi subagent ${handle.agentDir} has no readable journal.`);
+    }
+    const task = readKimiSpawnRecords(sessionDir).byAgentId.get(handle.agentDir);
+    const title = kimiSubagentTitle(handle.agentDir, task, head.firstPromptText);
+    const info: SessionInfo = {
+      id: sessionId,
+      tool: this.id,
+      title,
+      nativeId: sessionId,
+      origin: 'subagent',
+      parentThreadId: kimiSessionNativeId(handle.parentSessionId),
+      ...(head.cwd !== undefined ? { cwd: head.cwd } : {}),
+      status: kimiSubagentStatus(undefined, { updatedAt: head.mtimeMs, ...(task ? { task } : {}) }, Date.now()),
+      launchSurface: 'unknown',
+      attachMode: 'observe',
+      ...(head.modelAlias !== undefined ? { model: head.modelAlias } : {}),
+      ...(head.createdAt !== undefined ? { createdAt: head.createdAt } : {}),
+      updatedAt: head.mtimeMs,
+      control: kimiSubagentControlState(),
+    };
+    return new KimiSubagentConnection(info, wirePath);
+  }
+
   private async openAttach(
     sessionId: string,
     mode: AttachMode | undefined,

@@ -1,10 +1,17 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "d16f10cf4b5c43ca966b4481acc42ea278b0626c",
+  "acceptedBase": "c11ebb986e6076c9c2028e8b495e8d3b08e74d92",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
     "broker.agent-create-readiness",
+    "broker.agy-cross-client-join",
+    "broker.agy-drive",
+    "broker.agy-identity",
+    "broker.agy-mapping",
+    "broker.agy-observe",
+    "broker.agy-registration-gate",
+    "broker.agy-store",
     "broker.application-identity",
     "broker.artifact-session-isolation",
     "broker.attach-identity",
@@ -57,6 +64,7 @@
     "broker.kimi-observe",
     "broker.kimi-read-only",
     "broker.kimi-registration-gate",
+    "broker.kimi-roster-subagents",
     "broker.lifecycle",
     "broker.live-session-coherence",
     "broker.managed-host-ownership",
@@ -125,7 +133,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:92e1aee019a325e2c7f53a5e781fc7714d6c00fed5592f80a61a16b196f2029b"
+      "fingerprint": "sha256:ca69530aa3208205c3373081eddaccc82377e34e674b84ed75fc105cf2432d33"
     },
     {
       "id": "capabilities",
@@ -256,6 +264,34 @@
     {
       "id": "agent-create-readiness",
       "fingerprint": "sha256:36de11384e1245765c2fb864076370b0d41d8e72216f9a360ef05f7cb542d344"
+    },
+    {
+      "id": "agy-cross-client-join",
+      "fingerprint": "sha256:dfd261ad668f7bedbb007e21f8e06689d0dffcbdff762dc9e5a122afd8d80bc7"
+    },
+    {
+      "id": "agy-drive",
+      "fingerprint": "sha256:0524850694a009b05800e761c605e97ea856ec08ae630d879f6eaad053266b8a"
+    },
+    {
+      "id": "agy-identity",
+      "fingerprint": "sha256:aaae303462dcb8a676d7bd04313c33602699d9e9883faa87098906f23b163e35"
+    },
+    {
+      "id": "agy-mapping",
+      "fingerprint": "sha256:5d6a3f322dd3f50ab1157c908548ad03665c0ed85aa2b08ba16e63ec4bb3a4b4"
+    },
+    {
+      "id": "agy-observe",
+      "fingerprint": "sha256:8d0664e2faa5f550fda02e75a408a32b1c07d40fd918e992153f35a792b3025d"
+    },
+    {
+      "id": "agy-registration-gate",
+      "fingerprint": "sha256:40181db39064ea11a0665637440bda948255fb03f236353ec67745ed4c860d8a"
+    },
+    {
+      "id": "agy-store",
+      "fingerprint": "sha256:a714ed37554bad4ab21a6e1931225e8a3348faadac4f14a58a90a4bb719f5daf"
     },
     {
       "id": "app-send-echo-correlation",
@@ -480,6 +516,10 @@
     {
       "id": "kimi-registration-gate",
       "fingerprint": "sha256:f653313cc3b36d70f008b961f7aebc693c090ae76fe4aea5804439ccf0a09d05"
+    },
+    {
+      "id": "kimi-roster-subagents",
+      "fingerprint": "sha256:8902b7f4e80ba95067c929ac973887638dd72c07d3720d9d631f97c99c59f7ab"
     },
     {
       "id": "kimi-server",
