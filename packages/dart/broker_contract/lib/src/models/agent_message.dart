@@ -66,15 +66,33 @@ enum AgentMessageType {
 /// Structured meaning attached to a canonical `notice`.
 enum TranscriptNoticeSemanticKind {
   interruption('interruption'),
+  continuation('continuation'),
   unknown('unknown');
 
   const TranscriptNoticeSemanticKind(this.wireValue);
   final String wireValue;
 
   static TranscriptNoticeSemanticKind fromWire(Object? value) =>
-      value == 'interruption'
-      ? TranscriptNoticeSemanticKind.interruption
-      : TranscriptNoticeSemanticKind.unknown;
+      switch (value) {
+        'interruption' => TranscriptNoticeSemanticKind.interruption,
+        'continuation' => TranscriptNoticeSemanticKind.continuation,
+        _ => TranscriptNoticeSemanticKind.unknown,
+      };
+}
+
+/// Structured reason for a system-opened continuation turn.
+enum TranscriptContinuationReason {
+  taskNotification('task-notification'),
+  unknown('unknown');
+
+  const TranscriptContinuationReason(this.wireValue);
+  final String wireValue;
+
+  static TranscriptContinuationReason fromWire(Object? value) =>
+      switch (value) {
+        'task-notification' => TranscriptContinuationReason.taskNotification,
+        _ => TranscriptContinuationReason.unknown,
+      };
 }
 
 /// Structured reason for a canonical turn interruption.
@@ -833,6 +851,26 @@ extension TranscriptSemanticAgentMessage on AgentMessage {
   String? get transcriptInterruptionTurnId {
     if (transcriptNoticeSemanticKind !=
         TranscriptNoticeSemanticKind.interruption) {
+      return null;
+    }
+    return _trimmedString(_transcriptSemantic?['turnId']);
+  }
+
+  /// Structured continuation reason, null for another notice kind.
+  TranscriptContinuationReason? get transcriptContinuationReason {
+    if (transcriptNoticeSemanticKind !=
+        TranscriptNoticeSemanticKind.continuation) {
+      return null;
+    }
+    return TranscriptContinuationReason.fromWire(
+      _transcriptSemantic?['reason'],
+    );
+  }
+
+  /// Exact native continuation turn supplied by the adapter, when available.
+  String? get transcriptContinuationTurnId {
+    if (transcriptNoticeSemanticKind !=
+        TranscriptNoticeSemanticKind.continuation) {
       return null;
     }
     return _trimmedString(_transcriptSemantic?['turnId']);

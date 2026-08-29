@@ -109,6 +109,7 @@
     "test:broker-agy-cross-client-join": "bun run packages/typescript/broker/test/broker/test-agy-cross-client-join.ts",
     "test:broker-protocol-journal": "bun run packages/typescript/broker/test/broker/test-protocol-journal.ts",
     "test:broker-history-page-cache": "bun run packages/typescript/broker/test/broker/test-history-page-cache.ts",
+    "test:broker-resync-serialization": "bun run packages/typescript/broker/test/broker/test-resync-serialization.ts",
     "test:broker-history-paging": "bun run packages/typescript/broker/test/broker/test-history-page-wire.ts",
     "test:broker-codex-history-paging": "bun run packages/typescript/broker/test/broker/test-codex-history-page-wire.ts",
     "test:codex-history-paging-large": "bun run packages/typescript/broker/test/codex/history-paging-large.ts",

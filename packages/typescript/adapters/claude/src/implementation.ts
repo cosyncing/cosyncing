@@ -1695,6 +1695,8 @@ export class ClaudeObserveConnection implements SessionConnection {
    *  must continue that message's count, or the tail and a fresh history read key it differently and the
    *  duplicate this identity removes comes back on the tail side. Same lifecycle as `runtime`. */
   private blockOrdinals = newClaudeBlockOrdinals();
+  /** Durable context-window evidence plus the latest per-message usage reading. */
+  private contextWindow = newClaudeContextWindowState();
 
   /** Streaming decoder so a line flushed mid-multibyte char isn't corrupted across reads. */
   private readonly decoder = new TextDecoder();
@@ -1819,7 +1821,15 @@ export class ClaudeObserveConnection implements SessionConnection {
     this.runtime = new ClaudeRuntimeTracker(uuid, 'claude-transcript');
     this.taskLedger = new ClaudeTaskLedger(); // fresh per (re)play — the tail feeds the same instance
     this.blockOrdinals = newClaudeBlockOrdinals();
-    const mapped = mapTranscript(lines, this.runtime, this.taskLedger, this.blockOrdinals);
+    this.contextWindow = newClaudeContextWindowState();
+    const mapped = mapTranscript(
+      lines,
+      this.runtime,
+      this.taskLedger,
+      this.blockOrdinals,
+      newClaudeQueuedSends(),
+      this.contextWindow,
+    );
     return [
       ...mapped,
       ...this.runtime.flush(),
@@ -1876,7 +1886,14 @@ export class ClaudeObserveConnection implements SessionConnection {
       // User echoes stay UNSTAMPED here: Claude Code writes the JSONL itself and gives an app send
       // no id handle, so exact attribution is impossible (a terminal prompt with identical text is
       // indistinguishable). The client's narrow legacy reconcile converges the optimistic bubble.
-      const mapped = mapLine(ln, this.callMeta, this.seenTokenIds, this.queuedSends, this.blockOrdinals);
+      const mapped = mapLine(
+        ln,
+        this.callMeta,
+        this.seenTokenIds,
+        this.queuedSends,
+        this.blockOrdinals,
+        this.contextWindow,
+      );
       for (const m of mapped) this.emit(m);
       if (this.taskLedger) for (const m of this.taskLedger.feed(ln)) this.emit(m); // live TaskCreate/TaskUpdate → panel refresh
       if (this.runtime) {
@@ -2497,8 +2514,13 @@ export class ClaudeResumeConnection implements SessionConnection {
   private launchMode?: string;
   private launchEffort?: string;
   private running = false;
+  /** Live autonomous continuation lifecycle. Consecutive notifications coalesce
+   *  only until this continuation emits assistant content. */
+  private liveContinuationOpen = false;
+  private liveContinuationHasOutput = false;
   private readonly callMeta = new Map<string, ClaudeCall>();
   private readonly seenTokenIds = new Set<string>();
+  private contextWindow = newClaudeContextWindowState();
   /** Auto-surfaced subagent/workflow progress cards + parent-answered tool_use_ids (subagent done). The
    *  watcher re-points if the live process ever reports a rotated session id (defensive — issue 15a). */
   private activity?: ClaudeActivityWatcher;
@@ -2591,6 +2613,18 @@ export class ClaudeResumeConnection implements SessionConnection {
    *  writes can land a moment after its stdout result, so assistant rows inside this grace window are
    *  attributed to our own turn's tail rather than flagged foreign. */
   private lastTurnEndedAt = 0;
+  /** Wall clock of the newest `<task-notification>` line the ECHO TAIL read, cleared by the next
+   *  terminal-authority line. A background-agent wake makes OUR OWN CHILD write a continuation turn
+   *  OUTSIDE any driven turn (symptom 4, docs-internal 2026-08-28 diagnosis): the transcript orders
+   *  the notification before the continuation's assistant rows, so the tail can exonerate them
+   *  deterministically from its own reading — no dependence on stdout timing. Bounded by
+   *  CONTINUATION_PENDING_MS so an abandoned wake cannot shelter a real foreign writer forever. */
+  private tailContinuationOpenedAt?: number;
+  /** `message.id` of every assistant message OUR child streamed on stdout (bounded FIFO). Ownership
+   *  proof for the echo tail: a transcript assistant row whose id our own child produced is our write
+   *  by definition — covers any autonomous turn shape that is not notification-led. */
+  private readonly childStreamedMessageIds = new Set<string>();
+  private readonly childStreamedMessageIdOrder: string[] = [];
 
   constructor(
     private readonly store: ClaudeStore,
@@ -2655,6 +2689,10 @@ export class ClaudeResumeConnection implements SessionConnection {
       const ln = parseLineOrNull(raw);
       if (!ln) continue;
       if (ln.type === 'user') {
+        // A task-notification line is the CLI waking OUR OWN CHILD for a background-agent result: the
+        // continuation's assistant rows follow it IN TRANSCRIPT ORDER, so opening the exoneration
+        // window here (before any of them is examined) is race-free (symptom 4).
+        if (claudeTaskNotificationLine(ln)) this.tailContinuationOpenedAt = Date.now();
         // P1b: pass the queued-send state, exactly as the history pass (mapTranscript) does. Without it
         // the delivered line was keyed by its own uuid, so the queued bubble could never clear on the
         // live tail and a later history refetch re-keyed the same row into an orphan.
@@ -2687,13 +2725,74 @@ export class ClaudeResumeConnection implements SessionConnection {
         // later delivery. The dropped prompt's own row (pendingDriven) is untouched: it stays
         // honestly queued.
         for (const m of mapLine(ln, this.callMeta, this.seenTokenIds, this.queuedSends)) this.emit(m);
-      } else if (!this.demoted && ln.type === 'assistant' && !this.running && Date.now() - this.lastTurnEndedAt > CLAUDE_TURN_END_GRACE_MS) {
-        // An assistant row from nobody's live turn: our child is not running and the grace window for
-        // its final writes has closed — a second writer is mid-turn on the shared transcript.
+      } else if (
+        !this.demoted && ln.type === 'assistant' && !this.running
+        && Date.now() - this.lastTurnEndedAt > CLAUDE_TURN_END_GRACE_MS
+        && !this.tailContinuationActive() && !this.childStreamedId(ln)
+      ) {
+        // An assistant row from nobody's live turn: our child is not running, the grace window for its
+        // final writes has closed, no notification-led continuation is open, and our child never
+        // streamed this message id — a second writer is mid-turn on the shared transcript.
         this.demoteToObserve();
         return;
       }
+      // The continuation's own closing line: exonerated above (the open window covers it), and the
+      // grace stamp covers the terminal message's remaining per-block lines landing in later polls.
+      if (this.tailContinuationOpenedAt !== undefined && claudeLineTurnAuthority(ln) === 'terminal') {
+        this.tailContinuationOpenedAt = undefined;
+        this.lastTurnEndedAt = Date.now();
+      }
     }
+  }
+
+  /** A notification-led continuation window is open and not stale (see tailContinuationOpenedAt). */
+  private tailContinuationActive(): boolean {
+    return this.tailContinuationOpenedAt !== undefined && Date.now() - this.tailContinuationOpenedAt <= CONTINUATION_PENDING_MS;
+  }
+
+  /** True when OUR OWN CHILD streamed this transcript row's assistant message on stdout. */
+  private childStreamedId(ln: any): boolean {
+    const id = ln?.message?.id;
+    return typeof id === 'string' && this.childStreamedMessageIds.has(id);
+  }
+
+  /** Record a message id our child streamed (bounded — real depth is a handful per turn). */
+  private noteChildMessageId(id: string): void {
+    if (this.childStreamedMessageIds.has(id)) return;
+    this.childStreamedMessageIds.add(id);
+    this.childStreamedMessageIdOrder.push(id);
+    while (this.childStreamedMessageIdOrder.length > 500) {
+      this.childStreamedMessageIds.delete(this.childStreamedMessageIdOrder.shift()!);
+    }
+  }
+
+  /** Our own child starting a turn NOBODY drove (a task-notification wake seen on its stdout, or a
+   *  message_start with no driven turn open): open the turn state exactly like a driven send, so the
+   *  UI shows working, the echo tail's running-turn rule covers the continuation's transcript rows,
+   *  and the live tracker gets a continuation run for `result` to close with a real footer (the drive
+   *  leg of symptom 2 — before this, drive mode showed neither spinner nor summary for continuations).
+   *  `result` (or child exit) closes it through the normal path. */
+  private beginAutonomousTurn(turnId?: string): void {
+    // `handleStreamEvent` is also exercised as a pure mapper in tests and can be fed
+    // captured frames after the connection has closed. Only a live owned child can
+    // start an autonomous drive turn; without one there is no status/runtime lifecycle
+    // to project (and an Observe connection will cover the persisted transcript).
+    if (!this.proc || this.demoted) return;
+    if (this.running) {
+      if (!this.liveContinuationOpen || !this.liveContinuationHasOutput) return;
+      // The replay tracker fences the same shape: a new wake after assistant
+      // output cancels the unterminated continuation before opening another.
+      if (this.runtime) {
+        for (const message of this.runtime.finishLive('cancelled', Date.now())) this.emit(message);
+      }
+    } else {
+      this.running = true;
+      this.emit({ type: 'status', status: 'running' });
+    }
+    this.liveContinuationOpen = true;
+    this.liveContinuationHasOutput = false;
+    const id = turnId ?? `live${this.connNonce}.${++this.liveTurnSeq}`;
+    if (this.runtime) this.emit(this.runtime.startLive(id, Date.now(), { continuation: true }));
   }
 
   /** Retire the pending row a delivered echo just claimed (P1a). mapUser never sets `queued`, so a
@@ -2753,6 +2852,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     // it completes interleaves the two branches further. The user echo tail keeps running — watching
     // is the whole point of staying open.
     this.killProc();
+    this.finishLiveAbnormally('cancelled');
     if (this.running) {
       this.running = false;
       this.emit({ type: 'status', status: 'idle' });
@@ -2831,7 +2931,18 @@ export class ClaudeResumeConnection implements SessionConnection {
         }),
         byUuid: live.byUuid,
       };
-      const mapped = mapTranscript(lines, this.runtime, this.taskLedger, newClaudeBlockOrdinals(), replay);
+      // Replay has its own context evidence. Historical assistant/cost-state rows
+      // must never overwrite the live child's authoritative init model/window,
+      // which the next result usage needs for the composer meter.
+      const replayContextWindow = newClaudeContextWindowState();
+      const mapped = mapTranscript(
+        lines,
+        this.runtime,
+        this.taskLedger,
+        newClaudeBlockOrdinals(),
+        replay,
+        replayContextWindow,
+      );
       // Whatever the replay keyed from a seeded entry is DELIVERED: drop its live link and its row.
       const delivered = new Set(live.byUuid.values());
       for (let i = live.pending.length - 1; i >= 0; i--) if (delivered.has(live.pending[i]!.key)) live.pending.splice(i, 1);
@@ -2938,6 +3049,8 @@ export class ClaudeResumeConnection implements SessionConnection {
     if (!this.proc) throw new Error('Claude could not be launched, so the prompt was not sent.');
     const wasRunning = this.running; // BEFORE the flip: a send during a live turn is the queued case
     this.running = true;
+    this.liveContinuationOpen = false;
+    this.liveContinuationHasOutput = false;
     this.emit({ type: 'status', status: 'running' });
     // Live driven turn starts now (stream events carry no native ts → broker wall clock). A turn = this user
     // send through the next `result`; message_start fires per assistant message so it is NOT the turn boundary.
@@ -3055,33 +3168,36 @@ export class ClaudeResumeConnection implements SessionConnection {
     proc.stdout.on('data', (b: Buffer) => this.onStdout(b));
     proc.stderr.on('data', () => {/* surfaced via result/exit */});
     proc.on('error', (e) => this.emit({ type: 'error', message: 'Claude process error: ' + String(e) }));
-    proc.on('exit', () => {
-      // A child we've already replaced (mid-turn model/mode relaunch) exits LATER — its exit must be a
-      // no-op, or it would emit a spurious 'idle' for the NEW turn (flipping the UI idle + hiding Stop
-      // until the new child's result). Only the CURRENT child's exit ends the turn.
-      if (this.proc !== proc) return;
-      this.proc = undefined;
-      // The child is gone — any pending permission/question can no longer be answered into it; clear them
-      // so getPending() never replays a dead card and an answer can't be written to a closed stdin.
-      if (this.pendingQuestionId) {
-        this.emit({ type: 'question-resolved', requestId: this.pendingQuestionId });
-        this.pendingQuestionId = undefined;
-        this.pendingQuestionCard = undefined;
-      }
-      this.pendingQuestionControlId = undefined;
-      this.pendingQuestionControlInput = undefined;
-      this.pendingPermId = undefined;
-      this.pendingPermCard = undefined;
-      this.pendingPermInput = undefined;
-      if (this.running) {
-        // A dying child's trailing transcript writes are its own — give them the same post-turn grace
-        // the result path does so they can't be flagged foreign (issue 15a).
-        this.lastTurnEndedAt = Date.now();
-        this.running = false;
-        this.emit({ type: 'status', status: 'idle' });
-      }
-    });
+    proc.on('exit', () => this.handleChildExit(proc));
     return true;
+  }
+
+  private handleChildExit(proc: ChildProcessWithoutNullStreams): void {
+    // A child we've already replaced (mid-turn model/mode relaunch) exits LATER — its exit must be a
+    // no-op, or it would emit a spurious 'idle' for the NEW turn (flipping the UI idle + hiding Stop
+    // until the new child's result). Only the CURRENT child's exit ends the turn.
+    if (this.proc !== proc) return;
+    this.proc = undefined;
+    // The child is gone — any pending permission/question can no longer be answered into it; clear them
+    // so getPending() never replays a dead card and an answer can't be written to a closed stdin.
+    if (this.pendingQuestionId) {
+      this.emit({ type: 'question-resolved', requestId: this.pendingQuestionId });
+      this.pendingQuestionId = undefined;
+      this.pendingQuestionCard = undefined;
+    }
+    this.pendingQuestionControlId = undefined;
+    this.pendingQuestionControlInput = undefined;
+    this.pendingPermId = undefined;
+    this.pendingPermCard = undefined;
+    this.pendingPermInput = undefined;
+    this.finishLiveAbnormally('error');
+    if (this.running) {
+      // A dying child's trailing transcript writes are its own — give them the same post-turn grace
+      // the result path does so they can't be flagged foreign (issue 15a).
+      this.lastTurnEndedAt = Date.now();
+      this.running = false;
+      this.emit({ type: 'status', status: 'idle' });
+    }
   }
 
   private writeLine(obj: unknown): void {
@@ -3118,9 +3234,15 @@ export class ClaudeResumeConnection implements SessionConnection {
           this.ingestInit(o);
           return;
         }
-        for (const m of mapLine(o, this.callMeta, this.seenTokenIds)) this.emit(m); // compact_boundary etc.
+        for (const m of mapLine(o, this.callMeta, this.seenTokenIds, undefined, undefined, this.contextWindow)) this.emit(m); // compact_boundary etc.
         return;
       case 'assistant':
+        if (
+          this.liveContinuationOpen
+          && Array.isArray(o?.message?.content)
+          && o.message.content.length > 0
+        ) this.liveContinuationHasOutput = true;
+        if (typeof o?.message?.id === 'string' && o.message.id) this.noteChildMessageId(o.message.id);
         accumulateCallMeta(o, this.callMeta);
         collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity());
         if (this.taskLedger) for (const m of this.taskLedger.feed(o)) this.emit(m);
@@ -3129,10 +3251,14 @@ export class ClaudeResumeConnection implements SessionConnection {
         this.emitFinalAssistant(o);
         return;
       case 'user':
+        // A task-notification event = our child starting an autonomous continuation turn (symptom 4).
+        if (claudeTaskNotificationLine(o)) {
+          this.beginAutonomousTurn(typeof o.uuid === 'string' && o.uuid ? String(o.uuid) : undefined);
+        }
         accumulateCallMeta(o, this.callMeta);
         collectParentActivity(o, this.resolvedToolUseIds, this.backgroundToolUseIds, this.notifiedToolUseIds, this.backgroundSpawnMs, this.parentActivity());
         if (this.taskLedger) for (const m of this.taskLedger.feed(o)) this.emit(m);
-        for (const m of mapLine(o, this.callMeta, this.seenTokenIds)) this.emit(m);
+        for (const m of mapLine(o, this.callMeta, this.seenTokenIds, undefined, undefined, this.contextWindow)) this.emit(m);
         return;
       case 'stream_event':
         this.handleStreamEvent(o.event); // token-by-token deltas from --include-partial-messages
@@ -3148,6 +3274,23 @@ export class ClaudeResumeConnection implements SessionConnection {
             cacheWrite: typeof u.cache_creation_input_tokens === 'number' ? u.cache_creation_input_tokens : undefined,
             cost: typeof o.total_cost_usd === 'number' ? o.total_cost_usd : undefined,
           });
+          const resident = [
+            numOrUndef(u.input_tokens),
+            numOrUndef(u.cache_read_input_tokens),
+            numOrUndef(u.cache_creation_input_tokens),
+          ];
+          if (resident.some((value) => value !== undefined)) {
+            const used = resident.reduce<number>(
+              (sum, value) => sum + Math.max(0, value ?? 0),
+              0,
+            );
+            const context = claudeContextUsageMessage(
+              this.contextWindow,
+              this.contextWindow.lastModel,
+              used,
+            );
+            if (context) this.emit(context);
+          }
         }
         if (o.is_error && typeof o.result === 'string' && o.result) this.emit({ type: 'error', message: oneLine(o.result) });
         // Turn over → the NEXT assistant event without a message_start is a local-command reply, not a
@@ -3175,6 +3318,8 @@ export class ClaudeResumeConnection implements SessionConnection {
         // next milliseconds — neither can be misread as a foreign write by the next poll (issue 15a).
         this.drainUserEcho();
         this.lastTurnEndedAt = Date.now();
+        this.liveContinuationOpen = false;
+        this.liveContinuationHasOutput = false;
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
         return;
@@ -3248,6 +3393,10 @@ export class ClaudeResumeConnection implements SessionConnection {
       this.streamedThisMessage = true;
       this.streamedFinalTexts.clear(); // new message → the previous message's finalized texts are stale
       this.curMsgId = typeof ev.message?.id === 'string' ? ev.message.id : '';
+      if (this.curMsgId) this.noteChildMessageId(this.curMsgId);
+      // A message starting with no driven turn open is our child's own turn (a continuation the
+      // notification event did not precede — local-command replies carry no message_start).
+      this.beginAutonomousTurn();
       this.curKey = 'r' + ++this.turnSeq;
       this.blockAccum.clear();
       this.blockKind.clear();
@@ -3257,10 +3406,12 @@ export class ClaudeResumeConnection implements SessionConnection {
     if (ev.type === 'content_block_delta') {
       const d = ev.delta;
       if (d?.type === 'text_delta' && typeof d.text === 'string') {
+        if (this.liveContinuationOpen && d.text) this.liveContinuationHasOutput = true;
         this.blockKind.set(idx, 'text');
         this.blockAccum.set(idx, (this.blockAccum.get(idx) ?? '') + d.text);
         this.emit({ type: 'model-output', delta: d.text, key: this.liveBlockKey(idx, 'text') });
       } else if (d?.type === 'thinking_delta' && typeof d.thinking === 'string') {
+        if (this.liveContinuationOpen && d.thinking) this.liveContinuationHasOutput = true;
         this.blockKind.set(idx, 'thinking');
         this.blockAccum.set(idx, (this.blockAccum.get(idx) ?? '') + d.thinking);
         this.emit({ type: 'thinking', delta: d.thinking, key: this.liveBlockKey(idx, 'thinking') });
@@ -3356,6 +3507,7 @@ export class ClaudeResumeConnection implements SessionConnection {
     // Preserve the exact model id reported by init as resolved-session identity. Curated aliases remain
     // selection inputs only; they must not replace the concrete model a running session actually reports.
     if (typeof o.model === 'string' && o.model) {
+      seedClaudeContextModel(this.contextWindow, o.model);
       this.info.model = o.model;
       this.info.currentModel = {
         providerID: this.store.isDefault ? 'anthropic' : 'wrapper',
@@ -3537,6 +3689,7 @@ export class ClaudeResumeConnection implements SessionConnection {
   async runCommand(name: string, args?: string): Promise<CommandResult | void> {
     if (name === 'stop' || name === 'abort') {
       this.killProc();
+      this.finishLiveAbnormally('cancelled');
       if (this.running) {
         this.running = false;
         this.emit({ type: 'status', status: 'idle' });
@@ -3545,6 +3698,17 @@ export class ClaudeResumeConnection implements SessionConnection {
     }
     // Any other slash command → send it as a turn-starting user message (Claude handles it in-stream).
     await this.submitTurn({ text: `/${name}${args ? ' ' + args : ''}` }, true);
+  }
+
+  /** Close an abnormal live turn through the same authoritative runtime boundary as
+   *  a result frame. `finishLive` consumes the open run, so overlapping stop/exit/
+   *  demotion signals remain exactly-once. */
+  private finishLiveAbnormally(status: 'cancelled' | 'error'): void {
+    if (this.runtime) {
+      for (const message of this.runtime.finishLive(status, Date.now())) this.emit(message);
+    }
+    this.liveContinuationOpen = false;
+    this.liveContinuationHasOutput = false;
   }
 
   private clearQueuedSendState(): void {
@@ -3836,6 +4000,97 @@ function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, t
   return key;
 }
 
+/** Durable evidence and latest reading for Claude's composer context meter. */
+export interface ClaudeContextWindowState {
+  oneMillionModels: Set<string>;
+  lastModel?: string;
+  lastUsed?: number;
+  lastEmittedUsed?: number;
+  lastEmittedMax?: number;
+}
+
+export function newClaudeContextWindowState(): ClaudeContextWindowState {
+  return { oneMillionModels: new Set() };
+}
+
+const CLAUDE_DEFAULT_CONTEXT_MAX = 200_000;
+const CLAUDE_EXTENDED_CONTEXT_MAX = 1_000_000;
+
+function claudeContextModel(model: unknown): string | undefined {
+  if (typeof model !== 'string') return undefined;
+  const clean = model.replace(/\[1m\]$/, '');
+  return /^claude-/i.test(clean) ? clean : undefined;
+}
+
+/** `init.model` is Drive's durable model identity. Preserve the `[1m]` suffix as
+ *  window evidence while storing the clean model id used by result usage frames. */
+function seedClaudeContextModel(
+  state: ClaudeContextWindowState,
+  model: unknown,
+): void {
+  const cleanModel = claudeContextModel(model);
+  state.lastModel = cleanModel;
+  if (cleanModel && typeof model === 'string') {
+    // Unlike cumulative transcript evidence, init describes the model/window
+    // the live Drive child is using now. A later untagged init must therefore
+    // revoke an earlier [1m] classification for the same clean model.
+    if (/\[1m\]$/.test(model)) state.oneMillionModels.add(cleanModel);
+    else state.oneMillionModels.delete(cleanModel);
+  }
+}
+
+function claudeContextUsageMessage(
+  state: ClaudeContextWindowState,
+  model: unknown,
+  used: number,
+  onlyWhenChanged = false,
+): AgentMessage | undefined {
+  const cleanModel = claudeContextModel(model);
+  state.lastModel = cleanModel;
+  state.lastUsed = used;
+  if (!cleanModel) return undefined;
+  // A resident reading above 200k is itself proof that this session is on the
+  // 1M window even when the durable cost-state marker has not landed yet.
+  const max = state.oneMillionModels.has(cleanModel) || used > CLAUDE_DEFAULT_CONTEXT_MAX
+    ? CLAUDE_EXTENDED_CONTEXT_MAX
+    : CLAUDE_DEFAULT_CONTEXT_MAX;
+  const boundedUsed = Math.min(used, max);
+  if (
+    onlyWhenChanged
+    && state.lastEmittedUsed === boundedUsed
+    && state.lastEmittedMax === max
+  ) return undefined;
+  state.lastEmittedUsed = boundedUsed;
+  state.lastEmittedMax = max;
+  return { type: 'metadata-update', key: 'contextUsage', value: { used: boundedUsed, max } };
+}
+
+/** Update the durable 1M model evidence. cost-state is cumulative session data:
+ *  only its model-key suffix is consumed; its token totals never feed token-count. */
+function feedClaudeCostState(
+  state: ClaudeContextWindowState | undefined,
+  ln: any,
+): AgentMessage[] {
+  if (!state || ln?.type !== 'cost-state') return [];
+  state.oneMillionModels.clear();
+  const usage = ln.modelUsage;
+  if (usage && typeof usage === 'object') {
+    for (const key of Object.keys(usage)) {
+      if (!key.endsWith('[1m]')) continue;
+      const model = claudeContextModel(key);
+      if (model) state.oneMillionModels.add(model);
+    }
+  }
+  if (state.lastModel === undefined || state.lastUsed === undefined) return [];
+  const corrected = claudeContextUsageMessage(
+    state,
+    state.lastModel,
+    state.lastUsed,
+    true,
+  );
+  return corrected ? [corrected] : [];
+}
+
 /**
  * Map ONE parsed transcript line to canonical messages (0..n). `callMeta` resolves a tool-result's
  * toolName; `seenTokenIds` dedupes token-count to once per message.id (it is MUTATED here).
@@ -3844,11 +4099,20 @@ function takeQueuedSendKey(state: ClaudeQueuedSends | undefined, uuid: string, t
  * caller that maps lines OUT of file order must omit it rather than pass a fresh one — an ordinal
  * counted from the wrong start would merge two genuine blocks.
  */
-export function mapLine(ln: any, callMeta: Map<string, ClaudeCall>, seenTokenIds: Set<string>, queuedSends?: ClaudeQueuedSends, blocks?: ClaudeBlockOrdinals): AgentMessage[] {
+export function mapLine(
+  ln: any,
+  callMeta: Map<string, ClaudeCall>,
+  seenTokenIds: Set<string>,
+  queuedSends?: ClaudeQueuedSends,
+  blocks?: ClaudeBlockOrdinals,
+  contextWindow?: ClaudeContextWindowState,
+): AgentMessage[] {
   if (!ln || typeof ln !== 'object') return [];
+  const contextCorrection = feedClaudeCostState(contextWindow, ln);
+  if (contextCorrection.length > 0) return contextCorrection;
   switch (ln.type) {
     case 'assistant':
-      return mapAssistant(ln, seenTokenIds, blocks);
+      return mapAssistant(ln, seenTokenIds, blocks, contextWindow);
     case 'user':
       return mapUser(ln, callMeta, queuedSends);
     case 'system':
@@ -4057,7 +4321,12 @@ export class ClaudeTaskLedger {
   }
 }
 
-function mapAssistant(ln: any, seenTokenIds: Set<string>, blocks?: ClaudeBlockOrdinals): AgentMessage[] {
+function mapAssistant(
+  ln: any,
+  seenTokenIds: Set<string>,
+  blocks?: ClaudeBlockOrdinals,
+  contextWindow?: ClaudeContextWindowState,
+): AgentMessage[] {
   const msg = ln.message;
   if (!msg) return [];
   const uuid = String(ln.uuid ?? '');
@@ -4123,6 +4392,21 @@ function mapAssistant(ln: any, seenTokenIds: Set<string>, blocks?: ClaudeBlockOr
       cacheRead: numOrUndef(u.cache_read_input_tokens),
       cacheWrite: numOrUndef(u.cache_creation_input_tokens),
     });
+    if (contextWindow) {
+      const resident = [
+        numOrUndef(u.input_tokens),
+        numOrUndef(u.cache_read_input_tokens),
+        numOrUndef(u.cache_creation_input_tokens),
+      ];
+      if (resident.some((value) => value !== undefined)) {
+        const used = resident.reduce<number>(
+          (sum, value) => sum + Math.max(0, value ?? 0),
+          0,
+        );
+        const context = claudeContextUsageMessage(contextWindow, msg.model, used);
+        if (context) out.push(context);
+      }
+    }
   }
   return out;
 }
@@ -4135,6 +4419,11 @@ function mapUser(ln: any, callMeta: Map<string, ClaudeCall>, queuedSends?: Claud
   const uuid = String(ln.uuid ?? '');
   const content = msg.content;
   const sentAt = timestampToMs(ln.timestamp); // authoritative native send time (contract doc-15)
+
+  // A task-notification is a system-opened continuation boundary, never a user
+  // prompt. Emit its human summary as a structured notice before the generic
+  // wrapper suppression below so the client can segment and associate the run.
+  if (claudeTaskNotificationLine(ln)) return [claudeTaskNotificationNotice(ln)];
 
   if (typeof content === 'string') {
     if (ln.isMeta || !content.trim()) return [];
@@ -4659,6 +4948,24 @@ interface ClaudeRun {
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   hasTokens: boolean;
   cost?: number;
+  /** Opened by a task-notification wake, not a real prompt. Its structured notice
+   *  carries the same turnId and opens the display turn that owns this run. */
+  continuation?: boolean;
+}
+
+/** The just-closed run held for AMENDMENT: Claude writes one JSONL line per content
+ *  block and every line of the terminal message repeats its stop_reason, so the close
+ *  fires at the FIRST such line (deferring it would defer the observe idle flip on a
+ *  quiet session). Later lines of the SAME message.id re-emit the summary under its
+ *  existing key — idempotent by key, later frames win — with the corrected completedAt
+ *  and assistant anchor, plus a runtimeTotals delta. */
+interface ClaudeClosedRun {
+  run: ClaudeRun;
+  status: 'done' | 'error';
+  completedAt?: number;
+  messageId: string;
+  countedMs?: number;
+  counted: boolean;
 }
 
 /** Derives per-turn `run-summary` frames + cumulative `runtimeTotals` from the Claude transcript line
@@ -4670,6 +4977,7 @@ interface ClaudeRun {
  *  Agent/execution split is OMITTED — Claude's transcript has no paired tool start/end events (see doc gaps). */
 export class ClaudeRuntimeTracker {
   private current?: ClaudeRun;
+  private lastClosed?: ClaudeClosedRun;
   private readonly tokenSeen = new Set<string>();
   private totalRuntimeMs = 0;
   private turnCount = 0;
@@ -4682,6 +4990,7 @@ export class ClaudeRuntimeTracker {
     // not reimplement that predicate here. If mapUser's filters change, this follows automatically.
     const userMsg = mapped.find((m): m is Extract<AgentMessage, { type: 'user-message' }> => m.type === 'user-message');
     if (userMsg) {
+      this.lastClosed = undefined;
       const out = this.current ? this.close('cancelled', undefined) : [];
       const turnId = String(ln?.uuid ?? userMsg.key ?? '');
       this.current = {
@@ -4693,6 +5002,41 @@ export class ClaudeRuntimeTracker {
         hasTokens: false,
       };
       return [...out, this.summary(this.current, 'running', undefined)];
+    }
+    if (
+      !this.current &&
+      this.lastClosed &&
+      ln?.type === 'assistant' &&
+      typeof ln.message?.id === 'string' &&
+      ln.message.id === this.lastClosed.messageId
+    ) {
+      return this.amendClosed(ln, mapped);
+    }
+    if (claudeTaskNotificationLine(ln)) {
+      this.lastClosed = undefined;
+      // Consecutive notifications with no assistant output between them are ONE wake:
+      // updating the open continuation in place instead of fencing it avoids a phantom
+      // cancelled run per queued notification. A wake landing on an UNTERMINATED run
+      // that already produced output fences it, mirroring the real-prompt boundary.
+      if (this.current?.continuation && this.current.lastAssistantKey === undefined && !this.current.hasTokens) {
+        return [];
+      }
+      const out = this.current ? this.close('cancelled', undefined) : [];
+      const turnId = String(ln?.uuid ?? '');
+      this.current = {
+        turnId,
+        key: `${this.sessionId}:run:${turnId}`,
+        startedAt: timestampToMs(ln?.timestamp),
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        hasTokens: false,
+        continuation: true,
+      };
+      return [...out, this.summary(this.current, 'running', undefined)];
+    }
+    // Any other conversation line ends the amendment window — only the terminal
+    // message's own trailing blocks may amend its summary.
+    if (this.lastClosed && (ln?.type === 'user' || ln?.type === 'assistant' || ln?.type === 'system')) {
+      this.lastClosed = undefined;
     }
     if (ln?.type === 'assistant' && this.current) {
       // CONTRACT: take the key the mapper actually emitted rather than recomputing it — the turn's
@@ -4708,8 +5052,46 @@ export class ClaudeRuntimeTracker {
     }
     if (mapped.some((m) => m.type === 'error')) return this.close('error', completedAt);
     const stopStatus = ln?.type === 'assistant' ? claudeStopRunStatus(ln?.message?.stop_reason) : undefined;
-    if (stopStatus) return this.close(stopStatus, completedAt);
+    if (stopStatus) {
+      const run = this.current!;
+      const out = this.close(stopStatus, completedAt);
+      const messageId = ln?.message?.id;
+      const countedMs =
+        typeof run.startedAt === 'number' && typeof completedAt === 'number'
+          ? Math.max(0, completedAt - run.startedAt)
+          : undefined;
+      this.lastClosed =
+        typeof messageId === 'string' && messageId
+          ? { run, status: stopStatus, completedAt, messageId, countedMs, counted: countedMs !== undefined }
+          : undefined;
+      return out;
+    }
     return [];
+  }
+
+  /** Fold a trailing line of the just-closed terminal message into its summary (see
+   *  {@link ClaudeClosedRun}): later lines carry the message's real final anchor (the
+   *  thinking block closed the run; the TEXT block is the row the client indexes) and
+   *  a later timestamp. Re-emits by the run's existing key plus a totals correction. */
+  private amendClosed(ln: any, mapped: AgentMessage[]): AgentMessage[] {
+    const closed = this.lastClosed!;
+    const run = closed.run;
+    for (const m of mapped) {
+      if ((m.type === 'model-output' || m.type === 'thinking') && typeof m.key === 'string') run.lastAssistantKey = m.key;
+    }
+    const ts = timestampToMs(ln?.timestamp);
+    if (ts !== undefined && (closed.completedAt === undefined || ts > closed.completedAt)) closed.completedAt = ts;
+    const msg = this.summary(run, closed.status, closed.completedAt);
+    const out: AgentMessage[] = [msg];
+    if (typeof msg.totalRuntimeMs === 'number') {
+      this.totalRuntimeMs += msg.totalRuntimeMs - (closed.countedMs ?? 0);
+      if (!closed.counted) this.turnCount += 1;
+      closed.countedMs = msg.totalRuntimeMs;
+      closed.counted = true;
+      this.updatedAt = closed.completedAt;
+      out.push(this.totals());
+    }
+    return out;
   }
 
   private accumulateTokens(ln: any): void {
@@ -4732,8 +5114,16 @@ export class ClaudeRuntimeTracker {
 
   /** Live (resume/Drive) turn boundaries from stream events, which carry no native timestamps → broker
    *  wall clock. message_start → startLive (running); result → finishLive (done/error + authoritative usage). */
-  startLive(turnId: string, startedAt: number): AgentMessage {
-    this.current = { turnId, key: `${this.sessionId}:run:${turnId}`, startedAt, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, hasTokens: false };
+  startLive(turnId: string, startedAt: number, opts?: { continuation?: boolean }): AgentMessage {
+    this.lastClosed = undefined;
+    this.current = {
+      turnId,
+      key: `${this.sessionId}:run:${turnId}`,
+      startedAt,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      hasTokens: false,
+      ...(opts?.continuation ? { continuation: true } : {}),
+    };
     return this.summary(this.current, 'running', undefined);
   }
   finishLive(status: 'done' | 'error' | 'cancelled', completedAt: number, tokens?: RunSummaryMsg['tokens']): AgentMessage[] {
@@ -4770,6 +5160,9 @@ export class ClaudeRuntimeTracker {
       key: run.key,
       turnId: run.turnId,
       ...(run.userMessageKey ? { userMessageKey: run.userMessageKey } : {}),
+      // Continuations have a structured notice boundary carrying this run's turnId,
+      // so their assistant anchor resolves inside that new display turn instead of
+      // replacing the preceding prompt turn's footer.
       ...(run.lastAssistantKey ? { assistantMessageKey: run.lastAssistantKey } : {}),
       status,
       ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
@@ -4788,14 +5181,21 @@ export class ClaudeRuntimeTracker {
 /** `queuedSends` (optional, MUTATED) links enqueue bubbles to their delivering user lines. A caller that
  *  also drives a LIVE tail passes its own state seeded with the tail's `byUuid` map, so a line already
  *  delivered under an app-minted key replays under that same key instead of being re-keyed by uuid. */
-export function mapTranscript(lines: any[], tracker?: ClaudeRuntimeTracker, tasks: ClaudeTaskLedger = new ClaudeTaskLedger(), blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals(), queuedSends: ClaudeQueuedSends = newClaudeQueuedSends()): AgentMessage[] {
+export function mapTranscript(
+  lines: any[],
+  tracker?: ClaudeRuntimeTracker,
+  tasks: ClaudeTaskLedger = new ClaudeTaskLedger(),
+  blocks: ClaudeBlockOrdinals = newClaudeBlockOrdinals(),
+  queuedSends: ClaudeQueuedSends = newClaudeQueuedSends(),
+  contextWindow: ClaudeContextWindowState = newClaudeContextWindowState(),
+): AgentMessage[] {
   const callMeta = new Map<string, ClaudeCall>();
   for (const ln of lines) if (ln) accumulateCallMeta(ln, callMeta);
   const seenTokenIds = new Set<string>();
   const out: AgentMessage[] = [];
   for (const ln of lines) {
     if (!ln) continue;
-    const mapped = mapLine(ln, callMeta, seenTokenIds, queuedSends, blocks);
+    const mapped = mapLine(ln, callMeta, seenTokenIds, queuedSends, blocks, contextWindow);
     out.push(...mapped);
     out.push(...tasks.feed(ln)); // TaskCreate/TaskUpdate → the upserted task-list-state panel
     if (tracker) out.push(...tracker.feed(ln, mapped)); // interleave run-summary at turn boundaries
@@ -5082,6 +5482,17 @@ export function collectParentActivity(
           : Array.isArray(b.content)
             ? b.content.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('\n')
             : '';
+      // The async-launch ack IS the background classification on ≥2.1.25x CLIs: those
+      // spawns omit `run_in_background` (backgrounding became the harness default), so
+      // the input-flag check above never fires for them. The ack lands within the same
+      // second as the spawn, so its own timestamp serves as the spawn time.
+      if (/^Async agent launched/.test(blockText)) {
+        background.add(tuid);
+        if (backgroundSpawnMs && !backgroundSpawnMs.has(tuid)) {
+          const ts = timestampToMs(ln.timestamp);
+          if (ts !== undefined) backgroundSpawnMs.set(tuid, ts);
+        }
+      }
       // The spawn ack ("Async agent launched… agentId: X") maps agent id → spawning tool_use_id, so a
       // later TaskStop of X can resolve the pending-background entry keyed by that tool_use_id.
       const ack = /agentId:\s*([A-Za-z0-9_-]+)/.exec(blockText);
@@ -5519,6 +5930,12 @@ interface ClaudeTurnAuthorityEntry {
   /** Latest exact marker in the processed prefix, published only after catch-up reaches EOF. */
   candidateAuthority: ClaudeTranscriptTurnAuthority;
   candidateAuthoritative: boolean;
+  /** Notification-led turn state at the published EOF. This travels with the
+   *  authority cursor so arbitrarily long continuation output cannot push its
+   *  opener out of a separate tail window. */
+  continuationOpenedAt?: number;
+  /** Continuation state at the incremental candidate cursor. */
+  candidateContinuationOpenedAt?: number;
 }
 
 type ClaudeAuthorityTail =
@@ -5537,6 +5954,53 @@ function claudeStopRunStatus(stopReason: unknown): 'done' | 'error' | undefined 
   return 'error';
 }
 
+/** A CLI-injected task-notification user line — the wake that starts a CONTINUATION
+ *  turn with no real user prompt. Keyed on the structured `origin` stamp (≥2.1.25x
+ *  writes `origin: {kind:'task-notification'}` on the line), with a text-prefix
+ *  fallback for transcripts from before the stamp. Shared by the turn-authority
+ *  scanner, the runtime tracker, and the continuation-pending file fact so the three
+ *  cannot disagree about what counts as a wake. */
+export function claudeTaskNotificationLine(line: any): boolean {
+  if (line?.type !== 'user' || line.isMeta || line.isCompactSummary) return false;
+  if (line.origin?.kind === 'task-notification') return true;
+  const content = line.message?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+            .map((b: any) => b.text)
+            .join('\n')
+        : '';
+  return /^\s*<task-notification\b/.test(text);
+}
+
+/** Canonical continuation boundary for a CLI-injected task notification. */
+function claudeTaskNotificationNotice(line: any): AgentMessage {
+  const content = line?.message?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+            .map((b: any) => b.text)
+            .join('\n')
+        : '';
+  const summary = /<summary>([\s\S]*?)<\/summary>/.exec(text)?.[1]?.trim();
+  const turnId = typeof line?.uuid === 'string' && line.uuid ? line.uuid : undefined;
+  return {
+    type: 'notice',
+    message: summary ? oneLine(summary) : 'Background task completed.',
+    semantic: {
+      kind: 'continuation',
+      reason: 'task-notification',
+      ...(turnId ? { turnId } : {}),
+    },
+  };
+}
+
 function claudeLineTurnAuthority(line: any): Exclude<ClaudeTranscriptTurnAuthority, 'unknown'> | undefined {
   if (line.type === 'assistant') {
     if (line.isApiErrorMessage || claudeStopRunStatus(line.message?.stop_reason)) return 'terminal';
@@ -5548,6 +6012,11 @@ function claudeLineTurnAuthority(line: any): Exclude<ClaudeTranscriptTurnAuthori
     return line.subtype === 'api_error' || line.level === 'error' ? 'terminal' : undefined;
   }
   if (line.type !== 'user' || line.isCompactSummary || line.isMeta) return undefined;
+  // A task notification WAKES a turn: the CLI starts the continuation immediately, so a
+  // trailing notification is an open turn, not the wrapper silence it lexically resembles.
+  // 'active' alone never manufactures Working — status still needs a busy live row or a
+  // pending background/continuation fact.
+  if (claudeTaskNotificationLine(line)) return 'active';
   const content = line.message?.content;
   if (typeof content === 'string') {
     if (!content.trim() || isWrapper(content)) return undefined;
@@ -5565,6 +6034,31 @@ function claudeLineTurnAuthority(line: any): Exclude<ClaudeTranscriptTurnAuthori
   return undefined;
 }
 
+type ClaudeContinuationTransition =
+  | { kind: 'open'; openedAt?: number }
+  | { kind: 'clear' };
+
+/** Turn-boundary state carried beside exact authority. Assistant thinking/tool
+ *  rows preserve an open continuation; a terminal marker or a genuine new user
+ *  turn clears it. */
+function claudeLineContinuationTransition(line: any): ClaudeContinuationTransition | undefined {
+  if (claudeTaskNotificationLine(line)) {
+    return { kind: 'open', openedAt: timestampToMs(line.timestamp) };
+  }
+  const authority = claudeLineTurnAuthority(line);
+  if (authority === 'terminal') return { kind: 'clear' };
+  if (authority === 'active' && line?.type === 'user') return { kind: 'clear' };
+  return undefined;
+}
+
+function applyClaudeContinuationTransition(
+  current: number | undefined,
+  transition: ClaudeContinuationTransition | undefined,
+): number | undefined {
+  if (!transition) return current;
+  return transition.kind === 'open' ? transition.openedAt : undefined;
+}
+
 export type ClaudeTurnAuthorityFallbackReason =
   | 'source-limit'
   | 'time-limit'
@@ -5572,10 +6066,16 @@ export type ClaudeTurnAuthorityFallbackReason =
   | 'source-changed';
 
 export type ClaudeTurnAuthorityInference =
-  | { kind: 'authority'; authority: ClaudeTranscriptTurnAuthority; scannedBytes: number }
+  | {
+      kind: 'authority';
+      authority: ClaudeTranscriptTurnAuthority;
+      continuationOpenedAt?: number;
+      scannedBytes: number;
+    }
   | {
       kind: 'fallback';
       authority: ClaudeTranscriptTurnAuthority;
+      continuationOpenedAt?: number;
       reason: ClaudeTurnAuthorityFallbackReason;
       scannedBytes: number;
     };
@@ -5620,6 +6120,9 @@ export async function claudeTranscriptTurnAuthorityResult(
         return {
           kind: 'fallback',
           authority: cached.authority,
+          ...(cached.continuationOpenedAt !== undefined
+            ? { continuationOpenedAt: cached.continuationOpenedAt }
+            : {}),
           reason: advanced.reason,
           scannedBytes: advanced.scannedBytes,
         };
@@ -5630,25 +6133,47 @@ export async function claudeTranscriptTurnAuthorityResult(
       cached.tail = advanced.tail;
       cached.candidateAuthority = advanced.candidateAuthority;
       cached.candidateAuthoritative = advanced.candidateAuthoritative;
+      cached.continuationOpenedAt = advanced.continuationOpenedAt;
+      cached.candidateContinuationOpenedAt = advanced.candidateContinuationOpenedAt;
       cached.resolution = advanced.kind;
       cached.fallbackReason = advanced.kind === 'fallback' ? advanced.reason : undefined;
       refreshClaudeAuthoritySamples(path, st, cached);
       rememberClaudeTurnAuthority(path, cached);
       return advanced.kind === 'authority'
-        ? { kind: 'authority', authority: advanced.authority, scannedBytes: advanced.scannedBytes }
+        ? {
+            kind: 'authority',
+            authority: advanced.authority,
+            ...(advanced.continuationOpenedAt !== undefined
+              ? { continuationOpenedAt: advanced.continuationOpenedAt }
+              : {}),
+            scannedBytes: advanced.scannedBytes,
+          }
         : {
             kind: 'fallback',
             authority: advanced.authority,
+            ...(advanced.continuationOpenedAt !== undefined
+              ? { continuationOpenedAt: advanced.continuationOpenedAt }
+              : {}),
             reason: advanced.reason,
             scannedBytes: advanced.scannedBytes,
           };
     }
     rememberClaudeTurnAuthority(path, cached);
     return cached.resolution === 'authority'
-      ? { kind: 'authority', authority: cached.authority, scannedBytes: 0 }
+      ? {
+          kind: 'authority',
+          authority: cached.authority,
+          ...(cached.continuationOpenedAt !== undefined
+            ? { continuationOpenedAt: cached.continuationOpenedAt }
+            : {}),
+          scannedBytes: 0,
+        }
       : {
           kind: 'fallback',
           authority: cached.authority,
+          ...(cached.continuationOpenedAt !== undefined
+            ? { continuationOpenedAt: cached.continuationOpenedAt }
+            : {}),
           reason: cached.fallbackReason ?? 'source-limit',
           scannedBytes: 0,
         };
@@ -5674,6 +6199,8 @@ export async function claudeTranscriptTurnAuthorityResult(
       : { kind: 'opaque' }),
     candidateAuthority: recovered.authority,
     candidateAuthoritative: recovered.kind === 'authority',
+    continuationOpenedAt: recovered.continuationOpenedAt,
+    candidateContinuationOpenedAt: recovered.continuationOpenedAt,
   };
   refreshClaudeAuthoritySamples(path, st, entry);
   rememberClaudeTurnAuthority(path, entry);
@@ -5684,6 +6211,7 @@ type ClaudeColdAuthorityScan =
   | {
       kind: 'authority';
       authority: ClaudeTranscriptTurnAuthority;
+      continuationOpenedAt?: number;
       scannedThrough: number;
       scannedBytes: number;
       tail?: ClaudeAuthorityTail;
@@ -5692,6 +6220,7 @@ type ClaudeColdAuthorityScan =
   | {
       kind: 'fallback';
       authority: 'unknown';
+      continuationOpenedAt?: number;
       reason: ClaudeTurnAuthorityFallbackReason;
       scannedThrough: number;
       scannedBytes: number;
@@ -5713,6 +6242,41 @@ async function scanClaudeAuthorityCold(
   let scannedBytes = 0;
   let scannedThrough: number | undefined;
   let result: ClaudeColdAuthorityScan | undefined;
+  let latestAuthority: ClaudeTranscriptTurnAuthority | undefined;
+  let continuationOpenedAt: number | undefined;
+  let continuationResolved = false;
+  const boundedResult = (
+    reason: ClaudeTurnAuthorityFallbackReason,
+  ): ClaudeColdAuthorityScan => latestAuthority
+    ? {
+        kind: 'authority',
+        authority: latestAuthority,
+        ...(continuationResolved && continuationOpenedAt !== undefined
+          ? { continuationOpenedAt }
+          : {}),
+        scannedThrough: scannedThrough ?? st.size,
+        scannedBytes,
+      }
+    : {
+        kind: 'fallback',
+        authority: 'unknown',
+        reason,
+        scannedThrough: st.size,
+        scannedBytes,
+      };
+  const inspectReverseRecord = (record: Buffer): boolean => {
+    const state = claudeRecordTurnState(record);
+    if (!latestAuthority && state.authority) latestAuthority = state.authority;
+    if (!latestAuthority) return false;
+    if (!continuationResolved && state.continuationTransition) {
+      continuationOpenedAt = applyClaudeContinuationTransition(
+        continuationOpenedAt,
+        state.continuationTransition,
+      );
+      continuationResolved = true;
+    }
+    return continuationResolved;
+  };
   try {
     fd = openSync(path, 'r');
     const opened = fstatSync(fd);
@@ -5730,11 +6294,11 @@ async function scanClaudeAuthorityCold(
     let suffix: Buffer = Buffer.alloc(0);
     scan: while (pos > 0) {
       if (scannedBytes >= maxSourceBytes) {
-        result = { kind: 'fallback', authority: 'unknown', reason: 'source-limit', scannedThrough: st.size, scannedBytes };
+        result = boundedResult('source-limit');
         break;
       }
       if (Date.now() > deadline) {
-        result = { kind: 'fallback', authority: 'unknown', reason: 'time-limit', scannedThrough: st.size, scannedBytes };
+        result = boundedResult('time-limit');
         break;
       }
       const len = Math.min(CLAUDE_TURN_AUTHORITY_CHUNK_BYTES, pos, maxSourceBytes - scannedBytes);
@@ -5754,7 +6318,7 @@ async function scanClaudeAuthorityCold(
       }
       if (newlineOffsets.length === 0) {
         if (chunk.length + suffix.length > CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
-          result = { kind: 'fallback', authority: 'unknown', reason: 'record-limit', scannedThrough: st.size, scannedBytes };
+          result = boundedResult('record-limit');
           break;
         }
         suffix = Buffer.concat([chunk, suffix], chunk.length + suffix.length);
@@ -5768,17 +6332,17 @@ async function scanClaudeAuthorityCold(
         const fragment = chunk.subarray(left, right);
         const recordLength = fragment.length + suffix.length;
         if (recordLength > CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
-          result = { kind: 'fallback', authority: 'unknown', reason: 'record-limit', scannedThrough: st.size, scannedBytes };
+          result = boundedResult('record-limit');
           break scan;
         }
         const record = suffix.length > 0
           ? Buffer.concat([fragment, suffix], recordLength)
           : fragment;
-        const authority = claudeRecordTurnAuthority(record);
-        if (authority) {
+        if (inspectReverseRecord(record)) {
           result = {
             kind: 'authority',
-            authority,
+            authority: latestAuthority ?? 'unknown',
+            ...(continuationOpenedAt !== undefined ? { continuationOpenedAt } : {}),
             scannedThrough: scannedThrough ?? 0,
             scannedBytes,
           };
@@ -5789,16 +6353,17 @@ async function scanClaudeAuthorityCold(
       }
       suffix = chunk.subarray(0, right);
       if (suffix.length > CLAUDE_TURN_AUTHORITY_MAX_RECORD_BYTES) {
-        result = { kind: 'fallback', authority: 'unknown', reason: 'record-limit', scannedThrough: st.size, scannedBytes };
+        result = boundedResult('record-limit');
         break;
       }
       await yieldToEventLoop();
     }
     if (!result) {
-      const authority = claudeRecordTurnAuthority(suffix);
+      if (suffix.length > 0) inspectReverseRecord(suffix);
       result = {
         kind: 'authority',
-        authority: authority ?? 'unknown',
+        authority: latestAuthority ?? 'unknown',
+        ...(continuationOpenedAt !== undefined ? { continuationOpenedAt } : {}),
         scannedThrough: scannedThrough ?? 0,
         scannedBytes,
       };
@@ -5831,6 +6396,8 @@ type ClaudeRangeAuthorityScan =
       processedThrough: number;
       candidateAuthority: ClaudeTranscriptTurnAuthority;
       candidateAuthoritative: boolean;
+      continuationOpenedAt?: number;
+      candidateContinuationOpenedAt?: number;
       reason?: undefined;
     }
   | {
@@ -5842,6 +6409,8 @@ type ClaudeRangeAuthorityScan =
       processedThrough: number;
       candidateAuthority: ClaudeTranscriptTurnAuthority;
       candidateAuthoritative: boolean;
+      continuationOpenedAt?: number;
+      candidateContinuationOpenedAt?: number;
     };
 
 /** Cooperatively advance an admitted transcript without revisiting an unbounded suffix.
@@ -5864,6 +6433,7 @@ async function scanClaudeAuthorityRange(
   const initialAuthority = cached.authority;
   let candidateAuthority = cached.candidateAuthority;
   let candidateAuthoritative = cached.candidateAuthoritative;
+  let candidateContinuationOpenedAt = cached.candidateContinuationOpenedAt;
   let fallbackReason = cached.fallbackReason;
   let scannedBytes = 0;
   let fd: number | undefined;
@@ -5871,7 +6441,22 @@ async function scanClaudeAuthorityRange(
     fd = openSync(path, 'r');
     const opened = fstatSync(fd);
     if (!claudeAuthorityStatMatches(st, opened)) {
-      return { kind: 'fallback', authority: cached.authority, reason: 'source-changed', tail: cached.tail, scannedBytes, processedThrough: cached.processedSize, candidateAuthority, candidateAuthoritative };
+      return {
+        kind: 'fallback',
+        authority: cached.authority,
+        ...(cached.continuationOpenedAt !== undefined
+          ? { continuationOpenedAt: cached.continuationOpenedAt }
+          : {}),
+        reason: 'source-changed',
+        tail: cached.tail,
+        scannedBytes,
+        processedThrough: cached.processedSize,
+        candidateAuthority,
+        candidateAuthoritative,
+        ...(candidateContinuationOpenedAt !== undefined
+          ? { candidateContinuationOpenedAt }
+          : {}),
+      };
     }
     const guard = claudeAuthorityGuardFromFd(fd, opened);
     const start = cached.tail.kind === 'partial' ? cached.tail.start : cached.processedSize;
@@ -5911,11 +6496,15 @@ async function scanClaudeAuthorityRange(
           const record = fragments.length > 0
             ? Buffer.concat([...fragments, fragment], recordLength)
             : fragment;
-          const next = claudeRecordTurnAuthority(record);
-          if (next) {
-            candidateAuthority = next;
+          const next = claudeRecordTurnState(record);
+          if (next.authority) {
+            candidateAuthority = next.authority;
             candidateAuthoritative = true;
           }
+          candidateContinuationOpenedAt = applyClaudeContinuationTransition(
+            candidateContinuationOpenedAt,
+            next.continuationTransition,
+          );
         }
         fragments = [];
         fragmentBytes = 0;
@@ -5930,6 +6519,7 @@ async function scanClaudeAuthorityRange(
           fallbackReason = 'record-limit';
           candidateAuthority = initialAuthority;
           candidateAuthoritative = false;
+          candidateContinuationOpenedAt = cached.continuationOpenedAt;
         } else {
           fragments.push(trailing);
           fragmentBytes += trailing.length;
@@ -5940,11 +6530,15 @@ async function scanClaudeAuthorityRange(
     }
 
     if (!boundedReason && !skippingOversized && fragmentBytes > 0) {
-      const trailingAuthority = claudeRecordTurnAuthority(Buffer.concat(fragments, fragmentBytes));
-      if (trailingAuthority) {
-        candidateAuthority = trailingAuthority;
+      const trailing = claudeRecordTurnState(Buffer.concat(fragments, fragmentBytes));
+      if (trailing.authority) {
+        candidateAuthority = trailing.authority;
         candidateAuthoritative = true;
       }
+      candidateContinuationOpenedAt = applyClaudeContinuationTransition(
+        candidateContinuationOpenedAt,
+        trailing.continuationTransition,
+      );
     }
 
     let tail: ClaudeAuthorityTail;
@@ -5956,24 +6550,70 @@ async function scanClaudeAuthorityRange(
 
     options.beforeValidation?.();
     if (!claudeAuthorityGuardStillMatches(path, fd, guard)) {
-      return { kind: 'fallback', authority: cached.authority, reason: 'source-changed', tail: cached.tail, scannedBytes, processedThrough: cached.processedSize, candidateAuthority: cached.candidateAuthority, candidateAuthoritative: cached.candidateAuthoritative };
+      return {
+        kind: 'fallback',
+        authority: cached.authority,
+        ...(cached.continuationOpenedAt !== undefined
+          ? { continuationOpenedAt: cached.continuationOpenedAt }
+          : {}),
+        reason: 'source-changed',
+        tail: cached.tail,
+        scannedBytes,
+        processedThrough: cached.processedSize,
+        candidateAuthority: cached.candidateAuthority,
+        candidateAuthoritative: cached.candidateAuthoritative,
+        ...(cached.candidateContinuationOpenedAt !== undefined
+          ? { candidateContinuationOpenedAt: cached.candidateContinuationOpenedAt }
+          : {}),
+      };
     }
     const caughtUp = !boundedReason && pos === st.size;
     if (caughtUp && candidateAuthoritative && !skippingOversized) {
-      return { kind: 'authority', authority: candidateAuthority, tail, scannedBytes, processedThrough: pos, candidateAuthority, candidateAuthoritative };
+      return {
+        kind: 'authority',
+        authority: candidateAuthority,
+        ...(candidateContinuationOpenedAt !== undefined
+          ? {
+              continuationOpenedAt: candidateContinuationOpenedAt,
+              candidateContinuationOpenedAt,
+            }
+          : {}),
+        tail,
+        scannedBytes,
+        processedThrough: pos,
+        candidateAuthority,
+        candidateAuthoritative,
+      };
     }
     return {
       kind: 'fallback',
       authority: initialAuthority,
+      ...(cached.continuationOpenedAt !== undefined ? { continuationOpenedAt: cached.continuationOpenedAt } : {}),
       reason: fallbackReason ?? 'record-limit',
       tail,
       scannedBytes,
       processedThrough: pos,
       candidateAuthority,
       candidateAuthoritative,
+      ...(candidateContinuationOpenedAt !== undefined ? { candidateContinuationOpenedAt } : {}),
     };
   } catch {
-    return { kind: 'fallback', authority: cached.authority, reason: 'source-changed', tail: cached.tail, scannedBytes, processedThrough: cached.processedSize, candidateAuthority: cached.candidateAuthority, candidateAuthoritative: cached.candidateAuthoritative };
+    return {
+      kind: 'fallback',
+      authority: cached.authority,
+      ...(cached.continuationOpenedAt !== undefined
+        ? { continuationOpenedAt: cached.continuationOpenedAt }
+        : {}),
+      reason: 'source-changed',
+      tail: cached.tail,
+      scannedBytes,
+      processedThrough: cached.processedSize,
+      candidateAuthority: cached.candidateAuthority,
+      candidateAuthoritative: cached.candidateAuthoritative,
+      ...(cached.candidateContinuationOpenedAt !== undefined
+        ? { candidateContinuationOpenedAt: cached.candidateContinuationOpenedAt }
+        : {}),
+    };
   } finally {
     if (fd !== undefined) try { closeSync(fd); } catch { /* ignore */ }
   }
@@ -5982,10 +6622,22 @@ async function scanClaudeAuthorityRange(
 function claudeRecordTurnAuthority(
   record: Buffer,
 ): Exclude<ClaudeTranscriptTurnAuthority, 'unknown'> | undefined {
+  return claudeRecordTurnState(record).authority;
+}
+
+function claudeRecordTurnState(record: Buffer): {
+  authority?: Exclude<ClaudeTranscriptTurnAuthority, 'unknown'>;
+  continuationTransition?: ClaudeContinuationTransition;
+} {
   const raw = record.toString('utf8');
-  if (!/"type"\s*:\s*"(?:assistant|user|system)"/.test(raw)) return undefined;
+  if (!/"type"\s*:\s*"(?:assistant|user|system)"/.test(raw)) return {};
   const line = parseLineOrNull(raw);
-  return line ? claudeLineTurnAuthority(line) : undefined;
+  return line
+    ? {
+        authority: claudeLineTurnAuthority(line),
+        continuationTransition: claudeLineContinuationTransition(line),
+      }
+    : {};
 }
 
 function claudeAuthoritySourceKey(st: ClaudeAuthorityStat): string {
@@ -6105,32 +6757,48 @@ function rememberClaudeTurnAuthority(path: string, entry: ClaudeTurnAuthorityEnt
 
 /** One status projection shared by discovery and Observe attach.
  *
- * Exact terminal transcript authority always wins. Exact active transcript authority preserves a
- * live process through arbitrarily quiet tools, but cannot manufacture Working after that process
- * has exited: it must be qualified by the current `agents --json` row. The freshness fallback applies
- * only when the transcript has no exact latest-turn evidence; the background-task fallback also
- * upgrades an active turn that the live row leaves idle. */
+ * Exact terminal transcript authority wins over the live row, with ONE upgrade: an
+ * unnotified background spawn is still real work after the parent's turn ends (the real
+ * flow ends with end_turn right after the async-launch ack), so a fresh pending spawn
+ * keeps the row Working until the task notification lands. Exact active authority
+ * preserves a live process through arbitrarily quiet tools, but cannot manufacture
+ * Working after that process has exited: it must be qualified by the current
+ * `agents --json` row, a pending background spawn, or a pending notification-woken
+ * continuation (whose live row may read idle or carry no `status` at all). The
+ * freshness fallback applies only when the transcript has no exact latest-turn
+ * evidence. */
 export async function claudeSessionStatus(
   path: string,
   raw: RawStatus | undefined,
   now: number,
 ): Promise<RawStatus> {
-  const authority = await claudeTranscriptTurnAuthority(path);
-  if (authority === 'terminal') return 'idle';
+  const authorityResult = await claudeTranscriptTurnAuthorityResult(path);
+  const authority = authorityResult.authority;
+  const continuationPending =
+    authorityResult.continuationOpenedAt !== undefined
+    && now - authorityResult.continuationOpenedAt < CONTINUATION_PENDING_MS;
+  if (authority === 'terminal') {
+    // A terminal marker AFTER the notification resolves the continuation fact, so only
+    // the pending spawn can upgrade here. needs-input keeps today's terminal verdict: a
+    // stale waiting row must not outlive its turn.
+    return pendingBackgroundSpawnMs(path, now) != null && raw !== 'needs-input' ? 'working' : 'idle';
+  }
   if (authority === 'active') {
     if (raw === 'needs-input') return 'needs-input';
     if (raw === 'working') return 'working';
     // Exact active evidence proves a turn was OPEN, not that the CLI is busy now, so this branch would
-    // otherwise settle to idle. A fresh unnotified background spawn is the one thing that still makes
-    // that verdict wrong: the spawning tool_use line is itself an exact active marker, so without this
-    // the background-pending fallback below is unreachable for every real transcript. Upgrade only —
-    // live busy/needs-input evidence above keeps its precedence.
-    return pendingBackgroundSpawnMs(path, now) != null ? 'working' : 'idle';
+    // otherwise settle to idle. Two things still make that verdict wrong: a fresh unnotified
+    // background spawn (the spawning tool_use line is itself an exact active marker), and a
+    // notification-woken continuation (the notification consumed the pending spawn while the live row
+    // shows nothing). Upgrade only — live busy/needs-input evidence above keeps its precedence.
+    return pendingBackgroundSpawnMs(path, now) != null || continuationPending
+      ? 'working'
+      : 'idle';
   }
   const st = statSafe(path);
   const conversationTs = lastConversationTs(path) ?? st?.mtimeMs ?? 0;
   const pendingBg = pendingBackgroundSpawnMs(path, now);
-  if (pendingBg != null && raw !== 'needs-input') return 'working';
+  if ((pendingBg != null || continuationPending) && raw !== 'needs-input') return 'working';
   const gateMtime = raw === 'working'
     ? Math.max(conversationTs, activityHeartbeatMs(path))
     : conversationTs;
@@ -6143,6 +6811,10 @@ const WORKING_FRESH_MS = 120_000;
  *  immediate async-launch acknowledgement and `agents --json` reads idle. Keep the roster working until
  *  the parent receives the task notification, or the launch is old enough to be treated as abandoned. */
 const BACKGROUND_PENDING_MS = 1_800_000; // 30 min
+/** Abandonment bound for a notification-woken continuation with no terminal marker yet.
+ *  Interactive rows re-earn Working from `agents --json` anyway; this is the ceiling for
+ *  sessions whose live row cannot say busy (sdk-cli rows omit `status`). */
+const CONTINUATION_PENDING_MS = 1_800_000; // 30 min
 /** Abandonment window for a LIVE workflow with no top-level json. Measured against the run dir's freshest
  *  file (the per-agent agent-*.jsonl heartbeats, NOT the start/finish-only journal), so it is intentionally
  *  generous: a real fan-out streams agent output far more often than this, so only a crashed/old run (e.g.

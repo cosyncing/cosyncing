@@ -15,7 +15,7 @@ Widget _harness({
   bool? webReserved,
 }) {
   return MaterialApp(
-    home: CallbackShortcuts(
+    home: AppCallbackShortcuts(
       bindings: {
         ...appShortcutBindings(
           specs: appShortcutsForScope(AppShortcutScope.workspace),
@@ -160,6 +160,72 @@ void main() {
       expect(find.text('2]9['), findsOneWidget);
     });
 
+    // The composer regression: `CallbackShortcuts` marks any matched
+    // activator handled even when the guard declined, and a handled keydown
+    // never reaches the text input (the web engine `preventDefault`s it), so
+    // digits could not be typed into the composer. Consumption must follow
+    // the guard: declined → the event falls through to the field.
+    testWidgets('a guarded-out bare digit is not consumed', (tester) async {
+      final fired = <String>[];
+      final fieldFocus = FocusNode();
+      addTearDown(fieldFocus.dispose);
+      await tester.pumpWidget(_harness(fired: fired, fieldFocus: fieldFocus));
+      fieldFocus.requestFocus();
+      await tester.pump();
+
+      final handled = await tester.sendKeyDownEvent(LogicalKeyboardKey.digit2);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.digit2);
+
+      expect(handled, isFalse);
+      expect(fired, isEmpty);
+    });
+
+    // The bare layer also claims punctuation (`[`, `]`, `9`, and `/` in the
+    // roster scope); those characters ride the same consumption rule as the
+    // digits.
+    testWidgets('guarded-out bare punctuation is not consumed', (tester) async {
+      final fired = <String>[];
+      final fieldFocus = FocusNode();
+      addTearDown(fieldFocus.dispose);
+      await tester.pumpWidget(_harness(fired: fired, fieldFocus: fieldFocus));
+      fieldFocus.requestFocus();
+      await tester.pump();
+
+      final bracketHandled = await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.bracketRight,
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.bracketRight);
+      final digit9Handled = await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.digit9,
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.digit9);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      final shiftedDigitHandled = await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.digit9,
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.digit9);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+
+      expect(bracketHandled, isFalse);
+      expect(digit9Handled, isFalse);
+      expect(shiftedDigitHandled, isFalse);
+      expect(fired, isEmpty);
+    });
+
+    testWidgets('a fired bare digit is consumed', (tester) async {
+      final fired = <String>[];
+      final fieldFocus = FocusNode();
+      addTearDown(fieldFocus.dispose);
+      await tester.pumpWidget(_harness(fired: fired, fieldFocus: fieldFocus));
+      await tester.pump();
+
+      final handled = await tester.sendKeyDownEvent(LogicalKeyboardKey.digit2);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.digit2);
+
+      expect(handled, isTrue);
+      expect(fired, ['ordinal:1']);
+    });
+
     testWidgets('an active IME composition suppresses bare keys', (
       tester,
     ) async {
@@ -200,15 +266,15 @@ void main() {
       fieldFocus.requestFocus();
       await tester.pump();
 
-      // AltGr+W and AltGr+N are real characters on European layouts.
-      await _press(
-        tester,
-        LogicalKeyboardKey.keyW,
-        modifiers: const [
-          LogicalKeyboardKey.controlLeft,
-          LogicalKeyboardKey.altLeft,
-        ],
-      );
+      // AltGr+W and AltGr+N are real characters on European layouts — the
+      // suppressed chord must also stay unconsumed so the character reaches
+      // the field.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      final handled = await tester.sendKeyDownEvent(LogicalKeyboardKey.keyW);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyW);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await _press(
         tester,
         LogicalKeyboardKey.keyN,
@@ -218,6 +284,7 @@ void main() {
         ],
       );
 
+      expect(handled, isFalse);
       expect(fired, isEmpty);
       debugDefaultTargetPlatformOverride = null;
     });

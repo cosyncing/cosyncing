@@ -362,14 +362,20 @@ extension _SessionDetailBootstrap on SessionDetailController {
         gap: snapshot.gap,
         truncated: snapshot.truncation,
       );
+      final transcriptWindow = TranscriptHistoryWindow.fromHistory(history);
       state = state.copyWith(
         events: appendSessionDetailEventLog(const [], history),
-        transcriptWindow: TranscriptHistoryWindow.fromHistory(history),
+        transcriptWindow: transcriptWindow,
         // Hydrating the durable snapshot replaces the transcript just like a
         // broker replay does; keep the local replacement generation in step.
         transcriptResetGeneration: state.transcriptResetGeneration + 1,
+        // Same rule as the controller's reset fold: a snapshot over the
+        // count/byte budget evicts its own prefix during the build, and an
+        // evicted head cannot support the start-of-session claim.
         historyStartReached:
-            !snapshot.hasEarlier && snapshot.truncation == null,
+            !snapshot.hasEarlier &&
+            snapshot.truncation == null &&
+            !transcriptWindow.tailPrefixEvicted,
       );
       return snapshot.messages.isNotEmpty;
     } on Object {

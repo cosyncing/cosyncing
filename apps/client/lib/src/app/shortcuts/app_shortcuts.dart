@@ -274,23 +274,38 @@ bool appShortcutAltGrChordAllowed({TargetPlatform? platform}) {
   return !appShortcutEditableHasFocus();
 }
 
-/// Builds `CallbackShortcuts` bindings for [specs] from the handlers supplied
-/// by the binding site.
+/// One shortcut handler: fires (or declines) and reports whether it fired.
+///
+/// The report IS the consumption decision. A guarded-out keystroke must stay
+/// unconsumed so it continues to the focused text field — `CallbackShortcuts`
+/// marks any matched activator handled regardless of what the callback did,
+/// which had the engine `preventDefault` bare digits typed into the composer.
+typedef AppShortcutHandler = bool Function();
+
+/// Wraps an unconditional [action] as a handler that always consumes.
+AppShortcutHandler appShortcutAlways(VoidCallback action) => () {
+  action();
+  return true;
+};
+
+/// Builds [AppCallbackShortcuts] bindings for [specs] from the handlers
+/// supplied by the binding site.
 ///
 /// A spec with no handler in [handlers] contributes nothing, so one call can
 /// be given the whole registry slice for a scope and wire only what the site
 /// actually owns. Every family carries its guard: the composition guard on
 /// modifier chords, the AltGr guard on the `Ctrl+Alt` family, and the focus
-/// guard on bare keys.
+/// guard on bare keys. A guard that declines reports unfired, so the
+/// keystroke reaches the focused field instead of being swallowed.
 ///
 /// [webReserved] defaults to [appShortcutsWebReserved].
-Map<ShortcutActivator, VoidCallback> appShortcutBindings({
+Map<ShortcutActivator, AppShortcutHandler> appShortcutBindings({
   required Iterable<AppShortcutSpec> specs,
   required Map<AppShortcutId, VoidCallback> handlers,
   bool? webReserved,
 }) {
   final reserved = webReserved ?? appShortcutsWebReserved;
-  final bindings = <ShortcutActivator, VoidCallback>{};
+  final bindings = <ShortcutActivator, AppShortcutHandler>{};
   for (final spec in specs) {
     final handler = handlers[spec.id];
     if (handler == null) {
@@ -300,21 +315,23 @@ Map<ShortcutActivator, VoidCallback> appShortcutBindings({
       for (final activator in spec.nativeActivators) {
         bindings[activator] = () {
           if (appShortcutCompositionActive()) {
-            return;
+            return false;
           }
           handler();
+          return true;
         };
       }
     }
     for (final activator in spec.webSafeActivators) {
       bindings[activator] = () {
         if (!appShortcutAltGrChordAllowed()) {
-          return;
+          return false;
         }
         if (appShortcutCompositionActive()) {
-          return;
+          return false;
         }
         handler();
+        return true;
       };
     }
     for (final activator in spec.bareActivators) {
@@ -324,25 +341,70 @@ Map<ShortcutActivator, VoidCallback> appShortcutBindings({
   return bindings;
 }
 
-/// Wraps [action] in the bare-key focus guard.
-VoidCallback appShortcutBareKey(VoidCallback action) => () {
+/// Wraps [action] in the bare-key focus guard; declining reports unfired.
+AppShortcutHandler appShortcutBareKey(VoidCallback action) => () {
   if (!appShortcutBareKeyAllowed()) {
-    return;
+    return false;
   }
   action();
+  return true;
 };
 
 /// Binds each activator in [activators] to [onIndex] with its position.
 ///
 /// The session ordinals are one spec covering eight bare digits, so they
 /// cannot go through [appShortcutBindings]'s one-handler-per-id shape.
-Map<ShortcutActivator, VoidCallback> appShortcutOrdinalBindings(
+Map<ShortcutActivator, AppShortcutHandler> appShortcutOrdinalBindings(
   List<SingleActivator> activators,
   void Function(int index) onIndex,
-) => <ShortcutActivator, VoidCallback>{
+) => <ShortcutActivator, AppShortcutHandler>{
   for (var index = 0; index < activators.length; index++)
     activators[index]: appShortcutBareKey(() => onIndex(index)),
 };
+
+/// `CallbackShortcuts` whose consumption follows the handler's report.
+///
+/// The stock widget returns `handled` for any matched activator even when the
+/// callback's guard declined, and a handled keydown never reaches the text
+/// input (the web engine `preventDefault`s it; desktop embedders don't
+/// forward it to the IME). Here an activator consumes its keystroke only when
+/// its [AppShortcutHandler] returns true, so bare keys and AltGr chords typed
+/// into a focused field insert their characters.
+class AppCallbackShortcuts extends StatelessWidget {
+  /// Creates the binding scope.
+  const AppCallbackShortcuts({
+    required this.bindings,
+    required this.child,
+    super.key,
+  });
+
+  /// Activator → guarded handler, same matching rules as `CallbackShortcuts`.
+  final Map<ShortcutActivator, AppShortcutHandler> bindings;
+
+  /// Subtree the bindings cover.
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: (FocusNode node, KeyEvent event) {
+        var result = KeyEventResult.ignored;
+        // Like the stock widget, every matching binding runs; any that fired
+        // consumes.
+        for (final entry in bindings.entries) {
+          if (entry.key.accepts(event, HardwareKeyboard.instance) &&
+              entry.value()) {
+            result = KeyEventResult.handled;
+          }
+        }
+        return result;
+      },
+      child: child,
+    );
+  }
+}
 
 /// The bare digit activators for session ordinals, in strip order: index 0 is
 /// the first open session, index 7 the eighth.

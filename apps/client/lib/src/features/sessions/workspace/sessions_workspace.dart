@@ -362,7 +362,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   /// action, while the compact page must also route to a neighbour. The
   /// draft-durability barrier is NOT one of those differences — it lives
   /// inside `OpenSessionsController.close`, so both layouts get it.
-  Map<ShortcutActivator, VoidCallback> _workspaceShortcuts(
+  Map<ShortcutActivator, AppShortcutHandler> _workspaceShortcuts(
     OpenSessionsState open, {
     required bool canCreateSession,
   }) => {
@@ -475,7 +475,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     final active = open.active;
     final buildDetail = widget.detailBuilder ?? _defaultDetail;
 
-    return CallbackShortcuts(
+    return AppCallbackShortcuts(
       bindings: _workspaceShortcuts(
         open,
         canCreateSession: canCreateSession,

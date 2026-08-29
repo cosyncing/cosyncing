@@ -293,6 +293,9 @@ Widget _noticeMessageRenderer(BuildContext context, AgentMessage message) {
   final isInterruption =
       message.transcriptNoticeSemanticKind ==
       TranscriptNoticeSemanticKind.interruption;
+  final isContinuation =
+      message.transcriptNoticeSemanticKind ==
+      TranscriptNoticeSemanticKind.continuation;
   final text =
       message.transcriptInterruptionReason ==
           TranscriptInterruptionReason.automaticApprovalDeniedRepeatedly
@@ -304,6 +307,8 @@ Widget _noticeMessageRenderer(BuildContext context, AgentMessage message) {
     key: Key(
       isInterruption
           ? 'session-transcript-interruption-inline'
+          : isContinuation
+          ? 'session-transcript-continuation-inline'
           : 'session-transcript-notice-inline',
     ),
     text: text,

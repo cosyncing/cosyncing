@@ -1006,9 +1006,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     }
   }
 
-  void _interruptFromShortcut() {
+  bool _interruptFromShortcut() {
     final route = ModalRoute.of(context);
-    if (route == null || !route.isCurrent) return;
+    if (route == null || !route.isCurrent) return false;
 
     // A focused editor outside the composer (for example inline rename) owns
     // Escape. The prompt's own palette gets first refusal in its Focus node.
@@ -1019,8 +1019,9 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
         primaryFocus != _promptFocusNode &&
         (focusContext?.widget is EditableText ||
             focusContext?.findAncestorStateOfType<EditableTextState>() != null);
-    if (anotherEditableOwnsEscape) return;
+    if (anotherEditableOwnsEscape) return false;
     unawaited(_interruptCurrentTurn());
+    return true;
   }
 
   void _focusPromptComposer() {
@@ -1994,7 +1995,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// Same registry specs as `SessionsWorkspace`, different handlers: here
   /// every selection also flushes the draft and routes, because the tab strip
   /// and the detail are the same screen.
-  Map<ShortcutActivator, VoidCallback> _openSessionShortcuts(
+  Map<ShortcutActivator, AppShortcutHandler> _openSessionShortcuts(
     OpenSessionsState open,
   ) => {
     ...appShortcutBindings(
@@ -2250,12 +2251,12 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     final detailFreshness = SessionDetailFreshnessPresentation.fromState(state);
     final isSubView = _view != _SessionDetailView.chat;
 
-    final page = CallbackShortcuts(
+    final page = AppCallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyK, control: true):
-            _focusPromptComposer,
+            appShortcutAlways(_focusPromptComposer),
         const SingleActivator(LogicalKeyboardKey.keyK, meta: true):
-            _focusPromptComposer,
+            appShortcutAlways(_focusPromptComposer),
         const SingleActivator(LogicalKeyboardKey.escape):
             _interruptFromShortcut,
         // Only the compact single-pane layout owns the working set here. When

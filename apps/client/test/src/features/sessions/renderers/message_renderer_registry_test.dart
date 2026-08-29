@@ -377,6 +377,45 @@ void main() {
     });
 
     testWidgets(
+      'renders a continuation boundary as distinct neutral inline text',
+      (tester) async {
+        for (final brightness in Brightness.values) {
+          await _pumpRenderer(
+            tester,
+            const AgentMessage(
+              type: AgentMessageType.notice,
+              raw: {
+                'type': 'notice',
+                'message': 'Worker finished',
+                'semantic': {
+                  'kind': 'continuation',
+                  'reason': 'task-notification',
+                  'turnId': 'turn-8',
+                },
+              },
+            ),
+            brightness: brightness,
+          );
+
+          final finder = find.byKey(
+            const Key('session-transcript-continuation-inline'),
+          );
+          expect(finder, findsOneWidget);
+          expect(find.text('Worker finished'), findsOneWidget);
+          expect(find.byType(Card), findsNothing);
+          expect(find.byType(Icon), findsNothing);
+          final text = tester.widget<Text>(
+            find.descendant(of: finder, matching: find.byType(Text)),
+          );
+          final tokens = brightness == Brightness.light
+              ? softMinimalistTheme.light
+              : softMinimalistTheme.dark;
+          expect(text.style?.color, tokens.textSecondary);
+        }
+      },
+    );
+
+    testWidgets(
       'unknown notice text stays unchanged and neutral in light and dark',
       (tester) async {
         const raw =

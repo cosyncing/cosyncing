@@ -35,7 +35,7 @@ import {
 import { validateResolvedWorkspacePath } from '../artifacts/fs-browse.ts';
 import type { SharedDraftStore } from './draft-store.ts';
 import { planSemanticFromMessage } from './client-message-policy.ts';
-import { capHistoryMessages } from './history-delta.ts';
+import { backwardHistoryCursor, capHistoryDelta, historyDelta, isCursorDurableMessage } from './history-delta.ts';
 import type { SessionControlTransition } from '../attention/attention-policy.ts';
 import type { LiveOverlayEntry } from '../roster/roster-overlay.ts';
 import {
@@ -259,6 +259,38 @@ export interface DraftSetResult {
   record: { text: string; at: number; revision: number; updateId?: string };
 }
 
+/** Identity used to reconcile a captured live snapshot against the history just delivered.
+ *  Only model-output/thinking accumulate in the live text buffer, so only they can overlap. */
+export function liveOverlapKey(message: AgentMessage): string | undefined {
+  if (message.type !== 'model-output' && message.type !== 'thinking') return undefined;
+  return message.key ? `${message.type}:${message.key}` : undefined;
+}
+
+/** How much text a keyed message carries, so the more complete copy of one identity wins. */
+export function liveOverlapTextLength(message: AgentMessage): number {
+  const text = (message as { text?: unknown }).text;
+  return typeof text === 'string' ? text.length : 0;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const inner = (value as Record<string, unknown>)[key];
+      if (inner !== undefined) out[key] = canonicalize(inner);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Key-order-independent structural identity, for snapshot-containment checks on rows that have
+ *  no stable transcript key to dedup on (errors, events, terminal output). */
+function canonicalMessageJson(message: AgentMessage): string {
+  return JSON.stringify(canonicalize(message));
+}
+
 export class ManagedConn {
   private readonly ring: Array<{ seq: number; message: AgentMessage }> = [];
   private seq = 0;
@@ -305,6 +337,23 @@ export class ManagedConn {
   /** Current adapter-authored plan states, keyed by the semantic planKey. Generic task ledgers never
    * enter this map. It is seeded from attach/resync history and refreshed by live frames. */
   private readonly currentPlans = new Map<string, Extract<AgentMessage, { type: 'task-list-state' }>>();
+  /** Live frames that raced a resync snapshot read, re-broadcast after the snapshot frame so a
+   *  client never ENDS UP holding content newer than the "fresh" snapshot that replaced its window.
+   *  They still fan out immediately (holding them would stall live delivery across the read and its
+   *  1.5s empty retry). Null outside a resync cycle. */
+  private resyncReplay: AgentMessage[] | null = null;
+  /** Serializes overlapping resyncs: one read/broadcast cycle records raced frames at a time. */
+  private resyncChain: Promise<void> = Promise.resolve();
+  /** Full durable cursor for the last history projection accepted by a client. Unlike either read
+   *  inside resyncNow(), this boundary is known to precede the next replay window. */
+  private resyncBaselineCursor: string | undefined;
+  /** Structurally keyed durable live rows delivered before a resync starts. They must be subtracted
+   *  from the cursor suffix: they are older than the replay window even if their native persistence
+   *  happened later. Recording starts before the first attach cursor exists, conservatively covering
+   *  live delivery that raced that attach. Bounded like the live ring; overflow fails safe. */
+  private readonly resyncBaselineLiveRows = new Map<string, number>();
+  private resyncBaselineLiveRowCount = 0;
+  private resyncBaselineLiveRowsUsable = true;
 
   constructor(
     public conn: SessionConnection,
@@ -467,6 +516,13 @@ export class ManagedConn {
       // closes the getHistory race: a plan emitted while history is loading must not be overwritten.
       if (!this.currentPlans.has(planKey) && message.status !== 'cleared') this.currentPlans.set(planKey, message);
     }
+  }
+
+  /** Seed the pre-resync boundary from an attach frame the client accepted. Later attaches must not
+   *  move an owned connection backwards; successful resyncs advance this cursor internally. */
+  acceptResyncHistoryCursor(cursor: string | undefined): void {
+    if (!cursor || this.resyncBaselineCursor !== undefined) return;
+    this.resyncBaselineCursor = cursor;
   }
 
   currentPlan(planKey: unknown): Extract<AgentMessage, { type: 'task-list-state' }> | undefined {
@@ -709,13 +765,41 @@ export class ManagedConn {
     } catch (error) {
       console.warn('[hub] attention message observer failed:', error instanceof Error ? error.message : String(error));
     }
+    // A resync snapshot read is in flight: record the frame for post-snapshot replay so the wire
+    // ENDS as [snapshot][newer live frames] without stalling live delivery — see resyncNow().
+    this.resyncReplay?.push(message);
+    this.broadcastLive(message);
+    // After the tool-result is delivered, auto-surface a deliverable file the agent just wrote,
+    // so "make an html/pdf and send it to me" works with no extra agent context.
+    this.maybeSurfaceWrite(message);
+  }
+
+  private broadcastLive(message: AgentMessage): void {
+    this.recordLiveBeyondResyncBaseline(message);
     const entry = { seq: ++this.seq, message };
     this.ring.push(entry);
     if (this.ring.length > 3000) this.ring.shift();
     for (const c of this.clients) c({ kind: 'message', ...entry });
-    // After the tool-result is delivered, auto-surface a deliverable file the agent just wrote,
-    // so "make an html/pdf and send it to me" works with no extra agent context.
-    this.maybeSurfaceWrite(message);
+  }
+
+  private recordLiveBeyondResyncBaseline(message: AgentMessage): void {
+    if (
+      this.resyncReplay === null &&
+      this.resyncBaselineLiveRowsUsable &&
+      liveOverlapKey(message) === undefined &&
+      isCursorDurableMessage(message)
+    ) {
+      this.resyncBaselineLiveRowCount += 1;
+      if (this.resyncBaselineLiveRowCount > 3000) {
+        // We can no longer prove which suffix occurrences predate the next replay window. Keep no
+        // partial budget: conservative replay may duplicate, whereas a partial budget can lose data.
+        this.resyncBaselineLiveRowsUsable = false;
+        this.resyncBaselineLiveRows.clear();
+      } else {
+        const json = canonicalMessageJson(message);
+        this.resyncBaselineLiveRows.set(json, (this.resyncBaselineLiveRows.get(json) ?? 0) + 1);
+      }
+    }
   }
 
   /** Write this wrapper's own projection onto the adapter-owned SessionInfo, recording it so the
@@ -825,34 +909,252 @@ export class ManagedConn {
     return out;
   }
 
-  /** Re-fetch history and broadcast a fresh snapshot (+ optional system note) to all clients. */
-  private async resync(notice?: string): Promise<void> {
-    let full = await this.conn.getHistory().catch(() => null);
-    // An EMPTY snapshot here is almost always a transient read (the CLI mid-rewrite at a compaction
-    // boundary, or a fork transcript not flushed yet) — pushing it would WIPE every client's thread
-    // until a manual refresh (issues-part2 "/compact removes/cleared the displayed messages"). Retry
-    // once, then keep the current view rather than destroy it; the next reset/turn will resync.
-    if (!full || full.length === 0) {
-      await new Promise((r) => setTimeout(r, 1500));
-      full = await this.conn.getHistory().catch(() => null);
+  /** Re-fetch history and broadcast a fresh snapshot (+ optional system note) to all clients.
+   *  Overlapping calls are chained so only one read/broadcast cycle records raced live frames
+   *  at a time (see {@link resyncReplay}). */
+  private resync(notice?: string): Promise<void> {
+    const run = this.resyncChain.then(() => this.resyncNow(notice));
+    this.resyncChain = run.catch(() => {});
+    return run;
+  }
+
+  private async resyncNow(notice?: string): Promise<void> {
+    // The history read races live delivery: a frame broadcast while getHistory() is pending can
+    // carry content the snapshot has not persisted yet, so the snapshot that then REPLACES the
+    // client's window would silently drop it (2026-08-28 stale-resync review). Record every frame
+    // that races the cycle and reconcile it after the snapshot: live delivery never stalls, and
+    // every client converges on [authoritative snapshot][everything newer].
+    this.resyncReplay = [];
+    const acceptedCursor = this.resyncBaselineCursor;
+    const preWindowLiveRows = this.resyncBaselineLiveRowsUsable
+      ? new Map(this.resyncBaselineLiveRows)
+      : null;
+    let sent: { frame: AgentMessage[]; derived: AgentMessage[]; persistedAfterBaseline: AgentMessage[] } | null = null;
+    try {
+      let full = await this.conn.getHistory().catch(() => null);
+      // An EMPTY snapshot here is almost always a transient read (the CLI mid-rewrite at a compaction
+      // boundary, or a fork transcript not flushed yet) — pushing it would WIPE every client's thread
+      // until a manual refresh (issues-part2 "/compact removes/cleared the displayed messages"). Retry
+      // once, then keep the current view rather than destroy it; the next reset/turn will resync.
+      if (!full || full.length === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+        full = await this.conn.getHistory().catch(() => null);
+      }
+      if (!full || full.length === 0) return;
+      // A second read can catch a keyless row that persisted late, but it is NOT the baseline: the
+      // first read may already contain the raced occurrence. The accepted cursor captured above is
+      // the only boundary known to precede this replay window.
+      if (this.resyncReplay.some((message) => liveOverlapKey(message) === undefined)) {
+        const refreshed = await this.conn.getHistory().catch(() => null);
+        if (refreshed && refreshed.length > 0) {
+          full = refreshed;
+        }
+      }
+      this.observeHistory(full);
+      // Same shape as initial attach: durable rows travel in ONE authoritative frame — explicit
+      // `reset` (the client replaces its window instead of inferring how to merge an unlabeled
+      // snapshot) with a full-prefix cursor (the next reattach is an incremental delta) — and the
+      // derived overlays replay after it. The cap is the same state-aware projection as attach:
+      // a raw slice loses durable panels/goal state that may not recur in the transcript tail.
+      // Governing doc: docs/architecture/client-ui.md
+      const durable = full.filter(isCursorDurableMessage);
+      const derived = full.filter((m) => !isCursorDurableMessage(m));
+      const delta = capHistoryDelta(historyDelta(durable), RESYNC_MAX_MESSAGES, durable.length);
+      let persistedAfterBaseline: AgentMessage[] = [];
+      if (acceptedCursor !== undefined && preWindowLiveRows !== null) {
+        const advance = historyDelta(durable, acceptedCursor);
+        if (!advance.reset) {
+          // Rows delivered live before resync are in the cursor suffix when they later persist, but
+          // they cannot cover a raced occurrence. Subtract them occurrence-for-occurrence. Missing
+          // or ambiguous persistence only shrinks the budget, preserving the lossless direction.
+          persistedAfterBaseline = advance.messages.filter((message) => {
+            if (liveOverlapKey(message) !== undefined) return false;
+            const json = canonicalMessageJson(message);
+            const before = preWindowLiveRows.get(json) ?? 0;
+            if (before === 0) return true;
+            preWindowLiveRows.set(json, before - 1);
+            return false;
+          });
+        }
+      }
+      // A capped reset replaces the client's window, so without the backward cursor the older
+      // history would become unreachable after every undo/compaction — same construction as the
+      // attach path (the paging handler rebuilds its cache on demand; no seeding is needed here).
+      const olderCursor = delta.truncated
+        ? backwardHistoryCursor(durable, durable.length - delta.truncated.shown)
+        : undefined;
+      this.ring.length = 0; // fresh baseline so a late joiner doesn't replay pre-revert live frames
+      sent = { frame: delta.messages, derived, persistedAfterBaseline };
+      for (const c of this.clients) {
+        c({
+          kind: 'history',
+          messages: delta.messages,
+          reset: true,
+          ...(delta.cursor !== undefined ? { cursor: delta.cursor } : {}),
+          ...(delta.truncated ? { truncated: delta.truncated } : {}),
+          ...(olderCursor ? { olderCursor } : {}),
+          ...(delta.truncated ? { hasEarlier: true } : {}),
+        });
+        for (const m of derived) c({ kind: 'message', seq: ++this.seq, message: m });
+        // Re-attach the received files AFTER history — the app clears the thread on a history frame, and
+        // these broker-injected artifacts aren't in getHistory(), so without this they'd vanish on every
+        // undo/redo/compaction. (This was the "received files disappeared" bug.)
+        for (const a of this.artifacts) c({ kind: 'message', seq: ++this.seq, message: a });
+        if (notice) c({ kind: 'notice', message: notice });
+      }
+      // The snapshot is now the accepted durable boundary. Clear pre-window evidence before finally
+      // replays missing rows: broadcastLive() records those replays beyond this new cursor.
+      this.resyncBaselineCursor = delta.cursor;
+      this.resyncBaselineLiveRows.clear();
+      this.resyncBaselineLiveRowCount = 0;
+      this.resyncBaselineLiveRowsUsable = true;
+    } finally {
+      const raced = this.resyncReplay;
+      this.resyncReplay = null;
+      // An aborted resync sent no snapshot: the raced frames were already delivered live and
+      // nothing got ahead of them — no replay. They are now pre-window live evidence for the next
+      // resync, however, so fold them into the accepted-cursor suffix accounting.
+      if (sent) {
+        this.replayAfterResync(raced ?? [], sent.frame, sent.derived, sent.persistedAfterBaseline);
+      } else {
+        for (const message of raced ?? []) this.recordLiveBeyondResyncBaseline(message);
+      }
     }
-    if (!full || full.length === 0) return;
-    this.observeHistory(full);
-    // Apply the same state-aware cap as initial attach. A raw slice loses durable panels/goal state
-    // that may not recur in the transcript tail; projecting the newest state after the tail also
-    // keeps terminal states such as "Goal paused" visible at the client's bottom scroll.
-    // Governing doc: docs/architecture/client-ui.md
-    const capped = capHistoryMessages(full, RESYNC_MAX_MESSAGES);
-    const messages = capped.messages;
-    const truncated = capped.truncated;
-    this.ring.length = 0; // fresh baseline so a late joiner doesn't replay pre-revert live frames
-    for (const c of this.clients) {
-      c({ kind: 'history', messages, ...(truncated ? { truncated } : {}) });
-      // Re-attach the received files AFTER history — the app clears the thread on a history frame, and
-      // these broker-injected artifacts aren't in getHistory(), so without this they'd vanish on every
-      // undo/redo/compaction. (This was the "received files disappeared" bug.)
-      for (const a of this.artifacts) c({ kind: 'message', seq: ++this.seq, message: a });
-      if (notice) c({ kind: 'notice', message: notice });
+  }
+
+  /** The authoritative reset frame just REPLACED every client's window. Re-deliver, with fresh
+   *  seqs, exactly what that snapshot does not carry: raced frames the pending read missed, and
+   *  the in-flight live buffer only the accumulator holds (persisted parts are in getHistory; the
+   *  streaming tail is not). This is the attach path's CR4 text-overlap reconciliation applied to
+   *  resync — replaying unconditionally instead would duplicate content the snapshot already
+   *  delivered: keyless rows (errors, events, terminal output) have no client-side identity to
+   *  dedup on, and a raw streamed delta chunk is APPENDED to text the client already holds. */
+  private replayAfterResync(
+    raced: AgentMessage[],
+    frame: AgentMessage[],
+    derived: AgentMessage[],
+    persistedAfterBaseline: AgentMessage[],
+  ): void {
+    const deliveredText = new Map<string, string>();
+    const deliveredFinal = new Set<string>();
+    const deliveredRowBudget = new Map<string, number>();
+    const coveredRowBudget = new Map<string, number>();
+    for (const m of [...frame, ...derived]) {
+      const key = liveOverlapKey(m);
+      if (key) {
+        const text = (m as { text?: unknown }).text;
+        if (typeof text === 'string' && text.length >= (deliveredText.get(key)?.length ?? 0)) {
+          deliveredText.set(key, text);
+        }
+        if ((m as { final?: unknown }).final === true) deliveredFinal.add(key);
+      }
+      const json = canonicalMessageJson(m);
+      deliveredRowBudget.set(json, (deliveredRowBudget.get(json) ?? 0) + 1);
+    }
+    // Occurrence BUDGET, not a set: keyless rows (terminal output, errors, events) can repeat
+    // legitimately, so each NEW snapshot occurrence covers at most one raced occurrence. Crucially,
+    // the budget comes only from the prefix-validated suffix after the pre-resync baseline; an older
+    // identical snapshot row is not evidence that the new live occurrence persisted.
+    for (const message of persistedAfterBaseline) {
+      if (liveOverlapKey(message) !== undefined) continue;
+      const json = canonicalMessageJson(message);
+      const delivered = deliveredRowBudget.get(json) ?? 0;
+      if (delivered === 0) continue;
+      coveredRowBudget.set(json, Math.min(delivered, (coveredRowBudget.get(json) ?? 0) + 1));
+    }
+    // Streamed text reconciles per key over the raced frames' ACCUMULATED result, never per raw
+    // frame: re-broadcasting a delta chunk to a client that already holds its text through the
+    // snapshot would append it twice. A history-reset clears the live accumulator before resync
+    // (reverted content must not resurrect), so a chunk racing THIS cycle may be a fragment with
+    // no full-text baseline — those align against the delivered text by suffix overlap.
+    const racedStream = new Map<
+      string,
+      { type: string; key: string; text: string; sawFullText: boolean; sawFinal: boolean }
+    >();
+    for (const message of raced) {
+      const overlapKey = liveOverlapKey(message);
+      if (overlapKey) {
+        const entry = racedStream.get(overlapKey) ?? {
+          type: message.type,
+          key: (message as { key?: string }).key ?? '',
+          text: '',
+          sawFullText: false,
+          sawFinal: false,
+        };
+        const text = (message as { text?: unknown }).text;
+        const delta = (message as { delta?: unknown }).delta;
+        if (typeof text === 'string') {
+          entry.text = text;
+          entry.sawFullText = true;
+        } else if (typeof delta === 'string') {
+          entry.text += delta;
+        }
+        if ((message as { final?: unknown }).final === true) entry.sawFinal = true;
+        racedStream.set(overlapKey, entry);
+        continue;
+      }
+      const json = canonicalMessageJson(message);
+      const budget = coveredRowBudget.get(json) ?? 0;
+      if (budget > 0) {
+        coveredRowBudget.set(json, budget - 1);
+        continue;
+      }
+      this.broadcastLive(message);
+    }
+    const handledStream = new Set<string>();
+    for (const [overlapKey, entry] of racedStream) {
+      handledStream.add(overlapKey);
+      const finality = entry.sawFinal ? { final: true } : {};
+      const delivered = deliveredText.get(overlapKey);
+      // A raced completion must survive even when the snapshot delivered every character: its copy
+      // may lack the `final` marker, and the reset wiped the final-bearing live frame — losing it
+      // takes the answer out of read-aloud/copy aggregation and the completed-turn projection.
+      // Re-finalize on the most complete text (replace-semantics, exact).
+      const refinalize = (): void => {
+        if (!entry.sawFinal || deliveredFinal.has(overlapKey)) return;
+        const text = (delivered?.length ?? 0) >= entry.text.length ? delivered! : entry.text;
+        if (text.length === 0) return;
+        this.broadcastLive({ type: entry.type, key: entry.key, text, final: true } as AgentMessage);
+      };
+      if (entry.sawFullText) {
+        // The raced stream carried complete text: replace-semantics are exact. Skip when the
+        // snapshot already delivered at least as much (attach's CR4 length rule).
+        if (delivered !== undefined && entry.text.length <= delivered.length) {
+          refinalize();
+          continue;
+        }
+        if (entry.text.length === 0) continue;
+        this.broadcastLive({ type: entry.type, key: entry.key, text: entry.text, ...finality } as AgentMessage);
+        continue;
+      }
+      if (delivered === undefined || delivered.length === 0) {
+        // The snapshot never mentions this key; the fragment is everything anyone knows.
+        if (entry.text.length === 0) continue;
+        this.broadcastLive({ type: entry.type, key: entry.key, text: entry.text, ...finality } as AgentMessage);
+        continue;
+      }
+      // Fragment: the largest k where the delivered text ends with the fragment's first k
+      // characters is exactly the already-delivered overlap; append only the rest.
+      let overlap = Math.min(entry.text.length, delivered.length);
+      while (overlap > 0 && !delivered.endsWith(entry.text.slice(0, overlap))) overlap--;
+      const tail = entry.text.slice(overlap);
+      if (!tail) {
+        refinalize();
+        continue;
+      }
+      this.broadcastLive({ type: entry.type, key: entry.key, delta: tail, ...finality } as AgentMessage);
+    }
+    // Restore what the reset wiped and history cannot restate: un-raced in-flight streamed text
+    // beyond the delivered prefix, the running status, and pending request cards (idempotent
+    // client-side).
+    for (const m of this.liveSnapshot()) {
+      const key = liveOverlapKey(m);
+      if (key !== undefined) {
+        if (handledStream.has(key)) continue;
+        const delivered = deliveredText.get(key);
+        if (delivered !== undefined && liveOverlapTextLength(m) <= delivered.length) continue;
+      }
+      this.broadcastLive(m);
     }
   }
 

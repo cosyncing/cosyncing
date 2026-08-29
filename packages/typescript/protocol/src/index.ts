@@ -605,18 +605,34 @@ export type TranscriptInterruptionReason =
   | 'user'
   | 'automatic-approval-denied-repeatedly';
 
-/**
- * Optional semantics for a canonical `notice`.
- *
- * Generic notices omit this field. Presence of `kind: 'interruption'`, never
- * adapter-authored English text, proves that the notice terminates a turn.
- */
-export interface TranscriptNoticeSemantic {
+/** A structurally identified turn interruption. */
+export interface TranscriptInterruptionSemantic {
   kind: 'interruption';
   reason: TranscriptInterruptionReason;
   /** Exact native turn when the adapter can attribute it. */
   turnId?: string;
 }
+
+/** Why native system activity opened a continuation turn without a user prompt. */
+export type TranscriptContinuationReason = 'task-notification';
+
+/** A structurally identified continuation boundary. */
+export interface TranscriptContinuationSemantic {
+  kind: 'continuation';
+  reason: TranscriptContinuationReason;
+  /** Exact native continuation turn when the adapter can attribute it. */
+  turnId?: string;
+}
+
+/**
+ * Optional semantics for a canonical `notice`.
+ *
+ * Generic notices omit this field. The discriminant, never adapter-authored
+ * display text, identifies an interruption or a system-opened continuation.
+ */
+export type TranscriptNoticeSemantic =
+  | TranscriptInterruptionSemantic
+  | TranscriptContinuationSemantic;
 
 /**
  * Optional semantics for a canonical `history-reset`.
@@ -898,7 +914,7 @@ export type AgentMessage =
   | {
       type: 'notice';
       message: string;
-      /** Present only for a proven turn interruption; generic notices omit it. */
+      /** Present only for a proven interruption/continuation boundary; generic notices omit it. */
       semantic?: TranscriptNoticeSemantic;
     }
   | { type: 'metadata-update'; key: string; value: unknown }

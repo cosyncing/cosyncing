@@ -529,15 +529,19 @@ class _AppCommandShell extends ConsumerWidget {
 
     // App-level navigation shortcuts are shell-scoped, not tool-aware.
     // See `docs/architecture/client-ui.md`.
-    final shortcutBindings = <ShortcutActivator, VoidCallback>{
+    final shortcutBindings = <ShortcutActivator, AppShortcutHandler>{
       for (final item in _appRouteNavItems)
         if (item.role == _AppRouteRole.primary)
           if (item.shellShortcut != null)
-            item.shellShortcut!: () => context.go(item.route),
+            item.shellShortcut!: appShortcutAlways(
+              () => context.go(item.route),
+            ),
       for (final item in _appRouteNavItems)
         if (item.role == _AppRouteRole.primary)
           if (item.menuShortcut != null)
-            item.menuShortcut!: () => context.go(item.route),
+            item.menuShortcut!: appShortcutAlways(
+              () => context.go(item.route),
+            ),
       // Text size comes from the registry, which carries only native
       // activators for it: on web the browser owns the whole triad and these
       // contribute nothing.
@@ -582,7 +586,10 @@ class _AppCommandShell extends ConsumerWidget {
           ],
         ),
       ],
-      child: CallbackShortcuts(bindings: shortcutBindings, child: shellChild),
+      child: AppCallbackShortcuts(
+        bindings: shortcutBindings,
+        child: shellChild,
+      ),
     );
 
     return _LatchedKeyboardStateGuard(child: menuBar);

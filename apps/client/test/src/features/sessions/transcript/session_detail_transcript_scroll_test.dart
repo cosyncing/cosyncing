@@ -2352,12 +2352,93 @@ void main() {
       },
     );
   });
+
+  group('history start marker rejects a locally evicted prefix', () {
+    // A reset can sit under the broker's message cap yet exceed the client's
+    // decoded-byte budget; `fromHistory` then evicts the frame's own prefix
+    // and the window's head is no longer the session start, whatever
+    // `hasEarlier`/`truncated` claim. The marker and the released banner must
+    // never render together.
+    testWidgets(
+      'network-first byte-heavy reset shows the released banner, '
+      'not Start of session',
+      (tester) async {
+        useRoomyTestViewport(tester);
+        await tester.pumpWidget(
+          buildSessionDetailTestPage(
+            events: [
+              HistoryWireEvent(
+                messages: _byteHeavyAgentMessages(6),
+                reset: true,
+                cursor: 'tail-cursor',
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('session-history-start-marker')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const Key('history-gap-leading-local')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets('a complete small reset still shows Start of session', (
+      tester,
+    ) async {
+      useRoomyTestViewport(tester);
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: [
+            HistoryWireEvent(
+              messages: _agentMessages(5),
+              reset: true,
+              cursor: 'tail-cursor',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('session-history-start-marker')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('history-gap-leading-local')),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
 }
 
 /// The follow logic allows a small slack from the very end (see
 /// `_TranscriptSurfaceState._bottomThreshold`), so assert closeness rather
 /// than exact equality.
 Matcher monotonicallyCloseTo(double value) => closeTo(value, 32);
+
+/// Builds [count] user [AgentMessage]s whose combined decoded-byte estimate
+/// exceeds [kMaxActiveTranscriptDecodedBytes] while staying far under every
+/// message-count limit. The bulk sits in an unrendered raw field so the rows
+/// lay out cheaply; only the byte limb of the eviction gate trips.
+List<AgentMessage> _byteHeavyAgentMessages(int count) {
+  final pad = 'x' * 500000;
+  return [
+    for (var i = 0; i < count; i++)
+      AgentMessage(
+        type: AgentMessageType.userMessage,
+        id: 'heavy-message-${i + 1}',
+        raw: {'type': 'user-message', 'text': 'Heavy ${i + 1}', 'pad': pad},
+      ),
+  ];
+}
 
 /// Builds [count] user [AgentMessage]s, oldest first, for history frames and
 /// cached snapshots.

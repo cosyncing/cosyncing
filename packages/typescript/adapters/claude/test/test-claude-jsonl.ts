@@ -127,6 +127,9 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('token-count deduped per message.id (3, not per-line)', of('token-count').length === 3, `got ${of('token-count').length}`);
   const tc1 = of('token-count').find((m) => m.input === 100);
   check('token-count m1 mapped (input100/output20/cacheRead5/cacheWrite2, emitted once)', !!tc1 && tc1.output === 20 && tc1.cacheRead === 5 && tc1.cacheWrite === 2, JSON.stringify(tc1));
+  const context1 = of('metadata-update').find((m) => m.key === 'contextUsage');
+  check('Claude context meter uses input + disjoint cache buckets at the known 200k default',
+    JSON.stringify(context1?.value) === JSON.stringify({ used: 107, max: 200_000 }), JSON.stringify(context1));
 
   // user-message: the real prompt plus CLEAN slash-command echoes (round 4: a /compact run in the
   // terminal used to vanish entirely); meta/compact-summary/caveat lines stay filtered.
@@ -210,6 +213,36 @@ function check(name: string, ok: boolean, detail = ''): void {
   check('keyed messages have unique keys (queued→delivered upsert exempt)', keyed.length > 0 && badReuse === 0, `${badReuse} bad reuses / ${keyed.length}`);
   const bad = out.map((m) => m.type).filter((t) => !(CANONICAL_MESSAGE_TYPES as readonly string[]).includes(t));
   check('all emitted types are canonical', bad.length === 0, bad.join(',') || 'ok');
+}
+
+// Context-window sizing: `[1m]` is durable cost-state MODEL evidence only; its
+// cumulative token totals never become token-count. A >200k resident reading is
+// independent proof of the 1M window, and unknown models produce no meter.
+{
+  const usage = { input_tokens: 10, output_tokens: 99, cache_read_input_tokens: 150_000, cache_creation_input_tokens: 25_000 };
+  const lines = [
+    { type: 'assistant', uuid: 'ctx-a', message: { id: 'ctx-m1', model: 'claude-opus-5', content: [{ type: 'text', text: 'before marker' }], usage } },
+    { type: 'cost-state', modelUsage: { 'claude-opus-5[1m]': { inputTokens: 999_999_999 } } },
+  ];
+  const out = mapTranscript(lines) as any[];
+  const contexts = out.filter((m) => m.type === 'metadata-update' && m.key === 'contextUsage');
+  check('cost-state [1m] suffix corrects the latest context reading to max=1M',
+    contexts.length === 2 && contexts[0]?.value?.max === 200_000 && contexts[1]?.value?.max === 1_000_000
+      && contexts[1]?.value?.used === 175_010, JSON.stringify(contexts));
+  check('cost-state cumulative totals never feed token-count',
+    out.filter((m) => m.type === 'token-count').length === 1, JSON.stringify(out.filter((m) => m.type === 'token-count')));
+
+  const selfCorrected = mapTranscript([
+    { type: 'assistant', uuid: 'ctx-b', message: { id: 'ctx-m2', model: 'claude-sonnet-5', content: [], usage: { input_tokens: 250_001 } } },
+  ]) as any[];
+  check('a resident reading above 200k self-corrects to the 1M window',
+    selfCorrected.some((m) => m.type === 'metadata-update' && m.key === 'contextUsage' && m.value?.used === 250_001 && m.value?.max === 1_000_000));
+
+  const unknown = mapTranscript([
+    { type: 'assistant', uuid: 'ctx-c', message: { id: 'ctx-m3', model: 'vendor-mystery', content: [], usage: { input_tokens: 10 } } },
+  ]) as any[];
+  check('an unknown model emits no contextUsage guess',
+    !unknown.some((m) => m.type === 'metadata-update' && m.key === 'contextUsage'));
 }
 
 // ── P6: a pasted image belongs to the prompt it was SENT WITH ───────────────────────────────────

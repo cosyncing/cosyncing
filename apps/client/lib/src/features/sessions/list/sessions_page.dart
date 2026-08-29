@@ -106,13 +106,15 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
     final canCreateSession =
         creationAvailability == SessionCreationAvailability.available;
 
-    return CallbackShortcuts(
+    return AppCallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.f5): _loadSessions,
+        const SingleActivator(LogicalKeyboardKey.f5): appShortcutAlways(
+          _loadSessions,
+        ),
         const SingleActivator(LogicalKeyboardKey.keyR, control: true):
-            _loadSessions,
+            appShortcutAlways(_loadSessions),
         const SingleActivator(LogicalKeyboardKey.keyR, meta: true):
-            _loadSessions,
+            appShortcutAlways(_loadSessions),
         ...appShortcutBindings(
           specs: appShortcutsForScope(AppShortcutScope.sessionList),
           handlers: {AppShortcutId.focusRosterSearch: _focusRosterSearch},

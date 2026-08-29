@@ -1085,8 +1085,15 @@ final class TranscriptHistoryWindow {
   }) : initialized = true;
 
   /// Builds a bounded tail from one authoritative history frame.
+  ///
+  /// Latest-wins restatements collapse to their last copy before the bounds
+  /// apply, so the retained tail holds exactly ONE canonical reading per
+  /// state/telemetry key — the same shape the delta reconciliation emits.
+  /// A raw list with duplicates left the reading's recency ambiguous: live
+  /// upserts landed on the first copy while position said the last copy was
+  /// newest, so later merges could resurrect a stale value.
   factory TranscriptHistoryWindow.fromHistory(HistoryWireEvent event) {
-    final tailMessages = List<AgentMessage>.of(event.messages);
+    final tailMessages = _collapseLatestWinsRestatements(event.messages);
     var tailBytes = tailMessages.fold<int>(
       0,
       (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
@@ -1660,12 +1667,11 @@ final class TranscriptHistoryWindow {
     final tailIndex = base.pages.lastIndexWhere((page) => page.isTail);
     final safeTailIndex = tailIndex < 0 ? base.pages.length - 1 : tailIndex;
     final tail = base.pages[safeTailIndex];
-    final nextTailMessages = List<AgentMessage>.of(
-      reconcileTranscriptHistoryDelta(
-        retained: tail.messages,
-        frame: messages,
-      ),
+    final reconciled = reconcileTranscriptHistoryDeltaDetailed(
+      retained: tail.messages,
+      frame: messages,
     );
+    final nextTailMessages = List<AgentMessage>.of(reconciled.messages);
     var nextBytes = nextTailMessages.fold<int>(
       0,
       (sum, message) => sum + estimatedAgentMessageDecodedBytes(message),
@@ -1690,9 +1696,13 @@ final class TranscriptHistoryWindow {
     nextPages[safeTailIndex] = nextTail;
     var liveState = base.liveState ?? SessionLiveState.fromMessages(const []);
     var telemetry = base.telemetry;
-    for (final message in messages) {
-      liveState = liveState.applyMessage(message);
-      telemetry = telemetry.applyMessage(message);
+    // A superseded frame restates values older than rows the projections have
+    // already folded; applying it would silently regress latest-wins state.
+    if (!reconciled.frameSuperseded) {
+      for (final message in messages) {
+        liveState = liveState.applyMessage(message);
+        telemetry = telemetry.applyMessage(message);
+      }
     }
     return TranscriptHistoryWindow._(
       pages: List.unmodifiable(nextPages),
@@ -2151,14 +2161,15 @@ _stitchConversationBoundary(
   final merged = ConversationTurn(
     index: left.index,
     turnKey: left.turnKey,
+    openReason: left.openReason,
     userMessage: left.userMessage,
+    continuationNotice: left.continuationNotice,
     content: content,
     modelText: mergedModelText,
     distinctToolCallCount:
         left.distinctToolCallCount +
         right.distinctToolCallCount -
         (stitchedTool == null ? 0 : 1),
-    isPartial: left.isPartial,
     runSummary: right.runSummary ?? left.runSummary,
   );
   return (
@@ -2743,54 +2754,182 @@ String? stableTranscriptMessageKey(AgentMessage message) {
   return id == null ? null : '$typeKey:id:$id';
 }
 
+/// Whether a row is a unique, order-stable transcript row that may relate
+/// POSITIONS between an incremental frame and the retained tail.
+///
+/// Latest-wins state/telemetry rows (status ticks, run summaries, task/goal
+/// state, metadata updates, token counts) restate one upsert key throughout a
+/// session, so a key match proves identity but not position: anchoring on
+/// them mapped dozens of old retained positions onto one new frame index and
+/// spliced the retained transcript into the middle of the frame's turn (the
+/// 2026-08-28 Codex reconnect scramble). They still deduplicate by key —
+/// see [reconcileTranscriptHistoryDelta] — but never carry position.
+/// `terminal-output` and `event` are conservatively excluded too: a missed
+/// anchor merely loses a hint, while a false one reorders the transcript.
+/// Unknown/future types default to non-anchor for the same reason.
+bool _isReconcilePositionAnchor(AgentMessage message) => switch (message.type) {
+  AgentMessageType.userMessage ||
+  AgentMessageType.modelOutput ||
+  AgentMessageType.thinking ||
+  AgentMessageType.toolCall ||
+  AgentMessageType.toolResult ||
+  AgentMessageType.fsEdit ||
+  AgentMessageType.fileArtifact ||
+  AgentMessageType.permissionRequest ||
+  AgentMessageType.permissionResolved ||
+  AgentMessageType.questionRequest ||
+  AgentMessageType.questionResolved ||
+  AgentMessageType.notice ||
+  AgentMessageType.historyReset ||
+  AgentMessageType.error => true,
+  _ => false,
+};
+
+/// Keeps only the LAST restatement of each latest-wins key.
+///
+/// Run summaries, state panels, and telemetry restate one upsert key
+/// throughout a session; a raw frame can carry many copies. Collapsing to the
+/// last copy keeps one canonical reading whose newest value sits late enough
+/// to survive the bounded tail trim — the same emission rule
+/// [reconcileTranscriptHistoryDeltaDetailed] applies. Anchor rows and keyless
+/// rows pass through untouched, in order.
+List<AgentMessage> _collapseLatestWinsRestatements(
+  List<AgentMessage> messages,
+) {
+  final lastIndexByKey = <String, int>{};
+  for (var index = 0; index < messages.length; index++) {
+    final message = messages[index];
+    final key = stableTranscriptMessageKey(message);
+    if (key == null || _isReconcilePositionAnchor(message)) continue;
+    lastIndexByKey[key] = index;
+  }
+  final collapsed = <AgentMessage>[];
+  for (var index = 0; index < messages.length; index++) {
+    final message = messages[index];
+    final key = stableTranscriptMessageKey(message);
+    if (key != null &&
+        !_isReconcilePositionAnchor(message) &&
+        lastIndexByKey[key] != index) {
+      continue;
+    }
+    collapsed.add(message);
+  }
+  return collapsed;
+}
+
 /// Reconciles one authoritative incremental history frame into a retained
 /// tail, returning the merged sequence in native/source order.
 ///
-/// The frame's order is the adapter's native order. A retained row whose
-/// stable key the frame shares is merged (see [mergeStableTranscriptMessage])
-/// at its FRAME position, so a malformed retained order is repaired rather
-/// than preserved. A frame row the retained tail never saw — missed live
-/// delivery, cache restore — returns to its authoritative position between
-/// the shared neighbors instead of appending behind an already-retained
-/// later row. A retained row the frame does not cover keeps its relative
-/// order and its position after the same shared predecessor; the frame
-/// carries no evidence about it, and order is never inferred from
-/// timestamps, text, or arrival timing. Rows without stable keys cannot be
-/// related across the sequences and keep frame/arrival order.
+/// Two identity roles are deliberately separate:
 ///
-/// When the frame shares no stable key with the retained tail there is no
+/// - UPSERT identity: every stable key relates copies of one logical row, so
+///   a retained copy merges into the frame's copy (see
+///   [mergeStableTranscriptMessage]) instead of surviving as a duplicate.
+/// - POSITIONAL anchor: only rows passing [_isReconcilePositionAnchor] may
+///   relate positions between the sequences. A retained anchor row merges at
+///   its FRAME position, so a malformed retained order is repaired rather
+///   than preserved.
+///
+/// A frame row the retained tail never saw — missed live delivery, cache
+/// restore — returns to its authoritative position between the shared anchor
+/// neighbors instead of appending behind an already-retained later row. A
+/// retained row the frame does not cover keeps its relative order and its
+/// position after the same shared anchor predecessor; the frame carries no
+/// evidence about it, and order is never inferred from timestamps, text, or
+/// arrival timing. Rows without stable keys cannot be related across the
+/// sequences and keep frame/arrival order.
+///
+/// A latest-wins row is emitted at its LAST frame occurrence, so the newest
+/// state survives the bounded tail trim exactly as a raw reset frame's late
+/// re-emission does; an anchor row keeps its first occurrence and absorbs
+/// later frame copies.
+///
+/// When the frame shares no anchor with the retained tail there is no
 /// authoritative anchor relating the two sequences, so the frame appends —
-/// the same outcome live delivery would have produced.
+/// the same outcome live delivery would have produced — while covered
+/// latest-wins rows still deduplicate into the frame's copies.
 List<AgentMessage> reconcileTranscriptHistoryDelta({
   required List<AgentMessage> retained,
   required List<AgentMessage> frame,
+}) => reconcileTranscriptHistoryDeltaDetailed(
+  retained: retained,
+  frame: frame,
+).messages;
+
+/// [reconcileTranscriptHistoryDelta] plus the staleness verdict the caller
+/// needs before folding the frame's state into latest-wins projections.
+///
+/// An uncursored snapshot (hub resync) carries no position claim, so the
+/// reconciliation itself decides whether it is current: a frame is
+/// SUPERSEDED when at least one retained anchor row is covered by it and a
+/// retained anchor row it does NOT cover sits after the last covered one —
+/// the retained tail demonstrably extends past the frame's end. That is the
+/// shape of a snapshot read before rows the client already holds existed (a
+/// resync racing live delivery, or an outdated snapshot). An authoritative
+/// current snapshot covers every retained anchor through its own end, so
+/// nothing retained extends past it. For a superseded frame the retained
+/// copy of each covered latest-wins row wins the merge — its reading is
+/// newer — and the caller must not fold the frame's state/telemetry
+/// restatements over projections built from those newer rows. Order is still
+/// taken from the frame for the region it covers; recency is never inferred
+/// from timestamps or arrival timing, only from this coverage evidence.
+({List<AgentMessage> messages, bool frameSuperseded})
+reconcileTranscriptHistoryDeltaDetailed({
+  required List<AgentMessage> retained,
+  required List<AgentMessage> frame,
 }) {
-  if (frame.isEmpty) return List<AgentMessage>.of(retained);
-  final frameIndexByKey = <String, int>{};
+  if (frame.isEmpty) {
+    return (
+      messages: List<AgentMessage>.of(retained),
+      frameSuperseded: false,
+    );
+  }
+  // Where each key's merged row will be emitted, and separately where anchor
+  // keys carry position. An anchor key keeps its first occurrence; a
+  // latest-wins key is emitted at its last restatement.
+  final emitIndexByKey = <String, int>{};
+  final anchorIndexByKey = <String, int>{};
   for (var index = 0; index < frame.length; index++) {
-    final key = stableTranscriptMessageKey(frame[index]);
-    if (key != null) frameIndexByKey.putIfAbsent(key, () => index);
+    final message = frame[index];
+    final key = stableTranscriptMessageKey(message);
+    if (key == null) continue;
+    if (_isReconcilePositionAnchor(message)) {
+      emitIndexByKey.putIfAbsent(key, () => index);
+      anchorIndexByKey.putIfAbsent(key, () => index);
+    } else {
+      emitIndexByKey[key] = index;
+    }
   }
   final retainedByKey = <String, AgentMessage>{};
   // Uncovered retained rows grouped by the frame index of their nearest
-  // covered predecessor (-1 when no covered row precedes them).
+  // ANCHOR-covered predecessor (-1 when no anchor precedes them).
   final uncoveredAfter = <int, List<AgentMessage>>{};
-  var anchored = false;
   var lastCoveredFrameIndex = -1;
-  for (final row in retained) {
+  var lastCoveredAnchorRetainedIndex = -1;
+  var lastUncoveredAnchorRetainedIndex = -1;
+  for (var r = 0; r < retained.length; r++) {
+    final row = retained[r];
     final key = stableTranscriptMessageKey(row);
-    final frameIndex = key == null ? null : frameIndexByKey[key];
-    if (key == null || frameIndex == null) {
+    final emitIndex = key == null ? null : emitIndexByKey[key];
+    if (key == null || emitIndex == null) {
       (uncoveredAfter[lastCoveredFrameIndex] ??= <AgentMessage>[]).add(row);
+      if (_isReconcilePositionAnchor(row)) {
+        lastUncoveredAnchorRetainedIndex = r;
+      }
       continue;
     }
-    anchored = true;
     retainedByKey[key] = row;
-    lastCoveredFrameIndex = frameIndex;
+    final anchorIndex = anchorIndexByKey[key];
+    if (anchorIndex != null) {
+      lastCoveredFrameIndex = anchorIndex;
+      lastCoveredAnchorRetainedIndex = r;
+    }
+    // A covered latest-wins row is absorbed by the frame's restatement: it
+    // neither moves the position cursor nor survives as a duplicate.
   }
-  if (!anchored) {
-    return List<AgentMessage>.unmodifiable([...retained, ...frame]);
-  }
+  final frameSuperseded =
+      lastCoveredAnchorRetainedIndex >= 0 &&
+      lastUncoveredAnchorRetainedIndex > lastCoveredAnchorRetainedIndex;
   final merged = <AgentMessage>[];
   final mergedIndexByKey = <String, int>{};
   void emitUncovered(int frameIndex) {
@@ -2802,24 +2941,40 @@ List<AgentMessage> reconcileTranscriptHistoryDelta({
   for (var index = 0; index < frame.length; index++) {
     final message = frame[index];
     final key = stableTranscriptMessageKey(message);
-    final existingMergedIndex = key == null ? null : mergedIndexByKey[key];
+    if (key == null) {
+      merged.add(message);
+      emitUncovered(index);
+      continue;
+    }
+    final existingMergedIndex = mergedIndexByKey[key];
     if (existingMergedIndex != null) {
       merged[existingMergedIndex] = mergeStableTranscriptMessage(
         merged[existingMergedIndex],
         message,
       );
-    } else {
-      final previous = key == null ? null : retainedByKey[key];
-      if (key != null) mergedIndexByKey[key] = merged.length;
-      merged.add(
-        previous == null
-            ? message
-            : mergeStableTranscriptMessage(previous, message),
-      );
+    } else if (emitIndexByKey[key] == index) {
+      final previous = retainedByKey[key];
+      mergedIndexByKey[key] = merged.length;
+      final AgentMessage row;
+      if (previous == null) {
+        row = message;
+      } else if (frameSuperseded && anchorIndexByKey[key] == null) {
+        // The frame is superseded and this is a latest-wins key: the retained
+        // reading is newer, so the merge direction flips.
+        row = mergeStableTranscriptMessage(message, previous);
+      } else {
+        row = mergeStableTranscriptMessage(previous, message);
+      }
+      merged.add(row);
     }
+    // An earlier copy of a latest-wins key is superseded by the frame's later
+    // restatement and deliberately not emitted.
     emitUncovered(index);
   }
-  return List<AgentMessage>.unmodifiable(merged);
+  return (
+    messages: List<AgentMessage>.unmodifiable(merged),
+    frameSuperseded: frameSuperseded,
+  );
 }
 
 /// Merges two canonical emissions with the same non-text identity.
