@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Fixed
+
+- Full transcript resyncs now preserve newer live output and telemetry without
+  duplicating raced streamed or keyless rows, and capped resets retain a valid
+  cursor for loading earlier history.
+- Transcript windows no longer label a locally evicted head as the start of
+  the session.
+- Focused text fields no longer lose bare shortcut characters such as digits,
+  brackets, or AltGr input when the matching shortcut is intentionally
+  suppressed.
+
 ## 0.5.0 — 2026-08-27
 
 This release raises the minimum client contract revision to 17, so a 0.4.1 or

@@ -1712,7 +1712,7 @@ class SessionDetailController
           state.forkSessionActionState.refusal ==
               SessionActionRefusal.agentOwnedSession &&
           event.info.origin != SessionOrigin.subagent;
-      final historyStartReached = switch (event) {
+      final wireHistoryStartReached = switch (event) {
         // A frame the broker could not read history for proves nothing about
         // where this session starts, whatever else it carries (H1c). This arm
         // is first on purpose: it also RETRACTS an earlier true marker, since a
@@ -1721,13 +1721,26 @@ class SessionDetailController
         HistoryWireEvent(:final gap)
             when isHistoryUnavailableGapCode(gap?.code) =>
           false,
+        // The wire fields alone are not enough: a reset under the count/byte
+        // budget evicts the frame's own prefix locally (and a retained
+        // browsing anchor prepends mid-session rows), so the window's head is
+        // no longer the frame's head and the start claim does not survive the
+        // fold.
         HistoryWireEvent(:final reset, :final hasEarlier, :final truncated)
             when reset =>
-          !hasEarlier && truncated == null,
+          !hasEarlier &&
+              truncated == null &&
+              !transcriptWindow.tailPrefixEvicted,
         HistoryPageWireEvent(:final endOfHistory) when acceptedHistoryPage =>
           endOfHistory,
         _ => state.historyStartReached,
       };
+      // Live/delta growth can evict the head after the claim was made. A
+      // leading local gap means the top of the retained window is not the
+      // session start, whichever event carried the claim; an endOfHistory
+      // page at the head keeps it (its eviction gap sits mid-window).
+      final historyStartReached =
+          wireHistoryStartReached && transcriptWindow.leadingGap == null;
       state = state.copyWith(
         events: appendSessionDetailEventLog(state.events, event),
         transcriptWindow: transcriptWindow,

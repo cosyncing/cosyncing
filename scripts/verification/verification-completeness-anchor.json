@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "79c21946924170f76532901126bb8b36a042180b",
+  "acceptedBase": "8d78ba10ff901ffa530e1ebe420dde2534ff2e16",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -84,6 +84,7 @@
     "broker.protocol-journal",
     "broker.request-resolution",
     "broker.restart-identity",
+    "broker.resync-serialization",
     "broker.roster-publication",
     "broker.roster-revision",
     "broker.service-lifecycle",
@@ -133,7 +134,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:ca69530aa3208205c3373081eddaccc82377e34e674b84ed75fc105cf2432d33"
+      "fingerprint": "sha256:540a64c333a0f8d1e360efc957174c6b073119553be9e020a04250b2b8f72225"
     },
     {
       "id": "capabilities",
@@ -604,6 +605,10 @@
     {
       "id": "restart-message-identity",
       "fingerprint": "sha256:1585f7aeb8512f4ae422783c22cdb70af957b30e8c01dfea21d04ec4f64c66b2"
+    },
+    {
+      "id": "resync-serialization",
+      "fingerprint": "sha256:f88ff7c0e1420ba24948b5522a18339ebd98dfb4a9a7d60f0f94a2d09a55e4c8"
     },
     {
       "id": "roster-publication-qualification",

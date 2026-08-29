@@ -62,7 +62,7 @@ import { ClaudeAdapter, claudeSessionId, installClaudeHooks, uninstallClaudeHook
 import { KimiAdapter } from '@cosyncing/adapter-kimi';
 import { DshAdapter } from '@cosyncing/adapter-dsh';
 import { AgyAdapter } from '@cosyncing/adapter-antigravity';
-import { Hub, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
+import { Hub, liveOverlapKey, liveOverlapTextLength, type Client, type ManagedConn, type WireEvent } from '../sessions/hub.ts';
 import { authoritativeLiveOwners, overlayAuthoritativeOwner } from '../roster/roster-overlay.ts';
 import {
   createRosterPublicationBoundary,
@@ -2432,19 +2432,6 @@ function pendingReplayKey(message: AgentMessage): string | undefined {
 
 function pendingReplayEventKey(event: WireEvent): string | undefined {
   return event.kind === 'message' ? pendingReplayKey(event.message) : undefined;
-}
-
-/** Identity used to reconcile the captured live snapshot against the history just delivered.
- *  Only model-output/thinking accumulate in the live text buffer, so only they can overlap. */
-function liveOverlapKey(message: AgentMessage): string | undefined {
-  if (message.type !== 'model-output' && message.type !== 'thinking') return undefined;
-  return message.key ? `${message.type}:${message.key}` : undefined;
-}
-
-/** How much text a keyed message carries, so the more complete copy of one identity wins. */
-function liveOverlapTextLength(message: AgentMessage): number {
-  const text = (message as { text?: unknown }).text;
-  return typeof text === 'string' ? text.length : 0;
 }
 
 function parseClientMessageId(raw: unknown): string | null {
@@ -6500,6 +6487,9 @@ server = Bun.serve<WsData>({
           ...(olderCursor ? { olderCursor } : {}),
           ...(hasEarlier ? { hasEarlier: true } : {}),
         });
+        // Seed resync reconciliation from a cursor the client has actually accepted. Reads started
+        // after replay recording begins cannot serve as a pre-race baseline.
+        mc.acceptResyncHistoryCursor(delta.cursor);
         for (const m of derivedHistory) sendRaw({ kind: 'message', seq: 0, message: m });
         for (const m of artifactSnapshot) sendRaw({ kind: 'message', seq: 0, message: m });
         // One logical message can be BOTH persisted in history and still held in the live text
