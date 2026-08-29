@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.1 — 2026-08-29
+
 ### Fixed
 
 - Full transcript resyncs now preserve newer live output and telemetry without
