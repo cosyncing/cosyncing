@@ -1341,6 +1341,12 @@ export const BROKER_INTEGRATION_ROUTES = [
   '/claude/hook/hello',
   '/claude/hook/request',
   '/claude/hook/status',
+  '/omp/bridge/bye',
+  '/omp/bridge/commands',
+  '/omp/bridge/events',
+  '/omp/bridge/hello',
+  '/omp/bridge/send-file',
+  '/omp/bridge/status',
   '/pi/bridge/bye',
   '/pi/bridge/commands',
   '/pi/bridge/events',
@@ -1599,9 +1605,12 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * 18 adds the owner-controlled workspace-browsing exposure route,
  * provider/profile display labels, and a distinct persistent-rule permission
  * decision. Older clients ignore the unknown optional answer and retain the
- * safe approve-once/reject floor.
+ * safe approve-once/reject floor. Revision 19 identifies the first-party client
+ * generation that renders omp as a distinct agent, including its label, color,
+ * and New Session surface. The wire shape is unchanged; the revision is the
+ * broker-visible feature floor used to keep omp hidden from revision-18 clients.
  */
-export const BROKER_CONTRACT_REVISION = 18 as const;
+export const BROKER_CONTRACT_REVISION = 19 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
@@ -1641,6 +1650,9 @@ export const CLIENT_MINIMUM_BROKER_CONTRACT_REVISION = 16 as const;
 export const CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE = 14 as const;
 /** @see CLIENT_REVISION_WITH_TOLERANT_INTEGRATION_KIND_DECODE */
 export const CLIENT_REVISION_WITH_TOLERANT_ATTACH_MODE_DECODE = 15 as const;
+
+/** First first-party client revision with complete omp roster and creation UI identity. */
+export const CLIENT_REVISION_WITH_OMP_ROSTER_IDENTITY = 19 as const;
 
 /**
  * The {@link AttachMode} members every supported client has always decoded.

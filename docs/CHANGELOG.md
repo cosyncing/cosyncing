@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Added omp (oh-my-pi) session discovery, Drive/resume, live bridge sync, model and
+  command controls, New Session, setup/repair ownership, and client roster identity.
+  OMP 17.4.2 or newer is required; older clients do not receive OMP roster rows.
+
 ## 0.5.1 — 2026-08-29
 
 ### Fixed

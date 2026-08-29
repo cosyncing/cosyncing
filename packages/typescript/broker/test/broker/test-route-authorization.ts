@@ -19,6 +19,7 @@ const principals: ReadonlyArray<{ name: string; value: RouteAuthorizationPrincip
   { name: 'observe+files', value: peer('observe', 'files') },
   { name: 'zero-role', value: peer() },
   { name: 'Pi integration', value: { kind: 'integration', integration: 'pi' } },
+  { name: 'omp integration', value: { kind: 'integration', integration: 'omp' } },
 ];
 
 assert.deepEqual(

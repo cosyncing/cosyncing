@@ -176,13 +176,14 @@ void main() {
   });
 
   group('brokerIntegrationRoutes', () {
-    test('mirrors ten non-client integration routes without duplicates', () {
-      expect(brokerIntegrationRoutes, hasLength(10));
+    test('mirrors sixteen integration routes without duplicates', () {
+      expect(brokerIntegrationRoutes, hasLength(16));
       expect(
         brokerIntegrationRoutes.toSet().length,
         brokerIntegrationRoutes.length,
       );
       expect(brokerIntegrationRoutes, contains('/pi/bridge/events'));
+      expect(brokerIntegrationRoutes, contains('/omp/bridge/events'));
     });
   });
 }

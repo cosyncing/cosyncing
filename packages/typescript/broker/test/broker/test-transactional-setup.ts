@@ -108,6 +108,10 @@ import {
   PI_BRIDGE_EMBEDDED_SOURCE,
 } from '../../../adapters/pi/src/implementation.ts';
 import {
+  OMP_BRIDGE_EMBEDDED_SHA256,
+  OMP_BRIDGE_EMBEDDED_SOURCE,
+} from '../../../adapters/omp/src/bridge-asset.ts';
+import {
   executeSetupTransaction,
   readSetupFailureDiagnostic,
   readSetupTransactionJournal,
@@ -132,7 +136,7 @@ const AGENT_SKILL_V010_FIXTURE = readFileSync(join(
 ), 'utf8');
 const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
   import.meta.dir,
-  '../../../adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+  '../../../pi-engine/assets/legacy/cosyncing-bridge-v0.1.0.json',
 ));
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -231,6 +235,7 @@ function contextFor(home: string, extraEnv: Record<string, string> = {}, platfor
       COSYNCING_CACHE_DIR: join(home, '.cache', 'cosyncing'),
       CODEX_HOME: join(home, '.codex'),
       PI_CODING_AGENT_DIR: join(home, '.pi', 'agent'),
+      COSYNCING_OMP_AGENT_DIR: join(home, '.omp', 'agent'),
       ...extraEnv,
     },
   });
@@ -273,6 +278,30 @@ function supportedPiFixture(machine: string): { context: ReturnType<typeof conte
   };
 }
 
+function supportedOmpFixture(machine: string): { context: ReturnType<typeof contextFor>; bridge: string } {
+  const packageRoot = join(machine, 'omp-package', 'node_modules', '@oh-my-pi', 'pi-coding-agent');
+  const ompBin = join(packageRoot, 'dist', 'cli.js');
+  const bunBin = join(machine, 'omp-runtime', 'bun');
+  const binDir = join(machine, 'omp-bin');
+  mkdirSync(dirname(ompBin), { recursive: true });
+  mkdirSync(dirname(bunBin), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@oh-my-pi/pi-coding-agent',
+    version: '17.4.2',
+    engines: { bun: '>=1.3.14' },
+  }));
+  writeFileSync(bunBin, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "1.3.14\\n"; else printf "17.4.2\\n"; fi\n');
+  chmodSync(bunBin, 0o755);
+  writeFileSync(ompBin, `#!${bunBin}\n// fixture\n`);
+  chmodSync(ompBin, 0o755);
+  symlinkSync(ompBin, join(binDir, 'omp'));
+  return {
+    context: contextFor(machine, { PATH: binDir, PI_CODING_AGENT_DIR: '' }),
+    bridge: join(machine, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts'),
+  };
+}
+
 function treeSnapshot(root: string): string {
   if (!existsSync(root)) return '<missing>';
   const rows: string[] = [];
@@ -303,6 +332,8 @@ async function crashChild(home: string, marker: string): Promise<never> {
     setupState: { schemaVersion: 1 },
     piAgentDir: join(home, 'pi-agent'),
     installPiBridge: false,
+    ompAgentDir: join(home, 'omp-agent'),
+    installOmpBridge: false,
     agentSkillTargets: agentSkillTargets(contextFor(home)),
     installAgentSkill: true,
     removeAgentSkillResourceIds: [],
@@ -415,6 +446,8 @@ async function schedulerIdentityCrashChild(
     setupState: { schemaVersion: 1 },
     piAgentDir: join(home, 'pi-agent'),
     installPiBridge: false,
+    ompAgentDir: join(home, 'omp-agent'),
+    installOmpBridge: false,
     agentSkillTargets: [],
     installAgentSkill: false,
     removeAgentSkillResourceIds: [],
@@ -1520,6 +1553,52 @@ try {
     }
   }
 
+  // Pi-family native variables are shared. Setup must stop before either bridge transaction when
+  // the two shipped adapters resolve those variables to the same session and extension targets.
+  {
+    const machine = join(root, 'pi-omp-path-collision');
+    const sharedAgent = join(machine, 'shared-agent');
+    const sharedSessions = join(machine, 'shared-sessions');
+    const context = contextFor(machine, {
+      PI_CODING_AGENT_DIR: sharedAgent,
+      PI_CODING_AGENT_SESSION_DIR: sharedSessions,
+      COSYNCING_OMP_AGENT_DIR: sharedAgent,
+      COSYNCING_OMP_SESSIONS_ROOT: sharedSessions,
+    });
+    const inspection = await inspectSetupEnvironment({
+      buildInfo: BUILD_INFO,
+      executablePath: join(machine, 'bin', 'cosyncing'),
+      home: join(machine, '.cosyncing'),
+      context,
+    });
+    const collision = inspection.blockingIssues.find((issue) => issue.code === 'omp-pi-path-collision');
+    check('setup fails early when Pi and omp share bridge/session targets',
+      collision?.summary.includes('Pi and omp') === true
+        && collision.remediation.includes('COSYNCING_OMP_AGENT_DIR'),
+      JSON.stringify(collision));
+    const result = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    check('the dual-adapter collision blocks before either bridge asset is written',
+      result.status === 'blocked'
+        && !existsSync(join(sharedAgent, 'extensions', 'cosyncing-bridge', 'index.ts')),
+      `${result.status}: ${result.summary}`);
+
+    const darwinMachine = join(root, 'pi-omp-darwin-case-collision');
+    mkdirSync(darwinMachine, { recursive: true });
+    const darwinContext = contextFor(darwinMachine, {
+      COSYNCING_PI_SESSIONS_ROOT: join(darwinMachine, 'CosySessions'),
+      COSYNCING_OMP_SESSIONS_ROOT: join(darwinMachine, 'cosysessions'),
+    }, 'darwin');
+    const darwinInspection = await inspectSetupEnvironment({
+      buildInfo: BUILD_INFO,
+      executablePath: join(darwinMachine, 'bin', 'cosyncing'),
+      home: join(darwinMachine, '.cosyncing'),
+      context: darwinContext,
+    });
+    check('darwin setup blocks case-only aliases of not-yet-created session roots',
+      darwinInspection.blockingIssues.some((issue) => issue.code === 'omp-pi-path-collision'),
+      JSON.stringify(darwinInspection.blockingIssues));
+  }
+
   // "unsupported" with no explanation is what a physical audit asked about. The preflight must answer it
   // inline: detected version, the required floor read from the adapter's own constant, and the fix command.
   {
@@ -2116,6 +2195,26 @@ try {
         && (statSync(peers).mode & 0o777) === 0o644
         && !inspectInstallState(join(machine, '.cosyncing')).committed,
       `${failed.status}:mode=${(statSync(peers).mode & 0o777).toString(8)}`);
+  }
+
+  // omp setup owns bridge installation independently of session discovery. A first run must install and
+  // receipt the extension even though omp has never created its sessions directory yet.
+  {
+    const machine = join(root, 'omp-fresh-install-no-sessions');
+    const { context, bridge } = supportedOmpFixture(machine);
+    const sessions = join(machine, '.omp', 'agent', 'sessions');
+    const complete = await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
+    const install = inspectInstallState(join(machine, '.cosyncing'));
+    check('fresh setup installs and receipts the omp bridge before any sessions root exists',
+      complete.status === 'complete'
+        && complete.actions.includes('omp-bridge.install')
+        && !existsSync(sessions)
+        && readFileSync(bridge, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && install.committed
+        && install.state.resources.some((item) => item.id === 'omp-bridge'
+          && item.target === bridge
+          && item.ownership.installedSha256 === OMP_BRIDGE_EMBEDDED_SHA256),
+      `${complete.status}:${complete.actions.join(',')}`);
   }
 
   // First-install migration owns its own confirmation path. Only the full preceding packaged source is
@@ -3028,6 +3127,8 @@ try {
       brokerCredential: { status: 'ok', path: join(home, 'broker-token'), detailCode: 'broker-token-ok' },
       piCredential: { status: 'ok', path: join(home, 'pi-integration.json'), detailCode: 'pi-integration-ok' },
       piCredentialUrlMatches: true,
+      ompCredential: { status: 'ok', path: join(home, 'omp-integration.json'), detailCode: 'omp-integration-ok' },
+      ompCredentialUrlMatches: true,
       setupState: {
         schemaVersion: 1,
         agents: { codex: false },
@@ -3044,6 +3145,13 @@ try {
         status: 'missing',
         path: join(machine, '.pi', 'agent', 'extensions', 'cosyncing.ts'),
         expectedSha256: '0'.repeat(64),
+        requiresConfirmation: false,
+      },
+      ompAgentDir: join(machine, '.omp', 'agent'),
+      ompBridge: {
+        status: 'missing',
+        path: join(machine, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts'),
+        expectedSha256: OMP_BRIDGE_EMBEDDED_SHA256,
         requiresConfirmation: false,
       },
       agentSkills: [],
@@ -3256,6 +3364,7 @@ try {
           COSYNCING_CACHE_DIR: join(machineRoot, '.cache', 'cosyncing'),
           CODEX_HOME: join(machineRoot, '.codex'),
           PI_CODING_AGENT_DIR: join(machineRoot, '.pi', 'agent'),
+          COSYNCING_OMP_AGENT_DIR: join(machineRoot, '.omp', 'agent'),
         },
       });
       return {

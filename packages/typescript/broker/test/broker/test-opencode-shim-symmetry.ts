@@ -45,6 +45,7 @@ import {
   type SetupActionInputs,
 } from '../../src/installation/setup-actions.ts';
 import {
+  inspectOmpBridgeOwnership,
   inspectPiBridgeOwnership,
   piBridgeOwnershipPrecondition,
 } from '../../src/installation/pi-bridge-ownership.ts';
@@ -152,6 +153,8 @@ function actionInputsFor(m: Machine): SetupActionInputs {
     setupState: readSetupState(m.home),
     piAgentDir: join(m.userHome, '.pi', 'agent'),
     installPiBridge: false,
+    ompAgentDir: join(m.userHome, '.omp', 'agent'),
+    installOmpBridge: false,
     agentSkillTargets: [],
     installAgentSkill: false,
     removeAgentSkillResourceIds: [],
@@ -176,10 +179,13 @@ function shimArgs(m: Machine): [string, number] {
 function fullActionInputsFor(m: Machine): SetupActionInputs {
   const inputs = actionInputsFor(m);
   const piBridge = inspectPiBridgeOwnership(inspectInstallState(m.home), inputs.piAgentDir);
+  const ompBridge = inspectOmpBridgeOwnership(inspectInstallState(m.home), inputs.ompAgentDir);
   return {
     ...inputs,
     installPiBridge: true,
     piBridgePrecondition: piBridgeOwnershipPrecondition(piBridge),
+    installOmpBridge: true,
+    ompBridgePrecondition: piBridgeOwnershipPrecondition(ompBridge),
     agentSkillTargets: agentSkillTargets(m.context),
     installAgentSkill: true,
     installMetadata: {
@@ -232,9 +238,10 @@ try {
     check('every setup-catalog-emitted resource id is a member of KNOWN_INSTALL_RESOURCE_IDS',
       emittedIds.length > 0 && emittedIds.every((id) => KNOWN_INSTALL_RESOURCE_IDS.has(id)),
       emittedIds.join(','));
-    check('catalog emits the expected binary/alias, pi-bridge, agent-skill, and opencode-shim ids',
+    check('catalog emits the expected binary/alias, bridge, agent-skill, and opencode-shim ids',
       emittedIds.includes('broker-binary') && emittedIds.includes('broker-alias')
         && emittedIds.includes('pi-bridge')
+        && emittedIds.includes('omp-bridge')
         && Object.values(AGENT_SKILL_RESOURCE_IDS).every((id) => emittedIds.includes(id))
         && emittedIds.includes(OPENCODE_SHIM_RESOURCE_ID)
         && emittedIds.includes(OPENCODE_SHIM_RC_RESOURCE_IDS.bash)
@@ -250,7 +257,7 @@ try {
     const knownConstants = [
       'broker-binary', 'broker-binary-previous', 'broker-alias',
       'service-systemd', 'service-environment', 'service-systemd-linger',
-      'pi-bridge', LEGACY_TAILSCALE_RESOURCE_ID,
+      'pi-bridge', 'omp-bridge', LEGACY_TAILSCALE_RESOURCE_ID,
       ...Object.values(AGENT_SKILL_RESOURCE_IDS),
       OPENCODE_SHIM_RESOURCE_ID, ...Object.values(OPENCODE_SHIM_RC_RESOURCE_IDS),
     ];
@@ -503,6 +510,8 @@ try {
       setupState: readSetupState(outsideHome),
       piAgentDir: join(userHome, '.pi', 'agent'),
       installPiBridge: false,
+      ompAgentDir: join(userHome, '.omp', 'agent'),
+      installOmpBridge: false,
       agentSkillTargets: [],
       installAgentSkill: false,
       removeAgentSkillResourceIds: [],

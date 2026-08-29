@@ -102,6 +102,7 @@ async function wsTicket(base: string, token: string, tool: string, sessionId: st
 const TOKEN = 'auth-test-secret';
 const PEER_TOKEN = 'paired-device-token-0123456789abcdefghijklmnop';
 const PI_CREDENTIAL = 'pi-route-only-credential-0123456789abcdefghijklmno';
+const OMP_CREDENTIAL = 'omp-route-only-credential-0123456789abcdefghijklm';
 const withTok: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN }, body: '{}' };
 const noTok = (method = 'POST'): RequestInit => ({ method, headers: { 'content-type': 'application/json' }, body: method === 'DELETE' ? undefined : '{}' });
 
@@ -148,6 +149,7 @@ const MUTATING: [string, RequestInit][] = [
   ['/api/agent-runtime-updates/codex/restart', noTok()],
   ['/api/tool/send_file', noTok()],
   ['/pi/bridge/hello', noTok()],
+  ['/omp/bridge/hello', noTok()],
   ['/claude/hook/request', noTok()],
   ['/api/projects/rename', { ...noTok(), method: 'PATCH' }],
   ['/api/sessions/codex', noTok()], // createSession spawns a process — must be gated
@@ -174,6 +176,7 @@ const SENSITIVE_GETS = [
 ];
 
 let piCredentialFile = '';
+let ompCredentialFile = '';
 const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
   const secrets = join(home, 'secrets');
   mkdirSync(secrets, { recursive: true, mode: 0o700 });
@@ -186,6 +189,15 @@ const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
   }), { mode: 0o600 });
   chmodSync(piCredentialFile, 0o600);
   process.env.COSYNCING_PI_INTEGRATION_FILE = piCredentialFile;
+  ompCredentialFile = join(secrets, 'omp-integration.json');
+  writeFileSync(ompCredentialFile, JSON.stringify({
+    schemaVersion: 1,
+    kind: 'omp-bridge',
+    internalUrl: 'http://127.0.0.1:7796',
+    credential: OMP_CREDENTIAL,
+  }), { mode: 0o600 });
+  chmodSync(ompCredentialFile, 0o600);
+  process.env.COSYNCING_OMP_INTEGRATION_FILE = ompCredentialFile;
   writeFileSync(join(home, 'transport-peers.json'), JSON.stringify({
     version: 2,
     peers: [{
@@ -427,6 +439,49 @@ try {
   });
   check('shared token is rejected in the Pi integration header', confusedPiHeader === 401, `status=${confusedPiHeader}`);
 
+  // The omp family is scoped exactly like pi, and the two scopes are disjoint: each family's
+  // credential opens ONLY its own `/…/bridge/` routes, never the other family's, never the API.
+  const ompHeaders = { 'content-type': 'application/json', 'x-cosyncing-integration-token': OMP_CREDENTIAL };
+  const ompHello = await fetch(`${tokened.base}/omp/bridge/hello`, {
+    method: 'POST',
+    headers: ompHeaders,
+    body: JSON.stringify({ sessionFile: join(tokened.home, 'omp-session.jsonl'), cwd: tokened.home }),
+  });
+  const ompHelloBody = await ompHello.json().catch(() => ({})) as any;
+  check('route-scoped omp credential authenticates omp hello',
+    ompHello.status === 200 && typeof ompHelloBody.id === 'string', `status=${ompHello.status}`);
+  const ompStatus = await status(tokened.base, `/omp/bridge/status?id=${encodeURIComponent(String(ompHelloBody.id ?? ''))}`, {
+    method: 'GET', headers: { 'x-cosyncing-integration-token': OMP_CREDENTIAL },
+  });
+  check('route-scoped omp credential authenticates omp GET legs', ompStatus === 200, `status=${ompStatus}`);
+  const ompNoToken = await fetch(`${tokened.base}/omp/bridge/hello`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
+  const ompNoTokenBody = await ompNoToken.json().catch(() => ({})) as any;
+  check('omp bridge routes are 401 AUTH_REQUIRED without a credential',
+    ompNoToken.status === 401 && ompNoTokenBody.code === 'AUTH_REQUIRED',
+    `status=${ompNoToken.status} code=${String(ompNoTokenBody.code)}`);
+  const piOnOmp = await status(tokened.base, '/omp/bridge/hello', {
+    method: 'POST', headers: piHeaders, body: '{}',
+  });
+  check('Pi credential cannot authorize omp bridge routes', piOnOmp === 401, `status=${piOnOmp}`);
+  const ompOnPi = await status(tokened.base, '/pi/bridge/hello', {
+    method: 'POST', headers: ompHeaders, body: '{}',
+  });
+  check('omp credential cannot authorize Pi bridge routes', ompOnPi === 401, `status=${ompOnPi}`);
+  const generalWithOmp = await status(tokened.base, '/api/agents/codex/sync', {
+    method: 'POST', headers: ompHeaders, body: JSON.stringify({ enabled: false }),
+  });
+  check('omp credential cannot authorize general broker control', generalWithOmp === 401, `status=${generalWithOmp}`);
+  const confusedOmpShared = await status(tokened.base, '/omp/bridge/hello', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-cosyncing-token': OMP_CREDENTIAL }, body: '{}',
+  });
+  check('omp credential is rejected in the shared-token header', confusedOmpShared === 401, `status=${confusedOmpShared}`);
+  const confusedOmpIntegration = await status(tokened.base, '/omp/bridge/hello', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-cosyncing-integration-token': TOKEN }, body: '{}',
+  });
+  check('shared token is rejected in the omp integration header', confusedOmpIntegration === 401, `status=${confusedOmpIntegration}`);
+
   const scheduleHeaders = { 'content-type': 'application/json', 'x-cosyncing-token': TOKEN };
   const repeatingMessage = await status(tokened.base, '/api/schedules', {
     method: 'POST', headers: scheduleHeaders,
@@ -531,6 +586,7 @@ try {
   await tokened.broker.exited.catch(() => null);
   rmSync(tokened.home, { recursive: true, force: true });
   delete process.env.COSYNCING_PI_INTEGRATION_FILE;
+  delete process.env.COSYNCING_OMP_INTEGRATION_FILE;
 }
 
 const featureEnabled = await spawnBroker(7798, { COSYNCING_TOKEN: TOKEN }, (home) => {

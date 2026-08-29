@@ -25,6 +25,7 @@ export const KNOWN_INSTALL_RESOURCE_IDS: ReadonlySet<string> = new Set<string>([
   'service-environment',
   'service-systemd-linger',
   'pi-bridge',
+  'omp-bridge',
   LEGACY_TAILSCALE_RESOURCE_ID,
   ...Object.values(AGENT_SKILL_RESOURCE_IDS),
   OPENCODE_SHIM_RESOURCE_ID,

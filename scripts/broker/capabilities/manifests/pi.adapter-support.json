@@ -12,7 +12,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('get_state')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('get_state')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-pi.ts", "packages/typescript/adapters/pi/test/test-pi-rename.ts"]
     },
     {
@@ -23,7 +23,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('get_messages')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('get_messages')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-pi.ts"]
     },
     {
@@ -34,7 +34,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (type: 'prompt')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (type: 'prompt')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-pi.ts"]
     },
     {
@@ -45,7 +45,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (type: 'abort')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (type: 'abort')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-pi.ts"]
     },
     {
@@ -56,7 +56,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (type: 'compact')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (type: 'compact')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-pi.ts"]
     },
     {
@@ -67,7 +67,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('get_available_models')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('get_available_models')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-tool-result-enrich.ts"]
     },
     {
@@ -78,7 +78,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (type: 'set_model')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (type: 'set_model')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-tool-result-enrich.ts"]
     },
     {
@@ -89,7 +89,7 @@
       "version": "0.78.1",
       "mappedStatus": "partial",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (type: 'set_thinking_level')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (type: 'set_thinking_level')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-tool-result-enrich.ts"]
     },
     {
@@ -100,7 +100,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('get_commands')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('get_commands')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-tool-result-enrich.ts"]
     },
     {
@@ -111,7 +111,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L2"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('extension_ui_request')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('extension_ui_request')"],
       "traceRefs": ["packages/typescript/broker/test/pi/test-tool-result-enrich.ts"]
     },
     {
@@ -122,7 +122,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (renameSession, 'set_session_name')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (renameSession, 'set_session_name')"],
       "traceRefs": ["packages/typescript/adapters/pi/test/test-pi-rename.ts", "scripts/broker/tests/app/test-web-ui-components.ts"]
     },
     {
@@ -133,7 +133,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts ('get_session_stats')"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts ('get_session_stats')"],
       "traceRefs": ["packages/typescript/adapters/pi/test/test-pi-stats.ts"]
     },
     {
@@ -144,7 +144,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (forkSession, runPiLifecycleRpc)"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (forkSession), packages/typescript/pi-engine/src/implementation.ts (runPiLifecycleRpc)"],
       "traceRefs": ["packages/typescript/adapters/pi/test/test-pi-lifecycle.ts"]
     },
     {
@@ -155,7 +155,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (cloneSession, runPiLifecycleRpc)"],
+      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (cloneSession), packages/typescript/pi-engine/src/implementation.ts (runPiLifecycleRpc)"],
       "traceRefs": ["packages/typescript/adapters/pi/test/test-pi-lifecycle.ts"]
     },
     {
@@ -166,7 +166,7 @@
       "version": "0.78.1",
       "mappedStatus": "mapped",
       "evidencePresent": ["D", "L0", "L1"],
-      "adapterRefs": ["packages/typescript/adapters/pi/src/implementation.ts (exportTranscript, 'export_html')", "packages/typescript/broker/src/security/r2-export.ts", "packages/typescript/broker/src/security/r2-redactor.ts"],
+      "adapterRefs": ["packages/typescript/pi-engine/src/implementation.ts (exportTranscript, 'export_html')", "packages/typescript/broker/src/security/r2-export.ts", "packages/typescript/broker/src/security/r2-redactor.ts"],
       "traceRefs": [
         "packages/typescript/broker/test/security-r2/test-r2-export.ts",
         "packages/typescript/broker/test/security-r2/test-r2-redactor.ts",

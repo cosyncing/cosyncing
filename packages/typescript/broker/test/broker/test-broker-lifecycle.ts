@@ -18,6 +18,10 @@ import {
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
 } from '../../../adapters/pi/src/index.ts';
+import {
+  OMP_BRIDGE_EMBEDDED_SHA256,
+  OMP_BRIDGE_EMBEDDED_SOURCE,
+} from '../../../adapters/omp/src/bridge-asset.ts';
 import type {
   SetupDiagnosisContext,
   SetupHttpProbe,
@@ -58,6 +62,7 @@ import { defaultBrokerConfig, writeBrokerConfig, type BrokerConfig } from '../..
 import {
   ensureInstallationCredentials,
   readBrokerToken,
+  readOmpIntegration,
   readPiIntegration,
 } from '../../src/security/credentials.ts';
 import {
@@ -125,7 +130,7 @@ function readFrozenTextFixture(path: string): string {
 // The repair fixture comes from the frozen released asset, never from the production identity constant.
 const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
   import.meta.dir,
-  '../../../adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+  '../../../pi-engine/assets/legacy/cosyncing-bridge-v0.1.0.json',
 ));
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -800,6 +805,7 @@ try {
         && JSON.stringify(settings).includes('keep-this-command')
         && !JSON.stringify(settings).includes('cosyncing-hook')
         && readPiIntegration(join(m.home, 'secrets', 'pi-integration.json')).internalUrl === m.config.broker.internalUrl
+        && readOmpIntegration(join(m.home, 'secrets', 'omp-integration.json')).internalUrl === m.config.broker.internalUrl
         && readBrokerToken(join(m.home, 'secrets', 'broker-token')) !== beforeToken);
   }
 
@@ -843,6 +849,37 @@ try {
         && after.committed
         && after.state.resources.some((item) => item.id === 'pi-bridge'
           && item.ownership.installedSha256 === PI_BRIDGE_EMBEDDED_SHA256),
+      `${repaired.exitCode}:${repaired.detailCode}`);
+  }
+
+  {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const ompPath = join(m.userHome, '.omp', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts');
+    const priorPackaged = `${OMP_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged omp bridge comment\n`;
+    atomicWriteOwnerOnly(ompPath, priorPackaged, { mode: 0o600 });
+    const install = inspectInstallState(m.home);
+    if (!install.committed) throw new Error('fixture install missing');
+    install.state.resources.push({
+      id: 'omp-bridge',
+      kind: 'agent-integration',
+      target: ompPath,
+      ownership: { proof: 'package-hash', installedSha256: hash(priorPackaged) },
+    });
+    writeInstallState(install.state, m.home);
+    const plan = await inspectRepair(baseOptions(m));
+    const repaired = await runRepair({
+      ...baseOptions(m),
+      confirmed: true,
+      allowLegacyIntegrations: false,
+    });
+    const after = inspectInstallState(m.home);
+    check('repair refreshes a receipt-proven stale omp bridge and updates its receipt',
+      plan.actions.some((action) => action.id === 'omp-bridge.refresh' && !action.legacy)
+        && repaired.exitCode === 0
+        && readFileSync(ompPath, 'utf8') === OMP_BRIDGE_EMBEDDED_SOURCE
+        && after.committed
+        && after.state.resources.some((item) => item.id === 'omp-bridge'
+          && item.ownership.installedSha256 === OMP_BRIDGE_EMBEDDED_SHA256),
       `${repaired.exitCode}:${repaired.detailCode}`);
   }
 

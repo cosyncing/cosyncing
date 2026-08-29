@@ -36,7 +36,7 @@ import {
 
 const BRIDGE_MODULE_PATH = resolve(
   import.meta.dir,
-  '../../../adapters/pi/agent-extensions/cosyncing-bridge/index.ts',
+  '../../../pi-engine/agent-extensions/cosyncing-bridge/index.ts',
 );
 const brokerFixtureRoot = mkdtempSync(
   join(tmpdir(), 'cosyncing-pi-tool-result-'),

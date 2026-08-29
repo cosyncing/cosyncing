@@ -438,9 +438,10 @@ try {
   // setup plumbing* keyed to a surface only that agent has, and none of them decides a tool
   // capability. Capability answers stay adapter-hook-derived (see the canTranscriptExport comment
   // in runtime.ts). Adding a line here means that review was done; a new finding fails this test.
-  //   doctor.ts diagnosis.agent === 'pi' overlays broker-owned Pi bridge receipt and file-safety
-  //                                    evidence onto Pi's diagnosis. It changes doctor presentation and
-  //                                    remediation, not an agent capability answer.
+  //   doctor.ts family.agent === 'pi'  the bridge-ownership overlay picks which family's receipt and
+  //                                    file-safety evidence (pi vs omp) replaces the adapter's bridge
+  //                                    content check. It changes doctor presentation and remediation,
+  //                                    not an agent capability answer.
   //   runtime.ts b.id === 'codex'      /api/agents attaches `syncEnabled` only for Codex, the one
   //                                    agent with a persisted enable; the capability fields above it
   //                                    are unbranched. Absent field != disabled for the others.
@@ -455,7 +456,7 @@ try {
   //   setup.ts  agent.id === 'codex'   (x2) inspects the Codex-only legacy-daemon migration posture and
   //                                    records `agents.codex` support in persisted setup state.
   const expectedBrokerBranches = [
-    "packages/typescript/broker/src/installation/doctor.ts:diagnosis.agent === 'pi'",
+    "packages/typescript/broker/src/installation/doctor.ts:family.agent === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'pi'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'codex'",
     "packages/typescript/broker/src/installation/setup.ts:id === 'claude'",

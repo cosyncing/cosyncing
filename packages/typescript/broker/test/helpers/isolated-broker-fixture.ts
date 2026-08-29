@@ -59,6 +59,10 @@ export function isolatedBrokerFixtureEnvironment(
     CLAUDE_CONFIG_DIR: join(root, 'claude'),
     PI_CODING_AGENT_DIR: join(root, 'pi-agent'),
     PI_CODING_AGENT_SESSION_DIR: join(root, 'pi-sessions'),
+    // Pi's native variables are also understood by omp. Keep the two adapters disjoint by
+    // default; a collision test must opt back into the shared variables explicitly.
+    COSYNCING_OMP_AGENT_DIR: join(root, 'omp-agent'),
+    COSYNCING_OMP_SESSIONS_ROOT: join(root, 'omp-sessions'),
     COSYNCING_HOME: join(root, 'cosyncing-home'),
   };
   for (const directory of Object.values(owned)) {

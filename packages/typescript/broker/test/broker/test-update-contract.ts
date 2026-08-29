@@ -126,8 +126,13 @@ check('a client below the revision-17 security floor still fails closed',
 // optional health data for a feature that remains default-off. Revision-17
 // clients do not call the route and ignore the extra health field, so the
 // security floor remains 17 and the normal one-revision overlap applies.
-check('the current revision-18 broker retains the intentional revision-17 client floor',
-  BROKER_CONTRACT.revision === 18
+//
+// Revision 19 changes first-party presentation rather than the wire surface:
+// it is the visibility floor for the new omp row. Revision-18 clients remain
+// writable for every agent they already understand, while roster filtering
+// keeps omp out of their response.
+check('the current revision-19 broker retains the intentional revision-17 client floor',
+  BROKER_CONTRACT.revision === 19
     && BROKER_CONTRACT.minimumClientRevision === 17
     && previousRevisionClient.status === 'client-behind'
     && !previousRevisionClient.readOnly);

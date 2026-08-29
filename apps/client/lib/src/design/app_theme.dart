@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 /// The [AppTokens] are attached as a theme extension, so feature widgets can
 /// read semantic roles via `context.tokens` while Material components inherit a
 /// consistent [ColorScheme] derived from the same tokens.
+/// Per-tool identity colors, including omp, remain on [AppTokens] because they
+/// are feature identities rather than global Material color roles.
 ///
 /// [density] tunes Material component spacing (see the user-facing Density
 /// control in Settings → Appearance); it defaults to the platform-adaptive

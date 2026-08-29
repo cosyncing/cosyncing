@@ -14,6 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { SetupDiagnosisContext } from '../../../adapter-api/src/index.ts';
+import { OMP_DIALECT } from '../../../adapters/omp/src/index.ts';
+import { PI_DIALECT, resolvePiDialectPaths } from '../../../pi-engine/src/index.ts';
 import { BUILD_INFO, buildFingerprint, type BuildInfo } from '../../src/runtime/build-info.ts';
 import { defaultBrokerConfig } from '../../src/runtime/configuration.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
@@ -29,6 +31,7 @@ import {
   brokerServiceEnvironmentEntries,
   createServiceCommandRunner,
   parseLaunchdPrintState,
+  serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
   servicePathMatchesExpected,
@@ -333,6 +336,7 @@ function contextFor(options: {
         COSYNCING_CACHE_DIR: join(options.root, '.cache', 'cosyncing'),
         CODEX_HOME: join(options.root, '.codex'),
         PI_CODING_AGENT_DIR: join(options.root, '.pi', 'agent'),
+        COSYNCING_OMP_AGENT_DIR: join(options.root, '.omp', 'agent'),
       },
       resolveExecutable(command): string | undefined {
         if (command in (options.agentExecutables ?? {})) {
@@ -368,6 +372,7 @@ function contextFor(options: {
       COSYNCING_CACHE_DIR: join(options.root, '.cache', 'cosyncing'),
       CODEX_HOME: join(options.root, '.codex'),
       PI_CODING_AGENT_DIR: join(options.root, '.pi', 'agent'),
+      COSYNCING_OMP_AGENT_DIR: join(options.root, '.omp', 'agent'),
       ...(options.wsl ? { WSL_DISTRO_NAME: 'Ubuntu' } : {}),
     },
   });
@@ -811,7 +816,7 @@ try {
       unit.split('\n').filter((line) => /^(WorkingDirectory|EnvironmentFile)=/.test(line)).join(' | '));
     check('service environment is explicit, minimal, and path-only',
       ['HOME=', 'PATH=', 'COSYNCING_HOME=', 'COSYNCING_CACHE_DIR=', 'COSYNCING_TOKEN_FILE=',
-        'COSYNCING_PI_INTEGRATION_FILE=', 'COSYNCING_WEB_DIR=']
+        'COSYNCING_PI_INTEGRATION_FILE=', 'COSYNCING_OMP_INTEGRATION_FILE=', 'COSYNCING_WEB_DIR=']
         .every((name) => environment.includes(name))
         && !environment.includes('WSL_DISTRO_NAME=')
         && !environment.includes('CLAUDE'));
@@ -1231,6 +1236,79 @@ try {
         && overrideOutcome.piCreate === true
         && overrideOutcome.piRuns === true,
       `exit=${overrideExit} result=${JSON.stringify(overrideOutcome)} stderr=${overrideStderr.trim().slice(0, 240)}`);
+
+    const piAgentDir = join(machine, 'pi-home');
+    const ompAgentDir = join(machine, 'omp-home');
+    const piSessionsRoot = join(machine, 'pi-sessions');
+    const ompSessionsRoot = join(machine, 'omp-sessions');
+    const dataPathOverrides = serviceAgentDataPathOverrides({
+      env: {
+        COSYNCING_PI_AGENT_DIR: piAgentDir,
+        COSYNCING_OMP_AGENT_DIR: ompAgentDir,
+        COSYNCING_PI_SESSIONS_ROOT: piSessionsRoot,
+        COSYNCING_OMP_SESSIONS_ROOT: ompSessionsRoot,
+      },
+      piAgentDir,
+      ompAgentDir,
+      piSessionsRoot,
+      ompSessionsRoot,
+    });
+    const dataPathEntries = Object.fromEntries(brokerServiceEnvironmentEntries({
+      homeDir: userHome,
+      stateHome,
+      cacheRoot: join(userHome, '.cache', 'cosyncing'),
+      executablePath: process.execPath,
+      agentDataPathOverrides: dataPathOverrides,
+      webDir: join(machine, 'web'),
+    }));
+    const defaultDataPathEntries = Object.fromEntries(brokerServiceEnvironmentEntries({
+      homeDir: userHome,
+      stateHome,
+      cacheRoot: join(userHome, '.cache', 'cosyncing'),
+      executablePath: process.execPath,
+      webDir: join(machine, 'web'),
+    }));
+    check('durable services preserve disjoint Pi and OMP data paths without shared native overrides',
+      dataPathEntries.COSYNCING_PI_AGENT_DIR === piAgentDir
+        && dataPathEntries.COSYNCING_OMP_AGENT_DIR === ompAgentDir
+        && dataPathEntries.COSYNCING_PI_SESSIONS_ROOT === piSessionsRoot
+        && dataPathEntries.COSYNCING_OMP_SESSIONS_ROOT === ompSessionsRoot
+        && dataPathEntries.PI_CODING_AGENT_DIR === undefined
+        && dataPathEntries.PI_CODING_AGENT_SESSION_DIR === undefined
+        && defaultDataPathEntries.COSYNCING_PI_AGENT_DIR === undefined
+        && defaultDataPathEntries.COSYNCING_OMP_AGENT_DIR === undefined
+        && defaultDataPathEntries.COSYNCING_PI_SESSIONS_ROOT === undefined
+        && defaultDataPathEntries.COSYNCING_OMP_SESSIONS_ROOT === undefined);
+
+    const derivedOverrides = (env: NodeJS.ProcessEnv) => {
+      const piPaths = resolvePiDialectPaths(PI_DIALECT, env);
+      const ompPaths = resolvePiDialectPaths(OMP_DIALECT, env);
+      return serviceAgentDataPathOverrides({
+        env,
+        piAgentDir: piPaths.agentDir,
+        ompAgentDir: ompPaths.agentDir,
+        piSessionsRoot: piPaths.sessionsRoot,
+        ompSessionsRoot: ompPaths.sessionsRoot,
+      });
+    };
+    const configEnv = { HOME: userHome, PI_CONFIG_DIR: '.omp-custom' };
+    const configPaths = resolvePiDialectPaths(OMP_DIALECT, configEnv);
+    const configOverrides = derivedOverrides(configEnv);
+    check('durable lifecycle freezes PI_CONFIG_DIR-derived omp agent and session paths',
+      configOverrides.COSYNCING_OMP_AGENT_DIR === configPaths.agentDir
+        && configOverrides.COSYNCING_OMP_SESSIONS_ROOT === configPaths.sessionsRoot,
+      JSON.stringify(configOverrides));
+
+    const xdgDataHome = join(machine, 'xdg-data');
+    mkdirSync(join(xdgDataHome, 'omp'), { recursive: true });
+    const xdgEnv = { HOME: userHome, XDG_DATA_HOME: xdgDataHome };
+    const xdgPaths = resolvePiDialectPaths(OMP_DIALECT, xdgEnv);
+    const xdgOverrides = derivedOverrides(xdgEnv);
+    check('durable lifecycle freezes an existing XDG omp redirect without inheriting XDG_DATA_HOME',
+      xdgOverrides.COSYNCING_OMP_AGENT_DIR === xdgPaths.agentDir
+        && xdgOverrides.COSYNCING_OMP_SESSIONS_ROOT === join(xdgDataHome, 'omp', 'sessions')
+        && xdgOverrides.COSYNCING_OMP_SESSIONS_ROOT === xdgPaths.sessionsRoot,
+      JSON.stringify(xdgOverrides));
   }
 
   // A launcher can remain in an older npm prefix after Node itself moves. The interactive setup process
@@ -1895,7 +1973,7 @@ try {
         && !plist.includes('COSYNCING_TOKEN=') && !/--token/.test(plist));
     check('launchd materializes the identical receipt-owned environment into EnvironmentVariables',
       ['HOME', 'PATH', 'COSYNCING_HOME', 'COSYNCING_CACHE_DIR', 'COSYNCING_TOKEN_FILE', 'COSYNCING_PI_INTEGRATION_FILE',
-        'COSYNCING_WEB_DIR']
+        'COSYNCING_OMP_INTEGRATION_FILE', 'COSYNCING_WEB_DIR']
         .every((name) => environment.includes(`${name}=`) && plist.includes(`<key>${name}</key>`))
         // The provider marker lives only in the definition, exactly as systemd's Environment= line does.
         && plist.includes('<key>COSYNCING_SERVICE_PROVIDER</key>\n    <string>launchd</string>')

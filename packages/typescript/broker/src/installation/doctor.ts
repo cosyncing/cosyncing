@@ -23,6 +23,7 @@ import {
 } from '../runtime/configuration.ts';
 import {
   inspectBrokerToken,
+  inspectOmpIntegration,
   inspectPiIntegration,
   readBrokerToken,
 } from '../security/credentials.ts';
@@ -48,6 +49,7 @@ import {
   createDurableServiceProvider,
   parseLaunchdPrintState,
   resolveServiceAgentExecutables,
+  serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
   servicePathEntries,
@@ -66,13 +68,15 @@ import { readSetupFailureDiagnostic, setupFailureDiagnosticPath } from './setup-
 import { cliMessages } from '../cli/cli-i18n.ts';
 import type { SetupLanguage } from './setup-i18n.ts';
 import { diagnoseManagedRuntimeFailure } from '../runtime/managed-runtime-state.ts';
+import { PI_DIALECT, resolvePiDialectPaths } from '@cosyncing/adapter-pi';
+import { OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
   classifyManagedHost,
   defaultManagedHostEffects,
   listManagedHostOwnerships,
   locateRecordedManagedHost,
 } from '../runtime/managed-host.ts';
-import { inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
+import { inspectOmpBridgeOwnership, inspectPiBridgeOwnership } from './pi-bridge-ownership.ts';
 import { parseMachinePeers } from '../roster/machine-aggregation.ts';
 import { WindowsTaskSchedulerPowerShellBackend } from './windows-task-scheduler-powershell.ts';
 import { parseWindowsServiceEnvironment, windowsServiceVersionKey } from './windows-service-install.ts';
@@ -1106,6 +1110,9 @@ async function installedBrokerServiceChecks(
       if (!install.committed || !install.state.installationId || !identity.runtimePath) {
         throw new Error('incomplete Windows service receipt');
       }
+      const dialectEnv = { ...context.env, HOME: context.homeDir };
+      const piPaths = resolvePiDialectPaths(PI_DIALECT, dialectEnv);
+      const ompPaths = resolvePiDialectPaths(OMP_DIALECT, dialectEnv);
       const durable = createDurableServiceProvider({
         context,
         homeDir: context.homeDir,
@@ -1121,6 +1128,13 @@ async function installedBrokerServiceChecks(
         runtimePath: identity.runtimePath,
         agentExecutableDirectories: serviceAgentExecutableDirectories(context),
         agentExecutableOverrides: serviceAgentExecutableOverrides(context),
+        agentDataPathOverrides: serviceAgentDataPathOverrides({
+          env: dialectEnv,
+          piAgentDir: piPaths.agentDir,
+          ompAgentDir: ompPaths.agentDir,
+          piSessionsRoot: piPaths.sessionsRoot,
+          ompSessionsRoot: ompPaths.sessionsRoot,
+        }),
         webDir: serviceFlutterWebRoot({
           override: context.env.COSYNCING_WEB_DIR,
           packaged: buildInfo.packaged,
@@ -1494,35 +1508,43 @@ export async function diagnoseAgents(
 }
 
 /** Overlay broker receipt/safety evidence onto the adapter's provider-specific bridge content check. */
-function reconcilePiBridgeDoctorDiagnosis(
+function reconcileBridgeDoctorDiagnosis(
+  family: {
+    agent: 'pi' | 'omp';
+    checkId: 'pi.bridge-asset' | 'omp.bridge-asset';
+    displayName: string;
+    agentDir: string;
+  },
   context: SetupDiagnosisContext,
   install: InstallStateInspection,
   diagnoses: readonly AgentSetupDiagnosis[],
 ): AgentSetupDiagnosis[] {
-  const pi = diagnoses.find((diagnosis) => diagnosis.agent === 'pi');
-  if (!pi || !pi.checks.some((check) => check.id === 'pi.bridge-asset')) return [...diagnoses];
-  const piAgentDir = context.env.PI_CODING_AGENT_DIR?.trim() || join(context.homeDir, '.pi', 'agent');
-  const decision = inspectPiBridgeOwnership(install, piAgentDir);
+  const target = diagnoses.find((diagnosis) => diagnosis.agent === family.agent);
+  if (!target || !target.checks.some((check) => check.id === family.checkId)) return [...diagnoses];
+  const decision = family.agent === 'pi'
+    ? inspectPiBridgeOwnership(install, family.agentDir)
+    : inspectOmpBridgeOwnership(install, family.agentDir);
+  const evidence = { path: context.displayPath(decision.bridge.path) };
   let replacement: SetupCheck | undefined;
   if (decision.status === 'owned-stale') {
     replacement = {
-      id: 'pi.bridge-asset',
+      id: family.checkId,
       status: 'warn',
       detailCode: 'bridge-owned-stale',
-      summary: 'The installed Pi bridge is a receipt-proven older packaged version.',
-      evidence: { path: context.displayPath(decision.bridge.path) },
+      summary: `The installed ${family.displayName} bridge is a receipt-proven older packaged version.`,
+      evidence,
       remediation: remediation(
         'cosyncing setup',
-        'Run setup or repair to refresh the package-owned Pi bridge.',
+        `Run setup or repair to refresh the package-owned ${family.displayName} bridge.`,
       ),
     };
   } else if (decision.status === 'receipt-invalid') {
     replacement = {
-      id: 'pi.bridge-asset',
+      id: family.checkId,
       status: 'fail',
       detailCode: 'bridge-receipt-invalid',
-      summary: 'The Pi bridge receipt does not prove ownership of the installed target.',
-      evidence: { path: context.displayPath(decision.bridge.path) },
+      summary: `The ${family.displayName} bridge receipt does not prove ownership of the installed target.`,
+      evidence,
       remediation: {
         kind: 'manual',
         message: 'Preserve the bridge and reconcile its install receipt before setup or repair.',
@@ -1530,19 +1552,41 @@ function reconcilePiBridgeDoctorDiagnosis(
     };
   } else if (decision.status === 'unsafe' || decision.status === 'unreadable') {
     replacement = {
-      id: 'pi.bridge-asset',
+      id: family.checkId,
       status: 'fail',
       detailCode: decision.status === 'unsafe' ? 'bridge-unsafe' : 'bridge-unreadable',
-      summary: 'The Pi bridge target cannot be inspected safely.',
-      evidence: { path: context.displayPath(decision.bridge.path) },
-      remediation: remediation('cosyncing repair', 'Repair Pi bridge ownership and permissions.'),
+      summary: `The ${family.displayName} bridge target cannot be inspected safely.`,
+      evidence,
+      remediation: remediation('cosyncing repair', `Repair ${family.displayName} bridge ownership and permissions.`),
     };
   }
   if (!replacement) return [...diagnoses];
-  return diagnoses.map((diagnosis) => diagnosis !== pi ? diagnosis : {
+  return diagnoses.map((diagnosis) => diagnosis !== target ? diagnosis : {
     ...diagnosis,
     checks: diagnosis.checks.map((check) => check.id === replacement.id ? replacement : check),
   });
+}
+
+function reconcilePiBridgeDoctorDiagnosis(
+  context: SetupDiagnosisContext,
+  install: InstallStateInspection,
+  diagnoses: readonly AgentSetupDiagnosis[],
+): AgentSetupDiagnosis[] {
+  const env = { ...context.env, HOME: context.homeDir };
+  const piAgentDir = resolvePiDialectPaths(PI_DIALECT, env).agentDir;
+  const pi = reconcileBridgeDoctorDiagnosis(
+    { agent: 'pi', checkId: 'pi.bridge-asset', displayName: 'Pi', agentDir: piAgentDir },
+    context,
+    install,
+    diagnoses,
+  );
+  const ompAgentDir = resolvePiDialectPaths(OMP_DIALECT, env).agentDir;
+  return reconcileBridgeDoctorDiagnosis(
+    { agent: 'omp', checkId: 'omp.bridge-asset', displayName: 'omp', agentDir: ompAgentDir },
+    context,
+    install,
+    pi,
+  );
 }
 
 function summarize(sections: readonly DoctorSection[]): Record<SetupCheckStatus, number> {
@@ -1579,6 +1623,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
   const config = inspectBrokerConfig(home);
   const brokerToken = inspectBrokerToken(join(home, 'secrets', 'broker-token'));
   const piIntegration = inspectPiIntegration(join(home, 'secrets', 'pi-integration.json'));
+  const ompIntegration = inspectOmpIntegration(join(home, 'secrets', 'omp-integration.json'));
   const host = hostChecks(dependencies.context, dependencies.context.arch);
   const adapters = dependencies.adapters ?? defaultDoctorAdapters(dependencies.context.env);
   const installedResources = inspectInstallState(home);
@@ -1642,6 +1687,7 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
         configCheck(config, dependencies.context),
         credentialCheck({ id: 'state.broker-token', label: 'Broker credential', inspection: brokerToken, context: dependencies.context }),
         credentialCheck({ id: 'state.pi-integration', label: 'Pi integration credential', inspection: piIntegration, context: dependencies.context }),
+        credentialCheck({ id: 'state.omp-integration', label: 'omp integration credential', inspection: ompIntegration, context: dependencies.context }),
         environmentPrecedenceCheck({ packaged: dependencies.buildInfo.packaged, home, context: dependencies.context }),
         machinePeerCredentialCheck(dependencies.context),
         ...agentSkillChecks(home, dependencies.context),

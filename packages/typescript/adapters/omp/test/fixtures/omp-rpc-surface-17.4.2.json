@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "package": "@oh-my-pi/pi-coding-agent",
+  "nativeVersion": "17.4.2",
+  "source": {
+    "commandTypes": "src/modes/rpc/rpc-types.ts",
+    "eventForwarder": "src/modes/rpc/rpc-mode.ts"
+  },
+  "adapterCommands": [
+    "abort",
+    "compact",
+    "export_html",
+    "get_available_commands",
+    "get_available_models",
+    "get_messages",
+    "get_session_stats",
+    "get_state",
+    "prompt",
+    "set_model",
+    "set_session_name",
+    "set_thinking_level"
+  ],
+  "absentCommands": [
+    "clone",
+    "fork",
+    "get_commands"
+  ],
+  "consumedEvents": [
+    "agent_end",
+    "agent_start",
+    "auto_retry_end",
+    "auto_retry_start",
+    "compaction_end",
+    "compaction_start",
+    "extension_error",
+    "extension_ui_request",
+    "message_end",
+    "message_start",
+    "message_update",
+    "tool_execution_end",
+    "turn_start"
+  ]
+}

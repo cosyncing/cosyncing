@@ -101,6 +101,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "Owners can inspect and change the authenticated HTTP workspace-browsing exposure gate through /api/broker/features/workspace-browsing; enabling requires explicit remote-file-access confirmation and a broker restart. Model catalogs may advertise a human-facing provider/profile label while retaining the exact native provider identity. Permission requests may advertise a distinct persistent-rule approval decision."
+    },
+    {
+      "revision": 19,
+      "surfaceHash": "fnv1a32:4531a029",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "First-party clients add complete omp roster identity, agent color, and New Session support. Brokers use revision 19 as omp's visibility floor so revision-18 clients do not receive a second-class omp row."
     }
   ]
 }

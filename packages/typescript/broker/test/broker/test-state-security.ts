@@ -42,8 +42,10 @@ import {
 import {
   ensureInstallationCredentials,
   inspectBrokerToken,
+  inspectOmpIntegration,
   inspectPiIntegration,
   readBrokerToken,
+  readOmpIntegration,
   readPiIntegration,
   resolveRuntimeCredentials,
 } from '../../src/security/credentials.ts';
@@ -370,34 +372,44 @@ try {
         && !child.stdout.includes('{ malformed'));
   }
 
-  // Owner-only shared and Pi-scoped credentials, idempotence, URL update, and rotation.
+  // Owner-only shared and scoped credentials, idempotence, URL update, and rotation.
   {
     const home = join(root, 'credential-home');
     const first = ensureInstallationCredentials({ home, internalUrl: 'http://127.0.0.1:7734' });
     const second = ensureInstallationCredentials({ home, internalUrl: 'http://127.0.0.1:7734' });
-    check('first credential setup creates separate random broker and Pi credentials',
-      first.brokerToken !== first.piIntegration.credential && first.brokerToken.length >= 43 &&
+    check('first credential setup creates separate random broker, Pi, and omp credentials',
+      first.brokerToken !== first.piIntegration.credential &&
+        first.brokerToken !== first.ompIntegration.credential &&
+        first.piIntegration.credential !== first.ompIntegration.credential &&
+        first.brokerToken.length >= 43 &&
         inspectBrokerToken(join(home, 'secrets', 'broker-token')).status === 'ok' &&
-        inspectPiIntegration(join(home, 'secrets', 'pi-integration.json')).status === 'ok');
+        inspectPiIntegration(join(home, 'secrets', 'pi-integration.json')).status === 'ok' &&
+        inspectOmpIntegration(join(home, 'secrets', 'omp-integration.json')).status === 'ok');
     check('credential files and secret directory are owner-only',
       ownerOnlyMode(join(home, 'secrets')) === 0o700 &&
         ownerOnlyMode(join(home, 'secrets', 'broker-token')) === 0o600 &&
-        ownerOnlyMode(join(home, 'secrets', 'pi-integration.json')) === 0o600);
+        ownerOnlyMode(join(home, 'secrets', 'pi-integration.json')) === 0o600 &&
+        ownerOnlyMode(join(home, 'secrets', 'omp-integration.json')) === 0o600);
     check('repeated setup is idempotent for credential material',
-      second.brokerToken === first.brokerToken && second.piIntegration.credential === first.piIntegration.credential);
+      second.brokerToken === first.brokerToken &&
+        second.piIntegration.credential === first.piIntegration.credential &&
+        second.ompIntegration.credential === first.ompIntegration.credential);
 
     const moved = ensureInstallationCredentials({ home, internalUrl: 'http://127.0.0.1:8844' });
-    check('internal URL drift atomically updates the Pi record without stranding or rotating it',
+    check('internal URL drift atomically updates the scoped records without stranding or rotating them',
       moved.piIntegration.internalUrl === 'http://127.0.0.1:8844' &&
-        moved.piIntegration.credential === first.piIntegration.credential);
+        moved.piIntegration.credential === first.piIntegration.credential &&
+        moved.ompIntegration.internalUrl === 'http://127.0.0.1:8844' &&
+        moved.ompIntegration.credential === first.ompIntegration.credential);
     const rotated = ensureInstallationCredentials({
       home,
       internalUrl: 'http://127.0.0.1:8844',
       rotateBrokerToken: true,
     });
-    check('explicit broker-token rotation mints fresh material without changing the Pi scope',
+    check('explicit broker-token rotation mints fresh material without changing the integration scopes',
       rotated.brokerToken !== first.brokerToken &&
-        rotated.piIntegration.credential === first.piIntegration.credential);
+        rotated.piIntegration.credential === first.piIntegration.credential &&
+        rotated.ompIntegration.credential === first.ompIntegration.credential);
 
     const runtime = resolveRuntimeCredentials({
       packaged: true,
@@ -405,10 +417,12 @@ try {
       internalUrl: 'http://127.0.0.1:8844',
       env: {},
     });
-    check('packaged runtime resolves both credentials only from owner-only files',
+    check('packaged runtime resolves all credentials only from owner-only files',
       runtime.brokerTokenSource === 'file' && runtime.piIntegrationSource === 'file' &&
+        runtime.ompIntegrationSource === 'file' &&
         runtime.brokerToken === readBrokerToken(join(home, 'secrets', 'broker-token')) &&
-        runtime.piInternalUrl === readPiIntegration(join(home, 'secrets', 'pi-integration.json')).internalUrl);
+        runtime.piInternalUrl === readPiIntegration(join(home, 'secrets', 'pi-integration.json')).internalUrl &&
+        runtime.ompInternalUrl === readOmpIntegration(join(home, 'secrets', 'omp-integration.json')).internalUrl);
   }
 
   // Cross-command lock: mutual exclusion, safe release, stale-PID proof, and symlink refusal.

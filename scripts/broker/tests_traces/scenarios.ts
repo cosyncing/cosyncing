@@ -1,4 +1,4 @@
-export type AgentId = 'opencode' | 'pi' | 'claude' | 'codex';
+export type AgentId = 'opencode' | 'pi' | 'omp' | 'claude' | 'codex';
 export type TraceTier = 'synthetic' | 'adapter-live' | 'product-trace' | 'drift';
 export type TracePriority = 'p0' | 'p1' | 'p2';
 
@@ -15,7 +15,7 @@ export interface TraceScenario {
   gaps?: string[];
 }
 
-export const AGENTS: AgentId[] = ['opencode', 'pi', 'claude', 'codex'];
+export const AGENTS: AgentId[] = ['opencode', 'pi', 'omp', 'claude', 'codex'];
 
 export const TRACE_SCENARIOS: TraceScenario[] = [
   {
@@ -56,7 +56,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     title: 'true sync: app to terminal',
     tier: 'product-trace',
     priority: 'p0',
-    agents: ['opencode', 'pi', 'codex'],
+    agents: ['opencode', 'pi', 'omp', 'codex'],
     purpose: 'Verify the single-owner promise from the phone/web side to the host terminal side.',
     steps: ['Start the true-live owner for the agent.', 'Attach the product UI.', 'Send from the product.', 'Observe the host terminal/session state.'],
     assertions: ['The terminal-owned view sees the prompt and response without resume or refresh.', 'Only one owning agent process/server writes the session.'],
@@ -67,7 +67,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     title: 'true sync: terminal to app',
     tier: 'product-trace',
     priority: 'p0',
-    agents: ['opencode', 'pi', 'codex'],
+    agents: ['opencode', 'pi', 'omp', 'codex'],
     purpose: 'Verify the host terminal can drive the same live session and the app updates without refresh.',
     steps: ['Attach app to a live session.', 'Send a prompt directly through the agent terminal or native API.', 'Record app frames and UI state.'],
     assertions: ['Terminal prompt renders as a right-side user-message.', 'No duplicate left-side echo.', 'Assistant stream reaches the app live.'],
@@ -245,7 +245,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     title: 'agent to user file artifacts',
     tier: 'product-trace',
     priority: 'p0',
-    agents: ['opencode', 'pi'],
+    agents: ['opencode', 'pi', 'omp'],
     purpose: 'Session-qualified agent-produced files must surface, persist across reattach, and be safe to open.',
     steps: ['Deliver through the native session-bound route.', 'Rewrite the same filename.', 'Attempt symlink escape.', 'Send an HTML artifact with local assets.'],
     assertions: ['Only the producing session receives the artifact.', 'Rewrites remain distinct versions for that owner.', 'Symlinks and absolute path leaks are blocked.', 'HTML local assets are bundled.'],
@@ -257,7 +257,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     title: 'native send-file tools',
     tier: 'product-trace',
     priority: 'p1',
-    agents: ['opencode', 'pi'],
+    agents: ['opencode', 'pi', 'omp'],
     purpose: 'Native session-qualified send-file mechanisms must produce the canonical file-artifact UI.',
     steps: ['Trigger the agent native send-file tool if available.', 'Send a non-deliverable file that only native send-file should surface.'],
     assertions: ['A file-artifact appears with correct bytes.', 'The tool-result is not merely a bare chip.', 'Unsupported agents explicitly skip with reason.'],
@@ -382,7 +382,7 @@ export const TRACE_SCENARIOS: TraceScenario[] = [
     title: 'terminal owner disappearance and sync degradation',
     tier: 'product-trace',
     priority: 'p0',
-    agents: ['opencode', 'codex', 'pi'],
+    agents: ['opencode', 'codex', 'pi', 'omp'],
     purpose: 'If the terminal/shared-server/daemon owner disappears, the app must stop claiming stale true-sync or app-drivable ownership.',
     steps: ['Attach to an active sync/session owner.', 'Kill or disconnect the owner.', 'Observe pushed session frames and roster overlay.', 'Attempt a crafted prompt after downgrade.'],
     assertions: ['Attached clients receive an honest ended/degraded/observe session state.', '`terminalSync.active` is false after owner loss.', 'Prompts are rejected at the broker boundary unless a new Drive owner is explicitly established.'],

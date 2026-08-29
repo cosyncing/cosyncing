@@ -50,6 +50,7 @@ import {
 } from '@cosyncing/adapter-api';
 import { OpenCodeAdapter } from '@cosyncing/adapter-opencode';
 import { PiAdapter } from '@cosyncing/adapter-pi';
+import { inspectOmpPathCollision, OmpAdapter, OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
   CodexAdapter,
   createCodexConfigFreshnessProbe,
@@ -418,6 +419,7 @@ const RUNTIME_CREDENTIALS = resolveRuntimeCredentials({
 });
 const TOKEN = RUNTIME_CREDENTIALS.brokerToken;
 const PI_INTEGRATION_TOKEN = RUNTIME_CREDENTIALS.piIntegrationToken;
+const OMP_INTEGRATION_TOKEN = RUNTIME_CREDENTIALS.ompIntegrationToken;
 const MACHINE_PEER_CONFIG = readMachinePeerConfig();
 // Flutter web build, served same-origin under /cosy/. From the monorepo root, build it with
 // `bun run scripts/client/run-client-command.ts flutter build web --release --base-href /cosy/`.
@@ -451,7 +453,7 @@ const WEB_COI = /^(1|true|yes|on)$/i.test(process.env.COSYNCING_WEB_COI?.trim() 
 type AuthenticatedPrincipal =
   | { kind: 'owner'; credentialId: string }
   | { kind: 'peer'; peerId: string; authGeneration: number; roles: ReadonlySet<PeerRole> }
-  | { kind: 'integration'; integration: 'pi' };
+  | { kind: 'integration'; integration: 'pi' | 'omp' };
 
 const SOURCE_DEVELOPMENT_CREDENTIAL_ID = 'source-development-loopback';
 
@@ -471,11 +473,22 @@ function authenticatedPrincipal(req: Request, path: string): AuthenticatedPrinci
       roles: peer.roles,
     };
   }
-  if (!path.startsWith('/pi/bridge/') || !PI_INTEGRATION_TOKEN) return undefined;
+  // Each bridge route family authenticates ONLY against its own scoped integration credential:
+  // the pi token never authorizes /omp/bridge/ and the omp token never authorizes /pi/bridge/.
   const integrationToken = req.headers.get('x-cosyncing-integration-token')?.trim() || '';
-  return safeCredentialEqual(PI_INTEGRATION_TOKEN, integrationToken)
-    ? { kind: 'integration', integration: 'pi' }
-    : undefined;
+  if (path.startsWith('/pi/bridge/')) {
+    if (!PI_INTEGRATION_TOKEN) return undefined;
+    return safeCredentialEqual(PI_INTEGRATION_TOKEN, integrationToken)
+      ? { kind: 'integration', integration: 'pi' }
+      : undefined;
+  }
+  if (path.startsWith('/omp/bridge/')) {
+    if (!OMP_INTEGRATION_TOKEN) return undefined;
+    return safeCredentialEqual(OMP_INTEGRATION_TOKEN, integrationToken)
+      ? { kind: 'integration', integration: 'omp' }
+      : undefined;
+  }
+  return undefined;
 }
 
 function credentialAuthenticated(principal: AuthenticatedPrincipal | undefined): boolean {
@@ -693,12 +706,23 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
 
 const sessionMetadata = new SessionMetadataStore();
 const registry = new AgentRegistry();
+// This gate is shared by adapter readiness and the broker-owned bridge route. Without the broker
+// check, a blocked disk/RPC adapter could still adopt an omp bridge for a file Pi also discovers.
+const ompPathCollision = inspectOmpPathCollision(process.env);
 registry.register(new OpenCodeAdapter({
   waitForManagedCreateReadiness: waitForManagedOpencodeCreateReadiness,
 }));
 registry.register(new PiAdapter({
   brokerUrl: BROKER_URL,
   bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.piIntegrationSource === 'file',
+}));
+// omp (oh-my-pi) — the shared Pi engine bound to the omp dialect: own binary, own sessions root,
+// own bridge route family and scoped integration credential, no RPC fork/clone. Registered
+// UNCONDITIONALLY, like Kimi below: the roster route filters per client against the adapter's
+// declared minimumClientRevision, so pre-omp clients are simply never shown the row.
+registry.register(new OmpAdapter({
+  brokerUrl: BROKER_URL,
+  bridgeUsesIntegrationFile: RUNTIME_CREDENTIALS.ompIntegrationSource === 'file',
 }));
 registry.register(new CodexAdapter({
   resolveStoredCurrentModel: (info) => sessionMetadata.currentModelHint(info),
@@ -1294,6 +1318,22 @@ const piBridgeSweepTimer = setInterval(() => {
   if (stale.length) console.warn(`${LOG_PREFIX} removed ${stale.length} stale Pi bridge connection(s)`);
 }, 30_000);
 piBridgeSweepTimer.unref?.();
+// The omp family shares the engine's registry but must carry the omp dialect explicitly — the
+// constructor defaults to PI_DIALECT, and a forgotten argument compiles clean while stamping omp
+// sessions with pi:run: keys and pi-bridge sources. Fail LOUDLY at construction instead.
+if (OMP_DIALECT.toolId !== 'omp' || OMP_DIALECT.eventKeyNamespace !== 'omp:run:') {
+  throw new Error('omp bridge registry requires OMP_DIALECT');
+}
+const ompBridge = new PiBridgeRegistry(
+  (id, reason) => hub.evict('omp', id, reason),
+  Number(process.env.COSYNCING_BRIDGE_GRACE_MS ?? 4000),
+  OMP_DIALECT,
+);
+const ompBridgeSweepTimer = setInterval(() => {
+  const stale = ompBridge.sweepStale(Date.now(), 60_000);
+  if (stale.length) console.warn(`${LOG_PREFIX} removed ${stale.length} stale omp bridge connection(s)`);
+}, 30_000);
+ompBridgeSweepTimer.unref?.();
 const uploadStaging = new UploadStaging({ maxBytes: UPLOAD_MAX_BYTES });
 const uploadGcTimer = setInterval(() => uploadStaging.sweepExpired(), 60 * 60 * 1000);
 uploadGcTimer.unref?.();
@@ -1395,41 +1435,44 @@ function canonicalPiSessionFile(sessionFile: string): string {
   }
 }
 const bridgeId = (sessionFile: string): string => Buffer.from(canonicalPiSessionFile(sessionFile), 'utf8').toString('base64url');
-const piBridgeFiles = new Map<string, string>();
-const piBridgeAliases = new Map<string, string>();
 
-function resolvePiBridgeAlias(id: string): string {
-  let cur = id;
-  const seen = new Set<string>();
-  while (piBridgeAliases.has(cur) && !seen.has(cur)) {
-    seen.add(cur);
-    cur = piBridgeAliases.get(cur)!;
-  }
-  return cur;
+/** Per-tool bridge id tracking: remembered session files plus symlink-spelling aliases, so an early
+ *  hello re-keys to the canonical session id once the JSONL exists. One tracker per bridge family —
+ *  omp and pi session roots are disjoint, so the path-derived ids cannot collide across tools (C9). */
+function createBridgeIdTracker(tool: 'pi' | 'omp', bridge: PiBridgeRegistry) {
+  const files = new Map<string, string>();
+  const aliases = new Map<string, string>();
+  const resolveAlias = (id: string): string => {
+    let cur = id;
+    const seen = new Set<string>();
+    while (aliases.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = aliases.get(cur)!;
+    }
+    return cur;
+  };
+  const canonicalize = (id: string): string => {
+    const current = resolveAlias(id);
+    const sessionFile = files.get(current);
+    if (!sessionFile) return current;
+    const canonical = bridgeId(sessionFile);
+    if (canonical === current) return current;
+    const conn = bridge.rekey(current, canonical);
+    if (!conn) return current;
+    files.delete(current);
+    files.set(canonical, sessionFile);
+    aliases.set(current, canonical);
+    hub.rekey(tool, current, canonical);
+    return canonical;
+  };
+  return {
+    remember: (id: string, sessionFile: string): void => { files.set(id, sessionFile); },
+    canonicalize,
+    canonicalizeAll: (): void => { for (const id of [...files.keys()]) canonicalize(id); },
+  };
 }
-
-function rememberPiBridgeFile(id: string, sessionFile: string): void {
-  piBridgeFiles.set(id, sessionFile);
-}
-
-function canonicalizePiBridgeId(id: string): string {
-  const current = resolvePiBridgeAlias(id);
-  const sessionFile = piBridgeFiles.get(current);
-  if (!sessionFile) return current;
-  const canonical = bridgeId(sessionFile);
-  if (canonical === current) return current;
-  const conn = piBridge.rekey(current, canonical);
-  if (!conn) return current;
-  piBridgeFiles.delete(current);
-  piBridgeFiles.set(canonical, sessionFile);
-  piBridgeAliases.set(current, canonical);
-  hub.rekey('pi', current, canonical);
-  return canonical;
-}
-
-function canonicalizePiBridgeIds(): void {
-  for (const id of [...piBridgeFiles.keys()]) canonicalizePiBridgeId(id);
-}
+const piBridgeIds = createBridgeIdTracker('pi', piBridge);
+const ompBridgeIds = createBridgeIdTracker('omp', ompBridge);
 
 function normalizeCreateDirectory(input: unknown): string {
   const raw = typeof input === 'string' ? input.trim() : '';
@@ -1707,7 +1750,8 @@ async function discoverLocalSessions(
   windowMs?: number,
   now = Date.now(),
 ): Promise<SessionInfo[]> {
-  canonicalizePiBridgeIds();
+  piBridgeIds.canonicalizeAll();
+  ompBridgeIds.canonicalizeAll();
   const sessions = (await discoverAllCached(force, windowMs, now)).map((s) => ({ ...s, machine: MACHINE }));
   // A native runtime may replace the adapter id while retaining one exact native identity (Claude
   // bridge continuation is the measured case). Retire every superseded Hub owner and remove its
@@ -3483,7 +3527,7 @@ function jsonRequestBodyLimit(path: string, method: string): number | undefined 
   if (/^\/api\/sessions\/[^/]+\/[^/]+\/uploads\/[^/]+$/.test(path) && method === 'PATCH') return undefined;
   if (/^\/api\/transport\/pairings\/[^/]+\/accept$/.test(path)) return PAIRING_ACCEPT_MAX_BYTES;
   if (path === '/api/ws-auth-tickets') return WS_TICKET_JSON_MAX_BYTES;
-  if (path.startsWith('/api/') || path.startsWith('/pi/bridge/') || path.startsWith('/claude/hook/')) {
+  if (path.startsWith('/api/') || path.startsWith('/pi/bridge/') || path.startsWith('/omp/bridge/') || path.startsWith('/claude/hook/')) {
     return ORDINARY_JSON_MAX_BYTES;
   }
   return undefined;
@@ -4103,6 +4147,7 @@ server = Bun.serve<WsData>({
       || isWsTicketUpgrade;
     const isApiRequest = path.startsWith('/api/');
     const isPiIntegrationRoute = path.startsWith('/pi/bridge/');
+    const isOmpIntegrationRoute = path.startsWith('/omp/bridge/');
     const isResumeStream = url.searchParams.get('mode') === 'resume'
       && /^\/api\/sessions\/[^/]+\/[^/]+\/stream$/.test(path);
     if (
@@ -4110,7 +4155,8 @@ server = Bun.serve<WsData>({
       (
         (isApiRequest && !isPublicApiRequest) ||
         path.startsWith('/claude/hook/') ||
-        path.startsWith('/pi/bridge/')
+        path.startsWith('/pi/bridge/') ||
+        path.startsWith('/omp/bridge/')
       )
     ) {
       const incidentKey = authFailureAttention.recordFailure();
@@ -4131,6 +4177,10 @@ server = Bun.serve<WsData>({
         ? json({ ok: false, code: 'RESUME_AUTH_REQUIRED', error: 'authenticated credential required for Drive resume' }, 401)
         : isPiIntegrationRoute
         ? json({ ok: false, code: 'PI_INTEGRATION_AUTH_REQUIRED', error: 'Pi integration authentication required' }, 401)
+        : isOmpIntegrationRoute
+        // No omp-specific code: adding one would move BROKER_CONTRACT_SURFACE_HASH (errorCodes is a
+        // hash input) and force a contract revision. AUTH_REQUIRED is registered and route-accurate.
+        ? json({ ok: false, code: 'AUTH_REQUIRED', error: 'omp integration authentication required' }, 401)
         : new Response('unauthorized', { status: 401 });
     }
 
@@ -5362,7 +5412,7 @@ server = Bun.serve<WsData>({
       const sessionFile = String(b?.sessionFile ?? '');
       if (!sessionFile) return new Response('missing sessionFile', { status: 400 });
       const id = bridgeId(sessionFile);
-      rememberPiBridgeFile(id, sessionFile);
+      piBridgeIds.remember(id, sessionFile);
       const bridgeThinkingLevel =
         typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
           ? b.thinkingLevel
@@ -5410,7 +5460,7 @@ server = Bun.serve<WsData>({
     // events: the extension pushes a batch of session events → fan out to attached clients.
     if (path === '/pi/bridge/events' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
-      const conn = piBridge.get(canonicalizePiBridgeId(String(b?.id ?? '')));
+      const conn = piBridge.get(piBridgeIds.canonicalize(String(b?.id ?? '')));
       if (!conn) return new Response('unknown bridge', { status: 404 });
       for (const ev of Array.isArray(b?.events) ? b.events : []) conn.ingest(ev);
       return json({ ok: true });
@@ -5419,7 +5469,7 @@ server = Bun.serve<WsData>({
     // selects a live Pi session and `surfaceExplicit` independently jails the path to its workspace.
     if (path === '/pi/bridge/send-file' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
-      const id = canonicalizePiBridgeId(String(b?.id ?? ''));
+      const id = piBridgeIds.canonicalize(String(b?.id ?? ''));
       const conn = piBridge.get(id);
       if (!conn) return json({ ok: false, code: 'NOT_FOUND', error: 'unknown bridge' }, 404);
       const mc = hub.getConn('pi', id);
@@ -5429,23 +5479,124 @@ server = Bun.serve<WsData>({
     }
     // commands: the extension long-polls for actions to perform (inject prompt, abort, …).
     if (path === '/pi/bridge/commands' && req.method === 'GET') {
-      const conn = piBridge.get(canonicalizePiBridgeId(url.searchParams.get('id') ?? ''));
+      const conn = piBridge.get(piBridgeIds.canonicalize(url.searchParams.get('id') ?? ''));
       if (!conn) return new Response('unknown bridge', { status: 404 });
       const commands = await conn.takeCommands();
       return json({ commands });
     }
     // status: is a session currently live-bridged? (used to gate attach + mark the roster live)
     if (path === '/pi/bridge/status' && req.method === 'GET') {
-      return json({ bridged: piBridge.has(canonicalizePiBridgeId(url.searchParams.get('id') ?? '')) });
+      return json({ bridged: piBridge.has(piBridgeIds.canonicalize(url.searchParams.get('id') ?? '')) });
     }
     // bye: the session shut down → let the registry decide. A `reload` (or unknown reason) is held
     // open briefly so the same-id re-hello reclaims the live connection (the phone stays attached);
     // quit/new/resume/fork tear down now and notify the phone. See PiBridgeRegistry.bye.
     if (path === '/pi/bridge/bye' && req.method === 'POST') {
       const b: any = await req.json().catch(() => ({}));
-      const id = canonicalizePiBridgeId(String(b?.id ?? ''));
+      const id = piBridgeIds.canonicalize(String(b?.id ?? ''));
       const reason = b?.reason ? String(b.reason) : undefined;
       if (id) piBridge.bye(id, reason);
+      return json({ ok: true });
+    }
+
+    // ── omp live bridge (Mode A): the in-session omp extension relays here ──
+    // Same contract as the Pi family above, keyed by tool 'omp' with omp terminal-sync labels and
+    // the omp bridge registry (OMP_DIALECT connections, omp:run: keys, omp-bridge sources).
+    if (path === '/omp/bridge/hello' && req.method === 'POST') {
+      const b: any = await req.json().catch(() => ({}));
+      const sessionFile = String(b?.sessionFile ?? '');
+      if (!sessionFile) return new Response('missing sessionFile', { status: 400 });
+      if (ompPathCollision) {
+        return json({
+          ok: false,
+          code: ompPathCollision.code,
+          error: ompPathCollision.summary,
+          remediation: ompPathCollision.remediation,
+        }, 409);
+      }
+      const id = bridgeId(sessionFile);
+      ompBridgeIds.remember(id, sessionFile);
+      const bridgeThinkingLevel =
+        typeof b?.thinkingLevel === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(b.thinkingLevel)
+          ? b.thinkingLevel
+          : undefined;
+      const bridgeCurrentModel = b?.model?.modelID
+        ? {
+            providerID: String(b.model.providerID ?? ''),
+            modelID: String(b.model.modelID),
+            ...(bridgeThinkingLevel ? { reasoningEffort: bridgeThinkingLevel } : {}),
+          }
+        : undefined;
+      const info: SessionInfo = {
+        id, tool: 'omp', machine: MACHINE,
+        title: String(b?.title || sessionFile.split('/').pop() || 'omp session'),
+        cwd: b?.cwd ? String(b.cwd) : undefined,
+        // Same rule as pi: a bridge hello is exact live-source activity, published so the default
+        // recent-session roster does not hide an undated terminal session; never artifact ownership.
+        updatedAt: Date.now(),
+        status: 'idle', attachMode: 'live',
+        model: b?.model?.label || b?.model?.name || b?.model?.modelID ? String(b.model.label ?? b.model.name ?? b.model.modelID) : undefined,
+        currentModel: bridgeCurrentModel,
+        control: {
+          drive: {
+            supported: false,
+            state: 'unavailable',
+            reason: 'This omp session is already synced with the terminal through the bridge; no Drive takeover is needed.',
+          },
+          terminalSync: {
+            supported: true,
+            syncAvailable: true,
+            active: true,
+            label: 'Synced with omp terminal',
+            note: `This omp session is connected through the ${PRODUCT_IDENTITY.productName} bridge extension.`,
+          },
+        },
+      };
+      const conn = ompBridge.hello(id, info);
+      conn.ingestHistory(b?.history); // backfill the conversation-so-far (idempotent on re-hello)
+      conn.setCommands(b?.commands); // the user's skills/templates → richer palette than /stop
+      conn.setModelOptions(b?.models, bridgeCurrentModel?.reasoningEffort);
+      hub.adopt('omp', id, conn); // pinned: lives as long as the terminal session, not the clients
+      return json({ ok: true, id });
+    }
+    // events: the extension pushes a batch of session events → fan out to attached clients.
+    if (path === '/omp/bridge/events' && req.method === 'POST') {
+      const b: any = await req.json().catch(() => ({}));
+      const conn = ompBridge.get(ompBridgeIds.canonicalize(String(b?.id ?? '')));
+      if (!conn) return new Response('unknown bridge', { status: 404 });
+      for (const ev of Array.isArray(b?.events) ? b.events : []) conn.ingest(ev);
+      return json({ ok: true });
+    }
+    // Scoped send_file replacement, omp family: the bridge id selects a live omp session and
+    // `surfaceExplicit` independently jails the path to its workspace.
+    if (path === '/omp/bridge/send-file' && req.method === 'POST') {
+      const b: any = await req.json().catch(() => ({}));
+      const id = ompBridgeIds.canonicalize(String(b?.id ?? ''));
+      const conn = ompBridge.get(id);
+      if (!conn) return json({ ok: false, code: 'NOT_FOUND', error: 'unknown bridge' }, 404);
+      const mc = hub.getConn('omp', id);
+      if (!mc) return json({ ok: false, code: 'NOT_FOUND', error: 'bridge session is not open' }, 404);
+      const result = mc.surfaceExplicit(String(b?.path ?? ''));
+      return json({ ok: result.ok, detail: result.detail }, result.ok ? 200 : 400);
+    }
+    // commands: the extension long-polls for actions to perform (inject prompt, abort, …).
+    if (path === '/omp/bridge/commands' && req.method === 'GET') {
+      const conn = ompBridge.get(ompBridgeIds.canonicalize(url.searchParams.get('id') ?? ''));
+      if (!conn) return new Response('unknown bridge', { status: 404 });
+      const commands = await conn.takeCommands();
+      return json({ commands });
+    }
+    // status: is a session currently live-bridged? (used to gate attach + mark the roster live)
+    if (path === '/omp/bridge/status' && req.method === 'GET') {
+      return json({ bridged: ompBridge.has(ompBridgeIds.canonicalize(url.searchParams.get('id') ?? '')) });
+    }
+    // bye: identical teardown policy as pi — reload/unknown defer by the grace window,
+    // quit/new/resume tear down now. See PiBridgeRegistry.bye.
+    if (path === '/omp/bridge/bye' && req.method === 'POST') {
+      const b: any = await req.json().catch(() => ({}));
+      const id = ompBridgeIds.canonicalize(String(b?.id ?? ''));
+      const reason = b?.reason ? String(b.reason) : undefined;
+      if (id) ompBridge.bye(id, reason);
       return json({ ok: true });
     }
 

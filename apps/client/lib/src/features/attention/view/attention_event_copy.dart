@@ -49,6 +49,7 @@ String attentionToolDisplayName(String? value, AppLocalizations l10n) {
     'codex' => l10n.sessionRosterAgentCodex,
     'opencode' => l10n.sessionRosterAgentOpenCode,
     'pi' => l10n.sessionRosterAgentPi,
+    'omp' => l10n.sessionRosterAgentOmp,
     // The backend id and the product name differ here, so the fallback below
     // would name the command (`agy`) in a notification the user reads as prose.
     'agy' => l10n.sessionRosterAgentAntigravity,

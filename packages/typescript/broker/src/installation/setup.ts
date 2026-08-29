@@ -1,7 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { inspectPiBridgeAsset } from '@cosyncing/adapter-pi';
+import {
+  inspectPiBridgeAsset,
+  PI_DIALECT,
+  resolvePiDialectPaths,
+} from '@cosyncing/adapter-pi';
+import {
+  inspectOmpBridgeAsset,
+  inspectOmpPathCollision,
+  OMP_DIALECT,
+} from '@cosyncing/adapter-omp';
 import {
   inspectLegacyCodexDaemon,
   migrateLegacyCodexDaemon,
@@ -23,9 +32,12 @@ import {
 import {
   brokerTokenPath,
   inspectBrokerToken,
+  inspectOmpIntegration,
   inspectPiIntegration,
+  ompIntegrationPath,
   piIntegrationPath,
   readBrokerToken,
+  readOmpIntegration,
   readPiIntegration,
 } from '../security/credentials.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
@@ -71,7 +83,10 @@ import {
   type AgentSkillInspection,
 } from './agent-skill.ts';
 import {
+  decideBridgeOwnership,
   decidePiBridgeOwnership,
+  inspectOmpBridgeOwnership,
+  OMP_BRIDGE_OWNERSHIP_SPEC,
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import {
@@ -94,6 +109,7 @@ import {
   serviceDefinitionResourceId,
   startAndVerifyDurableService,
   SERVICE_RESOURCE_IDS,
+  serviceAgentDataPathOverrides,
   serviceAgentExecutableDirectories,
   serviceAgentExecutableOverrides,
   type DurableServiceProvider,
@@ -102,6 +118,7 @@ import {
   type ServiceAgentExecutableOverrides,
   type DurableServiceProviderOptions,
 } from './service-manager.ts';
+
 import {
   createSetupActionCatalog,
   inspectInstalledBinary,
@@ -136,6 +153,19 @@ import {
   type SetupTransactionAction,
   type SetupTransactionPlan,
 } from './setup-transaction.ts';
+
+function piFamilyServiceDataPathOverrides(context: SetupDiagnosisContext) {
+  const env = { ...context.env, HOME: context.homeDir };
+  const pi = resolvePiDialectPaths(PI_DIALECT, env);
+  const omp = resolvePiDialectPaths(OMP_DIALECT, env);
+  return serviceAgentDataPathOverrides({
+    env,
+    piAgentDir: pi.agentDir,
+    ompAgentDir: omp.agentDir,
+    piSessionsRoot: pi.sessionsRoot,
+    ompSessionsRoot: omp.sessionsRoot,
+  });
+}
 
 /**
  * How the broker runs after setup. Exactly one durable option is offered per host — `systemd` on linux,
@@ -185,7 +215,7 @@ export interface OpencodeShimInspection {
 }
 
 export interface SetupAgentSummary {
-  id: 'codex' | 'opencode' | 'pi' | 'claude' | 'agy' | 'kimi' | 'dsh';
+  id: 'codex' | 'opencode' | 'pi' | 'omp' | 'claude' | 'agy' | 'kimi' | 'dsh';
   displayName: string;
   state: 'missing' | 'supported' | 'unsupported' | 'runtime-unavailable';
   installedVersion?: string;
@@ -229,9 +259,13 @@ export interface SetupInspection {
   brokerCredential: ReturnType<typeof inspectBrokerToken>;
   piCredential: ReturnType<typeof inspectPiIntegration>;
   piCredentialUrlMatches: boolean;
+  ompCredential: ReturnType<typeof inspectOmpIntegration>;
+  ompCredentialUrlMatches: boolean;
   setupState: SetupState;
   piAgentDir: string;
   piBridge: ReturnType<typeof inspectPiBridgeAsset>;
+  ompAgentDir: string;
+  ompBridge: ReturnType<typeof inspectOmpBridgeAsset>;
   durableStatePermissionRepairs: DurableStatePermissionRepair[];
   agentSkills: AgentSkillInspection[];
   opencodeShim: OpencodeShimInspection;
@@ -278,6 +312,7 @@ export interface SetupPlan {
   desiredSetupState: SetupState;
   targetConfig: BrokerConfig;
   installPiBridge: boolean;
+  installOmpBridge: boolean;
   requiresCommit: boolean;
   noOp: boolean;
   actions: SetupPlanAction[];
@@ -425,7 +460,7 @@ function installedVersion(report: DoctorReport, id: string): string | undefined 
 }
 
 /** Agents the installed service delivers itself, with no external host involved. */
-const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'claude', 'agy'] as const;
+const SETUP_DELIVERED_AGENTS = ['codex', 'opencode', 'pi', 'omp', 'claude', 'agy'] as const;
 
 /**
  * Setup advertises what the SERVICE IT INSTALLS can actually deliver.
@@ -455,6 +490,7 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     codex: 'Managed shared app-server; remote terminals may join it.',
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
+    omp: 'Packaged in-session bridge when omp is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
     agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
@@ -464,7 +500,11 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
     const matrix = report.minimumVersions.find((entry) => entry.agent === id);
     const binary = check(report, `${id}.binary`);
     const version = check(report, `${id}.version`);
-    const runtime = id === 'pi' ? check(report, 'pi.node-runtime') : undefined;
+    const runtime = id === 'pi'
+      ? check(report, 'pi.node-runtime')
+      : id === 'omp'
+        ? check(report, 'omp.bun-runtime')
+        : undefined;
     const state: SetupAgentSummary['state'] = binary?.status !== 'pass'
       ? 'missing'
       : version?.status !== 'pass'
@@ -490,7 +530,7 @@ export function agentSummaries(report: DoctorReport): SetupAgentSummary[] {
       ? {
           detailCode: runtime.detailCode,
           summary: runtime.summary,
-          remediation: runtime.remediation?.message ?? 'Repair the effective Pi runtime, then rerun setup.',
+          remediation: runtime.remediation?.message ?? `Repair the effective ${id} runtime, then rerun setup.`,
           ...(typeof runtime.evidence?.installedVersion === 'string'
             ? { installedVersion: runtime.evidence.installedVersion } : {}),
           ...(typeof runtime.evidence?.minimumVersion === 'string'
@@ -634,10 +674,16 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     brokerCredential: input.brokerCredential.status,
     piCredential: input.piCredential.status,
     piCredentialUrlMatches: input.piCredentialUrlMatches,
+    ompCredential: input.ompCredential.status,
+    ompCredentialUrlMatches: input.ompCredentialUrlMatches,
     setupState: input.setupState,
     piBridge: {
       status: input.piBridge.status,
       actualSha256: input.piBridge.actualSha256,
+    },
+    ompBridge: {
+      status: input.ompBridge.status,
+      actualSha256: input.ompBridge.actualSha256,
     },
     agentSkills: input.agentSkills.map(({ id, path, status, actualSha256 }) => ({
       id,
@@ -695,10 +741,17 @@ export async function inspectSetupEnvironment(options: {
   const piCredential = inspectPiIntegration(piIntegrationPath(options.home));
   const piCredentialUrlMatches = piCredential.status === 'ok'
     && readPiIntegration(piCredential.path).internalUrl === targetConfig.broker.internalUrl;
+  const ompCredential = inspectOmpIntegration(ompIntegrationPath(options.home));
+  const ompCredentialUrlMatches = ompCredential.status === 'ok'
+    && readOmpIntegration(ompCredential.path).internalUrl === targetConfig.broker.internalUrl;
   const setupState = readSetupState(options.home);
-  const piAgentDir = options.context.env.PI_CODING_AGENT_DIR?.trim()
-    || join(options.context.homeDir, '.pi', 'agent');
+  const dialectEnv = { ...options.context.env, HOME: options.context.homeDir };
+  const piPaths = resolvePiDialectPaths(PI_DIALECT, dialectEnv);
+  const ompPaths = resolvePiDialectPaths(OMP_DIALECT, dialectEnv);
+  const piAgentDir = piPaths.agentDir;
   const piBridge = inspectPiBridgeAsset(piAgentDir);
+  const ompAgentDir = ompPaths.agentDir;
+  const ompBridge = inspectOmpBridgeAsset(ompAgentDir);
   const agentSkills = inspectAgentSkills(options.context);
   const opencodeShimPath = opencodeShimShellPath(options.home);
   const shimPort = opencodeShimPort(options.context.env.OPENCODE_URL);
@@ -758,6 +811,14 @@ export async function inspectSetupEnvironment(options: {
     doctor,
     new Set(durableAssessment.permissionRepairs.map((repair) => repair.id)),
   ), ...durableStateBlockers(durableAssessment.blockers)];
+  const ompPathCollision = inspectOmpPathCollision(dialectEnv, options.context.platform);
+  if (ompPathCollision) {
+    issues.push({
+      code: ompPathCollision.code,
+      summary: ompPathCollision.summary,
+      remediation: ompPathCollision.remediation,
+    });
+  }
   if (legacyCodexDaemon?.state === 'unproven') {
     issues.push({
       code: 'codex-legacy-daemon-unproven',
@@ -786,6 +847,13 @@ export async function inspectSetupEnvironment(options: {
       remediation: `Run \`${PRODUCT_IDENTITY.primaryBinary} repair\` to reconcile the scoped credential.`,
     });
   }
+  if (ompCredential.status !== 'missing' && ompCredential.status !== 'ok') {
+    issues.push({
+      code: ompCredential.detailCode,
+      summary: 'Existing omp integration credential state is unsafe or malformed.',
+      remediation: `Run \`${PRODUCT_IDENTITY.primaryBinary} repair\` to reconcile the scoped credential.`,
+    });
+  }
   if (currentPort === 'conflict') {
     issues.push({
       code: 'broker-port-conflict',
@@ -805,6 +873,22 @@ export async function inspectSetupEnvironment(options: {
         'zh-Hans': {
           summary: '现有 Pi bridge 无法安全替换，安装不会覆盖。',
           remediation: `请先明确处理或备份 ${piBridge.path}，再重新运行安装。安装会自动更新由收据证明归属的发行包副本；没有归属收据的已知旧版只有在内容完全匹配并得到确认后才会替换。`,
+        },
+      },
+    });
+  }
+  const omp = agents.find((agent) => agent.id === 'omp');
+  const ompBridgeOwnership = inspectOmpBridgeOwnership(installState, ompAgentDir);
+  if (omp?.state === 'supported'
+      && ['unowned', 'receipt-invalid', 'unsafe', 'unreadable', 'legacy-unreceipted'].includes(ompBridgeOwnership.status)) {
+    issues.push({
+      code: `omp-bridge-${ompBridgeOwnership.status}`,
+      summary: 'The omp bridge target cannot be replaced safely.',
+      remediation: `Reconcile or back up ${ompBridge.path}, then rerun setup; setup replaces only a missing target or a receipt-proven packaged omp bridge.`,
+      localized: {
+        'zh-Hans': {
+          summary: '现有 omp bridge 无法安全替换，安装不会覆盖。',
+          remediation: `请先明确处理或备份 ${ompBridge.path}，再重新运行安装。安装只会写入缺失目标，或更新由收据证明归属的 omp bridge。`,
         },
       },
     });
@@ -841,6 +925,7 @@ export async function inspectSetupEnvironment(options: {
         ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
         agentExecutableDirectories,
         agentExecutableOverrides,
+        agentDataPathOverrides: piFamilyServiceDataPathOverrides(options.context),
         webDir: serviceFlutterWebRoot({
           override: options.context.env.COSYNCING_WEB_DIR,
           packaged: options.buildInfo.packaged,
@@ -863,9 +948,13 @@ export async function inspectSetupEnvironment(options: {
     brokerCredential,
     piCredential,
     piCredentialUrlMatches,
+    ompCredential,
+    ompCredentialUrlMatches,
     setupState,
     piAgentDir,
     piBridge,
+    ompAgentDir,
+    ompBridge,
     durableStatePermissionRepairs: durableAssessment.permissionRepairs,
     agentSkills,
     opencodeShim,
@@ -1135,7 +1224,9 @@ export function buildSetupPlan(options: {
   }
   if (options.inspection.brokerCredential.status === 'missing'
       || options.inspection.piCredential.status === 'missing'
-      || !options.inspection.piCredentialUrlMatches) {
+      || options.inspection.ompCredential.status === 'missing'
+      || !options.inspection.piCredentialUrlMatches
+      || !options.inspection.ompCredentialUrlMatches) {
     actions.push(planned({ kind: 'credentials' },
       { id: 'credentials.ensure', title: 'Create scoped credentials', reversible: true }));
   }
@@ -1174,6 +1265,27 @@ export function buildSetupPlan(options: {
       title: replacingLegacy
         ? 'Replace the known legacy Pi bridge'
         : refreshingStale ? 'Refresh the packaged Pi bridge' : 'Install packaged Pi bridge',
+      reversible: true,
+    }));
+  }
+  const ompBridgeOwnership = decideBridgeOwnership(
+    OMP_BRIDGE_OWNERSHIP_SPEC,
+    options.inspection.installState,
+    options.inspection.ompBridge,
+  );
+  const installOmpBridge = options.inspection.agents.some((agent) => agent.id === 'omp' && agent.state === 'supported')
+    && (ompBridgeOwnership.status === 'missing'
+      || ompBridgeOwnership.status === 'owned-stale'
+      || (ompBridgeOwnership.status === 'owned-current'
+        && !ompBridgeOwnership.receiptMatchesCurrentPackage));
+  if (installOmpBridge) {
+    const refreshingStale = ompBridgeOwnership.status === 'owned-stale';
+    actions.push(planned({
+      kind: 'omp-bridge',
+      path: options.inspection.ompBridge.path,
+    }, {
+      id: 'omp-bridge.install',
+      title: refreshingStale ? 'Refresh the packaged omp bridge' : 'Install packaged omp bridge',
       reversible: true,
     }));
   }
@@ -1467,6 +1579,7 @@ export function buildSetupPlan(options: {
     desiredSetupState,
     targetConfig,
     installPiBridge,
+    installOmpBridge,
     requiresCommit,
     noOp: actions.length === 0 && !requiresCommit,
     actions: planActions,
@@ -1518,6 +1631,15 @@ function actionInputs(options: {
       ? piBridgeOwnershipPrecondition(decidePiBridgeOwnership(
           options.inspection.installState,
           options.inspection.piBridge,
+        ))
+      : undefined,
+    ompAgentDir: options.inspection.ompAgentDir,
+    installOmpBridge: options.plan.installOmpBridge,
+    ompBridgePrecondition: options.plan.installOmpBridge
+      ? piBridgeOwnershipPrecondition(decideBridgeOwnership(
+          OMP_BRIDGE_OWNERSHIP_SPEC,
+          options.inspection.installState,
+          options.inspection.ompBridge,
         ))
       : undefined,
     durableStatePermissionRepairs: options.inspection.durableStatePermissionRepairs ?? [],
@@ -1595,10 +1717,13 @@ async function verifySetup(options: {
   }
   const broker = inspectBrokerToken(brokerTokenPath(options.inspection.stateHome));
   const piCredential = inspectPiIntegration(piIntegrationPath(options.inspection.stateHome));
-  if (broker.status !== 'ok' || piCredential.status !== 'ok') return false;
+  const ompCredential = inspectOmpIntegration(ompIntegrationPath(options.inspection.stateHome));
+  if (broker.status !== 'ok' || piCredential.status !== 'ok' || ompCredential.status !== 'ok') return false;
   if (readPiIntegration(piCredential.path).internalUrl !== options.plan.targetConfig.broker.internalUrl) return false;
+  if (readOmpIntegration(ompCredential.path).internalUrl !== options.plan.targetConfig.broker.internalUrl) return false;
   if (!setupStateMatches(readSetupState(options.inspection.stateHome), options.plan.desiredSetupState)) return false;
   if (options.plan.installPiBridge && inspectPiBridgeAsset(options.inspection.piAgentDir).status !== 'owned') return false;
+  if (options.plan.installOmpBridge && inspectOmpBridgeAsset(options.inspection.ompAgentDir).status !== 'owned') return false;
   const skillStatus = inspectAgentSkills(options.context);
   if (options.plan.choices.installAgentSkill
       && !skillStatus.every((target) => target.status === 'owned')) {
@@ -1881,6 +2006,7 @@ function createDurableProviderForSetup(options: {
       ?? serviceAgentExecutableDirectories(options.context),
     agentExecutableOverrides: options.agentExecutableOverrides
       ?? serviceAgentExecutableOverrides(options.context),
+    agentDataPathOverrides: piFamilyServiceDataPathOverrides(options.context),
     webDir: serviceFlutterWebRoot({
       override: options.context.env.COSYNCING_WEB_DIR,
       packaged: options.packaged,
@@ -1915,8 +2041,10 @@ export async function runSetup(dependencies: SetupDependencies): Promise<SetupCo
         home,
         config: defaultBrokerConfig(),
         setupState: readSetupState(home),
-        piAgentDir: context.env.PI_CODING_AGENT_DIR?.trim() || join(context.homeDir, '.pi', 'agent'),
+        piAgentDir: resolvePiDialectPaths(PI_DIALECT, { ...context.env, HOME: context.homeDir }).agentDir,
         installPiBridge: true,
+        ompAgentDir: resolvePiDialectPaths(OMP_DIALECT, { ...context.env, HOME: context.homeDir }).agentDir,
+        installOmpBridge: true,
         durableStatePermissionRepairs: [],
         agentSkillTargets: agentSkillTargets(context),
         installAgentSkill: true,

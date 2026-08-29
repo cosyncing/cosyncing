@@ -86,7 +86,7 @@ const fakeCtx: any = {
 };
 
 try {
-  const ext = (await import('../agent-extensions/cosyncing-bridge/index.ts')).default;
+  const ext = (await import('../../../pi-engine/agent-extensions/cosyncing-bridge/index.ts')).default;
   ext(fakePi);
   await handlers.get('session_start')?.({}, fakeCtx);
 
