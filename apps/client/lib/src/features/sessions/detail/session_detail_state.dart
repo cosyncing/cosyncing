@@ -2161,14 +2161,15 @@ _stitchConversationBoundary(
   final merged = ConversationTurn(
     index: left.index,
     turnKey: left.turnKey,
+    openReason: left.openReason,
     userMessage: left.userMessage,
+    continuationNotice: left.continuationNotice,
     content: content,
     modelText: mergedModelText,
     distinctToolCallCount:
         left.distinctToolCallCount +
         right.distinctToolCallCount -
         (stitchedTool == null ? 0 : 1),
-    isPartial: left.isPartial,
     runSummary: right.runSummary ?? left.runSummary,
   );
   return (

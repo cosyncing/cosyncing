@@ -25,6 +25,225 @@ void main() {
       expect(turns.every((turn) => !turn.isPartial), isTrue);
     });
 
+    test('a continuation notice opens a non-partial append-only turn', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _user('u1', 'Start workers'),
+          _model('a1', 'Workers started'),
+          _runSummary(
+            status: 'done',
+            turnId: 'prompt-turn',
+            userMessageKey: 'u1',
+            assistantMessageKey: 'a1',
+            totalRuntimeMs: 100,
+          ),
+          _msg('notice', {
+            'message': 'Worker finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-turn',
+            },
+          }),
+          _model('a2', 'Continuation answer'),
+          _runSummary(
+            status: 'done',
+            turnId: 'continuation-turn',
+            assistantMessageKey: 'a2',
+            totalRuntimeMs: 200,
+          ),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(turns, hasLength(2));
+      expect(turns[0].runSummary?.totalRuntimeMs, 100);
+      expect(turns[1].openReason, ConversationTurnOpenReason.continuation);
+      expect(turns[1].isPartial, isFalse);
+      expect(turns[1].userMessage, isNull);
+      expect(
+        turns[1].continuationNotice?.transcriptContinuationTurnId,
+        'continuation-turn',
+      );
+      expect(turns[1].turnKey, 'turn:continuation:continuation-turn');
+      expect(turns[1].modelText, 'Continuation answer');
+      expect(turns[1].runSummary?.totalRuntimeMs, 200);
+      expect(
+        turns[1].content.whereType<MessageTranscriptDisplayEntry>().map(
+          (entry) => entry.message.type,
+        ),
+        [AgentMessageType.notice, AgentMessageType.modelOutput],
+      );
+    });
+
+    test(
+      'consecutive output-free notifications share one continuation boundary',
+      () {
+        final turns = buildConversationTurns(
+          messages: [
+            _msg('notice', {
+              'message': 'Worker one finished',
+              'semantic': {
+                'kind': 'continuation',
+                'reason': 'task-notification',
+                'turnId': 'continuation-one',
+              },
+            }),
+            _msg('notice', {
+              'message': 'Worker two finished',
+              'semantic': {
+                'kind': 'continuation',
+                'reason': 'task-notification',
+                'turnId': 'continuation-two',
+              },
+            }),
+            _model('a1', 'Combined continuation answer'),
+            _runSummary(
+              status: 'done',
+              turnId: 'continuation-one',
+              assistantMessageKey: 'a1',
+              totalRuntimeMs: 200,
+            ),
+          ],
+          mode: ToolDisplayMode.responsive,
+        );
+
+        expect(turns, hasLength(1));
+        expect(
+          turns.single.openReason,
+          ConversationTurnOpenReason.continuation,
+        );
+        expect(turns.single.turnKey, 'turn:continuation:continuation-one');
+        expect(turns.single.modelText, 'Combined continuation answer');
+        expect(turns.single.runSummary?.totalRuntimeMs, 200);
+        expect(
+          turns.single.content
+              .whereType<MessageTranscriptDisplayEntry>()
+              .where((entry) => entry.message.type == AgentMessageType.notice)
+              .map((entry) => entry.message.raw['message']),
+          ['Worker one finished', 'Worker two finished'],
+        );
+      },
+    );
+
+    test('a notification after continuation output opens a new boundary', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _msg('notice', {
+            'message': 'Worker one finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-one',
+            },
+          }),
+          _model('a1', 'First continuation output'),
+          _msg('notice', {
+            'message': 'Worker two finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-two',
+            },
+          }),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(turns, hasLength(2));
+      expect(turns[0].turnKey, 'turn:continuation:continuation-one');
+      expect(turns[1].turnKey, 'turn:continuation:continuation-two');
+    });
+
+    test('an error fences notification coalescing', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _msg('notice', {
+            'message': 'Worker one finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-one',
+            },
+          }),
+          _msg('error', {'message': 'Continuation failed'}),
+          _runSummary(
+            status: 'error',
+            turnId: 'continuation-one',
+            totalRuntimeMs: 10,
+          ),
+          _msg('notice', {
+            'message': 'Worker two finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-two',
+            },
+          }),
+          _model('a2', 'Recovered continuation'),
+          _runSummary(
+            status: 'done',
+            turnId: 'continuation-two',
+            assistantMessageKey: 'a2',
+            totalRuntimeMs: 20,
+          ),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(turns, hasLength(2));
+      expect(turns[0].turnKey, 'turn:continuation:continuation-one');
+      expect(turns[0].runSummary?.status, ConversationRunStatus.error);
+      expect(turns[1].turnKey, 'turn:continuation:continuation-two');
+      expect(turns[1].runSummary?.status, ConversationRunStatus.done);
+    });
+
+    test('an interruption notice fences notification coalescing', () {
+      final turns = buildConversationTurns(
+        messages: [
+          _msg('notice', {
+            'message': 'Worker one finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-one',
+            },
+          }),
+          _msg('notice', {
+            'message': 'Interrupted by user.',
+            'semantic': {'kind': 'interruption', 'reason': 'user'},
+          }),
+          _runSummary(
+            status: 'cancelled',
+            turnId: 'continuation-one',
+            totalRuntimeMs: 10,
+          ),
+          _msg('notice', {
+            'message': 'Worker two finished',
+            'semantic': {
+              'kind': 'continuation',
+              'reason': 'task-notification',
+              'turnId': 'continuation-two',
+            },
+          }),
+          _model('a2', 'Second continuation'),
+          _runSummary(
+            status: 'done',
+            turnId: 'continuation-two',
+            assistantMessageKey: 'a2',
+            totalRuntimeMs: 20,
+          ),
+        ],
+        mode: ToolDisplayMode.responsive,
+      );
+
+      expect(turns, hasLength(2));
+      expect(turns[0].turnKey, 'turn:continuation:continuation-one');
+      expect(turns[0].runSummary?.status, ConversationRunStatus.cancelled);
+      expect(turns[1].turnKey, 'turn:continuation:continuation-two');
+      expect(turns[1].runSummary?.status, ConversationRunStatus.done);
+    });
+
     test('a queued prompt stays in the current turn and steals no output', () {
       final turns = buildConversationTurns(
         messages: [

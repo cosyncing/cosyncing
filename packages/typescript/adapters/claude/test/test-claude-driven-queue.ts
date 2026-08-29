@@ -494,6 +494,273 @@ async function main(): Promise<void> {
       JSON.stringify(h.msgs.filter((m: any) => m.type === 'metadata-update')));
     await h.conn.close();
   }
+
+  // ── Drive context usage comes from init model + authoritative result usage ─────────────────────
+  for (const fixture of [
+    { label: '200K', model: 'claude-opus-5', used: 175_010, max: 200_000, history: [] },
+    {
+      label: '1M',
+      model: 'claude-opus-5[1m]',
+      used: 175_010,
+      max: 1_000_000,
+      history: [
+        {
+          type: 'assistant',
+          uuid: 'old-context-row',
+          message: {
+            id: 'old-context-message',
+            role: 'assistant',
+            model: 'claude-sonnet-5',
+            content: [{ type: 'text', text: 'historical answer' }],
+            usage: { input_tokens: 20, cache_read_input_tokens: 10 },
+          },
+        },
+        { type: 'cost-state', modelUsage: { 'claude-sonnet-5': { inputTokens: 30 } } },
+      ],
+    },
+  ]) {
+    const h = newConn(true, fixture.history);
+    await h.history();
+    (h.conn as any).ingestInit({ model: fixture.model, permissionMode: 'default', slash_commands: [] });
+    await h.history(); // non-empty replay must not replace the live init model/window seed
+    await h.conn.sendPrompt({ text: `context ${fixture.label}` });
+    h.msgs.length = 0;
+    (h.conn as any).handleEvent({
+      type: 'result',
+      usage: {
+        input_tokens: 10,
+        output_tokens: 99,
+        cache_read_input_tokens: fixture.used - 10,
+        cache_creation_input_tokens: 0,
+      },
+    });
+    const contexts = h.msgs.filter(
+      (message: any) => message.type === 'metadata-update' && message.key === 'contextUsage',
+    ) as any[];
+    check(`Drive ${fixture.label}: result emits one authoritative composer context update`,
+      contexts.length === 1
+        && contexts[0].value?.used === fixture.used
+        && contexts[0].value?.max === fixture.max,
+      JSON.stringify(contexts));
+    check(`Drive ${fixture.label}: output tokens do not inflate resident context`,
+      contexts[0]?.value?.used !== fixture.used + 99,
+      JSON.stringify(contexts));
+    await h.conn.close();
+  }
+
+  {
+    const h = newConn();
+    await h.history();
+    const emitResult = async (label: string): Promise<any[]> => {
+      await h.conn.sendPrompt({ text: `context transition ${label}` });
+      h.msgs.length = 0;
+      (h.conn as any).handleEvent({
+        type: 'result',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 99,
+          cache_read_input_tokens: 175_000,
+          cache_creation_input_tokens: 0,
+        },
+      });
+      return h.msgs.filter(
+        (message: any) => message.type === 'metadata-update' && message.key === 'contextUsage',
+      ) as any[];
+    };
+
+    (h.conn as any).ingestInit({
+      model: 'claude-opus-5[1m]',
+      permissionMode: 'default',
+      slash_commands: [],
+    });
+    const extended = await emitResult('1M');
+    (h.conn as any).ingestInit({
+      model: 'claude-opus-5',
+      permissionMode: 'default',
+      slash_commands: [],
+    });
+    const standard = await emitResult('200K');
+    check('Drive context transition: a later untagged init revokes prior 1M evidence',
+      extended.length === 1
+        && JSON.stringify(extended[0].value) === JSON.stringify({ used: 175_010, max: 1_000_000 })
+        && standard.length === 1
+        && JSON.stringify(standard[0].value) === JSON.stringify({ used: 175_010, max: 200_000 }),
+      JSON.stringify({ extended, standard }));
+    await h.conn.close();
+  }
+
+  // ── every abnormal termination closes the live run exactly once ───────────────────────────────
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'stop this run' });
+    h.msgs.length = 0;
+    await h.conn.runCommand('stop');
+    (h.conn as any).finishLiveAbnormally('cancelled');
+    const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
+    check('abnormal close: Stop emits exactly one cancelled summary before Idle',
+      closed.length === 1 && closed[0].status === 'cancelled'
+        && h.msgs.findIndex((m: any) => m.type === 'run-summary') < h.msgs.findIndex((m: any) => m.type === 'status' && m.status === 'idle'),
+      JSON.stringify(h.msgs));
+    await h.conn.close();
+  }
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'child exits' });
+    const proc = (h.conn as any).proc;
+    h.msgs.length = 0;
+    (h.conn as any).handleChildExit(proc);
+    (h.conn as any).handleChildExit(proc);
+    const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
+    check('abnormal close: current child exit emits exactly one error summary before Idle',
+      closed.length === 1 && closed[0].status === 'error'
+        && h.msgs.findIndex((m: any) => m.type === 'run-summary') < h.msgs.findIndex((m: any) => m.type === 'status' && m.status === 'idle'),
+      JSON.stringify(h.msgs));
+    await h.conn.close();
+  }
+  {
+    const h = newConn();
+    await h.history();
+    await h.conn.sendPrompt({ text: 'owned live run' });
+    h.msgs.length = 0;
+    h.append(userLine('foreign-user', 'foreign writer'));
+    h.drain();
+    (h.conn as any).finishLiveAbnormally('cancelled');
+    const closed = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status !== 'running') as any[];
+    check('abnormal close: drive demotion emits exactly one cancelled summary before Idle',
+      (h.conn as any).demoted === true && closed.length === 1 && closed[0].status === 'cancelled'
+        && h.msgs.findIndex((m: any) => m.type === 'run-summary') < h.msgs.findIndex((m: any) => m.type === 'status' && m.status === 'idle'),
+      JSON.stringify(h.msgs));
+    await h.conn.close();
+  }
+
+  // ── (q) symptom 4: a background-agent wake is OUR OWN CHILD's turn, never a foreign writer ───────
+  // Real flow (docs-internal 2026-08-28 diagnosis): the spawn turn ends with end_turn, the subagent
+  // finishes minutes later, and the SAME child appends `<task-notification>` + continuation assistant
+  // rows outside any driven turn. Before this round the first such row demoted the drive.
+  const assistantLine = (uuid: string, id: string, text: string, stop: string | null, timestamp = nowIso()): any =>
+    ({ type: 'assistant', uuid, timestamp, message: { id, role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text }], stop_reason: stop } });
+  const wakeLine = (uuid: string, timestamp = nowIso()): any =>
+    ({ type: 'user', uuid, timestamp, origin: { kind: 'task-notification' }, message: { role: 'user', content: [{ type: 'text', text: '<task-notification>\n<task-id>t1</task-id>\n<summary>Agent "explore" finished</summary>\n</task-notification>' }] } });
+  {
+    const h = newConn();
+    h.append(wakeLine('wake-1'));
+    h.append(assistantLine('cont-1', 'msg_cont', 'continuing after the wake', null));
+    h.drain();
+    check('q: continuation assistant rows after a task-notification line do not demote',
+      (h.conn as any).demoted === false && (h.conn as any).tailContinuationOpenedAt !== undefined, JSON.stringify(h.msgs.filter((m: any) => m.type === 'error')));
+    h.append(assistantLine('cont-2', 'msg_cont', 'done', 'end_turn'));
+    h.drain();
+    check('q: the terminal line is exonerated too and closes the window with a grace stamp',
+      (h.conn as any).demoted === false && (h.conn as any).tailContinuationOpenedAt === undefined && Date.now() - (h.conn as any).lastTurnEndedAt < 2_000);
+    h.append(assistantLine('cont-3', 'msg_cont', 'trailing per-block twin', 'end_turn'));
+    h.drain();
+    check('q: the terminal message\'s trailing per-block line rides the grace stamp', (h.conn as any).demoted === false);
+    (h.conn as any).lastTurnEndedAt = Date.now() - 60_000; // grace long over, window closed
+    h.append(assistantLine('for-1', 'msg_foreign', 'a second writer mid-turn', null));
+    h.drain();
+    check('q: after the continuation closed, a foreign assistant row still convicts', (h.conn as any).demoted === true);
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // a stale wake (30 min bound) cannot shelter a real foreign writer
+    h.append(wakeLine('wake-stale'));
+    h.drain();
+    (h.conn as any).tailContinuationOpenedAt = Date.now() - 31 * 60_000;
+    h.append(assistantLine('for-2', 'msg_foreign2', 'foreign under a stale window', null));
+    h.drain();
+    check('q: an expired continuation window no longer exonerates', (h.conn as any).demoted === true);
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // ownership proof by stdout echo, independent of any notification
+    (h.conn as any).handleEvent({ type: 'assistant', message: { id: 'msg_ours', role: 'assistant', content: [{ type: 'text', text: 'streamed by our child' }] } });
+    h.append(assistantLine('t-1', 'msg_ours', 'streamed by our child', 'end_turn'));
+    h.drain();
+    check('q: a transcript row whose message id OUR child streamed never convicts', (h.conn as any).demoted === false);
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // the detector itself is intact
+    h.append(assistantLine('f-1', 'msg_f', 'foreign with no window and no streamed id', null));
+    h.drain();
+    check('q: a bare foreign assistant row still demotes (detector unweakened)', (h.conn as any).demoted === true);
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // the stdout wake event opens a real turn: status, tracker run, result closes it
+    await h.history(); // installs the live runtime tracker (as a real drive attach does)
+    await h.conn.sendPrompt({ text: 'seed the owned child' });
+    (h.conn as any).handleEvent({ type: 'result', usage: { input_tokens: 1, output_tokens: 1 } });
+    h.msgs.length = 0;
+    const before = h.msgs.length;
+    (h.conn as any).handleEvent(wakeLine('wake-live'));
+    const after = h.msgs.slice(before);
+    const running = after.filter((m: any) => m.type === 'run-summary' && m.status === 'running') as any[];
+    check('q: a task-notification stdout event flips running + emits status running',
+      (h.conn as any).running === true && after.some((m: any) => m.type === 'status' && m.status === 'running'), JSON.stringify(after));
+    check('q: the continuation run opens on the wake line uuid with NO association keys (append-only holds)',
+      running.length === 1 && running[0].turnId === 'wake-live' && running[0].userMessageKey === undefined && running[0].assistantMessageKey === undefined,
+      JSON.stringify(running));
+    check('q: the wake event itself never renders as a user bubble', !after.some((m: any) => m.type === 'user-message'), JSON.stringify(after));
+    (h.conn as any).handleEvent(wakeLine('wake-live-2')); // repeat wake mid-turn is a no-op
+    check('q: a second wake while the continuation runs opens nothing new',
+      h.msgs.filter((m: any) => m.type === 'run-summary' && m.status === 'running').length === 1);
+    (h.conn as any).handleEvent({ type: 'result', usage: { input_tokens: 5, output_tokens: 7 } });
+    const done = h.msgs.filter((m: any) => m.type === 'run-summary' && m.status === 'done') as any[];
+    check('q: result closes the continuation with a done summary and idle status',
+      (h.conn as any).running === false && done.length === 1 && done[0].key === running[0].key
+        && (h.msgs.filter((m: any) => m.type === 'status') as any[]).at(-1)?.status === 'idle', JSON.stringify(done));
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // output between wakes fences the first live continuation
+    await h.history();
+    await h.conn.sendPrompt({ text: 'seed the owned child' });
+    (h.conn as any).handleEvent({ type: 'result', usage: { input_tokens: 1, output_tokens: 1 } });
+    h.msgs.length = 0;
+    (h.conn as any).handleEvent(wakeLine('wake-output-1'));
+    (h.conn as any).handleEvent({
+      type: 'stream_event',
+      event: { type: 'message_start', message: { id: 'wake-output-message' } },
+    });
+    (h.conn as any).handleEvent({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'partial continuation output' },
+      },
+    });
+    (h.conn as any).handleEvent(wakeLine('wake-output-2'));
+    const summaries = h.msgs.filter((m: any) => m.type === 'run-summary') as any[];
+    const first = summaries.filter((m) => m.turnId === 'wake-output-1');
+    const second = summaries.filter((m) => m.turnId === 'wake-output-2');
+    check('q: output-bearing live continuation is cancelled before the next wake opens',
+      first.map((m) => m.status).join(',') === 'running,cancelled'
+        && second.map((m) => m.status).join(',') === 'running'
+        && summaries.findIndex((m) => m.turnId === 'wake-output-1' && m.status === 'cancelled')
+          < summaries.findIndex((m) => m.turnId === 'wake-output-2' && m.status === 'running'),
+      JSON.stringify(summaries));
+    (h.conn as any).handleEvent({ type: 'result', usage: { input_tokens: 5, output_tokens: 7 } });
+    check('q: result closes the second output-fenced continuation, not the first',
+      h.msgs.some((m: any) => m.type === 'run-summary' && m.turnId === 'wake-output-2' && m.status === 'done')
+        && !h.msgs.some((m: any) => m.type === 'run-summary' && m.turnId === 'wake-output-1' && m.status === 'done'));
+    await h.conn.close();
+  }
+  {
+    const h = newConn(); // message_start with no driven turn open = autonomous turn (fallback trigger)
+    await h.history();
+    await h.conn.sendPrompt({ text: 'seed the owned child' });
+    (h.conn as any).handleEvent({ type: 'result', usage: { input_tokens: 1, output_tokens: 1 } });
+    h.msgs.length = 0;
+    (h.conn as any).handleEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg_auto' } } });
+    check('q: message_start outside a driven turn opens an autonomous turn and records the id',
+      (h.conn as any).running === true && (h.conn as any).childStreamedMessageIds.has('msg_auto'),
+      JSON.stringify(h.msgs.filter((m: any) => m.type === 'status')));
+    await h.conn.close();
+  }
 }
 
 await main().catch((e) => check('test threw', false, String(e)));

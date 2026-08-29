@@ -21,6 +21,11 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Focused text fields no longer lose bare shortcut characters such as digits,
   brackets, or AltGr input when the matching shortcut is intentionally
   suppressed.
+- Claude sessions now keep truthful working and Drive state while background
+  agents report back, render notification-led continuations as distinct turns,
+  and close interrupted or failed live runs without leaving stale telemetry.
+- The Claude composer context meter now reports current 200K or 1M usage across
+  history refreshes and model-window changes.
 
 ## 0.5.0 — 2026-08-27
 

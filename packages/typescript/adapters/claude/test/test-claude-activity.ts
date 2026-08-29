@@ -17,7 +17,7 @@
  */
 export {};
 import { mkdirSync, writeFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildActivitySnapshot, collectParentActivity, claudeActivityDir, ClaudeActivityWatcher, mapTranscript } from '../src/index.ts';
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
@@ -218,6 +218,26 @@ check('R4: running card elapsed is wall-clock since start (not the frozen file s
   check('R4: TaskStop result marks the agent killed', extra.killedAgentIds.has('abc123def'));
   check('R4: the kill resolves the pending-background entry (notified via mapped tool_use_id)', notified.has('toolu_spawn'), JSON.stringify([...notified]));
 }
+
+// ≥2.1.25x spawns omit run_in_background (backgrounding is the harness default): the
+// async-launch ack is the classification. Without it, the ack tool_result landed in
+// `resolved` and the card read done AT SPAWN while the agent was still working.
+{
+  const resolvedIds = new Set<string>();
+  const background = new Set<string>();
+  const notified = new Set<string>();
+  const spawnMs = new Map<string, number>();
+  const feed = (ln: any) => collectParentActivity(ln, resolvedIds, background, notified, spawnMs);
+  feed({ type: 'assistant', timestamp: '2026-06-16T10:00:00.000Z', message: { content: [{ type: 'tool_use', id: 'toolu_flagless', name: 'Agent', input: { description: 'bg' } }] } });
+  feed({ type: 'user', timestamp: '2026-06-16T10:00:01.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_flagless', content: [{ type: 'text', text: 'Async agent launched successfully.\nagentId: flag1ess (internal ID)' }] }] } });
+  check('flagless spawn: the async-launch ack classifies it background', background.has('toolu_flagless'), JSON.stringify([...background]));
+  check('flagless spawn: the ack timestamp serves as the spawn time', spawnMs.get('toolu_flagless') === Date.parse('2026-06-16T10:00:01.000Z'), String(spawnMs.get('toolu_flagless')));
+  check('flagless spawn: not notified by its own ack', !notified.has('toolu_flagless'));
+  // A FOREGROUND Task's tool_result is the agent's final report, not the async ack.
+  feed({ type: 'assistant', timestamp: '2026-06-16T10:01:00.000Z', message: { content: [{ type: 'tool_use', id: 'toolu_fg', name: 'Task', input: { description: 'fg' } }] } });
+  feed({ type: 'user', timestamp: '2026-06-16T10:02:00.000Z', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_fg', content: [{ type: 'text', text: 'Report: everything checked out.' }] }] } });
+  check('foreground result text never classifies background', !background.has('toolu_fg'));
+}
 const C = byKey.get('agent:toolu_C');
 check('W4: foreground subagent ending with final assistant text is DONE immediately', C?.status === 'done', C?.status);
 check('W4: subagent tokens use max output_tokens per message.id (287 + 86 = 373)', C?.tokens?.output === 373, String(C?.tokens?.output));
@@ -292,7 +312,13 @@ check('every frame carries a non-empty src dedupe key', fresh.every((f) => typeo
 rmSync(ROOT, { recursive: true, force: true });
 
 // ── smoke test against a REAL session dir if present (read-only, no cost) ──────────
-const REAL = '/home/tester/.claude/projects/-home-tester-Projects-coding-agent-cosyncing/031081b6-0a70-4d71-952c-9d53fd608af0';
+const REAL = join(
+  homedir(),
+  '.claude',
+  'projects',
+  '-home-tester-Projects-coding-agent-cosyncing',
+  '031081b6-0a70-4d71-952c-9d53fd608af0',
+);
 if (existsSync(REAL)) {
   let frames;
   try {

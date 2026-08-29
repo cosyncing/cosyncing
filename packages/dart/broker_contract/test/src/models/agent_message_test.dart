@@ -265,12 +265,33 @@ void main() {
       );
       expect(interruption.transcriptInterruptionTurnId, 'turn-7');
 
+      final continuation = AgentMessage.fromJson({
+        'type': 'notice',
+        'message': 'Worker finished',
+        'semantic': {
+          'kind': 'continuation',
+          'reason': 'task-notification',
+          'turnId': 'turn-8',
+        },
+      });
+      expect(
+        continuation.transcriptNoticeSemanticKind,
+        TranscriptNoticeSemanticKind.continuation,
+      );
+      expect(
+        continuation.transcriptContinuationReason,
+        TranscriptContinuationReason.taskNotification,
+      );
+      expect(continuation.transcriptContinuationTurnId, 'turn-8');
+      expect(continuation.transcriptInterruptionReason, isNull);
+
       final generic = AgentMessage.fromJson({
         'type': 'notice',
         'message': 'Conversation interrupted.',
       });
       expect(generic.transcriptNoticeSemanticKind, isNull);
       expect(generic.transcriptInterruptionReason, isNull);
+      expect(generic.transcriptContinuationReason, isNull);
 
       final compaction = AgentMessage.fromJson({
         'type': 'history-reset',

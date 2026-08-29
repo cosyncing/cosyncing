@@ -187,17 +187,30 @@ final class ConversationTurnRunSummary {
 }
 
 /// One projected conversation turn.
+enum ConversationTurnOpenReason {
+  /// A delivered user message opened the turn.
+  userMessage,
+
+  /// A structured system notice opened a continuation without a user prompt.
+  continuation,
+
+  /// The opener fell outside the retained transcript window.
+  partial,
+}
+
+/// One projected conversation turn.
 @immutable
 final class ConversationTurn {
   /// Creates a projected turn.
   const ConversationTurn({
     required this.index,
     required this.turnKey,
+    required this.openReason,
     required this.userMessage,
+    required this.continuationNotice,
     required this.content,
     required this.modelText,
     required this.distinctToolCallCount,
-    required this.isPartial,
     this.runSummary,
     this.userAttachments = const [],
   });
@@ -212,11 +225,23 @@ final class ConversationTurn {
   /// falls back to its first content row's identity.
   final String turnKey;
 
+  /// The structural reason this display turn opened.
+  final ConversationTurnOpenReason openReason;
+
   /// The delivered user message that opened this turn.
   ///
   /// `null` for a truncated leading turn whose opening prompt fell outside the
   /// retained history window ([isPartial] is then true).
   final AgentMessage? userMessage;
+
+  /// The structured notice that opened a system continuation turn.
+  ///
+  /// It remains in [content] so the ordinary notice renderer displays the
+  /// boundary; this field carries segmentation and stable turn identity only.
+  final AgentMessage? continuationNotice;
+
+  /// Whether this is a truncated leading turn whose opener is unavailable.
+  bool get isPartial => openReason == ConversationTurnOpenReason.partial;
 
   /// Ordered display rows for the turn's model output, thinking, tools, agent
   /// activity, requests, errors, notices, artifacts, and queued user prompts.
@@ -240,10 +265,6 @@ final class ConversationTurn {
   /// Counted by stable `callId` with a message-key fallback; a result, a
   /// streamed update, and a replay duplicate are never counted as another call.
   final int distinctToolCallCount;
-
-  /// Whether this turn's opening prompt is missing because history was
-  /// truncated. Such a turn is labelled partial in telemetry.
-  final bool isPartial;
 
   /// File artifacts the user SENT WITH [userMessage], in canonical order.
   ///
@@ -281,8 +302,14 @@ List<ConversationTurn> buildConversationTurns({
   final runSummaryMessages = <AgentMessage>[];
   _TurnSegment? current;
 
-  _TurnSegment openTurn(AgentMessage? opener) {
-    final segment = _TurnSegment(opener);
+  _TurnSegment openTurn({
+    AgentMessage? userMessage,
+    AgentMessage? continuationNotice,
+  }) {
+    final segment = _TurnSegment(
+      userMessage: userMessage,
+      continuationNotice: continuationNotice,
+    );
     segments.add(segment);
     return segment;
   }
@@ -297,9 +324,20 @@ List<ConversationTurn> buildConversationTurns({
         runSummaryMessages.add(message);
         continue;
       case AgentMessageType.userMessage when !message.userMessageQueued:
-        current = openTurn(message);
+        current = openTurn(userMessage: message);
+      case AgentMessageType.notice
+          when message.transcriptNoticeSemanticKind ==
+              TranscriptNoticeSemanticKind.continuation:
+        // Claude coalesces consecutive task notifications until the
+        // continuation produces assistant output. Keep every notification
+        // visible, but open only the first display boundary so the client and
+        // runtime retain the same turn cardinality.
+        if (current?.isOutputFreeContinuation != true) {
+          current = openTurn(continuationNotice: message);
+        }
+        current!.content.add(message);
       case _:
-        current ??= openTurn(null);
+        current ??= openTurn();
         current.content.add(message);
     }
   }
@@ -310,9 +348,11 @@ List<ConversationTurn> buildConversationTurns({
   final turnByTurnId = <String, int>{};
   for (var index = 0; index < segments.length; index++) {
     final segment = segments[index];
-    final userKey = segment.opener?.userMessageKey;
+    final userKey = segment.userMessage?.userMessageKey;
     if (userKey != null) turnByUserKey[userKey] = index;
-    final turnId = _stringField(segment.opener?.raw['turnId']);
+    final turnId =
+        _stringField(segment.userMessage?.raw['turnId']) ??
+        segment.continuationNotice?.transcriptContinuationTurnId;
     if (turnId != null) turnByTurnId[turnId] = index;
     for (final message in segment.content) {
       if (message.type != AgentMessageType.modelOutput) continue;
@@ -361,13 +401,16 @@ List<ConversationTurn> buildConversationTurns({
       ConversationTurn(
         index: index,
         turnKey: _turnKey(segments[index], index),
-        userMessage: segments[index].opener,
+        openReason: segments[index].userMessage != null
+            ? ConversationTurnOpenReason.userMessage
+            : segments[index].continuationNotice != null
+            ? ConversationTurnOpenReason.continuation
+            : ConversationTurnOpenReason.partial,
+        userMessage: segments[index].userMessage,
+        continuationNotice: segments[index].continuationNotice,
         content: _buildTurnContent(segments[index].content, mode),
         modelText: _modelTextAggregate(segments[index].content),
         distinctToolCallCount: _distinctToolCallCount(segments[index].content),
-        isPartial:
-            segments[index].opener == null &&
-            segments[index].content.isNotEmpty,
         runSummary: summaryByTurn[index],
         userAttachments: List<AgentMessage>.unmodifiable(
           attachmentsByTurn[index] ?? const <AgentMessage>[],
@@ -567,10 +610,24 @@ List<AgentMessage> _reorderDeliveredPrompts(List<AgentMessage> messages) {
 
 /// Mutable per-turn accumulator used only while projecting.
 class _TurnSegment {
-  _TurnSegment(this.opener);
+  _TurnSegment({this.userMessage, this.continuationNotice});
 
-  final AgentMessage? opener;
+  final AgentMessage? userMessage;
+  final AgentMessage? continuationNotice;
   final List<AgentMessage> content = [];
+
+  bool get isOutputFreeContinuation =>
+      continuationNotice != null &&
+      !content.any(
+        (message) =>
+            message.type == AgentMessageType.modelOutput ||
+            message.type == AgentMessageType.thinking ||
+            message.type == AgentMessageType.tokenCount ||
+            message.type == AgentMessageType.error ||
+            (message.type == AgentMessageType.notice &&
+                message.transcriptNoticeSemanticKind ==
+                    TranscriptNoticeSemanticKind.interruption),
+      );
 }
 
 List<SessionTranscriptDisplayEntry> _buildTurnContent(
@@ -663,7 +720,7 @@ int _distinctToolCallCount(List<AgentMessage> content) {
 }
 
 String _turnKey(_TurnSegment segment, int index) {
-  final opener = segment.opener;
+  final opener = segment.userMessage;
   if (opener != null) {
     // The send correlation token survives the optimistic → delivered swap of
     // an app-sent opener, so the turn (and its footer) keeps one identity.
@@ -673,6 +730,15 @@ String _turnKey(_TurnSegment segment, int index) {
     if (key != null && key.isNotEmpty) return 'turn:user:$key';
     final seq = opener.seq;
     if (seq != null) return 'turn:user-seq:$seq';
+  }
+  final continuation = segment.continuationNotice;
+  if (continuation != null) {
+    final turnId = continuation.transcriptContinuationTurnId;
+    if (turnId != null) return 'turn:continuation:$turnId';
+    final id = continuation.id;
+    if (id != null && id.isNotEmpty) return 'turn:continuation-id:$id';
+    final seq = continuation.seq;
+    if (seq != null) return 'turn:continuation-seq:$seq';
   }
   if (segment.content.isNotEmpty) {
     final first = segment.content.first;

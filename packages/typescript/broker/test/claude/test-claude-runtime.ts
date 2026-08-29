@@ -13,7 +13,7 @@ import { mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync, writeSync }
 import { homedir } from 'node:os';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { claudeSessionStatus, claudeTranscriptTurnAuthorityResult, mapTranscript, ClaudeRuntimeTracker, ClaudeObserveConnection, selectClaudeLiveStatusAfterProbe } from '../../../adapters/claude/src/index.ts';
+import { claudeSessionStatus, claudeTaskNotificationLine, claudeTranscriptTurnAuthorityResult, mapTranscript, ClaudeRuntimeTracker, ClaudeObserveConnection, selectClaudeLiveStatusAfterProbe } from '../../../adapters/claude/src/index.ts';
 import { AttentionService } from '../../src/attention/attention-service.ts';
 import type { AgentMessage } from '../../../adapter-api/src/index.ts';
 
@@ -570,6 +570,154 @@ const lines = [
   }
 }
 
+// ── per-block terminal lines amend the summary; task notifications open continuations ──
+// 2.1.250 writes one JSONL line per content block and EVERY line of the terminal message
+// repeats stop_reason — the close fires at the first (thinking) line and later same-id
+// lines amend by key. Task notifications (wrapper user lines, origin-stamped) open
+// CONTINUATION runs whose notice boundary and summary share one turn id.
+{
+  const A0 = '2026-08-28T10:00:00.000Z';
+  const A1 = '2026-08-28T10:00:10.000Z'; // thinking block line, end_turn → closes
+  const A2 = '2026-08-28T10:00:12.000Z'; // text block line, SAME message.id, end_turn → amends
+  const N0 = '2026-08-28T10:05:00.000Z'; // task notification → continuation opens
+  const N2 = '2026-08-28T10:06:00.000Z'; // continuation end_turn
+  const prompt = { type: 'user', uuid: 'cu1', timestamp: A0, message: { role: 'user', content: 'kick off' } };
+  const thinkingEnd = { type: 'assistant', uuid: 'ca1', timestamp: A1, message: { id: 'cm1', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: 'weighing options' }] } };
+  const textEnd = { type: 'assistant', uuid: 'ca2', timestamp: A2, message: { id: 'cm1', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'final text' }] } };
+  const notification = { type: 'user', uuid: 'cn1', timestamp: N0, origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_cont</tool-use-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>' } };
+  const notification2 = { type: 'user', uuid: 'cn2', timestamp: '2026-08-28T10:05:01.000Z', origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_cont2</tool-use-id>\n<status>completed</status>\n</task-notification>' } };
+  const contText = { type: 'assistant', uuid: 'cb1', timestamp: '2026-08-28T10:05:30.000Z', message: { id: 'cm2', role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'text', text: 'continuing' }, { type: 'tool_use', id: 'cont-tool', name: 'Bash', input: { command: 'true' } }] } };
+  const contEnd = { type: 'assistant', uuid: 'cb2', timestamp: N2, message: { id: 'cm3', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'wrapped up' }] } };
+  const summariesFor = (out: AgentMessage[], key: string) => out.filter((m: any) => m.type === 'run-summary' && m.key === key) as any[];
+  const lastTotals = (out: AgentMessage[]) => (out.filter((m: any) => m.type === 'metadata-update' && m.key === 'runtimeTotals').at(-1) as any)?.value;
+
+  // thinking+text replay: the amend supplies the TEXT anchor and the later completedAt
+  {
+    const out = mapTranscript([prompt, thinkingEnd, textEnd], new ClaudeRuntimeTracker('s1', 't'));
+    const frames = summariesFor(out, 's1:run:cu1');
+    const finalDone = frames.at(-1);
+    const textKey = (out.find((m: any) => m.type === 'model-output' && String(m.text).includes('final text')) as any)?.key;
+    check('thinking+text: close then amend, later frame wins by key', frames.filter((f) => f.status === 'done').length === 2 && finalDone.status === 'done' && finalDone.completedAt === ms(A2));
+    check('thinking+text: amended anchor is the TEXT row the client indexes', !!textKey && finalDone.assistantMessageKey === textKey);
+    check('thinking+text: totals carry the amended duration once', lastTotals(out).turnCount === 1 && lastTotals(out).totalRuntimeMs === ms(A2) - ms(A0));
+  }
+  // live-tail arrival: the amend line lands in a LATER feed of the same tracker
+  {
+    const tracker = new ClaudeRuntimeTracker('s2', 't');
+    mapTranscript([prompt, thinkingEnd], tracker);
+    const tail = mapTranscript([textEnd], tracker);
+    const amended = summariesFor(tail, 's2:run:cu1').at(-1);
+    check('live tail: same-id line amends after the close already emitted', !!amended && amended.status === 'done' && amended.completedAt === ms(A2));
+    check('live tail: totals corrected to the amended duration', lastTotals(tail).totalRuntimeMs === ms(A2) - ms(A0) && lastTotals(tail).turnCount === 1);
+  }
+  // thinking-only replay EOF: the close stands, no amend ever arrives
+  {
+    const out = mapTranscript([prompt, thinkingEnd], new ClaudeRuntimeTracker('s3', 't'));
+    const frames = summariesFor(out, 's3:run:cu1');
+    const thinkingKey = (out.find((m: any) => m.type === 'thinking') as any)?.key;
+    check('thinking-only EOF: one done frame anchored on the thinking row', frames.filter((f) => f.status === 'done').length === 1 && frames.at(-1).completedAt === ms(A1) && frames.at(-1).assistantMessageKey === thinkingKey);
+  }
+  // a different conversation line closes the amendment window
+  {
+    const stray = { type: 'assistant', uuid: 'cx1', timestamp: '2026-08-28T10:00:11.000Z', message: { id: 'cmX', role: 'assistant', content: [{ type: 'text', text: 'unrelated' }] } };
+    const out = mapTranscript([prompt, thinkingEnd, stray, textEnd], new ClaudeRuntimeTracker('s4', 't'));
+    const frames = summariesFor(out, 's4:run:cu1');
+    check('amend window ends at the first foreign conversation line', frames.filter((f) => f.status === 'done').length === 1 && lastTotals(out).totalRuntimeMs === ms(A1) - ms(A0));
+  }
+  // continuation lifecycle: notification opens a system turn, terminal closes it
+  {
+    const out = mapTranscript([prompt, thinkingEnd, textEnd, notification, contText, contEnd], new ClaudeRuntimeTracker('s5', 't'));
+    const cont = summariesFor(out, 's5:run:cn1');
+    const running = cont.find((f) => f.status === 'running');
+    const done = cont.at(-1);
+    const boundary = out.find((m: any) => m.type === 'notice' && m.semantic?.kind === 'continuation') as any;
+    check('continuation: the notification opens a running run and boundary notice', !!running && running.turnId === 'cn1' && running.userMessageKey === undefined && boundary?.semantic?.turnId === 'cn1' && boundary?.message === 'Agent finished');
+    check('continuation: closes done with an assistant anchor in its own turn', done.status === 'done' && done.userMessageKey === undefined && typeof done.assistantMessageKey === 'string' && done.totalRuntimeMs === ms(N2) - ms(N0));
+    check('continuation: totals count both the prompt turn and the continuation', lastTotals(out).turnCount === 2 && lastTotals(out).totalRuntimeMs === ms(A2) - ms(A0) + (ms(N2) - ms(N0)));
+  }
+  // consecutive notifications with no output between them coalesce into ONE wake
+  {
+    const out = mapTranscript([prompt, thinkingEnd, textEnd, notification, notification2], new ClaudeRuntimeTracker('s6', 't'));
+    const all = out.filter((m: any) => m.type === 'run-summary') as any[];
+    check('coalesce: repeat notification neither cancels nor re-opens', !all.some((f) => f.status === 'cancelled') && all.filter((f) => f.status === 'running' && f.turnId?.startsWith('cn')).length === 1);
+  }
+  // a wake landing on an unterminated continuation that produced output fences it
+  {
+    const out = mapTranscript([prompt, thinkingEnd, textEnd, notification, contText, notification2], new ClaudeRuntimeTracker('s7', 't'));
+    const first = summariesFor(out, 's7:run:cn1');
+    const second = summariesFor(out, 's7:run:cn2');
+    check('fence: an output-bearing unterminated continuation is cancelled by the next wake', first.at(-1).status === 'cancelled' && second.some((f) => f.status === 'running'));
+  }
+  // the predicate accepts both the origin stamp and the bare text prefix, and nothing else
+  {
+    const textOnly = { type: 'user', uuid: 'tn1', timestamp: N0, message: { role: 'user', content: '<task-notification>\n<status>completed</status>\n</task-notification>' } };
+    const reminder = { type: 'user', uuid: 'sr1', timestamp: N0, message: { role: 'user', content: '<system-reminder>ambient context</system-reminder>' } };
+    check('notification predicate: origin stamp, text fallback, wrapper rejection', claudeTaskNotificationLine(notification) && claudeTaskNotificationLine(textOnly) && !claudeTaskNotificationLine(reminder) && !claudeTaskNotificationLine(prompt));
+  }
+}
+
+// ── status projection: ack-classified background spawns and continuation pending ──
+// Real ≥2.1.25x spawns omit run_in_background; the async-launch ack is the classification.
+// The notification then consumes the pending spawn, so the continuation must hold Working
+// on its own bounded evidence — including for sdk-cli live rows that omit `status`.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'claude-continuation-'));
+  const file = join(dir, 'bg-lifecycle.jsonl');
+  try {
+    const now = Date.now();
+    const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
+    const spawnLines = [
+      { type: 'user', uuid: 'bgu', timestamp: iso(-120_000), message: { role: 'user', content: 'spawn a worker' } },
+      { type: 'assistant', uuid: 'bga', timestamp: iso(-115_000), message: { id: 'bgm1', role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_flagless', name: 'Agent', input: { description: 'worker' } }] } },
+      { type: 'user', uuid: 'bgr', timestamp: iso(-114_000), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_flagless', content: 'Async agent launched successfully. agentId: agt1 (internal ID).' }] } },
+      { type: 'assistant', uuid: 'bgd', timestamp: iso(-113_000), message: { id: 'bgm2', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'launched; will report back' }] } },
+    ];
+    writeFileSync(file, spawnLines.map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('flagless spawn + ack + end_turn holds Working with NO live row', await claudeSessionStatus(file, undefined, now) === 'working');
+    check('flagless spawn + ack + end_turn holds Working over an idle live row', await claudeSessionStatus(file, 'idle', now) === 'working');
+    check('terminal needs-input still yields to the terminal verdict', await claudeSessionStatus(file, 'needs-input', now) === 'idle');
+
+    const notificationLine = { type: 'user', uuid: 'bgn', timestamp: iso(-60_000), origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>' } };
+    appendFileSync(file, JSON.stringify(notificationLine) + '\n');
+    check('notification consumed the spawn: continuation holds Working with NO live row', await claudeSessionStatus(file, undefined, now) === 'working');
+    check('continuation holds Working over an idle live row', await claudeSessionStatus(file, 'idle', now) === 'working');
+
+    const longThinking = Array.from({ length: 620 }, (_, index) => ({
+      type: 'assistant',
+      uuid: `bgt-${index}`,
+      timestamp: iso(-59_000 + index),
+      message: {
+        id: `bg-thinking-${index}`,
+        role: 'assistant',
+        stop_reason: null,
+        content: [{ type: 'thinking', thinking: `reasoning-${index}-${'x'.repeat(1024)}` }],
+      },
+    }));
+    appendFileSync(file, longThinking.map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('an incrementally scanned continuation stays Working after its notification is >512 KiB behind EOF',
+      statSync(file).size > 512 * 1024 && await claudeSessionStatus(file, 'idle', now) === 'working');
+
+    const coldLong = join(dir, 'cold-long-continuation.jsonl');
+    writeFileSync(coldLong, [...spawnLines, notificationLine, ...longThinking].map((line) => JSON.stringify(line)).join('\n') + '\n');
+    check('a cold authority scan recovers a continuation opener beyond the old tail window',
+      statSync(coldLong).size > 512 * 1024 && await claudeSessionStatus(coldLong, undefined, now) === 'working');
+
+    appendFileSync(file, JSON.stringify({ type: 'assistant', uuid: 'bge', timestamp: iso(-5_000), message: { id: 'bgm3', role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'continuation report' }] } }) + '\n');
+    check('a terminal line after the notification resolves the continuation', await claudeSessionStatus(file, 'idle', now) === 'idle');
+
+    // Abandonment bounds: the same shapes far in the past pin neither fact forever.
+    const staleSpawn = join(dir, 'stale-spawn.jsonl');
+    const staleIso = (offsetMs: number) => new Date(now - 40 * 60_000 + offsetMs).toISOString();
+    writeFileSync(staleSpawn, spawnLines.map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
+    check('a 40-minute-old unnotified spawn has expired', await claudeSessionStatus(staleSpawn, undefined, now) === 'idle');
+    const staleCont = join(dir, 'stale-continuation.jsonl');
+    writeFileSync(staleCont, [...spawnLines, { type: 'user', uuid: 'bgn2', timestamp: staleIso(1000), origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<tool-use-id>toolu_flagless</tool-use-id>\n<status>completed</status>\n</task-notification>' } }].map((line) => JSON.stringify({ ...line, timestamp: staleIso(0) })).join('\n') + '\n');
+    check('a 40-minute-old unterminated continuation has expired', await claudeSessionStatus(staleCont, undefined, now) === 'idle');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ── real-data smoke (best-effort; SKIPS when no local transcript is present, e.g. CI) ──
 {
   const projects = join(homedir(), '.claude', 'projects');
@@ -589,12 +737,19 @@ const lines = [
           const done = runs.filter((r) => r.status === 'done' && typeof r.totalRuntimeMs === 'number');
           if (done.length >= 1 && userMsgs.length >= 1) {
             const totals = out.filter((m: any) => m.type === 'metadata-update' && m.key === 'runtimeTotals') as any[];
+            // Summaries are idempotent BY KEY (an amended terminal message re-emits its
+            // run's summary), so run counting must be key-distinct, and totals must equal
+            // the sum of each counted run's LAST reading — that pins the amend delta math.
+            const lastByKey = new Map<string, any>();
+            for (const r of runs) if (r.status !== 'running' && typeof r.totalRuntimeMs === 'number') lastByKey.set(r.key, r);
+            const countedSum = [...lastByKey.values()].reduce((sum, r) => sum + r.totalRuntimeMs, 0);
             check(`real-data smoke (${slug.name}/${f.slice(0, 8)}): durations ≥ 0, totals ≥ turns, sentAt sane`,
               done.every((r) => r.totalRuntimeMs >= 0) &&
               runs.every((r) => r.startedAt === undefined || r.completedAt === undefined || r.completedAt >= r.startedAt) &&
               userMsgs.every((u) => u.sentAt === undefined || u.sentAt > 0) &&
-              totals.length >= 1 && totals.at(-1).value.turnCount === done.length,
-              `${done.length} completed turns, ${userMsgs.length} prompts`);
+              totals.length >= 1 && totals.at(-1).value.turnCount === lastByKey.size &&
+              totals.at(-1).value.totalRuntimeMs === countedSum,
+              `${lastByKey.size} counted runs (${done.length} done frames), ${userMsgs.length} prompts`);
             smoked = true;
             break outer;
           }

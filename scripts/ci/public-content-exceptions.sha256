@@ -1,5 +1,4 @@
 # Exact reviewed files containing synthetic paths/credentials or policy terms.
-a1ccfb43a52a05c68250ea7958f0f37e6c2c446f6c4fedb4e1da5c7e07cb69b3  packages/typescript/adapters/claude/test/test-claude-activity.ts
 cf0f80af4ad10e57cee937d52087a8004fd4f0a3147794a4e3223e89004cbb76  packages/typescript/adapters/claude/test/test-claude-control.ts
 434a821515795f290683c4b00660119f3e161d2944445a0b1a01b45784dfe993  packages/typescript/broker/test/security-r2/test-r2-export.ts
 328f8ddbe80fd5ccce9cdf37e89d64f24ef8cf80321c7a2ab84032fb48f755ee  packages/typescript/broker/test/security-r2/test-r2-redactor.ts
