@@ -849,8 +849,9 @@ try {
   check('full doctor preserves the filesystem byte-for-byte and invokes read-only probes only',
     before === after && calls.every((call) => call.startsWith('run:') || call.startsWith('get:')),
     calls.join(','));
-  check('stable doctor JSON contains no broker or Pi credential material',
+  check('stable doctor JSON contains no broker, Pi, or omp credential material',
     !reportJson.includes(credentials.brokerToken) && !reportJson.includes(credentials.piIntegration.credential) &&
+      !reportJson.includes(credentials.ompIntegration.credential) &&
       !reportJson.includes('fixture.tailnet.ts.net'));
 
   const serviceBlindContext: SetupDiagnosisContext = {

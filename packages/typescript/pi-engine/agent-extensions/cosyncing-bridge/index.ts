@@ -11,7 +11,13 @@
  * /api/tool/send_file endpoint). On shutdown it POSTs /pi/bridge/bye.
  *
  * Dormant when COSYNCING_NO_BRIDGE is set — that marks a pi the broker itself spawned (resume-under-
- * broker), which must not bridge back to the broker (a loop). See packages/typescript/adapters/pi/src/bridge.ts.
+ * broker), which must not bridge back to the broker (a loop). See packages/typescript/pi-engine/src/bridge.ts.
+ *
+ * Dialect note: the pi route family, integration credential (env overrides, secrets record name and
+ * `kind`), and event-source labels below are rewritten per dialect when a sibling tool's asset bytes
+ * are stamped — a build-time constant per install, see bridge-asset.ts
+ * piBridgeEmbeddedSourceForDialect. A sibling tool's installed extension calls its own broker routes
+ * with its own integration record, never pi's.
  */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { existsSync, readFileSync } from 'node:fs';
@@ -86,7 +92,7 @@ export default function (pi: ExtensionAPI) {
   // Tool-call args by callId — Pi's tool_execution_end carries no args, but the broker needs them to
   // recover the edited file's path for the canonical tool-result `path` chip. Cached at start, read
   // (and cleared) at end. See enrichPiToolResult in
-  // packages/typescript/adapters/pi/src/implementation.ts.
+  // packages/typescript/pi-engine/src/implementation.ts.
   const toolArgs = new Map<string, any>();
   const pendingPermissions = new Map<string, { resolve: (ok: boolean) => void; cleanup: () => void; scope: string }>();
   const pendingQuestions = new Map<string, { resolve: (answers: string[][] | null) => void; cleanup: () => void }>();
@@ -512,14 +518,21 @@ export default function (pi: ExtensionAPI) {
   };
   pi.on('resources_discover', (_e: any, ctx: any) => relayCommands(skillCommands(ctx)));
   pi.on('before_agent_start', (event: any) => relayCommands(commandsFromOptions((event as any)?.systemPromptOptions)));
-  pi.on('model_select', (_event: any, ctx: any) => {
-    lastCtx = ctx;
-    relayModelState(ctx);
-  });
-  pi.on('thinking_level_select', (_event: any, ctx: any) => {
-    lastCtx = ctx;
-    relayModelState(ctx);
-  });
+  // omp (oh-my-pi) does not emit model_select/thinking_level_select. Both runtimes' `on()` is an
+  // unvalidated Map insert that never throws, so a try/catch is the only possible guard: subscribing
+  // to an absent event is a silent no-op there, and pi behavior is byte-for-byte what it was.
+  try {
+    pi.on('model_select', (_event: any, ctx: any) => {
+      lastCtx = ctx;
+      relayModelState(ctx);
+    });
+    pi.on('thinking_level_select', (_event: any, ctx: any) => {
+      lastCtx = ctx;
+      relayModelState(ctx);
+    });
+  } catch {
+    /* dialect without these events — the model state relay rides get_state/model_change instead */
+  }
 
   // Remote approval gate. Default is intentionally narrow (`dangerous` bash commands) so installing
   // the bridge does not make normal terminal editing depend on a phone. Broaden with:
@@ -544,7 +557,7 @@ export default function (pi: ExtensionAPI) {
     // Relay Pi's shutdown reason ('quit'|'reload'|'new'|'resume'|'fork') so the broker can tell a
     // reload (the SAME session re-hellos in a moment → keep the attached phone) apart from a genuine
     // quit / session replacement (tear down + send the phone a clean `ended` frame). See
-    // packages/typescript/adapters/pi/src/bridge.ts (PiBridgeRegistry.bye) and SessionShutdownEvent in Pi's types.
+    // packages/typescript/pi-engine/src/bridge.ts (PiBridgeRegistry.bye) and SessionShutdownEvent in Pi's types.
     if (id) await post('/pi/bridge/bye', { id, reason: event?.reason });
     id = undefined;
   });

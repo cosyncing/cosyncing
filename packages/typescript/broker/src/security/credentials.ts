@@ -12,10 +12,20 @@ import {
 export const BROKER_TOKEN_FILENAME = 'broker-token';
 export const PI_INTEGRATION_FILENAME = 'pi-integration.json';
 export const PI_INTEGRATION_SCHEMA_VERSION = 1 as const;
+export const OMP_INTEGRATION_FILENAME = 'omp-integration.json';
+export const OMP_INTEGRATION_SCHEMA_VERSION = 1 as const;
 
 export interface PiIntegrationCredential {
   schemaVersion: typeof PI_INTEGRATION_SCHEMA_VERSION;
   kind: 'pi-bridge';
+  internalUrl: string;
+  credential: string;
+  [key: string]: unknown;
+}
+
+export interface OmpIntegrationCredential {
+  schemaVersion: typeof OMP_INTEGRATION_SCHEMA_VERSION;
+  kind: 'omp-bridge';
   internalUrl: string;
   credential: string;
   [key: string]: unknown;
@@ -33,6 +43,9 @@ export interface RuntimeCredentials {
   piIntegrationToken: string;
   piIntegrationSource: 'file' | 'environment' | 'none';
   piInternalUrl?: string;
+  ompIntegrationToken: string;
+  ompIntegrationSource: 'file' | 'environment' | 'none';
+  ompInternalUrl?: string;
   warnings: string[];
 }
 
@@ -55,6 +68,10 @@ export function piIntegrationPath(home = setupStateHome()): string {
   return join(secretsDirectory(home), PI_INTEGRATION_FILENAME);
 }
 
+export function ompIntegrationPath(home = setupStateHome()): string {
+  return join(secretsDirectory(home), OMP_INTEGRATION_FILENAME);
+}
+
 export function generateCredential(): string {
   return randomBytes(32).toString('base64url');
 }
@@ -74,19 +91,19 @@ export function safeCredentialEqual(expected: string, supplied: string): boolean
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function normalizeInternalUrl(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2_048) throw new CredentialStateError('pi-internal-url');
+function normalizeInternalUrl(value: unknown, code = 'pi-internal-url'): string {
+  if (typeof value !== 'string' || value.length > 2_048) throw new CredentialStateError(code);
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new CredentialStateError('pi-internal-url');
+    throw new CredentialStateError(code);
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   const loopback = host === 'localhost' || host === '::1' || host.startsWith('127.');
   if (!loopback || parsed.protocol !== 'http:' || parsed.username || parsed.password || parsed.search || parsed.hash
       || (parsed.pathname !== '/' && parsed.pathname !== '')) {
-    throw new CredentialStateError('pi-internal-url');
+    throw new CredentialStateError(code);
   }
   return parsed.origin;
 }
@@ -119,46 +136,93 @@ export function readBrokerToken(target = brokerTokenPath()): string {
   return readOwnerOnlyText(target).trim();
 }
 
-function validatePiIntegration(value: unknown): PiIntegrationCredential {
+/** One scoped bridge-integration record family: the filename, record kind, and detail-code prefix differ per tool. */
+interface IntegrationRecordSpec<K extends string, C extends { kind: K; internalUrl: string; credential: string }> {
+  prefix: 'pi-integration' | 'omp-integration';
+  kind: K;
+  schemaVersion: 1;
+}
+
+const PI_INTEGRATION_SPEC: IntegrationRecordSpec<'pi-bridge', PiIntegrationCredential> = {
+  prefix: 'pi-integration',
+  kind: 'pi-bridge',
+  schemaVersion: PI_INTEGRATION_SCHEMA_VERSION,
+};
+const OMP_INTEGRATION_SPEC: IntegrationRecordSpec<'omp-bridge', OmpIntegrationCredential> = {
+  prefix: 'omp-integration',
+  kind: 'omp-bridge',
+  schemaVersion: OMP_INTEGRATION_SCHEMA_VERSION,
+};
+
+function validateIntegration<K extends string, C extends { kind: K; internalUrl: string; credential: string }>(
+  spec: IntegrationRecordSpec<K, C>,
+  value: unknown,
+): C {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new CredentialStateError('pi-integration-root');
+    throw new CredentialStateError(`${spec.prefix}-root`);
   }
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== PI_INTEGRATION_SCHEMA_VERSION || record.kind !== 'pi-bridge') {
-    throw new CredentialStateError('pi-integration-schema');
+  if (record.schemaVersion !== spec.schemaVersion || record.kind !== spec.kind) {
+    throw new CredentialStateError(`${spec.prefix}-schema`);
   }
   if (typeof record.credential !== 'string' || !validCredential(record.credential)) {
-    throw new CredentialStateError('pi-integration-credential');
+    throw new CredentialStateError(`${spec.prefix}-credential`);
   }
   return {
     ...record,
-    schemaVersion: PI_INTEGRATION_SCHEMA_VERSION,
-    kind: 'pi-bridge',
-    internalUrl: normalizeInternalUrl(record.internalUrl),
+    schemaVersion: spec.schemaVersion,
+    kind: spec.kind,
+    internalUrl: normalizeInternalUrl(record.internalUrl, `${spec.prefix.replace(/-integration$/, '')}-internal-url`),
     credential: record.credential,
-  } as PiIntegrationCredential;
+  } as unknown as C;
+}
+
+function inspectIntegration<K extends string, C extends { kind: K; internalUrl: string; credential: string }>(
+  spec: IntegrationRecordSpec<K, C>,
+  target: string,
+): CredentialInspection {
+  const file = inspectionFromFile(inspectOwnerOnlyFile(target), spec.prefix);
+  if (file.status !== 'ok') return file;
+  try {
+    validateIntegration(spec, JSON.parse(readOwnerOnlyText(target)));
+    return file;
+  } catch {
+    return { status: 'malformed', path: target, detailCode: `${spec.prefix}-malformed` };
+  }
+}
+
+function readIntegration<K extends string, C extends { kind: K; internalUrl: string; credential: string }>(
+  spec: IntegrationRecordSpec<K, C>,
+  target: string,
+): C {
+  const inspection = inspectIntegration(spec, target);
+  if (inspection.status !== 'ok') throw new CredentialStateError(inspection.detailCode);
+  try {
+    return validateIntegration(spec, JSON.parse(readOwnerOnlyText(target)));
+  } catch (error) {
+    if (error instanceof CredentialStateError) throw error;
+    throw new CredentialStateError(`${spec.prefix}-malformed`);
+  }
+}
+
+function validatePiIntegration(value: unknown): PiIntegrationCredential {
+  return validateIntegration(PI_INTEGRATION_SPEC, value);
 }
 
 export function inspectPiIntegration(target = piIntegrationPath()): CredentialInspection {
-  const file = inspectionFromFile(inspectOwnerOnlyFile(target), 'pi-integration');
-  if (file.status !== 'ok') return file;
-  try {
-    validatePiIntegration(JSON.parse(readOwnerOnlyText(target)));
-    return file;
-  } catch {
-    return { status: 'malformed', path: target, detailCode: 'pi-integration-malformed' };
-  }
+  return inspectIntegration(PI_INTEGRATION_SPEC, target);
 }
 
 export function readPiIntegration(target = piIntegrationPath()): PiIntegrationCredential {
-  const inspection = inspectPiIntegration(target);
-  if (inspection.status !== 'ok') throw new CredentialStateError(inspection.detailCode);
-  try {
-    return validatePiIntegration(JSON.parse(readOwnerOnlyText(target)));
-  } catch (error) {
-    if (error instanceof CredentialStateError) throw error;
-    throw new CredentialStateError('pi-integration-malformed');
-  }
+  return readIntegration(PI_INTEGRATION_SPEC, target);
+}
+
+export function inspectOmpIntegration(target = ompIntegrationPath()): CredentialInspection {
+  return inspectIntegration(OMP_INTEGRATION_SPEC, target);
+}
+
+export function readOmpIntegration(target = ompIntegrationPath()): OmpIntegrationCredential {
+  return readIntegration(OMP_INTEGRATION_SPEC, target);
 }
 
 export function writeBrokerToken(token: string, target = brokerTokenPath()): void {
@@ -170,8 +234,12 @@ export function writePiIntegration(value: PiIntegrationCredential, target = piIn
   atomicWriteJsonOwnerOnly(target, validatePiIntegration(value));
 }
 
+export function writeOmpIntegration(value: OmpIntegrationCredential, target = ompIntegrationPath()): void {
+  atomicWriteJsonOwnerOnly(target, validateIntegration(OMP_INTEGRATION_SPEC, value));
+}
+
 /**
- * Idempotent setup primitive. Existing valid credentials survive repeated setup; URL drift updates the Pi
+ * Idempotent setup primitive. Existing valid credentials survive repeated setup; URL drift updates each
  * record atomically without changing its scoped credential. Rotation always mints fresh random material.
  */
 export function ensureInstallationCredentials(options: {
@@ -179,10 +247,10 @@ export function ensureInstallationCredentials(options: {
   internalUrl: string;
   rotateBrokerToken?: boolean;
   rotatePiCredential?: boolean;
-}): { brokerToken: string; piIntegration: PiIntegrationCredential } {
+  rotateOmpCredential?: boolean;
+}): { brokerToken: string; piIntegration: PiIntegrationCredential; ompIntegration: OmpIntegrationCredential } {
   const home = options.home ?? setupStateHome();
   const tokenTarget = brokerTokenPath(home);
-  const piTarget = piIntegrationPath(home);
   const normalizedInternalUrl = normalizeInternalUrl(options.internalUrl);
 
   let brokerToken: string;
@@ -196,23 +264,33 @@ export function ensureInstallationCredentials(options: {
     writeBrokerToken(brokerToken, tokenTarget);
   }
 
-  let piIntegration: PiIntegrationCredential;
-  const piInspection = inspectPiIntegration(piTarget);
-  if (!options.rotatePiCredential && piInspection.status === 'ok') {
-    const existing = readPiIntegration(piTarget);
-    piIntegration = { ...existing, internalUrl: normalizedInternalUrl };
-  } else if (piInspection.status !== 'missing' && piInspection.status !== 'ok' && !options.rotatePiCredential) {
-    throw new CredentialStateError(piInspection.detailCode);
-  } else {
-    piIntegration = {
-      schemaVersion: PI_INTEGRATION_SCHEMA_VERSION,
-      kind: 'pi-bridge',
-      internalUrl: normalizedInternalUrl,
-      credential: generateCredential(),
-    };
-  }
-  writePiIntegration(piIntegration, piTarget);
-  return { brokerToken, piIntegration };
+  const ensureIntegration = <K extends string, C extends { schemaVersion: 1; kind: K; internalUrl: string; credential: string }>(
+    spec: IntegrationRecordSpec<K, C>,
+    target: string,
+    rotate: boolean | undefined,
+  ): C => {
+    const inspection = inspectIntegration(spec, target);
+    let record: C;
+    if (!rotate && inspection.status === 'ok') {
+      const existing = readIntegration(spec, target);
+      record = { ...existing, internalUrl: normalizedInternalUrl };
+    } else if (inspection.status !== 'missing' && inspection.status !== 'ok' && !rotate) {
+      throw new CredentialStateError(inspection.detailCode);
+    } else {
+      record = {
+        schemaVersion: spec.schemaVersion,
+        kind: spec.kind,
+        internalUrl: normalizedInternalUrl,
+        credential: generateCredential(),
+      } as C;
+    }
+    atomicWriteJsonOwnerOnly(target, validateIntegration(spec, record));
+    return record;
+  };
+
+  const piIntegration = ensureIntegration(PI_INTEGRATION_SPEC, piIntegrationPath(home), options.rotatePiCredential);
+  const ompIntegration = ensureIntegration(OMP_INTEGRATION_SPEC, ompIntegrationPath(home), options.rotateOmpCredential);
+  return { brokerToken, piIntegration, ompIntegration };
 }
 
 function explicitAbsolutePath(value: string | undefined, fallback: string, code: string): string {
@@ -231,6 +309,7 @@ export function resolveRuntimeCredentials(options: {
   const home = options.home ?? setupStateHome();
   const tokenTarget = explicitAbsolutePath(env.COSYNCING_TOKEN_FILE, brokerTokenPath(home), 'broker-token-file-path');
   const piTarget = explicitAbsolutePath(env.COSYNCING_PI_INTEGRATION_FILE, piIntegrationPath(home), 'pi-integration-file-path');
+  const ompTarget = explicitAbsolutePath(env.COSYNCING_OMP_INTEGRATION_FILE, ompIntegrationPath(home), 'omp-integration-file-path');
   const warnings: string[] = [];
 
   let brokerToken = '';
@@ -270,12 +349,37 @@ export function resolveRuntimeCredentials(options: {
     throw new CredentialStateError(piInspection.detailCode);
   }
 
+  let ompIntegrationToken = '';
+  let ompIntegrationSource: RuntimeCredentials['ompIntegrationSource'] = 'none';
+  let ompInternalUrl: string | undefined;
+  const ompInspection = inspectOmpIntegration(ompTarget);
+  if (ompInspection.status === 'ok') {
+    const integration = readOmpIntegration(ompTarget);
+    if (integration.internalUrl !== normalizeInternalUrl(options.internalUrl, 'omp-internal-url')) {
+      throw new CredentialStateError('omp-integration-url-mismatch');
+    }
+    ompIntegrationToken = integration.credential;
+    ompInternalUrl = integration.internalUrl;
+    ompIntegrationSource = 'file';
+  } else if (!options.packaged && ompInspection.status === 'missing' && env.COSYNCING_OMP_INTEGRATION_TOKEN?.trim()) {
+    const candidate = env.COSYNCING_OMP_INTEGRATION_TOKEN.trim();
+    if (!validDevelopmentCredential(candidate)) throw new CredentialStateError('omp-integration-environment-malformed');
+    ompIntegrationToken = candidate;
+    ompInternalUrl = normalizeInternalUrl(options.internalUrl, 'omp-internal-url');
+    ompIntegrationSource = 'environment';
+  } else if (options.packaged || ompInspection.status !== 'missing') {
+    throw new CredentialStateError(ompInspection.detailCode);
+  }
+
   return {
     brokerToken,
     brokerTokenSource,
     piIntegrationToken,
     piIntegrationSource,
     ...(piInternalUrl ? { piInternalUrl } : {}),
+    ompIntegrationToken,
+    ompIntegrationSource,
+    ...(ompInternalUrl ? { ompInternalUrl } : {}),
     warnings,
   };
 }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '@cosyncing/adapter-pi/bridge-asset';
+import { OMP_BRIDGE_EMBEDDED_SOURCE } from '@cosyncing/adapter-omp/bridge-asset';
 // @ts-expect-error Bun's text loader supports service templates that have no TypeScript module declaration.
 import systemdServiceTemplateModule from '../../assets/systemd/cosyncing.service' with { type: 'text' };
 // @ts-expect-error Bun's text loader supports service templates that have no TypeScript module declaration.
@@ -19,6 +20,7 @@ const windowsServiceBootstrap = windowsServiceBootstrapModule as unknown as stri
 
 export type RuntimeAssetId =
   | 'pi/cosyncing-bridge/index.ts'
+  | 'omp/cosyncing-bridge/index.ts'
   | 'service/systemd/cosyncing.service'
   | 'skill/cosyncing/SKILL.md'
   | 'service/launchd/cosyncing.plist'
@@ -81,6 +83,12 @@ export const RUNTIME_ASSET_MANIFEST: readonly RuntimeAsset[] = Object.freeze([
     id: 'pi/cosyncing-bridge/index.ts',
     content: PI_BRIDGE_EMBEDDED_SOURCE,
     installTarget: '~/.pi/agent/extensions/cosyncing-bridge/index.ts',
+    mediaType: 'application/typescript; charset=utf-8',
+  }),
+  embeddedAsset({
+    id: 'omp/cosyncing-bridge/index.ts',
+    content: OMP_BRIDGE_EMBEDDED_SOURCE,
+    installTarget: '~/.omp/agent/extensions/cosyncing-bridge/index.ts',
     mediaType: 'application/typescript; charset=utf-8',
   }),
   embeddedAsset({

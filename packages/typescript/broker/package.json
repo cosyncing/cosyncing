@@ -7,6 +7,7 @@
     "@cosyncing/adapter-api": "workspace:*",
     "@cosyncing/adapter-opencode": "workspace:*",
     "@cosyncing/adapter-pi": "workspace:*",
+    "@cosyncing/adapter-omp": "workspace:*",
     "@cosyncing/adapter-codex": "workspace:*",
     "@cosyncing/adapter-claude": "workspace:*",
     "@cosyncing/adapter-kimi": "workspace:*",

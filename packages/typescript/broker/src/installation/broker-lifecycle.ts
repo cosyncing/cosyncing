@@ -23,10 +23,18 @@ import {
 } from '@cosyncing/adapter-codex';
 import {
   inspectPiBridgeAsset,
+  PI_DIALECT,
   PI_BRIDGE_EMBEDDED_SHA256,
   PI_BRIDGE_EMBEDDED_SOURCE,
   PI_BRIDGE_LEGACY_MARKER,
+  resolvePiDialectPaths,
 } from '@cosyncing/adapter-pi';
+import {
+  OMP_BRIDGE_EMBEDDED_SHA256,
+  OMP_BRIDGE_EMBEDDED_SOURCE,
+} from '@cosyncing/adapter-omp/bridge-asset';
+import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
+import { OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
   bunSpawnResolvedInvocation,
   resolveInvocation,
@@ -39,9 +47,12 @@ import {
   brokerTokenPath,
   ensureInstallationCredentials,
   inspectBrokerToken,
+  inspectOmpIntegration,
   inspectPiIntegration,
+  ompIntegrationPath,
   piIntegrationPath,
   readBrokerToken,
+  readOmpIntegration,
   readPiIntegration,
 } from '../security/credentials.ts';
 import { createSetupDiagnosisContext } from './diagnosis-context.ts';
@@ -100,6 +111,7 @@ import {
   awaitServiceState,
   createServiceCommandRunner,
   createDurableServiceProvider,
+  serviceAgentDataPathOverrides,
   serviceDefinitionResourceId,
   SERVICE_RESOURCE_IDS,
   SERVICE_TRANSITION_TIMEOUT_MS,
@@ -115,6 +127,7 @@ import {
   atomicWriteOwnerOnly,
 } from '../security/secure-files.ts';
 import {
+  inspectOmpBridgeOwnership,
   inspectPiBridgeOwnership,
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
@@ -157,6 +170,7 @@ export interface LifecycleBaseOptions {
   systemdProviderFactory?: (options: DurableServiceProviderOptions) => DurableServiceProvider;
   runner?: ServiceCommandRunner;
   piAgentDir?: string;
+  ompAgentDir?: string;
   claudeSettingsPath?: string;
   now?: () => Date;
   /** Injected read-only Codex daemon probe (uninstall live-session enumeration); default talks to the daemon. */
@@ -285,6 +299,7 @@ interface LifecycleEnvironment {
   install: ReturnType<typeof inspectInstallState>;
   provider?: DurableServiceProvider;
   piAgentDir: string;
+  ompAgentDir: string;
   claudeSettingsPath: string;
   agentSkills: AgentSkillInspection[];
 }
@@ -327,6 +342,9 @@ export function createLifecycleDurableServiceProvider(options: LifecycleBaseOpti
   const context = options.context ?? createSetupDiagnosisContext();
   const home = options.home ?? setupStateHome();
   const install = inspectInstallState(home);
+  const dialectEnv = { ...context.env, HOME: context.homeDir };
+  const piPaths = resolvePiDialectPaths(PI_DIALECT, dialectEnv);
+  const ompPaths = resolvePiDialectPaths(OMP_DIALECT, dialectEnv);
   return (options.durableServiceProviderFactory ?? options.systemdProviderFactory ?? createDurableServiceProvider)({
     context,
     homeDir: context.homeDir,
@@ -352,6 +370,13 @@ export function createLifecycleDurableServiceProvider(options: LifecycleBaseOpti
     ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
     agentExecutableDirectories: serviceAgentExecutableDirectories(context),
     agentExecutableOverrides: serviceAgentExecutableOverrides(context),
+    agentDataPathOverrides: serviceAgentDataPathOverrides({
+      env: dialectEnv,
+      piAgentDir: piPaths.agentDir,
+      ompAgentDir: ompPaths.agentDir,
+      piSessionsRoot: piPaths.sessionsRoot,
+      ompSessionsRoot: ompPaths.sessionsRoot,
+    }),
     // Same reason, same inputs: the service cannot resolve the sidecar from the binary it execs, so status
     // and repair must expect the identical explicit path setup wrote.
     webDir: serviceFlutterWebRoot({
@@ -376,6 +401,7 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
   const provider = isDurableServiceChoice(setupState.serviceChoice)
     ? createLifecycleDurableServiceProvider({ ...options, home, context })
     : undefined;
+  const dialectEnv = { ...context.env, HOME: context.homeDir };
   return {
     home,
     cacheRoot: cacheRoot(options, context),
@@ -384,7 +410,8 @@ async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvi
     setupState,
     install,
     provider,
-    piAgentDir: options.piAgentDir ?? context.env.PI_CODING_AGENT_DIR?.trim() ?? join(context.homeDir, '.pi', 'agent'),
+    piAgentDir: options.piAgentDir ?? resolvePiDialectPaths(PI_DIALECT, dialectEnv).agentDir,
+    ompAgentDir: options.ompAgentDir ?? resolvePiDialectPaths(OMP_DIALECT, dialectEnv).agentDir,
     claudeSettingsPath: options.claudeSettingsPath ?? join(
       context.env.CLAUDE_CONFIG_DIR?.trim() ?? join(context.homeDir, '.claude'),
       'settings.json',
@@ -958,9 +985,11 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
   if (env.config) {
     const broker = inspectBrokerToken(brokerTokenPath(env.home));
     const piCredential = inspectPiIntegration(piIntegrationPath(env.home));
-    if (broker.status !== 'ok' || piCredential.status !== 'ok'
-        || (piCredential.status === 'ok' && readPiIntegration(piCredential.path).internalUrl !== env.config.broker.internalUrl)) {
-      actions.push({ id: 'credentials.reconcile', summary: 'Reconcile owner-only broker and Pi-scoped credentials with the internal URL.', legacy: false });
+    const ompCredential = inspectOmpIntegration(ompIntegrationPath(env.home));
+    if (broker.status !== 'ok' || piCredential.status !== 'ok' || ompCredential.status !== 'ok'
+        || (piCredential.status === 'ok' && readPiIntegration(piCredential.path).internalUrl !== env.config.broker.internalUrl)
+        || (ompCredential.status === 'ok' && readOmpIntegration(ompCredential.path).internalUrl !== env.config.broker.internalUrl)) {
+      actions.push({ id: 'credentials.reconcile', summary: 'Reconcile owner-only broker and integration-scoped credentials with the internal URL.', legacy: false });
     }
   }
   const pi = inspectPiBridgeOwnership(env.install, env.piAgentDir);
@@ -989,6 +1018,27 @@ export async function inspectRepair(options: LifecycleBaseOptions): Promise<Repa
     warnings.push({
       detailCode: `pi-bridge-${pi.status}`,
       summary: 'Preserve the unknown, modified, unsafe, or incorrectly receipted Pi bridge.',
+    });
+  }
+  const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
+  if (omp.status === 'missing' && omp.receiptMatchesCurrentPackage) {
+    actions.push({
+      id: 'omp-bridge.install',
+      summary: 'Restore the receipt-owned packaged omp bridge.',
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(omp),
+    });
+  } else if (omp.status === 'owned-stale') {
+    actions.push({
+      id: 'omp-bridge.refresh',
+      summary: 'Refresh the receipt-owned omp bridge to this build\'s packaged version.',
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(omp),
+    });
+  } else if (!['missing', 'owned-current'].includes(omp.status)) {
+    warnings.push({
+      detailCode: `omp-bridge-${omp.status}`,
+      summary: 'Preserve the unknown, modified, unsafe, or incorrectly receipted omp bridge.',
     });
   }
 
@@ -1151,7 +1201,7 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
           };
         }
       } else if (action.id === 'credentials.reconcile') {
-        snapshots.push(snapshot(brokerTokenPath(env.home)), snapshot(piIntegrationPath(env.home)));
+        snapshots.push(snapshot(brokerTokenPath(env.home)), snapshot(piIntegrationPath(env.home)), snapshot(ompIntegrationPath(env.home)));
         ensureInstallationCredentials({ home: env.home, internalUrl: env.config.broker.internalUrl });
       } else if (action.id === 'pi-bridge.install'
           || action.id === 'pi-bridge.refresh'
@@ -1193,6 +1243,32 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
         nextState = mergeResources(nextState, [{
           id: 'pi-bridge', kind: 'agent-integration', target,
           ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
+        }]);
+      } else if (action.id === 'omp-bridge.install' || action.id === 'omp-bridge.refresh') {
+        const inspectReplacement = () => inspectOmpBridgeOwnership(inspectInstallState(env.home), env.ompAgentDir);
+        const assertReplacementPrecondition = () => {
+          const current = inspectReplacement();
+          const allowed = action.id === 'omp-bridge.install'
+            ? current.status === 'missing' && current.receiptMatchesCurrentPackage
+            : current.status === 'owned-stale';
+          if (!allowed || !action.precondition
+              || piBridgeOwnershipPrecondition(current) !== action.precondition) {
+            throw new Error('omp-bridge-repair-precondition-changed');
+          }
+        };
+        assertReplacementPrecondition();
+        const target = inspectReplacement().bridge.path;
+        snapshots.push(snapshot(target));
+        atomicWriteOwnerOnly(target, OMP_BRIDGE_EMBEDDED_SOURCE, {
+          mode: 0o600,
+          beforeReplace: assertReplacementPrecondition,
+        });
+        if (inspectOmpBridgeAsset(env.ompAgentDir).status !== 'owned') {
+          throw new Error('omp-bridge-repair-verify-failed');
+        }
+        nextState = mergeResources(nextState, [{
+          id: 'omp-bridge', kind: 'agent-integration', target,
+          ownership: { proof: 'package-hash', installedSha256: OMP_BRIDGE_EMBEDDED_SHA256 },
         }]);
       } else if (action.id.startsWith('agent-skill.restore.')) {
         const targetId = action.id.slice('agent-skill.restore.'.length);
@@ -1290,6 +1366,10 @@ export async function runRepair(options: RepairOptions): Promise<LifecycleComman
     const piCredential = inspectPiIntegration(piIntegrationPath(env.home));
     if (piCredential.status !== 'ok' || readPiIntegration(piCredential.path).internalUrl !== env.config.broker.internalUrl) {
       throw new Error('pi-integration-repair-verify-failed');
+    }
+    const ompCredential = inspectOmpIntegration(ompIntegrationPath(env.home));
+    if (ompCredential.status !== 'ok' || readOmpIntegration(ompCredential.path).internalUrl !== env.config.broker.internalUrl) {
+      throw new Error('omp-integration-repair-verify-failed');
     }
     if (env.provider) {
       const brokerToken = inspectBrokerToken(brokerTokenPath(env.home));
@@ -1457,6 +1537,20 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
     warnings.push({
       detailCode: `pi-bridge-${pi.status}-preserved`,
       summary: 'The modified, unsafe, or incorrectly receipted Pi bridge will be preserved.',
+    });
+  }
+  const omp = inspectOmpBridgeOwnership(env.install, env.ompAgentDir);
+  if (omp.status === 'owned-current' || omp.status === 'owned-stale') {
+    actions.push({
+      id: 'omp-bridge.remove',
+      target: omp.bridge.path,
+      legacy: false,
+      precondition: piBridgeOwnershipPrecondition(omp),
+    });
+  } else if (omp.status !== 'missing') {
+    warnings.push({
+      detailCode: `omp-bridge-${omp.status}-preserved`,
+      summary: 'The modified, unsafe, or incorrectly receipted omp bridge will be preserved.',
     });
   }
   for (const target of env.agentSkills) {
@@ -1727,6 +1821,12 @@ export async function inspectUninstall(options: LifecycleBaseOptions & { purgeDa
       summary: 'Removing the Pi bridge drops the app link for any live bridged session; the terminal session itself continues uninterrupted.',
     });
   }
+  if (actions.some((item) => item.id === 'omp-bridge.remove')) {
+    advisories.push({
+      detailCode: 'omp-bridge-sessions-disconnect',
+      summary: 'Removing the omp bridge drops the app link for any live bridged session; the terminal session itself continues uninterrupted.',
+    });
+  }
 
   return {
     schemaVersion: 1,
@@ -1791,6 +1891,16 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           }
           if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('pi-bridge-drift');
           retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
+        } else if (action.id === 'omp-bridge.remove') {
+          const inspection = inspectOmpBridgeOwnership(inspectInstallState(env.home), env.ompAgentDir);
+          const allowed = inspection.status === 'owned-current' || inspection.status === 'owned-stale';
+          if (!allowed || !action.precondition
+              || piBridgeOwnershipPrecondition(inspection) !== action.precondition) {
+            throw new Error('omp-bridge-drift');
+          }
+          const expectedSha256 = inspection.bridge.actualSha256 ?? OMP_BRIDGE_EMBEDDED_SHA256;
+          if (!safeRemoveRegular(inspection.bridge.path, expectedSha256)) throw new Error('omp-bridge-drift');
+          retainedResources = retainedResources.filter((item) => item.id !== 'omp-bridge');
         } else if (action.id.startsWith('agent-skill.remove.')) {
           const targetId = action.id.slice('agent-skill.remove.'.length);
           const target = env.agentSkills.find((candidate) => candidate.id === targetId);
@@ -1971,6 +2081,8 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
     if (env.install.committed) {
       const piAfter = inspectPiBridgeAsset(env.piAgentDir);
       if (piAfter.status === 'missing') retainedResources = retainedResources.filter((item) => item.id !== 'pi-bridge');
+      const ompAfter = inspectOmpBridgeAsset(env.ompAgentDir);
+      if (ompAfter.status === 'missing') retainedResources = retainedResources.filter((item) => item.id !== 'omp-bridge');
       for (const target of env.agentSkills) {
         if (inspectAgentSkill(target).status === 'missing') {
           retainedResources = retainedResources.filter((item) => item.id !== target.resourceId);

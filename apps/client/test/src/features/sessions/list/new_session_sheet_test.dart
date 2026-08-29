@@ -855,6 +855,7 @@ void main() {
         _AgentFixture('claude', 'Claude'),
         _AgentFixture('opencode', 'OpenCode'),
         _AgentFixture('pi', 'Pi'),
+        _AgentFixture('omp', 'omp'),
       ],
       catalogs: {
         'codex': [_model('codex-model', 'Codex model')],
@@ -863,6 +864,7 @@ void main() {
           _model('MiniMax-M2.5', 'MiniMax', provider: 'minimax'),
         ],
         'pi': [_model('pi-model', 'Pi model', provider: 'pi-provider')],
+        'omp': [_model('omp-model', 'omp model', provider: 'omp-provider')],
       },
     );
     await tester.pumpWidget(_host(fake));
@@ -874,6 +876,7 @@ void main() {
       'Claude': 'Opus',
       'OpenCode': 'MiniMax',
       'Pi': 'Pi model',
+      'omp': 'omp model',
       'Codex': 'Codex model',
     }.entries) {
       await tester.tap(find.text(currentTool).first);

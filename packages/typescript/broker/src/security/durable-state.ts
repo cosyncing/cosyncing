@@ -33,6 +33,7 @@ export interface DurableStateLayout {
   transportKeys: string;
   brokerToken: string;
   piIntegration: string;
+  ompIntegration: string;
   artifactIndex: string;
   artifactBlobs: string;
   artifactUrlSecret: string;
@@ -142,6 +143,7 @@ export function durableStateLayout(options: { stateRoot?: string; cacheRoot?: st
     transportKeys: join(stateRoot, 'transport-keys'),
     brokerToken: join(stateRoot, 'secrets', 'broker-token'),
     piIntegration: join(stateRoot, 'secrets', 'pi-integration.json'),
+    ompIntegration: join(stateRoot, 'secrets', 'omp-integration.json'),
     artifactIndex: join(cacheRoot, 'artifacts', 'index.json'),
     artifactBlobs: join(cacheRoot, 'artifacts', 'blobs'),
     artifactUrlSecret: join(cacheRoot, 'artifact-url-secret'),
@@ -466,6 +468,7 @@ export function backupDurableStores(options: {
     { path: layout.transportKeys, label: 'state/transport-keys', destination: join(path, 'state', 'transport-keys') },
     { path: layout.brokerToken, label: 'state/secrets/broker-token', destination: join(path, 'state', 'secrets', 'broker-token') },
     { path: layout.piIntegration, label: 'state/secrets/pi-integration.json', destination: join(path, 'state', 'secrets', 'pi-integration.json') },
+    { path: layout.ompIntegration, label: 'state/secrets/omp-integration.json', destination: join(path, 'state', 'secrets', 'omp-integration.json') },
     { path: join(layout.cacheRoot, 'artifacts'), label: 'cache/artifacts', destination: join(path, 'cache', 'artifacts') },
     { path: layout.artifactUrlSecret, label: 'cache/artifact-url-secret', destination: join(path, 'cache', 'artifact-url-secret') },
   ];

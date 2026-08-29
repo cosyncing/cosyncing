@@ -7,6 +7,7 @@
     "./bridge-asset": "./src/bridge-asset.ts"
   },
   "dependencies": {
-    "@cosyncing/adapter-api": "workspace:*"
+    "@cosyncing/adapter-api": "workspace:*",
+    "@cosyncing/pi-engine": "workspace:*"
   }
 }

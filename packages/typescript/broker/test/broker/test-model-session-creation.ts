@@ -521,19 +521,18 @@ try {
     "scheduled retired selection is rejected without substitution",
   );
 
-  // Revision 18 adds only the owner workspace-exposure setting. Revision 17
-  // remains inside the writable compatibility window, and this request body is
-  // unchanged.
+  // Revision 19 adds only first-party omp identity. Revision 18 remains inside
+  // the writable compatibility window, and this request body is unchanged.
   const previousRevisionQuery =
-    "contractRevision=17&minimumBrokerRevision=16&" +
-    "contractSurfaceHash=fnv1a32%3A3ff9de78&clientVersion=1.0.0";
+    "contractRevision=18&minimumBrokerRevision=16&" +
+    "contractSurfaceHash=fnv1a32%3A4531a029&clientVersion=1.0.0";
   const previousRevision = await request(
     running.base,
     `/api/sessions/claude?${previousRevisionQuery}`,
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 18);
+  assert.equal(BROKER_CONTRACT.revision, 19);
   assert.equal(
     previousRevision.status,
     200,

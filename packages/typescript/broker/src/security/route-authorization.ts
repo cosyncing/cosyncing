@@ -1,17 +1,19 @@
 import { BROKER_INTEGRATION_ROUTES, BROKER_ROUTES } from '@cosyncing/protocol';
 import type { PeerRole } from '../transport/transport-pairing.ts';
 
+export type IntegrationId = 'pi' | 'omp';
+
 export type PeerRoutePolicy =
   | { kind: 'owner-only' }
   | { kind: 'peer'; allOf: readonly PeerRole[] }
   | { kind: 'peer'; anyOf: readonly PeerRole[] }
-  | { kind: 'integration'; integration: 'pi' }
+  | { kind: 'integration'; integration: IntegrationId }
   | { kind: 'public' };
 
 export type RouteAuthorizationPrincipal =
   | { kind: 'owner' }
   | { kind: 'peer'; roles: ReadonlySet<PeerRole> }
-  | { kind: 'integration'; integration: 'pi' }
+  | { kind: 'integration'; integration: IntegrationId }
   | undefined;
 
 export type RouteAuthorizationDecision =
@@ -35,6 +37,7 @@ const DRIVE: PeerRoutePolicy = { kind: 'peer', allOf: ['drive'] };
 const FILES: PeerRoutePolicy = { kind: 'peer', allOf: ['files'] };
 const OBSERVE_FILES: PeerRoutePolicy = { kind: 'peer', allOf: ['observe', 'files'] };
 const PI_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'pi' };
+const OMP_INTEGRATION: PeerRoutePolicy = { kind: 'integration', integration: 'omp' };
 
 /**
  * Exhaustive client HTTP policy. A route may have multiple entries when its
@@ -108,6 +111,9 @@ export const INTEGRATION_ROUTE_POLICIES: readonly RoutePolicyEntry<IntegrationRo
   ...[...new Set(BROKER_INTEGRATION_ROUTES)]
     .filter((route): route is Extract<IntegrationRoute, `/pi/${string}`> => route.startsWith('/pi/'))
     .map((route) => ({ route, methods: route.endsWith('/commands') || route.endsWith('/status') ? ['GET'] as const : ['POST'] as const, policy: PI_INTEGRATION })),
+  ...[...new Set(BROKER_INTEGRATION_ROUTES)]
+    .filter((route): route is Extract<IntegrationRoute, `/omp/${string}`> => route.startsWith('/omp/'))
+    .map((route) => ({ route, methods: route.endsWith('/commands') || route.endsWith('/status') ? ['GET'] as const : ['POST'] as const, policy: OMP_INTEGRATION })),
   ...[...new Set(BROKER_INTEGRATION_ROUTES)]
     .filter((route): route is Extract<IntegrationRoute, `/claude/${string}`> => route.startsWith('/claude/'))
     .map((route) => ({ route, methods: ['POST'] as const, policy: OWNER_ONLY })),

@@ -30,6 +30,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     required this.toolCodex,
     required this.toolClaude,
     required this.toolPi,
+    required this.toolOmp,
     required this.diffAddText,
     required this.diffAddSurface,
     required this.diffRemoveText,
@@ -96,6 +97,9 @@ class AppTokens extends ThemeExtension<AppTokens> {
   /// Stable per-tool identity color: pi.
   final Color toolPi;
 
+  /// Stable per-tool identity color: omp.
+  final Color toolOmp;
+
   /// Diff added-line text (green family), contrast-verified per theme.
   final Color diffAddText;
 
@@ -138,7 +142,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
   final double radiusLg;
 
   /// Resolves a tool's identity color from its wire id (`opencode`, `codex`,
-  /// `claude`, `pi`); falls back to [textTertiary] for unknown tools.
+  /// `claude`, `pi`, `omp`); falls back to [textTertiary] for unknown tools.
   Color toolColor(String tool) {
     switch (tool.toLowerCase()) {
       case 'opencode':
@@ -149,6 +153,8 @@ class AppTokens extends ThemeExtension<AppTokens> {
         return toolClaude;
       case 'pi':
         return toolPi;
+      case 'omp':
+        return toolOmp;
       default:
         return textTertiary;
     }
@@ -173,6 +179,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     Color? toolCodex,
     Color? toolClaude,
     Color? toolPi,
+    Color? toolOmp,
     Color? diffAddText,
     Color? diffAddSurface,
     Color? diffRemoveText,
@@ -205,6 +212,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       toolCodex: toolCodex ?? this.toolCodex,
       toolClaude: toolClaude ?? this.toolClaude,
       toolPi: toolPi ?? this.toolPi,
+      toolOmp: toolOmp ?? this.toolOmp,
       diffAddText: diffAddText ?? this.diffAddText,
       diffAddSurface: diffAddSurface ?? this.diffAddSurface,
       diffRemoveText: diffRemoveText ?? this.diffRemoveText,
@@ -248,6 +256,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       toolCodex: Color.lerp(toolCodex, other.toolCodex, t)!,
       toolClaude: Color.lerp(toolClaude, other.toolClaude, t)!,
       toolPi: Color.lerp(toolPi, other.toolPi, t)!,
+      toolOmp: Color.lerp(toolOmp, other.toolOmp, t)!,
       diffAddText: Color.lerp(diffAddText, other.diffAddText, t)!,
       diffAddSurface: Color.lerp(diffAddSurface, other.diffAddSurface, t)!,
       diffRemoveText: Color.lerp(diffRemoveText, other.diffRemoveText, t)!,

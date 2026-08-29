@@ -4,6 +4,8 @@ import {
   inspectPiBridgeAsset,
   type PiBridgeAssetInspection,
 } from '@cosyncing/adapter-pi';
+import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
+import { OMP_BRIDGE_EMBEDDED_SHA256 } from '@cosyncing/adapter-omp/bridge-asset';
 import { inspectOwnerOnlyFile } from '../security/secure-files.ts';
 import type {
   InstalledResourceRecord,
@@ -11,6 +13,7 @@ import type {
 } from './install-state.ts';
 
 export const PI_BRIDGE_RESOURCE_ID = 'pi-bridge';
+export const OMP_BRIDGE_RESOURCE_ID = 'omp-bridge';
 
 export type PiBridgeOwnershipStatus =
   | 'missing'
@@ -31,22 +34,23 @@ export interface PiBridgeOwnershipDecision {
   receiptMatchesCurrentPackage: boolean;
 }
 
-function piBridgeReceipts(install: InstallStateInspection): InstalledResourceRecord[] {
+function bridgeReceipts(install: InstallStateInspection, resourceId: string): InstalledResourceRecord[] {
   if (!install.committed) return [];
   return (install.state.resources as unknown[]).filter((resource): resource is InstalledResourceRecord =>
     !!resource
       && typeof resource === 'object'
-      && (resource as Record<string, unknown>).id === PI_BRIDGE_RESOURCE_ID);
+      && (resource as Record<string, unknown>).id === resourceId);
 }
 
 function receiptProves(
   receipt: InstalledResourceRecord | undefined,
   bridge: PiBridgeAssetInspection,
+  resourceId: string,
   sha256: string | undefined,
 ): receipt is InstalledResourceRecord {
   return !!receipt
     && !!sha256
-    && receipt.id === PI_BRIDGE_RESOURCE_ID
+    && receipt.id === resourceId
     && receipt.kind === 'agent-integration'
     && typeof receipt.target === 'string'
     && resolve(receipt.target) === resolve(bridge.path)
@@ -55,24 +59,41 @@ function receiptProves(
     && receipt.ownership.installedSha256 === sha256;
 }
 
+/** Which bridge family an ownership decision covers: receipt id plus this build's packaged bytes. */
+export interface BridgeOwnershipSpec {
+  resourceId: string;
+  currentSha256: string | undefined;
+}
+
+export const PI_BRIDGE_OWNERSHIP_SPEC: BridgeOwnershipSpec = {
+  resourceId: PI_BRIDGE_RESOURCE_ID,
+  currentSha256: PI_BRIDGE_EMBEDDED_SHA256,
+};
+
+export const OMP_BRIDGE_OWNERSHIP_SPEC: BridgeOwnershipSpec = {
+  resourceId: OMP_BRIDGE_RESOURCE_ID,
+  currentSha256: OMP_BRIDGE_EMBEDDED_SHA256,
+};
+
 /**
- * Interpret Pi bridge ownership at the broker installation boundary.
+ * Interpret bridge ownership at the broker installation boundary.
  *
  * The adapter owns only provider-specific path/content classification. Receipt meaning, canonical target
  * matching, and host-file safety stay here with setup/repair/uninstall.
  */
-export function decidePiBridgeOwnership(
+export function decideBridgeOwnership(
+  spec: BridgeOwnershipSpec,
   install: InstallStateInspection,
   bridge: PiBridgeAssetInspection,
 ): PiBridgeOwnershipDecision {
-  const receipts = piBridgeReceipts(install);
+  const receipts = bridgeReceipts(install, spec.resourceId);
   const receipt = receipts[0];
   const uniqueReceipt = receipts.length === 1 ? receipt : undefined;
   const file = inspectOwnerOnlyFile(bridge.path);
   const base = {
     bridge,
     ...(receipt ? { receipt } : {}),
-    receiptMatchesCurrentPackage: receiptProves(uniqueReceipt, bridge, PI_BRIDGE_EMBEDDED_SHA256),
+    receiptMatchesCurrentPackage: receiptProves(uniqueReceipt, bridge, spec.resourceId, spec.currentSha256),
   };
 
   if (file.status === 'unsafe') return { ...base, status: 'unsafe' };
@@ -89,13 +110,21 @@ export function decidePiBridgeOwnership(
 
   // Once a receipt exists it must prove the exact safe file now on disk. A malformed, wrong-path, stale,
   // or forged receipt cannot be ignored merely because the leaf happens to resemble a known asset.
-  if (receipt && !receiptProves(uniqueReceipt, bridge, bridge.actualSha256)) {
+  if (receipt && !receiptProves(uniqueReceipt, bridge, spec.resourceId, bridge.actualSha256)) {
     return { ...base, status: 'receipt-invalid' };
   }
   if (bridge.status === 'owned') return { ...base, status: 'owned-current' };
-  if (receiptProves(uniqueReceipt, bridge, bridge.actualSha256)) return { ...base, status: 'owned-stale' };
+  if (receiptProves(uniqueReceipt, bridge, spec.resourceId, bridge.actualSha256)) return { ...base, status: 'owned-stale' };
   if (!receipt && bridge.status === 'legacy-marker') return { ...base, status: 'legacy-unreceipted' };
   return { ...base, status: 'unowned' };
+}
+
+/** Pi ownership decision, bound to the pi receipt id and this build's packaged pi bytes. */
+export function decidePiBridgeOwnership(
+  install: InstallStateInspection,
+  bridge: PiBridgeAssetInspection,
+): PiBridgeOwnershipDecision {
+  return decideBridgeOwnership(PI_BRIDGE_OWNERSHIP_SPEC, install, bridge);
 }
 
 export function inspectPiBridgeOwnership(
@@ -103,6 +132,13 @@ export function inspectPiBridgeOwnership(
   piAgentDir: string,
 ): PiBridgeOwnershipDecision {
   return decidePiBridgeOwnership(install, inspectPiBridgeAsset(piAgentDir));
+}
+
+export function inspectOmpBridgeOwnership(
+  install: InstallStateInspection,
+  ompAgentDir: string,
+): PiBridgeOwnershipDecision {
+  return decideBridgeOwnership(OMP_BRIDGE_OWNERSHIP_SPEC, install, inspectOmpBridgeAsset(ompAgentDir));
 }
 
 /** Stable, non-secret identity carried from planning to the final pre-replacement check. */

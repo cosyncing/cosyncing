@@ -61,6 +61,14 @@
         "@cosyncing/adapter-api": "workspace:*",
       },
     },
+    "packages/typescript/adapters/omp": {
+      "name": "@cosyncing/adapter-omp",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+        "@cosyncing/pi-engine": "workspace:*",
+      },
+    },
     "packages/typescript/adapters/opencode": {
       "name": "@cosyncing/adapter-opencode",
       "version": "0.0.0",
@@ -73,6 +81,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@cosyncing/adapter-api": "workspace:*",
+        "@cosyncing/pi-engine": "workspace:*",
       },
     },
     "packages/typescript/broker": {
@@ -84,6 +93,7 @@
         "@cosyncing/adapter-codex": "workspace:*",
         "@cosyncing/adapter-dsh": "workspace:*",
         "@cosyncing/adapter-kimi": "workspace:*",
+        "@cosyncing/adapter-omp": "workspace:*",
         "@cosyncing/adapter-opencode": "workspace:*",
         "@cosyncing/adapter-pi": "workspace:*",
         "@cosyncing/crypto": "workspace:*",
@@ -95,6 +105,13 @@
     "packages/typescript/crypto": {
       "name": "@cosyncing/crypto",
       "version": "0.0.0",
+    },
+    "packages/typescript/pi-engine": {
+      "name": "@cosyncing/pi-engine",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cosyncing/adapter-api": "workspace:*",
+      },
     },
     "packages/typescript/protocol": {
       "name": "@cosyncing/protocol",
@@ -130,6 +147,8 @@
 
     "@cosyncing/adapter-kimi": ["@cosyncing/adapter-kimi@workspace:packages/typescript/adapters/kimi"],
 
+    "@cosyncing/adapter-omp": ["@cosyncing/adapter-omp@workspace:packages/typescript/adapters/omp"],
+
     "@cosyncing/adapter-opencode": ["@cosyncing/adapter-opencode@workspace:packages/typescript/adapters/opencode"],
 
     "@cosyncing/adapter-pi": ["@cosyncing/adapter-pi@workspace:packages/typescript/adapters/pi"],
@@ -137,6 +156,8 @@
     "@cosyncing/broker": ["@cosyncing/broker@workspace:packages/typescript/broker"],
 
     "@cosyncing/crypto": ["@cosyncing/crypto@workspace:packages/typescript/crypto"],
+
+    "@cosyncing/pi-engine": ["@cosyncing/pi-engine@workspace:packages/typescript/pi-engine"],
 
     "@cosyncing/poc-ui": ["@cosyncing/poc-ui@workspace:apps/poc-ui"],
 

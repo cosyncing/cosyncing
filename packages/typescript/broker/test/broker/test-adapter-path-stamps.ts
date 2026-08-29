@@ -52,6 +52,7 @@ import { createDshMapState, mapDshEvent } from '../../../adapters/dsh/src/mappin
 import { createKimiMappingState, mapKimiMessage } from '../../../adapters/kimi/src/mapping.ts';
 import { mapOpenCodePart } from '../../../adapters/opencode/src/index.ts';
 import { mapPiJsonlText } from '../../../adapters/pi/src/index.ts';
+import { OMP_DIALECT } from '../../../adapters/omp/src/index.ts';
 import { createAgyMapState, mapAgyStep, type AgyStep } from '../../../adapters/antigravity/src/index.ts';
 // agy's probe replays the package's recorded 1.1.17 fixture rather than an
 // inline reconstruction: the call row and the result row come from two
@@ -157,6 +158,16 @@ const DECLARED: Record<string, Record<Family, Answer>> = {
     // `filename`); the mapper accepts all of them.
     read: { status: 'supported', fields: ['semantic.path', 'result.path'] },
     // Plus the change set parsed out of `details.diff`.
+    edit: {
+      status: 'supported',
+      fields: ['result.path', 'result.fileChanges[].path'],
+    },
+  },
+  omp: {
+    // Omp shares pi's mapper through the pi-engine dialect, so the answer is
+    // pi's verbatim: the same four argument spellings on read...
+    read: { status: 'supported', fields: ['semantic.path', 'result.path'] },
+    // ...and the same result field plus the `details.diff` change set on edit.
     edit: {
       status: 'supported',
       fields: ['result.path', 'result.fileChanges[].path'],
@@ -328,6 +339,25 @@ PROBES.pi = {
       diff: '--- a/src/a.ts\n+++ b/src/a.ts\n@@\n-old\n+new\n',
     })),
     'pi-edit',
+  ),
+};
+
+// Omp: the same extension JSONL through the same pi-engine mapper, driven with
+// the omp dialect — the wiring M2 pins end to end.
+PROBES.omp = {
+  read: () => pair(
+    mapPiJsonlText(piJsonl('omp-read', 'read', { path: 'src/a.ts' }), 0, OMP_DIALECT),
+    'omp-read',
+  ),
+  edit: () => pair(
+    mapPiJsonlText(
+      piJsonl('omp-edit', 'edit', { path: 'src/a.ts' }, {
+        diff: '--- a/src/a.ts\n+++ b/src/a.ts\n@@\n-old\n+new\n',
+      }),
+      0,
+      OMP_DIALECT,
+    ),
+    'omp-edit',
   ),
 };
 

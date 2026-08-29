@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "8d78ba10ff901ffa530e1ebe420dde2534ff2e16",
+  "acceptedBase": "241c28c8c671151a47adf16a43c69ec664b177b3",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -71,6 +71,12 @@
     "broker.model-session-creation",
     "broker.notifications-bulk-dismiss",
     "broker.npm-package",
+    "broker.omp-bridge",
+    "broker.omp-bridge-asset",
+    "broker.omp-discovery",
+    "broker.omp-lifecycle",
+    "broker.omp-protocol-parity",
+    "broker.omp-runtime-readiness",
     "broker.opencode-completion",
     "broker.opencode-file-changes",
     "broker.opencode-identity",
@@ -134,7 +140,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:540a64c333a0f8d1e360efc957174c6b073119553be9e020a04250b2b8f72225"
+      "fingerprint": "sha256:29198375cad3198fd94dbe83a0d34c805ff4a108399b5dd611850d92204c43fc"
     },
     {
       "id": "capabilities",
@@ -545,6 +551,30 @@
     {
       "id": "npm-package",
       "fingerprint": "sha256:0d8ca40f7739bce208fc5023d6d76293b75d196562a9984af6df1d50427f4b5c"
+    },
+    {
+      "id": "omp-bridge",
+      "fingerprint": "sha256:dd32b17dea0e6e6dcaa27245e170ebcec5847719de061a036a8f20112ba44512"
+    },
+    {
+      "id": "omp-bridge-asset",
+      "fingerprint": "sha256:ad00ce6efc47eaa12c65f8d15bacbb712f22929d6daf2a461c81cf86893c15e5"
+    },
+    {
+      "id": "omp-discovery",
+      "fingerprint": "sha256:78518780be1e82545f96cd3547d7109927aaf663839f4e49ed82434c928fb92b"
+    },
+    {
+      "id": "omp-lifecycle",
+      "fingerprint": "sha256:ff888c868e813bf8bc8bdeed15548335e6334caec6bed87975c56a9e316314f6"
+    },
+    {
+      "id": "omp-protocol-parity",
+      "fingerprint": "sha256:50771d0cc80cbd581371934095630e74a4c979356f06347d1e8ccbae0fe1d92d"
+    },
+    {
+      "id": "omp-runtime-readiness",
+      "fingerprint": "sha256:b51cd4d65225807858df6ec2c1696efd9b97c2bc08b643c51b89b70dee8d5c9d"
     },
     {
       "id": "opencode-completion-fence",

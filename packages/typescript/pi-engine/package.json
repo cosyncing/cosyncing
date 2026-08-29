@@ -1,0 +1,12 @@
+{
+  "name": "@cosyncing/pi-engine",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bridge-asset": "./src/bridge-asset.ts"
+  },
+  "dependencies": {
+    "@cosyncing/adapter-api": "workspace:*"
+  }
+}

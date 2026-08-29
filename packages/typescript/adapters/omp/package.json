@@ -1,0 +1,13 @@
+{
+  "name": "@cosyncing/adapter-omp",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bridge-asset": "./src/bridge-asset.ts"
+  },
+  "dependencies": {
+    "@cosyncing/adapter-api": "workspace:*",
+    "@cosyncing/pi-engine": "workspace:*"
+  }
+}

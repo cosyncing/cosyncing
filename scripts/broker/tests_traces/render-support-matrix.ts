@@ -3,12 +3,13 @@ import { SUPPORT_MATRIX_CLAIMS, type SupportClaim } from './support-matrix-claim
 import { TAXONOMY_FUNCTIONS, type TaxonomyFunction } from './trace-manifest.ts';
 import type { AgentId } from './scenarios.ts';
 
-const AGENT_ORDER: AgentId[] = ['claude', 'codex', 'opencode', 'pi'];
+const AGENT_ORDER: AgentId[] = ['claude', 'codex', 'opencode', 'pi', 'omp'];
 const AGENT_LABELS: Record<AgentId, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
   opencode: 'OpenCode',
   pi: 'Pi',
+  omp: 'omp',
 };
 
 const FUNCTION_LABELS: Record<TaxonomyFunction, string> = {
@@ -35,8 +36,8 @@ for (const claim of SUPPORT_MATRIX_CLAIMS) claimMap.set(`${claim.agent}:${claim.
 
 export function renderSupportMatrixBlock(): string {
   const lines = [
-    '| Function | Claude Code | Codex | OpenCode | Pi |',
-    '|---|---|---|---|---|',
+    '| Function | Claude Code | Codex | OpenCode | Pi | omp |',
+    '|---|---|---|---|---|---|',
   ];
   for (const fn of TAXONOMY_FUNCTIONS) {
     const cells = [

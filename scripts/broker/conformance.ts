@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { CANONICAL_MESSAGE_TYPES, type AgentBackend } from '../../packages/typescript/adapter-api/src/index.ts';
 import { OpenCodeAdapter } from '../../packages/typescript/adapters/opencode/src/index.ts';
 import { PiAdapter } from '../../packages/typescript/adapters/pi/src/index.ts';
+import { OmpAdapter } from '../../packages/typescript/adapters/omp/src/index.ts';
 import { CodexAdapter } from '../../packages/typescript/adapters/codex/src/index.ts';
 import { ClaudeAdapter } from '../../packages/typescript/adapters/claude/src/index.ts';
 
@@ -66,6 +67,7 @@ interface Report {
 const ALL_ADAPTERS: AgentBackend[] = [
   new OpenCodeAdapter({ baseUrl: OC }),
   new PiAdapter(),
+  new OmpAdapter(),
   new CodexAdapter(),
   new ClaudeAdapter(),
 ];
@@ -173,6 +175,33 @@ async function piCoverage(): Promise<AgentCoverage> {
   return base;
 }
 
+async function ompCoverage(): Promise<AgentCoverage> {
+  const base: AgentCoverage = {
+    agent: 'omp', reachable: false,
+    commands: { true: 0, surfaced: 0, missing: [], droppedByFilter: [] },
+    models: { true: 0, surfaced: 0, missing: [] },
+  };
+  const omp = new OmpAdapter();
+  if (!(await omp.isAvailable())) { base.note = 'omp not installed or below its runtime/package floor — skipped'; return base; }
+  base.reachable = true;
+  const sessionFile = '/tmp/cosyncing-conformance-omp.jsonl';
+  const enc = Buffer.from(sessionFile, 'utf8').toString('base64url');
+  try {
+    const conn = await omp.attach(enc);
+    const surfaced = (await conn.listCommands?.()) ?? [];
+    const models = (await conn.listModels?.()) ?? [];
+    await conn.close?.();
+    base.commands = { true: surfaced.length, surfaced: surfaced.length, missing: [], droppedByFilter: [] };
+    base.models = { true: models.length, surfaced: models.length, missing: [] };
+    if (surfaced.length <= 1) base.note = 'REGRESSION: omp surfaces ≤1 command — get_available_commands not wired';
+  } catch (e) {
+    base.note = `probe error: ${String(e).slice(0, 120)}`;
+  } finally {
+    try { rmSync(sessionFile, { force: true }); } catch { /* ignore */ }
+  }
+  return base;
+}
+
 // Claude is ALWAYS reachable (disk-based), so probe it for free in OBSERVE mode (no model cost): the
 // adapter must surface >0 commands. This is exactly the gap that shipped silently (Claude had no
 // listCommands → ~0 commands); now it's a computed regression. (Issues C + H.)
@@ -223,6 +252,7 @@ async function main() {
     agents.push(
       await capProbe('opencode', opencodeCoverage()),
       await capProbe('pi', piCoverage()),
+      await capProbe('omp', ompCoverage()),
       await capProbe('claude', claudeCoverage()),
     );
   // Hard fails: a render blank-drop, OR a probed agent reporting a REGRESSION (e.g. a drivable adapter

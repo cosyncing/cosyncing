@@ -62,6 +62,21 @@
         }
       }
     },
+    "OmpAdapter": {
+      "coverage": {
+        "native-identity": ["omp-bridge"],
+        "terminal-authority": ["omp-bridge"],
+        "history-live-chronology": [],
+        "replacement": ["omp-bridge"],
+        "hub-authority": ["session-truth-conformance"]
+      },
+      "exclusions": {
+        "history-live-chronology": {
+          "reason": "Same bridge shape as Pi: the omp live surface is the upstream oh-my-pi runtime's own keyed event stream relayed by the shared engine; the broker holds no native omp rollout/history source it could re-derive live-vs-history chronology against, so this lane is not applicable to the bridge path.",
+          "reviewed": "2026-08-27"
+        }
+      }
+    },
     "KimiAdapter": {
       "coverage": {
         "native-identity": ["kimi-mapping"],

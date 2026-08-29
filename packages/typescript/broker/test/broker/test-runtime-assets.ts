@@ -76,7 +76,7 @@ function readFrozenTextFixture(path: string): string {
 // legacy identity from the current bridge again, this fixed fixture will stop matching and fail the test.
 const PI_BRIDGE_V010_FIXTURE = readFrozenTextFixture(join(
   import.meta.dir,
-  '../../../adapters/pi/assets/legacy/cosyncing-bridge-v0.1.0.json',
+  '../../../pi-engine/assets/legacy/cosyncing-bridge-v0.1.0.json',
 ));
 
 const ROOT = join(import.meta.dir, '../../../../..');
@@ -295,6 +295,7 @@ async function withSourceBroker(
   const requiredIds = required.map((asset) => asset.id).sort();
   check('manifest contains every embedded service asset, including the Windows bootstrap',
     JSON.stringify(requiredIds) === JSON.stringify([
+      'omp/cosyncing-bridge/index.ts',
       'pi/cosyncing-bridge/index.ts',
       'service/launchd/cosyncing.plist',
       'service/systemd/cosyncing.service',
@@ -612,7 +613,7 @@ try {
   const packageChecks = doctorJson.sections?.find((section) => section.id === 'package')?.checks ?? [];
   check('copied artifact doctor validates every embedded required asset',
     doctor.exitCode === 1 && doctorJson.ok === false &&
-      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 5 &&
+      packageChecks.filter((item) => item.status === 'pass' && item.evidence?.required === true).length === 6 &&
       packageChecks.every((item) => !String(item.id).includes('poc-ui')),
     doctor.stderr.trim().slice(0, 180));
   check('packaged doctor is read-only',

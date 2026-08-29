@@ -274,7 +274,7 @@ function main(): void {
   }
   const mainSource = readText(MAIN_TS);
   const brokerRoutes = extractRoutesFromMain(mainSource, ['/api']);
-  const integrationRoutes = extractRoutesFromMain(mainSource, ['/pi/bridge/', '/claude/hook/']);
+  const integrationRoutes = extractRoutesFromMain(mainSource, ['/pi/bridge/', '/omp/bridge/', '/claude/hook/']);
   const { literals: literalCodes, dynamicTranscriptExportCodes } = extractErrorCodesFromMain(mainSource);
   const wireKinds = extractWireEventKinds(readText(HUB_TS));
   const clientKinds = extractClientMessageKinds(mainSource);

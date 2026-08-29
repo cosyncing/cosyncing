@@ -167,6 +167,8 @@ export interface DurableServiceProviderOptions {
   agentExecutableDirectories?: readonly string[];
   /** Absolute executable overrides that supported adapters read instead of their conventional command name. */
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
+  /** Explicit Pi/omp data-path overrides translated into disjoint durable variables. */
+  agentDataPathOverrides?: Readonly<ServiceAgentDataPathOverrides>;
   /**
    * Flutter web root, resolved from the ACQUISITION executable. The unit execs the bootstrap copy, which has
    * no sidecar beside it, so the service can only find the web app if it is handed the path.
@@ -369,6 +371,43 @@ export const SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES = [
 export type ServiceAgentExecutableOverrideName = typeof SERVICE_AGENT_EXECUTABLE_OVERRIDE_NAMES[number];
 
 export type ServiceAgentExecutableOverrides = Partial<Record<ServiceAgentExecutableOverrideName, string>>;
+
+export const SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES = [
+  'COSYNCING_PI_AGENT_DIR',
+  'COSYNCING_OMP_AGENT_DIR',
+  'COSYNCING_PI_SESSIONS_ROOT',
+  'COSYNCING_OMP_SESSIONS_ROOT',
+] as const;
+
+export type ServiceAgentDataPathOverrideName = typeof SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES[number];
+export type ServiceAgentDataPathOverrides = Partial<Record<ServiceAgentDataPathOverrideName, string>>;
+
+/**
+ * Translate explicit/shared Pi-family path inputs into durable dialect-specific variables. Omp's
+ * PI_CONFIG_DIR and existing-XDG decisions must also be frozen here: the managed service deliberately
+ * does not inherit either variable, so asking it to resolve those defaults again would move its files.
+ */
+export function serviceAgentDataPathOverrides(options: {
+  env: Readonly<Record<string, string | undefined>>;
+  piAgentDir: string;
+  ompAgentDir: string;
+  piSessionsRoot: string;
+  ompSessionsRoot: string;
+}): ServiceAgentDataPathOverrides {
+  const set = (name: string) => !!options.env[name]?.trim();
+  const ompUsesNativeDerivedPath = set('PI_CONFIG_DIR')
+    || resolve(options.ompSessionsRoot) !== resolve(join(options.ompAgentDir, 'sessions'));
+  return {
+    ...(set('COSYNCING_PI_AGENT_DIR') || set('PI_CODING_AGENT_DIR')
+      ? { COSYNCING_PI_AGENT_DIR: options.piAgentDir } : {}),
+    ...(set('COSYNCING_OMP_AGENT_DIR') || set('PI_CODING_AGENT_DIR') || ompUsesNativeDerivedPath
+      ? { COSYNCING_OMP_AGENT_DIR: options.ompAgentDir } : {}),
+    ...(set('COSYNCING_PI_SESSIONS_ROOT') || set('PI_CODING_AGENT_SESSION_DIR')
+      ? { COSYNCING_PI_SESSIONS_ROOT: options.piSessionsRoot } : {}),
+    ...(set('COSYNCING_OMP_SESSIONS_ROOT') || set('PI_CODING_AGENT_SESSION_DIR') || ompUsesNativeDerivedPath
+      ? { COSYNCING_OMP_SESSIONS_ROOT: options.ompSessionsRoot } : {}),
+  };
+}
 
 function serviceEnvValue(
   env: Readonly<Record<string, string | undefined>>,
@@ -573,6 +612,16 @@ function serviceAgentOverrideEntries(
   });
 }
 
+function serviceAgentDataPathOverrideEntries(
+  overrides: Readonly<ServiceAgentDataPathOverrides>,
+  platform: string = process.platform,
+): Array<readonly [ServiceAgentDataPathOverrideName, string]> {
+  return SERVICE_AGENT_DATA_PATH_OVERRIDE_NAMES.flatMap((name) => {
+    const path = overrides[name];
+    return path ? [[name, cleanHostPath(path, `${name} path`, platform)] as const] : [];
+  });
+}
+
 /**
  * The exact, minimal environment a managed broker runs with. Both providers derive from this single list, so
  * the owner-only `service/broker.env` file and its `service-environment` receipt are byte-identical whichever
@@ -588,6 +637,8 @@ export function brokerServiceEnvironmentEntries(options: {
   runtimePath?: string;
   agentExecutableDirectories?: readonly string[];
   agentExecutableOverrides?: Readonly<ServiceAgentExecutableOverrides>;
+  /** Explicit Pi/omp data-path overrides translated into disjoint durable variables. */
+  agentDataPathOverrides?: Readonly<ServiceAgentDataPathOverrides>;
   webDir: string;
   platform?: string;
 }): Array<readonly [string, string]> {
@@ -604,10 +655,12 @@ export function brokerServiceEnvironmentEntries(options: {
       platform,
     )],
     ...serviceAgentOverrideEntries(options.agentExecutableOverrides ?? {}, platform),
+    ...serviceAgentDataPathOverrideEntries(options.agentDataPathOverrides ?? {}, platform),
     ['COSYNCING_HOME', stateHome],
     ['COSYNCING_CACHE_DIR', cleanHostPath(options.cacheRoot, 'cache', platform)],
     ['COSYNCING_TOKEN_FILE', pathApi.join(stateHome, 'secrets', 'broker-token')],
     ['COSYNCING_PI_INTEGRATION_FILE', pathApi.join(stateHome, 'secrets', 'pi-integration.json')],
+    ['COSYNCING_OMP_INTEGRATION_FILE', pathApi.join(stateHome, 'secrets', 'omp-integration.json')],
     // Not derivable inside the service. `executablePath` above is the bootstrap copy the unit execs, and no
     // web sidecar is ever placed beside it; the sidecar sits beside the acquisition executable, which is
     // exactly where setup measured it. Without this entry a packaged service install serves "no web app" on
@@ -809,6 +862,7 @@ export class SystemdUserServiceProvider implements DurableServiceProvider {
       ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
+      agentDataPathOverrides: options.agentDataPathOverrides,
       webDir: options.webDir,
     }));
     const template = embeddedRuntimeAsset('service/systemd/cosyncing.service').content;
@@ -1003,6 +1057,7 @@ export class LaunchdUserServiceProvider implements DurableServiceProvider {
       ...(options.runtimePath ? { runtimePath: options.runtimePath } : {}),
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
+      agentDataPathOverrides: options.agentDataPathOverrides,
       webDir: options.webDir,
     });
     // The env file is the receipt-owned source of truth for what the service environment IS; launchd has no
@@ -1238,6 +1293,7 @@ export function createDurableServiceProvider(options: DurableServiceProviderOpti
       runtimePath: options.runtimePath,
       agentExecutableDirectories: options.agentExecutableDirectories,
       agentExecutableOverrides: options.agentExecutableOverrides,
+      agentDataPathOverrides: options.agentDataPathOverrides,
       webDir: paths.webRoot,
       platform: 'win32',
     }),

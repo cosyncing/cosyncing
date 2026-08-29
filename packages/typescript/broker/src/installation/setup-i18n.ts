@@ -37,6 +37,7 @@ export type SetupMutationStep =
   | { kind: 'credentials' }
   | { kind: 'setup-state'; service: SetupServiceChoice }
   | { kind: 'pi-bridge'; path: string; replaceLegacy?: boolean }
+  | { kind: 'omp-bridge'; path: string }
   | { kind: 'durable-state-permissions'; paths: readonly string[] }
   | { kind: 'agent-skill-install' }
   | { kind: 'agent-skill-refresh' }
@@ -189,6 +190,7 @@ const en: SetupMessages = {
     codex: 'Managed shared app-server; remote terminals may join it.',
     opencode: 'Managed shared serve; externally managed servers remain untouched.',
     pi: 'Packaged in-session bridge when Pi is installed.',
+    omp: 'Packaged in-session bridge when omp is installed.',
     claude: 'Observe + Take over only; setup never edits Claude settings.',
     agy: 'Observe + Resume only; agy has no daemon to manage, and setup never touches Antigravity state.',
     kimi: 'Managed `kimi web` host; a server you started yourself is never touched.',
@@ -219,7 +221,7 @@ const en: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\nFix: ${remediation}`,
   managedRuntimeTitle: 'Required managed-runtime acknowledgement',
   managedRuntimeBody: (product) =>
-    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi bridge, and the \`kimi web\` and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
+    `${product} will manage supported shared Codex/OpenCode runtimes, the packaged Pi and omp bridges, and the \`kimi web\` and \`dsh web\` hosts — starting one when none is running, restarting it if it crashes, and stopping only the one it started. Externally managed processes stay untouched. Claude remains Observe + Take over and its settings are never edited.`,
   managedRuntimeConfirm: (product) =>
     `I understand and want ${product} to manage the supported shared runtimes.`,
   legacyPiBridgeConfirm: (path) =>
@@ -297,6 +299,8 @@ const en: SetupMessages = {
         return step.replaceLegacy
           ? `Transactionally replace the exact known legacy bridge at ${step.path}; rollback restores the previous bytes.`
           : `Write the exact packaged bridge to ${step.path}; unrelated content is never overwritten.`;
+      case 'omp-bridge':
+        return `Write the exact packaged omp bridge to ${step.path}; unrelated content is never overwritten.`;
       case 'durable-state-permissions':
         return `Tighten owner-only permissions on current-schema durable state: ${step.paths.join(', ')}; content is unchanged.`;
       case 'agent-skill-install':
@@ -401,6 +405,7 @@ const zhHans: SetupMessages = {
     codex: '由 cosyncing 托管共享 app-server，远程终端可以接入。',
     opencode: '由 cosyncing 托管共享 serve；你自己启动的 server 不受影响。',
     pi: '装有 Pi 时，随包提供会话内 bridge。',
+    omp: '装有 omp 时，随包提供会话内 bridge。',
     claude: '只有「观察 + 接管」两种模式；安装过程不会改动 Claude 的配置。',
     agy: '只有「观察 + 继续」两种模式；agy 没有常驻进程，安装过程不会改动 Antigravity 的数据。',
     kimi: '由 cosyncing 托管 `kimi web` host；你自己启动的 server 不受影响。',
@@ -428,7 +433,7 @@ const zhHans: SetupMessages = {
   blocker: ({ summary, remediation }) => `${summary}\n解决办法：${remediation}`,
   managedRuntimeTitle: '需要确认：由 cosyncing 托管运行时',
   managedRuntimeBody: (product) =>
-    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi bridge，以及 \`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
+    `${product} 会接管支持的 Codex/OpenCode 共享运行时、随包提供的 Pi 与 omp bridge，以及 \`kimi web\` 和 \`dsh web\` host：没有运行时会启动，崩溃后会重启，并且只停止它自己启动的那个。你自己启动的进程不受影响。Claude 仍然只有「观察 + 接管」两种模式，其配置文件不会被改动。`,
   managedRuntimeConfirm: (product) => `我已了解，同意由 ${product} 托管这些共享运行时。`,
   legacyPiBridgeConfirm: (path) =>
     `用当前随包版本替换 ${path} 中内容完全匹配的已知旧版 Pi bridge？如果回滚，会逐字节恢复旧文件。`,
@@ -492,6 +497,8 @@ const zhHans: SetupMessages = {
         return step.replaceLegacy
           ? `以事务方式替换 ${step.path} 中内容完全匹配的已知旧版 bridge；回滚时会恢复原始字节。`
           : `把随包提供的 bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
+      case 'omp-bridge':
+        return `把随包提供的 omp bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
       case 'durable-state-permissions':
         return `收紧当前架构持久状态的仅本人访问权限：${step.paths.join('、')}；不修改文件内容。`;
       case 'agent-skill-install':

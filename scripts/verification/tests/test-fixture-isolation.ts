@@ -87,7 +87,7 @@ try {
 
   const bridgePath = resolve(
     import.meta.dir,
-    '../../../packages/typescript/adapters/pi/agent-extensions/cosyncing-bridge/index.ts',
+    '../../../packages/typescript/pi-engine/agent-extensions/cosyncing-bridge/index.ts',
   );
   await import(
     resolve(

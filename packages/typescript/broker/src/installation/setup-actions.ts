@@ -13,6 +13,11 @@ import {
   PI_BRIDGE_EMBEDDED_SOURCE,
   inspectPiBridgeAsset,
 } from '@cosyncing/adapter-pi';
+import {
+  OMP_BRIDGE_EMBEDDED_SHA256,
+  OMP_BRIDGE_EMBEDDED_SOURCE,
+} from '@cosyncing/adapter-omp/bridge-asset';
+import { inspectOmpBridgeAsset } from '@cosyncing/adapter-omp';
 import type { BrokerConfig } from '../runtime/configuration.ts';
 import { inspectBrokerConfig, writeBrokerConfig } from '../runtime/configuration.ts';
 import { recordLegacyArtifactBrokerSources } from '../runtime/broker-instance.ts';
@@ -20,8 +25,11 @@ import {
   brokerTokenPath,
   ensureInstallationCredentials,
   inspectBrokerToken,
+  inspectOmpIntegration,
   inspectPiIntegration,
+  ompIntegrationPath,
   piIntegrationPath,
+  readOmpIntegration,
   readPiIntegration,
 } from '../security/credentials.ts';
 import {
@@ -75,6 +83,7 @@ import {
 } from '../security/durable-state.ts';
 import {
   inspectPiBridgeOwnership,
+  inspectOmpBridgeOwnership,
   piBridgeOwnershipPrecondition,
   piBridgeReplaceable,
 } from './pi-bridge-ownership.ts';
@@ -107,6 +116,10 @@ export interface SetupActionInputs {
   replaceLegacyPiBridge?: boolean;
   /** Locked-plan identity that both apply and the final atomic replacement callback must still observe. */
   piBridgePrecondition?: string;
+  ompAgentDir: string;
+  installOmpBridge: boolean;
+  /** Locked-plan identity for the separate omp bridge target and receipt. */
+  ompBridgePrecondition?: string;
   /** Current-schema, owner-held files whose only defect is a loose mode. */
   durableStatePermissionRepairs?: readonly DurableStatePermissionRepair[];
   agentSkillTargets: readonly AgentSkillTarget[];
@@ -394,15 +407,19 @@ export function createConfigurationSetupAction(inputs: SetupActionInputs): Setup
 export function createCredentialSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
   const tokenTarget = brokerTokenPath(inputs.home);
   const piTarget = piIntegrationPath(inputs.home);
+  const ompTarget = ompIntegrationPath(inputs.home);
   return {
     id: 'credentials.ensure',
-    prepare: (context) => snapshotSetupFiles(context, 'credentials.ensure', [tokenTarget, piTarget]),
+    prepare: (context) => snapshotSetupFiles(context, 'credentials.ensure', [tokenTarget, piTarget, ompTarget]),
     apply: () => {
       ensureInstallationCredentials({ home: inputs.home, internalUrl: inputs.config.broker.internalUrl });
     },
     verify: () => {
-      if (inspectBrokerToken(tokenTarget).status !== 'ok' || inspectPiIntegration(piTarget).status !== 'ok') return false;
-      return readPiIntegration(piTarget).internalUrl === inputs.config.broker.internalUrl;
+      if (inspectBrokerToken(tokenTarget).status !== 'ok'
+        || inspectPiIntegration(piTarget).status !== 'ok'
+        || inspectOmpIntegration(ompTarget).status !== 'ok') return false;
+      return readPiIntegration(piTarget).internalUrl === inputs.config.broker.internalUrl
+        && readOmpIntegration(ompTarget).internalUrl === inputs.config.broker.internalUrl;
     },
     rollback: (_context, record) => { rollbackSetupFiles(record); },
   };
@@ -429,38 +446,89 @@ export function createSetupStateAction(inputs: SetupActionInputs): SetupTransact
   };
 }
 
-export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
-  const target = inspectPiBridgeAsset(inputs.piAgentDir).path;
+function createBridgeSetupAction(options: {
+  actionId: 'pi-bridge.install' | 'omp-bridge.install';
+  displayName: 'Pi' | 'omp';
+  home: string;
+  agentDir: string;
+  precondition?: string;
+  allowLegacy: boolean;
+  allowCurrentUnreceipted: boolean;
+  source: string;
+  sha256: string;
+  resourceId: 'pi-bridge' | 'omp-bridge';
+  inspectAsset: (agentDir: string) => ReturnType<typeof inspectPiBridgeAsset>;
+  inspectOwnership: typeof inspectPiBridgeOwnership;
+}): SetupTransactionAction {
+  const target = options.inspectAsset(options.agentDir).path;
   const assertReplacementPrecondition = (): void => {
-    if (!inputs.piBridgePrecondition) throw new Error('Pi bridge replacement precondition is missing');
-    const decision = inspectPiBridgeOwnership(inspectInstallState(inputs.home), inputs.piAgentDir);
-    if (!piBridgeReplaceable(decision)
-        || piBridgeOwnershipPrecondition(decision) !== inputs.piBridgePrecondition
-        || (decision.status === 'legacy-unreceipted' && inputs.replaceLegacyPiBridge !== true)) {
-      throw new Error('Pi bridge target or receipt changed after planning');
+    if (!options.precondition) throw new Error(`${options.displayName} bridge replacement precondition is missing`);
+    const decision = options.inspectOwnership(inspectInstallState(options.home), options.agentDir);
+    const replaceable = piBridgeReplaceable(decision)
+      || (options.allowCurrentUnreceipted
+        && decision.status === 'owned-current'
+        && !decision.receiptMatchesCurrentPackage);
+    if (!replaceable
+        || piBridgeOwnershipPrecondition(decision) !== options.precondition
+        || (decision.status === 'legacy-unreceipted' && !options.allowLegacy)) {
+      throw new Error(`${options.displayName} bridge target or receipt changed after planning`);
     }
   };
   return {
-    id: 'pi-bridge.install',
-    prepare: (context) => snapshotSetupFiles(context, 'pi-bridge.install', [target]),
+    id: options.actionId,
+    prepare: (context) => snapshotSetupFiles(context, options.actionId, [target]),
     apply: () => {
       assertReplacementPrecondition();
-      atomicWriteOwnerOnly(target, PI_BRIDGE_EMBEDDED_SOURCE, {
+      atomicWriteOwnerOnly(target, options.source, {
         mode: 0o600,
         beforeReplace: assertReplacementPrecondition,
       });
       return {
         resources: [{
-          id: 'pi-bridge',
+          id: options.resourceId,
           kind: 'agent-integration',
           target,
-          ownership: { proof: 'package-hash', installedSha256: PI_BRIDGE_EMBEDDED_SHA256 },
+          ownership: { proof: 'package-hash', installedSha256: options.sha256 },
         } satisfies InstalledResourceRecord],
       };
     },
-    verify: () => inspectPiBridgeAsset(inputs.piAgentDir).status === 'owned',
+    verify: () => options.inspectAsset(options.agentDir).status === 'owned',
     rollback: (_context, record) => { rollbackSetupFiles(record); },
   };
+}
+
+export function createPiBridgeSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
+  return createBridgeSetupAction({
+    actionId: 'pi-bridge.install',
+    displayName: 'Pi',
+    home: inputs.home,
+    agentDir: inputs.piAgentDir,
+    precondition: inputs.piBridgePrecondition,
+    allowLegacy: inputs.replaceLegacyPiBridge === true,
+    allowCurrentUnreceipted: false,
+    source: PI_BRIDGE_EMBEDDED_SOURCE,
+    sha256: PI_BRIDGE_EMBEDDED_SHA256,
+    resourceId: 'pi-bridge',
+    inspectAsset: inspectPiBridgeAsset,
+    inspectOwnership: inspectPiBridgeOwnership,
+  });
+}
+
+export function createOmpBridgeSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
+  return createBridgeSetupAction({
+    actionId: 'omp-bridge.install',
+    displayName: 'omp',
+    home: inputs.home,
+    agentDir: inputs.ompAgentDir,
+    precondition: inputs.ompBridgePrecondition,
+    allowLegacy: false,
+    allowCurrentUnreceipted: true,
+    source: OMP_BRIDGE_EMBEDDED_SOURCE,
+    sha256: OMP_BRIDGE_EMBEDDED_SHA256,
+    resourceId: 'omp-bridge',
+    inspectAsset: inspectOmpBridgeAsset,
+    inspectOwnership: inspectOmpBridgeOwnership,
+  });
 }
 
 export function createDurableStatePermissionsSetupAction(inputs: SetupActionInputs): SetupTransactionAction {
@@ -715,6 +783,7 @@ export function createSetupActionCatalog(inputs: SetupActionInputs): {
     // Keep the complete stable catalog available for interrupted-transaction recovery. The plan decides
     // whether this action runs; merely constructing it performs no filesystem mutation.
     createPiBridgeSetupAction(inputs),
+    createOmpBridgeSetupAction(inputs),
     createAgentSkillSetupAction(inputs),
     createOpencodeShimSetupAction(inputs),
   ];
@@ -728,6 +797,8 @@ export function setupActionContentHash(inputs: SetupActionInputs): string {
     installPiBridge: inputs.installPiBridge,
     replaceLegacyPiBridge: inputs.replaceLegacyPiBridge,
     piBridgePrecondition: inputs.piBridgePrecondition,
+    installOmpBridge: inputs.installOmpBridge,
+    ompBridgePrecondition: inputs.ompBridgePrecondition,
     durableStatePermissionRepairs: inputs.durableStatePermissionRepairs,
     agentSkillTargets: inputs.agentSkillTargets,
     installAgentSkill: inputs.installAgentSkill,
