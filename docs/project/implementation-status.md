@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-08-22.
+Last updated: 2026-09-02.
 
 ## Publication state
 
@@ -49,7 +49,8 @@ credential.
 The public tree passes the required source-content policy with every retained
 binary pinned to reviewed content. Hosted Linux, Android, macOS, iOS simulator,
 Windows, web, broker, contract, and reusable-package jobs pass. The deterministic
-broker aggregate contains 66 registered sub-suites.
+broker aggregate registers every sub-suite bound by the verification
+completeness anchor.
 
 The local complete check covers every registered gate. Source architecture is
 enforced through package dependency direction, adapter isolation, public
@@ -72,7 +73,7 @@ executable — see
 [npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
 `.github/workflows/npm-publish.yml` builds, verifies, and submits releases
 through npm's protected staging and 2FA approval flow. The current JavaScript
-package is `cosyncing@0.4.0`. Flutter-only Android, Linux, Apple Silicon macOS,
+package is `cosyncing@0.5.1`. Flutter-only Android, Linux, Apple Silicon macOS,
 and Windows client downloads are published separately in the GitHub client
 release; iOS/TestFlight remains deferred.
 
