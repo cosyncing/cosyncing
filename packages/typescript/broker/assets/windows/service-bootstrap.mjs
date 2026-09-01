@@ -163,7 +163,39 @@ async function readServiceLogs(request) {
   }
 }
 
+/**
+ * Task Scheduler launches this bootstrap with an interactive logon token, which hands a console
+ * application a console window that lives exactly as long as the service does. The broker child is
+ * already spawned with `windowsHide`, so this is the supervisor's own window and nothing else.
+ *
+ * Only the service path releases it. The log-following path below writes to stdout on purpose, because
+ * an operator ran `logs` and is waiting to read it.
+ *
+ * Hiding precedes releasing: FreeConsole on its own can leave the window painted until conhost notices,
+ * which the operator sees as a flash. A console that survives is a cosmetic fault and must never stop the
+ * service from starting, so every failure here is swallowed deliberately.
+ */
+async function releaseServiceConsole() {
+  if (process.platform !== 'win32') return;
+  try {
+    const { dlopen, FFIType } = await import('bun:ffi');
+    const kernel32 = dlopen('kernel32.dll', {
+      GetConsoleWindow: { args: [], returns: FFIType.ptr },
+      FreeConsole: { args: [], returns: FFIType.i32 },
+    });
+    const user32 = dlopen('user32.dll', {
+      ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    });
+    const window = kernel32.symbols.GetConsoleWindow();
+    if (window) user32.symbols.ShowWindow(window, 0);
+    kernel32.symbols.FreeConsole();
+  } catch {
+    /* no console to release, or no FFI to release it with */
+  }
+}
+
 async function runBroker() {
+  await releaseServiceConsole();
   rotateLog();
   const log = openSync(logPath, 'a', 0o600);
 

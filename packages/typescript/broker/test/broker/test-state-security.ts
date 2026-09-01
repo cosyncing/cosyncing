@@ -76,8 +76,10 @@ import {
   atomicWriteOwnerOnly,
   createOwnerOnlyFileExclusive,
   ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyDirectory,
   inspectOwnerOnlyFile,
 } from '../../src/security/secure-files.ts';
+import { AttentionStore } from '../../src/attention/attention-store.ts';
 import { writeSetupState } from '../../src/installation/setup-state.ts';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/bridge-asset.ts';
 import { ArtifactStore } from '../../src/artifacts/artifact-store.ts';
@@ -570,6 +572,41 @@ try {
         migrated.schemaVersion === 1 && migrated.futureField?.keep === 7 &&
         backedUp?.schemaVersion === undefined && backedUp?.futureField?.keep === 7);
     check('schema migration is idempotent after the v1 stamp', planDurableStateMigrations(layout).steps.length === 0);
+  }
+
+  // The attention store is written by the broker at runtime rather than by setup, and it used to
+  // hand-roll its own atomic write with a POSIX mode. That secures the file on this platform and says
+  // nothing about a Windows ACL, so on Windows the store inherited its parent descriptor, failed the
+  // product's own owner-only check, and left `repair` permanently reporting a blocker it could never
+  // clear -- on a healthy installation. Pin the property that matters on every platform: whatever writes
+  // this store, the result satisfies the same owner-only contract as every store setup writes, and raises
+  // no migration blocker.
+  {
+    const stateRoot = join(root, 'attention-state');
+    const cacheRoot = join(root, 'attention-cache');
+    mkdirSync(stateRoot, { recursive: true });
+    const layout = durableStateLayout({ stateRoot, cacheRoot });
+    const store = new AttentionStore({ path: layout.attention, now: () => Date.UTC(2026, 8, 1) });
+    await store.upsertEvent({
+      dedupeKey: 'permission:state-security:1',
+      kind: 'permission-required',
+      state: 'active',
+      severity: 'action-required',
+      title: 'Action needed',
+      action: { kind: 'open-session', tool: 'test-adapter', sessionId: 'session-1' },
+      presentationRevision: 1,
+    });
+    const inspected = inspectOwnerOnlyFile(layout.attention);
+    const blockers = planDurableStateMigrations(layout).blockers;
+    // The parent is asserted too, and deliberately: the file mode alone cannot catch this regression on a
+    // POSIX gate, because the hand-rolled write did pass 0o600 and only Windows ignored it. Routing through
+    // the shared writer is what also hardens the directory, so the containing root is the portable witness
+    // that the shared writer -- not a private one -- produced this store.
+    const parent = inspectOwnerOnlyDirectory(stateRoot);
+    check('the attention store the broker writes satisfies the owner-only contract and blocks no repair',
+      inspected.status === 'ok' && parent.status === 'ok'
+        && !blockers.some((blocker) => blocker.store === 'attention'),
+      `${inspected.status}/${parent.status}/${blockers.map((blocker) => blocker.detailCode).join(',') || 'none'}`);
   }
 
   // Atomic replacement leaves a complete old or new document even with abandoned temp files.
