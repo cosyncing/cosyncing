@@ -119,8 +119,8 @@ Linux y macOS, las notas de WSL y la configuración de Tokdash.
 ## Instalación
 
 El paquete contiene un único paquete de aplicación JavaScript y el cliente web. Los hosts de broker
-admitidos son Linux x64, Linux arm64 y macOS con Apple Silicon; en Windows, ejecuta el broker dentro
-de WSL.
+admitidos son Linux x64, Linux arm64, macOS con Apple Silicon y Windows x64. Windows ARM64 todavía no
+está homologado y el broker lo rechaza, incluido un proceso x64 emulado sobre ARM64.
 
 Antes de configurar, instala solo los agentes que uses; consulta
 [configuración de agentes y comprobación del PATH](docs/supported_agents/README.md#preflight).
@@ -198,7 +198,7 @@ más adelante por TestFlight.
 
 <p>
   <img alt="macOS on Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
-  <img alt="Windows via WSL" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0F766E?logo=windows&logoColor=white">
   <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
@@ -213,10 +213,12 @@ más adelante por TestFlight.
   <img alt="Web" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
 </p>
 
-Esta versión no admite alojar el servidor en Windows nativo ni en macOS con Intel. En Windows,
-ejecuta el broker dentro de WSL, donde es un host Linux admitido. El software de conectividad que
-reenvía el loopback del broker debe ejecutarse donde pueda alcanzar al broker de WSL; consulta las
-guías de cada método.
+Esta versión aloja el broker de forma nativa en Windows x64. Windows ARM64 no: todavía no está
+homologado y el broker lo rechaza en lugar de ejecutarse sin verificar, incluido un proceso x64 emulado
+sobre ARM64, que se declara x64, por lo que el broker le pregunta a Windows cuál es la máquina real.
+Alojar el servidor en macOS con Intel sigue sin admitirse. WSL también sigue admitido, como host Linux;
+si te quedas en WSL, el software de conectividad que reenvía el loopback del broker debe ejecutarse
+donde pueda alcanzarlo, así que consulta las guías de cada método.
 
 ## Privacidad y seguridad
 

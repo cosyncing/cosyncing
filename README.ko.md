@@ -115,8 +115,9 @@ Linux와 macOS 명령, WSL 관련 참고 사항, Tokdash 설정은
 ## 설치
 
 패키지에는 JavaScript 애플리케이션 번들 하나와 웹 클라이언트가 들어 있습니다. 지원되는 Broker
-호스트는 Linux x64, Linux arm64, Apple Silicon macOS입니다. Windows에서는 WSL 안에서 Broker를
-실행하세요.
+호스트는 Linux x64, Linux arm64, Apple Silicon macOS, 그리고 Windows x64입니다. ARM64 Windows는
+아직 검증되지 않았으며 Broker가 실행을 거부합니다. ARM64에서 에뮬레이션으로 실행되는 x64
+프로세스도 마찬가지입니다.
 
 설정 전에 실제로 쓰는 에이전트만 설치하세요.
 [에이전트 설정과 PATH 사전 점검](docs/supported_agents/README.md#preflight)을 참고하세요.
@@ -194,7 +195,7 @@ iOS 클라이언트는 이후 TestFlight로 제공할 예정입니다.
 
 <p>
   <img alt="macOS on Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
-  <img alt="Windows via WSL" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0F766E?logo=windows&logoColor=white">
   <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
@@ -209,9 +210,12 @@ iOS 클라이언트는 이후 TestFlight로 제공할 예정입니다.
   <img alt="Web" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
 </p>
 
-이번 릴리스에서는 Windows 네이티브와 Intel macOS의 서버 호스팅을 지원하지 않습니다. Windows에서는
-지원되는 Linux 호스트인 WSL 안에서 Broker를 실행하세요. Broker의 루프백을 전달하는 연결
-소프트웨어는 WSL의 Broker에 접근할 수 있는 곳에서 실행해야 합니다. 방법별 가이드를 참고하세요.
+이번 릴리스에서는 Windows x64에서 Broker를 네이티브로 실행합니다. ARM64 Windows는 아직 검증되지
+않았으므로, Broker는 검증되지 않은 상태로 실행하는 대신 거부합니다. ARM64에서 에뮬레이션으로
+실행되는 x64 프로세스도 포함되며, 그런 프로세스는 스스로를 x64로 보고하므로 Broker는 실제 머신
+아키텍처를 Windows에 직접 확인합니다. Intel macOS의 서버 호스팅은 계속 지원하지 않습니다. WSL도
+Linux 호스트로서 계속 지원됩니다. WSL을 계속 사용한다면 Broker의 루프백을 전달하는 연결
+소프트웨어는 해당 Broker에 접근할 수 있는 곳에서 실행해야 하니 방법별 가이드를 참고하세요.
 
 ## 개인정보와 보안
 

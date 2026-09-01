@@ -119,8 +119,9 @@ Linux と macOS のコマンド、WSL に関する注意、Tokdash のセット�
 ## インストール
 
 パッケージには JavaScript のアプリケーションバンドル 1 つと Web クライアントが含まれます。
-対応する Broker ホストは Linux x64、Linux arm64、Apple Silicon の macOS です。Windows では
-WSL の中で Broker を動かしてください。
+対応する Broker ホストは Linux x64、Linux arm64、Apple Silicon の macOS、そして Windows x64 です。
+ARM64 の Windows はまだ認定されておらず、Broker は実行を拒否します。ARM64 上でエミュレーション
+実行される x64 プロセスも同様です。
 
 セットアップの前に、使うエージェントだけをインストールしてください。
 [エージェントのセットアップと PATH の事前確認](docs/supported_agents/README.md#preflight) を参照。
@@ -198,7 +199,7 @@ iOS クライアントは後日 TestFlight で提供予定です。
 
 <p>
   <img alt="macOS on Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
-  <img alt="Windows via WSL" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0F766E?logo=windows&logoColor=white">
   <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
@@ -213,10 +214,13 @@ iOS クライアントは後日 TestFlight で提供予定です。
   <img alt="Web" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
 </p>
 
-このリリースでは、Windows ネイティブと Intel macOS でのサーバー動作には対応していません。
-Windows では WSL の中で Broker を動かしてください。そこは対応済みの Linux ホストです。Broker の
-ループバックを転送する接続ソフトウェアは、WSL の Broker に到達できる場所で動かす必要があります。
-方法ごとのガイドを参照してください。
+このリリースでは x64 の Windows で Broker をネイティブに動かせます。ARM64 の Windows は対象外
+です。まだ認定されておらず、Broker は未検証のまま動くのではなく拒否します。ARM64 上でエミュレー
+ション実行される x64 プロセスも同じ扱いです。そのプロセスは自身を x64 と報告するため、Broker は
+実際のマシン種別を Windows に直接問い合わせます。Intel macOS でのサーバー動作は引き続き未対応
+です。WSL も Linux ホストとして引き続き対応します。WSL を使い続ける場合、Broker のループバックを
+転送する接続ソフトウェアはその Broker に到達できる場所で動かす必要があるため、方法ごとのガイドを
+参照してください。
 
 ## プライバシーとセキュリティ
 

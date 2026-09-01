@@ -117,7 +117,8 @@ WSL notes, and Tokdash setup.
 ## Install
 
 The package contains one JavaScript application bundle and the web client. Supported broker hosts
-are Linux x64, Linux arm64, and Apple Silicon macOS; on Windows, run the broker inside WSL.
+are Linux x64, Linux arm64, Apple Silicon macOS, and Windows x64. Windows ARM64 is not qualified
+yet, and the broker refuses it — including an x64 process running under ARM64 emulation.
 
 Before setup, install only the agents you use; see [agent setup and PATH
 preflight](docs/supported_agents/README.md#preflight).
@@ -195,7 +196,7 @@ The iOS client will follow later through TestFlight.
 
 <p>
   <img alt="macOS on Apple Silicon" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
-  <img alt="Windows via WSL" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0F766E?logo=windows&logoColor=white">
   <img alt="Linux x64 and arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
@@ -210,9 +211,12 @@ The iOS client will follow later through TestFlight.
   <img alt="Web" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
 </p>
 
-Native Windows and Intel macOS server hosting are not supported in this release. On Windows, run
-the broker inside WSL, where it is a supported Linux host. Connectivity software that forwards
-broker loopback must run where it can reach the WSL broker; see the method-specific guides.
+Windows x64 hosts the broker natively in this release. Windows ARM64 does not: it is not qualified
+yet, and the broker refuses it rather than running unverified — including an x64 process under ARM64
+emulation, which reports itself as x64 and is detected by asking Windows what the machine is. Intel
+macOS server hosting remains unsupported. WSL also remains supported, as a Linux host; connectivity
+software that forwards broker loopback must run where it can reach that broker, so see the
+method-specific guides if you stay on WSL.
 
 ## Privacy and security
 

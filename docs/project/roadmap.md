@@ -61,8 +61,10 @@ full support claim:
   separation.
 - Explore automatic discovery and relay/NAT traversal without weakening pairing
   security.
-- Add native Windows broker hosting when packaging and service integration can
-  be supported together.
+- Qualify Windows ARM64 broker hosting. Windows x64 is supported now; ARM64 is
+  refused as not yet qualified, and clearing that needs a Bun floor of at least
+  1.3.10, a windows-11-arm lane, the native suites run there, and its own
+  physical pass.
 - Evaluate tray operation, background tasks, notifications, and remote wake per
   platform before advertising them.
 

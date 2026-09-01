@@ -16,6 +16,27 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Added omp (oh-my-pi) session discovery, Drive/resume, live bridge sync, model and
   command controls, New Session, setup/repair ownership, and client roster identity.
   OMP 17.4.2 or newer is required; older clients do not receive OMP roster rows.
+- Windows x64 is a supported broker host. The npm package now declares `win32`,
+  and setup, doctor, and broker startup all accept the platform natively rather
+  than directing you to WSL. WSL remains supported as a Linux host.
+
+### Changed
+
+- Setup no longer reverses a permission repair. Tightening durable-state
+  permissions is a monotonic action: it is applied once and is not undone if a
+  later step fails, on every platform. Rollback still restores the file contents
+  it found. Reversing a security repair would mean widening access again from a
+  record written before the repair, which setup will not do.
+
+### Notes
+
+- Windows ARM64 is not qualified yet and is refused, including an x64 process
+  running under ARM64 emulation — which reports itself as x64, so the broker asks
+  Windows what the underlying machine is rather than trusting the process. npm
+  itself may still allow the package to be acquired there, because `os` and `cpu`
+  are independent lists and no combination of them can exclude Windows ARM64
+  without also excluding the supported Linux and macOS ARM64 hosts. The refusal
+  happens before setup changes anything.
 
 ## 0.5.1 — 2026-08-29
 

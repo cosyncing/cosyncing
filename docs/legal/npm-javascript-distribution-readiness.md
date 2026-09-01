@@ -66,16 +66,23 @@ that every applicable obligation is satisfied; that judgment is the owner's.
 
 ## Supported hosts
 
-`linux-x64`, `linux-arm64`, and `darwin-arm64`, single-sourced in
+`linux-x64`, `linux-arm64`, `darwin-arm64`, and `win32-x64`, single-sourced in
 `packages/typescript/broker/src/installation/supported-hosts.ts`.
 
 A universal JavaScript bundle runs anywhere a supported Bun runs, so the
 supported set is now stated and enforced rather than implied by which compiled
-artifacts happen to exist. npm `os`/`cpu` exclude Windows. They cannot exclude
-Intel macOS without also excluding Apple Silicon — the two fields are
-independent lists — so `cosyncing doctor` fails `host.platform` with
-`host-architecture-unsupported` on `darwin-x64`, and the package README says so
-before install.
+artifacts happen to exist. npm `os`/`cpu` cannot express the set: the two fields
+are independent lists, so they cannot exclude Intel macOS without also excluding
+Apple Silicon, and they cannot exclude Windows ARM64 without also excluding
+`linux-arm64` and `darwin-arm64`. Acquisition may therefore succeed where the
+product refuses. `cosyncing doctor` fails `host.platform` with
+`host-architecture-unsupported` on `darwin-x64`, and on Windows ARM64 with
+`windows-arm64-not-qualified` — or `windows-emulated-x64-not-qualified` for an
+x64 process emulated on an ARM64 machine, which reports itself as x64, so the
+broker asks Windows for the native machine rather than trusting the process. A
+machine that cannot be identified is refused as
+`windows-machine-architecture-unverified`. Every one of these refusals lands
+before setup mutates anything, and the package README says so before install.
 
 ## Update model
 

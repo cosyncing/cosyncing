@@ -105,8 +105,9 @@ Linux、macOS 命令、WSL 注意事项与 Tokdash 配置见
 
 ## 安装
 
-该发行包包含一个 JavaScript 应用包和网页客户端。受支持的 Broker 主机为 Linux x64、Linux arm64
-与 Apple Silicon macOS；Windows 上请在 WSL 内运行 Broker。
+该发行包包含一个 JavaScript 应用包和网页客户端。受支持的 Broker 主机为 Linux x64、Linux arm64、
+Apple Silicon macOS 与 Windows x64。ARM64 Windows 尚未通过认证，Broker 会拒绝在其上运行——包括
+在 ARM64 上以模拟方式运行的 x64 进程。
 
 setup 前只安装你要使用的智能体；详见[智能体安装与 PATH
 预检](docs/supported_agents/README.md#preflight)（英文）。
@@ -177,7 +178,7 @@ iOS 客户端将在后续通过 TestFlight 发布。
 
 <p>
   <img alt="Apple 芯片 macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0F766E?logo=apple&logoColor=white">
-  <img alt="通过 WSL 运行的 Windows" src="https://img.shields.io/badge/WSL-supported%20Linux%20host-0F766E?logo=windows&logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0F766E?logo=windows&logoColor=white">
   <img alt="Linux x64 与 arm64" src="https://img.shields.io/badge/Linux-x64%20%C2%B7%20arm64-0F766E?logo=linux&logoColor=white">
 </p>
 
@@ -192,9 +193,11 @@ iOS 客户端将在后续通过 TestFlight 发布。
   <img alt="浏览器" src="https://img.shields.io/badge/Web-E34F26?logo=html5&logoColor=white">
 </p>
 
-本版本不支持原生 Windows 与 Intel 芯片 Mac 作为 Broker 宿主机。Windows 上请在 WSL 内运行
-Broker——WSL 属于受支持的 Linux 宿主机。转发 Broker 回环地址的连接软件必须运行在能够访问 WSL
-Broker 的环境中；具体要求见各连接方式的指南。
+本版本支持在 x64 Windows 上原生运行 Broker。ARM64 Windows 则不支持：它尚未通过认证，Broker 会
+拒绝运行而不是在未经验证的情况下启动——这也包括在 ARM64 上以模拟方式运行的 x64 进程；此类进程会
+把自己报告为 x64，因此 Broker 会直接向 Windows 查询物理机器架构。Intel 芯片 Mac 仍不受支持。WSL
+同样仍受支持，属于 Linux 宿主机；若继续使用 WSL，转发 Broker 回环地址的连接软件必须运行在能够访问
+该 Broker 的环境中，具体要求见各连接方式的指南。
 
 ## 隐私与安全
 

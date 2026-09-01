@@ -23,9 +23,10 @@ private vulnerability reporting are enabled.
 
 The Flutter application, reusable Dart packages, broker, adapters, setup and
 lifecycle commands, release tooling, and public documentation live in this
-monorepo. Linux and Apple Silicon macOS are supported broker hosts. Native
-Windows broker hosting remains roadmap work; the Flutter client has separate
-desktop and mobile platform build coverage.
+monorepo. Linux, Apple Silicon macOS, and Windows x64 are supported broker
+hosts. Windows ARM64 is not qualified yet and is refused, including an x64
+process emulated on an ARM64 machine; the Flutter client has separate desktop
+and mobile platform build coverage.
 
 Codex, Claude Code, OpenCode, and Pi are registered through the shared adapter
 contract. Capabilities remain adapter-specific and are reported by the broker
