@@ -1297,6 +1297,44 @@ try {
       `${uninstalled.exitCode}/${uninstalled.detailCode}`);
   }
 
+  // Uninstalling an ACTIVE service. Every fixture above uninstalls one that is already stopped, and the
+  // fake was forgiving where the real provider is not: its uninstall() cleared `active` itself, so a
+  // lifecycle that removed a running service passed here and stranded a broker on a real host. Windows
+  // showed it physically — deleting the scheduled task left the task's own broker alive, holding the port
+  // and every staged file, so file removal failed and uninstall reported cleanup-required.
+  {
+    const m = machine({ service: true, binaryHash: true }); cleanup.push(m.root);
+    // The definition and environment files have to exist and be current, or the plan carries no
+    // service.remove at all and this fixture would assert the ordering of an action that never ran.
+    await m.service.installDefinition();
+    // Faithful now: a provider that refuses to be removed while it is still running, because removing it
+    // is what leaves the process behind.
+    m.service.active = true;
+    m.service.calls.length = 0;
+    const strandedFiles: string[] = [];
+    const realisticUninstall = m.service.uninstall.bind(m.service);
+    m.service.uninstall = async (): Promise<void> => {
+      if (m.service.active) {
+        strandedFiles.push(m.service.definitionPath);
+        throw new Error('service-files-in-use');
+      }
+      await realisticUninstall();
+    };
+    const uninstalled = await runUninstall({
+      ...baseOptions(m), confirmed: true, allowLegacyIntegrations: false,
+      purgeData: false, purgeConfirmed: false,
+    });
+    const stopIndex = m.service.calls.indexOf('stop');
+    const uninstallIndex = m.service.calls.indexOf('uninstall');
+    check('uninstalling a running service stops it first, then removes it and leaves nothing behind',
+      uninstalled.exitCode === 0
+        && stopIndex !== -1 && uninstallIndex !== -1 && stopIndex < uninstallIndex
+        && strandedFiles.length === 0
+        && !m.service.active
+        && !existsSync(m.service.definitionPath) && !existsSync(m.service.environmentPath),
+      `${uninstalled.exitCode}/${uninstalled.detailCode}:${m.service.calls.join(',')}`);
+  }
+
   // Modified resources survive uninstall and produce an honest remaining-resource result.
   {
     const m = machine({ resources: [], binaryHash: true }); cleanup.push(m.root);

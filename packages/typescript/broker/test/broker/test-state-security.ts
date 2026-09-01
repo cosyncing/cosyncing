@@ -17,6 +17,9 @@ import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   captureProcessOutput,
+  isOwnerOnlyDirectory,
+  isOwnerOnlyFile,
+  processCommandLine,
   settledProcessOutput,
   waitForBrokerHealth,
 } from '../helpers/isolated-broker-fixture.ts';
@@ -71,7 +74,9 @@ import {
 } from '../../src/installation/install-state.ts';
 import {
   atomicWriteOwnerOnly,
-  ownerOnlyMode,
+  createOwnerOnlyFileExclusive,
+  ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
 } from '../../src/security/secure-files.ts';
 import { writeSetupState } from '../../src/installation/setup-state.ts';
 import { PI_BRIDGE_EMBEDDED_SOURCE } from '../../../adapters/pi/src/bridge-asset.ts';
@@ -154,6 +159,21 @@ try {
       outcomes.find((outcome) => outcome.exitCode !== 0)?.stderr);
   }
 
+  // Both checks above reach createOwnerOnlyFileExclusive indirectly, so a broken primitive shows up as a
+  // downstream identity or lock symptom. Name the contract directly: whatever this creates, the owner-only
+  // gate must accept, on every host. Windows ignores the POSIX mode argument entirely.
+  {
+    const home = join(root, 'exclusive-create');
+    const target = join(home, 'exclusive.json');
+    const first = createOwnerOnlyFileExclusive(target, '{"kept":true}\n');
+    const inspected = inspectOwnerOnlyFile(target);
+    const second = createOwnerOnlyFileExclusive(target, '{"kept":false}\n');
+    check('exclusive creation yields a file the owner-only gate accepts and never replaces a winner',
+      first === 'created' && inspected.status === 'ok'
+        && second === 'exists' && readFileSync(target, 'utf8') === '{"kept":true}\n',
+      JSON.stringify({ first, second, status: inspected.status, problem: inspected.problem }));
+  }
+
   // Configuration schema, validation, additive preservation, and environment precedence.
   {
     const home = join(root, 'config-home');
@@ -161,7 +181,7 @@ try {
     const inspected = inspectBrokerConfig(home);
     check('config writes schema v2 through an owner-only atomic boundary',
       written.schemaVersion === BROKER_CONFIG_SCHEMA_VERSION && inspected.status === 'ok' &&
-        ownerOnlyMode(join(home, 'config.json')) === 0o600 && ownerOnlyMode(home) === 0o700);
+        isOwnerOnlyFile(join(home, 'config.json')) && isOwnerOnlyDirectory(home));
     check('unknown additive config fields survive validation and a read/write cycle',
       inspected.status === 'ok' && (inspected.config.ownerExtension as any)?.preserved === true &&
         inspected.config.broker.nestedExtension === 'keep-me');
@@ -224,7 +244,7 @@ try {
         && changedFeatureInspection.config.features?.httpWorkspaceBrowsing === true
         && (changedFeatureInspection.config.ownerExtension as any)?.preserved === true
         && changedFeatureInspection.config.broker.nestedExtension === 'keep-me'
-        && ownerOnlyMode(join(home, 'config.json')) === 0o600);
+        && isOwnerOnlyFile(join(home, 'config.json')));
 
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), broker: { ...fixtureConfig().broker, port: 0 } }));
     assert.throws(() => validateBrokerConfig({ ...fixtureConfig(), update: { channel: 'surprise' } }));
@@ -248,8 +268,8 @@ try {
     check('invalid port and update channel still fail closed', true);
 
     const legacyHome = join(root, 'legacy-config-home');
-    mkdirSync(legacyHome, { recursive: true, mode: 0o700 });
-    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({
+    ensureOwnerOnlyDirectory(legacyHome);
+    atomicWriteOwnerOnly(join(legacyHome, 'config.json'), JSON.stringify({
       schemaVersion: 1,
       ownerExtension: { preserved: true },
       broker: {
@@ -326,9 +346,9 @@ try {
         && stableResponse?.status === 200
         && await stableResponse.text() === 'available after setup');
 
-    writeFileSync(join(home, 'config.json'), '{bad json', { mode: 0o600 });
+    atomicWriteOwnerOnly(join(home, 'config.json'), '{bad json');
     check('malformed config is visible instead of silently defaulting', inspectBrokerConfig(home).status === 'error');
-    writeFileSync(join(home, 'config.json'), JSON.stringify({ broker: {} }), { mode: 0o600 });
+    atomicWriteOwnerOnly(join(home, 'config.json'), JSON.stringify({ broker: {} }));
     const unversioned = inspectBrokerConfig(home);
     check('unversioned config is an explicit migration case',
       unversioned.status === 'error' && unversioned.problem === 'migration-required');
@@ -350,8 +370,8 @@ try {
   // The foreground CLI reports a stable malformed-config code before constructing a listener.
   {
     const home = join(root, 'malformed-cli-home');
-    mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, 'config.json'), '{ malformed', { mode: 0o600 });
+    ensureOwnerOnlyDirectory(home);
+    atomicWriteOwnerOnly(join(home, 'config.json'), '{ malformed');
     console.log('STAGE malformed-config-cli start (deadline 15000ms)');
     const child = await runSupervised(
       ['bun', 'run', 'packages/typescript/broker/src/cli/cli.ts', 'broker', '--dev-bypass-first-run'],
@@ -386,10 +406,10 @@ try {
         inspectPiIntegration(join(home, 'secrets', 'pi-integration.json')).status === 'ok' &&
         inspectOmpIntegration(join(home, 'secrets', 'omp-integration.json')).status === 'ok');
     check('credential files and secret directory are owner-only',
-      ownerOnlyMode(join(home, 'secrets')) === 0o700 &&
-        ownerOnlyMode(join(home, 'secrets', 'broker-token')) === 0o600 &&
-        ownerOnlyMode(join(home, 'secrets', 'pi-integration.json')) === 0o600 &&
-        ownerOnlyMode(join(home, 'secrets', 'omp-integration.json')) === 0o600);
+      isOwnerOnlyDirectory(join(home, 'secrets')) &&
+        isOwnerOnlyFile(join(home, 'secrets', 'broker-token')) &&
+        isOwnerOnlyFile(join(home, 'secrets', 'pi-integration.json')) &&
+        isOwnerOnlyFile(join(home, 'secrets', 'omp-integration.json')));
     check('repeated setup is idempotent for credential material',
       second.brokerToken === first.brokerToken &&
         second.piIntegration.credential === first.piIntegration.credential &&
@@ -436,13 +456,13 @@ try {
     first.release();
 
     const stalePath = installationLockPath(home);
-    writeFileSync(stalePath, JSON.stringify({
+    atomicWriteOwnerOnly(stalePath, JSON.stringify({
       schemaVersion: 1,
       pid: 99_999_999,
       nonce: 'abcdefghijklmnopqrstuv',
       command: 'upgrade',
       acquiredAt: '2026-07-17T00:00:00.000Z',
-    }), { mode: 0o600 });
+    }));
     const recovered = acquireInstallationLock({ command: 'repair', home });
     check('stale lock recovery occurs only after a parseable dead PID is proven',
       recovered.recoveredStaleLock && readdirSync(home).some((name) => name.includes('.stale-99999999-')));
@@ -518,7 +538,7 @@ try {
         existsSync(join(backup.path, 'cache', 'artifacts', 'blobs', 'aa', 'blob')) &&
         backup.manifest.stateRootIncluded && backup.manifest.cacheRootIncluded);
     check('backup manifest is owner-only and exposes only logical source labels',
-      ownerOnlyMode(join(backup.path, 'manifest.json')) === 0o600 &&
+      isOwnerOnlyFile(join(backup.path, 'manifest.json')) &&
         backup.manifest.entries.every((entry) => !entry.source.startsWith('/')));
     const purge = purgeDataInventory(layout);
     check('purge inventory names both durable roots while normal uninstall can preserve them',
@@ -598,7 +618,7 @@ try {
     const advertised = 'https://fixture-machine.tailnet.example';
     writeBrokerConfig(fixtureConfig(port, advertised) as any, home);
     const credentials = ensureInstallationCredentials({ home, internalUrl: base });
-    writeFileSync(join(home, 'transport-peers.json'), '{ malformed peer state', { mode: 0o600 });
+    atomicWriteOwnerOnly(join(home, 'transport-peers.json'), '{ malformed peer state');
     const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
       cwd: ROOT,
       env: {
@@ -654,9 +674,13 @@ try {
         pairing.status === 201 && qr.transport.kind === 'broker-url' &&
           qr.transport.url === advertised && !offer.qr.includes(credentials.brokerToken));
 
-      const processArgs = Bun.spawnSync(['ps', '-o', 'args=', '-p', String(child.pid)]).stdout.toString();
+      const processArgs = processCommandLine(child.pid);
       check('broker process arguments contain neither shared nor Pi credential',
-        !processArgs.includes(credentials.brokerToken) && !processArgs.includes(credentials.piIntegration.credential));
+        processArgs.trim().length > 0
+          && !processArgs.includes(credentials.brokerToken)
+          && !processArgs.includes(credentials.piIntegration.credential),
+        // The command line itself may carry the very secrets under test; report only that one was read.
+        `commandLineBytes=${processArgs.trim().length}`);
     } finally {
       child.kill('SIGTERM');
       await child.exited.catch(() => undefined);

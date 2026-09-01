@@ -90,13 +90,12 @@ import {
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import {
-  inspectOpencodeShim,
   inspectRcFile,
-  opencodeShimActualSha256,
   opencodeShimHost,
   opencodeShimPort,
   opencodeShimRcCandidates,
   opencodeShimShellPath,
+  proveOpencodeShim,
   OPENCODE_SHIM_RESOURCE_ID,
   type OpencodeShimRcId,
   type OpencodeShimStatus,
@@ -114,6 +113,7 @@ import {
   serviceAgentExecutableOverrides,
   type DurableServiceProvider,
   type DurableServiceProviderId,
+  type DurableServiceOwnership,
   type DurableServiceStatus,
   type ServiceAgentExecutableOverrides,
   type DurableServiceProviderOptions,
@@ -211,6 +211,15 @@ export interface OpencodeShimInspection {
   shimStatus: OpencodeShimStatus;
   /** On-disk hash of a structurally-safe shim script (else undefined); proves owned-stale upgrade/removal. */
   actualSha256?: string;
+  /**
+   * Whether this platform can route terminal opencode AT ALL.
+   *
+   * False on Windows: routing works by sourcing a block from an interactive
+   * POSIX rc file and no Windows shell reads one. Carried on the inspection
+   * rather than re-derived in the planner so the reason a request is refused and
+   * the reason no rc candidate was offered are the same fact, decided once.
+   */
+  routingSupported: boolean;
   rc: OpencodeShimRcSummary[];
 }
 
@@ -289,6 +298,11 @@ export interface SetupInspection {
   durableServiceDefinitionPath?: string;
   durableServiceEnvironmentPath?: string;
   durableServicePersistenceTarget?: string;
+  /**
+   * The provider's own ownership verdict, where it can give one. Absent means the provider's objects are
+   * files and ownership is derived here from package-hash receipts instead.
+   */
+  durableServiceOwnershipVerdict?: DurableServiceOwnership;
   /**
    * Whether THIS build can actually serve the browser client. The Flutter bundle ships beside a packaged
    * executable and is routinely absent from the npm tarball, so the outro reads this rather than assuming
@@ -658,6 +672,17 @@ async function portStatus(options: {
     : 'conflict';
 }
 
+/**
+ * The precondition fingerprint: everything a plan's validity depends on. Exported so a test can prove a
+ * field is actually IN it -- the hash is computed only during inspection, so a fixture that overrides an
+ * inspection field cannot otherwise observe whether the hash would have changed.
+ */
+export function setupInspectionFingerprint(
+  input: Omit<SetupInspection, 'preconditionHash' | 'doctor'>,
+): unknown {
+  return inspectionFingerprint(input);
+}
+
 function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' | 'doctor'>): unknown {
   return {
     installState: input.installState.committed
@@ -713,6 +738,10 @@ function inspectionFingerprint(input: Omit<SetupInspection, 'preconditionHash' |
     durableServiceDefinitionPath: input.durableServiceDefinitionPath,
     durableServiceEnvironmentPath: input.durableServiceEnvironmentPath,
     durableServicePersistenceTarget: input.durableServicePersistenceTarget,
+    // Ownership decides whether setup may touch the service at all, so a plan built while the objects were
+    // ours must not commit after they stopped being ours. Fingerprinting the verdict makes that a
+    // precondition failure rather than a silent mutation of someone else's task.
+    durableServiceOwnershipVerdict: input.durableServiceOwnershipVerdict,
     blockingIssueCodes: input.blockingIssues.map((issue) => issue.code).sort(),
   };
 }
@@ -756,10 +785,13 @@ export async function inspectSetupEnvironment(options: {
   const opencodeShimPath = opencodeShimShellPath(options.home);
   const shimPort = opencodeShimPort(options.context.env.OPENCODE_URL);
   const shimHost = opencodeShimHost(options.context.env.OPENCODE_URL);
+  // One proof, not two: on Windows each costs a PowerShell process to establish ownership.
+  const opencodeShimProof = proveOpencodeShim(opencodeShimPath);
   const opencodeShim: OpencodeShimInspection = {
     shimPath: opencodeShimPath,
-    shimStatus: inspectOpencodeShim(opencodeShimPath),
-    actualSha256: opencodeShimActualSha256(opencodeShimPath),
+    shimStatus: opencodeShimProof.status,
+    actualSha256: opencodeShimProof.actualSha256,
+    routingSupported: options.context.platform !== 'win32',
     rc: opencodeShimRcCandidates(options.context).map(({ id, resourceId, path }): OpencodeShimRcSummary => {
       const rc = inspectRcFile(path, opencodeShimPath, shimPort, shimHost);
       const state = rc.status === 'absent' ? 'no-file' : rc.status === 'unsafe' ? 'unsafe' : rc.blockState;
@@ -975,6 +1007,7 @@ export async function inspectSetupEnvironment(options: {
       durableServiceDefinitionPath: durableService.definitionPath,
       durableServiceEnvironmentPath: durableService.environmentPath,
       durableServicePersistenceTarget: durableService.persistenceTarget,
+      ...(durableService.ownership ? { durableServiceOwnershipVerdict: durableService.ownership() } : {}),
     } : {}),
     webAppAvailable: existsSync(join(resolveFlutterWebRoot({
       override: options.context.env.COSYNCING_WEB_DIR,
@@ -1168,6 +1201,25 @@ function durableServiceOwnership(inspection: SetupInspection): {
   lingering: boolean;
 } {
   const lingering = installedResource(inspection, 'service-systemd-linger');
+  const lingeringOwned = !!lingering
+    && lingering.kind === 'other'
+    && lingering.target === inspection.durableServicePersistenceTarget
+    && lingering.ownership?.proof === 'receipt';
+  // A provider whose owned objects are not files proves ownership when it inspects them. The Windows task
+  // scheduler is the case, and the receipt it writes is marker-based because a scheduled task has no file
+  // to hash. Re-deriving ownership here from a package-hash receipt that provider never writes made every
+  // setup after the first one block as `task-scheduler-definition-unowned` -- setup refusing to recognise
+  // the install it had just created. The provider's own answer is live evidence checked against this
+  // installation's immutable marker, which is stronger than a hash recorded once at install time.
+  const verdict = inspection.durableServiceOwnershipVerdict;
+  if (verdict) {
+    // `unknown` is never a soft `owned`: a provider that could not establish the answer is treated exactly
+    // as one that answered no.
+    return {
+      serviceFiles: verdict.definition === 'owned' && verdict.environment === 'owned',
+      lingering: lingeringOwned,
+    };
+  }
   return {
     serviceFiles: packageOwnedFile(
       inspection,
@@ -1175,10 +1227,7 @@ function durableServiceOwnership(inspection: SetupInspection): {
       inspection.durableServiceDefinitionPath,
     )
       && packageOwnedFile(inspection, 'service-environment', inspection.durableServiceEnvironmentPath),
-    lingering: !!lingering
-      && lingering.kind === 'other'
-      && lingering.target === inspection.durableServicePersistenceTarget
-      && lingering.ownership?.proof === 'receipt',
+    lingering: lingeringOwned,
   };
 }
 
@@ -1242,7 +1291,12 @@ export function buildSetupPlan(options: {
     }, {
       id: 'durable-state.permissions',
       title: 'Tighten legacy durable-state permissions',
-      reversible: true,
+      // Monotonic on purpose. Undoing a security repair means restoring a descriptor that grants MORE
+      // access than the one in force, from data recorded before the repair — and on Windows the writers
+      // this path has cannot express the original descriptor at all, so a rollback there silently kept
+      // the tightened one while the plan promised otherwise. Rather than teach recovery to widen access,
+      // tightening is declared what it is: applied once, never reversed, on every platform.
+      reversible: false,
     }));
   }
   const piBridgeOwnership = decidePiBridgeOwnership(
@@ -1378,7 +1432,26 @@ export function buildSetupPlan(options: {
         { id: 'agent-skill.reconcile', title: 'Remove package-owned cosyncing skills', reversible: true }));
     }
   }
-  if (options.choices.installOpencodeShim) {
+  if (options.choices.installOpencodeShim && !options.inspection.opencodeShim.routingSupported) {
+    // Refused in WORDS, not by quietly doing nothing.
+    //
+    // Terminal routing works by sourcing a block from an interactive POSIX rc
+    // file. No Windows shell reads one: `cmd` and PowerShell have their own
+    // profile mechanisms. A Windows user with a `.bashrc` has it from Git Bash
+    // or MSYS, so installing there would report success for a block the terminal
+    // they actually type in never sources — which is worse than declining, since
+    // the operator would believe routing is on.
+    //
+    // `opencodeShimRcCandidates` already returns nothing on Windows, so nothing
+    // can be written either way; this is what makes the operator aware of it
+    // rather than leaving them to notice the feature silently does nothing.
+    blockingIssues.push({
+      code: 'opencode-shim-unsupported-platform',
+      summary: 'Terminal routing for opencode is not available on Windows.',
+      remediation: 'Deselect terminal routing and rerun setup. It routes by sourcing a block from an '
+        + 'interactive POSIX shell rc file, which no Windows shell reads.',
+    });
+  } else if (options.choices.installOpencodeShim) {
     const shim = options.inspection.opencodeShim;
     const shimOwnedStale = opencodeShimOwnedStale(options.inspection);
     // 'foreign' (symlink/unsafe) and 'drifted'-without-a-receipt (a user edit) are preserved untouched. Only a

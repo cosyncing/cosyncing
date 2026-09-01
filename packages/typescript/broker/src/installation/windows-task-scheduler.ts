@@ -1,4 +1,5 @@
 import type { InstalledResourceRecord } from './install-state.ts';
+import type { DurableServiceOwnership } from './service-manager.ts';
 
 export const WINDOWS_TASK_ROOT_PATH = '\\Cosyncing';
 export const WINDOWS_TASK_NAME = 'Broker';
@@ -147,6 +148,79 @@ function receiptOwns(
     && resource.kind === 'other'
     && resource.ownership.proof === 'receipt'
     && resource.target.toLowerCase() === normalizedTarget);
+}
+
+/**
+ * Exactly ONE receipt, matching in every field that identifies it.
+ *
+ * `.some()` is not enough for an ownership decision: two receipts under one id mean the state file
+ * disagrees with itself about what we installed, and picking whichever matches is choosing the answer.
+ * Missing, duplicated, wrong-target, wrong-kind and wrong-marker all fail here, and all mean the same
+ * thing — the receipt does not prove we put the object there.
+ */
+export function exactlyOneWindowsReceipt(
+  resources: readonly InstalledResourceRecord[],
+  id: string,
+  expected: { target: string; kind: InstalledResourceRecord['kind']; marker?: string },
+): boolean {
+  const matches = resources.filter((resource) => resource.id === id);
+  if (matches.length !== 1) return false;
+  const resource = matches[0]!;
+  return resource.kind === expected.kind
+    && resource.ownership.proof === 'receipt'
+    // Windows paths are case-insensitive, so the comparison has to be too.
+    && resource.target.toLowerCase() === expected.target.toLowerCase()
+    // STRICT, undefined included. `expected.marker === undefined || ...` accepted any marker on a receipt
+    // where none was expected -- the SID-folder receipt -- so a record carrying a foreign marker passed a
+    // check whose whole purpose is that the receipt matches exactly. "No marker expected" means the
+    // receipt must not carry one.
+    && resource.ownership.marker === expected.marker;
+}
+
+/**
+ * The ownership verdict for a Windows install: are these objects OURS, independently of whether they are
+ * healthy. Drift is deliberately owned — an environment file with unexpected contents, or a task whose
+ * action needs repair, is still one we installed, and reconciling it is exactly what setup is for. Only a
+ * foreign marker, a contested folder, or evidence that does not add up denies ownership.
+ */
+export function windowsTaskSchedulerOwnership(options: {
+  resources: readonly InstalledResourceRecord[];
+  identity: WindowsScheduledTaskIdentity;
+  environmentPath: string;
+  versionKey: string;
+  task: WindowsScheduledTaskClassification;
+  folders: WindowsTaskFolderClassification;
+}): DurableServiceOwnership {
+  const receiptsProveTask = exactlyOneWindowsReceipt(options.resources, WINDOWS_TASK_RESOURCE_ID, {
+    target: options.identity.taskPath,
+    kind: 'service',
+    // The marker is the immutable identity written into the task itself; a receipt naming a different
+    // installation is evidence of a DIFFERENT install, not of this one.
+    marker: options.identity.ownershipMarker,
+  }) && exactlyOneWindowsReceipt(options.resources, WINDOWS_SID_FOLDER_RESOURCE_ID, {
+    target: options.identity.sidFolderPath,
+    kind: 'other',
+  });
+  const folderOwned = options.folders.sidFolder === 'current' || options.folders.sidFolder === 'drifted';
+  const folderDenies = options.folders.sidFolder === 'conflict';
+  const definition: DurableServiceOwnership['definition'] =
+    options.task.ownership === 'conflict' || folderDenies
+      ? 'unowned'
+      : options.task.ownership === 'owned' && folderOwned && receiptsProveTask
+        ? 'owned'
+        : 'unknown';
+  return {
+    definition,
+    // The environment IS a file, but its ownership is still receipt-borne rather than hashed: the version
+    // key is what says this installation wrote it. Contents are a health question, answered elsewhere.
+    environment: exactlyOneWindowsReceipt(options.resources, 'service-environment', {
+      target: options.environmentPath,
+      kind: 'environment-file',
+      marker: options.versionKey,
+    })
+      ? 'owned'
+      : 'unowned',
+  };
 }
 
 /** Folder mutation authority comes only from exact receipts, never from installationId by itself. */

@@ -41,8 +41,17 @@ function standaloneInstallCheck(
 
   // The installer keeps `current` as a release symlink and `current/codex` as another symlink. Inspect the
   // real file beneath both links: SetupDiagnosisContext intentionally reports a final symlink as `other`.
-  const path = join(codexHome, 'packages', 'standalone', 'current', 'bin', 'codex');
-  const inspected = context.inspectPath(path);
+  // On Windows the same installer (install.ps1) writes `current\bin\codex.exe`, with `current` as a
+  // JUNCTION rather than a symlink — so checking only the extensionless name reports
+  // standalone-install-missing against a perfectly correct Windows standalone install, and tells the
+  // operator to reinstall something they already have.
+  const base = join(codexHome, 'packages', 'standalone', 'current', 'bin', 'codex');
+  const candidates = context.platform === 'win32' ? [`${base}.exe`, base] : [base];
+  let inspected = context.inspectPath(candidates[0]!);
+  for (const candidate of candidates.slice(1)) {
+    if (inspected.status === 'file' && inspected.readable) break;
+    inspected = context.inspectPath(candidate);
+  }
   if (inspected.status === 'file' && inspected.readable) {
     return {
       id: 'codex.standalone-install',

@@ -566,6 +566,23 @@ try {
         && !inspectInstallState(outsideHome).committed,
       `outside=${isOutside} ${uninstalled.exitCode}/${uninstalled.detailCode}`);
   }
+  // ── Windows offers no rc file to route through ────────────────────────────
+  //
+  // Routing works by sourcing a block from an interactive POSIX rc file, and no
+  // Windows shell reads one. A Windows user with a `.bashrc` has it from Git
+  // Bash; installing there would report success for a block the terminal they
+  // type in never sources. Structural half of the refusal — even a caller that
+  // skips the setup planner gets nothing to write to.
+  {
+    const homeDir = '/fixture/home';
+    const posix = opencodeShimRcCandidates({ homeDir, platform: 'linux' });
+    const windows = opencodeShimRcCandidates({ homeDir, platform: 'win32' });
+    check('rc candidates exist on POSIX and are EMPTY on Windows',
+      posix.length === 2 && posix.some((target) => target.id === 'bash')
+        && posix.some((target) => target.id === 'zsh')
+        && windows.length === 0,
+      `posix=${posix.length} windows=${windows.length}`);
+  }
 } finally {
   for (const root of cleanup) rmSync(root, { recursive: true, force: true });
 }

@@ -1867,6 +1867,15 @@ export async function runUninstall(options: UninstallOptions): Promise<Lifecycle
           if (current.definition !== 'current' || current.environment !== 'current') {
             throw new Error('service-drift');
           }
+          // STOP FIRST, and wait for it to be inactive. Removing a running service does not stop what it
+          // started: on Windows the scheduler's delete removes the task definition and leaves the broker
+          // it spawned alive, still holding the port and an open handle on every staged file — so the
+          // file removal below then fails and uninstall reports cleanup-required, having half-removed the
+          // install and stranded a broker serving from it. The rollback path in this same file has always
+          // stopped before uninstalling; this one did not.
+          await env.provider!.stop();
+          const stopped = await awaitServiceState({ provider: env.provider!, expected: 'inactive' });
+          if (stopped.active === 'active') throw new Error('service-stop-failed');
           await env.provider!.uninstall();
           const linger = resource(env.install.committed ? env.install.state : undefined, 'service-systemd-linger');
           if (linger && (await env.provider!.inspect()).lingering === 'enabled') await env.provider!.disableLingering();

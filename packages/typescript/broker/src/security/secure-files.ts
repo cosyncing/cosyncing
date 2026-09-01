@@ -4,6 +4,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -251,6 +252,54 @@ export function atomicWriteJsonOwnerOnly(target: string, value: unknown): void {
   atomicWriteOwnerOnly(target, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+/**
+ * Windows ignores the POSIX mode, so a file opened at `target` carries the parent's inherited ACEs until a
+ * PowerShell round trip can tighten it. Tightening in place would leave a multi-hundred-millisecond window in
+ * which a concurrent loser inspects a target that exists but is neither owner-only nor written yet, and every
+ * caller of this primitive treats `unsafe` as fatal rather than as contention. Build the file under a private
+ * name instead and publish it with a hard link: the link fails with EEXIST rather than replacing a winner, and
+ * shares the prepared security descriptor, so a loser only ever observes the finished file or none at all.
+ */
+function createOwnerOnlyFileExclusiveWindows(
+  target: string,
+  content: string | Uint8Array,
+  mode: number,
+): 'created' | 'exists' {
+  const temp = `${target}.tmp-${process.pid}-${randomBytes(12).toString('hex')}`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(temp, 'wx', mode);
+    // Before any secret bytes exist, as in atomicWriteOwnerOnly.
+    enforceWindowsOwnerOnlyDacl(temp, 'file');
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    try {
+      linkSync(temp, target);
+      return 'created';
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') return 'exists';
+      // Hard links are an NTFS feature, and this function exists precisely because creating the final path
+      // before its descriptor is tightened leaves a window in which a concurrent command reads a file that
+      // exists, is not owner-only, and is not written yet. An in-place fallback would reinstate exactly that
+      // window, so it fails closed instead: the qualified Windows contract is NTFS, and supporting a
+      // filesystem without hard links needs its own proven publication strategy, not a silent downgrade of
+      // this one.
+      throw new Error(
+        `owner-only exclusive creation requires hard-link support on this filesystem (${code ?? 'unknown'})`,
+        { cause: error },
+      );
+    }
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* preserve the original failure */ }
+    }
+    try { rmSync(temp, { force: true }); } catch { /* the published hard link keeps the contents */ }
+  }
+}
+
 /** Create a durable owner-only file without ever replacing an existing winner. */
 export function createOwnerOnlyFileExclusive(
   target: string,
@@ -260,6 +309,7 @@ export function createOwnerOnlyFileExclusive(
   assertNoSymlinkComponents(target, false);
   const parent = dirname(target);
   ensureOwnerOnlyDirectory(parent);
+  if (process.platform === 'win32') return createOwnerOnlyFileExclusiveWindows(target, content, mode);
   let fd: number | undefined;
   let created = false;
   try {

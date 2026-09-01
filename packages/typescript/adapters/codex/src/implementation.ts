@@ -1211,8 +1211,16 @@ function codexLiveSyncEnabled(): boolean {
   // ON by default (issues-part2): the daemon is managed via `codex app-server daemon start`
   // (idempotent, see ensureCodexDaemon). Set COSYNCING_CODEX_SYNC_SERVER=0 to opt out.
   const v = (process.env.COSYNCING_CODEX_SYNC_SERVER ?? process.env.COSYNCING_CODEX_LIVE ?? '').trim();
-  if (!v) return true;
-  return truthyEnv(v);
+  if (v) return truthyEnv(v);
+  // ...but NOT on Windows, where there is nothing to join. `~/.codex/app-server-control/` stays
+  // empty, the shared daemon a terminal joins with `codex resume --remote` is a Unix-domain-socket
+  // flow, and the desktop app runs its own private app-server instead of joining one. Defaulting on
+  // there advertised `syncAvailable: true` with a "Sync with Codex terminal" command that cannot
+  // work — inferred from the ability flag rather than, as this field's own contract requires, from
+  // real reachability. An explicit env value still wins, so a future Windows control plane needs no
+  // change here.
+  if (process.platform === 'win32') return false;
+  return true;
 }
 
 function brokerClientInfo(): { name: string; title: string; version: string } {
@@ -1585,7 +1593,9 @@ export function codexControlState(opts: {
         supported: false,
         syncAvailable: false,
         active: false,
-        reason: 'Codex true terminal sync is disabled. Configure the standalone Codex daemon, then enable COSYNCING_CODEX_SYNC_SERVER=1.',
+        reason: process.platform === 'win32'
+          ? 'Codex true terminal sync is not available on Windows: there is no app-server control socket for a terminal to join.'
+          : 'Codex true terminal sync is disabled. Configure the standalone Codex daemon, then enable COSYNCING_CODEX_SYNC_SERVER=1.',
       };
 
   return { drive, terminalSync };

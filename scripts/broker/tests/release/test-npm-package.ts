@@ -25,8 +25,14 @@ import { dirname, join, resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../../../packages/typescript/protocol/src/product.ts';
 import {
   SUPPORTED_BROKER_HOSTS,
-  isSupportedBrokerHost,
+  brokerHostVerdict,
+  isSupportedBrokerProcessTuple,
 } from '../../../../packages/typescript/broker/src/installation/supported-hosts.ts';
+import {
+  parseWindowsMachineArchitecture,
+  windowsNativeMachineArchitecture,
+  type WindowsMachineProbeResult,
+} from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import { validateWebBuildShape } from '../../release/package-web-sidecar.ts';
 import { writeStampedWebBuild, STAMPED_WEB_FIXTURE_COMMIT } from '../../../../packages/typescript/broker/test/helpers/stamped-web-build.ts';
 import { reserveLoopbackFixturePort } from '../../../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
@@ -177,15 +183,85 @@ try {
 
   // Windows is excluded by the fields npm can enforce. Intel macOS cannot be excluded by `os`/`cpu` without
   // also excluding Apple Silicon, so the product refuses it at diagnosis — asserted separately below.
-  check('the package constrains itself to supported operating systems and never claims Windows',
-    Array.isArray(manifest.os) && (manifest.os as string[]).sort().join(',') === 'darwin,linux'
+  check('the package declares the supported operating systems, Windows now among them',
+    Array.isArray(manifest.os) && (manifest.os as string[]).sort().join(',') === 'darwin,linux,win32'
       && Array.isArray(manifest.cpu) && (manifest.cpu as string[]).sort().join(',') === 'arm64,x64',
     `os=${JSON.stringify(manifest.os)} cpu=${JSON.stringify(manifest.cpu)}`);
-  check('the supported broker host set excludes Intel macOS and Windows',
-    isSupportedBrokerHost('linux', 'x64') && isSupportedBrokerHost('linux', 'arm64')
-      && isSupportedBrokerHost('darwin', 'arm64')
-      && !isSupportedBrokerHost('darwin', 'x64') && !isSupportedBrokerHost('win32', 'x64'),
+  // `os` and `cpu` are independent lists, so this manifest necessarily ADMITS win32-arm64 and darwin-x64
+  // at acquisition. Narrowing `cpu` cannot fix it without excluding linux-arm64 and darwin-arm64, which
+  // are supported. The metadata is a coarse pre-filter; the runtime verdict below is the contract, and it
+  // is what an operator actually meets — before setup mutates anything.
+  check('the supported broker process tuples are exactly the qualified four',
+    isSupportedBrokerProcessTuple('linux', 'x64') && isSupportedBrokerProcessTuple('linux', 'arm64')
+      && isSupportedBrokerProcessTuple('darwin', 'arm64') && isSupportedBrokerProcessTuple('win32', 'x64')
+      && !isSupportedBrokerProcessTuple('darwin', 'x64') && !isSupportedBrokerProcessTuple('win32', 'arm64'),
     SUPPORTED_BROKER_HOSTS.map((host) => `${host.platform}-${host.arch}`).join(','));
+
+  // ---- The Windows ARM64 boundary, stated as verdicts ---------------------------------------------------
+  // Windows ARM64 is NOT refused because no runtime exists for it: Bun has shipped one since 1.3.10. It is
+  // refused because nothing in this project has been run on it. The wording says so, and these cases pin
+  // both halves of the question — what the process is, and what the machine underneath it is.
+  const hostCases: Array<[string, string, 'x64' | 'arm64' | 'other' | 'unknown', string]> = [
+    ['win32', 'x64', 'x64', 'supported'],
+    ['win32', 'arm64', 'arm64', 'windows-arm64-not-qualified'],
+    ['win32', 'x64', 'arm64', 'windows-emulated-x64-not-qualified'],
+    ['win32', 'x64', 'unknown', 'windows-machine-architecture-unverified'],
+    ['win32', 'x64', 'other', 'windows-machine-architecture-unverified'],
+    ['linux', 'arm64', 'unknown', 'supported'],
+    ['darwin', 'arm64', 'unknown', 'supported'],
+    ['darwin', 'x64', 'unknown', 'host-architecture-unsupported'],
+  ];
+  const hostOutcomes = hostCases.map(([platform, arch, machine, expected]) => {
+    const verdict = brokerHostVerdict({ platform, arch, windowsMachineArchitecture: () => machine });
+    const actual = verdict.status === 'supported' ? 'supported' : verdict.code;
+    return { label: `${platform}/${arch}/${machine}`, ok: actual === expected, actual };
+  });
+  check('the host verdict admits Windows x64 and refuses every unqualified Windows shape',
+    hostOutcomes.every((outcome) => outcome.ok),
+    hostOutcomes.map((outcome) => `${outcome.label}=${outcome.actual}`).join(' | '));
+  // The PROVIDER, not only the verdict that consumes it. Every case above injects an architecture string
+  // directly, so none of them exercises what the probe does with what PowerShell actually returns — the
+  // one part that had no coverage at all until its x64 success path ran on a physical host.
+  const probeCases: Array<[string, WindowsMachineProbeResult, string]> = [
+    ['amd64', { status: 0, stdout: '8664\n' }, 'x64'],
+    ['arm64', { status: 0, stdout: 'AA64\r\n' }, 'arm64'],
+    ['padded', { status: 0, stdout: '  8664  ' }, 'x64'],
+    ['other-machine', { status: 0, stdout: '01c4\n' }, 'other'],
+    ['self-declared-unknown', { status: 0, stdout: 'unknown\n' }, 'unknown'],
+    ['empty', { status: 0, stdout: '' }, 'unknown'],
+    ['malformed', { status: 0, stdout: 'not-a-machine\n' }, 'unknown'],
+    ['nonzero-exit', { status: 1, stdout: '8664\n' }, 'unknown'],
+    ['spawn-failure-or-timeout', { status: null, stdout: '' }, 'unknown'],
+  ];
+  const probeOutcomes = probeCases.map(([label, result, expected]) => {
+    const actual = parseWindowsMachineArchitecture(result);
+    return { label, actual, ok: actual === expected };
+  });
+  check('the native-architecture probe maps every answer, refusal and failure it can receive',
+    probeOutcomes.every((outcome) => outcome.ok),
+    probeOutcomes.map((outcome) => `${outcome.label}=${outcome.actual}`).join(' | '));
+  // A non-zero exit carrying a VALID machine word must not be believed: that is the shape a probe takes
+  // when the script failed after printing, and trusting stdout alone would admit a host on partial output.
+  check('a probe that answers correctly but exits non-zero is still unproven',
+    parseWindowsMachineArchitecture({ status: 1, stdout: '8664' }) === 'unknown'
+      && parseWindowsMachineArchitecture({ status: 0, stdout: '8664' }) === 'x64');
+  // End to end through the exported entry point, with the spawn injected: proves the seam the physical
+  // host exercises is the same one these cases do, rather than a parser nothing calls.
+  check('the probe entry point returns what its injected runner reports',
+    windowsNativeMachineArchitecture(() => ({ status: 0, stdout: 'aa64' })) === 'arm64'
+      && windowsNativeMachineArchitecture(() => ({ status: 0, stdout: '8664' })) === 'x64'
+      && windowsNativeMachineArchitecture(() => { throw new Error('powershell missing'); }) === 'unknown');
+
+  // The refusal has to READ as "not yet", or an operator concludes the platform is impossible rather than
+  // unqualified — and the next person to qualify it inherits that impression from our own copy.
+  const armVerdict = brokerHostVerdict({
+    platform: 'win32', arch: 'arm64', windowsMachineArchitecture: () => 'arm64',
+  });
+  check('the Windows ARM64 refusal says not yet qualified rather than unavailable',
+    armVerdict.status === 'refused'
+      && /not yet qualified/i.test(armVerdict.remediation)
+      && !/bun/i.test(`${armVerdict.summary} ${armVerdict.remediation}`),
+    armVerdict.status === 'refused' ? armVerdict.remediation : 'supported');
 
   // ---- The application is JavaScript --------------------------------------------------------------------
   const applicationPath = join(stage, PACKAGED_APPLICATION);

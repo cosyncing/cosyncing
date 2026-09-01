@@ -48,6 +48,8 @@ import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/config
 import { loadOrCreateBrokerInstanceId } from '../../src/runtime/broker-instance.ts';
 import { ensureInstallationCredentials } from '../../src/security/credentials.ts';
 import { createSetupDiagnosisContext } from '../../src/installation/diagnosis-context.ts';
+import { ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
+import { isOwnerOnlyFile } from '../helpers/isolated-broker-fixture.ts';
 import {
   codexTuiReadinessCheck,
   collectDoctorReport,
@@ -161,6 +163,7 @@ interface FakeContextOptions {
   homeDir?: string;
   platform?: string;
   arch?: string;
+  windowsMachineArchitecture?: SetupDiagnosisContext['windowsMachineArchitecture'];
   env?: Record<string, string | undefined>;
   executables?: Record<string, string>;
   inspectPath?: SetupDiagnosisContext['inspectPath'];
@@ -169,6 +172,7 @@ interface FakeContextOptions {
   runReadOnly?: SetupDiagnosisContext['runReadOnly'];
   fetchJson?: SetupDiagnosisContext['fetchJson'];
   probeTcp?: SetupDiagnosisContext['probeTcp'];
+  currentUid?: SetupDiagnosisContext['currentUid'];
 }
 
 function fakeContext(options: FakeContextOptions = {}): SetupDiagnosisContext {
@@ -178,6 +182,11 @@ function fakeContext(options: FakeContextOptions = {}): SetupDiagnosisContext {
     platform: options.platform ?? 'linux',
     // Paired with the platform: a darwin fixture is an Apple Silicon Mac, the host that is supported.
     arch: options.arch ?? (options.platform === 'darwin' ? 'arm64' : 'x64'),
+    // Windows fixtures must say what MACHINE they are, not only what process: an x64 process on an ARM64
+    // machine is a distinct, refused host, and a fixture that omitted this would silently be the
+    // unverifiable case rather than the one it meant to describe.
+    windowsMachineArchitecture: options.windowsMachineArchitecture
+      ?? (() => (options.platform === 'win32' ? 'x64' : 'unknown')),
     homeDir,
     env: options.env ?? {},
     resolveExecutable: (command) => options.executables?.[command],
@@ -193,6 +202,8 @@ function fakeContext(options: FakeContextOptions = {}): SetupDiagnosisContext {
     probeTcp: options.probeTcp ?? (async () => 'closed'),
     listDirectory: () => ({ ok: false, reason: 'missing' } as const),
     processAlive: () => false,
+    // Paired with the platform, as arch is: a POSIX fixture has a uid whatever host runs the test.
+    currentUid: options.currentUid ?? (() => (options.platform === 'win32' ? undefined : '501')),
     displayPath: (path) => displayed(path, homeDir),
   };
 }
@@ -210,12 +221,34 @@ const matrix: Record<MatrixAgent, {
   claude: { minimum: CLAUDE_MINIMUM_VERSION, below: '2.1.206', command: 'claude' },
 };
 
+/**
+ * Create a fixture directory that is genuinely owner-only on THIS host.
+ *
+ * `mkdirSync(path, { mode: 0o700 })` is a POSIX-only way of saying "owner-only". On Windows the mode
+ * is ignored and the new directory inherits its parent's DACL, which under a user profile or the temp
+ * root admits SYSTEM and Administrators. Doctor then reported the directory as not owner-only, and it
+ * was RIGHT to: `inspectOwnerOnlyPath` checks the real DACL on win32, and the fixture had not built
+ * the state the check describes. The product's own primitive builds it on either platform.
+ */
+function makeOwnerOnlyDirectory(target: string): void {
+  ensureOwnerOnlyDirectory(target);
+}
+
+/**
+ * The product builds these candidate paths with node:path `join`, so their separator is the HOST's, not the
+ * one a fixture author typed. A `path.endsWith('/a/b')` predicate therefore matched nothing on Windows and
+ * reported a correct standalone install as missing — the fixture failing, not the product.
+ */
+function pathEndsWith(path: string, posixSuffix: string): boolean {
+  return path.split(/[\\/]/).join('/').endsWith(posixSuffix);
+}
+
 function makeFixtureContext(root: string, agent: MatrixAgent, version: string): SetupDiagnosisContext {
   const fixture = join(root, `${agent}-${version.replace(/[^a-zA-Z0-9]/g, '-')}`);
   const home = join(fixture, 'home');
   let binRoot = join(fixture, 'bin');
   let binary = join(binRoot, matrix[agent].command);
-  mkdirSync(home, { recursive: true, mode: 0o700 });
+  makeOwnerOnlyDirectory(home);
   if (agent === 'pi') {
     const packageRoot = join(fixture, 'node_modules', '@earendil-works', 'pi-coding-agent');
     binRoot = join(packageRoot, 'bin');
@@ -232,8 +265,9 @@ function makeFixtureContext(root: string, agent: MatrixAgent, version: string): 
   } else {
     mkdirSync(binRoot, { recursive: true });
   }
+  // The file still exists, because discovery legitimately looks for it on disk.
   writeFileSync(binary, `#!/bin/sh\nprintf '%s\\n' '${agent} ${version}'\n`, { mode: 0o755 });
-  chmodSync(binary, 0o755);
+  if (process.platform !== 'win32') chmodSync(binary, 0o755);
   const real = createSetupDiagnosisContext({
     homeDir: home,
     platform: 'linux',
@@ -246,6 +280,23 @@ function makeFixtureContext(root: string, agent: MatrixAgent, version: string): 
     probeTcp: async () => 'closed',
     listDirectory: () => ({ ok: false, reason: 'missing' } as const),
     processAlive: () => false,
+    // Resolution and execution are INJECTED rather than performed.
+    //
+    // These fixtures used to write a `#!/bin/sh` script, chmod it, and let the product spawn it for
+    // real. That cannot work on Windows and could not be repaired by writing a `.cmd` instead: the
+    // context deliberately declares `platform: 'linux'` so the LINUX diagnosis logic is what gets
+    // exercised, and linux resolution does not consult PATHEXT, so a `.cmd` would not be found
+    // either. Every version branch therefore degraded to `version-unparsable` on Windows.
+    //
+    // What these checks are actually about is how the product PARSES a version and which branch it
+    // takes — not whether this host can exec a shell script. Injecting the answer tests exactly that,
+    // on every platform, and faster. Real spawning on Windows is covered where it belongs: the
+    // native adapter probes under scripts/broker/windows, which run real agents through their real
+    // `.cmd` shims, and `doctor-real` against installed CLIs.
+    resolveExecutable: (command: string) => (command === matrix[agent].command ? binary : undefined),
+    runReadOnly: async (executable: string) => (executable === binary
+      ? { status: 'ok' as const, exitCode: 0, stdout: `${agent} ${version}\n`, stderr: '' }
+      : { status: 'unavailable' as const, stdout: '', stderr: 'not a fixture executable' }),
   };
 }
 
@@ -268,7 +319,7 @@ const testRoot = mkdtempSync(join(tmpdir(), 'cosyncing-doctor-'));
 // whole file at an empty fixture home; the checks that want a persisted language plant their own.
 const realCosyncingHome = process.env.COSYNCING_HOME;
 const cliHome = join(testRoot, 'cli-home');
-mkdirSync(cliHome, { recursive: true, mode: 0o700 });
+makeOwnerOnlyDirectory(cliHome);
 process.env.COSYNCING_HOME = cliHome;
 try {
   for (const agent of Object.keys(matrix) as MatrixAgent[]) {
@@ -316,7 +367,7 @@ try {
   const npmOnlyStandalone = checkById(npmOnlyCodex, 'codex.standalone-install');
   const standaloneCodex = await diagnoseCodexSetup(fakeContext({
     executables: { codex: '/fixture/releases/0.146.1-aarch64-apple-darwin/bin/codex' },
-    inspectPath: (path) => path.endsWith('/packages/standalone/current/bin/codex')
+    inspectPath: (path) => pathEndsWith(path, '/packages/standalone/current/bin/codex')
       ? { status: 'file', readable: true, displayPath: path }
       : { status: 'missing', readable: false, displayPath: path },
   }));
@@ -337,6 +388,32 @@ try {
       && externalStandalone.status === 'skip'
       && externalStandalone.detailCode === 'standalone-install-external-daemon',
     `${npmOnlyStandalone.status}/${standaloneReady.status}/${externalStandalone.status}`);
+
+  // The same official installer writes `current\bin\codex.exe` on Windows (with `current` as a
+  // junction). Checking only the extensionless name told an operator with a correct standalone install
+  // to go and install it again — verified against the real 0.149.0 install on the native Windows host.
+  const windowsStandalone = await diagnoseCodexSetup(fakeContext({
+    platform: 'win32',
+    executables: { codex: '/fixture/Programs/OpenAI/Codex/bin/codex.exe' },
+    inspectPath: (path) => pathEndsWith(path, '/packages/standalone/current/bin/codex.exe')
+      ? { status: 'file', readable: true, displayPath: path }
+      : { status: 'missing', readable: false, displayPath: path },
+  }));
+  const windowsReady = checkById(windowsStandalone, 'codex.standalone-install');
+  // And a Windows host with neither name present is still missing — the extension is not a way to pass.
+  const windowsAbsent = await diagnoseCodexSetup(fakeContext({
+    platform: 'win32',
+    executables: { codex: '/fixture/WinGet/Links/codex.exe' },
+    readPackageVersion: () => '0.146.1',
+    inspectPath: () => ({ status: 'missing', readable: false, displayPath: '/fixture/missing' }),
+  }));
+  const windowsMissing = checkById(windowsAbsent, 'codex.standalone-install');
+  check('A correct Windows standalone install is recognized by its .exe, and its absence still warns',
+    windowsReady.status === 'pass'
+      && windowsReady.detailCode === 'standalone-install-ready'
+      && windowsMissing.status === 'warn'
+      && windowsMissing.detailCode === 'standalone-install-missing',
+    `${windowsReady.status}/${windowsReady.detailCode} ${windowsMissing.status}/${windowsMissing.detailCode}`);
 
   // Daemon listener state comes from /proc/net/unix. On darwin that file does not exist, so a present,
   // safe socket must degrade to an explicit skip — never the Linux 'stale' verdict, which would accuse a
@@ -500,7 +577,7 @@ try {
   {
     const userHome = join(testRoot, 'config-v1-doctor');
     const stateHome = join(userHome, '.cosyncing');
-    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    makeOwnerOnlyDirectory(stateHome);
     atomicWriteOwnerOnly(join(stateHome, 'config.json'), `${JSON.stringify({
       schemaVersion: 1,
       broker: {
@@ -534,7 +611,7 @@ try {
     const piAgentDir = join(userHome, '.pi', 'agent');
     const bridge = join(piAgentDir, 'extensions', 'cosyncing-bridge', 'index.ts');
     const priorPackaged = `${PI_BRIDGE_EMBEDDED_SOURCE}\n// prior packaged bridge comment\n`;
-    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    makeOwnerOnlyDirectory(stateHome);
     atomicWriteOwnerOnly(bridge, priorPackaged, { mode: 0o600 });
     const install = committedInstallState('2026-07-17T00:00:00.000Z');
     install.resources.push({
@@ -583,7 +660,7 @@ try {
     // exists to withhold. Silent by construction, so it needs a test.
     const userHome = join(testRoot, 'managed-host-homes');
     const stateHome = join(userHome, '.cosyncing');
-    mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+    makeOwnerOnlyDirectory(stateHome);
     const install = committedInstallState('2026-08-17T00:00:00.000Z');
     install.resources.push({
       id: 'service-environment',
@@ -631,7 +708,7 @@ try {
       !('commandText' in (legacyHook.evidence ?? {})));
 
   const journalHome = join(testRoot, 'journal-home');
-  mkdirSync(journalHome, { recursive: true, mode: 0o700 });
+  makeOwnerOnlyDirectory(journalHome);
   recordManagedRuntimeFailure({
     agent: 'codex',
     detailCode: 'codex-daemon-start-exited',
@@ -642,7 +719,7 @@ try {
   const rawJournal = readFileSync(join(journalHome, 'logs', 'managed-runtime-failures.json'), 'utf8');
   const stored = readManagedRuntimeFailureJournal(journalHome);
   check('managed-runtime journal is owner-only, bounded, and redacted before persistence',
-    (statSync(join(journalHome, 'logs', 'managed-runtime-failures.json')).mode & 0o777) === 0o600 &&
+    isOwnerOnlyFile(join(journalHome, 'logs', 'managed-runtime-failures.json')) &&
       !rawJournal.includes(sentinel) && !!stored.failures.codex?.capturedOutput.includes('[REDACTED'));
   recordManagedRuntimeFailure({
     agent: 'fixture-adapter',
@@ -678,7 +755,7 @@ try {
   const stateHome = join(testRoot, 'configured-home', '.cosyncing');
   const userHome = dirname(stateHome);
   const cacheHome = join(userHome, '.cache', 'cosyncing');
-  mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+  makeOwnerOnlyDirectory(stateHome);
   const configured = defaultBrokerConfig();
   writeBrokerConfig(configured, stateHome);
   loadOrCreateBrokerInstanceId(stateHome);
@@ -839,13 +916,27 @@ try {
   }));
   const after = treeSnapshot(userHome);
   const reportJson = JSON.stringify(report);
+  const requiredGreenIds = [
+    'service.systemd-user', 'network.internal-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
+    'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness',
+    'state.schema.broker-instance',
+  ];
+  const aggregateChecks = report.sections.flatMap((section) => section.checks);
+  // Evidence NAMES what went wrong. This used to report only `report.summary`, so a red run said
+  // `{"pass":26,"fail":1}` and left the reader to find the one check by hand — which on a host where
+  // this suite had never run is the difference between a diagnosis and a guess.
+  const aggregateEvidence = JSON.stringify({
+    summary: report.summary,
+    notPassing: aggregateChecks
+      .filter((item) => item.status === 'fail' || item.status === 'warn')
+      .map((item) => `${item.id}:${item.status}:${item.detailCode ?? ''}`),
+    missingRequired: requiredGreenIds.filter((id) =>
+      !aggregateChecks.some((item) => item.id === id && item.status === 'pass')),
+  });
   check('full configured doctor is green and covers service, the local broker, health, and runtime updates',
-    report.ok &&
-      ['service.systemd-user', 'network.internal-endpoint', 'runtime.managed-updates', 'codex.broker-create-readiness',
-        'opencode.broker-create-readiness', 'pi.broker-create-readiness', 'claude.broker-create-readiness',
-        'state.schema.broker-instance']
-        .every((id) => report.sections.flatMap((section) => section.checks).some((item) => item.id === id && item.status === 'pass')),
-    JSON.stringify(report.summary));
+    report.ok && requiredGreenIds
+      .every((id) => aggregateChecks.some((item) => item.id === id && item.status === 'pass')),
+    aggregateEvidence);
   check('full doctor preserves the filesystem byte-for-byte and invokes read-only probes only',
     before === after && calls.every((call) => call.startsWith('run:') || call.startsWith('get:')),
     calls.join(','));
@@ -904,7 +995,9 @@ try {
   {
     const diagnosticPath = setupFailureDiagnosticPath(stateHome);
     const writeRecord = (rollback: 'complete' | 'incomplete') => {
-      writeFileSync(diagnosticPath, JSON.stringify({
+      // Gate-read by readSetupFailureDiagnostic, so it must be owner-only on this host, not merely
+      // chmodded 0o600 — a mode Windows ignores, leaving doctor to report no recorded failure at all.
+      atomicWriteOwnerOnly(diagnosticPath, JSON.stringify({
         schemaVersion: SETUP_FAILURE_SCHEMA_VERSION,
         recordedAt: '2026-08-05T12:00:00.000Z',
         transactionId: 'fixture-transaction-1',
@@ -914,7 +1007,6 @@ try {
         detail: 'fixture: service start health check failed',
         rollback,
       }));
-      chmodSync(diagnosticPath, 0o600);
     };
     const failureCheck = (r: DoctorReport) => r.sections.flatMap((section) => section.checks)
       .find((item) => item.id === 'state.last-setup-failure');
@@ -926,7 +1018,7 @@ try {
       stateHome,
       codexTuiReadiness: { status: 'ok', customSocket: false, staleCandidatePids: [], message: 'fixture-only raw message' },
     }));
-    mkdirSync(dirname(diagnosticPath), { recursive: true });
+    ensureOwnerOnlyDirectory(dirname(diagnosticPath));
     writeRecord('complete');
     const rolledBack = await failureDoctor();
     const rolledBackCheck = failureCheck(rolledBack);
@@ -1015,14 +1107,58 @@ try {
     }));
     const windowsChecks = windowsReport.sections.flatMap((section) => section.checks);
     const connectivity = /tailscale|serve|advertised|tunnel|vpn|mesh/i;
-    check('native Windows doctor refuses the host without inspecting external connectivity',
-      windowsChecks.some((item) => item.detailCode === 'native-windows-not-v1')
-        && !windowsChecks.some((item) => connectivity.test(item.id)
-          || connectivity.test(item.detailCode ?? '')
-          || connectivity.test(item.summary ?? ''))
-        && !resolved.some((command) => connectivity.test(command))
-        && !ran.some((command) => connectivity.test(command)),
-      `${resolved.join(',')}|${ran.join(',')}`);
+    check('native Windows x64 is now a supported host rather than a refusal',
+      windowsChecks.some((item) => item.id === 'host.platform'
+        && item.status === 'pass' && item.detailCode === 'windows-supported'),
+      JSON.stringify(windowsChecks.find((item) => item.id === 'host.platform')));
+
+    // The refused Windows shapes, and the property the old refusal was really pinning: a host doctor will
+    // not run on must not be probed for external connectivity on the way to saying so. `arm64` here is the
+    // MACHINE, which is the only thing that distinguishes an emulated x64 process from a native one.
+    const refusedShapes: Array<[string, 'x64' | 'arm64' | 'unknown', string]> = [
+      ['x64', 'arm64', 'windows-emulated-x64-not-qualified'],
+      ['arm64', 'arm64', 'windows-arm64-not-qualified'],
+      ['x64', 'unknown', 'windows-machine-architecture-unverified'],
+    ];
+    const refusals: string[] = [];
+    for (const [processArch, machine, expected] of refusedShapes) {
+      const probed: string[] = [];
+      const report = observeDoctorReport(await collectDoctorReport({
+        buildInfo: BUILD_INFO,
+        context: {
+          ...fakeContext({
+            homeDir: userHome,
+            platform: 'win32',
+            arch: processArch,
+            windowsMachineArchitecture: () => machine,
+            env: { HOME: userHome, COSYNCING_HOME: stateHome, COSYNCING_CACHE_DIR: cacheHome },
+            executables: {
+              'tailscale.exe': 'C:\\Program Files\\Tailscale\\tailscale.exe',
+              tailscale: 'C:\\Program Files\\Tailscale\\tailscale.exe',
+            },
+          }),
+          resolveExecutable: (command) => { probed.push(command); return undefined; },
+        },
+        assetReport: inspectRuntimeAssets(),
+        adapters: cleanAdapters,
+        stateHome,
+        codexTuiReadiness: {
+          status: 'unsupported', customSocket: false, staleCandidatePids: [], message: 'fixture-only raw message',
+        },
+      }));
+      const checks = report.sections.flatMap((section) => section.checks);
+      const host = checks.find((item) => item.id === 'host.platform');
+      const quiet = !checks.some((item) => connectivity.test(item.id)
+        || connectivity.test(item.detailCode ?? '') || connectivity.test(item.summary ?? ''))
+        && !probed.some((command) => connectivity.test(command));
+      refusals.push(`${processArch}/${machine}=${host?.detailCode}${quiet ? '' : ':probed'}`);
+      if (host?.status !== 'fail' || host.detailCode !== expected || !quiet) {
+        refusals.push(`${processArch}/${machine}:unexpected`);
+      }
+    }
+    check('every unqualified Windows shape is refused without inspecting external connectivity',
+      refusals.length === refusedShapes.length && !refusals.some((entry) => entry.includes('unexpected')),
+      refusals.join(' | '));
   }
 
   // macOS honesty: doctor must not call a supported host "not a v1 host", must not report a missing
@@ -1123,7 +1259,7 @@ try {
   // The render above is English because the fixture home persists no language, not because the CLI
   // ignores one. Plant a choice under COSYNCING_HOME and the same invocation must follow it.
   const zhHome = join(testRoot, 'zh-home');
-  mkdirSync(zhHome, { recursive: true, mode: 0o700 });
+  makeOwnerOnlyDirectory(zhHome);
   writeFileSync(
     join(zhHome, 'setup-state.json'),
     `${JSON.stringify({ schemaVersion: 1, language: 'zh-Hans' })}\n`,

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "241c28c8c671151a47adf16a43c69ec664b177b3",
+  "acceptedBase": "0dd919669a993b92b17d970b0b308f750668055c",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -103,6 +103,7 @@
     "broker.typecheck",
     "broker.update-contract",
     "broker.web-origin",
+    "broker.windows-lane",
     "broker.workspace-file-api",
     "browser.artifact-session-isolation",
     "browser.cache-model",
@@ -253,6 +254,10 @@
     {
       "id": "web-update-handoff",
       "fingerprint": "sha256:5cfc8e57421bca1892a74f64d07a990aa9cd2b05e62eddef2251e08ba91a1fc8"
+    },
+    {
+      "id": "windows-broker",
+      "fingerprint": "sha256:798076daf81c059cd8c309595d3ca6e9348a357381daff77da2ebdebd250edaf"
     },
     {
       "id": "workflow-policy",

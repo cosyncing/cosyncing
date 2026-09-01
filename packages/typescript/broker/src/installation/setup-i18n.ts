@@ -302,7 +302,9 @@ const en: SetupMessages = {
       case 'omp-bridge':
         return `Write the exact packaged omp bridge to ${step.path}; unrelated content is never overwritten.`;
       case 'durable-state-permissions':
-        return `Tighten owner-only permissions on current-schema durable state: ${step.paths.join(', ')}; content is unchanged.`;
+        return `Tighten owner-only permissions on current-schema durable state: ${step.paths.join(', ')}; `
+          + 'content is unchanged. This one is not undone if a later step fails: setup never widens access '
+          + 'again to reverse itself.';
       case 'agent-skill-install':
         return 'Install the packaged skill into both Claude and shared .agents discovery roots and record '
           + 'one ownership receipt per target.';
@@ -500,7 +502,8 @@ const zhHans: SetupMessages = {
       case 'omp-bridge':
         return `把随包提供的 omp bridge 原样写入 ${step.path}；不会覆盖任何无关内容。`;
       case 'durable-state-permissions':
-        return `收紧当前架构持久状态的仅本人访问权限：${step.paths.join('、')}；不修改文件内容。`;
+        return `收紧当前架构持久状态的仅本人访问权限：${step.paths.join('、')}；不修改文件内容。`
+          + '此项在后续步骤失败时不会回滚：安装程序不会为了撤销自身而重新放宽访问权限。';
       case 'agent-skill-install':
         return '把随包提供的 skill 安装到 Claude 和共享 .agents 两个发现目录，并为每个目标记录一条归属凭证。';
       case 'agent-skill-refresh':

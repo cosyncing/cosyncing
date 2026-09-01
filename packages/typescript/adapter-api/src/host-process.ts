@@ -333,3 +333,142 @@ export function terminateHostProcessTree(pid: number, force: boolean): void {
   }
   try { process.kill(pid, force ? 'SIGKILL' : 'SIGTERM'); } catch { /* already gone */ }
 }
+
+/**
+ * Whether a path's owner is the user this process is running as.
+ *
+ * The Windows counterpart of the `stat.uid === process.getuid()` check that
+ * guards every file the product is willing to modify or delete. `process.getuid`
+ * does not exist on Windows, so callers that only had the POSIX test were not
+ * failing there — they were SKIPPING the ownership question entirely and then
+ * treating a file of unknown provenance as their own. That is the fail-open
+ * direction, on exactly the check that exists to prevent touching somebody
+ * else's file.
+ *
+ * Compared by SID, never by account name: names are localized and renameable,
+ * SIDs are neither. This is deliberately NOT the owner-only-DACL inspection used
+ * for secret material — an ordinary rc file or shell script inherits its ACL and
+ * would fail that test while being perfectly, unremarkably the user's own. The
+ * question here is only "is this mine".
+ *
+ * Returns 'unknown' when the machine will not answer, which callers must treat
+ * as "not proven mine" rather than as "not mine" or "mine".
+ */
+export function windowsPathOwnedByCurrentUser(target: string): 'yes' | 'no' | 'unknown' {
+  if (process.platform !== 'win32') return 'unknown';
+  if (typeof target !== 'string' || target.length === 0) return 'unknown';
+  const executable = windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
+  if (!executable) return 'unknown';
+  // The path travels in the ENVIRONMENT, never interpolated into the script text, so a filename
+  // containing quotes or `$(...)` cannot become PowerShell source. It cannot travel in argv either:
+  // `-Command` treats every remaining argument as more command TEXT rather than binding $args, so the
+  // `--` separator parsed as a unary operator and powershell exited non-zero on every call, which this
+  // function reported as 'unknown'. Windows ownership was therefore never provable, and callers that
+  // require a definite 'yes' — the OpenCode shim's receipt proof among them — declined every time.
+  const script = "$ErrorActionPreference='Stop'\n"
+    + 'try {\n'
+    + "  $p = [Environment]::GetEnvironmentVariable('COSYNCING_OWNER_PROBE_TARGET','Process')\n"
+    + '  $acl = Get-Acl -LiteralPath $p\n'
+    + '  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value\n'
+    + '  $me = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value\n'
+    + "  if ($owner -eq $me) { 'yes' } else { 'no' }\n"
+    + "} catch { 'unknown' }\n";
+  try {
+    const result = spawnSync(
+      executable,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, COSYNCING_OWNER_PROBE_TARGET: target },
+        maxBuffer: 64 * 1024,
+        timeout: PROBE_TIMEOUT_MS, windowsHide: true,
+      },
+    );
+    if (result.status !== 0) return 'unknown';
+    const answer = (result.stdout ?? '').trim();
+    return answer === 'yes' ? 'yes' : answer === 'no' ? 'no' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * The architecture of the MACHINE, as distinct from the architecture of this process.
+ *
+ * Windows on ARM64 runs x64 binaries under emulation, and an emulated process describes itself as x64
+ * everywhere a program would normally look: `process.arch` reports the binary's architecture, and
+ * `PROCESSOR_ARCHITECTURE` reports the emulated one. `PROCESSOR_ARCHITEW6432` does carry the native
+ * answer, but it is ordinary process environment data that any parent can set, so it is evidence and a
+ * test fixture — never the gate. `IsWow64Process2` is the documented kernel answer and reports both
+ * machines in one call, which is why the question is asked of the OS rather than of the environment.
+ *
+ * Returns 'unknown' when the machine will not answer. Callers must treat that as unproven rather than as
+ * either answer: the whole point of asking is that a host we cannot identify is not one we have qualified.
+ */
+export type WindowsMachineProbeResult = {
+  readonly status: number | null;
+  readonly stdout: string;
+};
+
+/**
+ * The parsing and failure policy, separated from the spawn so it can be exercised without a Windows host.
+ * The image-file machine constants are the ones IsWow64Process2 documents: 0x8664 AMD64, 0xAA64 ARM64.
+ *
+ * Anything that is not one of those two, and not an explicit refusal to answer, is 'other': a machine that
+ * gave a real answer we do not recognise is not the same as one that could not be asked, and neither is
+ * qualified. A non-zero exit, a missing status (spawn failure or timeout), or unparsable output is
+ * 'unknown' — unproven rather than either answer.
+ */
+export function parseWindowsMachineArchitecture(
+  result: WindowsMachineProbeResult,
+): 'x64' | 'arm64' | 'other' | 'unknown' {
+  if (result.status !== 0) return 'unknown';
+  const answer = (result.stdout ?? '').trim().toLowerCase();
+  switch (answer) {
+    case '8664': return 'x64';
+    case 'aa64': return 'arm64';
+    case 'unknown': case '': return 'unknown';
+    default: return /^[0-9a-f]{1,8}$/.test(answer) ? 'other' : 'unknown';
+  }
+}
+
+export function windowsNativeMachineArchitecture(
+  runProbe?: (executable: string, script: string) => WindowsMachineProbeResult,
+): 'x64' | 'arm64' | 'other' | 'unknown' {
+  if (!runProbe && process.platform !== 'win32') return 'unknown';
+  const executable = runProbe
+    ? 'powershell.exe'
+    : windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
+  if (!executable) return 'unknown';
+  // Fixed text with nothing interpolated into it, as with the ownership probe above.
+  const script = "$ErrorActionPreference='Stop'\n"
+    + 'try {\n'
+    + "  Add-Type -Namespace Cosyncing -Name Wow -MemberDefinition '\n"
+    + '[DllImport(\"kernel32.dll\", SetLastError=true)]\n'
+    + 'public static extern bool IsWow64Process2(IntPtr h, out ushort processMachine, out ushort nativeMachine);\n'
+    + "' | Out-Null\n"
+    + '  [uint16]$processMachine = 0\n'
+    + '  [uint16]$nativeMachine = 0\n'
+    + '  $handle = [System.Diagnostics.Process]::GetCurrentProcess().Handle\n'
+    + '  if ([Cosyncing.Wow]::IsWow64Process2($handle, [ref]$processMachine, [ref]$nativeMachine)) {\n'
+    + "    '{0:x4}' -f $nativeMachine\n"
+    + "  } else { 'unknown' }\n"
+    + "} catch { 'unknown' }\n";
+  try {
+    if (runProbe) return parseWindowsMachineArchitecture(runProbe(executable, script));
+    const result = spawnSync(
+      executable,
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      {
+        encoding: 'utf8',
+        env: { ...process.env },
+        maxBuffer: 64 * 1024,
+        timeout: PROBE_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+    return parseWindowsMachineArchitecture({ status: result.status, stdout: result.stdout ?? '' });
+  } catch {
+    return 'unknown';
+  }
+}

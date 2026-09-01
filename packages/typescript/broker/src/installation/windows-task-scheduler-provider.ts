@@ -16,6 +16,7 @@ import {
 } from '../security/secure-files.ts';
 import { embeddedRuntimeAsset } from '../runtime/runtime-assets.ts';
 import type {
+  DurableServiceOwnership,
   DurableServiceProvider,
   DurableServiceProviderOptions,
   DurableServiceStatus,
@@ -39,6 +40,7 @@ import {
   WINDOWS_TASK_RESOURCE_ID,
   WINDOWS_TASK_ROOT_PATH,
   windowsScheduledTaskIdentity,
+  windowsTaskSchedulerOwnership,
   windowsTaskSchedulerReceiptOwnership,
   windowsTaskSchedulerSddl,
   windowsTaskSchedulerSddlMatches,
@@ -284,6 +286,17 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
     if (!filesystem.serviceRootExisted) removeEmpty(this.paths.serviceRoot);
   }
 
+  /**
+   * Recorded by {@link inspect} and nothing else. Until an inspection has run there is no evidence, and
+   * the honest answer is `unknown` -- which every caller must treat as `unowned`. Defaulting to anything
+   * friendlier would make a provider that has never looked claim the objects are ours.
+   */
+  private lastOwnership: DurableServiceOwnership = { definition: 'unknown', environment: 'unknown' };
+
+  ownership(): DurableServiceOwnership {
+    return this.lastOwnership;
+  }
+
   installedResources(): InstalledResourceRecord[] {
     return [
       {
@@ -369,6 +382,12 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
   }
 
   async inspect(): Promise<DurableServiceStatus> {
+    // Nothing is claimed until this inspection COMPLETES. The verdict used to be published the moment the
+    // classifications existed, while the filesystem and environment inspections below had yet to run --
+    // so an exception from either left an `owned` answer standing for an inspection that never finished.
+    // Cleared on entry and republished at the end, an inspection that throws anywhere can only ever leave
+    // `unknown` behind.
+    this.lastOwnership = { definition: 'unknown', environment: 'unknown' };
     let snapshot: WindowsTaskSchedulerSnapshot;
     try {
       snapshot = this.backend.inspect(this.identity);
@@ -390,6 +409,17 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
       expectedIdentity: this.identity,
       expectedDefinition: this.definition,
     });
+    // From the SAME classifications the status below is derived from, so the two can never disagree about
+    // what was inspected -- but answering a different question: whose objects these are, not how healthy.
+    // Held locally until the whole inspection succeeds; see the note at the top of this method.
+    const ownership = windowsTaskSchedulerOwnership({
+      resources: this.receiptResources,
+      identity: this.identity,
+      environmentPath: this.environmentPath,
+      versionKey: this.options.versionKey ?? '',
+      task,
+      folders,
+    });
     const unsafe = ['conflict', 'unknown'].includes(folders.shared)
       || ['conflict', 'unknown'].includes(folders.sidFolder)
       || ['conflict', 'unknown'].includes(task.ownership);
@@ -400,7 +430,7 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
       && folders.shared === 'current' && folders.sidFolder === 'current'
       && task.definition === 'current'
       && windowsTaskSchedulerSddlMatches(snapshot.task?.taskSddl, this.identity.sid);
-    return {
+    const status: DurableServiceStatus = {
       provider: 'task-scheduler',
       supported: true,
       definition: unsafe || filesystemUnsafe ? 'unsafe'
@@ -412,6 +442,9 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
       active: snapshot.task?.active ?? 'inactive',
       lingering: 'unsupported',
     };
+    // Published last: every seam that could throw has now returned.
+    this.lastOwnership = ownership;
+    return status;
   }
 
   async installDefinition(): Promise<void> {

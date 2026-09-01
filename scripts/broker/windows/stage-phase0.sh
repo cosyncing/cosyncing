@@ -68,7 +68,39 @@ if [ -e "$linux_run_root" ]; then
   echo "Phase 0 run ID already exists; choose a new COSYNCING_WINDOWS_PHASE0_RUN_ID." >&2
   exit 2
 fi
+
+# Staging cleanup. UNCONDITIONAL in CI and on success; an INTERACTIVE failure keeps the tree,
+# because then a person is standing there and it is the only place left to diagnose from.
+#
+# Phase 7's CI lane requires an unconditional final cleanup step. Without one these roots simply
+# accumulate: 84 run directories across the six phase roots had built up on the qualification host
+# before this existed, none of them referenced by any recorded evidence — that lives under
+# `output/windows-broker/`.
+staging_ready=0
+cleanup_staging() {
+  local status=$?
+  [ "$staging_ready" = 1 ] || return 0
+  if [ "${COSYNCING_WINDOWS_KEEP_STAGING:-0}" = 1 ]; then
+    echo "Staging kept by request: $linux_run_root" >&2
+    return 0
+  fi
+  if [ "$status" -ne 0 ] && [ "${CI:-}" != "true" ]; then
+    echo "Staging kept for diagnosis (exit $status): $linux_run_root" >&2
+    return 0
+  fi
+  # A COMPUTED path is being deleted, so it must be the run root this invocation created.
+  case "$linux_run_root" in
+    */CosyncingPhase0/"$run_id")
+      rm -rf -- "$linux_run_root"
+      ;;
+    *)
+      echo "Refusing to remove an unexpected run root: $linux_run_root" >&2
+      ;;
+  esac
+}
+trap cleanup_staging EXIT
 mkdir -p "$linux_run_root"
+staging_ready=1
 
 if [ "$candidate_dirty" = false ]; then
   candidate_archive_mode=clean-commit

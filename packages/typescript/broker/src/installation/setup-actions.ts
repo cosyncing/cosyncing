@@ -551,7 +551,10 @@ export function createDurableStatePermissionsSetupAction(inputs: SetupActionInpu
       }
     },
     verify: () => repairs.every((repair) => inspectDurableStatePermissionRepair(repair) === 'current'),
-    rollback: (_context, record) => { rollbackSetupFiles(record); },
+    // Deliberately no rollback: this action only ever narrows access, and reversing it would mean
+    // widening access again from a record written before the repair. The snapshot above is still taken
+    // so recovery can prove the CONTENT was untouched, which is the property this action does promise.
+    // The plan declares the same thing with `reversible: false`.
   };
 }
 

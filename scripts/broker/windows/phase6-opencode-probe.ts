@@ -21,7 +21,7 @@
  * the `--port` default of 4096, which is inside an excluded range on this host and is also where
  * the operator's own serve would live. The probe never sends a prompt and never asks a model.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { win32 } from 'node:path';
 import { captureHostSnapshot } from './phase6-host-snapshot.ts';
 import { resolveInvocation } from '../../../packages/typescript/adapter-api/src/invocation.ts';
@@ -103,59 +103,55 @@ let baseUrl = '';
 let pidsBefore = new Set<number>();
 let snapshotBefore: Awaited<ReturnType<typeof captureHostSnapshot>> = null;
 
-/** Run one broker lifetime as its own process and return the JSON line it prints. */
+/** Every pid this run spawned, so teardown can prove what is its own instead of assuming. */
+const helperPids: number[] = [];
+
+/** Run one broker lifetime as its own process and return the JSON report it wrote. */
 async function runBroker(mode: 'start' | 'crash' | 'restart-stop'): Promise<Record<string, unknown>> {
   const helperPath = win32.join(import.meta.dir, 'phase6-opencode-broker.ts');
   const helperReport = win32.join(root, `broker-${mode}.json`);
   observations.helper = { path: leaf(helperPath), exists: existsSync(helperPath), runner: leaf(process.execPath) };
-  const child = Bun.spawn({
-    cmd: [process.execPath, helperPath],
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-    cwd: root,
-    env: {
-      ...process.env,
-      OPENCODE_URL: baseUrl,
-      OPENCODE_DATA: dataDir,
-      COSYNCING_PHASE6_OC_RECORD: recordPath,
-      COSYNCING_PHASE6_OC_REPORT: helperReport,
-      COSYNCING_PHASE6_OC_MODE: mode,
-    },
-  });
+  // The helper's output goes to FILES, never to pipes this process holds. A serve that outlives its
+  // broker inherits whatever handles it was given, and a pipe handle here is a pipe handle all the
+  // way up: an orphan once held the staging runner's stdout open and wedged a finished run for
+  // twenty minutes with its report already on disk. A file handle wedges nothing.
+  const helperOut = win32.join(root, `broker-${mode}.out.log`);
+  const helperErr = win32.join(root, `broker-${mode}.err.log`);
+  const outFd = openSync(helperOut, 'w');
+  const errFd = openSync(helperErr, 'w');
+  try {
+    const child = Bun.spawn({
+      cmd: [process.execPath, helperPath],
+      stdin: 'ignore',
+      stdout: outFd,
+      stderr: errFd,
+      cwd: root,
+      env: {
+        ...process.env,
+        OPENCODE_URL: baseUrl,
+        OPENCODE_DATA: dataDir,
+        COSYNCING_PHASE6_OC_RECORD: recordPath,
+        COSYNCING_PHASE6_OC_REPORT: helperReport,
+        COSYNCING_PHASE6_OC_MODE: mode,
+      },
+    });
+    if (child.pid) helperPids.push(child.pid);
 
-  // Drain both streams with plain continuous loops. The previous version raced each `read()` against
-  // a 2s timer, and every time the timer won, the still-pending read was abandoned — so the chunk it
-  // later received was delivered to a settled race and dropped. The probe then reported zero stdout
-  // bytes from a process that had written plenty. Never race a read against a clock.
-  const drain = (stream: ReadableStream<Uint8Array>): { text: () => string; done: Promise<void> } => {
-    let text = '';
-    const done = (async () => {
-      const reader = stream.getReader();
-      const streamDecoder = new TextDecoder();
-      try {
-        for (;;) {
-          const next = await reader.read();
-          if (next.done) break;
-          if (text.length < 4_000) text += streamDecoder.decode(next.value, { stream: true });
-        }
-      } catch { /* the process ended while its stream was draining */ }
-    })();
-    return { text: () => text, done };
-  };
-  const out = drain(child.stdout);
-  const err = drain(child.stderr);
+    // The report is a FILE, so the deadline covers the work rather than a pipe handshake.
+    await Promise.race([child.exited, Bun.sleep(180_000)]);
+    if (child.exitCode === null) { try { child.kill(); } catch { /* already gone */ } }
 
-  // The report is a FILE, so the deadline covers the work rather than a pipe handshake.
-  await Promise.race([child.exited, Bun.sleep(180_000)]);
-  if (child.exitCode === null) { try { child.kill(); } catch { /* already gone */ } }
-  await Promise.race([Promise.all([out.done, err.done]), Bun.sleep(5_000)]);
-
-  if (!existsSync(helperReport)) {
-    const tail = (err.text().trim() || out.text().trim()).split('\n').filter(Boolean).at(-1) ?? 'no output';
-    throw new Error(`broker (${mode}) wrote no report (exit ${child.exitCode}): ${tail.slice(0, 300)}`);
+    if (!existsSync(helperReport)) {
+      const tail = [helperErr, helperOut]
+        .map((path) => { try { return readFileSync(path, 'utf8').trim(); } catch { return ''; } })
+        .find((text) => text.length > 0)?.split('\n').filter(Boolean).at(-1) ?? 'no output';
+      throw new Error(`broker (${mode}) wrote no report (exit ${child.exitCode}): ${tail.slice(0, 300)}`);
+    }
+    return JSON.parse(readFileSync(helperReport, 'utf8')) as Record<string, unknown>;
+  } finally {
+    try { closeSync(outFd); } catch { /* already closed */ }
+    try { closeSync(errFd); } catch { /* already closed */ }
   }
-  return JSON.parse(readFileSync(helperReport, 'utf8')) as Record<string, unknown>;
 }
 
 try {
@@ -251,20 +247,29 @@ try {
   note('the OpenCode probe stopped early; observations recorded up to that point');
 } finally {
   // Nothing this probe started may outlive it, including a serve the product could not prove it
-  // owned. Only pids absent from the opening snapshot are touched, and only by their own tree.
+  // owned. But "appeared during this run" is not proof of ownership, and this probe once acted as
+  // if it were: it killed every opencode process absent from its opening snapshot, which on a host
+  // the operator also uses means an unrelated TUI started at the wrong minute, and with two runs
+  // overlapping it meant one run reaping the other's serve and then failing on the corpse.
+  // A survivor is THIS run's only when the host says so: it holds the port this run bound, or it
+  // descends from a process this run spawned. Anything else is reported and left alone — the same
+  // rule the product itself follows, where unknown identity always preserves the process.
   await Bun.sleep(500);
   const listener = port ? hostProcesses.listener(port, { fresh: true }) : { state: 'absent' as const };
-  if (listener.state === 'identified' && !pidsBefore.has(listener.pid)) {
-    terminateHostProcessTree(listener.pid, true);
+  const listenerPid = listener.state === 'identified' ? listener.pid : undefined;
+  const isOurs = (pid: number): boolean => pid === listenerPid
+    || helperPids.some((helper) => hostProcesses.descendsFrom(pid, helper) === 'yes');
+  if (listenerPid !== undefined && !pidsBefore.has(listenerPid)) {
+    terminateHostProcessTree(listenerPid, true);
     await Bun.sleep(1_000);
   }
   const snapshotAfter = await captureHostSnapshot();
-  const survivors = (snapshotAfter?.processes ?? []).filter((entry) =>
+  const appeared = (snapshotAfter?.processes ?? []).filter((entry) =>
     !pidsBefore.has(entry.pid) && /^opencode(?:\.exe)?$/i.test(entry.name));
-  // Remove EVERY serve this run started, not only the one still holding the port. A survivor is not
-  // just untidy: it inherited this runner's output handle, so the staging script's wait never
-  // returned and the run wedged until the process was killed by hand. What survived is still
-  // reported below — the assertion is about the product's behaviour, the cleanup is about the host.
+  const survivors = appeared.filter((entry) => isOurs(entry.pid));
+  const unattributed = appeared.filter((entry) => !isOurs(entry.pid));
+  // Remove EVERY serve this run started, not only the one still holding the port: a survivor is not
+  // just untidy, it is a process the product promised it had reaped.
   const removedByProbe: number[] = [];
   for (const entry of survivors) {
     try { terminateHostProcessTree(entry.pid, true); removedByProbe.push(entry.pid); } catch { /* already gone */ }
@@ -272,13 +277,17 @@ try {
   if (removedByProbe.length) await Bun.sleep(1_000);
   const snapshotFinal = removedByProbe.length ? await captureHostSnapshot() : snapshotAfter;
   const stillThere = (snapshotFinal?.processes ?? []).filter((entry) =>
-    !pidsBefore.has(entry.pid) && /^opencode(?:\.exe)?$/i.test(entry.name));
+    !pidsBefore.has(entry.pid) && isOurs(entry.pid));
   const snapshotsSucceeded = snapshotBefore?.processesOk === true && snapshotAfter?.processesOk === true;
   observations.teardown = {
     snapshotsSucceeded,
     // A snapshot the probe could not take yields an empty survivor list, which reads exactly like a
     // clean teardown, so a successful snapshot is itself required at both ends.
     survivingServeProcesses: snapshotsSucceeded ? survivors.length : undefined,
+    // Opencode processes that appeared during the run and are NOT attributable to it. Expected to be
+    // zero: runs hold a host-wide lock, so a non-zero count means the operator started one, and it
+    // is named here rather than silently folded into the product's result.
+    unattributedOpencodeProcesses: snapshotsSucceeded ? unattributed.length : undefined,
     listenerHeldAtTeardown: listener.state === 'identified',
     removedByProbe: removedByProbe.length,
     leftOnTheHost: snapshotsSucceeded ? stillThere.length : undefined,
@@ -288,6 +297,9 @@ try {
   if (!snapshotsSucceeded) note('a process snapshot failed, so surviving serve processes are unknown');
   if (survivors.length) note('serve processes outlived the probe; the probe removed them from the host');
   if (stillThere.length) note('serve processes could not be removed and were left for the owner to inspect');
+  if (unattributed.length) {
+    note('opencode processes the probe could not attribute to itself were running; they were left alone');
+  }
 
   let removed = false;
   try { rmSync(root, { recursive: true, force: true }); removed = !existsSync(root); } catch { removed = false; }

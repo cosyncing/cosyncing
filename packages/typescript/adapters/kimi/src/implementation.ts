@@ -90,6 +90,7 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import { basename, join } from 'node:path';
+import { homedir } from 'node:os';
 import { diagnoseKimiSetup } from './diagnostics.ts';
 import {
   KIMI_INSTANCE_SCAN_MAX_FILES,
@@ -535,7 +536,18 @@ export class KimiAdapter implements AgentBackend {
   constructor(options: KimiAdapterOptions = {}) {
     this.options = options;
     this.env = options.env ?? process.env;
-    this.homeDir = options.homeDir ?? (process.env.HOME ?? '');
+    // `HOME` is a POSIX variable and Windows does not set it, so the old
+    // `process.env.HOME ?? ''` fallback resolved to the EMPTY STRING there — and
+    // an empty home makes `resolveKimiHome` return the RELATIVE path
+    // `.kimi-code`. Every derived path is built from that one value: the
+    // instance registry, the server token, the session store. A relative home
+    // silently reads and writes them against the broker's working directory
+    // instead of the user profile, which is both wrong and unpredictable.
+    // Reading through `this.env` keeps the injected-environment seam these
+    // constructors are tested with; `homedir()` is the final fallback because it
+    // is what the OS says rather than a guess, and it is what every other
+    // adapter in this repository already uses.
+    this.homeDir = options.homeDir ?? this.env.HOME ?? this.env.USERPROFILE ?? homedir();
     this.capabilities = kimiCapabilities();
     this.canCreateSession = () => this.probeCreateSession();
     this.prepareCreateSession = () => this.readyToCreateSession();
@@ -716,7 +728,29 @@ export class KimiAdapter implements AgentBackend {
         // port and publishes it in the registry. Inventing a flag here would
         // produce a launch that silently does something other than what the
         // descriptor claims — the DSH mismatch, imported.
-        ? { command: executable, args: ['web', '--no-open'], cwd: this.homeDir }
+        // `KIMI_CODE_HOME` is passed EXPLICITLY rather than inherited.
+        //
+        // The whole descriptor is scoped to `identityKey`, which is this home,
+        // and the locator reads the instance registry underneath it. A child
+        // that resolved a different home would register somewhere this broker
+        // never looks: the host boots, serves, and heartbeats perfectly well
+        // while `isAvailable` polls an empty registry until the readiness budget
+        // expires, and the start is then abandoned as `host-not-ready-in-time`
+        // — a healthy server killed for failing to appear in the wrong place.
+        //
+        // Inheriting was enough only while the adapter's environment and the
+        // broker's were the same object. They are explicitly not required to be:
+        // `managedHostIdentity` exists precisely so this adapter can describe a
+        // home for "an environment this adapter is not necessarily running in",
+        // and an installed service resolves its own. Naming the home here makes
+        // the launch agree with the descriptor that authorized it, by
+        // construction rather than by coincidence.
+        ? {
+          command: executable,
+          args: ['web', '--no-open'],
+          cwd: this.homeDir,
+          env: { KIMI_CODE_HOME: this.home() },
+        }
         : null,
       // The registry's own numbers, which is the only place kimi's chosen port
       // is ever written down. `profile` is the home, because that is what

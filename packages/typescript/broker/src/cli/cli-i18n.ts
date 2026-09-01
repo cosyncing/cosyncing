@@ -127,8 +127,16 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'WSL is supported through the declared Linux subset.': '通过已声明的 Linux 子集支持 WSL。',
   'Linux is a supported v1 broker host.': 'Linux 是 v1 支持的 broker 主机。',
   'macOS on Apple Silicon is a supported broker host.': 'Apple Silicon macOS 是受支持的 broker 主机。',
-  'Native Windows broker hosting is a named near-term follow-up, not part of v1.': '原生 Windows broker 托管不属于 v1，将在后续版本支持。',
-  'Run the broker inside the supported WSL subset.': '请在受支持的 WSL 子集中运行 broker。',
+  'Windows on x64 is a supported broker host.': 'x64 Windows 是受支持的 broker 主机。',
+  'Windows ARM64 is not yet qualified for this broker. Run the broker on Windows x64, or on a supported Linux or macOS host.':
+    'ARM64 Windows 尚未通过本 broker 的认证。请在 x64 Windows，或受支持的 Linux、macOS 主机上运行 broker。',
+  'The broker asks Windows for the native machine architecture and refuses hosts it cannot identify. Ensure PowerShell is available to the broker, then rerun.':
+    'broker 会向 Windows 查询物理机器架构，并拒绝无法识别的主机。请确保 broker 可以使用 PowerShell，然后重新运行。',
+  'Windows ARM64 is not a qualified broker host yet.': 'ARM64 Windows 目前尚未通过 broker 主机认证。',
+  'This is an x64 process emulated on an ARM64 Windows machine, which is not qualified yet.':
+    '当前进程是在 ARM64 Windows 上模拟运行的 x64 进程，尚未通过认证。',
+  'The native Windows machine architecture could not be verified, so this host is not proven qualified.':
+    '无法确认 Windows 物理机器架构，因此无法证明该主机已通过认证。',
   'launchctl is not on PATH, so the launchd user domain cannot be inspected; foreground mode remains supported.': 'PATH 中没有 launchctl，因此无法检查 launchd 用户域；仍可使用前台模式。',
   'Run the broker in the foreground on this host.': '请在此主机上以前台模式运行 broker。',
   'The launchd GUI user domain is available.': 'launchd GUI 用户域可用。',

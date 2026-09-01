@@ -79,6 +79,20 @@ export interface DurableServiceStatus {
   lingering: 'enabled' | 'disabled' | 'unknown' | 'unsupported';
 }
 
+/**
+ * Whether the installed objects are OURS. Deliberately separate from {@link DurableServiceStatus}, which
+ * says whether they are HEALTHY: an environment file with unexpected contents is `drifted` and still
+ * ours, while a task carrying someone else's ownership marker is `current` for them and not ours at all.
+ * Conflating the two lets drift stand in for proof of ownership.
+ *
+ * `unknown` is not a soft `owned`. It means the provider could not establish the answer, and every caller
+ * must treat it exactly as it treats `unowned`.
+ */
+export interface DurableServiceOwnership {
+  definition: 'owned' | 'unowned' | 'unknown';
+  environment: 'owned' | 'unowned' | 'unknown';
+}
+
 export interface ServiceLogsRequest {
   follow: boolean;
   /** Trailing entries to read when not following; callers bound this before it reaches argv. */
@@ -107,6 +121,20 @@ export interface DurableServiceProvider {
   restoreTransactionState?(state: Readonly<Record<string, unknown>>): Promise<void>;
   /** Receipt records for providers whose owned objects are not the two legacy service files. */
   installedResources?(): InstalledResourceRecord[];
+  /**
+   * This provider's own ownership verdict for the objects it installed.
+   *
+   * Providers whose definition is a FILE (systemd, launchd) omit it: `inspect()` cannot tell our unit file
+   * from a lookalike, so ownership rests on the package-hash receipt written at install time and the
+   * caller derives the verdict from that.
+   *
+   * Providers whose owned objects are not files implement it, because only they can answer. The Windows
+   * task scheduler is the case: a scheduled task has no file to hash, and its ownership rests on exact
+   * receipts, the immutable marker written into the task, folder authority and the security descriptor.
+   *
+   * Called after {@link inspect}; before that it must answer `unknown`, never `owned`.
+   */
+  ownership?(): DurableServiceOwnership;
   /** Remove superseded receipt-owned artifacts only after the new receipt and health gate have committed. */
   finalizeCommitted?(): Promise<void>;
   inspect(): Promise<DurableServiceStatus>;
@@ -306,13 +334,21 @@ export function createServiceCommandRunner(
  * so this serialization boundary refuses both independently — a runtime like `/tmp/a:b/bin/bun` must fail
  * here, not render a PATH whose directory silently split into two bogus entries.
  */
-function cleanAbsolutePath(value: string, label: string): string {
-  if (!isAbsolute(value) || /[\0\r\n%:]/.test(value)) throw new Error(`invalid ${label} path`);
-  return resolve(value);
+/**
+ * `platform` defaults to the host so every existing caller keeps its behaviour, but callers that already
+ * KNOW the platform must say so: the bare host `isAbsolute`/`resolve` treat a POSIX path on Windows as
+ * absolute and then drive-qualify it, turning `/opt/x/bin/codex` into `C:\opt\x\bin\codex`. A caller
+ * that went on to take its `posix.dirname` got `.`, and an agent executable was silently dropped from the
+ * service set — a doctor check reporting an agent as not installed on a context that had just resolved it.
+ */
+function cleanAbsolutePath(value: string, label: string, platform: string = process.platform): string {
+  const pathApi = platform === 'win32' ? win32 : posix;
+  if (!pathApi.isAbsolute(value) || /[\0\r\n%:]/.test(value)) throw new Error(`invalid ${label} path`);
+  return pathApi.resolve(value);
 }
 
 function cleanHostPath(value: string, label: string, platform: string): string {
-  if (platform !== 'win32') return cleanAbsolutePath(value, label);
+  if (platform !== 'win32') return cleanAbsolutePath(value, label, platform);
   if (!win32.isAbsolute(value) || /[\0\r\n;]/.test(value)) throw new Error(`invalid ${label} path`);
   return win32.resolve(value);
 }

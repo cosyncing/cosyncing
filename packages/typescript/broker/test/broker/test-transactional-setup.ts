@@ -29,13 +29,14 @@ import {
   durableStateLayout,
   planDurableStateMigrations,
 } from '../../src/security/durable-state.ts';
-import { inspectInstallState, writeInstallState } from '../../src/installation/install-state.ts';
+import { inspectInstallState, writeInstallState, type InstalledResourceRecord } from '../../src/installation/install-state.ts';
 import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import { acquireInstallationLock } from '../../src/installation/installation-lock.ts';
 import {
   atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
 } from '../../src/security/secure-files.ts';
+import { isLooseFile, isOwnerOnlyFile } from '../helpers/isolated-broker-fixture.ts';
 import { PRODUCT_IDENTITY } from '../../../protocol/src/product.ts';
 import {
   createDurableServiceSetupAction,
@@ -50,6 +51,7 @@ import {
 } from '../../src/installation/setup-actions.ts';
 import {
   buildSetupPlan,
+  setupInspectionFingerprint,
   inspectSetupEnvironment,
   runSetup,
   SETUP_PROMPT_CANCELLED,
@@ -63,6 +65,15 @@ import {
   type SetupPromptResult,
   type SetupServiceChoice,
 } from '../../src/installation/setup.ts';
+import {
+  classifyWindowsScheduledTask,
+  classifyWindowsTaskFolders,
+  WINDOWS_SID_FOLDER_RESOURCE_ID,
+  WINDOWS_TASK_RESOURCE_ID,
+  windowsScheduledTaskIdentity,
+  windowsTaskSchedulerOwnership,
+  windowsTaskSchedulerSddl,
+} from '../../src/installation/windows-task-scheduler.ts';
 import {
   agentPreflightLines,
   createClackSetupPresenter,
@@ -144,6 +155,17 @@ const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 function check(name: string, ok: boolean, detail?: string): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+const skipped: Array<{ name: string; reason: string }> = [];
+
+/**
+ * A group of checks this host cannot ask at all. Recorded and printed rather than quietly omitted: a
+ * suite that covers less on one platform has to say so, or a smaller total reads as the same run.
+ */
+function skip(name: string, reason: string): void {
+  skipped.push({ name, reason });
+  console.log(`SKIP  ${name} — ${reason}`);
 }
 
 function sha256(value: string | Uint8Array): string {
@@ -246,6 +268,10 @@ function contextFor(home: string, extraEnv: Record<string, string> = {}, platfor
     ...context,
     probeTcp: async () => 'closed' as const,
     fetchJson: async () => ({ status: 'unreachable' as const }),
+    // A win32 fixture has to say what MACHINE it is. Left to the real probe it would answer 'unknown' on
+    // the host running these tests, so every Windows fixture would quietly become the unverifiable-host
+    // case rather than the supported one it means to describe.
+    windowsMachineArchitecture: () => (platform === 'win32' ? 'x64' as const : 'unknown' as const),
   };
 }
 
@@ -265,15 +291,45 @@ function setupOptions(root: string, presenter: SetupPresenter, overrides: Record
 function supportedPiFixture(machine: string): { context: ReturnType<typeof contextFor>; bridge: string } {
   const packageRoot = join(machine, 'pi-package');
   const piBin = join(packageRoot, 'pi');
+  const nodeBin = join(packageRoot, 'node');
   mkdirSync(packageRoot, { recursive: true });
   writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
     name: '@earendil-works/pi-coding-agent',
     version: '0.78.1',
   }));
-  writeFileSync(piBin, `#!${process.execPath}\nconsole.log('Pi 0.78.1');\n`);
+  // A fixed shebang, not this runtime's path: the Node-runtime check reads it, and process.execPath
+  // differs per host, which would let the same fixture ask a different question on each one.
+  writeFileSync(piBin, "#!/usr/bin/env node\nconsole.log('Pi 0.78.1');\n");
+  // Present on disk as well as injected, so no path that inspects the interpreter rather than running
+  // it can make this fixture depend on the host again.
+  writeFileSync(nodeBin, "#!/usr/bin/env node\nconsole.log('v22.19.0');\n");
   chmodSync(piBin, 0o755);
   return {
-    context: contextFor(machine, { PATH: packageRoot }),
+    // `pi` here is an extensionless shebang script. No Windows host resolves one from PATH or executes
+    // it, so the agent read as missing and setup never reached the bridge migration these fixtures are
+    // named for — they failed on PATH and shell conventions rather than on the migration. Resolution
+    // and the version are injected, the way the unsupported-Claude fixture above already does, so what
+    // is exercised on either host is the migration. The package.json beside the binary stays: the
+    // version checks read it through the context's own readText, which needs no host shell.
+    context: {
+      ...contextFor(machine, { PATH: packageRoot }),
+      // Node too: these fixtures declare a Pi that is supported, and Pi is only supported when its
+      // effective Node runtime clears the floor. Leaving that to the host made the shebang's absolute
+      // interpreter path the fixture's real input, which is exactly what differs between hosts.
+      resolveExecutable: (command: string) => {
+        if (command === 'pi' || command === piBin) return piBin;
+        return command === 'node' || command === nodeBin ? nodeBin : undefined;
+      },
+      runReadOnly: async (executable: string) => {
+        if (executable === piBin) {
+          return { status: 'ok' as const, exitCode: 0, stdout: 'pi 0.78.1\n', stderr: '' };
+        }
+        if (executable === nodeBin) {
+          return { status: 'ok' as const, exitCode: 0, stdout: 'v22.19.0\n', stderr: '' };
+        }
+        return { status: 'unavailable' as const, stdout: '', stderr: 'not a fixture executable' };
+      },
+    },
     bridge: join(machine, '.pi', 'agent', 'extensions', 'cosyncing-bridge', 'index.ts'),
   };
 }
@@ -573,7 +629,7 @@ try {
     const home = join(machine, '.cosyncing');
     await zeroAgentSetup(machine, new ScriptedPresenter());
     const state = readSetupState(home);
-    writeFileSync(join(home, 'setup-state.json'), `${JSON.stringify({ ...state, tailscaleServeRequested: true }, null, 2)}\n`, { mode: 0o600 });
+    atomicWriteOwnerOnly(join(home, 'setup-state.json'), `${JSON.stringify({ ...state, tailscaleServeRequested: true }, null, 2)}\n`);
     const install = inspectInstallState(home);
     if (!install.committed) throw new Error('legacy connectivity fixture install missing');
     const target = 'https://legacy.example.test/ -> http://127.0.0.1:7734';
@@ -600,10 +656,12 @@ try {
       `${presenter.calls.join(',')}:${JSON.stringify(migrated.legacyConnectivityMigration)}`);
   }
 
-  // Native Windows is still refused by host policy, and that refusal is the whole Windows setup surface
-  // today. It must stay connectivity-free: no provider executable resolved, no provider command run, no
-  // prompt offering a route, and no planned action naming one. A Windows Tailscale choice would put
-  // cosyncing back in the connectivity-ownership business the loopback boundary removed.
+  // Windows x64 is a supported host now, so the old blanket refusal is gone. The property that refusal was
+  // carrying is not: Windows setup must stay connectivity-free either way — no provider executable
+  // resolved, no provider command run, no prompt offering a route, no planned action naming one. A Windows
+  // Tailscale choice would put cosyncing back in the connectivity-ownership business the loopback boundary
+  // removed. Both the supported shape and a refused one are checked, because that property has to survive
+  // the host verdict rather than depend on it.
   {
     const machine = join(root, 'windows-host-policy');
     mkdirSync(join(machine, 'bin'), { recursive: true });
@@ -621,15 +679,35 @@ try {
     const presenter = new ScriptedPresenter();
     const windowsSetup = await runSetup(setupOptions(machine, presenter, { context }));
     const connectivity = /tailscale|serve|advertis|tunnel|vpn|mesh/i;
-    check('native Windows setup refuses on host policy without any connectivity provider or prompt',
-      windowsSetup.status === 'blocked' && windowsSetup.exitCode === 1
-        && windowsSetup.issueCodes?.includes('native-windows-not-v1') === true
-        && (windowsSetup.actions ?? []).length === 0
+    check('supported Windows x64 setup is never blocked on host policy, and stays connectivity-free',
+      !(windowsSetup.issueCodes ?? []).some((code) => code.startsWith('windows-') || code === 'host-architecture-unsupported')
         && !resolved.some((command) => connectivity.test(command))
         && !ran.some((command) => connectivity.test(command))
         && !presenter.calls.some((call) => connectivity.test(call))
         && !('tailscaleServeRequested' in readSetupState(join(machine, '.cosyncing'))),
       `${windowsSetup.status}:${(windowsSetup.issueCodes ?? []).join(',')}:${presenter.calls.join(',')}`);
+
+    // The emulated shape: an x64 process on an ARM64 machine. Refused before any mutation, and just as
+    // connectivity-free on the way out.
+    const emulatedMachine = join(root, 'windows-emulated-host-policy');
+    mkdirSync(join(emulatedMachine, 'bin'), { recursive: true });
+    const emulatedProbed: string[] = [];
+    const emulatedPresenter = new ScriptedPresenter();
+    const emulated = await runSetup(setupOptions(emulatedMachine, emulatedPresenter, {
+      context: {
+        ...contextFor(emulatedMachine, {}, 'win32'),
+        windowsMachineArchitecture: () => 'arm64' as const,
+        resolveExecutable: (command: string) => { emulatedProbed.push(command); return undefined; },
+      },
+    }));
+    check('an x64 process on an ARM64 Windows machine is refused before mutation and without connectivity',
+      emulated.status === 'blocked' && emulated.exitCode === 1
+        && emulated.issueCodes?.includes('windows-emulated-x64-not-qualified') === true
+        && (emulated.actions ?? []).length === 0
+        && !existsSync(join(emulatedMachine, '.cosyncing', 'config.json'))
+        && !emulatedProbed.some((command) => connectivity.test(command))
+        && !emulatedPresenter.calls.some((call) => connectivity.test(call)),
+      `${emulated.status}:${(emulated.issueCodes ?? []).join(',')}:${emulatedPresenter.calls.join(',')}`);
   }
 
   // Planner purity and the first real zero-agent transaction.
@@ -652,7 +730,7 @@ try {
     check('setup creates separate valid owner-only credentials',
       inspectBrokerToken(join(home, 'secrets', 'broker-token')).status === 'ok'
         && inspectPiIntegration(join(home, 'secrets', 'pi-integration.json')).status === 'ok'
-        && (statSync(join(home, 'secrets', 'broker-token')).mode & 0o777) === 0o600);
+        && isOwnerOnlyFile(join(home, 'secrets', 'broker-token')));
     check('setup state has no per-agent mode picker and keeps independent consent fields',
       state.agents?.codex === false && state.quotaWarningsEnabled === true
         && state.serviceChoice === 'foreground' && !('tailscaleServeRequested' in state)
@@ -706,6 +784,105 @@ try {
       choices: { language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: true, installAgentSkill: true, installOpencodeShim: true },
       now,
     });
+    // ---- A provider whose owned objects are not files ---------------------------------------------
+    //
+    // Every fixture above models the systemd/launchd shape, where the definition is a FILE and ownership
+    // is a recorded hash. The Windows task scheduler is not that shape: a task has no file to hash, so
+    // its provider answers the ownership question itself. Setup used to demand a package-hash receipt
+    // that provider never writes, read its own healthy install as unowned, and block every setup after
+    // the first with `task-scheduler-definition-unowned`. It reproduced on the physical host on the first
+    // run, and no fixture here could see it, because none of them had a non-file-backed provider.
+    //
+    // The verdicts below come from the REAL derivation, so these check that setup honours a provider's
+    // answer -- while test-windows-service-install.ts checks that the answer itself is derived from exact
+    // receipts, markers, folder authority and the security descriptor.
+    const verdictIdentity = windowsScheduledTaskIdentity('install-plan', 'S-1-5-21-9-9-9-1001');
+    const verdictEnvironmentPath = 'C:\\Users\\Fixture\\.cosyncing\\service\\broker.env';
+    const verdictReceipts: InstalledResourceRecord[] = [
+      { id: WINDOWS_TASK_RESOURCE_ID, kind: 'service', target: verdictIdentity.taskPath,
+        ownership: { proof: 'receipt', marker: verdictIdentity.ownershipMarker } },
+      { id: WINDOWS_SID_FOLDER_RESOURCE_ID, kind: 'other', target: verdictIdentity.sidFolderPath,
+        ownership: { proof: 'receipt' } },
+      { id: 'service-environment', kind: 'environment-file', target: verdictEnvironmentPath,
+        ownership: { proof: 'receipt', marker: 'version-plan' } },
+    ];
+    const realVerdict = (marker: string, resources = verdictReceipts) => windowsTaskSchedulerOwnership({
+      resources,
+      identity: verdictIdentity,
+      environmentPath: verdictEnvironmentPath,
+      versionKey: 'version-plan',
+      task: classifyWindowsScheduledTask({
+        actual: {
+          path: verdictIdentity.taskPath, ownershipMarker: marker,
+          definition: undefined, enabled: 'enabled', active: 'active',
+        },
+        expectedIdentity: verdictIdentity,
+        expectedDefinition: {} as never,
+      }),
+      folders: classifyWindowsTaskFolders({
+        identity: verdictIdentity,
+        expectedSddl: windowsTaskSchedulerSddl(verdictIdentity.sid),
+        shared: { path: '\\Cosyncing', sddl: windowsTaskSchedulerSddl(verdictIdentity.sid), childFolders: [], tasks: [] },
+        sidFolder: {
+          path: verdictIdentity.sidFolderPath,
+          sddl: windowsTaskSchedulerSddl(verdictIdentity.sid),
+          childFolders: [],
+          tasks: [{ name: 'Broker', ownershipMarker: marker }],
+        },
+        sidFolderReceiptOwned: resources.some((r) => r.id === WINDOWS_SID_FOLDER_RESOURCE_ID),
+      }),
+    });
+    const providerVerified = (
+      verdict: ReturnType<typeof windowsTaskSchedulerOwnership>,
+      status: Partial<DurableServiceStatus> = {},
+    ) => buildSetupPlan({
+      inspection: {
+        ...inspection,
+        durableServiceProvider: 'task-scheduler',
+        durableServiceAvailable: true,
+        durableServiceOwnershipVerdict: verdict,
+        durableServiceStatus: {
+          provider: 'task-scheduler', supported: true,
+          definition: 'current', environment: 'current', enabled: 'enabled', active: 'active',
+          lingering: 'unsupported', ...status,
+        },
+      },
+      choices: {
+        language: 'en', service: 'task-scheduler', enableLingering: false, quotaWarnings: true,
+        installAgentSkill: false, installOpencodeShim: false,
+      },
+      now,
+    });
+    const unownedCode = 'task-scheduler-definition-unowned';
+    const blockedBy = (plan: ReturnType<typeof buildSetupPlan>) =>
+      plan.blockingIssues.some((issue) => issue.code === unownedCode);
+    const ownVerdict = realVerdict(verdictIdentity.ownershipMarker);
+    check('setup honours a provider that proves ownership of objects it cannot hash',
+      ownVerdict.definition === 'owned' && ownVerdict.environment === 'owned'
+        && !blockedBy(providerVerified(ownVerdict)),
+      `${ownVerdict.definition}/${ownVerdict.environment}`);
+    // Drift is owned-and-needs-reconciling, which is exactly when an operator reruns setup.
+    check('an owned but drifted service is reconciled rather than blocked',
+      !blockedBy(providerVerified(ownVerdict, { definition: 'drifted', environment: 'drifted' })));
+    // Health can never stand in for ownership: a healthy-looking task that is not ours must still block.
+    check('a healthy status cannot substitute for an ownership verdict',
+      blockedBy(providerVerified(realVerdict('cosyncing:task-scheduler:v1:someone-else'))));
+    // `unknown` is not a soft `owned`.
+    check('an unknown ownership verdict is refused exactly like unowned',
+      blockedBy(providerVerified({ definition: 'unknown', environment: 'owned' }))
+        && blockedBy(providerVerified({ definition: 'owned', environment: 'unknown' })));
+    // The verdict decides whether setup may touch the service at all, so a plan built while the objects
+    // were ours must not survive them ceasing to be ours.
+    const fingerprintWith = (verdict: ReturnType<typeof windowsTaskSchedulerOwnership>) => {
+      const { preconditionHash: _hash, doctor: _doctor, ...rest } = {
+        ...inspection, durableServiceOwnershipVerdict: verdict,
+      };
+      return JSON.stringify(setupInspectionFingerprint(rest));
+    };
+    check('the ownership verdict is part of the precondition fingerprint',
+      fingerprintWith(ownVerdict)
+        !== fingerprintWith(realVerdict('cosyncing:task-scheduler:v1:someone-else')));
+
     const legacyPlan = buildSetupPlan({
       inspection: {
         ...inspection,
@@ -919,7 +1096,7 @@ try {
         }
         if (line.endsWith('pipx uninstall tokdash')) {
           rmSync(statePath, { recursive: true });
-          writeFileSync(statePath, saved, { mode: 0o600 });
+          atomicWriteOwnerOnly(statePath, saved);
         }
         return { ok: true, stdout: '', stderr: '' };
       };
@@ -942,7 +1119,7 @@ try {
     {
       const machine = join(root, 'tokdash-resume');
       const home = join(machine, '.cosyncing');
-      mkdirSync(home, { recursive: true, mode: 0o700 });
+      ensureOwnerOnlyDirectory(home);
       writeSetupState({ tokdash: { installedByBroker: true, serviceStartedByBroker: true, recordedAt: 'r12' } }, home);
       const context = provisionContext(machine, { healthy: false });
       const persist = (left: TokdashOwnership | undefined): void => {
@@ -1418,7 +1595,7 @@ try {
         return outcome;
       });
       rmSync(statePath, { recursive: true });
-      writeFileSync(statePath, saved, { mode: 0o600 });
+      atomicWriteOwnerOnly(statePath, saved);
       check('an unchanged rerun retries consent without recreating the service or reinstalling',
         second.status === 'already-configured' && second.tokdash?.status === 'provisioned'
           && secondRunner.calls.length === 1
@@ -1525,9 +1702,13 @@ try {
     {
       // A noisy child must not be able to grow the broker's heap by talking. The tail is what
       // `failureDetail` quotes, so it is the end that has to survive, not the beginning.
-      const noisy = await runTokdashCommand('/bin/sh', [
-        '-c',
-        `head -c ${TOKDASH_OUTPUT_TAIL_CHARS * 4} /dev/zero | tr '\\0' x; printf TAILMARK`,
+      // A real spawn, as the sibling check below is: /bin/sh, head, /dev/zero and tr exist on no Windows
+      // host, so the runner produced nothing there and the check failed on the fixture's choice of shell
+      // rather than on what the runner does with a noisy child. writeSync for the same reason it uses it.
+      const noisy = await runTokdashCommand(process.execPath, [
+        '-e',
+        'import { writeSync } from "node:fs";'
+        + ` writeSync(1, "x".repeat(${TOKDASH_OUTPUT_TAIL_CHARS * 4})); writeSync(1, "TAILMARK");`,
       ], 30_000);
       check('command output is drained but retained only as a bounded tail',
         noisy.ok && noisy.stdout.length <= TOKDASH_OUTPUT_TAIL_CHARS && noisy.stdout.endsWith('TAILMARK'),
@@ -1606,11 +1787,23 @@ try {
     mkdirSync(machine, { recursive: true });
     const fakeClaude = join(machine, 'fake-claude');
     writeFileSync(fakeClaude, '#!/bin/sh\necho "1.0.99 (Claude Code)"\n', { mode: 0o755 });
+    // The subject here is what an unsupported version REPORTS, not how a host executes a file. A
+    // `#!/bin/sh` script is neither resolvable nor runnable on Windows, so the agent read as missing
+    // and the check failed against correct behaviour. Inject resolution and the version the way the
+    // adjacent npm-Codex fixture already does, so the reporting is what is exercised on either host.
     const inspection = await inspectSetupEnvironment({
       buildInfo: BUILD_INFO,
       executablePath: join(machine, 'bin', 'cosyncing'),
       home: join(machine, '.cosyncing'),
-      context: contextFor(machine, { COSYNCING_CLAUDE_BIN: fakeClaude }),
+      context: {
+        ...contextFor(machine, { COSYNCING_CLAUDE_BIN: fakeClaude }),
+        resolveExecutable: (command: string) => (command === 'claude' || command === fakeClaude
+          ? fakeClaude
+          : undefined),
+        runReadOnly: async (executable: string) => (executable === fakeClaude
+          ? { status: 'ok' as const, exitCode: 0, stdout: '1.0.99 (Claude Code)\n', stderr: '' }
+          : { status: 'unavailable' as const, stdout: '', stderr: 'not a fixture executable' }),
+      },
     });
     const claude = inspection.agents.find((agent) => agent.id === 'claude');
     check('an unsupported Claude CLI carries its detected version, the required floor, and the fix command',
@@ -1780,7 +1973,7 @@ try {
     const machine = join(root, 'skill-known-legacy');
     const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
     mkdirSync(dirname(agentsSkill), { recursive: true });
-    writeFileSync(agentsSkill, AGENT_SKILL_V010_FIXTURE, { mode: 0o600 });
+    atomicWriteOwnerOnly(agentsSkill, AGENT_SKILL_V010_FIXTURE);
     const presenter = new ScriptedPresenter({ legacySkill: true });
     const upgraded = await zeroAgentSetup(machine, presenter);
     const targets = agentSkillTargets(contextFor(machine));
@@ -1795,7 +1988,7 @@ try {
     const machine = join(root, 'skill-known-legacy-declined');
     const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
     mkdirSync(dirname(agentsSkill), { recursive: true });
-    writeFileSync(agentsSkill, AGENT_SKILL_V010_FIXTURE, { mode: 0o600 });
+    atomicWriteOwnerOnly(agentsSkill, AGENT_SKILL_V010_FIXTURE);
     const presenter = new ScriptedPresenter({ legacySkill: false });
     const declined = await zeroAgentSetup(machine, presenter);
     check('declining the known skill upgrade preserves it and commits nothing',
@@ -1809,7 +2002,7 @@ try {
     const agentsSkill = join(machine, '.agents', 'skills', 'cosyncing', 'SKILL.md');
     const modified = `${AGENT_SKILL_V010_FIXTURE}\nuser note\n`;
     mkdirSync(dirname(agentsSkill), { recursive: true });
-    writeFileSync(agentsSkill, modified, { mode: 0o600 });
+    atomicWriteOwnerOnly(agentsSkill, modified);
     const presenter = new ScriptedPresenter({ legacySkill: true });
     const blocked = await zeroAgentSetup(machine, presenter);
     check('an edited older skill remains unknown, blocked, and untouched',
@@ -1998,7 +2191,12 @@ try {
       stdout: 'pipe',
       stderr: 'pipe',
     });
-    for (let index = 0; index < 200 && !existsSync(marker); index += 1) await Bun.sleep(10);
+    // A fresh runtime has to start, load this file, and do owner-only writes before it can journal
+    // anything. On Windows each of those writes costs a PowerShell process, so a two-second budget
+    // expired first and the check failed on the fixture's patience rather than on the product. The
+    // poll still exits the instant the marker appears, so no host waits longer than it must.
+    const markerDeadline = Date.now() + 120_000;
+    while (!existsSync(marker) && Date.now() < markerDeadline) await Bun.sleep(10);
     check('crash fixture reaches a journaled in-flight mutation', existsSync(marker) && !!readSetupTransactionJournal(home));
     child.kill('SIGKILL');
     await child.exited;
@@ -2033,7 +2231,12 @@ try {
       stdout: 'pipe',
       stderr: 'pipe',
     });
-    for (let index = 0; index < 200 && !existsSync(marker); index += 1) await Bun.sleep(10);
+    // A fresh runtime has to start, load this file, and do owner-only writes before it can journal
+    // anything. On Windows each of those writes costs a PowerShell process, so a two-second budget
+    // expired first and the check failed on the fixture's patience rather than on the product. The
+    // poll still exits the instant the marker appears, so no host waits longer than it must.
+    const markerDeadline = Date.now() + 120_000;
+    while (!existsSync(marker) && Date.now() < markerDeadline) await Bun.sleep(10);
     const interrupted = readSetupTransactionJournal(home);
     check('interrupted first scheduler install journals its ownership identity before task creation returns',
       existsSync(marker) && existsSync(taskPath) && interrupted?.plan.installationId === installationId,
@@ -2082,8 +2285,10 @@ try {
     const machine = join(root, 'durable-setup-unversioned');
     const home = join(machine, '.cosyncing');
     const setupState = join(home, 'setup-state.json');
-    mkdirSync(home, { recursive: true });
-    writeFileSync(setupState, JSON.stringify({ language: 'zh-Hans' }), { mode: 0o600 });
+    // Owner-only on this host: the file's only intended defect is that it is unversioned, and a mode
+    // Windows ignores would make the gate refuse it as unsafe before setup could reach that question.
+    ensureOwnerOnlyDirectory(home);
+    atomicWriteOwnerOnly(setupState, JSON.stringify({ language: 'zh-Hans' }));
     const layout = durableStateLayout({
       stateRoot: home,
       cacheRoot: join(machine, '.cache', 'cosyncing'),
@@ -2107,8 +2312,8 @@ try {
     const machine = join(root, 'durable-peers-unversioned');
     const home = join(machine, '.cosyncing');
     const peers = join(home, 'transport-peers.json');
-    mkdirSync(home, { recursive: true });
-    writeFileSync(peers, JSON.stringify({ peers: [] }), { mode: 0o600 });
+    ensureOwnerOnlyDirectory(home);
+    atomicWriteOwnerOnly(peers, JSON.stringify({ peers: [] }));
     const layout = durableStateLayout({
       stateRoot: home,
       cacheRoot: join(machine, '.cache', 'cosyncing'),
@@ -2146,7 +2351,7 @@ try {
     check('setup tightens legacy peer state while doctor keeps the pending security migration visible',
       complete.status === 'complete'
         && complete.actions.includes('durable-state.permissions')
-        && (statSync(peers).mode & 0o777) === 0o600
+        && isOwnerOnlyFile(peers)
         && peerDoctor?.status === 'warn'
         && inspectInstallState(join(machine, '.cosyncing')).committed,
       `${complete.status}:mode=${(statSync(peers).mode & 0o777).toString(8)} doctor=${peerDoctor?.status}`);
@@ -2162,7 +2367,7 @@ try {
       blocked.status === 'blocked'
         && blocked.issueCodes?.includes('peers-unsafe') === true
         && readFileSync(peers, 'utf8') === '{"version":1'
-        && (statSync(peers).mode & 0o777) === 0o644
+        && isLooseFile(peers)
         && !inspectInstallState(join(machine, '.cosyncing')).committed,
       `${blocked.status}:${blocked.issueCodes?.join(',')}`);
   }
@@ -2189,12 +2394,46 @@ try {
       };
     };
     const failed = await runSetup(setupOptions(machine, new ScriptedPresenter(), { actionCatalogFactory: factory }));
-    check('a later setup failure restores the legacy peers bytes and permissions',
+    // Tightening durable state is MONOTONIC: applied once, never reversed, on every platform. So a later
+    // failure restores the content it found — that is what the snapshot is for — and deliberately leaves
+    // the repaired permissions in force. The alternative would be recovery widening access again from a
+    // record written before the repair, which is not a property worth having on any host, and which
+    // Windows could not honour anyway: its writers cannot express the original descriptor.
+    check('a later setup failure restores the legacy peers bytes and keeps the tightened permissions',
       failed.status === 'failed'
         && readFileSync(peers, 'utf8') === original
-        && (statSync(peers).mode & 0o777) === 0o644
+        && isOwnerOnlyFile(peers)
         && !inspectInstallState(join(machine, '.cosyncing')).committed,
-      `${failed.status}:mode=${(statSync(peers).mode & 0o777).toString(8)}`);
+      `${failed.status}:ownerOnly=${isOwnerOnlyFile(peers)}`);
+  }
+  {
+    // The contract, not just its effect: the plan has to SAY the repair is not reversible, and say it where
+    // an operator reads what setup is about to do. Pinned on every platform, because monotonicity is the
+    // rule everywhere and not a Windows accommodation.
+    const machine = join(root, 'durable-peers-monotonic');
+    const peers = join(machine, '.cosyncing', 'transport-peers.json');
+    mkdirSync(dirname(peers), { recursive: true });
+    writeFileSync(peers, JSON.stringify({ version: 1, peers: [] }), { mode: 0o644 });
+    chmodSync(peers, 0o644);
+    const inspection = await inspectSetupEnvironment({
+      buildInfo: BUILD_INFO,
+      executablePath: join(machine, 'bin', 'cosyncing'),
+      home: join(machine, '.cosyncing'),
+      context: contextFor(machine),
+    });
+    const plan = buildSetupPlan({
+      inspection,
+      choices: {
+        language: 'en', service: 'foreground', enableLingering: false, quotaWarnings: true,
+        installAgentSkill: true, installOpencodeShim: true,
+      },
+      now,
+    });
+    const repair = plan.actions.find((action) => action.id === 'durable-state.permissions');
+    check('setup plans tightening durable-state permissions as explicit non-reversible work',
+      repair?.reversible === false
+        && plan.mutationSummary.some((summary) => summary.includes('not undone if a later step fails')),
+      JSON.stringify(repair));
   }
 
   // omp setup owns bridge installation independently of session discovery. A first run must install and
@@ -2223,7 +2462,7 @@ try {
     const machine = join(root, 'pi-known-legacy');
     const { context, bridge } = supportedPiFixture(machine);
     mkdirSync(dirname(bridge), { recursive: true });
-    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    atomicWriteOwnerOnly(bridge, PI_BRIDGE_V010_FIXTURE);
     const presenter = new ScriptedPresenter({ legacyPi: true });
     const migrated = await runSetup(setupOptions(machine, presenter, { context }));
     check('first-time setup separately confirms and replaces the exact known legacy Pi bridge',
@@ -2239,7 +2478,7 @@ try {
     const machine = join(root, 'pi-known-legacy-declined');
     const { context, bridge } = supportedPiFixture(machine);
     mkdirSync(dirname(bridge), { recursive: true });
-    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    atomicWriteOwnerOnly(bridge, PI_BRIDGE_V010_FIXTURE);
     const presenter = new ScriptedPresenter({ legacyPi: false });
     const declined = await runSetup(setupOptions(machine, presenter, { context }));
     check('declining the separate legacy Pi migration preserves the bridge and commits nothing',
@@ -2252,7 +2491,7 @@ try {
     const machine = join(root, 'pi-known-legacy-rollback');
     const { context, bridge } = supportedPiFixture(machine);
     mkdirSync(dirname(bridge), { recursive: true });
-    writeFileSync(bridge, PI_BRIDGE_V010_FIXTURE, { mode: 0o600 });
+    atomicWriteOwnerOnly(bridge, PI_BRIDGE_V010_FIXTURE);
     const factory = (inputs: SetupActionInputs) => {
       const catalog = createSetupActionCatalog(inputs);
       return {
@@ -2284,7 +2523,7 @@ try {
     const { context, bridge } = supportedPiFixture(machine);
     const modified = `${PI_BRIDGE_V010_FIXTURE}\n// local change\n`;
     mkdirSync(dirname(bridge), { recursive: true });
-    writeFileSync(bridge, modified, { mode: 0o600 });
+    atomicWriteOwnerOnly(bridge, modified);
     const presenter = new ScriptedPresenter({ legacyPi: true });
     const blocked = await runSetup(setupOptions(machine, presenter, { context }));
     check('a marker-bearing modified Pi bridge remains blocked and is never offered for migration',
@@ -2371,10 +2610,22 @@ try {
       const { context, bridge } = supportedPiFixture(machine);
       await runSetup(setupOptions(machine, new ScriptedPresenter(), { context }));
       if (unsafeCase === 'loose-mode') {
-        chmodSync(bridge, 0o644);
+        // POSIX states this hazard as a mode; Windows states it as a descriptor that is not owner-only.
+        // chmod is a no-op there, so the bridge stayed owner-only and setup correctly found nothing to
+        // block. Recreating the file gives it the parent's inherited, unprotected ACEs, which is the same
+        // defect in the form the host can express: the packaged bytes under permissions setup must refuse.
+        if (process.platform === 'win32') {
+          rmSync(bridge);
+          writeFileSync(bridge, PI_BRIDGE_EMBEDDED_SOURCE);
+        } else {
+          chmodSync(bridge, 0o644);
+        }
+        // Never let a no-op pass for a hazard: if the host did not actually loosen the file, say so here
+        // rather than let the check report on a bridge that was never unsafe.
+        if (!isLooseFile(bridge)) outcomes.push(`${unsafeCase}:not-loosened`);
       } else if (unsafeCase === 'symlink') {
         const userFile = join(machine, 'user-owned-extension.ts');
-        writeFileSync(userFile, PI_BRIDGE_EMBEDDED_SOURCE, { mode: 0o600 });
+        atomicWriteOwnerOnly(userFile, PI_BRIDGE_EMBEDDED_SOURCE);
         rmSync(bridge);
         symlinkSync(userFile, bridge);
       } else {
@@ -2988,9 +3239,9 @@ try {
         && existsSync(homeCopy) && readFileSync(homeCopy, 'utf8') === 'npm-packaged-binary-v1',
       `${first.status}:${first.actions.join(',')}`);
     check('the bootstrap copy is owner-only executable and the npm-owned artifact is never mutated',
-      (statSync(homeCopy).mode & 0o777) === 0o700
+      isOwnerOnlyFile(homeCopy, 0o700)
         && readFileSync(npmBinary, 'utf8') === 'npm-packaged-binary-v1'
-        && (statSync(npmBinary).mode & 0o777) === 0o755);
+        && isLooseFile(npmBinary, 0o755));
     check('the broker-binary receipt names the home copy with a measured package hash, never the npm path',
       binaryReceipt(home)?.target === homeCopy
         && binaryReceipt(home)?.kind === 'binary'
@@ -3214,7 +3465,15 @@ try {
   // Everything the provider does is otherwise the ordinary systemd contract: `start()` on an already-active
   // unit is a no-op, `stop()` signals and waits, and `inspect()` reports the process it owns.
   // ---------------------------------------------------------------------------------------------------
-  {
+  // This lane is systemd end to end: the provider implements the systemd contract, and the fabricated
+  // builds it spawns are `#!/usr/bin/env bun` scripts installed under an extensionless name. Windows has
+  // neither, and refusing to resolve such a path is the product behaving correctly rather than a gap
+  // this suite could close. The Windows service lifecycle is a different manager and needs its own
+  // coverage; asserting this one there would only restate that Windows is not Linux.
+  if (process.platform === 'win32') {
+    skip('the live systemd service lifecycle lane',
+      'systemd and POSIX shebang binaries; the Windows service lifecycle is covered separately');
+  } else {
     const probeTcp = createSetupDiagnosisContext({ homeDir: root, platform: 'linux', env: {} }).probeTcp;
 
     /** Take a loopback port the OS says is free right now. */
@@ -3567,6 +3826,11 @@ try {
       && bridgeBlock.includes('initialValue: false')
       && !bridgeBlock.includes('initialValue: true'),
     bridgeBlock.split('\n').find((line) => line.includes('initialValue'))?.trim() ?? '(no initialValue)');
+}
+
+if (skipped.length) {
+  console.log(`\n${skipped.length} check group(s) skipped on ${process.platform}:`);
+  for (const entry of skipped) console.log(`  - ${entry.name}: ${entry.reason}`);
 }
 
 const failed = results.filter((entry) => !entry.ok);

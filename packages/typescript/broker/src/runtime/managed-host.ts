@@ -328,6 +328,14 @@ export interface ManagedHostEffects {
   deadline(ms: number): { expired: Promise<void>; cancel(): void };
   /** This process's own pid, which must never be signalled. */
   selfPid(): number;
+  /**
+   * Whether `pid` is a descendant of `ancestorPid`, when this machine can say.
+   *
+   * OPTIONAL, and absent means 'unknown'. Only a 'yes' is ever acted on, so an
+   * effects set that omits this — every existing fixture, and every platform
+   * whose provider declines to answer — keeps exactly the behaviour it had.
+   */
+  descendsFrom?(pid: number, ancestorPid: number, options?: { fresh?: boolean }): 'yes' | 'no' | 'unknown';
 }
 
 export interface ManagedHostStore {
@@ -622,7 +630,7 @@ export async function startManagedHost(
   // which process serves the address. Writing it here is what makes a child
   // that hangs, crashes, or outlives this broker still reapable — the leak this
   // whole module exists to prevent.
-  const record: ManagedHostOwnership = {
+  let record: ManagedHostOwnership = {
     schemaVersion: MANAGED_HOST_OWNER_SCHEMA_VERSION,
     ...spawned.identity,
     agent: plan.agent,
@@ -651,6 +659,36 @@ export async function startManagedHost(
     store.write({ ...record, evidence });
   };
   const childGone = (): boolean => child.exitCode !== null;
+  /**
+   * Move the ownership record from the child we spawned onto the process that is
+   * actually serving, once that process is PROVEN to be our child's descendant.
+   *
+   * Needed because a launch command is not always the thing that ends up
+   * serving. On Windows a CLI installed by npm is a `.cmd` shim, batch has no
+   * exec, so the shim CALLS the real program: the pid we spawn is `cmd.exe` and
+   * the server is its child. The adapter's locator names the server — Kimi reads
+   * it from its own instance registry, DSH from whoever holds the port — so the
+   * record has to name the server too, or `classifyManagedHost` compares a shim
+   * pid against a server pid and answers 'foreign' about our own host. That
+   * verdict is not cosmetic: 'foreign' is preserved rather than stopped, so the
+   * host becomes unreapable and every later start finds the address occupied.
+   *
+   * Safe because both processes are ours and neither is abandoned. Descent is
+   * proven, not assumed, and stopping the server collapses the shim with it: a
+   * `cmd /c` shim exits when the program it called exits, and the Windows stop
+   * path terminates the whole tree anyway.
+   *
+   * Returns false when the serving identity cannot be read, which is the one
+   * case that must not silently rewrite the record — an unreadable process is
+   * not a proof of anything, and the record we already hold is still true.
+   */
+  const adoptServingProcess = (servingPid: number): boolean => {
+    const identity = effects.liveProcess(servingPid, { fresh: true });
+    if (identity.state !== 'running') return false;
+    record = { ...record, ...identity.identity };
+    store.write(record);
+    return true;
+  };
   /** Give up the child and the record together, but only once it is proven gone. */
   const abandonChild = async (detailCode: string): Promise<ManagedHostStartOutcome> => {
     const stopped = await terminate(child.pid, plan.stopGraceMs, effects, childGone);
@@ -665,9 +703,23 @@ export async function startManagedHost(
   for (;;) {
     if (await probeReady(plan, effects, deadline - effects.now())) {
       const serving = await plan.locate();
-      if (serving.state === 'identified' && serving.pid === child.pid) {
+      // Ours if it IS the child, or if it is proven to descend from the child.
+      // Only a 'yes' counts: 'no' and 'unknown' both fall through to the branch
+      // below, so a machine that cannot read its process table — and every
+      // platform whose provider declines to answer, which is all of them except
+      // Windows — behaves exactly as it did before this was added.
+      if (serving.state === 'identified'
+        && (serving.pid === child.pid
+          || effects.descendsFrom?.(serving.pid, child.pid, { fresh: true }) === 'yes')) {
+        if (serving.pid !== child.pid && !adoptServingProcess(serving.pid)) {
+          // Proven ours, but its identity could not be read, so the record keeps
+          // naming the child. The start succeeded; what is unproven is which
+          // process serves, and that is exactly what `servingProven: false` says.
+          await recordObserved();
+          return { action: 'started', pid: child.pid, servingProven: false };
+        }
         await recordObserved();
-        return { action: 'started', pid: child.pid, servingProven: true };
+        return { action: 'started', pid: serving.pid, servingProven: true };
       }
       if (serving.state === 'identified') {
         // Another host won the address while ours was starting. Ours is proven
@@ -1619,6 +1671,7 @@ export function defaultManagedHostEffects(): ManagedHostEffects {
       return { expired, cancel: () => clearTimeout(timer) };
     },
     selfPid: () => process.pid,
+    descendsFrom: (pid, ancestorPid, options) => hostProcessProvider.descendsFrom(pid, ancestorPid, options),
   };
 }
 

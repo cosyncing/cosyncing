@@ -218,7 +218,7 @@ def workflow_contract_errors(source, heavy_jobs)
 end
 
 workflow_cases = {
-  '.github/workflows/ci.yml' => %w[current-host linux-android apple windows],
+  '.github/workflows/ci.yml' => %w[current-host linux-android apple windows windows-broker],
   '.github/workflows/broker-release-gate.yml' => %w[native-package broker-web-pair]
 }
 workflow_cases.each do |path, heavy_jobs|
