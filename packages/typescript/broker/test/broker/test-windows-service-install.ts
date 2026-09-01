@@ -19,7 +19,6 @@ import {
   WINDOWS_SHARED_FOLDER_RESOURCE_ID,
   WINDOWS_SID_FOLDER_RESOURCE_ID,
   windowsTaskSchedulerReceiptOwnership,
-  windowsTaskSchedulerCanonicalSddl,
   windowsTaskSchedulerSddl,
   windowsScheduledTaskIdentity,
   type WindowsScheduledTaskDefinition,
@@ -198,15 +197,30 @@ function check(name: string, ok: boolean, detail?: string): void {
     repairableFolder.shared === 'current' && repairableFolder.sidFolder === 'drifted'
       && blockedFolder.sidFolder === 'conflict' && blockedFolder.foreignChildren[0] === 'folder:Foreign'
       && incompatibleShared.shared === 'conflict');
-  const canonical = windowsTaskSchedulerCanonicalSddl(identity.sid);
-  const canonicalized = classifyWindowsTaskFolders({
+  const classifyBoth = (value: string) => classifyWindowsTaskFolders({
     identity, expectedSddl: sddl,
-    shared: { ...shared, sddl: canonical },
-    sidFolder: { ...ownedFolder, sddl: canonical },
+    shared: { ...shared, sddl: value },
+    sidFolder: { ...ownedFolder, sddl: value },
     sidFolderReceiptOwned: true,
   });
-  check('scheduler security accepts only the supplied DACL and its exact native owner/group canonical form',
-    canonicalized.shared === 'current' && canonicalized.sidFolder === 'current');
+  // Native inspection reads owner, group and DACL back together, and Task Scheduler fills the primary
+  // group in from the creating token. A local Windows account carries None (RID 513) there rather than
+  // its own SID, so a descriptor is ours whatever group it came back with.
+  const ownGroup = classifyBoth(`O:${identity.sid}G:${identity.sid}${sddl}`);
+  const localAccountGroup = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513${sddl}`);
+  const daclOnly = classifyBoth(sddl);
+  check('scheduler security accepts the stored descriptor whichever primary group the token carried',
+    ownGroup.shared === 'current' && ownGroup.sidFolder === 'current'
+      && localAccountGroup.shared === 'current' && localAccountGroup.sidFolder === 'current'
+      && daclOnly.shared === 'current' && daclOnly.sidFolder === 'current');
+  const foreignOwner = classifyBoth(`O:S-1-5-21-1-2-3-1002G:S-1-5-21-1-2-3-513${sddl}`);
+  const widenedDacl = classifyBoth(
+    `O:${identity.sid}G:S-1-5-21-1-2-3-513D:PAI(A;;FA;;;${identity.sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)`);
+  const audited = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513${sddl}S:(AU;SA;FA;;;WD)`);
+  const unprotected = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513D:AI(A;;FA;;;${identity.sid})(A;;FA;;;SY)(A;;FA;;;BA)`);
+  check('scheduler security still rejects a foreign owner, a widened or unprotected DACL, and an audit ACL',
+    [foreignOwner, widenedDacl, audited, unprotected]
+      .every((entry) => entry.shared === 'conflict' && entry.sidFolder === 'drifted'));
 }
 
 {
@@ -262,7 +276,7 @@ function check(name: string, ok: boolean, detail?: string): void {
         && entry.input.ownershipMarker === identity.ownershipMarker)
       && operations[2]?.input.definition === definition
       && operations[2]?.input.sidFolderOwned === false
-      && operations[2]?.input.canonicalSddl === windowsTaskSchedulerCanonicalSddl(identity.sid));
+      && operations[2]?.input.expectedSddl === windowsTaskSchedulerSddl(identity.sid));
 
   let malformedRejected = false;
   try {

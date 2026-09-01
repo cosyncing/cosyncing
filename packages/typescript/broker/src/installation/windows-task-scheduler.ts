@@ -118,24 +118,66 @@ export function windowsScheduledTaskIdentity(
   };
 }
 
+/** The protected DACL itself, without the `D:` marker, shared by the builder and the matcher. */
+function windowsTaskSchedulerDacl(cleanSid: string): string {
+  return `PAI(A;;FA;;;${cleanSid})(A;;FA;;;SY)(A;;FA;;;BA)`;
+}
+
 /**
  * Versioned descriptor used for every scheduler object created by the login-scoped Windows provider.
- * The supplied descriptor contains the protected DACL only. Native inspection adds exact owner/group fields;
- * {@link windowsTaskSchedulerSddlMatches} admits only these two representations of the same descriptor.
+ * The supplied descriptor carries the protected DACL only; {@link windowsTaskSchedulerSddlMatches}
+ * decides what counts as that descriptor once Windows has stored it.
  */
 export function windowsTaskSchedulerSddl(sid: string): string {
-  const cleanSid = validSid(sid);
-  return `D:PAI(A;;FA;;;${cleanSid})(A;;FA;;;SY)(A;;FA;;;BA)`;
+  return `D:${windowsTaskSchedulerDacl(validSid(sid))}`;
 }
 
-/** Task Scheduler adds the current principal as owner and primary group when storing this exact DACL. */
-export function windowsTaskSchedulerCanonicalSddl(sid: string): string {
-  const cleanSid = validSid(sid);
-  return `O:${cleanSid}G:${cleanSid}${windowsTaskSchedulerSddl(cleanSid)}`;
+/**
+ * Split a descriptor into its top-level components. `O:`, `G:`, `D:` and `S:` introduce a component
+ * only outside an ACE, so the scan tracks parenthesis depth; a repeated or trailing marker is malformed.
+ */
+function splitSddl(value: string): Partial<Record<'O' | 'G' | 'D' | 'S', string>> | undefined {
+  const parts: Partial<Record<'O' | 'G' | 'D' | 'S', string>> = {};
+  let key: 'O' | 'G' | 'D' | 'S' | undefined;
+  let start = 0;
+  let depth = 0;
+  const commit = (end: number): boolean => {
+    if (key === undefined) return end === 0;
+    if (parts[key] !== undefined) return false;
+    parts[key] = value.slice(start, end);
+    return true;
+  };
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === '(') depth += 1;
+    else if (character === ')') depth -= 1;
+    else if (depth === 0 && value[index + 1] === ':' && (character === 'O' || character === 'G'
+      || character === 'D' || character === 'S')) {
+      if (!commit(index)) return undefined;
+      key = character;
+      start = index + 2;
+      index += 1;
+    }
+  }
+  if (depth !== 0) return undefined;
+  return commit(value.length) ? parts : undefined;
 }
 
+/**
+ * Admits the descriptor this provider writes, in either the form it was written in or the form Windows
+ * stores it as. Native inspection reads owner, group and DACL together, and Task Scheduler fills the
+ * primary group in from the creating token: a local account carries `None` (RID 513) there rather than
+ * its own SID, so the group is not ours to predict and grants nothing on a protected DACL that names
+ * only the user, SYSTEM and Administrators. The DACL must match exactly, an owner -- who could rewrite
+ * that DACL -- must be the user when present, and an audit ACL we never write is still a foreign edit.
+ */
 export function windowsTaskSchedulerSddlMatches(actual: string | undefined, sid: string): boolean {
-  return actual === windowsTaskSchedulerSddl(sid) || actual === windowsTaskSchedulerCanonicalSddl(sid);
+  if (actual === undefined) return false;
+  const cleanSid = validSid(sid);
+  const parts = splitSddl(actual);
+  if (!parts || parts.S !== undefined) return false;
+  if (parts.O !== undefined && parts.O !== cleanSid) return false;
+  return parts.D === windowsTaskSchedulerDacl(cleanSid);
 }
 
 function receiptOwns(
