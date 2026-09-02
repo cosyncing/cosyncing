@@ -216,7 +216,7 @@ void main() {
       expect(report.projects, isNull);
       expect(report.projectReconciliation, isNull);
       expect(report.hasWhenYouWork, isFalse);
-      // Only the facet-fed sections go; the report itself still has its numbers.
+      // Only the facet-fed sections go; the report itself keeps its numbers.
       expect(report.totals.tokens, 19893991786);
       expect(report.tools, hasLength(3));
     });

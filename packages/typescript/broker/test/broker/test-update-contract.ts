@@ -131,9 +131,20 @@ check('a client below the revision-17 security floor still fails closed',
 // it is the visibility floor for the new omp row. Revision-18 clients remain
 // writable for every agent they already understand, while roster filtering
 // keeps omp out of their response.
-check('the current revision-19 broker retains the intentional revision-17 client floor',
-  BROKER_CONTRACT.revision === 19
-    && BROKER_CONTRACT.minimumClientRevision === 17
+//
+// Revision 20 is additive on revision 18's terms: one read-only route
+// (`GET /api/tokdash/report`) that older clients never call. What it is NOT is
+// free for shipped clients — 18 is the revision they advertise, and 20 puts
+// them two revisions back, outside the overlap window. `a revision outside the
+// one-version overlap window fails closed` below is what enforces that; the
+// release consequence is that a revision-19-or-later client ships first.
+//
+// The assertion tracks the constants rather than a literal revision. An
+// additive bump should not need this line edited — but raising the floor, or
+// making a previous-revision client read-only, must still fail here.
+check('the current broker retains the intentional revision-17 client floor',
+  BROKER_CONTRACT.minimumClientRevision === 17
+    && BROKER_CONTRACT.revision > BROKER_CONTRACT.minimumClientRevision
     && previousRevisionClient.status === 'client-behind'
     && !previousRevisionClient.readOnly);
 check('the overlap window never overrides the explicit security floor',

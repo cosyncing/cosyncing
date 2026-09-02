@@ -521,18 +521,26 @@ try {
     "scheduled retired selection is rejected without substitution",
   );
 
-  // Revision 19 adds only first-party omp identity. Revision 18 remains inside
-  // the writable compatibility window, and this request body is unchanged.
-  const previousRevisionQuery =
-    "contractRevision=18&minimumBrokerRevision=16&" +
-    "contractSurfaceHash=fnv1a32%3A4531a029&clientVersion=1.0.0";
+  // The revision immediately below the broker's is inside the writable
+  // compatibility window, and this request body is unchanged by any of the
+  // additive revisions above it. Derived from the constant rather than written
+  // as a literal: pinning a number here turns every additive bump into a red
+  // suite that says nothing about session creation.
+  //
+  // The surface hash is only compared at equal revisions, so a previous-revision
+  // client may advertise any value for it.
+  const previousRevisionQuery = new URLSearchParams({
+    contractRevision: String(BROKER_CONTRACT.revision - 1),
+    minimumBrokerRevision: String(BROKER_CONTRACT.minimumClientRevision - 1),
+    contractSurfaceHash: "fnv1a32:previous-revision-client",
+    clientVersion: "1.0.0",
+  }).toString();
   const previousRevision = await request(
     running.base,
     `/api/sessions/claude?${previousRevisionQuery}`,
     "POST",
     { directory: running.creationDir },
   );
-  assert.equal(BROKER_CONTRACT.revision, 19);
   assert.equal(
     previousRevision.status,
     200,
