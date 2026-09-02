@@ -14,6 +14,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// working set uses: a file pane names a path inside one broker's workspace,
 /// so carrying it to another broker would point at a file that may not exist.
 class FilePanesController extends AsyncNotifier<FilePanesState> {
+  /// Files asked for before this controller had a broker source.
+  ///
+  /// The same cold-start hole the opened-sessions working set has, reached by
+  /// the same route: a deep link resolves its URL before the active profile is
+  /// loaded, and a mutation against a sourceless build is refused outright.
+  /// Without this a bookmarked `?path=` link opened the session and no file.
+  ///
+  /// Bounded: a profile may never arrive, and this must not grow with every
+  /// navigation while that is true.
+  final List<FilePaneKey> _deferredOpens = [];
+
+  /// How many deferred opens are kept; the last still wins the active tab.
+  static const int _deferredOpenBudget = 8;
+
   String? _sourceKey;
   Future<void> _tail = Future<void>.value();
 
@@ -25,13 +39,51 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
     _sourceKey = source?.storageKey;
     final sourceKey = _sourceKey;
     if (sourceKey == null) return FilePanesState.empty;
-    return _store.load(sourceKey);
+    return _replayDeferredOpens(await _store.load(sourceKey), sourceKey);
+  }
+
+  /// Folds anything opened before a source existed into [restored].
+  ///
+  /// Runs inside `build`, so it returns the state build will publish and
+  /// persists through the store directly rather than assigning `state`.
+  FilePanesState _replayDeferredOpens(
+    FilePanesState restored,
+    String sourceKey,
+  ) {
+    if (_deferredOpens.isEmpty) return restored;
+    final pending = List<FilePaneKey>.of(_deferredOpens);
+    _deferredOpens.clear();
+    var next = restored;
+    for (final pane in pending) {
+      next = next.opened(pane.session, pane.path);
+    }
+    unawaited(_store.save(sourceKey, next));
+    return next;
+  }
+
+  /// Holds [pane] until a build with a source can replay it.
+  void _defer(FilePaneKey pane) {
+    _deferredOpens
+      ..removeWhere((held) => held.key == pane.key)
+      ..add(pane);
+    while (_deferredOpens.length > _deferredOpenBudget) {
+      _deferredOpens.removeAt(0);
+    }
   }
 
   /// Opens [path] in [session], or activates it when already open.
   Future<void> open(SessionDetailKey session, String path) async {
+    final pane = FilePaneKey(session: session, path: path);
+    // The restore has to land before the source is knowable: `_sourceKey` is
+    // only written by a build, and a cold deep link arrives before the first
+    // one has finished.
+    await future;
+    if (_sourceKey == null) {
+      _defer(pane);
+      return;
+    }
     await _mutate((current) => current.opened(session, path));
-    _followFocus(FilePaneKey(session: session, path: path));
+    _followFocus(pane);
   }
 
   /// Closes one file pane.

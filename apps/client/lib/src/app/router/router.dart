@@ -454,6 +454,11 @@ void _openSessionTab(
     // build() is still in flight is overwritten the moment the restore
     // resolves — and a deep link is precisely the case that arrives first, so
     // the tab it opened would be dropped every time.
+    //
+    // That is only half the race, and the controller owns the other half: on a
+    // cold start this future resolves against a build that has no broker
+    // source yet, and the profile's arrival rebuilds over it. `open` holds the
+    // request until a build has a source rather than dropping it here.
     unawaited(
       container.read(openSessionsControllerProvider.future).then((_) {
         container.read(openSessionsControllerProvider.notifier).open(ref);

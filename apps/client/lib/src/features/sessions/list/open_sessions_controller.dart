@@ -54,6 +54,32 @@ final openSessionsControllerProvider =
 /// persists asynchronously. Closing a tab removes it from the working set,
 /// never from the broker.
 class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
+  /// Opens asked for before this controller had a broker source.
+  ///
+  /// A cold start resolves the URL before the active profile is loaded, so a
+  /// deep link's `open` lands on the sourceless build — whose state is thrown
+  /// away, unpersisted, the moment the profile arrives. Holding the request
+  /// here and replaying it into the first build that has a source is what
+  /// makes a bookmarked session URL open its session instead of the empty
+  /// workspace.
+  ///
+  /// Bounded: a profile may never arrive (no broker configured), and this must
+  /// not grow with every navigation while that is true.
+  final List<SessionRef> _deferredOpens = [];
+
+  /// How many deferred opens are kept. The last one wins the active tab, so
+  /// dropping the oldest costs nothing a reader would notice.
+  static const int _deferredOpenBudget = 8;
+
+  /// An active tab this controller chose and has not yet seen confirmed by a
+  /// membership emission.
+  ///
+  /// The stream reports who is open and deliberately never carries active-tab
+  /// state, so an emission that predates the controller's own write must not
+  /// be allowed to answer a question it was never asked. Cleared by the first
+  /// emission that contains the member, which is the write's own.
+  String? _pendingActiveKey;
+
   String? _sourceKey;
   String? _legacyProfileId;
   StreamSubscription<List<SessionRef>>? _membershipSubscription;
@@ -93,18 +119,63 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
         unawaited(_membershipSubscription?.cancel());
       });
     }
-    return OpenSessionsState(
+    // A restore is authoritative and has nothing in flight behind it.
+    _pendingActiveKey = null;
+    final restored = OpenSessionsState(
       refs: snapshot.refs,
       activeKey:
           snapshot.activeKey ??
           (snapshot.refs.isEmpty ? null : snapshot.refs.first.key),
     );
+    return _replayDeferredOpens(restored, sourceKey);
+  }
+
+  /// Folds anything opened before a source existed into [restored].
+  ///
+  /// Runs inside `build`, so it cannot assign `state` — it returns the state
+  /// build will publish and persists through the store directly.
+  OpenSessionsState _replayDeferredOpens(
+    OpenSessionsState restored,
+    String sourceKey,
+  ) {
+    if (_deferredOpens.isEmpty) return restored;
+    final pending = List<SessionRef>.of(_deferredOpens);
+    _deferredOpens.clear();
+    final refs = [...restored.refs];
+    for (final entry in pending) {
+      final index = refs.indexWhere((ref) => ref.key == entry.key);
+      if (index >= 0) {
+        refs[index] = entry;
+      } else {
+        refs.add(entry);
+      }
+    }
+    final next = OpenSessionsState(refs: refs, activeKey: pending.last.key);
+    _pendingActiveKey = next.activeKey;
+    final store = _store;
+    if (store is LosslessOpenSessionsStore) {
+      for (final entry in pending) {
+        _runLosslessOperation(
+          (store, sourceKey) => store.openMember(sourceKey, entry),
+        );
+      }
+      _saveActiveHint(next.activeKey);
+    } else if (_legacyProfileId case final profileId?) {
+      unawaited(
+        _store.save(
+          profileId,
+          OpenSessionsSnapshot(refs: next.refs, activeKey: next.activeKey),
+        ),
+      );
+    }
+    return next;
   }
 
   OpenSessionsState get _current =>
       state.valueOrNull ?? const OpenSessionsState();
 
   void _commitLegacy(OpenSessionsState next) {
+    _pendingActiveKey = next.activeKey;
     state = AsyncData(next);
     final profileId = _legacyProfileId;
     if (profileId != null) {
@@ -118,17 +189,36 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
   }
 
   void _setLocal(OpenSessionsState next) {
+    _pendingActiveKey = next.activeKey;
     state = AsyncData(next);
   }
 
   void _acceptObservedMembership(int generation, List<SessionRef> refs) {
     if (generation != _membershipGeneration || _sourceKey == null) return;
-    final current = _current;
-    var activeKey = current.activeKey;
-    if (activeKey != null && !refs.any((ref) => ref.key == activeKey)) {
+    final pending = _pendingActiveKey;
+    var activeKey = _current.activeKey;
+    if (pending != null && refs.any((ref) => ref.key == pending)) {
+      // Confirmed: this emission has caught up with the controller's write.
+      _pendingActiveKey = null;
+      activeKey = pending;
+    } else if (pending != null) {
+      // Not yet. A deep link writes its member and its active choice together,
+      // and the watch can emit twice around that write: once before the member
+      // exists — which used to null the choice out — and once after, which had
+      // nothing left to restore it. The result was a tab in the strip beside
+      // an empty workspace, permanently.
+      activeKey = pending;
+    } else if (activeKey == null || !refs.any((ref) => ref.key == activeKey)) {
+      // Nothing in flight, so the emission is the truth: the active tab is
+      // gone (another window closed it) and a neighbour takes over. Never a
+      // non-empty working set with no active tab — that renders as "select a
+      // session" with the sessions already sitting in the strip.
       activeKey = refs.isEmpty ? null : refs.first.key;
     }
-    _setLocal(OpenSessionsState(refs: refs, activeKey: activeKey));
+    // Assigned directly rather than through [_setLocal]: an emission observes
+    // a choice, it never makes one, and recording it as pending would let a
+    // stale fallback outlive the write it was standing in for.
+    state = AsyncData(OpenSessionsState(refs: refs, activeKey: activeKey));
   }
 
   void _runLosslessOperation(
@@ -173,6 +263,15 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
   /// whatever status the caller actually has — so replacing it is what makes an
   /// unknown status expressible.
   void open(SessionRef entry) {
+    if (_sourceKey == null) {
+      _deferredOpens
+        ..removeWhere((ref) => ref.key == entry.key)
+        ..add(entry);
+      while (_deferredOpens.length > _deferredOpenBudget) {
+        _deferredOpens.removeAt(0);
+      }
+      return;
+    }
     final current = _current;
     final refs = [...current.refs];
     final index = refs.indexWhere((ref) => ref.key == entry.key);
