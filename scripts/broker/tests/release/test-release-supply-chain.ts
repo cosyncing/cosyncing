@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Deterministic release, signature, inventory, and bootstrap acceptance. */
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -12,6 +12,7 @@ import {
   readlinkSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -309,6 +310,9 @@ try {
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
   const publicKeyPath = join(root, 'release-key.pub.pem');
   writeFileSync(publicKeyPath, publicPem, { mode: 0o600 });
+  const p256 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const p256PrivatePem = p256.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const p256PublicPem = p256.publicKey.export({ type: 'spki', format: 'pem' }).toString();
   const armEvidencePath = join(
     evidenceDirectory,
     'cosyncing-linux-arm64.evidence.json',
@@ -336,6 +340,8 @@ try {
       keyId: 'test-2026',
       privateKeyPem: privatePem,
       publicKeyPem: publicPem,
+      p256PrivateKeyPem: p256PrivatePem,
+      p256PublicKeyPem: p256PublicPem,
     });
   } catch (error) {
     mismatchedNativeContractRejected = /disagrees on broker contract/.test(
@@ -359,6 +365,8 @@ try {
     keyId: 'test-2026',
     privateKeyPem: privatePem,
     publicKeyPem: publicPem,
+    p256PrivateKeyPem: p256PrivatePem,
+    p256PublicKeyPem: p256PublicPem,
   });
   const originalWebArtifact = readFileSync(webArtifactPath);
   writeFileSync(webArtifactPath, 'swapped candidate web sidecar\n');
@@ -375,6 +383,8 @@ try {
       keyId: 'test-2026',
       privateKeyPem: privatePem,
       publicKeyPem: publicPem,
+      p256PrivateKeyPem: p256PrivatePem,
+      p256PublicKeyPem: p256PublicPem,
     });
   } catch (error) {
     swappedWebRejected = /web sidecar no longer matches/.test(
@@ -412,6 +422,49 @@ try {
         target,
         trustedKeys: { 'test-2026': publicPem },
       }).artifact.target === target));
+
+  // The sibling P-256 signature. Nothing in this repository verifies it yet — the PowerShell installer that
+  // will is a separate lane — so these are the only checks standing between a malformed signature and a
+  // Windows operator discovering it months from now.
+  const p256PublicKeyObject = createPublicKey(
+    readFileSync(join(releaseDirectory, 'release-key-p256.pem'), 'utf8'),
+  );
+  const verifiesP256 = (payload: string, signature: string): boolean => verify(
+    'sha256',
+    readFileSync(join(releaseDirectory, payload)),
+    { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
+    readFileSync(join(releaseDirectory, signature)),
+  );
+  check('the manifest and checksum list carry sibling P-256 signatures a PowerShell host can verify',
+    verifiesP256('release-manifest.json', 'release-manifest.json.p256.sig')
+      && verifiesP256('SHA256SUMS', 'SHA256SUMS.p256.sig')
+      // IEEE P1363 is what .NET Framework's ECDsa.VerifyData reads: raw r || s, never a DER SEQUENCE.
+      && statSync(join(releaseDirectory, 'release-manifest.json.p256.sig')).size === 64
+      && statSync(join(releaseDirectory, 'SHA256SUMS.p256.sig')).size === 64);
+  check('the published P-256 key is the one that signed, and is not the Ed25519 key',
+    readFileSync(join(releaseDirectory, 'release-key-p256.pem'), 'utf8').trim() === p256PublicPem.trim()
+      && readFileSync(join(releaseDirectory, 'release-key.pem'), 'utf8').trim() === publicPem.trim());
+  check('a tampered manifest fails the sibling signature as well as the Ed25519 one',
+    !verify(
+      'sha256',
+      Buffer.concat([readFileSync(join(releaseDirectory, 'release-manifest.json')), Buffer.from(' ')]),
+      { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
+      readFileSync(join(releaseDirectory, 'release-manifest.json.p256.sig')),
+    ));
+  // The whole reason Ed25519 stays. A broker built before the sibling signature existed reads only the
+  // manifest, knows only `ed25519`, and trusts only the Ed25519 key id: prove that release is still readable
+  // by exactly that reader rather than assuming a sibling FILE cannot disturb it.
+  const publishedManifest = JSON.parse(readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8'));
+  check('a broker built before this change still verifies the manifest with Ed25519 alone',
+    publishedManifest.signature.algorithm === 'ed25519'
+      && Object.keys(publishedManifest.signature).sort().join(',') === 'algorithm,keyId,value'
+      && !('signatures' in publishedManifest) && !('p256Signature' in publishedManifest)
+      && verifyReleaseManifest({
+        value: publishedManifest,
+        target: 'linux-x64',
+        trustedKeys: { 'test-2026': publicPem },
+      }).manifest.version === version);
+
   const pairing = verifyReleasePairing(assembled.manifest);
   check(
     'signed manifest binds broker contract and the exact /cosy/ web sidecar',

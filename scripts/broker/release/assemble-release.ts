@@ -13,13 +13,16 @@ interface Args {
   keyId: string;
   privateKey: string;
   publicKey: string;
+  p256PrivateKey: string;
+  p256PublicKey: string;
 }
 
 function usage(): never {
   console.error(
     'Usage: bun run scripts/broker/release/assemble-release.ts ' +
     '--artifacts DIR --evidence DIR --output DIR --base-url HTTPS_URL --commit HEX ' +
-    '--published-at ISO --key-id ID --private-key PATH --public-key PATH',
+    '--published-at ISO --key-id ID --private-key PATH --public-key PATH ' +
+    '--p256-private-key PATH --p256-public-key PATH',
   );
   process.exit(2);
 }
@@ -43,6 +46,8 @@ function parseArgs(argv: string[]): Args {
     keyId: value('--key-id'),
     privateKey: resolve(value('--private-key')),
     publicKey: resolve(value('--public-key')),
+    p256PrivateKey: resolve(value('--p256-private-key')),
+    p256PublicKey: resolve(value('--p256-public-key')),
   };
 }
 
@@ -58,6 +63,8 @@ const result = assembleRelease({
   keyId: args.keyId,
   privateKeyPem: readFileSync(args.privateKey, 'utf8'),
   publicKeyPem: readFileSync(args.publicKey, 'utf8'),
+  p256PrivateKeyPem: readFileSync(args.p256PrivateKey, 'utf8'),
+  p256PublicKeyPem: readFileSync(args.p256PublicKey, 'utf8'),
 });
 console.log(JSON.stringify({
   version: result.manifest.version,

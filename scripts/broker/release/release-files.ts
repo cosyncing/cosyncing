@@ -54,6 +54,27 @@ export function releaseTargetArch(target: ReleaseTarget): 'x64' | 'arm64' {
 }
 export const WEB_SIDECAR_NAME = 'cosyncing-web-app.tar.gz' as const;
 
+/**
+ * The second signature, emitted as a SIBLING FILE rather than a second manifest field.
+ *
+ * A shipped broker hard-rejects any manifest whose `signature.algorithm` is not `ed25519`, so switching the
+ * manifest to another algorithm would strand every installed broker behind a channel it can no longer read —
+ * including the release that would have taught it the new algorithm. Ed25519 therefore stays, unchanged, and
+ * the manifest schema does not grow a second signature field.
+ *
+ * What this adds is a detached ECDSA P-256 signature over the same bytes, for a consumer that cannot verify
+ * Ed25519 at all: Windows PowerShell. PowerShell 5.1 runs on .NET Framework 4.x, Windows CNG exposes no
+ * Ed25519 algorithm identifier, and Windows ships no system OpenSSL — so a PowerShell installer has no way to
+ * check the Ed25519 signature and no WSL to hand off to. P-256 is verifiable there with no dependency.
+ *
+ * Each consumer verifies exactly ONE signature: the broker's own self-update path and `install.sh` verify
+ * Ed25519 as they always have and are untouched; a PowerShell installer verifies P-256. Nobody verifies both,
+ * and neither signature is a fallback for the other.
+ */
+export const P256_PUBLIC_KEY_NAME = 'release-key-p256.pem' as const;
+/** Suffix of a detached P-256 signature file: `<payload>.p256.sig` beside `<payload>.sig`. */
+export const P256_SIGNATURE_SUFFIX = '.p256.sig' as const;
+
 export interface PackageEvidence {
   schemaVersion: 1;
   product: typeof PRODUCT_IDENTITY.productName;
@@ -114,6 +135,9 @@ export interface ReleaseAssemblyOptions {
   keyId: string;
   privateKeyPem: string;
   publicKeyPem: string;
+  /** ECDSA P-256 key pair for the sibling signatures. See {@link P256_PUBLIC_KEY_NAME}. */
+  p256PrivateKeyPem: string;
+  p256PublicKeyPem: string;
 }
 
 export interface ReleaseAssemblyResult {
@@ -216,6 +240,37 @@ function detachedSignature(bytes: Uint8Array, privateKeyPem: string): Uint8Array
 
 function writeSignature(path: string, bytes: Uint8Array, privateKeyPem: string): void {
   writeFileSync(path, detachedSignature(bytes, privateKeyPem), { mode: 0o644 });
+}
+
+/**
+ * Detached ECDSA P-256 signature in IEEE P1363 form — the raw 64-byte `r || s`, not a DER SEQUENCE.
+ *
+ * The format is chosen by the one consumer this signature exists for. .NET's `ECDsa.VerifyData(byte[],
+ * byte[], HashAlgorithmName)` — the only overload Windows PowerShell 5.1's .NET Framework 4.x offers — reads
+ * exactly this layout, so a PowerShell installer verifies with two lines and no ASN.1 parsing. DER would be
+ * the friendlier choice for `openssl dgst -verify`, but no Unix consumer needs this signature: on Unix the
+ * Ed25519 signature is the one that is checked, and it is unchanged.
+ */
+function detachedP256Signature(bytes: Uint8Array, privateKeyPem: string): Uint8Array {
+  return sign('sha256', bytes, { key: createPrivateKey(privateKeyPem), dsaEncoding: 'ieee-p1363' });
+}
+
+function writeP256Signature(path: string, bytes: Uint8Array, options: {
+  privateKeyPem: string;
+  publicKeyPem: string;
+}): void {
+  const signature = detachedP256Signature(bytes, options.privateKeyPem);
+  // Self-verify every P-256 signature as it is written. Nothing in this repository consumes these files yet,
+  // so a silently malformed signature would first be discovered by a Windows operator months from now.
+  if (!verify(
+    'sha256',
+    bytes,
+    { key: createPublicKey(options.publicKeyPem), dsaEncoding: 'ieee-p1363' },
+    signature,
+  )) {
+    throw new Error(`P-256 signature failed its own verification: ${basename(path)}`);
+  }
+  writeFileSync(path, signature, { mode: 0o644 });
 }
 
 function renderBootstrap(options: {
@@ -354,12 +409,35 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   if (!verify(null, keyProbe, publicKey, sign(null, keyProbe, privateKey))) {
     throw new Error('release signing key pair does not match');
   }
+  // The P-256 pair is validated BESIDE the Ed25519 guard above, never in place of it. Relaxing that guard
+  // into "either algorithm" would let a release signed with only the P-256 key through, and every installed
+  // broker would reject it — the exact failure keeping Ed25519 avoids.
+  const p256PrivateKey = createPrivateKey(options.p256PrivateKeyPem);
+  const p256PublicKey = createPublicKey(options.p256PublicKeyPem);
+  if (p256PrivateKey.asymmetricKeyType !== 'ec' || p256PublicKey.asymmetricKeyType !== 'ec'
+      || p256PrivateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+      || p256PublicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw new Error('release sibling signing keys must be ECDSA P-256');
+  }
+  if (!verify(
+    'sha256',
+    keyProbe,
+    { key: p256PublicKey, dsaEncoding: 'ieee-p1363' },
+    sign('sha256', keyProbe, { key: p256PrivateKey, dsaEncoding: 'ieee-p1363' }),
+  )) {
+    throw new Error('release sibling signing key pair does not match');
+  }
 
   mkdirSync(options.outputDirectory, { recursive: true });
   const publicKeyName = 'release-key.pem';
   writeFileSync(
     join(options.outputDirectory, publicKeyName),
     `${options.publicKeyPem.trim()}\n`,
+    { mode: 0o644 },
+  );
+  writeFileSync(
+    join(options.outputDirectory, P256_PUBLIC_KEY_NAME),
+    `${options.p256PublicKeyPem.trim()}\n`,
     { mode: 0o644 },
   );
   const inventory = createCompiledSoftwareInventory({
@@ -521,6 +599,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   const manifestName = 'release-manifest.json';
   const manifestBytes = writeJson(join(options.outputDirectory, manifestName), manifest);
   writeSignature(join(options.outputDirectory, `${manifestName}.sig`), manifestBytes, options.privateKeyPem);
+  writeP256Signature(
+    join(options.outputDirectory, `${manifestName}${P256_SIGNATURE_SUFFIX}`),
+    manifestBytes,
+    { privateKeyPem: options.p256PrivateKeyPem, publicKeyPem: options.p256PublicKeyPem },
+  );
 
   const bootstrapName = 'install.sh';
   const bootstrap = renderBootstrap({
@@ -545,8 +628,10 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     noticeName,
     thirdPartyNoticesName,
     publicKeyName,
+    P256_PUBLIC_KEY_NAME,
     manifestName,
     `${manifestName}.sig`,
+    `${manifestName}${P256_SIGNATURE_SUFFIX}`,
     bootstrapName,
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
@@ -554,8 +639,18 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   const checksumBytes = Buffer.from(checksums, 'utf8');
   writeFileSync(join(options.outputDirectory, 'SHA256SUMS'), checksumBytes, { mode: 0o644 });
   writeSignature(join(options.outputDirectory, 'SHA256SUMS.sig'), checksumBytes, options.privateKeyPem);
+  writeP256Signature(
+    join(options.outputDirectory, `SHA256SUMS${P256_SIGNATURE_SUFFIX}`),
+    checksumBytes,
+    { privateKeyPem: options.p256PrivateKeyPem, publicKeyPem: options.p256PublicKeyPem },
+  );
 
-  const publishedFiles = [...checksumCandidates, 'SHA256SUMS', 'SHA256SUMS.sig'].sort();
+  const publishedFiles = [
+    ...checksumCandidates,
+    'SHA256SUMS',
+    'SHA256SUMS.sig',
+    `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
+  ].sort();
   const actualFiles = [...new Bun.Glob('*').scanSync({ cwd: options.outputDirectory, onlyFiles: true })].sort();
   if (JSON.stringify(actualFiles) !== JSON.stringify(publishedFiles)) {
     throw new Error(`release directory contains unexpected files: ${actualFiles.join(', ')}`);

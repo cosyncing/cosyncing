@@ -256,14 +256,21 @@ jobs:
         env:
           RELEASE_PRIVATE_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PRIVATE_KEY_PEM_B64 }}
           RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
+          RELEASE_P256_PRIVATE_KEY_B64: ${{ secrets.COSYNCING_RELEASE_P256_PRIVATE_KEY_PEM_B64 }}
+          RELEASE_P256_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_P256_PUBLIC_KEY_PEM_B64 }}
           RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
         shell: bash
         run: |
           test -n "$RELEASE_PRIVATE_KEY_B64"
           test -n "$RELEASE_PUBLIC_KEY_B64"
+          test -n "$RELEASE_P256_PRIVATE_KEY_B64"
+          test -n "$RELEASE_P256_PUBLIC_KEY_B64"
           printf '%s' "$RELEASE_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.key.pem"
           printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
+          printf '%s' "$RELEASE_P256_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release-p256.key.pem"
+          printf '%s' "$RELEASE_P256_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           chmod 600 "$RUNNER_TEMP/cosyncing-release.key.pem"
+          chmod 600 "$RUNNER_TEMP/cosyncing-release-p256.key.pem"
           COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
@@ -274,9 +281,26 @@ jobs:
             --base-url "$BASE_URL" --commit "$COMMIT" --published-at "$BUILD_DATE" \
             --key-id "$RELEASE_KEY_ID" \
             --private-key "$RUNNER_TEMP/cosyncing-release.key.pem" \
-            --public-key "$RUNNER_TEMP/cosyncing-release.pub.pem"
+            --public-key "$RUNNER_TEMP/cosyncing-release.pub.pem" \
+            --p256-private-key "$RUNNER_TEMP/cosyncing-release-p256.key.pem" \
+            --p256-public-key "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/cosyncing-release.pub.pem" -rawin \
             -in output/release/release-manifest.json -sigfile output/release/release-manifest.json.sig
+          # openssl cannot check the sibling signature: it is IEEE P1363 (raw r||s), the layout .NET reads,
+          # and openssl expects a DER SEQUENCE. bun is already on this runner and verifies it directly.
+          bun -e '
+            const { createPublicKey, verify } = await import("node:crypto");
+            const key = createPublicKey(await Bun.file(`${process.env.RUNNER_TEMP}/cosyncing-release-p256.pub.pem`).text());
+            for (const payload of ["release-manifest.json", "SHA256SUMS"]) {
+              const bytes = Buffer.from(await Bun.file(`output/release/${payload}`).arrayBuffer());
+              const signature = Buffer.from(await Bun.file(`output/release/${payload}.p256.sig`).arrayBuffer());
+              if (!verify("sha256", bytes, { key, dsaEncoding: "ieee-p1363" }, signature)) {
+                console.error(`P-256 sibling signature failed for ${payload}`);
+                process.exit(1);
+              }
+            }
+          '
+          cmp "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" output/release/release-key-p256.pem
           (cd output/release && sha256sum --check SHA256SUMS)
       - name: Replace staging assets only after remote candidate verification
         env:

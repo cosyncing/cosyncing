@@ -9,6 +9,8 @@ import {
   verifyReleasePairing,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
+  P256_PUBLIC_KEY_NAME,
+  P256_SIGNATURE_SUFFIX,
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
 } from './release-files.ts';
@@ -27,7 +29,9 @@ export const EXPECTED_CANDIDATE_ASSETS = Object.freeze([
   `${WEB_SIDECAR_NAME}.intoto.jsonl.sig`,
   'release-manifest.json',
   'release-manifest.json.sig',
+  `release-manifest.json${P256_SIGNATURE_SUFFIX}`,
   'release-key.pem',
+  P256_PUBLIC_KEY_NAME,
   'software-inventory.json',
   'software-bom.spdx.json',
   'LICENSE',
@@ -36,6 +40,7 @@ export const EXPECTED_CANDIDATE_ASSETS = Object.freeze([
   'install.sh',
   'SHA256SUMS',
   'SHA256SUMS.sig',
+  `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
 ].sort());
 export const EXPECTED_PROMOTION_ASSETS = Object.freeze([
   ...EXPECTED_CANDIDATE_ASSETS,
