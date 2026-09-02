@@ -7,6 +7,7 @@
 library;
 
 export 'components/copyable_code_line.dart';
+export 'components/file_mark_glyph.dart';
 export 'components/metadata_chip.dart';
 export 'components/section_header.dart';
 export 'components/selectable_tap_region.dart';
