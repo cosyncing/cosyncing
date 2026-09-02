@@ -355,7 +355,13 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     }
   }
 
-  /// Moves the tab at [oldIndex] to [newIndex] (ReorderableListView semantics).
+  /// Moves the tab at [oldIndex] to [newIndex].
+  ///
+  /// `onReorderItem` semantics: `newIndex` is the destination index in the
+  /// resulting list, already adjusted for the removal. This replaced the older
+  /// `onReorder` convention, where the caller had to subtract one for a
+  /// rightward move — that callback is deprecated, and this method had no
+  /// production caller to keep compatible with.
   void reorder(int oldIndex, int newIndex) {
     final current = _current;
     if (oldIndex < 0 || oldIndex >= current.refs.length) {
@@ -363,11 +369,7 @@ class OpenSessionsController extends AsyncNotifier<OpenSessionsState> {
     }
     final refs = [...current.refs];
     final moved = refs.removeAt(oldIndex);
-    var target = newIndex;
-    if (target > oldIndex) {
-      target -= 1;
-    }
-    refs.insert(target.clamp(0, refs.length), moved);
+    refs.insert(newIndex.clamp(0, refs.length), moved);
     final next = OpenSessionsState(
       refs: refs,
       activeKey: current.activeKey,

@@ -25,7 +25,12 @@ import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state
 import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
 import 'package:flutter/material.dart';
@@ -74,6 +79,17 @@ class SessionsWorkspace extends ConsumerStatefulWidget {
   /// The detail pane's workable minimum: the roster never grows past
   /// `windowWidth - detailMinPaneWidth`.
   static const double detailMinPaneWidth = 480;
+
+  /// The file pane's resting minimum. Narrower than this and a source line is
+  /// no longer legible beside its gutter, so the pane collapses instead.
+  static const double minFilePaneWidth = 320;
+
+  /// Dragging the file pane below this snaps it to the document rail.
+  static const double fileCollapseSnapWidth = 240;
+
+  /// The file pane never grows past `windowWidth - detailMinPaneWidth`, so the
+  /// transcript it was opened from stays readable beside it.
+  static const double maxFilePaneWidth = 720;
 
   /// How long a resize settles before it is written to the store.
   static const Duration resizePersistDebounce = Duration(milliseconds: 300);
@@ -127,6 +143,23 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   /// null prefs forever and would see that flash on *every* launch, not just
   /// the first.
   bool _collapsed = true;
+
+  /// File pane width when open, kept meaningful while [_fileCollapsed] so
+  /// reopening restores the width the user chose.
+  double _fileWidth = workspaceDefaultFilePaneWidth;
+
+  /// Whether the file pane is collapsed to its document rail.
+  ///
+  /// Unlike the roster this starts *expanded*, because the pane only exists at
+  /// all once a file is open — and a user who just opened a file wants to see
+  /// it, not a rail.
+  bool _fileCollapsed = false;
+
+  /// Raw pointer position during the file sash drag, tracked separately for
+  /// the same reason [_dragWidth] is: clamping at the floor must not swallow
+  /// further movement, or a slow drag can never reach the collapse snap.
+  double _fileDragWidth = workspaceDefaultFilePaneWidth;
+  double _fileDragStartWidth = workspaceDefaultFilePaneWidth;
 
   /// Raw pointer position during a drag, tracked separately from [_rosterWidth]
   /// so clamping at the floor cannot swallow further leftward movement — that
@@ -190,6 +223,97 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
       _dragWidth = _rosterWidth;
       _dragStartWidth = _rosterWidth;
     });
+    await _restoreFileSplit();
+  }
+
+  /// Restores the file pane's split.
+  ///
+  /// A null record opens the pane at its default width rather than collapsing
+  /// it: the pane exists only once a file is open, so the roster's
+  /// "closed until asked for" default would hide the thing just opened.
+  Future<void> _restoreFileSplit() async {
+    WorkspaceRosterPrefs? saved;
+    try {
+      saved = await ref.read(workspacePrefsStoreProvider).loadFilePane();
+    } on Object {
+      saved = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _fileWidth = saved?.width ?? workspaceDefaultFilePaneWidth;
+      _fileCollapsed = saved?.collapsed ?? false;
+      _fileDragWidth = _fileWidth;
+      _fileDragStartWidth = _fileWidth;
+    });
+  }
+
+  /// Clamps a file-pane width, leaving the detail pane its workable minimum.
+  double _clampFileWidth(double width, double available) {
+    var upper = SessionsWorkspace.maxFilePaneWidth;
+    final windowUpper =
+        available - SessionsWorkspace.detailMinPaneWidth - _rosterFootprint();
+    if (windowUpper < upper) upper = windowUpper;
+    if (upper < SessionsWorkspace.minFilePaneWidth) {
+      upper = SessionsWorkspace.minFilePaneWidth;
+    }
+    return width.clamp(SessionsWorkspace.minFilePaneWidth, upper);
+  }
+
+  /// What the roster side currently occupies, rail or pane plus its sash.
+  double _rosterFootprint() => _collapsed
+      ? workspaceCollapsedRailWidth
+      : _rosterWidth + workspaceSashHitWidth;
+
+  void _onFileDragStart() {
+    _fileDragStartWidth = _fileWidth;
+    _fileDragWidth = _fileWidth;
+  }
+
+  /// The file sash sits to the *right* of the detail pane, so a rightward drag
+  /// shrinks the file pane rather than growing it.
+  void _onFileDragDelta(double dx, double available) {
+    _fileDragWidth -= dx;
+    setState(() {
+      if (_fileDragWidth < SessionsWorkspace.fileCollapseSnapWidth) {
+        if (!_fileCollapsed) {
+          _fileCollapsed = true;
+          _fileWidth = _fileDragStartWidth;
+        }
+        return;
+      }
+      _fileCollapsed = false;
+      _fileWidth = _clampFileWidth(_fileDragWidth, available);
+    });
+  }
+
+  void _onFileDragEnd() => _schedulePersist();
+
+  void _resetFileSplit() {
+    setState(() {
+      _fileCollapsed = false;
+      _fileWidth = workspaceDefaultFilePaneWidth;
+      _fileDragWidth = _fileWidth;
+    });
+    _schedulePersist();
+  }
+
+  void _stepFileSplit(double delta, double available) {
+    setState(() {
+      _fileCollapsed = false;
+      // Negated for the same reason the drag is: this sash's left edge grows
+      // the pane, and the arrow keys have to agree with the drag.
+      _fileWidth = _clampFileWidth(_fileWidth - delta, available);
+      _fileDragWidth = _fileWidth;
+    });
+    _schedulePersist();
+  }
+
+  void _expandFilePane() {
+    setState(() {
+      _fileCollapsed = false;
+      _fileDragWidth = _fileWidth;
+    });
+    _schedulePersist();
   }
 
   /// Clamps a roster width to 120–480dp, and never past `available - 480` so
@@ -269,8 +393,14 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
       width: _rosterWidth,
       collapsed: _collapsed,
     );
+    final filePrefs = WorkspaceRosterPrefs(
+      width: _fileWidth,
+      collapsed: _fileCollapsed,
+    );
     try {
-      await ref.read(workspacePrefsStoreProvider).saveRoster(prefs);
+      final store = ref.read(workspacePrefsStoreProvider);
+      await store.saveRoster(prefs);
+      await store.saveFilePane(filePrefs);
     } on Object {
       // Best effort: a layout preference is never worth surfacing an error for.
     }
@@ -497,6 +627,43 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     );
   }
 
+  /// The second pane: one session's open files, with their own strip.
+  ///
+  /// The strip is in the pane, never in the top scroller — that one stays
+  /// sessions-only, so the two kinds can never be confused there.
+  Widget _buildFilePane({
+    required AppTokens tokens,
+    required SessionDetailKey session,
+    required List<FilePaneKey> panes,
+    required FilePaneKey? activeFile,
+  }) {
+    final controller = ref.read(filePanesControllerProvider.notifier);
+    return DecoratedBox(
+      decoration: BoxDecoration(color: tokens.surface2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          FileTabsStrip(
+            panes: panes,
+            activeKey: activeFile?.key,
+            onSelect: (pane) => unawaited(controller.activate(pane)),
+            onClose: (pane) => unawaited(controller.close(pane)),
+            onReorder: (oldIndex, newIndex) =>
+                unawaited(controller.reorder(session, oldIndex, newIndex)),
+          ),
+          Expanded(
+            child: activeFile == null
+                ? const SizedBox.shrink()
+                : WorkspaceFilePaneBody(
+                    key: ValueKey<String>(activeFile.key),
+                    pane: activeFile,
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSplit({
     required AppTokens tokens,
     required AppLocalizations l10n,
@@ -515,6 +682,31 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
       builder: (context, constraints) {
         final available = constraints.maxWidth;
         final rosterWidth = _clampWidth(_rosterWidth, available);
+        // No phantom pane: the second sash and the file pane exist precisely
+        // while the active session has a file open. With none, this is exactly
+        // today's two-column workspace and there is no empty third column.
+        final activeSession = active == null
+            ? null
+            : SessionDetailKey(tool: active.tool, sessionId: active.id);
+        final filePanes = activeSession == null
+            ? const <FilePaneKey>[]
+            : (ref.watch(filePanesControllerProvider).valueOrNull ??
+                      FilePanesState.empty)
+                  .forSession(activeSession);
+        final activeFile = activeSession == null
+            ? null
+            : (ref.watch(filePanesControllerProvider).valueOrNull ??
+                      FilePanesState.empty)
+                  .activeFor(activeSession);
+        // The split is an Expanded-width affordance. Below that the compact
+        // route carries the file instead, so a narrow window never has to fit
+        // three columns.
+        final fileWidth = _clampFileWidth(_fileWidth, available);
+        final showFilePane =
+            filePanes.isNotEmpty &&
+            available >=
+                SessionsWorkspace.detailMinPaneWidth +
+                    SessionsWorkspace.minFilePaneWidth;
         return Stack(
           children: [
             Row(
@@ -562,6 +754,11 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                       OpenSessionsTabStrip(
                         refs: open.refs,
                         activeKey: open.activeKey,
+                        // The controller's reorder had no production caller
+                        // until now; the strip had no way to ask for one.
+                        onReorder: (oldIndex, newIndex) => ref
+                            .read(openSessionsControllerProvider.notifier)
+                            .reorder(oldIndex, newIndex),
                         onSelect: (key) => ref
                             .read(openSessionsControllerProvider.notifier)
                             .activate(key),
@@ -598,6 +795,36 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                     ],
                   ),
                 ),
+                if (showFilePane) ...[
+                  if (_fileCollapsed)
+                    WorkspaceDocumentRail(
+                      panes: filePanes,
+                      separatorColor: tokens.separator,
+                      tokens: tokens,
+                      onExpand: _expandFilePane,
+                    )
+                  else ...[
+                    WorkspaceSplitSash(
+                      key: const Key('workspace-file-split-sash'),
+                      separatorColor: tokens.separator,
+                      onDragStart: _onFileDragStart,
+                      onDragDelta: (dx) => _onFileDragDelta(dx, available),
+                      onDragEnd: _onFileDragEnd,
+                      onReset: _resetFileSplit,
+                      onStep: (delta) => _stepFileSplit(delta, available),
+                    ),
+                    SizedBox(
+                      key: const Key('workspace-file-pane'),
+                      width: fileWidth,
+                      child: _buildFilePane(
+                        tokens: tokens,
+                        session: activeSession!,
+                        panes: filePanes,
+                        activeFile: activeFile,
+                      ),
+                    ),
+                  ],
+                ],
               ],
             ),
             if (_newSessionLaunch case final NewSessionLaunchRequest request)

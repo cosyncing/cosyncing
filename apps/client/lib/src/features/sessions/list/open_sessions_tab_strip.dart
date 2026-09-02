@@ -24,6 +24,7 @@ class OpenSessionsTabStrip extends StatefulWidget {
     required this.activeKey,
     required this.onSelect,
     required this.onClose,
+    this.onReorder,
     this.hideWhenSingle = true,
     super.key,
   });
@@ -47,6 +48,12 @@ class OpenSessionsTabStrip extends StatefulWidget {
 
   /// Called with a tab's [SessionRef.key] when its close affordance is used.
   final ValueChanged<String> onClose;
+
+  /// Moves a tab within the strip, or null to leave tabs fixed.
+  ///
+  /// `onReorderItem` semantics: `newIndex` is already adjusted for the removal
+  /// at `oldIndex`.
+  final void Function(int oldIndex, int newIndex)? onReorder;
 
   /// Whether to render nothing when fewer than two sessions are open.
   final bool hideWhenSingle;
@@ -124,6 +131,7 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
   @override
   Widget build(BuildContext context) {
     final refs = widget.refs;
+    final reorder = widget.onReorder;
     if (refs.isEmpty || (widget.hideWhenSingle && refs.length < 2)) {
       return const SizedBox.shrink();
     }
@@ -146,22 +154,45 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
                 child: NotificationListener<ScrollNotification>(
                   onNotification: (notification) =>
                       _syncScrollGeometry(notification.metrics),
-                  child: ListView.builder(
-                    controller: _controller,
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    itemCount: refs.length,
-                    itemBuilder: (context, index) {
-                      final ref = refs[index];
-                      return _Tab(
-                        key: Key('open-session-tab-${ref.key}'),
-                        ref: ref,
-                        selected: ref.key == widget.activeKey,
-                        onSelect: () => widget.onSelect(ref.key),
-                        onClose: () => widget.onClose(ref.key),
-                      );
-                    },
-                  ),
+                  child: reorder == null
+                      ? ListView.builder(
+                          controller: _controller,
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          itemCount: refs.length,
+                          itemBuilder: (context, index) {
+                            final ref = refs[index];
+                            return _Tab(
+                              key: Key('open-session-tab-${ref.key}'),
+                              ref: ref,
+                              selected: ref.key == widget.activeKey,
+                              onSelect: () => widget.onSelect(ref.key),
+                              onClose: () => widget.onClose(ref.key),
+                            );
+                          },
+                        )
+                      : ReorderableListView.builder(
+                          scrollController: _controller,
+                          scrollDirection: Axis.horizontal,
+                          buildDefaultDragHandles: false,
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          itemCount: refs.length,
+                          onReorderItem: reorder,
+                          proxyDecorator: (child, index, animation) => child,
+                          itemBuilder: (context, index) {
+                            final ref = refs[index];
+                            return ReorderableDragStartListener(
+                              key: Key('open-session-tab-${ref.key}'),
+                              index: index,
+                              child: _Tab(
+                                ref: ref,
+                                selected: ref.key == widget.activeKey,
+                                onSelect: () => widget.onSelect(ref.key),
+                                onClose: () => widget.onClose(ref.key),
+                              ),
+                            );
+                          },
+                        ),
                 ),
               ),
             ),

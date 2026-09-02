@@ -5,18 +5,26 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/attention/controller/attention_inbox_controller.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_drive_intent_store.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_launch_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
@@ -111,6 +119,26 @@ void main() {
         sessionDisplayPreferencesStoreProvider.overrideWithValue(
           InMemorySessionDisplayPreferencesStore()..sessionRosterWindow = 'all',
         ),
+        // Same reason as the drive intent store above: the real file-pane
+        // store opens a Drift database inside the widget test, and its timers
+        // never let a pump settle.
+        filePanesStoreProvider.overrideWithValue(_FakeFilePanesStore()),
+        // The workspace's own tests are about layout, not about reading. Left
+        // live, each file pane awaits a broker this harness never answers for,
+        // and pumpAndSettle waits on it forever. The read has its own tests.
+        filePaneReadProvider.overrideWith(
+          (ref, pane) async => FileViewerSource(
+            preview: SessionFilePreview(
+              path: pane.path,
+              displayName: pane.path.split('/').last,
+              mimeType: 'text/plain',
+              size: 12,
+              limit: 1024,
+              truncated: false,
+              text: 'stub contents',
+            ),
+          ),
+        ),
       ],
       child: MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -140,6 +168,195 @@ void main() {
     await tester.pump();
     await tester.pump();
   }
+
+  group('SessionsWorkspace file pane', () {
+    Future<ProviderContainer> openSession(WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        buildSubject([_session('claude', 'a'), _session('codex', 'b')]),
+      );
+      await tester.pumpAndSettle();
+      await expandRosterProject(tester);
+      await tester.tap(find.byKey(const Key('session-row-claude/a')));
+      await tester.pumpAndSettle();
+      return ProviderScope.containerOf(
+        tester.element(find.byType(SessionsWorkspace)),
+      );
+    }
+
+    /// The tab bearing [name].
+    ///
+    /// An open file draws its name twice — on its tab and in the pane's
+    /// header — so a bare text finder is ambiguous by design.
+    Finder fileTab(String name) => find.descendant(
+      of: find.byKey(const Key('file-tabs-strip')),
+      matching: find.text(name),
+    );
+
+    Future<void> openFile(
+      WidgetTester tester,
+      ProviderContainer container,
+      String tool,
+      String id,
+      String path,
+    ) async {
+      await container
+          .read(filePanesControllerProvider.notifier)
+          .open(SessionDetailKey(tool: tool, sessionId: id), path);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('with no file open there is no second pane and no sash', (
+      tester,
+    ) async {
+      await openSession(tester);
+      // No phantom pane: with nothing open this is exactly today's workspace.
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+      expect(find.byKey(const Key('workspace-file-split-sash')), findsNothing);
+      expect(find.byKey(const Key('workspace-document-rail')), findsNothing);
+      expect(find.byType(WorkspaceSplitSash), findsOneWidget);
+    });
+
+    testWidgets('opening a file adds the pane, its sash and its strip', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(
+        find.byKey(const Key('workspace-file-split-sash')),
+        findsOneWidget,
+      );
+      expect(find.byType(WorkspaceSplitSash), findsNWidgets(2));
+      expect(find.byKey(const Key('file-tabs-strip')), findsOneWidget);
+      expect(find.byKey(const Key('file-tabs-read-only')), findsOneWidget);
+      expect(fileTab('one.dart'), findsOneWidget);
+      // And the pane it opened is showing that same file.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('workspace-file-pane')),
+          matching: find.byKey(const Key('file-viewer-name')),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the top scroller never shows a file tab', (tester) async {
+      final container = await openSession(tester);
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+      await openFile(tester, container, 'codex', 'b', 'lib/one.dart');
+
+      // Owner direction: the top strip is sessions-only, so the two kinds can
+      // never be confused there.
+      final strip = find.byType(OpenSessionsTabStrip);
+      expect(strip, findsOneWidget);
+      expect(
+        find.descendant(of: strip, matching: find.text('one.dart')),
+        findsNothing,
+      );
+      expect(
+        find.descendant(of: strip, matching: find.byType(FileMarkGlyph)),
+        findsNothing,
+      );
+      // And the file tab itself carries no status affordance.
+      final fileStrip = find.byKey(const Key('file-tabs-strip'));
+      expect(
+        find.descendant(of: fileStrip, matching: find.byType(StatusDot)),
+        findsNothing,
+      );
+      expect(
+        find.descendant(of: fileStrip, matching: find.byType(FileMarkGlyph)),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('switching sessions swaps the strip, it does not merge', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/mine.dart');
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+
+      // A session with no open files shows no pane rather than the other
+      // session's files.
+      expect(fileTab('mine.dart'), findsNothing);
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+
+      await openFile(tester, container, 'codex', 'b', 'lib/theirs.dart');
+      expect(fileTab('theirs.dart'), findsOneWidget);
+      expect(fileTab('mine.dart'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('open-session-tab-claude/a')));
+      await tester.pumpAndSettle();
+      expect(fileTab('mine.dart'), findsOneWidget);
+      expect(fileTab('theirs.dart'), findsNothing);
+    });
+
+    testWidgets('closing the last file takes the pane and its sash away', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.tap(
+        find.byKey(const Key('file-tab-close-claude/a#lib/one.dart')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+      expect(find.byType(WorkspaceSplitSash), findsOneWidget);
+    });
+
+    testWidgets('dragging past the snap collapses to the document rail', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+
+      final sash = find.byKey(const Key('workspace-file-split-sash'));
+      // Rightward shrinks this pane: its sash is on its left edge.
+      await tester.drag(sash, const Offset(400, 0));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('workspace-document-rail')), findsOneWidget);
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+      // Collapsing keeps the files open rather than closing them.
+      expect(
+        container
+            .read(filePanesControllerProvider)
+            .value!
+            .forSession(
+              const SessionDetailKey(tool: 'claude', sessionId: 'a'),
+            ),
+        hasLength(1),
+      );
+
+      await tester.tap(
+        find.byKey(const Key('workspace-document-rail-expand')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(find.byKey(const Key('workspace-document-rail')), findsNothing);
+    });
+
+    testWidgets('a window too narrow for three columns shows two', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+
+      await tester.binding.setSurfaceSize(const Size(700, 800));
+      await tester.pumpAndSettle();
+
+      // The compact route carries the file at these widths instead, so the
+      // split never has to fit a third column it cannot honour.
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+    });
+  });
 
   group('SessionsWorkspace', () {
     testWidgets('shows the roster and a placeholder until one is opened', (
@@ -1350,6 +1567,19 @@ class _FakeWorkspacePrefsStore implements WorkspacePrefsStore {
     saved = prefs;
     saveCount += 1;
   }
+
+  @override
+  Future<WorkspaceRosterPrefs?> loadFilePane() async => savedFilePane;
+
+  @override
+  Future<void> saveFilePane(WorkspaceRosterPrefs prefs) async {
+    savedFilePane = prefs;
+    fileSaveCount += 1;
+  }
+
+  /// The persisted file-pane split; null means the user has never set one.
+  WorkspaceRosterPrefs? savedFilePane;
+  int fileSaveCount = 0;
 }
 
 class _FakeOpenSessionsStore implements OpenSessionsStore {
@@ -1394,4 +1624,16 @@ class _NoopDriveIntentStore implements SessionDriveIntentStore {
     required String tool,
     required String sessionId,
   }) async {}
+}
+
+class _FakeFilePanesStore implements FilePanesStore {
+  FilePanesState _state = FilePanesState.empty;
+
+  @override
+  Future<FilePanesState> load(String sourceKey) async => _state;
+
+  @override
+  Future<void> save(String sourceKey, FilePanesState state) async {
+    _state = state;
+  }
 }

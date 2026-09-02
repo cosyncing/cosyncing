@@ -1618,6 +1618,16 @@ class _InMemoryWorkspacePrefsStore implements WorkspacePrefsStore {
   Future<void> saveRoster(WorkspaceRosterPrefs prefs) async {
     saved = prefs;
   }
+
+  @override
+  Future<WorkspaceRosterPrefs?> loadFilePane() async => savedFilePane;
+
+  @override
+  Future<void> saveFilePane(WorkspaceRosterPrefs prefs) async {
+    savedFilePane = prefs;
+  }
+
+  WorkspaceRosterPrefs? savedFilePane;
 }
 
 class _InMemoryAttentionFeedSettingsStore

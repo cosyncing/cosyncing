@@ -110,6 +110,29 @@ void main() {
       expect(state.activeKey, 'codex/b');
     });
 
+    test('reorder takes an already-adjusted destination index', () async {
+      // `onReorderItem` semantics. The clamp hides the difference at the list
+      // end, so this case is mid-list, where the two conventions disagree:
+      // the deprecated `onReorder` would have been handed 3 for this move.
+      final container = buildContainer(profile: _profile('p1'));
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container.read(openSessionsControllerProvider.notifier)
+        ..open(_ref('claude', 'a'))
+        ..open(_ref('codex', 'b'))
+        ..open(_ref('pi', 'c'))
+        ..open(_ref('dsh', 'd'))
+        ..reorder(0, 2);
+
+      final state = container.read(openSessionsControllerProvider).value!;
+      expect(state.refs.map((ref) => ref.key), [
+        'codex/b',
+        'pi/c',
+        'claude/a',
+        'dsh/d',
+      ]);
+    });
+
     test('reorder moves a tab (ReorderableListView semantics)', () async {
       final container = buildContainer(profile: _profile('p1'));
       addTearDown(container.dispose);

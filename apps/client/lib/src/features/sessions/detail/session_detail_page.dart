@@ -61,7 +61,10 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_file_l
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_progress.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
@@ -1277,8 +1280,10 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       ref.read(sessionFileBrowserKeyProvider(_key));
 
   Future<void> _previewSessionFile(FsDirEntry entry) async {
-    // No dialog and no navigation: the read lands in browser state and the
-    // Files slot renders `FileViewerPane` over its own listing.
+    // With the split available the file becomes its own pane beside the
+    // browser, so the listing stays where the reader left it. Otherwise the
+    // read lands in browser state and the Files slot renders it in place.
+    if (_openInFilePane(entry.path, null)) return;
     await ref
         .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
         .previewFile(entry);
@@ -1314,11 +1319,40 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       );
       return;
     }
-    // The view switch stays for now: at this commit the viewer is docked in
-    // the Files slot, so a mention that did not switch would open the file
-    // where nobody can see it. The second split pane is what removes this —
-    // it shows the file beside the transcript instead of instead of it.
+    // Where the file lands depends on whether there is room to show it beside
+    // the transcript. With the split available it opens as its own pane and
+    // the reader keeps their place; without it, the Files slot is the only
+    // surface there is, so the view has to switch.
+    final preview = ref
+        .read(sessionFileBrowserControllerProvider(browserKey))
+        .preview;
+    if (preview != null && _openInFilePane(preview.path, reference.line)) {
+      return;
+    }
     _selectView(_SessionDetailView.files);
+  }
+
+  /// Opens [path] as a file pane, when the window is wide enough to show one.
+  ///
+  /// Returns false at narrower widths, where the caller keeps the in-place
+  /// behaviour rather than opening a pane the layout will not render.
+  bool _openInFilePane(String path, int? line) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (WindowSizeClass.fromWidth(width) != WindowSizeClass.expanded) {
+      return false;
+    }
+    final pane = FilePaneKey(session: _key, path: path);
+    if (line != null) {
+      ref
+          .read(filePaneAnchorProvider.notifier)
+          .update(
+            (anchors) => {...anchors, pane.key: line},
+          );
+    }
+    unawaited(
+      ref.read(filePanesControllerProvider.notifier).open(_key, path),
+    );
+    return true;
   }
 
   /// Probes the workspace-file gate once per attach.
