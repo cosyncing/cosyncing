@@ -11,6 +11,7 @@ module FlutterGoldenPolicy
     apps/client/test/src/features/attention/view/goldens
     apps/client/test/src/features/sessions/renderers/goldens
     apps/client/test/src/features/sessions/detail/goldens
+    apps/client/test/src/features/sessions/artifacts/goldens
     apps/client/test/src/features/settings/view/goldens
   ].freeze
   MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -40,6 +41,18 @@ module FlutterGoldenPolicy
   READ_ALOUD_NAMES = %w[light dark].product(%w[en zh]).map do |parts|
     "read_aloud_rate_#{parts.join('_')}.png"
   end.sort.freeze
+  # `html_source_only` is deliberate, not a typo for a rendered HTML face:
+  # `canRenderHtmlInPane` is false on Linux, where goldens are produced, so the
+  # capturable state is the source face plus the notice explaining the limit.
+  FILE_PANE_STATES = %w[
+    source markdown_rendered html_source_only diff_rendered
+    gone binary truncated no_files
+  ].freeze
+  FILE_PANE_NAMES = (
+    FILE_PANE_STATES.product(%w[dark light], %w[en zh]).map do |parts|
+      "file_pane_#{parts.join('_')}.png"
+    end + %w[file_pane_strip_overflow_light_en.png]
+  ).sort.freeze
   FAMILY_RULES = {
     'notifications' => {
       owner: 'apps/client/test/src/features/attention/view/attention_page_test.dart',
@@ -157,6 +170,21 @@ module FlutterGoldenPolicy
         'for (final brightness in Brightness.values)',
         "'goldens/read_aloud_rate_${brightness.name}_'",
         "'${locale.languageCode}.png'"
+      ]
+    },
+    'file-pane' => {
+      owner: 'apps/client/test/src/features/sessions/artifacts/file_pane_golden_test.dart',
+      root: 'apps/client/test/src/features/sessions/artifacts/goldens',
+      names: FILE_PANE_NAMES,
+      fragments: [
+        'const filePaneGoldenStates = <String>[',
+        'for (final state in filePaneGoldenStates)',
+        "for (final locale in const [Locale('en'), Locale('zh')])",
+        'for (final brightness in Brightness.values)',
+        '..physicalSize = const Size(720, 620)',
+        "'goldens/file_pane_${state}_${brightness.name}_'",
+        "'${locale.languageCode}.png'",
+        "matchesGoldenFile('goldens/file_pane_strip_overflow_light_en.png')"
       ]
     },
     # Exact single-path fixture used by the mutation suite. It grants no
