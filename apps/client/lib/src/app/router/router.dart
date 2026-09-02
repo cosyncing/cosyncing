@@ -16,10 +16,14 @@ import 'package:cosyncing_client/src/features/pairing/view/pairing_page.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_manager_page.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_page.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_file_page.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/ui_scale_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/agents_settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/appearance_settings_page.dart';
@@ -170,6 +174,14 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                         // deep link opens a tab and collapses to /sessions.
                         // Compact/Medium keep today's push route.
                         redirect: (context, state) {
+                          // Route-level redirects run root-first and the first
+                          // non-null wins, so redirecting here would swallow
+                          // every child of this route -- the file drill-in
+                          // would lose its path and land on the roster. Stand
+                          // down unless this route is the leaf.
+                          if (state.matchedLocation != state.uri.path) {
+                            return null;
+                          }
                           if (!_expandedShowsWorkspace(context)) {
                             return null;
                           }
@@ -195,6 +207,70 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                             sessionId: sessionId,
                           );
                         },
+                        routes: [
+                          GoRoute(
+                            path: 'file',
+                            // At expanded width the file belongs beside its
+                            // session, not over it, so the route resolves into
+                            // the second pane and collapses to /sessions --
+                            // the same shape the detail route uses, and the
+                            // reason the second pane never enters the URL.
+                            redirect: (context, state) {
+                              final tool = state.pathParameters['tool'] ?? '';
+                              final id = state.pathParameters['id'] ?? '';
+                              final path = state.uri.queryParameters['path'];
+                              // A file route naming no file is the session it
+                              // belongs to. Left alone it read the workspace
+                              // root, which the broker refuses as
+                              // NOT_REGULAR_FILE, so a truncated link landed
+                              // on an error panel instead of the session the
+                              // rest of the URL already names.
+                              if ((path == null || path.isEmpty) &&
+                                  tool.isNotEmpty &&
+                                  id.isNotEmpty) {
+                                return sessionDetailLocation(
+                                  tool: tool,
+                                  sessionId: id,
+                                );
+                              }
+                              if (!_expandedShowsWorkspace(context)) {
+                                return null;
+                              }
+                              if (tool.isEmpty ||
+                                  id.isEmpty ||
+                                  path == null ||
+                                  path.isEmpty) {
+                                return null;
+                              }
+                              _openSessionTab(context, tool: tool, id: id);
+                              _openFilePane(
+                                context,
+                                tool: tool,
+                                id: id,
+                                path: path,
+                                line: int.tryParse(
+                                  state.uri.queryParameters['line'] ?? '',
+                                ),
+                              );
+                              return sessionsRoute;
+                            },
+                            builder: (context, state) {
+                              final path =
+                                  state.uri.queryParameters['path'] ?? '';
+                              final tool = state.pathParameters['tool'] ?? '';
+                              final id = state.pathParameters['id'] ?? '';
+                              return SessionFilePage(
+                                key: ValueKey<String>('$tool/$id#$path'),
+                                tool: tool,
+                                sessionId: id,
+                                path: path,
+                                line: int.tryParse(
+                                  state.uri.queryParameters['line'] ?? '',
+                                ),
+                              );
+                            },
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -324,6 +400,32 @@ bool _isWideLayout(BuildContext context) =>
 /// Uses the roster's title/status when the session is already loaded, otherwise
 /// a placeholder the workspace refreshes once the roster arrives. Deferred to a
 /// post-frame callback so the redirect stays free of build-phase mutations.
+/// Opens a deep-linked file as a pane in the workspace working set.
+///
+/// Mirrors [_openSessionTab], and deferred for the same reason: a redirect
+/// runs inside the router's build, where a provider mutation is rejected.
+void _openFilePane(
+  BuildContext context, {
+  required String tool,
+  required String id,
+  required String path,
+  int? line,
+}) {
+  final container = ProviderScope.containerOf(context, listen: false);
+  final session = SessionDetailKey(tool: tool, sessionId: id);
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (line != null) {
+      final pane = FilePaneKey(session: session, path: path);
+      container
+          .read(filePaneAnchorProvider.notifier)
+          .update((anchors) => {...anchors, pane.key: line});
+    }
+    unawaited(
+      container.read(filePanesControllerProvider.notifier).open(session, path),
+    );
+  });
+}
+
 void _openSessionTab(
   BuildContext context, {
   required String tool,
@@ -361,7 +463,21 @@ void _openSessionTab(
     );
   }
   WidgetsBinding.instance.addPostFrameCallback((_) {
-    container.read(openSessionsControllerProvider.notifier).open(ref);
+    // Wait for the working set to finish restoring before adding to it. The
+    // controller's mutations write `state` synchronously, so one applied while
+    // build() is still in flight is overwritten the moment the restore
+    // resolves — and a deep link is precisely the case that arrives first, so
+    // the tab it opened would be dropped every time.
+    //
+    // That is only half the race, and the controller owns the other half: on a
+    // cold start this future resolves against a build that has no broker
+    // source yet, and the profile's arrival rebuilds over it. `open` holds the
+    // request until a build has a source rather than dropping it here.
+    unawaited(
+      container.read(openSessionsControllerProvider.future).then((_) {
+        container.read(openSessionsControllerProvider.notifier).open(ref);
+      }),
+    );
   });
 }
 
@@ -611,10 +727,10 @@ class _ScaffoldWithNav extends StatelessWidget {
     // compact layouts it owns the full viewport so the composer keeps its
     // vertical space; the AppBar back button is the way out. Wide layouts are
     // unaffected — they already have no bottom navigation.
-    final isSessionDetail = isSessionDetailLocation(
+    final isDrilledIn = isDrilledInSessionLocation(
       GoRouterState.of(context).uri.path,
     );
-    final showBottomNav = !isWideLayout && !isSessionDetail;
+    final showBottomNav = !isWideLayout && !isDrilledIn;
 
     return Scaffold(
       body: navigationShell,

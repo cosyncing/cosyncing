@@ -3,6 +3,7 @@ part of 'session_detail_page.dart';
 class _ChatPanel extends ConsumerWidget {
   const _ChatPanel({
     required this.sessionKey,
+    required this.sessionLabel,
     required this.state,
     required this.controller,
     required this.commands,
@@ -45,6 +46,10 @@ class _ChatPanel extends ConsumerWidget {
   });
 
   final SessionDetailKey sessionKey;
+
+  /// How this session is named on surfaces that show it from outside — the
+  /// prompt-target note. Resolved by the page, which owns the title fallback.
+  final String sessionLabel;
   final SessionDetailState state;
   final SessionDetailController controller;
   final List<SlashCommand> commands;
@@ -215,6 +220,8 @@ class _ChatPanel extends ConsumerWidget {
             const SizedBox(height: 8),
           ],
           _PromptComposer(
+            sessionPaneKey: SessionPaneKey(session: sessionKey).key,
+            sessionLabel: sessionLabel,
             commands: commands,
             controller: promptController,
             focusNode: promptFocusNode,

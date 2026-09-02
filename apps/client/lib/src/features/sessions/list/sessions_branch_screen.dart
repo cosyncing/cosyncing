@@ -1,7 +1,9 @@
 import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
+import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_page.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/open_session_sync_supervisor.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:flutter/material.dart';
@@ -60,10 +62,29 @@ class _SessionsBranchScreenState extends ConsumerState<SessionsBranchScreen> {
       if (active != null) {
         // Deferred: this runs during build, and go_router rejects navigation
         // from the build phase.
+        // A file pane open in the split is what the reader was looking at, so
+        // the collapse carries the file rather than the session under it. `go`
+        // rather than `push`: go_router builds /sessions -> detail -> file as
+        // the stack, so Back still lands on the transcript.
+        final file = ref
+            .read(filePanesControllerProvider)
+            .valueOrNull
+            ?.activeFor(
+              SessionDetailKey(tool: active.tool, sessionId: active.id),
+            );
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           GoRouter.of(context).go(
-            sessionDetailLocation(tool: active.tool, sessionId: active.id),
+            file == null
+                ? sessionDetailLocation(
+                    tool: active.tool,
+                    sessionId: active.id,
+                  )
+                : sessionFileLocation(
+                    tool: active.tool,
+                    sessionId: active.id,
+                    path: file.path,
+                  ),
           );
         });
       }

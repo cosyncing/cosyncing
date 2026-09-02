@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
@@ -108,6 +110,29 @@ void main() {
       final state = container.read(openSessionsControllerProvider).value!;
       expect(state.refs.map((ref) => ref.key), ['codex/b']);
       expect(state.activeKey, 'codex/b');
+    });
+
+    test('reorder takes an already-adjusted destination index', () async {
+      // `onReorderItem` semantics. The clamp hides the difference at the list
+      // end, so this case is mid-list, where the two conventions disagree:
+      // the deprecated `onReorder` would have been handed 3 for this move.
+      final container = buildContainer(profile: _profile('p1'));
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container.read(openSessionsControllerProvider.notifier)
+        ..open(_ref('claude', 'a'))
+        ..open(_ref('codex', 'b'))
+        ..open(_ref('pi', 'c'))
+        ..open(_ref('dsh', 'd'))
+        ..reorder(0, 2);
+
+      final state = container.read(openSessionsControllerProvider).value!;
+      expect(state.refs.map((ref) => ref.key), [
+        'codex/b',
+        'pi/c',
+        'claude/a',
+        'dsh/d',
+      ]);
     });
 
     test('reorder moves a tab (ReorderableListView semantics)', () async {
@@ -313,6 +338,192 @@ void main() {
       addTearDown(p2.dispose);
       final state = await p2.read(openSessionsControllerProvider.future);
       expect(state.isEmpty, isTrue);
+    });
+  });
+
+  group('OpenSessionsController cold deep link', () {
+    late AppDatabase database;
+    late DriftOpenSessionsStore losslessStore;
+    late StateProvider<BrokerProfile?> slot;
+
+    /// A container whose active profile arrives after the first build, which
+    /// is what a cold start does: the URL is resolved before the profile is
+    /// loaded.
+    ProviderContainer buildLateProfileContainer(OpenSessionsStore store) {
+      slot = StateProvider<BrokerProfile?>((_) => null);
+      return ProviderContainer(
+        overrides: [
+          openSessionsStoreProvider.overrideWithValue(store),
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => ref.watch(slot),
+          ),
+        ],
+      );
+    }
+
+    setUp(() {
+      database = AppDatabase(NativeDatabase.memory());
+      losslessStore = DriftOpenSessionsStore(database);
+    });
+
+    tearDown(() => database.close());
+
+    test('a tab opened before the profile arrives survives it', () async {
+      final container = buildLateProfileContainer(losslessStore);
+      addTearDown(container.dispose);
+
+      // The sourceless build: restored, empty, and about to be replaced.
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('claude', 'a'));
+
+      container.read(slot.notifier).state = _profile('p1');
+      final state = await container.read(openSessionsControllerProvider.future);
+      await _settle();
+
+      // Otherwise a bookmarked session URL opens the empty workspace: the tab
+      // lands on a state the profile's arrival throws away moments later.
+      expect(state.refs.map((ref) => ref.key), ['claude/a']);
+      expect(state.activeKey, 'claude/a');
+    });
+
+    test('and is persisted, not merely shown', () async {
+      final container = buildLateProfileContainer(losslessStore);
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('claude', 'a'));
+      container.read(slot.notifier).state = _profile('p1');
+      await container.read(openSessionsControllerProvider.future);
+      await _settle();
+
+      final reopened = ProviderContainer(
+        overrides: [
+          openSessionsStoreProvider.overrideWithValue(losslessStore),
+          activeBrokerProfileProvider.overrideWith((ref) => _profile('p1')),
+        ],
+      );
+      addTearDown(reopened.dispose);
+      final restored = await reopened.read(
+        openSessionsControllerProvider.future,
+      );
+
+      expect(restored.refs.map((ref) => ref.key), ['claude/a']);
+    });
+
+    test('the legacy store path replays it too', () async {
+      final container = buildLateProfileContainer(store);
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('codex', 'b'));
+
+      container.read(slot.notifier).state = _profile('p1');
+      final state = await container.read(openSessionsControllerProvider.future);
+      await _settle();
+
+      expect(state.refs.map((ref) => ref.key), ['codex/b']);
+    });
+
+    test('a profile that never arrives opens nothing', () async {
+      final container = buildLateProfileContainer(losslessStore);
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('claude', 'a'));
+      await _settle();
+
+      // Held, not applied: there is no working set to add to, and inventing
+      // one would put a tab in front of a broker the app is not talking to.
+      final state = await container.read(openSessionsControllerProvider.future);
+      expect(state.isEmpty, isTrue);
+    });
+  });
+
+  group('OpenSessionsController membership emissions', () {
+    late _WatchedOpenSessionsStore watched;
+    late StateProvider<BrokerProfile?> slot;
+
+    ProviderContainer buildContainer({BrokerProfile? profile}) {
+      slot = StateProvider<BrokerProfile?>((_) => profile);
+      return ProviderContainer(
+        overrides: [
+          openSessionsStoreProvider.overrideWithValue(watched),
+          activeBrokerProfileProvider.overrideWith((ref) => ref.watch(slot)),
+        ],
+      );
+    }
+
+    setUp(() => watched = _WatchedOpenSessionsStore());
+    tearDown(() => watched.dispose());
+
+    test('a stale emission does not strip the active tab', () async {
+      final container = buildContainer();
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('claude', 'a'));
+      container.read(slot.notifier).state = _profile('p1');
+      await container.read(openSessionsControllerProvider.future);
+
+      // The watch's first emission predates the member the replay just wrote,
+      // and the second catches up. Neither reports which tab is active.
+      watched.emit(const []);
+      await _settle();
+      watched.emit([_ref('claude', 'a')]);
+      await _settle();
+
+      final state = container.read(openSessionsControllerProvider).requireValue;
+      expect(state.refs.map((ref) => ref.key), ['claude/a']);
+      // Null here is what put a tab in the strip beside "select a session".
+      expect(state.activeKey, 'claude/a');
+    });
+
+    test('a late emission restores the deep link, not the first tab', () async {
+      watched.stored = OpenSessionsSnapshot(
+        refs: [_ref('claude', 'restored')],
+        activeKey: 'claude/restored',
+      );
+      final container = buildContainer();
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+      container
+          .read(openSessionsControllerProvider.notifier)
+          .open(_ref('codex', 'linked'));
+      container.read(slot.notifier).state = _profile('p1');
+      await container.read(openSessionsControllerProvider.future);
+
+      watched.emit([_ref('claude', 'restored')]);
+      await _settle();
+      watched.emit([_ref('claude', 'restored'), _ref('codex', 'linked')]);
+      await _settle();
+
+      final state = container.read(openSessionsControllerProvider).requireValue;
+      // The reader asked for the deep-linked session, not whichever tab
+      // happens to sit leftmost in a set they restored days ago.
+      expect(state.activeKey, 'codex/linked');
+    });
+
+    test('an emission that drops the active tab falls back', () async {
+      watched.stored = OpenSessionsSnapshot(
+        refs: [_ref('claude', 'a'), _ref('codex', 'b')],
+        activeKey: 'codex/b',
+      );
+      final container = buildContainer(profile: _profile('p1'));
+      addTearDown(container.dispose);
+      await container.read(openSessionsControllerProvider.future);
+
+      // Another window closed the active tab.
+      watched.emit([_ref('claude', 'a')]);
+      await _settle();
+
+      final state = container.read(openSessionsControllerProvider).requireValue;
+      expect(state.activeKey, 'claude/a');
     });
   });
 
@@ -549,6 +760,77 @@ void main() {
       },
     );
   });
+}
+
+/// A lossless store whose membership stream is driven by the test.
+///
+/// The Drift store's own emissions are correct but unschedulable; the race
+/// this covers is entirely about their ORDER relative to a write.
+class _WatchedOpenSessionsStore implements LosslessOpenSessionsStore {
+  final StreamController<List<SessionRef>> _membership =
+      StreamController<List<SessionRef>>.broadcast();
+
+  /// What a restore returns.
+  OpenSessionsSnapshot stored = OpenSessionsSnapshot.empty;
+
+  /// The members written through [openMember].
+  final List<SessionRef> opened = [];
+
+  /// The last active hint saved.
+  String? activeHint;
+
+  void emit(List<SessionRef> refs) => _membership.add(refs);
+
+  void dispose() => unawaited(_membership.close());
+
+  @override
+  Future<OpenSessionsSnapshot> load(String profileId) async => stored;
+
+  @override
+  Future<void> save(String profileId, OpenSessionsSnapshot snapshot) async {
+    stored = snapshot;
+  }
+
+  @override
+  Future<OpenSessionsSnapshot> loadLossless(
+    String sourceKey, {
+    String? legacyProfileId,
+  }) async => stored;
+
+  @override
+  Stream<List<SessionRef>> watchMembership(String sourceKey) =>
+      _membership.stream;
+
+  @override
+  Future<void> openMember(String sourceKey, SessionRef entry) async {
+    opened.add(entry);
+  }
+
+  @override
+  Future<void> closeMember(String sourceKey, String sessionKey) async {}
+
+  @override
+  Future<void> closeOtherMembers(
+    String sourceKey,
+    List<String> sessionKeys,
+  ) async {}
+
+  @override
+  Future<void> reorderMembers(
+    String sourceKey,
+    List<String> orderedKeys,
+  ) async {}
+
+  @override
+  Future<void> refreshMemberMetadata(
+    String sourceKey,
+    List<SessionRef> entries,
+  ) async {}
+
+  @override
+  Future<void> saveActiveHint(String sourceKey, String? sessionKey) async {
+    activeHint = sessionKey;
+  }
 }
 
 class _FakeOpenSessionsStore implements OpenSessionsStore {

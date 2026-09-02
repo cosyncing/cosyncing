@@ -41,7 +41,7 @@ Future<SessionArtifactPreviewPresentationResult> showSessionArtifactPreview(
   SessionArtifactCachedFile artifact, {
   SessionArtifactUriLauncher? uriLauncher,
 }) async {
-  final launcher = uriLauncher ?? const _SessionArtifactUriLauncher();
+  final launcher = uriLauncher ?? const SessionArtifactPlatformUriLauncher();
   final localizations = AppLocalizations.of(context);
   final previewPath = await prepareSessionArtifactPreviewFilePath(
     artifact: artifact,
@@ -762,8 +762,15 @@ String _artifactPreviewPresentationMessage(
   _ => l10n.artifactPreviewBlocked,
 };
 
-class _SessionArtifactUriLauncher implements SessionArtifactUriLauncher {
-  const _SessionArtifactUriLauncher();
+/// Opens a URI with the platform's own handler.
+///
+/// Public because the workspace HTML hand-off launches through the same
+/// command resolution — `xdg-open` on Linux, `rundll32` on Windows — and two
+/// implementations of "open this in the user's browser" would be two things to
+/// keep in policy agreement.
+class SessionArtifactPlatformUriLauncher implements SessionArtifactUriLauncher {
+  /// The only instance needed.
+  const SessionArtifactPlatformUriLauncher();
 
   @override
   String get name => 'ProcessRunUriLauncher';

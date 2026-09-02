@@ -24,6 +24,8 @@ class OpenSessionsTabStrip extends StatefulWidget {
     required this.activeKey,
     required this.onSelect,
     required this.onClose,
+    this.onReorder,
+    this.promptTargetKey,
     this.hideWhenSingle = true,
     super.key,
   });
@@ -47,6 +49,24 @@ class OpenSessionsTabStrip extends StatefulWidget {
 
   /// Called with a tab's [SessionRef.key] when its close affordance is used.
   final ValueChanged<String> onClose;
+
+  /// Moves a tab within the strip, or null to leave tabs fixed.
+  ///
+  /// `onReorderItem` semantics: `newIndex` is already adjusted for the removal
+  /// at `oldIndex`.
+  final void Function(int oldIndex, int newIndex)? onReorder;
+
+  /// The tab that still owns typing while a *file* pane holds focus.
+  ///
+  /// Null whenever the focused pane is a session's own, which is the ordinary
+  /// case: the active tab is then both the focused pane and the prompt target,
+  /// and a mark saying so would be on screen permanently and mean nothing.
+  ///
+  /// Note this signal is invisible with a single session open, because the
+  /// strip itself is. That is the case where it has nothing to disambiguate —
+  /// there is only one session input could reach — and the composer's own note
+  /// still names it.
+  final String? promptTargetKey;
 
   /// Whether to render nothing when fewer than two sessions are open.
   final bool hideWhenSingle;
@@ -124,6 +144,7 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
   @override
   Widget build(BuildContext context) {
     final refs = widget.refs;
+    final reorder = widget.onReorder;
     if (refs.isEmpty || (widget.hideWhenSingle && refs.length < 2)) {
       return const SizedBox.shrink();
     }
@@ -146,22 +167,47 @@ class _OpenSessionsTabStripState extends State<OpenSessionsTabStrip> {
                 child: NotificationListener<ScrollNotification>(
                   onNotification: (notification) =>
                       _syncScrollGeometry(notification.metrics),
-                  child: ListView.builder(
-                    controller: _controller,
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    itemCount: refs.length,
-                    itemBuilder: (context, index) {
-                      final ref = refs[index];
-                      return _Tab(
-                        key: Key('open-session-tab-${ref.key}'),
-                        ref: ref,
-                        selected: ref.key == widget.activeKey,
-                        onSelect: () => widget.onSelect(ref.key),
-                        onClose: () => widget.onClose(ref.key),
-                      );
-                    },
-                  ),
+                  child: reorder == null
+                      ? ListView.builder(
+                          controller: _controller,
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          itemCount: refs.length,
+                          itemBuilder: (context, index) {
+                            final ref = refs[index];
+                            return _Tab(
+                              key: Key('open-session-tab-${ref.key}'),
+                              ref: ref,
+                              selected: ref.key == widget.activeKey,
+                              promptTarget: ref.key == widget.promptTargetKey,
+                              onSelect: () => widget.onSelect(ref.key),
+                              onClose: () => widget.onClose(ref.key),
+                            );
+                          },
+                        )
+                      : ReorderableListView.builder(
+                          scrollController: _controller,
+                          scrollDirection: Axis.horizontal,
+                          buildDefaultDragHandles: false,
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          itemCount: refs.length,
+                          onReorderItem: reorder,
+                          proxyDecorator: (child, index, animation) => child,
+                          itemBuilder: (context, index) {
+                            final ref = refs[index];
+                            return ReorderableDragStartListener(
+                              key: Key('open-session-tab-${ref.key}'),
+                              index: index,
+                              child: _Tab(
+                                ref: ref,
+                                selected: ref.key == widget.activeKey,
+                                promptTarget: ref.key == widget.promptTargetKey,
+                                onSelect: () => widget.onSelect(ref.key),
+                                onClose: () => widget.onClose(ref.key),
+                              ),
+                            );
+                          },
+                        ),
                 ),
               ),
             ),
@@ -395,11 +441,15 @@ class _Tab extends StatelessWidget {
     required this.selected,
     required this.onSelect,
     required this.onClose,
+    this.promptTarget = false,
     super.key,
   });
 
   final SessionRef ref;
   final bool selected;
+
+  /// Whether this tab still receives typing while a file pane holds focus.
+  final bool promptTarget;
   final VoidCallback onSelect;
   final VoidCallback onClose;
 
@@ -423,7 +473,7 @@ class _Tab extends StatelessWidget {
         (ref.status == null
             ? l10n.sessionDetailTitleOpening
             : l10n.sessionDetailTitleUntitled);
-    return Padding(
+    final tab = Padding(
       padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
       // Middle-click closes the tab — the one Chrome tab affordance that needs
       // no chord and no reservation, so it works identically on native and on
@@ -452,45 +502,67 @@ class _Tab extends StatelessWidget {
                   color: selected ? tokens.separator : Colors.transparent,
                 ),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+              child: Stack(
                 children: [
-                  StatusDot(
-                    color: tokens.toolColor(ref.tool),
-                    ringColor: needsInput ? tokens.statusNeedsInput : null,
-                    ringGapColor: needsInput ? tokens.surface : null,
-                    pulse: ref.status == SessionStatus.working,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      StatusDot(
+                        color: tokens.toolColor(ref.tool),
+                        ringColor: needsInput ? tokens.statusNeedsInput : null,
+                        ringGapColor: needsInput ? tokens.surface : null,
+                        pulse: ref.status == SessionStatus.working,
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: selected
+                                ? tokens.textPrimary
+                                : tokens.textSecondary,
+                            fontWeight: needsInput || selected
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      IconButton(
+                        key: Key('open-session-tab-close-${ref.key}'),
+                        onPressed: onClose,
+                        icon: const Icon(Icons.close, size: 14),
+                        tooltip: AppLocalizations.of(context).close,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                        color: tokens.textTertiary,
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: selected
-                            ? tokens.textPrimary
-                            : tokens.textSecondary,
-                        fontWeight: needsInput || selected
-                            ? FontWeight.w600
-                            : FontWeight.w400,
+                  // Underline rather than a second dot: the leading dot is
+                  // already spoken for by tool colour and run state, and a
+                  // mark competing with it would have to be read against the
+                  // one glyph on the tab that changes for other reasons.
+                  if (promptTarget)
+                    Positioned(
+                      key: Key('open-session-tab-prompt-target-${ref.key}'),
+                      left: 12,
+                      right: 12,
+                      bottom: 1,
+                      height: 2,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: tokens.accent,
+                          borderRadius: BorderRadius.circular(1),
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 2),
-                  IconButton(
-                    key: Key('open-session-tab-close-${ref.key}'),
-                    onPressed: onClose,
-                    icon: const Icon(Icons.close, size: 14),
-                    tooltip: AppLocalizations.of(context).close,
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 48,
-                      minHeight: 48,
-                    ),
-                    color: tokens.textTertiary,
-                  ),
                 ],
               ),
             ),
@@ -498,5 +570,7 @@ class _Tab extends StatelessWidget {
         ),
       ),
     );
+    if (!promptTarget) return tab;
+    return Tooltip(message: l10n.workspacePromptTargetTooltip, child: tab);
   }
 }

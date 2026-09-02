@@ -39,7 +39,10 @@ void main() {
       final harness = await _pumpHarness(tester);
 
       expect(
-        harness.container.read(visibleAttentionSessionProvider)?.source,
+        harness.container
+            .read(visibleAttentionSessionsProvider)
+            .singleOrNull
+            ?.source,
         RosterSource.ofProfile(harness.profileA),
       );
 
@@ -118,7 +121,10 @@ void main() {
       harness.router.go('/sessions/session-b');
       await tester.pumpAndSettle();
       expect(
-        harness.container.read(visibleAttentionSessionProvider)?.sessionId,
+        harness.container
+            .read(visibleAttentionSessionsProvider)
+            .singleOrNull
+            ?.sessionId,
         'session-b',
       );
 
@@ -192,7 +198,7 @@ void main() {
 
       harness.router.go('/sessions');
       await tester.pumpAndSettle();
-      expect(harness.container.read(visibleAttentionSessionProvider), isNull);
+      expect(harness.container.read(visibleAttentionSessionsProvider), isEmpty);
 
       await harness.deliver(
         _event(
@@ -238,7 +244,10 @@ void main() {
       await tester.pump(foregroundAttentionCoalesceWindow);
 
       expect(
-        harness.container.read(visibleAttentionSessionProvider)?.source,
+        harness.container
+            .read(visibleAttentionSessionsProvider)
+            .singleOrNull
+            ?.source,
         RosterSource.ofProfile(harness.profileA),
       );
       expect(
@@ -272,7 +281,10 @@ void main() {
       await tester.pump();
 
       expect(
-        harness.container.read(visibleAttentionSessionProvider)?.source,
+        harness.container
+            .read(visibleAttentionSessionsProvider)
+            .singleOrNull
+            ?.source,
         RosterSource.ofProfile(profileB),
       );
 
@@ -310,7 +322,10 @@ void main() {
         findsOneWidget,
       );
       expect(
-        harness.container.read(visibleAttentionSessionProvider)?.sessionId,
+        harness.container
+            .read(visibleAttentionSessionsProvider)
+            .singleOrNull
+            ?.sessionId,
         _sessionA,
       );
 
@@ -322,7 +337,7 @@ void main() {
         find.byKey(const Key('responsive-session-detail')),
         findsNothing,
       );
-      expect(harness.container.read(visibleAttentionSessionProvider), isNull);
+      expect(harness.container.read(visibleAttentionSessionsProvider), isEmpty);
 
       await harness.deliver(
         _event(

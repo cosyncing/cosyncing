@@ -21,6 +21,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
@@ -67,6 +68,64 @@ void main() {
       expect(isSessionDetailLocation('/attention'), isFalse);
       expect(isSessionDetailLocation('/settings/keyboard-shortcuts'), isFalse);
       expect(isSessionDetailLocation('/transfers'), isFalse);
+    });
+
+    test('builds deep-link-safe file locations', () {
+      final location = sessionFileLocation(
+        tool: 'claude code/pro',
+        sessionId: 'a/b',
+        path: 'lib/src/a b.dart',
+        line: 42,
+      );
+
+      // The path travels as a query parameter: it is arbitrarily deep, and its
+      // own separators would otherwise be indistinguishable from the route's.
+      expect(
+        location,
+        '/sessions/claude%20code%2Fpro/a%2Fb/file'
+        '?path=lib%2Fsrc%2Fa+b.dart&line=42',
+      );
+      expect(Uri.parse(location).queryParameters['path'], 'lib/src/a b.dart');
+    });
+
+    test('an anchorless file location carries no line', () {
+      final location = sessionFileLocation(
+        tool: 'codex',
+        sessionId: 'a',
+        path: 'x.dart',
+      );
+
+      expect(Uri.parse(location).queryParameters.containsKey('line'), isFalse);
+    });
+
+    test('recognizes file locations', () {
+      expect(
+        isSessionFileLocation(
+          sessionFileLocation(tool: 'claude', sessionId: 'a', path: 'x.dart'),
+        ),
+        isTrue,
+      );
+      // A session id cannot counterfeit the shape: ids are single segments.
+      expect(
+        isSessionFileLocation(
+          sessionDetailLocation(tool: 'claude', sessionId: 'a/file'),
+        ),
+        isFalse,
+      );
+      expect(isSessionFileLocation('/sessions/claude/a'), isFalse);
+      expect(isSessionFileLocation('/sessions'), isFalse);
+    });
+
+    test('both drilled-in shapes own the compact viewport', () {
+      expect(isDrilledInSessionLocation('/sessions/claude/a'), isTrue);
+      expect(
+        isDrilledInSessionLocation(
+          sessionFileLocation(tool: 'claude', sessionId: 'a', path: 'x.dart'),
+        ),
+        isTrue,
+      );
+      expect(isDrilledInSessionLocation('/sessions'), isFalse);
+      expect(isDrilledInSessionLocation('/attention'), isFalse);
     });
 
     test('session widgets use centralized route helpers', () {
@@ -124,6 +183,9 @@ void main() {
             openSessionsStoreProvider.overrideWithValue(
               _InMemoryOpenSessionsStore(),
             ),
+            // Same reason as the tab store above: the file working set is
+            // persisted, and the real store opens Drift inside the test.
+            filePanesStoreProvider.overrideWithValue(_InMemoryFilePanesStore()),
             sessionLiveStateViewStoreProvider.overrideWithValue(
               InMemorySessionLiveStateViewStore(),
             ),
@@ -246,7 +308,10 @@ void main() {
         await tester.pump();
 
         expect(
-          container.read(visibleAttentionSessionProvider)?.sessionId,
+          container
+              .read(visibleAttentionSessionsProvider)
+              .singleOrNull
+              ?.sessionId,
           'session-a',
         );
 
@@ -260,9 +325,129 @@ void main() {
           findsOneWidget,
           reason: 'the indexed shell retains the inactive Sessions branch',
         );
-        expect(container.read(visibleAttentionSessionProvider), isNull);
+        expect(container.read(visibleAttentionSessionsProvider), isEmpty);
       },
     );
+
+    testWidgets('a compact deep link into a file shows the drill-in', (
+      tester,
+    ) async {
+      await pumpApp(
+        tester,
+        surfaceSize: const Size(500, 900),
+        initialLocation: sessionFileLocation(
+          tool: 'claude',
+          sessionId: 'session-a',
+          path: 'lib/one.dart',
+        ),
+        overrides: [
+          // The file working set is scoped by roster source, so with no
+          // active profile there is nowhere for an opened pane to be stored.
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => BrokerProfile(
+              id: 'p1',
+              displayName: 'p1',
+              baseUri: Uri.parse('http://127.0.0.1:17734'),
+              createdAt: DateTime(2026),
+              incarnationId: 'inc-a',
+            ),
+          ),
+          // A profile with no client: the route is what is under test, not
+          // the read, and a live client would retry an unreachable broker
+          // forever and never let a pump settle.
+          brokerClientProvider.overrideWith((_) async => null),
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+        ],
+      );
+
+      expect(find.byKey(const Key('session-file-page')), findsOneWidget);
+      // The route is self-sufficient: a link naming a file the working set
+      // has never heard of still opens it, strip and all.
+      expect(find.byKey(const Key('file-tabs-strip')), findsOneWidget);
+      expect(find.text('one.dart'), findsWidgets);
+      // A drilled-in view owns the viewport, exactly like session detail.
+      expect(find.byType(NavigationBar), findsNothing);
+    });
+
+    testWidgets('an expanded deep link into a file resolves to the pane', (
+      tester,
+    ) async {
+      final router = await pumpApp(
+        tester,
+        surfaceSize: const Size(1400, 900),
+        initialLocation: sessionFileLocation(
+          tool: 'claude',
+          sessionId: 'session-a',
+          path: 'lib/one.dart',
+        ),
+        overrides: [
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => BrokerProfile(
+              id: 'p1',
+              displayName: 'p1',
+              baseUri: Uri.parse('http://127.0.0.1:17734'),
+              createdAt: DateTime(2026),
+              incarnationId: 'inc-a',
+            ),
+          ),
+          // A profile with no client: the route is what is under test, not
+          // the read, and a live client would retry an unreachable broker
+          // forever and never let a pump settle.
+          brokerClientProvider.overrideWith((_) async => null),
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+        ],
+      );
+      await tester.pumpAndSettle();
+
+      // The second pane never enters the URL: the file resolves into the
+      // workspace and the location collapses to the branch root.
+      expect(
+        router.routerDelegate.currentConfiguration.uri.path,
+        sessionsRoute,
+      );
+      expect(find.byType(SessionsWorkspace), findsOneWidget);
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(find.byKey(const Key('session-file-page')), findsNothing);
+    });
+
+    testWidgets('a file link with no path falls back to the session', (
+      tester,
+    ) async {
+      final router = await pumpApp(
+        tester,
+        surfaceSize: const Size(420, 900),
+        // A hand-trimmed or truncated link. Without the fallback this resolves
+        // to the workspace root and the reader gets a NOT_REGULAR_FILE panel
+        // for a file they never named.
+        initialLocation: '/sessions/claude/session-a/file',
+        overrides: [
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => BrokerProfile(
+              id: 'p1',
+              displayName: 'p1',
+              baseUri: Uri.parse('http://127.0.0.1:17734'),
+              createdAt: DateTime(2026),
+              incarnationId: 'inc-a',
+            ),
+          ),
+          brokerClientProvider.overrideWith((_) async => null),
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+        ],
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        router.routerDelegate.currentConfiguration.uri.path,
+        sessionDetailLocation(tool: 'claude', sessionId: 'session-a'),
+      );
+      expect(find.byKey(const Key('session-file-page')), findsNothing);
+    });
 
     testWidgets('settings can open the transfer manager route', (tester) async {
       await pumpApp(
@@ -1615,6 +1800,16 @@ class _InMemoryWorkspacePrefsStore implements WorkspacePrefsStore {
   Future<void> saveRoster(WorkspaceRosterPrefs prefs) async {
     saved = prefs;
   }
+
+  @override
+  Future<WorkspaceRosterPrefs?> loadFilePane() async => savedFilePane;
+
+  @override
+  Future<void> saveFilePane(WorkspaceRosterPrefs prefs) async {
+    savedFilePane = prefs;
+  }
+
+  WorkspaceRosterPrefs? savedFilePane;
 }
 
 class _InMemoryAttentionFeedSettingsStore
@@ -1792,4 +1987,17 @@ List<PlatformMenuItem> _platformMenuActionItems(WidgetTester tester) {
   final menuBar = _platformMenuBar(tester);
   final appMenu = menuBar.menus.single as PlatformMenu;
   return appMenu.menus;
+}
+
+class _InMemoryFilePanesStore implements FilePanesStore {
+  final Map<String, FilePanesState> _bySource = {};
+
+  @override
+  Future<FilePanesState> load(String sourceKey) async =>
+      _bySource[sourceKey] ?? FilePanesState.empty;
+
+  @override
+  Future<void> save(String sourceKey, FilePanesState state) async {
+    _bySource[sourceKey] = state;
+  }
 }

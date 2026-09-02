@@ -127,6 +127,7 @@ class _TerminalPanelState extends State<_TerminalPanel> {
 class _FilesPanel extends ConsumerStatefulWidget {
   const _FilesPanel({
     required this.sessionKey,
+    required this.sessionLabel,
     required this.isConnected,
     required this.descriptors,
     required this.actionStates,
@@ -142,6 +143,10 @@ class _FilesPanel extends ConsumerStatefulWidget {
   });
 
   final SessionDetailKey sessionKey;
+
+  /// Owning session as `tool · title`, for the file viewer's owner meta.
+  final String sessionLabel;
+
   final bool isConnected;
   final List<SessionArtifactDescriptor> descriptors;
   final Map<String, SessionArtifactActionState> actionStates;
@@ -203,6 +208,32 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
         : null;
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context);
+
+    // An open file takes the whole slot. The viewer is a pane, so it needs a
+    // bounded viewport of its own — nesting it inside this ListView would give
+    // it unbounded height and cost it the sticky header that is the point.
+    if (state?.preview case final SessionFilePreview preview) {
+      return FileViewerPane(
+        key: const Key('session-detail-files-viewer'),
+        content: FileViewerSource(preview: preview),
+        sessionLabel: widget.sessionLabel,
+        toolColor: context.tokens.toolColor(widget.sessionKey.tool),
+        onClose: () => ref
+            .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+            .closePreview(),
+        onBrowseFiles: () => ref
+            .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+            .closePreview(),
+        onOpenExternally: () => openWorkspaceHtmlInBrowser(
+          sessionKey:
+              '${widget.sessionKey.tool}/${widget.sessionKey.sessionId}',
+          path: preview.path,
+          html: preview.text,
+          size: preview.size,
+          truncated: preview.truncated,
+        ),
+      );
+    }
 
     return ListView(
       key: const Key('session-detail-files-list'),

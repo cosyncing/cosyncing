@@ -582,7 +582,7 @@ class SessionFileBrowserController
       return null;
     }
 
-    if (!isPreviewableMime(read.mimeType)) {
+    if (!isPreviewableRead(read)) {
       state = state.copyWith(
         phase: SessionFileBrowserPhase.ready,
         notice: SessionFileBrowserNotice.previewMimeUnavailable,
@@ -635,6 +635,16 @@ class SessionFileBrowserController
     }
   }
 
+  /// Closes the open preview, keeping the listing behind it.
+  ///
+  /// The viewer is a pane now, not a dialog, so closing it is a state change
+  /// rather than a `Navigator.pop`. The listing is deliberately kept: the
+  /// reader closed a file, not the workspace.
+  void closePreview() {
+    if (state.preview == null) return;
+    state = state.copyWith(clearPreview: true, clearNotice: true);
+  }
+
   /// Navigates to a directory entry.
   Future<void> openDirectory(FsDirEntry entry) async {
     if (entry.type != 'directory') {
@@ -645,7 +655,7 @@ class SessionFileBrowserController
 
   /// Reads [entry] into [SessionFilePreview] when it is previewable text.
   Future<SessionFilePreview?> previewFile(FsDirEntry entry) async {
-    if (!_isPreviewableEntry(entry)) {
+    if (entry.type != 'file') {
       state = state.copyWith(
         phase: SessionFileBrowserPhase.ready,
         notice: SessionFileBrowserNotice.previewTextOnly,
@@ -674,7 +684,7 @@ class SessionFileBrowserController
 
     try {
       final read = await repository.readFile(arg.session, path: entry.path);
-      if (!isPreviewableMime(read.mimeType)) {
+      if (!isPreviewableRead(read)) {
         state = state.copyWith(
           phase: SessionFileBrowserPhase.ready,
           notice: SessionFileBrowserNotice.previewMimeUnavailable,
@@ -849,6 +859,11 @@ String decodeSessionFileReadText(FsReadResult result) {
 }
 
 /// MIME-driven preview eligibility.
+///
+/// A hint, never the whole answer: the broker guesses the label from the path
+/// suffix, so a broker older than the widened suffix table returns
+/// `application/octet-stream` for most source. [isPreviewableRead] is what the
+/// read path asks.
 bool isPreviewableMime(String? mimeType) {
   final mime = mimeType?.split(';').first.trim().toLowerCase();
   if (mime == null || mime.isEmpty) {
@@ -861,11 +876,26 @@ bool isPreviewableMime(String? mimeType) {
       mime == 'application/x-yaml';
 }
 
-bool _isPreviewableEntry(FsDirEntry entry) {
-  if (entry.type != 'file') {
-    return false;
+/// Whether a `/fs/read` payload can be shown as text.
+///
+/// Brokers upgrade independently of clients, so refusing on a MIME label the
+/// broker guessed from an extension is the bug that keeps `.py`, `.rs` and
+/// `.toml` from opening at all. `encoding == 'utf8'` is the broker's own
+/// byte-level finding (`looksUtf8ish`, `artifacts/fs-browse.ts`) that the
+/// payload decoded cleanly, and it outranks the guess.
+///
+/// `base64` gets no such bypass — [decodeSessionFileReadText] would decode
+/// those bytes with `allowMalformed: true` and hand back mojibake — so a base64
+/// read is still judged on its label alone, exactly as today. That keeps every
+/// binary refusal standing (`image/png`, `application/pdf`,
+/// `application/octet-stream` all fail the label test) without retracting the one
+/// case the label does admit: a `text/*` file the broker could not decode as
+/// UTF-8. A binary renderer is what replaces that, not this predicate.
+bool isPreviewableRead(FsReadResult read) {
+  if (read.encoding == 'utf8') {
+    return true;
   }
-  return true;
+  return isPreviewableMime(read.mimeType);
 }
 
 int _entryTypeRank(FsDirEntry entry) {

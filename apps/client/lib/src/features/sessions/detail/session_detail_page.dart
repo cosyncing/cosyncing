@@ -19,6 +19,8 @@ import 'package:cosyncing_client/src/features/schedules/controller/inline_schedu
 import 'package:cosyncing_client/src/features/schedules/view/inline_schedule_action_message.dart';
 import 'package:cosyncing_client/src/features/schedules/view/inline_scheduled_message_card.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_message_sheet.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_presenter.dart';
@@ -60,7 +62,11 @@ import 'package:cosyncing_client/src/features/sessions/transcript/session_file_l
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_display.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/session_transcript_progress.dart';
 import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_mode.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/tool_display_controller.dart';
@@ -1276,13 +1282,13 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       ref.read(sessionFileBrowserKeyProvider(_key));
 
   Future<void> _previewSessionFile(FsDirEntry entry) async {
-    final preview = await ref
+    // With the split available the file becomes its own pane beside the
+    // browser, so the listing stays where the reader left it. Otherwise the
+    // read lands in browser state and the Files slot renders it in place.
+    if (_openInFilePane(entry.path, null)) return;
+    await ref
         .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
         .previewFile(entry);
-    if (!mounted || preview == null) {
-      return;
-    }
-    await _showSessionFilePreviewDialog(context, preview);
   }
 
   /// Stable identity so the link scope only notifies on a real gate change.
@@ -1298,7 +1304,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// error would cost the reader their place for nothing.
   Future<void> _openFileReference(SessionFileReference reference) async {
     final browserKey = _fileBrowserKey;
-    final preview = await ref
+    await ref
         .read(sessionFileBrowserControllerProvider(browserKey).notifier)
         .openReference(reference);
     if (!mounted) return;
@@ -1315,9 +1321,66 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       );
       return;
     }
+    // Where the file lands depends on whether there is room to show it beside
+    // the transcript. With the split available it opens as its own pane and
+    // the reader keeps their place; without it, the Files slot is the only
+    // surface there is, so the view has to switch.
+    final preview = ref
+        .read(sessionFileBrowserControllerProvider(browserKey))
+        .preview;
+    if (preview != null && _openInFilePane(preview.path, reference.line)) {
+      return;
+    }
+    // `maybeOf`, not `of`: the drill-in needs a router, and this page is also
+    // mounted without one. Where there is no route to push, the Files slot is
+    // the only surface there is and switching to it stays correct.
+    final router = GoRouter.maybeOf(context);
+    if (preview != null && router != null) {
+      // No room for a second pane, so the file is a pushed route instead --
+      // the transcript stays on the stack underneath rather than being
+      // swapped away, which is what switching to the Files slot used to cost.
+      // The browser's own preview is closed on the way out: the drill-in is
+      // now the surface showing this file, and leaving a second copy behind
+      // the route would greet the reader on Back.
+      ref
+          .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+          .closePreview();
+      unawaited(
+        router.push(
+          sessionFileLocation(
+            tool: _key.tool,
+            sessionId: _key.sessionId,
+            path: preview.path,
+            line: reference.line,
+          ),
+        ),
+      );
+      return;
+    }
     _selectView(_SessionDetailView.files);
-    if (preview == null || !mounted) return;
-    await _showSessionFilePreviewDialog(context, preview);
+  }
+
+  /// Opens [path] as a file pane, when the window is wide enough to show one.
+  ///
+  /// Returns false at narrower widths, where the caller keeps the in-place
+  /// behaviour rather than opening a pane the layout will not render.
+  bool _openInFilePane(String path, int? line) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (WindowSizeClass.fromWidth(width) != WindowSizeClass.expanded) {
+      return false;
+    }
+    final pane = FilePaneKey(session: _key, path: path);
+    if (line != null) {
+      ref
+          .read(filePaneAnchorProvider.notifier)
+          .update(
+            (anchors) => {...anchors, pane.key: line},
+          );
+    }
+    unawaited(
+      ref.read(filePanesControllerProvider.notifier).open(_key, path),
+    );
+    return true;
   }
 
   /// Probes the workspace-file gate once per attach.
@@ -2367,6 +2430,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             child: _ChatPanel(
                               key: const Key('session-detail-tab-panel-chat'),
                               sessionKey: _key,
+                              sessionLabel: '${_key.tool} · $visibleTitle',
                               state: state,
                               controller: controller,
                               commands: commands,
@@ -2460,6 +2524,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                           child: _FilesPanel(
                             key: const Key('session-detail-tab-panel-files'),
                             sessionKey: _key,
+                            sessionLabel: '${_key.tool} · $visibleTitle',
                             isConnected: isConnected,
                             descriptors: state.fileArtifactDescriptors,
                             actionStates: state.artifactActionStates,

@@ -9,6 +9,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/voice_input_controller.dart';
 import 'package:cosyncing_client/src/features/voice/data/read_aloud_preferences_store.dart';
@@ -236,7 +237,10 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(container.read(visibleAttentionSessionProvider)?.sessionId, 'a');
+    expect(
+      container.read(visibleAttentionSessionsProvider).single.sessionId,
+      'a',
+    );
 
     config.value = _HostConfig(
       source: _sourceA,
@@ -245,9 +249,9 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    final visible = container.read(visibleAttentionSessionProvider);
-    expect(visible?.sessionId, 'b');
-    expect(visible?.isStillVisible(), isTrue);
+    final visible = container.read(visibleAttentionSessionsProvider).single;
+    expect(visible.sessionId, 'b');
+    expect(visible.isStillVisible(), isTrue);
 
     config.value = _HostConfig(
       source: _sourceA,
@@ -257,8 +261,8 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(
-      container.read(visibleAttentionSessionProvider),
-      isNull,
+      container.read(visibleAttentionSessionsProvider),
+      isEmpty,
       reason: 'an offstage navigation branch owns no visible session',
     );
   });
@@ -362,7 +366,353 @@ void main() {
       await tester.pump();
     }
   });
+  group('focused pane versus visible set', () {
+    testWidgets('a visible pane keeps ticking while another holds focus', (
+      tester,
+    ) async {
+      final ledger = _PageLedger();
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(
+          container,
+          config,
+          (context, session) => _ProbePage(session: session, ledger: ledger),
+        ),
+      );
+      await tester.pump();
+
+      expect(ledger.tickerEnabled[_a.key], isTrue);
+      expect(ledger.tickerEnabled[_b.key], isNull, reason: 'B never painted');
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key, _b.key},
+        focusedKey: _a.key,
+      );
+      await tester.pump();
+
+      // The whole point of the split: B is on screen without holding focus,
+      // so it is onstage and its animations run. Under the old single
+      // `activeKey` it would have been frozen behind an Offstage.
+      expect(ledger.tickerEnabled[_a.key], isTrue);
+      expect(ledger.tickerEnabled[_b.key], isTrue);
+      expect(_offstage(tester, _a.key), isFalse);
+      expect(_offstage(tester, _b.key), isFalse);
+      // Not hit-testability: this host stacks its retained pages, so the two
+      // overlap here. Laying visible panes out side by side belongs to the
+      // workspace split, not to the page host.
+      expect(find.text('PAGE codex/b', skipOffstage: false), findsOneWidget);
+    });
+
+    testWidgets('a pane outside the visible set does not tick', (tester) async {
+      final ledger = _PageLedger();
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+          visibleKeys: {_a.key, _b.key},
+          focusedKey: _a.key,
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(
+          container,
+          config,
+          (context, session) => _ProbePage(session: session, ledger: ledger),
+        ),
+      );
+      await tester.pump();
+      expect(ledger.tickerEnabled[_b.key], isTrue);
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key},
+        focusedKey: _a.key,
+      );
+      await tester.pump();
+
+      expect(ledger.tickerEnabled[_b.key], isFalse);
+      expect(_offstage(tester, _b.key), isTrue);
+      expect(find.text('PAGE codex/b').hitTestable(), findsNothing);
+      expect(ledger.mounts[_b.key], 1, reason: 'retained, not remounted');
+    });
+
+    testWidgets('a second visible pane does not steal focus from the first', (
+      tester,
+    ) async {
+      final ledger = _PageLedger();
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(
+          container,
+          config,
+          (context, session) => _ProbePage(session: session, ledger: ledger),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('probe-input-codex/a')));
+      await tester.pump();
+      final aState = ledger.states[_a.key]!;
+      expect(aState.focusNode.hasFocus, isTrue);
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key, _b.key},
+        focusedKey: _a.key,
+      );
+      await tester.pump();
+
+      // Becoming visible is not becoming focused. A composer losing its caret
+      // because a file pane appeared beside it is the failure this pins.
+      expect(aState.focusNode.hasFocus, isTrue);
+      expect(ledger.states[_b.key]!.focusNode.hasFocus, isFalse);
+    });
+
+    testWidgets('every visible pane publishes its Attention claim', (
+      tester,
+    ) async {
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+          visibleKeys: {_a.key, _b.key},
+          focusedKey: _a.key,
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(
+          container,
+          config,
+          (context, session) => VisibleAttentionSessionScope(
+            tool: session.tool,
+            sessionId: session.id,
+            child: Text('ATTENTION ${session.key}'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // Suppression keys on the visible set, not on focus: an unfocused pane
+      // is still being read, so notifying for it is the duplicate the claim
+      // exists to prevent.
+      final claims = container.read(visibleAttentionSessionsProvider);
+      expect(claims.map((claim) => claim.sessionId).toSet(), {'a', 'b'});
+      expect(claims.every((claim) => claim.isStillVisible()), isTrue);
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key},
+        focusedKey: _a.key,
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        container.read(visibleAttentionSessionsProvider).single.sessionId,
+        'a',
+      );
+    });
+
+    testWidgets('the focused pane is published for media ownership', (
+      tester,
+    ) async {
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+          visibleKeys: {_a.key, _b.key},
+          focusedKey: _a.key,
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(container, config, (context, session) => Text(session.key)),
+      );
+      await tester.pump();
+      expect(container.read(focusedPaneProvider), _a.key);
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key, _b.key},
+        focusedKey: _b.key,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(container.read(focusedPaneProvider), _b.key);
+
+      config.value = _HostConfig(
+        source: _sourceA,
+        open: _open([_a, _b], active: _a.key),
+        visibleKeys: {_a.key, _b.key},
+        focusedKey: _b.key,
+        branchVisible: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(
+        container.read(focusedPaneProvider),
+        isNull,
+        reason: 'an offstage branch focuses nothing',
+      );
+    });
+
+    testWidgets('eviction never reaches a pane that is on screen', (
+      tester,
+    ) async {
+      final ledger = _PageLedger();
+      final config = ValueNotifier(
+        _HostConfig(
+          source: _sourceA,
+          open: _open([_refs[0]], active: _refs[0].key),
+          visibleKeys: {_refs[0].key},
+          focusedKey: _refs[0].key,
+        ),
+      );
+      addTearDown(config.dispose);
+      final container = _container();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        _subject(
+          container,
+          config,
+          (context, session) => _ProbePage(session: session, ledger: ledger),
+        ),
+      );
+      await tester.pump();
+
+      // Walk the focus across every tab while pinning ref 0 visible beside it.
+      for (var index = 1; index < _refs.length; index++) {
+        config.value = _HostConfig(
+          source: _sourceA,
+          open: _open(_refs.sublist(0, index + 1), active: _refs[index].key),
+          visibleKeys: {_refs[0].key, _refs[index].key},
+          focusedKey: _refs[index].key,
+        );
+        await tester.pump();
+      }
+
+      expect(ledger.aliveKeys, hasLength(retainedSessionPageBudget));
+      expect(
+        ledger.aliveKeys,
+        contains(_refs[0].key),
+        reason: 'the pinned second pane outlived the LRU window',
+      );
+      expect(ledger.tickerEnabled[_refs[0].key], isTrue);
+    });
+
+    testWidgets(
+      'moving focus stops the pane being left, not the one arriving',
+      (
+        tester,
+      ) async {
+        final output = _RecordingSpeechOutput();
+        final input = _RecordingSpeechInput();
+        addTearDown(output.close);
+        addTearDown(input.close);
+        final container = _container(
+          extraOverrides: [
+            speechOutputFactoryProvider.overrideWithValue(() => output),
+            speechInputFactoryProvider.overrideWithValue(() => input),
+            readAloudPreferencesStoreProvider.overrideWithValue(
+              InMemoryReadAloudPreferencesStore(),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final config = ValueNotifier(
+          _HostConfig(
+            source: _sourceA,
+            open: _open([_a, _b], active: _a.key),
+            visibleKeys: {_a.key, _b.key},
+            focusedKey: _a.key,
+          ),
+        );
+        addTearDown(config.dispose);
+        await tester.pumpWidget(
+          _subject(
+            container,
+            config,
+            (context, session) => _VoiceOwner(session.key),
+          ),
+        );
+        await tester.pump();
+        expect(output.stopCalls, 0);
+
+        // A becomes the owner as it takes focus; B arriving on screen beside it
+        // changes nothing, because visibility is not focus.
+        config.value = _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+          visibleKeys: {_a.key, _b.key},
+          focusedKey: _a.key,
+        );
+        await tester.pump();
+        expect(output.stopCalls, 0);
+        expect(input.cancelCalls, 0);
+
+        config.value = _HostConfig(
+          source: _sourceA,
+          open: _open([_a, _b], active: _a.key),
+          visibleKeys: {_a.key, _b.key},
+          focusedKey: _b.key,
+        );
+        await tester.pump();
+
+        expect(output.stopCalls, 1);
+        expect(input.cancelCalls, 1);
+        expect(
+          container.read(readAloudControllerProvider.notifier).owningPane,
+          _b.key,
+          reason: 'whatever starts next belongs to the pane now in front',
+        );
+        expect(
+          container.read(voiceInputControllerProvider.notifier).owningPane,
+          _b.key,
+        );
+      },
+    );
+  });
 }
+
+/// Whether the retained slot for [pageKey] is offstage.
+///
+/// Read from the `Offstage` itself rather than inferred from hit-testing: the
+/// host stacks its pages, so an onstage page can still sit under another.
+bool _offstage(WidgetTester tester, String pageKey) => tester
+    .widget<Offstage>(
+      find.byKey(Key('retained-session-page-$pageKey'), skipOffstage: false),
+    )
+    .offstage;
 
 Widget _subject(
   ProviderContainer container,
@@ -379,6 +729,8 @@ Widget _subject(
           child: RetainedSessionPages(
             source: value.source,
             open: value.open,
+            visibleKeys: value.visibleKeys,
+            focusedKey: value.focusedKey,
             builder: builder,
           ),
         ),
@@ -433,11 +785,17 @@ final class _HostConfig {
     required this.source,
     required this.open,
     this.branchVisible = true,
+    this.visibleKeys,
+    this.focusedKey,
   });
 
   final RosterSource source;
   final OpenSessionsState open;
   final bool branchVisible;
+
+  /// Null keeps the single-pane default: the active tab alone is onscreen.
+  final Set<String>? visibleKeys;
+  final String? focusedKey;
 }
 
 final class _PageLedger {

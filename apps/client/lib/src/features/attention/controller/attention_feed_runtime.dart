@@ -57,10 +57,66 @@ final class VisibleAttentionSession {
   final bool Function() isStillVisible;
 }
 
-/// Exact onstage session used only for duplicate terminal-run suppression.
-final visibleAttentionSessionProvider = StateProvider<VisibleAttentionSession?>(
-  (_) => null,
-);
+/// Every onstage session, used only for duplicate terminal-run suppression.
+///
+/// A list and not one claim, because the workspace can put more than one pane
+/// on screen at a time. Suppression has to cover the whole visible set: a pane
+/// that is visible but unfocused is still being read, so notifying for it is
+/// exactly the duplicate this provider exists to prevent. One claim per owning
+/// page incarnation; order is claim order and carries no meaning.
+final visibleAttentionSessionsProvider =
+    StateProvider<List<VisibleAttentionSession>>((_) => const []);
+
+/// [claims] with [claim] replacing any earlier claim from the same owner.
+List<VisibleAttentionSession> withVisibleAttentionClaim(
+  List<VisibleAttentionSession> claims,
+  VisibleAttentionSession claim,
+) {
+  return List<VisibleAttentionSession>.unmodifiable(<VisibleAttentionSession>[
+    for (final entry in claims)
+      if (!identical(entry.owner, claim.owner)) entry,
+    claim,
+  ]);
+}
+
+/// [claims] without the claim owned by [owner].
+List<VisibleAttentionSession> withoutVisibleAttentionClaim(
+  List<VisibleAttentionSession> claims,
+  Object owner,
+) {
+  if (!claims.any((entry) => identical(entry.owner, owner))) return claims;
+  return List<VisibleAttentionSession>.unmodifiable(<VisibleAttentionSession>[
+    for (final entry in claims)
+      if (!identical(entry.owner, owner)) entry,
+  ]);
+}
+
+/// The onstage claim for an exact session, or null when none is visible.
+///
+/// [VisibleAttentionSession.isStillVisible] is consulted per claim because a
+/// deferred release can outlive the page that made it by one frame.
+VisibleAttentionSession? matchVisibleAttentionSession(
+  List<VisibleAttentionSession> claims, {
+  required RosterSource? source,
+  required String? tool,
+  required String? sessionId,
+}) {
+  if (source == null) return null;
+  for (final claim in claims) {
+    if (claim.source != source ||
+        claim.tool != tool ||
+        claim.sessionId != sessionId) {
+      continue;
+    }
+    try {
+      if (claim.isStillVisible()) return claim;
+    } on Object {
+      // A disposed page can briefly leave its deferred claim behind; a lease
+      // that throws is not a visible surface.
+    }
+  }
+  return null;
+}
 
 /// Latest foreground arrival eligible for app-root aggregation.
 final foregroundAttentionEventProvider = StateProvider<AttentionInboxEntry?>(
@@ -207,17 +263,13 @@ AttentionFeedRunFailureFocusMatcher attentionRunFailureFocusMatcher(
     required String? agent,
     required String? sessionId,
   }) {
-    final visible = ref.read(visibleAttentionSessionProvider);
-    if (visible?.source != source ||
-        visible?.tool != tool ||
-        visible?.sessionId != sessionId) {
-      return false;
-    }
-    try {
-      return visible!.isStillVisible();
-    } on Object {
-      return false;
-    }
+    return matchVisibleAttentionSession(
+          ref.read(visibleAttentionSessionsProvider),
+          source: source,
+          tool: tool,
+          sessionId: sessionId,
+        ) !=
+        null;
   };
 }
 

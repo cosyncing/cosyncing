@@ -147,12 +147,17 @@ class MarkdownCodeBlock extends MarkdownBlock {
 /// turning syntax highlighting into an unbounded allocation multiplier.
 const int maxHighlightedTranscriptCodeUnits = 128 * 1024;
 
-/// Maximum styled runs emitted for one fenced block.
+/// Maximum styled runs emitted for one lexed body.
 ///
 /// Highly alternating input can otherwise create nearly one widget span per
 /// character. Falling back to one literal run preserves both text and the
 /// transcript's existing resource envelope.
-const int _maxHighlightedTranscriptCodeTokens = 4096;
+///
+/// Public because it is a bound hosts have to reason about, not just obey: it
+/// is calibrated for a fenced snippet, and roughly 500 lines of ordinary source
+/// reaches it. A host showing whole files decides what to do about that — see
+/// [TranscriptCodeLineHighlighter].
+const int maxHighlightedTranscriptCodeTokens = 4096;
 
 /// Semantic class for one dependency-free fenced-code token.
 enum TranscriptCodeTokenKind {
@@ -481,15 +486,13 @@ final Map<String, _CodeLanguageProfile> _codeLanguageProfiles = {
 List<TranscriptCodeToken> highlightTranscriptCode(
   String source, {
   required String language,
-}) {
-  final profile = _codeLanguageProfiles[language.trim().toLowerCase()];
-  if (source.isEmpty) return const [];
-  if (profile == null || source.length > maxHighlightedTranscriptCodeUnits) {
-    return [
-      TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-    ];
-  }
+}) => highlightTranscriptCodeDetailed(source, language: language).tokens;
 
+/// Lexes [source] under [profile], or null when it blew the token budget.
+List<TranscriptCodeToken>? _scanTranscriptCode(
+  String source,
+  _CodeLanguageProfile profile,
+) {
   final ranges = <({int start, int end, TranscriptCodeTokenKind kind})>[];
   var index = 0;
   bool add(int end, TranscriptCodeTokenKind kind) {
@@ -501,7 +504,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
       ranges.add((start: index, end: end, kind: kind));
     }
     index = end;
-    return ranges.length <= _maxHighlightedTranscriptCodeTokens;
+    return ranges.length <= maxHighlightedTranscriptCodeTokens;
   }
 
   while (index < source.length) {
@@ -512,9 +515,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
         close < 0 ? source.length : close + 3,
         TranscriptCodeTokenKind.comment,
       )) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -524,9 +525,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
         close < 0 ? source.length : close + 2,
         TranscriptCodeTokenKind.comment,
       )) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -538,9 +537,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
         newline < 0 ? source.length : newline,
         TranscriptCodeTokenKind.comment,
       )) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -565,9 +562,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
       final end = index;
       index = start;
       if (!add(end, TranscriptCodeTokenKind.string)) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -582,9 +577,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
       final end = index;
       index = start;
       if (!add(end, TranscriptCodeTokenKind.number)) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -605,9 +598,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
           : TranscriptCodeTokenKind.plain;
       index = start;
       if (!add(end, kind)) {
-        return [
-          TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain),
-        ];
+        return null;
       }
       continue;
     }
@@ -619,7 +610,7 @@ List<TranscriptCodeToken> highlightTranscriptCode(
         : TranscriptCodeTokenKind.plain;
     index = start;
     if (!add(end, kind)) {
-      return [TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain)];
+      return null;
     }
   }
   return List<TranscriptCodeToken>.unmodifiable([
@@ -629,6 +620,242 @@ List<TranscriptCodeToken> highlightTranscriptCode(
         kind: range.kind,
       ),
   ]);
+}
+
+/// Why a highlight attempt fell back to one plain run.
+enum TranscriptCodeDecline {
+  /// The language label has no lexical profile.
+  noProfile,
+
+  /// Input exceeded [maxHighlightedTranscriptCodeUnits].
+  tooLarge,
+
+  /// Styling exceeded [maxHighlightedTranscriptCodeTokens].
+  tooManyTokens,
+}
+
+/// One highlight attempt: its runs, and why it declined when it did.
+typedef TranscriptCodeHighlight = ({
+  List<TranscriptCodeToken> tokens,
+  TranscriptCodeDecline? declined,
+});
+
+/// Highlights [source], reporting whether the highlighter declined.
+///
+/// [highlightTranscriptCode] answers the same question by returning one plain
+/// run, but a caller cannot tell that apart from a file that genuinely has no
+/// keywords in it. A host that must say "syntax highlighting is off, and the
+/// text is still complete" needs the reason, and the two size bounds are not
+/// enough on their own to derive it: the token bound is only knowable after
+/// lexing.
+TranscriptCodeHighlight highlightTranscriptCodeDetailed(
+  String source, {
+  required String language,
+}) {
+  TranscriptCodeHighlight plain(TranscriptCodeDecline reason) => (
+    tokens: [TranscriptCodeToken(source, kind: TranscriptCodeTokenKind.plain)],
+    declined: reason,
+  );
+
+  final profile = _codeLanguageProfiles[language.trim().toLowerCase()];
+  if (source.isEmpty) return (tokens: const [], declined: null);
+  if (profile == null) return plain(TranscriptCodeDecline.noProfile);
+  if (source.length > maxHighlightedTranscriptCodeUnits) {
+    return plain(TranscriptCodeDecline.tooLarge);
+  }
+  final tokens = _scanTranscriptCode(source, profile);
+  if (tokens == null) return plain(TranscriptCodeDecline.tooManyTokens);
+  return (tokens: tokens, declined: null);
+}
+
+/// Where a line begins, for the one construct that spans lines.
+enum _TranscriptCodeCarry {
+  /// Ordinary code.
+  none,
+
+  /// Inside an unclosed `/* … */`.
+  block,
+
+  /// Inside an unclosed `<!-- … -->`.
+  html,
+}
+
+/// Highlights a whole source file one line at a time.
+///
+/// The transcript's budgets are calibrated for fenced snippets: 4,096 styled
+/// runs is roughly 500 lines of ordinary source, so handing a whole file to
+/// [highlightTranscriptCode] greys out most real files. Lexing per line keeps
+/// every call far inside both bounds, and matches a viewer whose
+/// `ListView.builder` builds one line at a time anyway.
+///
+/// Block and HTML comments are the only constructs here that legitimately span
+/// lines, so the carry state for every line is settled in one linear pass at
+/// construction. That keeps a jump to line 12,000 correct without lexing the
+/// 11,999 lines above it. An unterminated string stops at end of line rather
+/// than running to end of file, which is what an editor does and is strictly
+/// better than the whole-block lexer's behaviour.
+class TranscriptCodeLineHighlighter {
+  /// Prepares [lines] for per-line highlighting as [language].
+  factory TranscriptCodeLineHighlighter(
+    List<String> lines, {
+    required String language,
+  }) {
+    final profile = _codeLanguageProfiles[language.trim().toLowerCase()];
+    if (profile == null) {
+      return TranscriptCodeLineHighlighter._(
+        lines,
+        null,
+        const [],
+        declined: TranscriptCodeDecline.noProfile,
+      );
+    }
+
+    final carries = List<_TranscriptCodeCarry>.filled(
+      lines.length,
+      _TranscriptCodeCarry.none,
+    );
+    TranscriptCodeDecline? declined;
+    var carry = _TranscriptCodeCarry.none;
+    for (var i = 0; i < lines.length; i++) {
+      carries[i] = carry;
+      final line = lines[i];
+      // Both ways a single line can decline, settled up front so the notice is
+      // a property of the file rather than of whatever is on screen. The token
+      // bound needs a lex, but a line cannot reach 4,096 runs with fewer than
+      // 4,096 characters — so in real source nothing here is ever lexed twice.
+      if (declined == null) {
+        if (line.length > maxHighlightedTranscriptCodeUnits) {
+          declined = TranscriptCodeDecline.tooLarge;
+        } else if (line.length > maxHighlightedTranscriptCodeTokens &&
+            _scanTranscriptCode(line, profile) == null) {
+          declined = TranscriptCodeDecline.tooManyTokens;
+        }
+      }
+      carry = _carryAfterLine(line, profile, carry);
+    }
+    return TranscriptCodeLineHighlighter._(
+      lines,
+      profile,
+      carries,
+      declined: declined,
+    );
+  }
+
+  TranscriptCodeLineHighlighter._(
+    this._lines,
+    this._profile,
+    this._carries, {
+    required this.declined,
+  });
+
+  final List<String> _lines;
+  final _CodeLanguageProfile? _profile;
+  final List<_TranscriptCodeCarry> _carries;
+
+  /// Why some line in this file will render unstyled, when one will.
+  ///
+  /// Null means every line is highlighted. A host shows its "highlighting is
+  /// off, the text is complete" notice exactly when this is non-null and the
+  /// reason is not [TranscriptCodeDecline.noProfile] — an unknown language was
+  /// never offered highlighting, so there is nothing to explain.
+  final TranscriptCodeDecline? declined;
+
+  /// Whether this file has a lexical profile at all.
+  bool get hasProfile => _profile != null;
+
+  /// The styled runs for the line at [index], zero-based.
+  List<TranscriptCodeToken> tokensFor(int index) {
+    final line = _lines[index];
+    final profile = _profile;
+    if (profile == null || line.isEmpty) {
+      return line.isEmpty
+          ? const []
+          : [TranscriptCodeToken(line, kind: TranscriptCodeTokenKind.plain)];
+    }
+
+    final carry = _carries[index];
+    if (carry == _TranscriptCodeCarry.none) {
+      return _scanTranscriptCode(line, profile) ??
+          [TranscriptCodeToken(line, kind: TranscriptCodeTokenKind.plain)];
+    }
+
+    // The line opened inside a comment. Close it, then lex what follows as
+    // ordinary code — a `*/` halfway down a line is followed by real source.
+    final closer = carry == _TranscriptCodeCarry.block ? '*/' : '-->';
+    final close = line.indexOf(closer);
+    if (close < 0) {
+      return [TranscriptCodeToken(line, kind: TranscriptCodeTokenKind.comment)];
+    }
+    final end = close + closer.length;
+    final rest = line.substring(end);
+    return [
+      TranscriptCodeToken(
+        line.substring(0, end),
+        kind: TranscriptCodeTokenKind.comment,
+      ),
+      if (rest.isNotEmpty)
+        ...(_scanTranscriptCode(rest, profile) ??
+            [TranscriptCodeToken(rest, kind: TranscriptCodeTokenKind.plain)]),
+    ];
+  }
+}
+
+/// Where the line after [line] begins, given it began at [carry].
+///
+/// Walks the line skipping strings and line comments, so a `/*` inside a
+/// string literal does not open a comment that swallows the rest of the file.
+_TranscriptCodeCarry _carryAfterLine(
+  String line,
+  _CodeLanguageProfile profile,
+  _TranscriptCodeCarry carry,
+) {
+  var index = 0;
+  var state = carry;
+  while (index < line.length) {
+    if (state != _TranscriptCodeCarry.none) {
+      final closer = state == _TranscriptCodeCarry.block ? '*/' : '-->';
+      final close = line.indexOf(closer, index);
+      if (close < 0) return state;
+      index = close + closer.length;
+      state = _TranscriptCodeCarry.none;
+      continue;
+    }
+    if (profile.htmlComments && line.startsWith('<!--', index)) {
+      index += 4;
+      state = _TranscriptCodeCarry.html;
+      continue;
+    }
+    if (profile.blockComments && line.startsWith('/*', index)) {
+      index += 2;
+      state = _TranscriptCodeCarry.block;
+      continue;
+    }
+    if ((profile.slashComments && line.startsWith('//', index)) ||
+        (profile.dashComments && line.startsWith('--', index)) ||
+        (profile.hashComments && line.codeUnitAt(index) == 0x23)) {
+      return _TranscriptCodeCarry.none;
+    }
+    final unit = line.codeUnitAt(index);
+    if (unit == 0x22 ||
+        unit == 0x27 ||
+        (unit == 0x60 && profile.backtickStrings)) {
+      index++;
+      var escaped = false;
+      while (index < line.length) {
+        final next = line.codeUnitAt(index++);
+        if (escaped) {
+          escaped = false;
+        } else if (next == 0x5c) {
+          escaped = true;
+        } else if (next == unit) {
+          break;
+        }
+      }
+      continue;
+    }
+    index++;
+  }
+  return state;
 }
 
 bool _isCodeDigit(int unit) => unit >= 0x30 && unit <= 0x39;

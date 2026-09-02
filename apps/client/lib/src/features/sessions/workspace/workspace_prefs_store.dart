@@ -8,9 +8,19 @@ const String workspaceRosterPaneWidthKey = 'workspace.rosterPaneWidth';
 /// Setting key for whether the Expanded workspace roster is collapsed.
 const String workspaceRosterCollapsedKey = 'workspace.rosterCollapsed';
 
+/// Setting key for the Expanded workspace file pane width, in logical pixels.
+const String workspaceFilePaneWidthKey = 'workspace.filePaneWidth';
+
+/// Setting key for whether the Expanded workspace file pane is collapsed to
+/// its document rail.
+const String workspaceFilePaneCollapsedKey = 'workspace.filePaneCollapsed';
+
 /// Width restored when a collapsed flag was persisted without a usable width
 /// (a half-written or corrupt record). Mirrors the workspace's default split.
 const double workspaceDefaultRosterWidth = 320;
+
+/// Width the file pane opens at, and restores to when its record is unusable.
+const double workspaceDefaultFilePaneWidth = 420;
 
 /// A restored roster split preference: how wide the roster is, and whether the
 /// user closed it.
@@ -53,6 +63,12 @@ abstract interface class WorkspacePrefsStore {
 
   /// Persists the roster split.
   Future<void> saveRoster(WorkspaceRosterPrefs prefs);
+
+  /// Loads the saved file-pane split, or null if the user has never set one.
+  Future<WorkspaceRosterPrefs?> loadFilePane();
+
+  /// Persists the file-pane split.
+  Future<void> saveFilePane(WorkspaceRosterPrefs prefs);
 }
 
 /// Drift-backed [WorkspacePrefsStore] over the shared app settings KV table.
@@ -99,6 +115,27 @@ class DriftWorkspacePrefsStore implements WorkspacePrefsStore {
     await _write(workspaceRosterPaneWidthKey, prefs.width.toString());
     await _write(
       workspaceRosterCollapsedKey,
+      prefs.collapsed ? 'true' : 'false',
+    );
+  }
+
+  @override
+  Future<WorkspaceRosterPrefs?> loadFilePane() async {
+    final widthValue = await _read(workspaceFilePaneWidthKey);
+    final collapsedValue = await _read(workspaceFilePaneCollapsedKey);
+    if (widthValue == null && collapsedValue == null) return null;
+    final width = double.tryParse(widthValue ?? '');
+    return WorkspaceRosterPrefs(
+      width: width ?? workspaceDefaultFilePaneWidth,
+      collapsed: collapsedValue == 'true',
+    );
+  }
+
+  @override
+  Future<void> saveFilePane(WorkspaceRosterPrefs prefs) async {
+    await _write(workspaceFilePaneWidthKey, prefs.width.toString());
+    await _write(
+      workspaceFilePaneCollapsedKey,
       prefs.collapsed ? 'true' : 'false',
     );
   }

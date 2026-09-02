@@ -22,6 +22,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     required this.textTertiary,
     required this.accent,
     required this.accentInk,
+    required this.accentSurface,
     required this.statusWorking,
     required this.statusNeedsInput,
     required this.statusIdle,
@@ -72,6 +73,19 @@ class AppTokens extends ThemeExtension<AppTokens> {
 
   /// High-emphasis foreground drawn on top of [accent].
   final Color accentInk;
+
+  /// [accent] resolved over [surface2] as a low-alpha wash.
+  ///
+  /// A concrete color per theme, never runtime alpha math: the right alpha
+  /// differs by brightness (a dark theme needs a little more to read as a
+  /// tint at all), and a one-off `accent.withValues(...)` in feature code is
+  /// exactly what the token rule forbids.
+  ///
+  /// It is a *surface*, so it carries only text that clears 4.5:1 on it.
+  /// [textPrimary] does everywhere; the `syntax*` tokens do not — several
+  /// themes sit under 4.8:1 against [surface2] already and have no headroom
+  /// left for a wash. Use it behind plain text, not behind highlighted code.
+  final Color accentSurface;
 
   /// Agent running/active.
   final Color statusWorking;
@@ -171,6 +185,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     Color? textTertiary,
     Color? accent,
     Color? accentInk,
+    Color? accentSurface,
     Color? statusWorking,
     Color? statusNeedsInput,
     Color? statusIdle,
@@ -204,6 +219,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       textTertiary: textTertiary ?? this.textTertiary,
       accent: accent ?? this.accent,
       accentInk: accentInk ?? this.accentInk,
+      accentSurface: accentSurface ?? this.accentSurface,
       statusWorking: statusWorking ?? this.statusWorking,
       statusNeedsInput: statusNeedsInput ?? this.statusNeedsInput,
       statusIdle: statusIdle ?? this.statusIdle,
@@ -244,6 +260,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       textTertiary: Color.lerp(textTertiary, other.textTertiary, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
       accentInk: Color.lerp(accentInk, other.accentInk, t)!,
+      accentSurface: Color.lerp(accentSurface, other.accentSurface, t)!,
       statusWorking: Color.lerp(statusWorking, other.statusWorking, t)!,
       statusNeedsInput: Color.lerp(
         statusNeedsInput,

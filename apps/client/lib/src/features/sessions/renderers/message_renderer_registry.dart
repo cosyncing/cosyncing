@@ -103,6 +103,14 @@ Widget buildAgentMessageRenderer(
   );
 }
 
+/// Renders [source] as markdown blocks, for a host outside the transcript.
+///
+/// The file viewer's Rendered mode is this same block set at file scale. A
+/// second markdown implementation would drift from the transcript's within a
+/// release, and the two would disagree about the same file.
+Widget buildTranscriptMarkdownBody(String source) =>
+    _MarkdownBody(source: source);
+
 /// Supplies the device-global D9 policy to type-driven message renderers.
 class ToolDisplayModeScope extends InheritedWidget {
   /// Creates a scope for one transcript subtree.
