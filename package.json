@@ -72,6 +72,7 @@
     "test:broker-service": "bun run packages/typescript/broker/test/broker/test-service-lifecycle.ts",
     "test:broker-pairing": "bun run packages/typescript/broker/test/broker/test-pairing.ts",
     "test:broker-route-authorization": "bun run packages/typescript/broker/test/broker/test-route-authorization.ts",
+    "test:broker-tokdash-report": "bun run packages/typescript/broker/test/broker/test-tokdash-report.ts",
     "test:broker-lifecycle": "bun run packages/typescript/broker/test/broker/test-broker-lifecycle.ts",
     "test:broker-opencode-shim-symmetry": "bun run packages/typescript/broker/test/broker/test-opencode-shim-symmetry.ts",
     "test:broker-opencode-shim-runtime": "bun run packages/typescript/broker/test/broker/test-opencode-shim-runtime.ts",

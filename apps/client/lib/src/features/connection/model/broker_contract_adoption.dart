@@ -94,6 +94,11 @@ const Map<String, BrokerContractAdoption> brokerRouteAdoption = {
   ),
   '/api/tokdash/quota': _adopted,
   '/api/tokdash/quota-preference': _adopted,
+  // Deliberately not the same answer as its deferred `/api/tokdash/usage` neighbour above. That
+  // refusal was about raw per-session usage with no product surface; this route is an aggregated
+  // report DTO with a designed one (Settings → Usage overview), and prompt text is dropped
+  // broker-side before the DTO is built.
+  '/api/tokdash/report': _adopted,
   '/api/tool/send_file': BrokerContractAdoption(
     BrokerContractAdoptionDisposition.brokerInternal,
     'Tool adapter ingress is not a native-client upload path.',

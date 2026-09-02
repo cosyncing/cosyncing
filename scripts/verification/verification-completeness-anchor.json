@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "95637858736bf7bbae67752b73ad87bf1ae4c173",
+  "acceptedBase": "2edda2e9aa2d736f55282477f4515758ba1b8eb0",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -98,6 +98,7 @@
     "broker.state-security",
     "broker.surface",
     "broker.sync-degraded",
+    "broker.tokdash-report",
     "broker.tool-semantics",
     "broker.transactional-setup",
     "broker.typecheck",
@@ -141,7 +142,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:29198375cad3198fd94dbe83a0d34c805ff4a108399b5dd611850d92204c43fc"
+      "fingerprint": "sha256:41b15e0e4b639a54a5b1b482ded650a5cac75aa6d3bcab0a568a6da133a074ba"
     },
     {
       "id": "capabilities",
@@ -676,6 +677,10 @@
     {
       "id": "systemd-fixtures",
       "fingerprint": "sha256:b281c83e4adb752b1f911557b4f41155e541d1a7e5947694ddc21b75d476aec2"
+    },
+    {
+      "id": "tokdash-report",
+      "fingerprint": "sha256:a7de355c32c7159470ce9875db0175ec0ed74087647fb05f2f8e71c9713788a8"
     },
     {
       "id": "tool-semantics",

@@ -185,6 +185,11 @@ import {
   tokdashRejectionReason,
   TokdashQuotaEvaluator,
 } from '../installation/tokdash-quota.ts';
+import {
+  fetchTokdashReport,
+  isTokdashReportDate,
+  TokdashReportCache,
+} from '../installation/tokdash-report.ts';
 import { AttentionReminderScheduler } from '../attention/attention-reminder-scheduler.ts';
 import {
   isValidTimeZone,
@@ -1253,6 +1258,13 @@ function scheduleBrokerHealthAttentionReconcile(): void {
 }
 
 const tokdashQuotaEvaluator = new TokdashQuotaEvaluator();
+/**
+ * Per-window report cache. The composite insights scan is a full pass over Tokdash's SQLite, and the
+ * report page's period switcher walks the same handful of windows repeatedly.
+ */
+const tokdashReportCache = new TokdashReportCache({
+  ttlMs: Math.max(0, envNumber('COSYNCING_TOKDASH_REPORT_CACHE_MS', 5 * 60_000)),
+});
 async function reconcileTokdashQuota(): Promise<void> {
   const optedIn = getQuotaWarningsEnabled();
   let lifecycle;
@@ -5877,6 +5889,44 @@ server = Bun.serve<WsData>({
 
     if (path === '/api/tokdash/quota-preference' && req.method === 'GET') {
       return json({ ok: true, enabled: getQuotaWarningsEnabled() });
+    }
+
+    if (path === '/api/tokdash/report' && req.method === 'GET') {
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      if (!isTokdashReportDate(from) || !isTokdashReportDate(to)) {
+        return json(
+          { ok: false, code: 'BAD_PARAM', error: 'from and to must be YYYY-MM-DD dates' },
+          400,
+        );
+      }
+      if (from > to) {
+        return json({ ok: false, code: 'BAD_PARAM', error: 'from must not be after to' }, 400);
+      }
+      const window = { from, to };
+      const cached = tokdashReportCache.get(window);
+      if (cached) {
+        return json({
+          ok: true,
+          baseUrl: TOKDASH_URL,
+          cachedAt: cached.cachedAt,
+          servedFromCache: true,
+          data: cached.report,
+        });
+      }
+      try {
+        const report = await fetchTokdashReport(TOKDASH_URL, window);
+        const entry = tokdashReportCache.set(window, report);
+        return json({
+          ok: true,
+          baseUrl: TOKDASH_URL,
+          cachedAt: entry.cachedAt,
+          servedFromCache: false,
+          data: report,
+        });
+      } catch (error) {
+        return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 502);
+      }
     }
 
     if (path === '/api/tokdash/quota-preference' && req.method === 'POST') {

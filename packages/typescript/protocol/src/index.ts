@@ -1323,6 +1323,7 @@ export const BROKER_ROUTES = [
   '/api/tokdash/usage',
   '/api/tokdash/quota',
   '/api/tokdash/quota-preference',
+  '/api/tokdash/report',
   '/api/tool/send_file',
   '/api/transport/envelopes',
   '/api/transport/peers',
@@ -1609,8 +1610,17 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * generation that renders omp as a distinct agent, including its label, color,
  * and New Session surface. The wire shape is unchanged; the revision is the
  * broker-visible feature floor used to keep omp hidden from revision-18 clients.
+ * Revision 20 adds the read-only aggregated usage-report route, which moves the
+ * surface hash because it adds a route — the first tokdash addition since the
+ * namespace landed. It is purely additive: a client that never calls it is
+ * unaffected, and an older client simply does not get the report, so the
+ * minimum client revision does NOT move with it. Only the security revisions 16
+ * and 17 have ever raised that floor, and this route widens no credential
+ * boundary. Note what the overlap window does mean here: 18 is the revision
+ * shipped clients advertise, and 20 puts them outside it, so a revision-19-or-
+ * later client has to ship before a revision-20 broker does.
  */
-export const BROKER_CONTRACT_REVISION = 19 as const;
+export const BROKER_CONTRACT_REVISION = 20 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.
