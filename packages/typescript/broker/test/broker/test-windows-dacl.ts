@@ -59,6 +59,52 @@ rejected('partial rights', (candidate) => { candidate.rules[0]!.rights = 1_179_7
 rejected('file inheritance', (candidate) => { candidate.rules[0]!.inheritanceFlags = 3; }, 'unsafe-inheritance');
 rejected('propagation flags', (candidate) => { candidate.rules[0]!.propagationFlags = 1; }, 'unsafe-inheritance');
 
+// An elevated token stamps BUILTIN\\Administrators as the owner of everything it creates, so the
+// product's OWN files come back owned by a SID that is not the user. Accepting that owner is the
+// difference between "loose legacy state, tighten it" and "somebody else's file, refuse" -- and
+// `wrong-owner` is the one problem durable state will not repair, so getting this wrong turned every
+// elevated host into an unfixable setup blocker rather than a visible failure.
+const ADMINISTRATORS = 'S-1-5-32-544';
+{
+  const elevated = (): WindowsDaclSnapshot => ({
+    ...snapshot('file'),
+    tokenOwnerSid: ADMINISTRATORS,
+    ownerSid: ADMINISTRATORS,
+  });
+  const owned = elevated();
+  assert.deepEqual(classifyWindowsOwnerOnlyDacl(owned, 'file'), { ok: true },
+    'a file owned by the owner this token stamps is ours, not foreign');
+
+  // Repairable, not foreign: the loose form must report the problem durable state KNOWS how to fix.
+  const loose = elevated();
+  loose.rules[0]!.inherited = true;
+  assert.deepEqual(classifyWindowsOwnerOnlyDacl(loose, 'file'), { ok: false, problem: 'inherited-access' });
+
+  // Accepting the owner widens nothing about ACCESS. Every DACL rule still has to hold.
+  for (const [name, corrupt] of [
+    ['an extra principal', (c: WindowsDaclSnapshot) => { c.rules[0]!.sid = 'S-1-5-11'; }],
+    ['a deny ACE', (c: WindowsDaclSnapshot) => { c.rules[0]!.type = 'Deny'; }],
+    ['partial rights', (c: WindowsDaclSnapshot) => { c.rules[0]!.rights = 1_179_785; }],
+    ['an unprotected DACL', (c: WindowsDaclSnapshot) => { c.protected = false; }],
+  ] as const) {
+    const candidate = elevated();
+    corrupt(candidate);
+    assert.equal(classifyWindowsOwnerOnlyDacl(candidate, 'file').ok, false,
+      `${name} must still be refused on an elevated token`);
+  }
+
+  // A THIRD party's SID is still foreign. The acceptance is this token's own default owner, not any
+  // owner that happens not to be the user.
+  const foreign = elevated();
+  foreign.ownerSid = 'S-1-5-21-9-9-9-1234';
+  assert.deepEqual(classifyWindowsOwnerOnlyDacl(foreign, 'file'), { ok: false, problem: 'wrong-owner' });
+
+  // Absent the token owner the comparison stays strict, so no caller loses a check by not asking.
+  const unasked = elevated();
+  delete unasked.tokenOwnerSid;
+  assert.deepEqual(classifyWindowsOwnerOnlyDacl(unasked, 'file'), { ok: false, problem: 'wrong-owner' });
+}
+
 // Enforcement runs against the Windows API, so applying it cannot be exercised from a POSIX gate.
 // What CAN be pinned here is the policy it applies and the mechanism it applies it through.
 {
@@ -91,4 +137,4 @@ rejected('propagation flags', (candidate) => { candidate.rules[0]!.propagationFl
     'owner-only enforcement must not reach the operating system through a shell');
 }
 
-console.log('PASS 24/24 Windows DACL policy checks');
+console.log('PASS 33/33 Windows DACL policy checks');

@@ -17,6 +17,13 @@ export interface WindowsDaclRule {
 
 export interface WindowsDaclSnapshot {
   currentUserSid: string;
+  /**
+   * The SID this process's token stamps as owner on objects IT creates.
+   *
+   * Equal to the user on an ordinary session and `BUILTIN\Administrators` on an elevated one.
+   * Optional so a caller that has not asked keeps the strict comparison it had.
+   */
+  tokenOwnerSid?: string;
   ownerSid: string;
   protected: boolean;
   rules: WindowsDaclRule[];
@@ -46,7 +53,22 @@ export function classifyWindowsOwnerOnlyDacl(
   snapshot: WindowsDaclSnapshot,
   kind: WindowsSecurePathKind,
 ): WindowsDaclInspection {
-  if (snapshot.ownerSid !== snapshot.currentUserSid) return { ok: false, problem: 'wrong-owner' };
+  // Owned by the user, or by the owner this very token stamps on what it creates.
+  //
+  // The enforce path already accepted both, for a reason that applies just as much here: run
+  // elevated, Windows stamps BUILTIN\Administrators as the owner of every file the product creates,
+  // so a file it wrote itself came back reading as somebody else's. On the enforcement side that was
+  // a refusal to write. Here it is worse and quieter -- `wrong-owner` is the ONE problem durable
+  // state will not repair, because a foreign file must never be laundered by tightening it, so
+  // loose-but-ours legacy state became an unfixable setup blocker on every elevated host.
+  //
+  // Nothing about ACCESS widens: every rule below still has to hold, so the DACL must still name
+  // exactly the user, SYSTEM and Administrators at full control, protected and uninherited.
+  // Enforcement rewrites the owner to the user regardless, and on an ordinary session the two SIDs
+  // are the same value.
+  const ownedByUs = snapshot.ownerSid === snapshot.currentUserSid
+    || (snapshot.tokenOwnerSid !== undefined && snapshot.ownerSid === snapshot.tokenOwnerSid);
+  if (!ownedByUs) return { ok: false, problem: 'wrong-owner' };
   if (!snapshot.protected) return { ok: false, problem: 'inherited-access' };
 
   const expected = new Set([
@@ -111,6 +133,7 @@ function snapshotOf(target: string): WindowsDaclSnapshot {
   const read = security.readSecurity(target);
   return {
     currentUserSid: security.currentUserSid(),
+    tokenOwnerSid: security.currentTokenOwnerSid(),
     ownerSid: read.ownerSid,
     protected: read.protected,
     rules: read.aces.map((ace) => ({

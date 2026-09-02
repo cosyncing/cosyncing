@@ -42,6 +42,9 @@ const TOKEN_OWNER_CLASS = 4;
 /** `SDDL_REVISION_1`. */
 const SDDL_REVISION_1 = 1;
 
+/** `ERROR_ALREADY_EXISTS`: somebody else created this directory first. */
+const ERROR_ALREADY_EXISTS = 183;
+
 /** ACE header flags, as Windows stores them. */
 const OBJECT_INHERIT_ACE = 0x01;
 const CONTAINER_INHERIT_ACE = 0x02;
@@ -403,9 +406,16 @@ function load(): WindowsFfi {
         if (!kernel32.symbols.CreateDirectoryW(
           ptr(wide(path)) as never, ptr(new Uint8Array(attributes)) as never,
         )) {
-          throw new Error(
-            `the owner-only directory could not be created (Windows error ${kernel32.symbols.GetLastError()})`,
-          );
+          const error = kernel32.symbols.GetLastError();
+          // Losing the race is not a failure. Several brokers starting at once each create the state
+          // directory, one wins, and the rest get ERROR_ALREADY_EXISTS -- which is why the .NET call
+          // this replaced accepted an existing directory too. Nothing is relaxed by accepting it: the
+          // caller reads the directory's ACL back and classifies it, so one created by somebody else,
+          // or left over with inherited access, still fails there. What must NOT happen is creating
+          // it unprotected and tightening afterwards, and this path never does.
+          if (error !== ERROR_ALREADY_EXISTS) {
+            throw new Error(`the owner-only directory could not be created (Windows error ${error})`);
+          }
         }
       } finally {
         kernel32.symbols.LocalFree(descriptor as never);
