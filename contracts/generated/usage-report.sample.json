@@ -1,0 +1,219 @@
+{
+  "range": {
+    "from": "2026-08-01",
+    "to": "2026-08-31",
+    "days": 31,
+    "recognized": true,
+    "periodResolved": "custom"
+  },
+  "timezone": "BST",
+  "totals": {
+    "tokens": 19893991786,
+    "cost": 12976.51,
+    "requests": 129030,
+    "tokensIn": 469390032,
+    "tokensOut": 51016889,
+    "tokensCache": 17562787785,
+    "cacheHitRate": 0.9689
+  },
+  "comparison": {
+    "tokensPrev": 17228365707,
+    "costPrev": 11328.73,
+    "requestsPrev": 127012,
+    "tokensPct": 15.5,
+    "costPct": 14.5,
+    "requestsPct": 1.6
+  },
+  "activeTime": {
+    "activeMs": 1453366891,
+    "activeMsSum": 2830367494,
+    "activeMsPct": 27.7,
+    "estimated": true,
+    "gapCapMs": 300000,
+    "method": "capped-inter-event-gap",
+    "sessions": 294
+  },
+  "tools": [
+    {
+      "tool": "claude",
+      "label": "Claude Code",
+      "tokens": 10088964020,
+      "cost": 7568.01,
+      "tokensIn": 230778425,
+      "tokensOut": 27831586,
+      "tokensCache": 9830354009,
+      "cacheHitRate": 0.9771,
+      "requests": 44456,
+      "sessions": 119,
+      "activeMs": 793691035,
+      "coding": true
+    },
+    {
+      "tool": "codex",
+      "label": "Codex",
+      "tokens": 8001548471,
+      "cost": 4907.66,
+      "tokensIn": 238611607,
+      "tokensOut": 23185303,
+      "tokensCache": 7732433776,
+      "cacheHitRate": 0.9701,
+      "requests": 58926,
+      "sessions": 175,
+      "activeMs": 969656855,
+      "coding": true
+    },
+    {
+      "tool": "openclaw",
+      "label": null,
+      "tokens": 777870272,
+      "cost": 118.12,
+      "tokensIn": 114805061,
+      "tokensOut": null,
+      "tokensCache": 655369004,
+      "cacheHitRate": 0.8509,
+      "requests": null,
+      "sessions": null,
+      "activeMs": null,
+      "coding": false
+    }
+  ],
+  "topModelsByTokens": [
+    {
+      "name": "claude-opus-5",
+      "tokens": 7979785226,
+      "cost": 5146.76,
+      "tokensIn": 122162066,
+      "tokensOut": 18557261,
+      "tokensCache": 7839065899,
+      "requests": 33247
+    },
+    {
+      "name": "gpt-5.6-sol",
+      "tokens": 6120000000,
+      "cost": 3900.12,
+      "tokensIn": null,
+      "tokensOut": null,
+      "tokensCache": null,
+      "requests": 41000
+    }
+  ],
+  "topModelsByCost": [
+    {
+      "name": "claude-opus-5",
+      "tokens": 7979785226,
+      "cost": 5146.76,
+      "tokensIn": null,
+      "tokensOut": null,
+      "tokensCache": null,
+      "requests": 33247
+    }
+  ],
+  "hourly": {
+    "buckets": [
+      {
+        "hour": 0,
+        "tokens": 861148188,
+        "cost": 576.85,
+        "requests": 4430
+      },
+      {
+        "hour": 15,
+        "tokens": 1900000000,
+        "cost": 1200,
+        "requests": 9000
+      }
+    ],
+    "peakHour": 15,
+    "nightShare": 0.218,
+    "nightHours": [
+      22,
+      23,
+      0,
+      1
+    ]
+  },
+  "weekday": {
+    "buckets": [
+      {
+        "weekday": 0,
+        "name": "Monday",
+        "tokens": 3579777284,
+        "cost": 2118.33,
+        "requests": 23681
+      },
+      {
+        "weekday": 6,
+        "name": "Sunday",
+        "tokens": 4100000000,
+        "cost": 2400,
+        "requests": 25000
+      }
+    ],
+    "peakWeekday": 6
+  },
+  "daily": [
+    {
+      "date": "2026-08-01",
+      "tokens": 837487917,
+      "cost": 595.57,
+      "requests": 5054,
+      "intensity": 4
+    },
+    {
+      "date": "2026-08-02",
+      "tokens": 12000,
+      "cost": 0.1,
+      "requests": 4,
+      "intensity": 1
+    }
+  ],
+  "projects": {
+    "rows": [
+      {
+        "project": "atlas",
+        "tokens": 7771744344,
+        "cost": 5882.03,
+        "requests": 36771
+      },
+      {
+        "project": "atlas_private",
+        "tokens": 4000000000,
+        "cost": 2400,
+        "requests": 20000
+      }
+    ],
+    "unattributed": {
+      "tokens": 153435350,
+      "cost": 17.44,
+      "requests": 1376
+    },
+    "attributedCount": 41,
+    "namesIncluded": true
+  },
+  "streaks": {
+    "currentStreak": 0,
+    "longestStreak": 31,
+    "activeDays": 31,
+    "totalDays": 31
+  },
+  "firsts": {
+    "firstActiveDay": "2026-08-01",
+    "lastActiveDay": "2026-08-31",
+    "busiestDay": "2026-08-31",
+    "busiestDayTokens": 1097438655
+  },
+  "coverage": {
+    "storedSources": [
+      "claude",
+      "codex",
+      "openclaw"
+    ],
+    "liveSources": [
+      "kilocode",
+      "mimo"
+    ],
+    "sourceCount": 5
+  },
+  "sourceErrors": [],
+  "insightsUnavailable": null
+}

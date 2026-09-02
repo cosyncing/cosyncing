@@ -193,6 +193,12 @@ class EndpointResolver {
   String get tokdashQuotaPreferenceEndpoint =>
       '$baseUrl/api/tokdash/quota-preference';
 
+  /// Aggregated usage-report endpoint for one inclusive `YYYY-MM-DD` window.
+  String tokdashReportEndpoint({required String from, required String to}) =>
+      '$baseUrl/api/tokdash/report'
+      '?from=${Uri.encodeQueryComponent(from)}'
+      '&to=${Uri.encodeQueryComponent(to)}';
+
   /// Endpoint for acking a single attention event.
   String attentionEventAckEndpoint(String id) =>
       '$baseUrl/api/attention-events/${Uri.encodeComponent(id)}/ack';

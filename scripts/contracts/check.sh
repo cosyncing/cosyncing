@@ -11,6 +11,7 @@ if [ "${1:-}" = "--write" ]; then
   fi
   bun run scripts/broker/export-client-contract.ts \
     --output "$SNAPSHOT" --dart-output "$DART_IDENTITY"
+  bun run scripts/contracts/generate-usage-report-sample.ts
   exit 0
 fi
 if [ "$#" -ne 0 ]; then
@@ -36,4 +37,5 @@ if ! cmp --silent "$temporary_dart" "$DART_IDENTITY"; then
   exit 1
 fi
 bun run scripts/contracts/check-revision-history.ts
+bun run scripts/contracts/generate-usage-report-sample.ts --check
 echo "PASS: broker-owned flattened client contract is current."

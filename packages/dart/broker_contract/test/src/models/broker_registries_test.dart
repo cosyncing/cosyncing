@@ -4,7 +4,11 @@ import 'package:test/test.dart';
 void main() {
   group('brokerRoutes', () {
     test('has the expected route count', () {
-      expect(brokerRoutes, hasLength(56));
+      expect(brokerRoutes, hasLength(57));
+    });
+
+    test('contains the aggregated usage-report route', () {
+      expect(brokerRoutes, contains('/api/tokdash/report'));
     });
 
     test('contains the fs and upload routes', () {

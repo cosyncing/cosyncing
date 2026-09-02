@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "0406c570ae9db32c77bc1ce8d8ec75625ea1bc89",
+  "acceptedBase": "6e7aad5c62b412e5b2fdd2ac0561ab660ce2bd48",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
