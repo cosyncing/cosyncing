@@ -14,6 +14,9 @@ WEB_ASSET='@WEB_ASSET@'
 MINIMUM_BUN='@MINIMUM_BUN@'
 # One row per artifact this installer places: "<name> <sha256> <size>".
 ARTIFACT_TABLE='@ARTIFACT_TABLE@'
+# Official Bun builds for MINIMUM_BUN, most likely first: "<host> <asset> <sha256>".
+BUN_TABLE='@BUN_TABLE@'
+BUN_RELEASE_BASE='@BUN_RELEASE_BASE@'
 
 fail() {
   printf 'cosyncing install: %s\n' "$1" >&2
@@ -217,22 +220,79 @@ resolve_bun() {
   return 1
 }
 
+# Bun's archives are zips. `unzip` is the usual tool and bsdtar reads zip too, which is what macOS installs
+# as `tar`. Probed lazily rather than required up front: a host that already has a new-enough Bun never
+# needs to unpack one, and must not be turned away for missing a tool this install will not use.
+if command -v unzip >/dev/null 2>&1; then
+  unpack_zip() { unzip -q -o "$1" -d "$2"; }
+elif command -v bsdtar >/dev/null 2>&1; then
+  unpack_zip() { bsdtar -xf "$1" -C "$2"; }
+elif tar --version 2>/dev/null | grep -q bsdtar; then
+  unpack_zip() { tar -xf "$1" -C "$2"; }
+else
+  unpack_zip() { fail 'installing Bun needs unzip (or bsdtar); install one and rerun this installer'; }
+fi
+
+# The Bun builds this installer may place on this host, most likely first.
+#
+# One host target is not one binary: glibc and musl need different builds, and a pre-AVX2 x64 needs the
+# baseline one. The rows are reordered on what can be detected cheaply, but detection never decides — the
+# extracted binary has to answer `--revision` at or above the floor before it is installed, so a wrong
+# guess costs one download and moves to the next pinned build.
+bun_candidates() {
+  rows="$(printf '%s\n' "$BUN_TABLE" | awk -v host="$1" '$1 == host { print $2, $3 }')"
+  [ -n "$rows" ] || fail "this installer carries no pinned Bun build for $1"
+  if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ]; then
+    rows="$(printf '%s\n' "$rows" | awk '/-musl/')
+$(printf '%s\n' "$rows" | awk '!/-musl/')"
+  fi
+  if [ "$OS" = Linux ] && [ -r /proc/cpuinfo ] && ! grep -qw avx2 /proc/cpuinfo; then
+    rows="$(printf '%s\n' "$rows" | awk '/-baseline/')
+$(printf '%s\n' "$rows" | awk '!/-baseline/')"
+  fi
+  printf '%s\n' "$rows" | awk 'NF'
+}
+
 # Bun is DOWNLOADED, never bundled. A Bun inside this release would put a JavaScriptCore build back into
 # the artifact set — the one thing this distribution exists to avoid — and would make every cosyncing
-# release responsible for shipping a runtime it does not build. So the runtime comes from Bun's own
-# installer, pinned to the version this release names, into Bun's own per-user prefix.
+# release responsible for shipping a runtime it does not build.
+#
+# Downloaded is not the same as unverified. Every cosyncing artifact above is checked against a digest baked
+# into this script; the runtime that EXECUTES those artifacts is held to exactly the same rule. Bun's own
+# `bun.sh/install` script is deliberately not in this path: piping an unpinned third-party script to a shell
+# would make the one component nothing here checks the one component that runs everything else. The archives
+# come straight from Bun's tagged release and their checksums are Bun's own published ones.
 install_bun() {
   [ "${COSYNCING_SKIP_BUN_INSTALL:-}" != 1 ] || fail \
     "Bun $MINIMUM_BUN or newer is required to run cosyncing and COSYNCING_SKIP_BUN_INSTALL=1 forbids installing it; install it from https://bun.sh and rerun this installer"
-  printf 'Bun %s or newer is required and was not found. Installing Bun %s from https://bun.sh.\n' \
+  printf 'Bun %s or newer is required and was not found. Installing the pinned Bun %s.\n' \
     "$MINIMUM_BUN" "$MINIMUM_BUN"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-    --output "$WORK/bun-install.sh" 'https://bun.sh/install' \
-    || fail 'could not download the Bun installer from https://bun.sh'
-  # Bun's installer takes the release tag as its first argument. Pinning it means the runtime a host ends up
-  # with is the one this release was built and tested against, not whichever Bun is newest that day.
-  BUN_INSTALL="$BUN_PREFIX" bash "$WORK/bun-install.sh" "bun-v$MINIMUM_BUN" > "$WORK/bun-install.log" 2>&1 \
-    || { sed -n '1,20p' "$WORK/bun-install.log" >&2; fail 'the Bun installer from https://bun.sh failed'; }
+  bun_candidates "$TARGET" > "$WORK/bun-candidates"
+  while read -r bun_asset bun_digest; do
+    [ -n "$bun_asset" ] || continue
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+      --output "$WORK/$bun_asset" "$BUN_RELEASE_BASE/bun-v$MINIMUM_BUN/$bun_asset" \
+      || fail "could not download $bun_asset from $BUN_RELEASE_BASE"
+    # A mismatch is fatal, never "try the next one": these are the bytes Bun published for this tag, so
+    # different bytes mean the download was substituted, not that this build is wrong for this host.
+    [ "$(sha256_of "$WORK/$bun_asset")" = "$bun_digest" ] \
+      || fail "$bun_asset does not match the checksum embedded in this installer"
+    rm -rf "$WORK/bun-unpack"
+    mkdir "$WORK/bun-unpack"
+    unpack_zip "$WORK/$bun_asset" "$WORK/bun-unpack" || fail "$bun_asset could not be extracted"
+    # Bun packs one directory named after the asset, holding the binary.
+    unpacked="$WORK/bun-unpack/${bun_asset%.zip}/bun"
+    [ -f "$unpacked" ] || fail "$bun_asset did not contain a bun binary"
+    chmod 755 "$unpacked"
+    if bun_meets_floor "$unpacked"; then
+      mkdir -p "$BUN_PREFIX/bin" || fail "could not create the Bun prefix: $BUN_PREFIX"
+      mv "$unpacked" "$BUN_PREFIX/bin/bun" || fail "could not install Bun into $BUN_PREFIX/bin"
+      chmod 755 "$BUN_PREFIX/bin/bun"
+      return 0
+    fi
+    printf '  %s does not run on this host; trying the next pinned build\n' "$bun_asset"
+  done < "$WORK/bun-candidates"
+  fail "no pinned Bun $MINIMUM_BUN build runs on this host ($TARGET); install Bun from https://bun.sh and rerun this installer"
 }
 
 BUN_BIN=''

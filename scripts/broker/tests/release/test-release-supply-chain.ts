@@ -238,25 +238,44 @@ exec bash "$@"
 }
 
 /**
- * Stands in for `https://bun.sh/install`. Records the release tag it was pinned to and drops a working fake
- * Bun into the prefix Bun's own installer would use, so the download path can be exercised without
- * fetching a real runtime.
+ * Stands in for an official Bun release archive: a real zip holding `<asset without .zip>/bun`, the layout
+ * the installer unpacks. Omitting `version` yields a build that cannot run on this host — the case the
+ * installer must survive by trying the next pinned candidate.
  */
-function writeFakeBunInstaller(path: string, options: { version: string; argLog: string }): void {
-  writeFileSync(path, `#!/usr/bin/env bash
-set -eu
-printf '%s\\n' "\${1:-}" > '${options.argLog}'
-mkdir -p "\$BUN_INSTALL/bin"
-cat > "\$BUN_INSTALL/bin/bun" <<'BUN'
-#!/usr/bin/env bash
+function writeFakeBunArchive(
+  directory: string,
+  asset: string,
+  options: { version?: string } = {},
+): { path: string; sha256: string } {
+  const name = asset.replace(/\.zip$/, '');
+  const staging = join(directory, `${asset}.staging`);
+  mkdirSync(join(staging, name), { recursive: true });
+  writeFileSync(join(staging, name, 'bun'), options.version === undefined
+    ? '#!/usr/bin/env bash\nexit 1\n'
+    : `#!/usr/bin/env bash
 if [ "\${1:-}" = --revision ]; then
   echo '${options.version}+fixturebuild'
   exit 0
 fi
 exec bash "$@"
-BUN
-chmod 755 "\$BUN_INSTALL/bin/bun"
 `, { mode: 0o755 });
+  const path = join(directory, asset);
+  const zipped = Bun.spawnSync(['zip', '-q', '-r', path, name], {
+    cwd: staging,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  });
+  if (!zipped.success) throw new Error(`Bun archive fixture could not be zipped: ${zipped.stderr.toString()}`);
+  rmSync(staging, { recursive: true, force: true });
+  return { path, sha256: sha256(readFileSync(path)) };
+}
+
+/** Repoint a rendered installer's pinned Bun table at fixture archives, keeping every other pin real. */
+function repinBunTable(installer: string, rows: readonly string[]): void {
+  const source = readFileSync(installer, 'utf8');
+  const replaced = source.replace(/^BUN_TABLE='[^']*'$/m, `BUN_TABLE='${rows.join('\n')}'`);
+  if (replaced === source) throw new Error('installer does not carry a pinned Bun table');
+  writeFileSync(installer, replaced, { mode: 0o755 });
 }
 
 /** A PATH that reaches the host's real tools but no `bun`, for the case where the host has none. */
@@ -806,47 +825,101 @@ exec /usr/bin/openssl "$@"
   // The bundle carries no interpreter, so a Bun meeting the signed floor is a hard prerequisite. Bun is
   // downloaded from bun.sh rather than bundled: shipping one would put a JavaScriptCore build back into the
   // artifact set. The fake bun.sh serves through the same stub curl, keyed on the URL's last path segment.
-  const bunDownloadRelease = join(root, 'bun-download-release');
-  cpSync(releaseDirectory, bunDownloadRelease, { recursive: true });
-  const bunInstallerArgLog = join(root, 'bun-installer-arg');
-  writeFakeBunInstaller(join(bunDownloadRelease, 'install'), {
-    version: MINIMUM_BUN_RUNTIME_VERSION,
-    argLog: bunInstallerArgLog,
-  });
   const staleBunBin = join(root, 'stale-bun-bin');
   mkdirSync(staleBunBin);
   writeFakeCurl(join(staleBunBin, 'curl'));
   writeFakeBun(join(staleBunBin, 'bun'), '1.2.99');
-  const bunDownloadHome = join(root, 'bun-download-home');
-  mkdirSync(bunDownloadHome);
-  const bunDownload = await run(['bash', join(bunDownloadRelease, 'install.sh')], {
+
+  // The runtime that executes every verified artifact is held to the artifacts' own rule. A rendered
+  // installer carries Bun's real published digests for the pinned tag, so a substituted archive is refused
+  // with nothing repointed: the fixture zip simply is not the bytes Bun published.
+  const bunTamperRelease = join(root, 'bun-tamper-release');
+  cpSync(releaseDirectory, bunTamperRelease, { recursive: true });
+  writeFakeBunArchive(bunTamperRelease, 'bun-linux-x64.zip', { version: MINIMUM_BUN_RUNTIME_VERSION });
+  const bunTamperHome = join(root, 'bun-tamper-home');
+  mkdirSync(bunTamperHome);
+  const bunTamper = await run(['bash', join(bunTamperRelease, 'install.sh')], {
     env: {
       PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
-      HOME: bunDownloadHome,
-      FAKE_RELEASE_ROOT: bunDownloadRelease,
+      HOME: bunTamperHome,
+      FAKE_RELEASE_ROOT: bunTamperRelease,
       LANG: 'C.UTF-8',
     },
   });
-  const downloadedBun = join(bunDownloadHome, '.bun', 'bin', 'bun');
-  check('a host whose Bun is below the floor gets the pinned Bun from bun.sh, not the stale one',
-    bunDownload.exitCode === 0
-      && existsSync(downloadedBun)
-      && readFileSync(bunInstallerArgLog, 'utf8').trim() === `bun-v${MINIMUM_BUN_RUNTIME_VERSION}`
-      && readFileSync(join(bunDownloadHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
-        .includes(`runtime=${downloadedBun}\n`)
-      && bunDownload.stdout.includes('Installing Bun')
-      && bunDownload.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
-    `${bunDownload.exitCode}: ${bunDownload.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunDownload.stderr.trim().slice(0, 120)}`);
+  check('a substituted Bun archive is refused against the checksum embedded in the installer',
+    bunTamper.exitCode !== 0
+      && /does not match the checksum embedded in this installer/.test(bunTamper.stderr)
+      && !existsSync(join(bunTamperHome, '.bun', 'bin', 'bun'))
+      && !existsSync(join(bunTamperHome, '.cosyncing', 'bin', 'cosyncing')),
+    bunTamper.stderr.trim().slice(0, 200));
+
+  // The pinned table names real ~90 MB Bun archives, which no deterministic suite can host. Repointing it
+  // at fixture archives — and at their true digests — exercises fetch, verify, unpack and probe exactly as
+  // rendered; the check above is what proves the REAL pins are enforced.
+  const bunInstallRelease = join(root, 'bun-install-release');
+  cpSync(releaseDirectory, bunInstallRelease, { recursive: true });
+  const workingArchive = writeFakeBunArchive(bunInstallRelease, 'bun-linux-x64.zip', {
+    version: MINIMUM_BUN_RUNTIME_VERSION,
+  });
+  repinBunTable(join(bunInstallRelease, 'install.sh'),
+    [`linux-x64 bun-linux-x64.zip ${workingArchive.sha256}`]);
+  const bunInstallHome = join(root, 'bun-install-home');
+  mkdirSync(bunInstallHome);
+  const bunInstall = await run(['bash', join(bunInstallRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: bunInstallHome,
+      FAKE_RELEASE_ROOT: bunInstallRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const installedBun = join(bunInstallHome, '.bun', 'bin', 'bun');
+  check('a host whose Bun is below the floor gets the pinned archive, not the stale runtime',
+    bunInstall.exitCode === 0
+      && existsSync(installedBun)
+      && readFileSync(join(bunInstallHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
+        .includes(`runtime=${installedBun}\n`)
+      && bunInstall.stdout.includes('Installing the pinned Bun')
+      && bunInstall.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
+    `${bunInstall.exitCode}: ${bunInstall.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunInstall.stderr.trim().slice(0, 160)}`);
+
+  // One host target is not one binary: musl and pre-AVX2 hosts need a different build of the same release.
+  // A build that cannot run here is the wrong candidate, not a failed install.
+  const bunFallbackRelease = join(root, 'bun-fallback-release');
+  cpSync(releaseDirectory, bunFallbackRelease, { recursive: true });
+  const unrunnable = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64.zip');
+  const fallback = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64-musl.zip', {
+    version: MINIMUM_BUN_RUNTIME_VERSION,
+  });
+  repinBunTable(join(bunFallbackRelease, 'install.sh'), [
+    `linux-x64 bun-linux-x64.zip ${unrunnable.sha256}`,
+    `linux-x64 bun-linux-x64-musl.zip ${fallback.sha256}`,
+  ]);
+  const bunFallbackHome = join(root, 'bun-fallback-home');
+  mkdirSync(bunFallbackHome);
+  const bunFallback = await run(['bash', join(bunFallbackRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: bunFallbackHome,
+      FAKE_RELEASE_ROOT: bunFallbackRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a pinned build that cannot run on this host advances to the next pinned build',
+    bunFallback.exitCode === 0
+      && existsSync(join(bunFallbackHome, '.bun', 'bin', 'bun'))
+      && /does not run on this host; trying the next pinned build/.test(bunFallback.stdout),
+    `${bunFallback.exitCode}: ${bunFallback.stdout.trim().split('\n').slice(-5).join(' | ')} ${bunFallback.stderr.trim().slice(0, 160)}`);
 
   // An operator who does not want this script installing a runtime gets a refusal that names the floor,
   // rather than a silent install of a bundle nothing on the host can execute.
   const optOutHome = join(root, 'bun-opt-out-home');
   mkdirSync(optOutHome);
-  const optOut = await run(['bash', join(bunDownloadRelease, 'install.sh')], {
+  const optOut = await run(['bash', join(bunInstallRelease, 'install.sh')], {
     env: {
       PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: optOutHome,
-      FAKE_RELEASE_ROOT: bunDownloadRelease,
+      FAKE_RELEASE_ROOT: bunInstallRelease,
       COSYNCING_SKIP_BUN_INSTALL: '1',
       LANG: 'C.UTF-8',
     },
@@ -859,8 +932,8 @@ exec /usr/bin/openssl "$@"
       && !existsSync(join(optOutHome, '.cosyncing', 'bin', 'cosyncing')),
     optOut.stderr.trim().slice(0, 200));
 
-  // A host with no Bun at all and no reachable bun.sh must fail loudly. The release copy used here has no
-  // `install` file, so the stub curl fails the bun.sh fetch exactly as an offline host would.
+  // A host with no Bun at all and no reachable release archive must fail loudly. The release copy used here
+  // carries no Bun archive, so the stub curl fails the fetch exactly as an offline host would.
   const noBunBin = join(root, 'no-bun-bin');
   mkdirSync(noBunBin);
   writeFakeCurl(join(noBunBin, 'curl'));
@@ -874,9 +947,9 @@ exec /usr/bin/openssl "$@"
       LANG: 'C.UTF-8',
     },
   });
-  check('an unreachable bun.sh fails the install rather than leaving an unrunnable bundle behind',
+  check('an unreachable Bun archive fails the install rather than leaving an unrunnable bundle behind',
     noBun.exitCode !== 0
-      && /could not download the Bun installer|Bun installer from https:\/\/bun.sh failed/.test(noBun.stderr)
+      && /could not download bun-linux-x64\.zip/.test(noBun.stderr)
       && !existsSync(join(noBunHome, '.cosyncing', 'bin', 'cosyncing')),
     noBun.stderr.trim().slice(0, 200));
 

@@ -135,6 +135,51 @@ function assertExecutableFile(path: string, label: string, detailCode: string): 
  */
 export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
 
+/**
+ * The official Bun release archives for exactly {@link MINIMUM_BUN_RUNTIME_VERSION}, by installer host.
+ *
+ * The curl installer digest-pins every cosyncing artifact it places, so the runtime that executes them
+ * cannot be the one link resting on TLS alone. Piping `bun.sh/install` to a shell would do exactly that:
+ * an unpinned third-party script, fetched fresh, choosing and placing a binary nothing here ever checks.
+ * These digests come from Bun's own published `SHASUMS256.txt` beside the tagged release, are baked into
+ * the installer at assembly time, and are enforced before anything is unpacked.
+ *
+ * They live next to the floor because they are one fact with it: these are the checksums OF that version,
+ * and a release that raises the floor without replacing them would pin the wrong bytes. Nothing offline can
+ * prove that binding — Bun's asset names carry no version, the tag alone does — so adjacency is the whole
+ * guard, and moving the floor means replacing this table from the new tag's `SHASUMS256.txt`.
+ *
+ * Several builds per host, most likely first, because one host target is not one binary: glibc and musl
+ * need different builds, and pre-AVX2 x64 needs the baseline one. The installer reorders on what it can
+ * detect and then PROVES the choice by running `--revision` — a build that cannot run on this machine is
+ * simply the wrong candidate, and the next one is tried. Detection is an optimization; the probe decides.
+ */
+export const PINNED_BUN_RUNTIME_ARCHIVES: Readonly<Record<string, readonly BunRuntimeArchive[]>> =
+  Object.freeze({
+    'linux-x64': Object.freeze([
+      { asset: 'bun-linux-x64.zip', sha256: '0322b17f0722da76a64298aad498225aedcbf6df1008a1dee45e16ecb226a3f1' },
+      { asset: 'bun-linux-x64-baseline.zip', sha256: 'bbe4632ac03d7495177d542ecefa8f21f9849273106525f6bb13172ec8e4ab2c' },
+      { asset: 'bun-linux-x64-musl.zip', sha256: 'a810b5083a830596cff3715402371917a200940efdeed6189bcde191e79d4633' },
+      { asset: 'bun-linux-x64-musl-baseline.zip', sha256: 'f05311fc12304ff8eaca136fc934eede6728055ba3d00cdb7e7dac394853f159' },
+    ]),
+    'linux-arm64': Object.freeze([
+      { asset: 'bun-linux-aarch64.zip', sha256: '4e9deb6814a7ec7f68725ddd97d0d7b4065bcda9a850f69d497567e995a7fa33' },
+      { asset: 'bun-linux-aarch64-musl.zip', sha256: '76dddebfd8c011c8b774991eb8ba47da770e4ce06ddc2b045aa0d659ef5fbe44' },
+    ]),
+    'darwin-arm64': Object.freeze([
+      { asset: 'bun-darwin-aarch64.zip', sha256: '672a0a9a7b744d085a1d2219ca907e3e26f5579fca9e783a9510a4f98a36212f' },
+    ]),
+  });
+
+/** Where Bun publishes the tagged archives these digests describe. */
+export const BUN_RELEASE_DOWNLOAD_BASE = 'https://github.com/oven-sh/bun/releases/download';
+
+/** One official Bun build: the release asset name and the sha256 Bun published for it. */
+export interface BunRuntimeArchive {
+  asset: string;
+  sha256: string;
+}
+
 /** Bounded because it runs during setup, repair, and doctor on a path an operator may have typed wrong. */
 const RUNTIME_PROBE_TIMEOUT_MS = 5_000;
 const RUNTIME_PROBE_MAX_BYTES = 4_096;

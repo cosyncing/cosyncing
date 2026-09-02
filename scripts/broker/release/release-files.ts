@@ -22,7 +22,11 @@ import {
   type ReleaseArtifact,
   type ReleaseManifest,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
-import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import {
+  BUN_RELEASE_DOWNLOAD_BASE,
+  MINIMUM_BUN_RUNTIME_VERSION,
+  PINNED_BUN_RUNTIME_ARCHIVES,
+} from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
@@ -56,6 +60,9 @@ export function releaseTargetArch(target: ReleaseTarget): 'x64' | 'arm64' {
   return target.endsWith('-x64') ? 'x64' : 'arm64';
 }
 export const WEB_SIDECAR_NAME = 'cosyncing-web-app.tar.gz' as const;
+
+/** The hosts the shell installer supports, and therefore the hosts it must carry a pinned Bun for. */
+const BOOTSTRAP_HOST_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
 
 /**
  * The second signature, emitted as a SIBLING FILE rather than a second manifest field.
@@ -367,8 +374,27 @@ function renderBootstrap(options: {
   // no target — could not be listed at all, which is why the installer never checked it.
   const rows = [options.application, options.webApp];
   const artifactTable = rows.map((row) => `${row.name} ${row.sha256} ${row.size}`).join('\n');
+  // The Bun the installer may place is pinned by the same rule as everything else it places. Rendering it
+  // from the runtime constant rather than restating it here is what keeps the installer's pin and the
+  // floor the application enforces from drifting apart.
+  const bunRows = BOOTSTRAP_HOST_TARGETS.flatMap((host) => {
+    const builds = PINNED_BUN_RUNTIME_ARCHIVES[host];
+    if (!builds || builds.length === 0) {
+      throw new Error(`no pinned Bun build is published for installer host ${host}`);
+    }
+    return builds.map((build) => {
+      if (!/^[a-z0-9][a-z0-9.-]*\.zip$/.test(build.asset) || !/^[a-f0-9]{64}$/.test(build.sha256)) {
+        throw new Error(`pinned Bun build is malformed for ${host}`);
+      }
+      return `${host} ${build.asset} ${build.sha256}`;
+    });
+  });
+  if (new Set(bunRows).size !== bunRows.length) throw new Error('pinned Bun table repeats a build');
+  const bunTable = bunRows.join('\n');
   const embedded = [
     artifactTable,
+    bunTable,
+    BUN_RELEASE_DOWNLOAD_BASE,
     options.version,
     options.baseUrl,
     options.keyId,
@@ -389,7 +415,9 @@ function renderBootstrap(options: {
     .replaceAll('@APP_ASSET@', options.application.name)
     .replaceAll('@WEB_ASSET@', options.webApp.name)
     .replaceAll('@MINIMUM_BUN@', options.minimumBunVersion)
-    .replaceAll('@ARTIFACT_TABLE@', artifactTable);
+    .replaceAll('@ARTIFACT_TABLE@', artifactTable)
+    .replaceAll('@BUN_TABLE@', bunTable)
+    .replaceAll('@BUN_RELEASE_BASE@', BUN_RELEASE_DOWNLOAD_BASE);
 }
 
 function provenance(options: {

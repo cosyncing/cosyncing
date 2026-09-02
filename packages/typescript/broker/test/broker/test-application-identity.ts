@@ -18,6 +18,7 @@ import {
   DISTRIBUTION_KINDS,
   isDistributionKind,
   MINIMUM_BUN_RUNTIME_VERSION,
+  PINNED_BUN_RUNTIME_ARCHIVES,
   requireRuntimePath,
   resolveApplicationIdentity,
   resolveBunRuntime,
@@ -408,6 +409,28 @@ try {
       && !!threw(() => resolveApplicationIdentity({
         distribution: 'bun-js', execPath: bunRuntime, sourceEntry: sourceCheckoutEntry,
       })));
+  // The curl installer digest-pins every artifact it places; the runtime that executes them is held to the
+  // same rule, so the table it renders from has to be complete and well-formed for every host it supports.
+  // Nothing offline can prove these digests belong to MINIMUM_BUN_RUNTIME_VERSION — Bun's asset names carry
+  // no version — so what is checkable is asserted, and the binding stays a review obligation.
+  const pinnedHosts = ['linux-x64', 'linux-arm64', 'darwin-arm64'] as const;
+  const pinnedBuilds = pinnedHosts.flatMap((host) => PINNED_BUN_RUNTIME_ARCHIVES[host] ?? []);
+  check('every host the shell installer supports has at least one pinned Bun build',
+    pinnedHosts.every((host) => (PINNED_BUN_RUNTIME_ARCHIVES[host]?.length ?? 0) > 0)
+      && Object.keys(PINNED_BUN_RUNTIME_ARCHIVES).every((host) =>
+        (pinnedHosts as readonly string[]).includes(host)),
+    Object.keys(PINNED_BUN_RUNTIME_ARCHIVES).join(','));
+  check('every pinned Bun build names an official archive and a full sha256',
+    pinnedBuilds.length > 0
+      && pinnedBuilds.every((build) => /^bun-[a-z0-9][a-z0-9-]*\.zip$/.test(build.asset)
+        && /^[a-f0-9]{64}$/.test(build.sha256))
+      && new Set(pinnedBuilds.map((build) => build.asset)).size === pinnedBuilds.length,
+    pinnedBuilds.map((build) => build.asset).join(','));
+  // One host target is not one binary. If this ever collapsed to a single x64 build, an Alpine or pre-AVX2
+  // host would get an archive that unpacks cleanly and then cannot execute.
+  check('the x64 pins cover the musl and baseline builds the same release publishes',
+    (PINNED_BUN_RUNTIME_ARCHIVES['linux-x64'] ?? []).some((build) => build.asset.includes('-musl'))
+      && (PINNED_BUN_RUNTIME_ARCHIVES['linux-x64'] ?? []).some((build) => build.asset.includes('-baseline')));
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
