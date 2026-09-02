@@ -614,6 +614,20 @@ async function probeBuiltClient(options: {
     // reloading alone cannot restore a hash the guard replaced. First reboot
     // Flutter from the persisted token, wait for that document to paint, then
     // revisit the intended session from the authenticated app.
+    // Open session tabs arm the app's accidental-close protection, so this
+    // deliberate reboot must raise the same one-shot bypass the coordinated
+    // web-update handoff raises before it replaces the document. Without it the
+    // reload opens the browser's beforeunload dialog, which blocks the renderer
+    // until the wait below times out — and the dialog only appears once a cold
+    // deep link actually opens the session it named, so the guard is invisible
+    // here until that works.
+    const unloadBypassRaised = await evaluate(
+      `typeof window.cosyncingAllowIntentionalUnload === 'function'
+        && (window.cosyncingAllowIntentionalUnload(), true)`,
+    );
+    if (unloadBypassRaised !== true) {
+      throw new Error('built app does not expose the intentional-unload bypass');
+    }
     const reloadEventMark = events.length;
     await send('Page.reload', { ignoreCache: false });
     const documentReloaded = await waitFor(() => events
@@ -645,7 +659,12 @@ async function probeBuiltClient(options: {
     let appSocket: any;
     let lastSessionNavigation = Date.now();
     const connected = await waitFor(async () => {
-      appSocket = events.find((event) => {
+      // Only the rebooted document counts. `events` spans the whole run, and the
+      // credential commit itself can open a session before the reload — the
+      // pending deep-link open replays as soon as the profile source arrives —
+      // so an unbounded search can settle on a socket whose document is gone,
+      // and whose request bodies the browser has already discarded.
+      appSocket = events.slice(reloadEventMark).find((event) => {
         if (event.method !== 'Network.webSocketCreated') return false;
         return isTicketedSessionWebSocket(event.params.url, encodedSession);
       });
@@ -694,7 +713,7 @@ async function probeBuiltClient(options: {
     }
     const socketEventIndex = events.indexOf(appSocket);
     const ticketRequest = events
-      .slice(0, socketEventIndex)
+      .slice(reloadEventMark, socketEventIndex)
       .find((event) => isHeaderAuthenticatedTicketRequest(
         event,
         options.base,
