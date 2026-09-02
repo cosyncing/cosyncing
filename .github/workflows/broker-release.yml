@@ -172,6 +172,64 @@ jobs:
             "output/native/cosyncing-${{ matrix.target }}" \
             "output/native/cosyncing-${{ matrix.target }}.evidence.json" --clobber
 
+  javascript-package:
+    needs: prepare-draft
+    name: universal JavaScript application
+    environment: broker-release-candidate
+    permissions:
+      contents: write
+    # One bundle serves every host, so this job has no matrix and no runner/target correspondence to keep.
+    # It is not the npm artifact: the same builder stamps `bootstrap-js` here, which is what makes the
+    # installed files cosyncing's own to replace rather than a package manager's.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.8
+      - run: bun install --frozen-lockfile
+      - name: Load public release trust material
+        env:
+          RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
+          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
+        shell: bash
+        run: |
+          test -n "$RELEASE_PUBLIC_KEY_B64"
+          test -n "$RELEASE_KEY_ID"
+          printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
+      - name: Build, prove, and stage the JavaScript application
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
+        shell: bash
+        run: |
+          COMMIT="$(git rev-parse HEAD)"
+          BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
+          VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          BASE_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/broker-v$VERSION"
+          CHANNEL_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/release-manifest.json"
+          mkdir -p output/js
+          bun run scripts/broker/build-broker-bundle.ts \
+            --outfile output/js/cosyncing-app.js \
+            --distribution bootstrap-js \
+            --commit "$COMMIT" --build-date "$BUILD_DATE" \
+            --release-manifest-url "$BASE_URL/release-manifest.json" \
+            --release-channel-manifest-url "$CHANNEL_URL" \
+            --release-key-id "$RELEASE_KEY_ID" \
+            --release-public-key "$RUNNER_TEMP/cosyncing-release.pub.pem" \
+            --require-clean --minify
+          bun run scripts/broker/release/package-evidence.ts \
+            --artifact output/js/cosyncing-app.js \
+            --output output/js/cosyncing-app.js.evidence.json \
+            --target universal --version "$VERSION" \
+            --commit "$COMMIT" --build-date "$BUILD_DATE"
+          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
+          gh release upload "$GITHUB_REF_NAME" output/js/* --clobber
+
   web-package:
     needs: prepare-draft
     name: canonical /app/ web sidecar
@@ -215,7 +273,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" output/web/* --clobber
 
   candidate:
-    needs: [native-package, web-package]
+    needs: [native-package, javascript-package, web-package]
     name: assemble, verify, and publish prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -256,14 +314,21 @@ jobs:
         env:
           RELEASE_PRIVATE_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PRIVATE_KEY_PEM_B64 }}
           RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
+          RELEASE_P256_PRIVATE_KEY_B64: ${{ secrets.COSYNCING_RELEASE_P256_PRIVATE_KEY_PEM_B64 }}
+          RELEASE_P256_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_P256_PUBLIC_KEY_PEM_B64 }}
           RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
         shell: bash
         run: |
           test -n "$RELEASE_PRIVATE_KEY_B64"
           test -n "$RELEASE_PUBLIC_KEY_B64"
+          test -n "$RELEASE_P256_PRIVATE_KEY_B64"
+          test -n "$RELEASE_P256_PUBLIC_KEY_B64"
           printf '%s' "$RELEASE_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.key.pem"
           printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
+          printf '%s' "$RELEASE_P256_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release-p256.key.pem"
+          printf '%s' "$RELEASE_P256_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           chmod 600 "$RUNNER_TEMP/cosyncing-release.key.pem"
+          chmod 600 "$RUNNER_TEMP/cosyncing-release-p256.key.pem"
           COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
@@ -274,9 +339,33 @@ jobs:
             --base-url "$BASE_URL" --commit "$COMMIT" --published-at "$BUILD_DATE" \
             --key-id "$RELEASE_KEY_ID" \
             --private-key "$RUNNER_TEMP/cosyncing-release.key.pem" \
-            --public-key "$RUNNER_TEMP/cosyncing-release.pub.pem"
+            --public-key "$RUNNER_TEMP/cosyncing-release.pub.pem" \
+            --p256-private-key "$RUNNER_TEMP/cosyncing-release-p256.key.pem" \
+            --p256-public-key "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/cosyncing-release.pub.pem" -rawin \
             -in output/release/release-manifest.json -sigfile output/release/release-manifest.json.sig
+          # The DER sibling is what the shell installer verifies on macOS, and openssl reads it directly.
+          for payload in release-manifest.json SHA256SUMS; do
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" \
+              -signature "output/release/$payload.p256.der.sig" "output/release/$payload"
+          done
+          # openssl cannot check the P1363 sibling: it is raw r||s, the layout .NET reads, and openssl
+          # expects a DER SEQUENCE. bun is already on this runner and verifies it directly. Both encodings
+          # are checked because a release that published only one working encoding would break exactly one
+          # of the two installers, on hosts neither CI job runs on.
+          bun -e '
+            const { createPublicKey, verify } = await import("node:crypto");
+            const key = createPublicKey(await Bun.file(`${process.env.RUNNER_TEMP}/cosyncing-release-p256.pub.pem`).text());
+            for (const payload of ["release-manifest.json", "SHA256SUMS"]) {
+              const bytes = Buffer.from(await Bun.file(`output/release/${payload}`).arrayBuffer());
+              const signature = Buffer.from(await Bun.file(`output/release/${payload}.p256.sig`).arrayBuffer());
+              if (!verify("sha256", bytes, { key, dsaEncoding: "ieee-p1363" }, signature)) {
+                console.error(`P-256 sibling signature failed for ${payload}`);
+                process.exit(1);
+              }
+            }
+          '
+          cmp "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" output/release/release-key-p256.pem
           (cd output/release && sha256sum --check SHA256SUMS)
       - name: Replace staging assets only after remote candidate verification
         env:

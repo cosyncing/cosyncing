@@ -2,6 +2,7 @@
 /** Refuse candidate assembly unless the draft release contains exactly the native staging inputs. */
 import { resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
+import { RELEASE_JAVASCRIPT_APP_NAME } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
@@ -18,6 +19,8 @@ export const EXPECTED_STAGING_ASSETS = Object.freeze(
     const artifact = `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`;
     return [artifact, `${artifact}.evidence.json`];
     }),
+    RELEASE_JAVASCRIPT_APP_NAME,
+    `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`,
     WEB_SIDECAR_NAME,
     `${WEB_SIDECAR_NAME}.evidence.json`,
   ].sort(),

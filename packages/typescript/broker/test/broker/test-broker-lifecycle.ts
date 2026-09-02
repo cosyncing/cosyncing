@@ -75,7 +75,9 @@ import {
   releaseManifestForTests,
   runUpgrade,
   type ReleaseArtifact,
+  type ReleaseJavaScriptApp,
   type ReleaseManifest,
+  type ReleaseWebSidecar,
   type UpgradeServiceController,
 } from '../../src/updates/release-upgrade.ts';
 import {
@@ -2042,6 +2044,181 @@ try {
         && readFileSync(npmBinary, 'utf8') === 'npm-launcher-v0',
       `${upgraded.exitCode}/${upgraded.detailCode}`);
   }
+  // The installer-owned JavaScript distribution upgrades through the SAME signed channel as the compiled
+  // one, taking a different artifact class out of the same manifest.
+  {
+    const webFixture = mkdtempSync(join(tmpdir(), 'cosyncing-web-sidecar-'));
+    cleanup.push(webFixture);
+    mkdirSync(join(webFixture, 'app'));
+    writeFileSync(join(webFixture, 'app', 'index.html'), '<html><base href="/cosy/"></html>\n');
+    const packed = Bun.spawnSync(
+      ['tar', '-czf', join(webFixture, 'app.tar.gz'), '-C', webFixture, 'app'],
+      { stdout: 'ignore', stderr: 'pipe' },
+    );
+    if (!packed.success) throw new Error(`web sidecar fixture could not be packed: ${packed.stderr.toString()}`);
+    const sidecarBytes = Buffer.from(readFileSync(join(webFixture, 'app.tar.gz')));
+    const jsBundle = Buffer.from('#!/usr/bin/env bun\n// candidate-bundle-v2\n');
+    const webApp: ReleaseWebSidecar = {
+      name: 'cosyncing-web-app.tar.gz',
+      mount: '/cosy/',
+      size: sidecarBytes.byteLength,
+      sha256: hash(sidecarBytes),
+      url: 'https://releases.example/cosyncing-web-app.tar.gz',
+      buildId: '0'.repeat(16),
+      cacheManifestSha256: '2'.repeat(64),
+      mainDartSha256: '3'.repeat(64),
+      directorySha256: '4'.repeat(64),
+      fileCount: 1,
+    };
+    const jsApp: ReleaseJavaScriptApp = {
+      name: 'cosyncing-app.js',
+      target: 'universal',
+      size: jsBundle.byteLength,
+      sha256: hash(jsBundle),
+      url: 'https://releases.example/cosyncing-app.js',
+      provenanceUrl: 'https://releases.example/cosyncing-app.js.intoto.jsonl',
+      minimumBunVersion: '1.3.8',
+    };
+    const jsManifest = (override: Partial<ReleaseJavaScriptApp> | null = {}): ReleaseManifest =>
+      releaseManifestForTests({
+        version: '2.0.0', sourceCommit: '2222222', publishedAt: '2026-07-17T12:00:00.000Z',
+        artifact, keyId,
+        contract: { revision: 1, minimumClientRevision: 1, surfaceHash: 'fnv1a32:00000000' },
+        webApp,
+        ...(override === null ? {} : { jsApp: { ...jsApp, ...override } }),
+        sign: (payload) => sign(null, payload, privateKey),
+      });
+    const jsFetcher = (manifest: ReleaseManifest, sidecar = sidecarBytes): typeof fetch =>
+      (async (input: Parameters<typeof fetch>[0]) => {
+        const url = String(input);
+        if (url.endsWith('manifest.json')) {
+          const body = JSON.stringify(manifest);
+          return new Response(body, { status: 200, headers: { 'content-length': String(Buffer.byteLength(body)) } });
+        }
+        const bytes = url.endsWith('.tar.gz') ? sidecar : jsBundle;
+        return new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.byteLength) } });
+      }) as typeof fetch;
+    const jsBuild = { ...BUILD, target: 'universal', distribution: 'bootstrap-js' as const };
+    const runtimePath = join(tmpdir(), 'fixture-bun');
+    const launches: Array<{ executable: string; args: readonly string[] }> = [];
+    const jsUpgradeOptions = (
+      fixture: ReturnType<typeof upgradeMachine>,
+      manifest = jsManifest(),
+      sidecar = sidecarBytes,
+    ) => ({
+      home: fixture.m.home,
+      cacheRoot: fixture.m.cache,
+      buildInfo: jsBuild,
+      executablePath: fixture.m.binary,
+      runtimePath,
+      runtimeVersion: '1.3.14',
+      manifestUrl: 'https://releases.example/manifest.json',
+      trustedKeys: { [keyId]: publicPem },
+      fetch: jsFetcher(manifest, sidecar),
+      runBinary: async (executable: string, args: readonly string[]) => {
+        launches.push({ executable, args });
+        return {
+          status: 'ok' as const,
+          exitCode: 0,
+          stdout: JSON.stringify({ version: '2.0.0', target: 'universal', packaged: true, distribution: 'bootstrap-js' }),
+          stderr: '',
+        };
+      },
+      service: fixture.service,
+      verifyBrokerVersion: async () => true,
+      healthAttempts: 1,
+      sleep: async () => undefined,
+    });
+
+    {
+      const fixture = upgradeMachine();
+      // Two superseded roots and the one the running service is still configured to serve.
+      mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0'), { recursive: true });
+      mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'), { recursive: true });
+      const upgraded = await runUpgrade(jsUpgradeOptions(fixture));
+      const state = inspectInstallState(fixture.m.home);
+      check('a bootstrap-js build upgrades through the signed channel and takes the JavaScript artifact',
+        upgraded.exitCode === 0
+          && readFileSync(fixture.m.binary, 'utf8') === jsBundle.toString()
+          && state.committed && (state.state.installer as any)?.version === '2.0.0',
+        `${upgraded.exitCode}/${upgraded.detailCode}`);
+      // A bundle cannot identify itself: exec'ing it would resolve `bun` through PATH, which may not be the
+      // runtime this install recorded. The candidate is handed to that exact runtime instead.
+      check('the JavaScript candidate self-checks through the recorded runtime, not through its own shebang',
+        launches.length === 1 && launches[0]?.executable === runtimePath
+          && launches[0]?.args[0]?.includes('cosyncing.staging-2.0.0') === true
+          && launches[0]?.args[1] === 'version',
+        JSON.stringify(launches));
+      // The web client is versioned with the application, so a swap that moved only the application would
+      // leave the new version resolving a directory nothing ever created.
+      check('the paired web client is installed at the new version\'s web root',
+        existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0', 'index.html')));
+      check('the previous version\'s web root survives and only superseded ones are pruned',
+        existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'))
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0')));
+    }
+
+    {
+      // A JavaScript release may raise the Bun it needs. Installing one this host cannot run would report
+      // success and take the service down, so the floor is checked against the runtime's proven version.
+      const fixture = upgradeMachine();
+      const refused = await runUpgrade(jsUpgradeOptions(fixture, jsManifest({ minimumBunVersion: '9.9.9' })));
+      check('an upgrade whose signed Bun floor this host cannot meet is refused before anything changes',
+        refused.detailCode === 'release-runtime-too-old'
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')));
+    }
+
+    {
+      const fixture = upgradeMachine();
+      const { runtimePath: _omitted, runtimeVersion: _also, ...withoutRuntime } = jsUpgradeOptions(fixture);
+      const refused = await runUpgrade(withoutRuntime);
+      check('a JavaScript build with no resolved runtime refuses before any network call',
+        refused.detailCode === 'upgrade-runtime-unresolved'
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1');
+    }
+
+    {
+      // The compiled set is keyed by machine-code target. A JavaScript build must never fall back to it,
+      // whatever a served manifest offers.
+      const fixture = upgradeMachine();
+      const refused = await runUpgrade(jsUpgradeOptions(fixture, jsManifest(null)));
+      check('a JavaScript build never falls back to the compiled artifact set',
+        refused.detailCode === 'release-javascript-artifact-unavailable'
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1');
+    }
+
+    {
+      // The sidecar is verified against the same signed manifest as the application, before the journal
+      // opens, so a bad one costs nothing.
+      const fixture = upgradeMachine();
+      const refused = await runUpgrade(
+        jsUpgradeOptions(fixture, jsManifest(), Buffer.from('not-the-signed-sidecar')),
+      );
+      // Substituted bytes trip the signed SIZE before the digest is reached; both are the same refusal.
+      check('a web sidecar that fails its signed digest stops the upgrade with nothing switched',
+        (refused.detailCode === 'release-web-sidecar-checksum-mismatch'
+          || refused.detailCode === 'release-web-sidecar-size-mismatch')
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.staging-2.0.0')),
+        `${refused.exitCode}/${refused.detailCode}`);
+    }
+
+    {
+      // Widening the fence for the installer-owned build must not move the npm one, which a package manager
+      // owns, moves and removes.
+      const fixture = upgradeMachine();
+      const npm = await runUpgrade({
+        ...jsUpgradeOptions(fixture),
+        buildInfo: { ...BUILD, target: 'universal', distribution: 'bun-js' as const },
+      });
+      check('the npm distribution still answers with instructions and replaces nothing',
+        npm.detailCode === 'upgrade-package-manager-owned'
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')));
+    }
+  }
+
   {
     const fixture = upgradeMachine();
     const oversized = await runUpgrade({
