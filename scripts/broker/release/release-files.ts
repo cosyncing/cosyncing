@@ -348,7 +348,12 @@ function renderBootstrap(options: {
   baseUrl: string;
   keyId: string;
   publicKeyPem: string;
-  artifacts: readonly ReleaseArtifact[];
+  minimumBunVersion: string;
+  // The installer places exactly these two files. It no longer selects among per-host machine-code
+  // artifacts: one JavaScript bundle runs on every supported host, and the web client it is paired with
+  // is the same archive everywhere too, so the host only decides whether the install is supported at all.
+  application: { name: string; sha256: string; size: number };
+  webApp: { name: string; sha256: string; size: number };
 }): string {
   const publicKeyB64 = Buffer.from(options.publicKeyPem.trim() + '\n', 'utf8').toString('base64');
   // Bake the per-artifact digests into the script itself. Stock macOS ships LibreSSL, which cannot load an
@@ -356,15 +361,34 @@ function renderBootstrap(options: {
   // cannot run there. The embedded table gives every host a real, mandatory check on the bytes it is about
   // to install, with the script — delivered over TLS — as its trust root; signature verification remains
   // required wherever openssl can actually perform it.
-  const artifactTable = options.artifacts
-    .map((artifact) => `${artifact.target} ${artifact.sha256} ${artifact.size}`)
-    .join('\n');
-  if (/['\\]/.test(artifactTable)) throw new Error('artifact table is not safe to embed');
+  //
+  // Rows are keyed by asset NAME rather than by target. The old table was keyed by target because the
+  // installer picked one machine-code artifact out of several; keyed that way, the web sidecar — which has
+  // no target — could not be listed at all, which is why the installer never checked it.
+  const rows = [options.application, options.webApp];
+  const artifactTable = rows.map((row) => `${row.name} ${row.sha256} ${row.size}`).join('\n');
+  const embedded = [
+    artifactTable,
+    options.version,
+    options.baseUrl,
+    options.keyId,
+    options.minimumBunVersion,
+    options.application.name,
+    options.webApp.name,
+  ].join('\n');
+  // Every one of these is interpolated into a single-quoted shell assignment.
+  if (/['\\]/.test(embedded)) throw new Error('bootstrap substitution is not safe to embed');
+  if (!/^\d+\.\d+\.\d+$/.test(options.minimumBunVersion)) {
+    throw new Error('minimum Bun version is not a release version');
+  }
   return readFileSync(BOOTSTRAP_TEMPLATE, 'utf8')
     .replaceAll('@VERSION@', options.version)
     .replaceAll('@BASE_URL@', options.baseUrl)
     .replaceAll('@KEY_ID@', options.keyId)
     .replaceAll('@PUBLIC_KEY_B64@', publicKeyB64)
+    .replaceAll('@APP_ASSET@', options.application.name)
+    .replaceAll('@WEB_ASSET@', options.webApp.name)
+    .replaceAll('@MINIMUM_BUN@', options.minimumBunVersion)
     .replaceAll('@ARTIFACT_TABLE@', artifactTable);
 }
 
@@ -759,7 +783,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   for (const target of RELEASE_TARGETS) {
     verifyReleaseManifest({ value: manifest, target, trustedKeys: { [options.keyId]: options.publicKeyPem } });
   }
-  verifyReleasePairing(manifest);
+  const paired = verifyReleasePairing(manifest);
   const manifestName = 'release-manifest.json';
   const manifestBytes = writeJson(join(options.outputDirectory, manifestName), manifest);
   writeSignature(join(options.outputDirectory, `${manifestName}.sig`), manifestBytes, options.privateKeyPem);
@@ -775,7 +799,9 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     baseUrl: releaseBase,
     keyId: options.keyId,
     publicKeyPem: options.publicKeyPem,
-    artifacts,
+    minimumBunVersion: paired.jsApp.minimumBunVersion,
+    application: paired.jsApp,
+    webApp: paired.webApp,
   });
   writeFileSync(join(options.outputDirectory, bootstrapName), bootstrap, { mode: 0o755 });
   chmodSync(join(options.outputDirectory, bootstrapName), 0o755);

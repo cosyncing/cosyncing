@@ -223,6 +223,20 @@ function evidence(options: {
   };
 }
 
+/**
+ * A Bun stand-in for the installer's two uses of one: the `--revision` capability probe, and running the
+ * verified bundle. `version` lets a test present a runtime that is too old without installing one.
+ */
+function writeFakeBun(path: string, version = '1.3.14'): void {
+  writeFileSync(path, `#!/usr/bin/env bash
+if [ "\${1:-}" = --revision ]; then
+  echo '${version}+fixturebuild'
+  exit 0
+fi
+exec bash "$@"
+`, { mode: 0o755 });
+}
+
 function writeFakeCurl(path: string): void {
   writeFileSync(path, `#!/usr/bin/env bash
 set -eu
@@ -340,8 +354,24 @@ try {
     `${JSON.stringify(jsEvidence, null, 2)}\n`,
   );
 
+  // A real gzipped ustar archive holding the one `app/` tree the installer unpacks. The sidecar stopped
+  // being an opaque blob the moment install.sh had to extract it, so an opaque fixture would no longer
+  // exercise the code under test.
   const webArtifactPath = join(artifactDirectory, WEB_SIDECAR_NAME);
-  writeFileSync(webArtifactPath, 'deterministic fixture web sidecar\n');
+  {
+    const staging = join(root, 'web-fixture');
+    mkdirSync(join(staging, 'app', 'assets'), { recursive: true });
+    writeFileSync(join(staging, 'app', 'index.html'), '<html><base href="/cosy/"></html>\n');
+    writeFileSync(join(staging, 'app', 'assets', 'NOTICES'), 'fixture notices\n');
+    const packed = Bun.spawnSync([
+      'tar', '--format=ustar', '--sort=name', '--mtime=@1750000000',
+      '--owner=0', '--group=0', '--numeric-owner',
+      '-czf', webArtifactPath, '-C', staging, 'app',
+    ], { stdout: 'ignore', stderr: 'pipe' });
+    if (!packed.success) {
+      throw new Error(`web sidecar fixture could not be packed: ${packed.stderr.toString()}`);
+    }
+  }
   const webBytes = readFileSync(webArtifactPath);
   const webEvidence: WebPackageEvidence = {
     schemaVersion: 1,
@@ -590,6 +620,7 @@ try {
   const fakeBin = join(root, 'fake-bin');
   mkdirSync(fakeBin);
   writeFakeCurl(join(fakeBin, 'curl'));
+  writeFakeBun(join(fakeBin, 'bun'));
   const home = join(root, 'install-home');
   mkdirSync(home);
   writeFileSync(join(home, '.bashrc'), '# preserve\n');
@@ -604,17 +635,35 @@ try {
   });
   const binary = join(home, '.cosyncing', 'bin', 'cosyncing');
   const alias = join(home, '.cosyncing', 'bin', 'cosy');
-  check('bootstrap verifies, installs user-owned binary+relative alias, and records ownership',
+  const installedReceipt = readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8');
+  check('bootstrap verifies, installs user-owned bundle+relative alias, and records ownership',
     install.exitCode === 0 && existsSync(binary) && lstatSync(binary).isFile()
       && lstatSync(alias).isSymbolicLink() && readlinkSync(alias) === 'cosyncing'
-      && readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8').includes(`sha256=${sha256(readFileSync(binary))}`),
+      && installedReceipt.includes(`sha256=${sha256(readFileSync(binary))}`),
     install.stderr.trim());
+  // A packaged broker resolves its web client as `<directory of the application>/cosyncing-web-<version>`.
+  // Before this change the installer placed no web client at all, so every curl install came up with a
+  // broker whose own UI was missing and no error saying so.
+  const installedWebRoot = join(home, '.cosyncing', 'bin', `cosyncing-web-${version}`);
+  check('bootstrap installs the paired web client where a packaged broker looks for it',
+    existsSync(join(installedWebRoot, 'index.html'))
+      && existsSync(join(installedWebRoot, 'assets', 'NOTICES'))
+      && lstatSync(installedWebRoot).isDirectory() && !lstatSync(installedWebRoot).isSymbolicLink()
+      && install.stdout.includes(`Web client: ${installedWebRoot}`),
+    install.stdout.trim().split('\n').slice(-6).join(' | '));
+  check('the receipt records the installer-owned distribution, the web root, and the resolved runtime',
+    installedReceipt.includes('schemaVersion=2\n')
+      && installedReceipt.includes('distribution=bootstrap-js\n')
+      && installedReceipt.includes('target=universal\n')
+      && installedReceipt.includes(`webRoot=${installedWebRoot}\n`)
+      && installedReceipt.includes(`runtime=${join(fakeBin, 'bun')}\n`),
+    installedReceipt.trim().replaceAll('\n', ' | '));
   check('bootstrap never edits shell startup files and prints the absolute setup command',
     readFileSync(join(home, '.bashrc'), 'utf8') === '# preserve\n'
       && install.stdout.includes(`${binary} setup`) && install.stdout.includes('PATH was not changed'));
   check('a capable openssl reports the signature as verified, not merely checked',
     /Release signature: verified/.test(install.stdout)
-      && /Artifact digest: matched/.test(install.stdout),
+      && /Artifact digests: matched/.test(install.stdout),
     install.stdout.trim().split('\n').slice(-4).join(' | '));
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.
@@ -623,6 +672,7 @@ try {
   const libreSslBin = join(root, 'libressl-bin');
   mkdirSync(libreSslBin);
   writeFakeCurl(join(libreSslBin, 'curl'));
+  writeFakeBun(join(libreSslBin, 'bun'));
   writeFileSync(join(libreSslBin, 'openssl'), `#!/usr/bin/env bash
 # Reproduces LibreSSL 3.3.6: every other subcommand works, but anything that must LOAD an Ed25519 public
 # key fails the way LibreSSL fails ("unable to load Public Key").
@@ -649,14 +699,14 @@ exec /usr/bin/openssl "$@"
   check('bootstrap installs on a LibreSSL host and states plainly that the signature was not verified',
     libreSsl.exitCode === 0 && existsSync(libreSslBinary)
       && /Release signature: skipped \(this openssl cannot verify Ed25519\)/.test(libreSsl.stdout)
-      && /Artifact digest: matched/.test(libreSsl.stdout)
+      && /Artifact digests: matched/.test(libreSsl.stdout)
       && /delivered over TLS/.test(libreSsl.stdout),
     `${libreSsl.exitCode}: ${libreSsl.stdout.trim().split('\n').slice(-4).join(' | ')}`);
 
   // The embedded digest is the whole trust root on LibreSSL, so it must still refuse a corrupted artifact.
   const corruptRelease = join(root, 'libressl-corrupt-release');
   cpSync(releaseDirectory, corruptRelease, { recursive: true });
-  const corruptAsset = join(corruptRelease, 'cosyncing-linux-x64');
+  const corruptAsset = join(corruptRelease, RELEASE_JAVASCRIPT_APP_NAME);
   const corruptBytes = readFileSync(corruptAsset);
   corruptBytes[corruptBytes.length - 1] = (corruptBytes[corruptBytes.length - 1] ?? 0) ^ 0xff;
   writeFileSync(corruptAsset, corruptBytes);
@@ -673,13 +723,13 @@ exec /usr/bin/openssl "$@"
   });
   check('the embedded digest still refuses a flipped byte when no signature check is possible',
     corrupted.exitCode !== 0
-      && /checksum verification failed|artifact size does not match/.test(corrupted.stderr)
+      && /checksum verification failed|size does not match/.test(corrupted.stderr)
       && !existsSync(join(corruptHome, '.cosyncing', 'bin', 'cosyncing')),
     corrupted.stderr.trim().slice(0, 160));
 
   const tamperedArtifactRelease = join(root, 'tampered-artifact-release');
   cpSync(releaseDirectory, tamperedArtifactRelease, { recursive: true });
-  writeFileSync(join(tamperedArtifactRelease, 'cosyncing-linux-x64'), '\n# modified\n', { flag: 'a' });
+  writeFileSync(join(tamperedArtifactRelease, RELEASE_JAVASCRIPT_APP_NAME), '\n# modified\n', { flag: 'a' });
   const tamperedArtifactHome = join(root, 'tampered-artifact-home');
   mkdirSync(tamperedArtifactHome);
   const tamperedArtifact = await run(['bash', join(tamperedArtifactRelease, 'install.sh')], {
@@ -694,9 +744,56 @@ exec /usr/bin/openssl "$@"
   // rejection for the same tamper, so either message is a correct refusal.
   check('bootstrap rejects a modified artifact before installation',
     tamperedArtifact.exitCode !== 0
-      && /checksum verification failed|artifact size does not match/.test(tamperedArtifact.stderr)
+      && /checksum verification failed|size does not match/.test(tamperedArtifact.stderr)
       && !existsSync(join(tamperedArtifactHome, '.cosyncing')),
     tamperedArtifact.stderr.trim().slice(0, 120));
+
+  // The application is fetched and verified before the sidecar, so a corrupted sidecar is the case where
+  // the installer already holds a good bundle and must still refuse rather than leave a broker with no UI.
+  const tamperedWebRelease = join(root, 'tampered-web-release');
+  cpSync(releaseDirectory, tamperedWebRelease, { recursive: true });
+  const tamperedWebAsset = join(tamperedWebRelease, WEB_SIDECAR_NAME);
+  const tamperedWebBytes = readFileSync(tamperedWebAsset);
+  tamperedWebBytes[tamperedWebBytes.length - 1] =
+    (tamperedWebBytes[tamperedWebBytes.length - 1] ?? 0) ^ 0xff;
+  writeFileSync(tamperedWebAsset, tamperedWebBytes);
+  const tamperedWebHome = join(root, 'tampered-web-home');
+  mkdirSync(tamperedWebHome);
+  const tamperedWeb = await run(['bash', join(tamperedWebRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: tamperedWebHome,
+      FAKE_RELEASE_ROOT: tamperedWebRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('bootstrap refuses a corrupted web sidecar and installs no application either',
+    tamperedWeb.exitCode !== 0
+      && /checksum verification failed|size does not match/.test(tamperedWeb.stderr)
+      && !existsSync(join(tamperedWebHome, '.cosyncing', 'bin', 'cosyncing')),
+    tamperedWeb.stderr.trim().slice(0, 160));
+
+  // The bundle carries no interpreter. Without a Bun that meets the signed floor there is nothing to run
+  // it, and the installer must say so instead of placing a file the service can never start.
+  const staleBunBin = join(root, 'stale-bun-bin');
+  mkdirSync(staleBunBin);
+  writeFakeCurl(join(staleBunBin, 'curl'));
+  writeFakeBun(join(staleBunBin, 'bun'), '1.2.99');
+  const staleBunHome = join(root, 'stale-bun-home');
+  mkdirSync(staleBunHome);
+  const staleBun = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: staleBunHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('bootstrap refuses a Bun older than the floor the signed manifest names',
+    staleBun.exitCode !== 0
+      && staleBun.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
+      && !existsSync(join(staleBunHome, '.cosyncing', 'bin', 'cosyncing')),
+    staleBun.stderr.trim().slice(0, 160));
 
   const tamperedManifestRelease = join(root, 'tampered-manifest-release');
   cpSync(releaseDirectory, tamperedManifestRelease, { recursive: true });
@@ -735,10 +832,13 @@ exec /usr/bin/openssl "$@"
     },
   });
   const appleSiliconReceipt = join(appleSiliconHome, '.cosyncing', 'bootstrap-receipt');
-  check('bootstrap installs the darwin-arm64 artifact on Apple Silicon',
+  // One universal bundle now serves every supported host, so `uname` no longer picks an artifact. It still
+  // decides whether the host is supported at all, and the receipt records which host it ran on.
+  check('bootstrap installs the one universal bundle on Apple Silicon and records the host',
     appleSilicon.exitCode === 0
       && existsSync(join(appleSiliconHome, '.cosyncing', 'bin', 'cosyncing'))
-      && readFileSync(appleSiliconReceipt, 'utf8').includes('target=darwin-arm64'),
+      && readFileSync(appleSiliconReceipt, 'utf8').includes('host=darwin-arm64\n')
+      && readFileSync(appleSiliconReceipt, 'utf8').includes('target=universal\n'),
     `${appleSilicon.exitCode}: ${appleSilicon.stderr.trim().slice(0, 160)}`);
 
   const intelHome = join(root, 'darwin-x64-home');
