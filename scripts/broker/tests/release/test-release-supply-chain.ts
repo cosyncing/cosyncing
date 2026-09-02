@@ -237,6 +237,36 @@ exec bash "$@"
 `, { mode: 0o755 });
 }
 
+/**
+ * Stands in for `https://bun.sh/install`. Records the release tag it was pinned to and drops a working fake
+ * Bun into the prefix Bun's own installer would use, so the download path can be exercised without
+ * fetching a real runtime.
+ */
+function writeFakeBunInstaller(path: string, options: { version: string; argLog: string }): void {
+  writeFileSync(path, `#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "\${1:-}" > '${options.argLog}'
+mkdir -p "\$BUN_INSTALL/bin"
+cat > "\$BUN_INSTALL/bin/bun" <<'BUN'
+#!/usr/bin/env bash
+if [ "\${1:-}" = --revision ]; then
+  echo '${options.version}+fixturebuild'
+  exit 0
+fi
+exec bash "$@"
+BUN
+chmod 755 "\$BUN_INSTALL/bin/bun"
+`, { mode: 0o755 });
+}
+
+/** A PATH that reaches the host's real tools but no `bun`, for the case where the host has none. */
+function pathWithoutBun(first: string): string {
+  const entries = (process.env.PATH ?? '/usr/bin:/bin')
+    .split(':')
+    .filter((entry) => entry !== '' && !existsSync(join(entry, 'bun')));
+  return [first, ...entries].join(':');
+}
+
 function writeFakeCurl(path: string): void {
   writeFileSync(path, `#!/usr/bin/env bash
 set -eu
@@ -773,27 +803,82 @@ exec /usr/bin/openssl "$@"
       && !existsSync(join(tamperedWebHome, '.cosyncing', 'bin', 'cosyncing')),
     tamperedWeb.stderr.trim().slice(0, 160));
 
-  // The bundle carries no interpreter. Without a Bun that meets the signed floor there is nothing to run
-  // it, and the installer must say so instead of placing a file the service can never start.
+  // The bundle carries no interpreter, so a Bun meeting the signed floor is a hard prerequisite. Bun is
+  // downloaded from bun.sh rather than bundled: shipping one would put a JavaScriptCore build back into the
+  // artifact set. The fake bun.sh serves through the same stub curl, keyed on the URL's last path segment.
+  const bunDownloadRelease = join(root, 'bun-download-release');
+  cpSync(releaseDirectory, bunDownloadRelease, { recursive: true });
+  const bunInstallerArgLog = join(root, 'bun-installer-arg');
+  writeFakeBunInstaller(join(bunDownloadRelease, 'install'), {
+    version: MINIMUM_BUN_RUNTIME_VERSION,
+    argLog: bunInstallerArgLog,
+  });
   const staleBunBin = join(root, 'stale-bun-bin');
   mkdirSync(staleBunBin);
   writeFakeCurl(join(staleBunBin, 'curl'));
   writeFakeBun(join(staleBunBin, 'bun'), '1.2.99');
-  const staleBunHome = join(root, 'stale-bun-home');
-  mkdirSync(staleBunHome);
-  const staleBun = await run(['bash', join(releaseDirectory, 'install.sh')], {
+  const bunDownloadHome = join(root, 'bun-download-home');
+  mkdirSync(bunDownloadHome);
+  const bunDownload = await run(['bash', join(bunDownloadRelease, 'install.sh')], {
     env: {
       PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
-      HOME: staleBunHome,
+      HOME: bunDownloadHome,
+      FAKE_RELEASE_ROOT: bunDownloadRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const downloadedBun = join(bunDownloadHome, '.bun', 'bin', 'bun');
+  check('a host whose Bun is below the floor gets the pinned Bun from bun.sh, not the stale one',
+    bunDownload.exitCode === 0
+      && existsSync(downloadedBun)
+      && readFileSync(bunInstallerArgLog, 'utf8').trim() === `bun-v${MINIMUM_BUN_RUNTIME_VERSION}`
+      && readFileSync(join(bunDownloadHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
+        .includes(`runtime=${downloadedBun}\n`)
+      && bunDownload.stdout.includes('Installing Bun')
+      && bunDownload.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
+    `${bunDownload.exitCode}: ${bunDownload.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunDownload.stderr.trim().slice(0, 120)}`);
+
+  // An operator who does not want this script installing a runtime gets a refusal that names the floor,
+  // rather than a silent install of a bundle nothing on the host can execute.
+  const optOutHome = join(root, 'bun-opt-out-home');
+  mkdirSync(optOutHome);
+  const optOut = await run(['bash', join(bunDownloadRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: optOutHome,
+      FAKE_RELEASE_ROOT: bunDownloadRelease,
+      COSYNCING_SKIP_BUN_INSTALL: '1',
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('COSYNCING_SKIP_BUN_INSTALL=1 refuses by naming the floor instead of downloading a runtime',
+    optOut.exitCode !== 0
+      && optOut.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
+      && optOut.stderr.includes('COSYNCING_SKIP_BUN_INSTALL=1')
+      && !existsSync(join(optOutHome, '.bun'))
+      && !existsSync(join(optOutHome, '.cosyncing', 'bin', 'cosyncing')),
+    optOut.stderr.trim().slice(0, 200));
+
+  // A host with no Bun at all and no reachable bun.sh must fail loudly. The release copy used here has no
+  // `install` file, so the stub curl fails the bun.sh fetch exactly as an offline host would.
+  const noBunBin = join(root, 'no-bun-bin');
+  mkdirSync(noBunBin);
+  writeFakeCurl(join(noBunBin, 'curl'));
+  const noBunHome = join(root, 'no-bun-home');
+  mkdirSync(noBunHome);
+  const noBun = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    env: {
+      PATH: pathWithoutBun(noBunBin),
+      HOME: noBunHome,
       FAKE_RELEASE_ROOT: releaseDirectory,
       LANG: 'C.UTF-8',
     },
   });
-  check('bootstrap refuses a Bun older than the floor the signed manifest names',
-    staleBun.exitCode !== 0
-      && staleBun.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
-      && !existsSync(join(staleBunHome, '.cosyncing', 'bin', 'cosyncing')),
-    staleBun.stderr.trim().slice(0, 160));
+  check('an unreachable bun.sh fails the install rather than leaving an unrunnable bundle behind',
+    noBun.exitCode !== 0
+      && /could not download the Bun installer|Bun installer from https:\/\/bun.sh failed/.test(noBun.stderr)
+      && !existsSync(join(noBunHome, '.cosyncing', 'bin', 'cosyncing')),
+    noBun.stderr.trim().slice(0, 200));
 
   const tamperedManifestRelease = join(root, 'tampered-manifest-release');
   cpSync(releaseDirectory, tamperedManifestRelease, { recursive: true });

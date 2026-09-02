@@ -197,8 +197,16 @@ bun_meets_floor() {
   [ -n "$reported" ] || return 1
   printf '%s\n%s\n' "$MINIMUM_BUN" "$reported" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1 | grep -Fxq "$MINIMUM_BUN"
 }
+# Bun's own installer puts its prefix at $BUN_INSTALL, defaulting to ~/.bun. Honour an existing setting so
+# a host that already directs Bun elsewhere is not given a second copy in a directory it never reads.
+BUN_PREFIX="${BUN_INSTALL:-$HOME/.bun}"
+case "$BUN_PREFIX" in
+  /*) ;;
+  *) fail 'BUN_INSTALL must be absolute when set' ;;
+esac
+
 resolve_bun() {
-  for candidate in "${COSYNCING_BUN_BIN:-}" "$(command -v bun 2>/dev/null || true)" "$HOME/.bun/bin/bun"; do
+  for candidate in "${COSYNCING_BUN_BIN:-}" "$(command -v bun 2>/dev/null || true)" "$BUN_PREFIX/bin/bun"; do
     [ -n "$candidate" ] || continue
     [ -x "$candidate" ] || continue
     if bun_meets_floor "$candidate"; then
@@ -209,13 +217,36 @@ resolve_bun() {
   return 1
 }
 
+# Bun is DOWNLOADED, never bundled. A Bun inside this release would put a JavaScriptCore build back into
+# the artifact set — the one thing this distribution exists to avoid — and would make every cosyncing
+# release responsible for shipping a runtime it does not build. So the runtime comes from Bun's own
+# installer, pinned to the version this release names, into Bun's own per-user prefix.
+install_bun() {
+  [ "${COSYNCING_SKIP_BUN_INSTALL:-}" != 1 ] || fail \
+    "Bun $MINIMUM_BUN or newer is required to run cosyncing and COSYNCING_SKIP_BUN_INSTALL=1 forbids installing it; install it from https://bun.sh and rerun this installer"
+  printf 'Bun %s or newer is required and was not found. Installing Bun %s from https://bun.sh.\n' \
+    "$MINIMUM_BUN" "$MINIMUM_BUN"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    --output "$WORK/bun-install.sh" 'https://bun.sh/install' \
+    || fail 'could not download the Bun installer from https://bun.sh'
+  # Bun's installer takes the release tag as its first argument. Pinning it means the runtime a host ends up
+  # with is the one this release was built and tested against, not whichever Bun is newest that day.
+  BUN_INSTALL="$BUN_PREFIX" bash "$WORK/bun-install.sh" "bun-v$MINIMUM_BUN" > "$WORK/bun-install.log" 2>&1 \
+    || { sed -n '1,20p' "$WORK/bun-install.log" >&2; fail 'the Bun installer from https://bun.sh failed'; }
+}
+
 BUN_BIN=''
 BUN_STATE=''
 if resolve_bun; then
   BUN_STATE="already installed ($(bun_version_of "$BUN_BIN") at $BUN_BIN)"
+else
+  install_bun
+  # Re-probe rather than trusting the installer's exit status: it reports success for an install this script
+  # would still refuse, and a Bun below the floor must never reach the receipt.
+  resolve_bun || fail \
+    "Bun $MINIMUM_BUN or newer is still not runnable after installing it into $BUN_PREFIX; install it from https://bun.sh and rerun this installer"
+  BUN_STATE="installed by this script ($(bun_version_of "$BUN_BIN") at $BUN_BIN)"
 fi
-
-[ -n "$BUN_BIN" ] || fail "Bun $MINIMUM_BUN or newer is required to run cosyncing; install it from https://bun.sh and rerun this installer"
 
 # Run the verified bundle through the resolved Bun and make it identify itself, exactly as the compiled
 # artifact used to be asked directly. A bundle cannot be exec'd on its own here: its shebang would resolve
