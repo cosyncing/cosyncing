@@ -350,6 +350,16 @@ async function defaultRunDevicesRevoke(options: {
  * has to execute it. Both come from the one identity resolver, so setup, status, repair, upgrade, logs, and
  * uninstall address exactly the same file with exactly the same launch model.
  */
+/**
+ * The Bun version the running runtime reported, for the one command that compares it against a release's
+ * interpreter floor. It is kept out of {@link applicationLaunchInputs} because every other caller only
+ * needs the pair of paths it launches with; upgrade alone has a floor to check.
+ */
+function upgradeRuntimeVersion(buildInfo: Readonly<BuildInfo>): { runtimeVersion?: string } {
+  const identity = applicationIdentity(buildInfo);
+  return identity.runtimeVersion ? { runtimeVersion: identity.runtimeVersion } : {};
+}
+
 function applicationLaunchInputs(
   buildInfo: Readonly<BuildInfo>,
 ): { executablePath: string; runtimePath?: string } {
@@ -504,6 +514,7 @@ async function defaultRunUpgrade(options: {
     home,
     buildInfo: options.buildInfo,
     ...applicationLaunchInputs(options.buildInfo),
+    ...upgradeRuntimeVersion(options.buildInfo),
     ...(options.manifestUrl ? { manifestUrl: options.manifestUrl } : {}),
     ...(service ? { service } : {}),
   });
