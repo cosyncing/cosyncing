@@ -170,6 +170,15 @@ class VoiceInputController extends AutoDisposeNotifier<VoiceInputState> {
     );
   }
 
+  /// The workspace pane that was focused when this controller last started.
+  ///
+  /// Opaque here on purpose: this layer never interprets it. The workspace
+  /// stamps it and reads it back, so a focus change can stop the media the
+  /// *other* pane started without silencing the pane now in front. One voice
+  /// and one microphone stay global — a singleton with an owner is both
+  /// cheaper and more correct than one controller per pane.
+  Object? owningPane;
+
   /// Begin push-to-talk recognition with the given [policy].
   ///
   /// Stops any active TTS first, then requests permission and starts

@@ -246,7 +246,10 @@ void main() {
         await tester.pump();
 
         expect(
-          container.read(visibleAttentionSessionProvider)?.sessionId,
+          container
+              .read(visibleAttentionSessionsProvider)
+              .singleOrNull
+              ?.sessionId,
           'session-a',
         );
 
@@ -260,7 +263,7 @@ void main() {
           findsOneWidget,
           reason: 'the indexed shell retains the inactive Sessions branch',
         );
-        expect(container.read(visibleAttentionSessionProvider), isNull);
+        expect(container.read(visibleAttentionSessionsProvider), isEmpty);
       },
     );
 

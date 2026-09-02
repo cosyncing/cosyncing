@@ -92,30 +92,35 @@ class _VisibleAttentionSessionScopeState
   }
 
   void _syncClaim() {
-    final notifier = ref.read(visibleAttentionSessionProvider.notifier);
+    final notifier = ref.read(visibleAttentionSessionsProvider.notifier);
     final source = _source;
     if (!_disposed && _tickerEnabled && source != null) {
       final tool = widget.tool;
       final sessionId = widget.sessionId;
-      final current = notifier.state;
-      if (identical(current?.owner, _owner) &&
-          current?.source == source &&
-          current?.tool == tool &&
-          current?.sessionId == sessionId) {
+      // This scope owns exactly its own claim and never touches a sibling's:
+      // with two panes onstage, both claims stand at once.
+      final current = notifier.state
+          .where((claim) => identical(claim.owner, _owner))
+          .firstOrNull;
+      if (current != null &&
+          current.source == source &&
+          current.tool == tool &&
+          current.sessionId == sessionId) {
         return;
       }
-      notifier.state = VisibleAttentionSession(
-        source: source,
-        tool: tool,
-        sessionId: sessionId,
-        owner: _owner,
-        isStillVisible: () => _ownsVisibleSurface(source, tool, sessionId),
+      notifier.state = withVisibleAttentionClaim(
+        notifier.state,
+        VisibleAttentionSession(
+          source: source,
+          tool: tool,
+          sessionId: sessionId,
+          owner: _owner,
+          isStillVisible: () => _ownsVisibleSurface(source, tool, sessionId),
+        ),
       );
       return;
     }
-    if (identical(notifier.state?.owner, _owner)) {
-      notifier.state = null;
-    }
+    notifier.state = withoutVisibleAttentionClaim(notifier.state, _owner);
   }
 
   bool _ownsVisibleSurface(
@@ -137,13 +142,11 @@ class _VisibleAttentionSessionScopeState
   void _releaseCapturedClaim() {
     final container = _container;
     if (container == null) return;
-    final notifier = container.read(visibleAttentionSessionProvider.notifier);
+    final notifier = container.read(visibleAttentionSessionsProvider.notifier);
 
     void release() {
       if (!notifier.mounted) return;
-      if (identical(notifier.state?.owner, _owner)) {
-        notifier.state = null;
-      }
+      notifier.state = withoutVisibleAttentionClaim(notifier.state, _owner);
     }
 
     if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {

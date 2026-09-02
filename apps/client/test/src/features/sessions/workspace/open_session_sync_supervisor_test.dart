@@ -599,15 +599,15 @@ void main() {
       final source = RosterSource.ofProfile(
         container.read(activeBrokerProfileProvider)!,
       );
-      container
-          .read(visibleAttentionSessionProvider.notifier)
-          .state = VisibleAttentionSession(
-        source: source,
-        tool: a.tool,
-        sessionId: a.id,
-        owner: Object(),
-        isStillVisible: () => routeIsOnstage,
-      );
+      container.read(visibleAttentionSessionsProvider.notifier).state = [
+        VisibleAttentionSession(
+          source: source,
+          tool: a.tool,
+          sessionId: a.id,
+          owner: Object(),
+          isStillVisible: () => routeIsOnstage,
+        ),
+      ];
       await tester.pump();
 
       const key = SessionDetailKey(tool: 'claude', sessionId: 'a');

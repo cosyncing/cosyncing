@@ -51,7 +51,7 @@ class _OpenSessionSyncSupervisorState
   final Set<SessionDetailKey> _watchedRetirements = {};
   final Queue<_AttachAdmission> _attachQueue = Queue<_AttachAdmission>();
   RosterSource? _source;
-  SessionDetailKey? _visibleKey;
+  Set<SessionDetailKey> _visibleKeys = const {};
   int _runningAttaches = 0;
   int _admissionEpoch = 0;
   int _reconcileGeneration = 0;
@@ -103,7 +103,7 @@ class _OpenSessionSyncSupervisorState
         },
       )
       ..watch(openSessionsControllerProvider)
-      ..watch(visibleAttentionSessionProvider);
+      ..watch(visibleAttentionSessionsProvider);
     _scheduleReconcile();
     // A source change is visible to child SessionDetailPage widgets during
     // this build, one frame before the supervisor's deferred reconciliation
@@ -176,7 +176,7 @@ class _OpenSessionSyncSupervisorState
       source,
       open,
       _readLifecycle(),
-      _readVisibleKey(source),
+      _readVisibleKeys(source),
     );
   }
 
@@ -184,10 +184,10 @@ class _OpenSessionSyncSupervisorState
     RosterSource? source,
     OpenSessionsState? open,
     BrokerAppLifecycleState lifecycle,
-    SessionDetailKey? visibleKey,
+    Set<SessionDetailKey> visibleKeys,
   ) {
     _latestLifecycle = lifecycle;
-    _visibleKey = visibleKey;
+    _visibleKeys = visibleKeys;
     if (_source != source) {
       _adoptSource(source);
       if (_sourceRetirementPending) return;
@@ -247,7 +247,7 @@ class _OpenSessionSyncSupervisorState
       return;
     }
 
-    _warmDesiredSessions(desired, _visibleKey, source);
+    _warmDesiredSessions(desired, _visibleKeys, source);
   }
 
   /// Adopts [source] before descendant source listeners can attach against it.
@@ -273,15 +273,15 @@ class _OpenSessionSyncSupervisorState
 
   void _warmDesiredSessions(
     Set<SessionDetailKey> desired,
-    SessionDetailKey? visibleKey,
+    Set<SessionDetailKey> visibleKeys,
     RosterSource source,
   ) {
     // A real onstage detail may be admitted first, but the supervisor never
     // grants it authority. Only SessionDetailPage can promote the shared
     // controller to interactive; OpenSessionsState.activeKey is a restart hint.
     final ordered = [
-      ...desired.where((key) => key == visibleKey),
-      ...desired.where((key) => key != visibleKey),
+      ...desired.where(visibleKeys.contains),
+      ...desired.where((key) => !visibleKeys.contains(key)),
     ];
     for (final key in ordered) {
       // The pending retirement may belong to a PREVIOUS supervisor
@@ -318,9 +318,9 @@ class _OpenSessionSyncSupervisorState
   }
 
   void _suspendBackgroundLeases() {
-    final selectedKey = _visibleKey;
+    final onscreen = _visibleKeys;
     final background = _leases.keys
-        .where((key) => key != selectedKey)
+        .where((key) => !onscreen.contains(key))
         .toList(growable: false);
     for (final key in background) {
       _suspendLease(_leases[key]!);
@@ -351,7 +351,7 @@ class _OpenSessionSyncSupervisorState
       source,
       _latestOpen,
       _latestLifecycle,
-      _readVisibleKey(source),
+      _readVisibleKeys(source),
     );
   }
 
@@ -384,7 +384,7 @@ class _OpenSessionSyncSupervisorState
     if (lease.queued) return;
     lease.queued = true;
     final request = _AttachAdmission(lease: lease, epoch: _admissionEpoch);
-    if (lease.key == _visibleKey) {
+    if (_visibleKeys.contains(lease.key)) {
       _attachQueue.addFirst(request);
     } else {
       _attachQueue.addLast(request);
@@ -468,7 +468,7 @@ class _OpenSessionSyncSupervisorState
             _source,
             _latestOpen,
             _readLifecycle(),
-            _readVisibleKey(_source),
+            _readVisibleKeys(_source),
           );
         }
       }),
@@ -520,7 +520,7 @@ class _OpenSessionSyncSupervisorState
       );
     }
     _leases.clear();
-    _visibleKey = null;
+    _visibleKeys = const {};
     if (clearViewports) {
       _container?.read(sessionViewportRegistryProvider.notifier).clear();
     }
@@ -574,37 +574,46 @@ class _OpenSessionSyncSupervisorState
       _source,
       _latestOpen,
       lifecycle,
-      _readVisibleKey(_source),
+      _readVisibleKeys(_source),
     );
   }
 
-  SessionDetailKey? _readVisibleKey(RosterSource? source) {
+  /// Every onstage session of [source], as detail keys.
+  ///
+  /// A set rather than one key: two panes can be onscreen at once, and both
+  /// deserve warm-first ordering, attach priority, and exemption from
+  /// background suspension. A key drops out the moment its claim stops
+  /// answering, so ownership still fails closed.
+  Set<SessionDetailKey> _readVisibleKeys(RosterSource? source) {
     final container = _container;
-    if (container == null) return null;
-    return _qualifyVisibleKey(
-      container.read(visibleAttentionSessionProvider),
+    if (container == null || source == null) return const {};
+    return _qualifyVisibleKeys(
+      container.read(visibleAttentionSessionsProvider),
       source,
     );
   }
 
-  SessionDetailKey? _qualifyVisibleKey(
-    VisibleAttentionSession? visible,
+  Set<SessionDetailKey> _qualifyVisibleKeys(
+    List<VisibleAttentionSession> claims,
     RosterSource? source,
   ) {
-    if (visible == null || source == null || visible.source != source) {
-      return null;
+    if (source == null) return const {};
+    final keys = <SessionDetailKey>{};
+    for (final claim in claims) {
+      if (claim.source != source) continue;
+      try {
+        if (!claim.isStillVisible()) continue;
+      } on Object {
+        // A disposed route can briefly leave its deferred claim in the
+        // provider. Lifecycle ownership fails closed until the onstage scope
+        // republishes.
+        continue;
+      }
+      keys.add(
+        SessionDetailKey(tool: claim.tool, sessionId: claim.sessionId),
+      );
     }
-    try {
-      if (!visible.isStillVisible()) return null;
-    } on Object {
-      // A disposed route can briefly leave its deferred claim in the provider.
-      // Lifecycle ownership fails closed until the onstage scope republishes.
-      return null;
-    }
-    return SessionDetailKey(
-      tool: visible.tool,
-      sessionId: visible.sessionId,
-    );
+    return Set<SessionDetailKey>.unmodifiable(keys);
   }
 
   bool _isBackgroundLifecycle(BrokerAppLifecycleState lifecycle) =>
