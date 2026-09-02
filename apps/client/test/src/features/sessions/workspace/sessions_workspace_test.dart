@@ -318,10 +318,18 @@ void main() {
       tester,
     ) async {
       final container = await openSession(tester);
+      // Both sessions are open tabs, which is the only way a file for `codex/b`
+      // can exist: files are opened from a session that is on screen. Opening
+      // one for a session with no tab is a state the app cannot reach, and a
+      // pane held open by it could never be filled.
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
       await openFile(tester, container, 'codex', 'b', 'lib/theirs.dart');
+      await tester.tap(find.byKey(const Key('open-session-tab-claude/a')));
+      await tester.pumpAndSettle();
 
       // D-2 is about the working set, not the visible slice: the pane exists
-      // while any session has a file open, so switching to a session with
+      // while any open session has a file open, so switching to a session with
       // none does not take the third column away and give it back.
       expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
       expect(find.byKey(const Key('file-pane-no-files')), findsOneWidget);
@@ -486,6 +494,55 @@ void main() {
         find.byKey(const Key('open-session-tab-prompt-target-codex/b')),
         findsNothing,
       );
+    });
+
+    testWidgets('a closed session stops holding the split open', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.tap(find.byKey(const Key('open-session-tab-claude/a')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const Key('open-session-tab-close-claude/a')),
+      );
+      await tester.pumpAndSettle();
+
+      // The file belongs to a session that is no longer in the strip, so it
+      // can never be shown again. Holding the split open for it put a second
+      // pane on screen reading "No files open" with nothing able to fill it.
+      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+      // Kept, not deleted: the file comes back with its session.
+      expect(
+        container.read(filePanesControllerProvider).value!.panes,
+        hasLength(1),
+      );
+    });
+
+    testWidgets('reopening the session brings its files back', (tester) async {
+      final container = await openSession(tester);
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.tap(find.byKey(const Key('open-session-tab-claude/a')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const Key('open-session-tab-close-claude/a')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('session-row-claude/a')));
+      await tester.pumpAndSettle();
+
+      // This is "a file tab outlives its session" in the only form per-session
+      // scoping allows: the file is not shown while its session is closed, and
+      // it is exactly where it was when the session comes back.
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(fileTab('one.dart'), findsOneWidget);
     });
 
     testWidgets('the file pane names its session, never its id', (

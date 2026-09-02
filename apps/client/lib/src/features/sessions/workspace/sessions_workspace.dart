@@ -681,9 +681,26 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         final sessionPaneKey = activeSession == null
             ? null
             : SessionPaneKey(session: activeSession).key;
+        // Reachable, not merely open. A file pane belongs to one session and
+        // is only ever shown while that session is the active tab, so files
+        // left behind by a closed session can never be displayed — and holding
+        // the split open for them put a second pane on screen that said "No
+        // files open" and could not be filled from anywhere.
+        //
+        // They are kept in the working set rather than deleted: reopening the
+        // session brings its files back, which is the design's "a file tab
+        // outlives its session" in the only form per-session scoping allows.
+        final openSessionKeys = <String>{
+          for (final ref in open.refs) ref.key,
+        };
+        final hasReachableFilePane = fileState.panes.any(
+          (pane) => openSessionKeys.contains(
+            SessionPaneKey(session: pane.session).key,
+          ),
+        );
         final showFilePane =
             activeSession != null &&
-            fileState.panes.isNotEmpty &&
+            hasReachableFilePane &&
             available >=
                 SessionsWorkspace.detailMinPaneWidth +
                     SessionsWorkspace.minFilePaneWidth;
