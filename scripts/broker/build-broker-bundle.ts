@@ -3,7 +3,10 @@
  * Build the JavaScript broker application: ONE self-contained bundle, executed by a separately installed
  * Bun runtime.
  *
- * This is the artifact the published npm package ships. It is `bun build --target=bun` WITHOUT `--compile`,
+ * This is the artifact BOTH JavaScript channels ship — the published npm package and the signed release the
+ * curl installer places — from the same source with the same flags. `--distribution` is the only thing that
+ * differs, and it records who owns the installed files rather than changing what is built. It is
+ * `bun build --target=bun` WITHOUT `--compile`,
  * so nothing of Bun, JavaScriptCore, or WebKit is copied into it — the operator installs Bun themselves and
  * the package carries only cosyncing's own code plus its JavaScript dependencies.
  *
@@ -40,8 +43,20 @@ const UNIVERSAL_TARGET = 'universal';
  */
 const BUN_SHEBANG = '#!/usr/bin/env bun';
 
+/**
+ * The two kinds this builder may stamp, and nothing else.
+ *
+ * `buildDefines` already refuses a value outside the closed distribution vocabulary, but that vocabulary
+ * also contains `native` and `source` — neither of which describes a bundle. Naming the pair here keeps a
+ * mistyped flag from producing a JavaScript file that claims to be a compiled executable.
+ */
+const BUNDLE_DISTRIBUTIONS = Object.freeze(['bun-js', 'bootstrap-js'] as const);
+type BundleDistribution = (typeof BUNDLE_DISTRIBUTIONS)[number];
+
 interface BundleOptions {
   outfile: string;
+  /** Who will own the installed files: npm (`bun-js`) or cosyncing's own installer (`bootstrap-js`). */
+  distribution: BundleDistribution;
   version?: string;
   buildDate?: string;
   commit?: string;
@@ -57,6 +72,8 @@ function usage(): never {
   console.error(
     `Usage: bun run scripts/broker/build-broker-bundle.ts [options]\n\n` +
       `  --outfile PATH                  output JavaScript application bundle\n` +
+      `  --distribution ${BUNDLE_DISTRIBUTIONS.join('|')}\n` +
+      `                                  who owns the installed files (default: bun-js, the npm package)\n` +
       `  --version X.Y.Z                 candidate/test builds only; defaults to the root package.json\n` +
       `  --build-date ISO-8601           immutable build time (or SOURCE_DATE_EPOCH)\n` +
       `  --commit HEX                    immutable source commit\n` +
@@ -79,6 +96,7 @@ function nextArg(argv: string[], index: number): string {
 
 function parseArgs(argv: string[]): BundleOptions {
   let outfile = resolve('output', PRODUCT_IDENTITY.productName, PRODUCT_IDENTITY.primaryBinary);
+  let distribution: BundleDistribution = 'bun-js';
   let version: string | undefined;
   let buildDate: string | undefined;
   let commit: string | undefined;
@@ -91,6 +109,11 @@ function parseArgs(argv: string[]): BundleOptions {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--outfile') outfile = resolve(nextArg(argv, index++));
+    else if (arg === '--distribution') {
+      const value = nextArg(argv, index++);
+      if (!(BUNDLE_DISTRIBUTIONS as readonly string[]).includes(value)) usage();
+      distribution = value as BundleDistribution;
+    }
     else if (arg === '--version') version = nextArg(argv, index++);
     else if (arg === '--build-date') buildDate = nextArg(argv, index++);
     else if (arg === '--commit') commit = nextArg(argv, index++);
@@ -104,6 +127,7 @@ function parseArgs(argv: string[]): BundleOptions {
   }
   return {
     outfile,
+    distribution,
     ...(version ? { version } : {}),
     ...(buildDate ? { buildDate } : {}),
     ...(commit ? { commit } : {}),
@@ -130,7 +154,7 @@ const result = await Bun.build({
   naming: { entry: '[dir]/[name].[ext]' },
   define: buildDefines({
     identity,
-    distribution: 'bun-js',
+    distribution: options.distribution,
     target: UNIVERSAL_TARGET,
     release: options,
   }),
@@ -169,7 +193,7 @@ console.log(JSON.stringify({
   commit: identity.commit,
   dirty: identity.dirty,
   buildDate: identity.buildDate,
-  distribution: 'bun-js',
+  distribution: options.distribution,
   target: UNIVERSAL_TARGET,
   schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
   contract: BROKER_CONTRACT,

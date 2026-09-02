@@ -58,15 +58,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
+          RELEASE_P256_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_P256_PUBLIC_KEY_PEM_B64 }}
         shell: bash
         run: |
           test -n "$RELEASE_PUBLIC_KEY_B64"
+          test -n "$RELEASE_P256_PUBLIC_KEY_B64"
           printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
+          printf '%s' "$RELEASE_P256_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           mkdir -p output/promotion
           gh release download "$TAG" --dir output/promotion
           cmp "$RUNNER_TEMP/cosyncing-release.pub.pem" output/promotion/release-key.pem
+          cmp "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" output/promotion/release-key-p256.pem
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/cosyncing-release.pub.pem" -rawin \
             -in output/promotion/release-manifest.json -sigfile output/promotion/release-manifest.json.sig
+          # The DER sibling is what the shell installer verifies on macOS, and openssl reads it directly.
+          for payload in release-manifest.json SHA256SUMS; do
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" \
+              -signature "output/promotion/$payload.p256.der.sig" "output/promotion/$payload"
+          done
+          # The P1363 sibling is raw r||s, which openssl will not read; bun verifies it in the layout a
+          # PowerShell installer will. Both encodings are checked because a candidate that published only
+          # one working encoding would break exactly one installer, on hosts this job does not run on. A
+          # candidate that cannot be verified here must not become stable.
+          bun -e '
+            const { createPublicKey, verify } = await import("node:crypto");
+            const key = createPublicKey(await Bun.file(`${process.env.RUNNER_TEMP}/cosyncing-release-p256.pub.pem`).text());
+            for (const payload of ["release-manifest.json", "SHA256SUMS"]) {
+              const bytes = Buffer.from(await Bun.file(`output/promotion/${payload}`).arrayBuffer());
+              const signature = Buffer.from(await Bun.file(`output/promotion/${payload}.p256.sig`).arrayBuffer());
+              if (!verify("sha256", bytes, { key, dsaEncoding: "ieee-p1363" }, signature)) {
+                console.error(`P-256 sibling signature failed for ${payload}`);
+                process.exit(1);
+              }
+            }
+          '
           (cd output/promotion && sha256sum --check SHA256SUMS)
           bun run scripts/broker/release/verify-promotion-assets.ts output/promotion
       - name: Promote without changing assets

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Deterministic release, signature, inventory, and bootstrap acceptance. */
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -12,6 +12,7 @@ import {
   readlinkSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -25,11 +26,14 @@ import { BROKER_CONFIG_SCHEMA_VERSION } from '../../../../packages/typescript/br
 import { DURABLE_SCHEMA_REGISTRY } from '../../../../packages/typescript/broker/src/security/durable-state.ts';
 import { INSTALL_STATE_SCHEMA_VERSION } from '../../../../packages/typescript/broker/src/installation/install-state.ts';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
+  RELEASE_JAVASCRIPT_APP_TARGET,
   RELEASE_MANIFEST_SCHEMA_VERSION,
   UPGRADE_JOURNAL_SCHEMA_VERSION,
   verifyReleaseManifest,
   verifyReleasePairing,
 } from '../../../../packages/typescript/broker/src/updates/release-upgrade.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   BROKER_CONTRACT,
   CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
@@ -49,6 +53,7 @@ import {
   WEB_SIDECAR_NAME,
   type PackageEvidence,
   type ReleaseTarget,
+  type JavaScriptPackageEvidence,
   type WebPackageEvidence,
 } from '../../release/release-files.ts';
 import {
@@ -153,6 +158,37 @@ exit 2
 `;
 }
 
+/**
+ * The JavaScript application fixture: a shell script that answers `version --json` exactly as the real
+ * bundle does. The installer runs it through a Bun, never directly, so a fake `bun` on PATH can stand in
+ * for the runtime while every other property under test — digests, signatures, evidence — stays real.
+ */
+function javaScriptAppScript(version: string, commit: string, buildDate: string): string {
+  return `#!/usr/bin/env bash
+if [ "\${1:-}" = version ] && [ "\${2:-}" = --json ]; then
+  cat <<'JSON'
+${JSON.stringify({
+  schemaVersion: 2,
+  product: 'cosyncing',
+  binary: 'cosyncing',
+  alias: 'cosy',
+  version,
+  commit,
+  buildDate,
+  target: RELEASE_JAVASCRIPT_APP_TARGET,
+  distribution: 'bootstrap-js',
+  packaged: true,
+  dirty: false,
+  schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+  contract: PUBLISHED_BROKER_CONTRACT,
+}, null, 2)}
+JSON
+  exit 0
+fi
+exit 2
+`;
+}
+
 function evidence(options: {
   artifactPath: string;
   target: ReleaseTarget;
@@ -185,6 +221,69 @@ function evidence(options: {
       invocationId: `100${RELEASE_TARGETS.indexOf(options.target) + 1}`,
     },
   };
+}
+
+/**
+ * A Bun stand-in for the installer's two uses of one: the `--revision` capability probe, and running the
+ * verified bundle. `version` lets a test present a runtime that is too old without installing one.
+ */
+function writeFakeBun(path: string, version = '1.3.14'): void {
+  writeFileSync(path, `#!/usr/bin/env bash
+if [ "\${1:-}" = --revision ]; then
+  echo '${version}+fixturebuild'
+  exit 0
+fi
+exec bash "$@"
+`, { mode: 0o755 });
+}
+
+/**
+ * Stands in for an official Bun release archive: a real zip holding `<asset without .zip>/bun`, the layout
+ * the installer unpacks. Omitting `version` yields a build that cannot run on this host — the case the
+ * installer must survive by trying the next pinned candidate.
+ */
+function writeFakeBunArchive(
+  directory: string,
+  asset: string,
+  options: { version?: string } = {},
+): { path: string; sha256: string } {
+  const name = asset.replace(/\.zip$/, '');
+  const staging = join(directory, `${asset}.staging`);
+  mkdirSync(join(staging, name), { recursive: true });
+  writeFileSync(join(staging, name, 'bun'), options.version === undefined
+    ? '#!/usr/bin/env bash\nexit 1\n'
+    : `#!/usr/bin/env bash
+if [ "\${1:-}" = --revision ]; then
+  echo '${options.version}+fixturebuild'
+  exit 0
+fi
+exec bash "$@"
+`, { mode: 0o755 });
+  const path = join(directory, asset);
+  const zipped = Bun.spawnSync(['zip', '-q', '-r', path, name], {
+    cwd: staging,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  });
+  if (!zipped.success) throw new Error(`Bun archive fixture could not be zipped: ${zipped.stderr.toString()}`);
+  rmSync(staging, { recursive: true, force: true });
+  return { path, sha256: sha256(readFileSync(path)) };
+}
+
+/** Repoint a rendered installer's pinned Bun table at fixture archives, keeping every other pin real. */
+function repinBunTable(installer: string, rows: readonly string[]): void {
+  const source = readFileSync(installer, 'utf8');
+  const replaced = source.replace(/^BUN_TABLE='[^']*'$/m, `BUN_TABLE='${rows.join('\n')}'`);
+  if (replaced === source) throw new Error('installer does not carry a pinned Bun table');
+  writeFileSync(installer, replaced, { mode: 0o755 });
+}
+
+/** A PATH that reaches the host's real tools but no `bun`, for the case where the host has none. */
+function pathWithoutBun(first: string): string {
+  const entries = (process.env.PATH ?? '/usr/bin:/bin')
+    .split(':')
+    .filter((entry) => entry !== '' && !existsSync(join(entry, 'bun')));
+  return [first, ...entries].join(':');
 }
 
 function writeFakeCurl(path: string): void {
@@ -275,8 +374,53 @@ try {
       `${JSON.stringify(evidence({ artifactPath, target, version, commit, buildDate }), null, 2)}\n`,
     );
   }
+  const jsArtifactPath = join(artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
+  writeFileSync(jsArtifactPath, javaScriptAppScript(version, commit, buildDate), { mode: 0o755 });
+  const jsBytes = readFileSync(jsArtifactPath);
+  const jsEvidence: JavaScriptPackageEvidence = {
+    schemaVersion: 1,
+    product: 'cosyncing',
+    artifact: RELEASE_JAVASCRIPT_APP_NAME,
+    version,
+    target: RELEASE_JAVASCRIPT_APP_TARGET,
+    distribution: 'bootstrap-js',
+    sourceCommit: commit,
+    buildDate,
+    size: jsBytes.byteLength,
+    sha256: sha256(jsBytes),
+    minimumBunVersion: MINIMUM_BUN_RUNTIME_VERSION,
+    packaged: true,
+    dirty: false,
+    schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+    contract: PUBLISHED_BROKER_CONTRACT,
+    cleanCheckout: true,
+    offlineVersionCheck: true,
+    forbiddenContentCheck: true,
+    runner: { os: 'linux', arch: 'x64', image: 'fixture-universal', invocationId: '1004' },
+  };
+  writeFileSync(
+    join(evidenceDirectory, `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`),
+    `${JSON.stringify(jsEvidence, null, 2)}\n`,
+  );
+
+  // A real gzipped ustar archive holding the one `app/` tree the installer unpacks. The sidecar stopped
+  // being an opaque blob the moment install.sh had to extract it, so an opaque fixture would no longer
+  // exercise the code under test.
   const webArtifactPath = join(artifactDirectory, WEB_SIDECAR_NAME);
-  writeFileSync(webArtifactPath, 'deterministic fixture web sidecar\n');
+  {
+    const staging = join(root, 'web-fixture');
+    mkdirSync(join(staging, 'app', 'assets'), { recursive: true });
+    writeFileSync(join(staging, 'app', 'index.html'), '<html><base href="/cosy/"></html>\n');
+    writeFileSync(join(staging, 'app', 'assets', 'NOTICES'), 'fixture notices\n');
+    const packed = Bun.spawnSync([
+      'tar', '--format=ustar', '--sort=name', '--mtime=@1750000000',
+      '--owner=0', '--group=0', '--numeric-owner',
+      '-czf', webArtifactPath, '-C', staging, 'app',
+    ], { stdout: 'ignore', stderr: 'pipe' });
+    if (!packed.success) {
+      throw new Error(`web sidecar fixture could not be packed: ${packed.stderr.toString()}`);
+    }
+  }
   const webBytes = readFileSync(webArtifactPath);
   const webEvidence: WebPackageEvidence = {
     schemaVersion: 1,
@@ -309,6 +453,9 @@ try {
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
   const publicKeyPath = join(root, 'release-key.pub.pem');
   writeFileSync(publicKeyPath, publicPem, { mode: 0o600 });
+  const p256 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const p256PrivatePem = p256.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const p256PublicPem = p256.publicKey.export({ type: 'spki', format: 'pem' }).toString();
   const armEvidencePath = join(
     evidenceDirectory,
     'cosyncing-linux-arm64.evidence.json',
@@ -336,6 +483,8 @@ try {
       keyId: 'test-2026',
       privateKeyPem: privatePem,
       publicKeyPem: publicPem,
+      p256PrivateKeyPem: p256PrivatePem,
+      p256PublicKeyPem: p256PublicPem,
     });
   } catch (error) {
     mismatchedNativeContractRejected = /disagrees on broker contract/.test(
@@ -359,6 +508,8 @@ try {
     keyId: 'test-2026',
     privateKeyPem: privatePem,
     publicKeyPem: publicPem,
+    p256PrivateKeyPem: p256PrivatePem,
+    p256PublicKeyPem: p256PublicPem,
   });
   const originalWebArtifact = readFileSync(webArtifactPath);
   writeFileSync(webArtifactPath, 'swapped candidate web sidecar\n');
@@ -375,6 +526,8 @@ try {
       keyId: 'test-2026',
       privateKeyPem: privatePem,
       publicKeyPem: publicPem,
+      p256PrivateKeyPem: p256PrivatePem,
+      p256PublicKeyPem: p256PublicPem,
     });
   } catch (error) {
     swappedWebRejected = /web sidecar no longer matches/.test(
@@ -412,6 +565,94 @@ try {
         target,
         trustedKeys: { 'test-2026': publicPem },
       }).artifact.target === target));
+
+  // The sibling P-256 signature, published in two encodings because the two consumers can each read only
+  // one: PowerShell 5.1 has no DER overload, and openssl has no P1363 input. The installer's macOS path
+  // depends on the DER one, so it is no longer an unverified emit.
+  const p256PublicKeyObject = createPublicKey(
+    readFileSync(join(releaseDirectory, 'release-key-p256.pem'), 'utf8'),
+  );
+  const verifiesP256 = (payload: string, signature: string): boolean => verify(
+    'sha256',
+    readFileSync(join(releaseDirectory, payload)),
+    { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
+    readFileSync(join(releaseDirectory, signature)),
+  );
+  const verifiesP256Der = (payload: string, signature: string): boolean => verify(
+    'sha256',
+    readFileSync(join(releaseDirectory, payload)),
+    { key: p256PublicKeyObject, dsaEncoding: 'der' },
+    readFileSync(join(releaseDirectory, signature)),
+  );
+  // The DER file must be a re-encoding of the SAME signature, not a second one. ECDSA is randomized, so two
+  // signings would produce two independent signatures that could disagree — one valid and one not — and a
+  // host would have no way to tell which encoding was broken. Decoding r and s back out and comparing them
+  // to the P1363 halves is what proves they are two spellings of one fact.
+  const derToRawScalars = (der: Uint8Array): string => {
+    if (der[0] !== 0x30) throw new Error('P-256 DER signature is not a SEQUENCE');
+    const scalars: string[] = [];
+    let at = 2;
+    for (let index = 0; index < 2; index += 1) {
+      if (der[at] !== 0x02) throw new Error('P-256 DER signature member is not an INTEGER');
+      const length = der[at + 1]!;
+      const body = Buffer.from(der.subarray(at + 2, at + 2 + length));
+      scalars.push(body.toString('hex').replace(/^0+/, '').padStart(64, '0'));
+      at += 2 + length;
+    }
+    if (at !== der.length) throw new Error('P-256 DER signature has trailing bytes');
+    return scalars.join('');
+  };
+  check('both P-256 encodings verify and carry the same signature, not two independent ones',
+    ['release-manifest.json', 'SHA256SUMS'].every((payload) => {
+      const p1363 = readFileSync(join(releaseDirectory, `${payload}.p256.sig`));
+      const der = readFileSync(join(releaseDirectory, `${payload}.p256.der.sig`));
+      return p1363.byteLength === 64
+        && verifiesP256Der(payload, `${payload}.p256.der.sig`)
+        && derToRawScalars(der) === p1363.toString('hex');
+    }));
+  check('the manifest and checksum list carry sibling P-256 signatures a PowerShell host can verify',
+    verifiesP256('release-manifest.json', 'release-manifest.json.p256.sig')
+      && verifiesP256('SHA256SUMS', 'SHA256SUMS.p256.sig')
+      // IEEE P1363 is what .NET Framework's ECDsa.VerifyData reads: raw r || s, never a DER SEQUENCE.
+      && statSync(join(releaseDirectory, 'release-manifest.json.p256.sig')).size === 64
+      && statSync(join(releaseDirectory, 'SHA256SUMS.p256.sig')).size === 64);
+  check('the published P-256 key is the one that signed, and is not the Ed25519 key',
+    readFileSync(join(releaseDirectory, 'release-key-p256.pem'), 'utf8').trim() === p256PublicPem.trim()
+      && readFileSync(join(releaseDirectory, 'release-key.pem'), 'utf8').trim() === publicPem.trim());
+  check('a tampered manifest fails the sibling signature as well as the Ed25519 one',
+    !verify(
+      'sha256',
+      Buffer.concat([readFileSync(join(releaseDirectory, 'release-manifest.json')), Buffer.from(' ')]),
+      { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
+      readFileSync(join(releaseDirectory, 'release-manifest.json.p256.sig')),
+    ));
+  // The whole reason Ed25519 stays. A broker built before the sibling signature existed reads only the
+  // manifest, knows only `ed25519`, and trusts only the Ed25519 key id: prove that release is still readable
+  // by exactly that reader rather than assuming a sibling FILE cannot disturb it.
+  const publishedManifest = JSON.parse(readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8'));
+  check('a broker built before this change still verifies the manifest with Ed25519 alone',
+    publishedManifest.signature.algorithm === 'ed25519'
+      && Object.keys(publishedManifest.signature).sort().join(',') === 'algorithm,keyId,value'
+      && !('signatures' in publishedManifest) && !('p256Signature' in publishedManifest)
+      && verifyReleaseManifest({
+        value: publishedManifest,
+        target: 'linux-x64',
+        trustedKeys: { 'test-2026': publicPem },
+      }).manifest.version === version);
+
+  check('the signed manifest carries the JavaScript application beside the compiled set',
+    assembled.manifest.jsApp?.name === RELEASE_JAVASCRIPT_APP_NAME
+      && assembled.manifest.jsApp?.target === RELEASE_JAVASCRIPT_APP_TARGET
+      && assembled.manifest.jsApp?.sha256 === jsEvidence.sha256
+      && assembled.manifest.jsApp?.size === jsEvidence.size
+      && assembled.manifest.jsApp?.minimumBunVersion === MINIMUM_BUN_RUNTIME_VERSION
+      // It is NOT in the per-host array: that array is machine-code, keyed by target, and a universal
+      // bundle placed there would have to claim a machine-code binding it does not have.
+      && !assembled.manifest.artifacts.some((item) => item.name === RELEASE_JAVASCRIPT_APP_NAME)
+      && assembled.publishedFiles.includes(RELEASE_JAVASCRIPT_APP_NAME)
+      && assembled.publishedFiles.includes(`${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl.sig`),
+    JSON.stringify(assembled.manifest.jsApp));
+
   const pairing = verifyReleasePairing(assembled.manifest);
   check(
     'signed manifest binds broker contract and the exact /cosy/ web sidecar',
@@ -460,6 +701,7 @@ try {
   const fakeBin = join(root, 'fake-bin');
   mkdirSync(fakeBin);
   writeFakeCurl(join(fakeBin, 'curl'));
+  writeFakeBun(join(fakeBin, 'bun'));
   const home = join(root, 'install-home');
   mkdirSync(home);
   writeFileSync(join(home, '.bashrc'), '# preserve\n');
@@ -474,32 +716,80 @@ try {
   });
   const binary = join(home, '.cosyncing', 'bin', 'cosyncing');
   const alias = join(home, '.cosyncing', 'bin', 'cosy');
-  check('bootstrap verifies, installs user-owned binary+relative alias, and records ownership',
+  const installedReceipt = readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8');
+  check('bootstrap verifies, installs user-owned bundle+relative alias, and records ownership',
     install.exitCode === 0 && existsSync(binary) && lstatSync(binary).isFile()
       && lstatSync(alias).isSymbolicLink() && readlinkSync(alias) === 'cosyncing'
-      && readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8').includes(`sha256=${sha256(readFileSync(binary))}`),
+      && installedReceipt.includes(`sha256=${sha256(readFileSync(binary))}`),
     install.stderr.trim());
+  // A packaged broker resolves its web client as `<directory of the application>/cosyncing-web-<version>`.
+  // Before this change the installer placed no web client at all, so every curl install came up with a
+  // broker whose own UI was missing and no error saying so.
+  const installedWebRoot = join(home, '.cosyncing', 'bin', `cosyncing-web-${version}`);
+  check('bootstrap installs the paired web client where a packaged broker looks for it',
+    existsSync(join(installedWebRoot, 'index.html'))
+      && existsSync(join(installedWebRoot, 'assets', 'NOTICES'))
+      && lstatSync(installedWebRoot).isDirectory() && !lstatSync(installedWebRoot).isSymbolicLink()
+      && install.stdout.includes(`Web client: ${installedWebRoot}`),
+    install.stdout.trim().split('\n').slice(-6).join(' | '));
+  check('the receipt records the installer-owned distribution, the web root, and the resolved runtime',
+    installedReceipt.includes('schemaVersion=2\n')
+      && installedReceipt.includes('distribution=bootstrap-js\n')
+      && installedReceipt.includes('target=universal\n')
+      && installedReceipt.includes(`webRoot=${installedWebRoot}\n`)
+      && installedReceipt.includes(`runtime=${join(fakeBin, 'bun')}\n`),
+    installedReceipt.trim().replaceAll('\n', ' | '));
   check('bootstrap never edits shell startup files and prints the absolute setup command',
     readFileSync(join(home, '.bashrc'), 'utf8') === '# preserve\n'
       && install.stdout.includes(`${binary} setup`) && install.stdout.includes('PATH was not changed'));
   check('a capable openssl reports the signature as verified, not merely checked',
     /Release signature: verified/.test(install.stdout)
-      && /Artifact digest: matched/.test(install.stdout),
+      && /Artifact digests: matched/.test(install.stdout),
     install.stdout.trim().split('\n').slice(-4).join(' | '));
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.
-  // The installer must still work there, must SAY it skipped signature verification, and must still gate the
-  // download on the digest baked into the script. `openssl pkey -pubin` failing is the capability probe.
+  // It has no trouble with ECDSA P-256, so the stub refuses Ed25519 SPECIFICALLY rather than refusing every
+  // key: a stub that failed both would model a host that does not exist and would hide the branch that
+  // matters. Every Mac takes this path, and it is the one that decides whether a Mac gets a cryptographic
+  // check or bytes delivered by TLS alone.
   const libreSslBin = join(root, 'libressl-bin');
   mkdirSync(libreSslBin);
   writeFakeCurl(join(libreSslBin, 'curl'));
-  writeFileSync(join(libreSslBin, 'openssl'), `#!/usr/bin/env bash
-# Reproduces LibreSSL 3.3.6: every other subcommand works, but anything that must LOAD an Ed25519 public
-# key fails the way LibreSSL fails ("unable to load Public Key").
+  writeFakeBun(join(libreSslBin, 'bun'));
+  const libreSslOpenssl = `#!/usr/bin/env bash
+# Reproduces LibreSSL 3.3.6: every other subcommand works, and so does every other key type, but anything
+# that must LOAD an Ed25519 public key fails the way LibreSSL fails ("unable to load Public Key").
+subject=''
+previous=''
+for argument in "$@"; do
+  case "$previous" in
+    -in|-inkey|-verify) subject="$argument" ;;
+  esac
+  previous="$argument"
+done
 case "\${1:-}" in
   pkey|pkeyutl)
+    if [ -z "$subject" ] || /usr/bin/openssl pkey -pubin -in "$subject" -noout -text 2>/dev/null \
+        | grep -qi 'ED25519'; then
+      echo 'unable to load Public Key' >&2
+      echo 'digital envelope routines: unsupported algorithm' >&2
+      exit 1
+    fi ;;
+esac
+exec /usr/bin/openssl "$@"
+`;
+  writeFileSync(join(libreSslBin, 'openssl'), libreSslOpenssl, { mode: 0o755 });
+
+  // A host whose openssl can load NEITHER algorithm is the only one that may degrade. Separated from the
+  // LibreSSL stub above so "degrades" and "verifies with the other algorithm" cannot be confused.
+  const noSignatureBin = join(root, 'no-signature-bin');
+  mkdirSync(noSignatureBin);
+  writeFakeCurl(join(noSignatureBin, 'curl'));
+  writeFakeBun(join(noSignatureBin, 'bun'));
+  writeFileSync(join(noSignatureBin, 'openssl'), `#!/usr/bin/env bash
+case "\${1:-}" in
+  pkey|pkeyutl|dgst)
     echo 'unable to load Public Key' >&2
-    echo 'digital envelope routines: unsupported algorithm' >&2
     exit 1 ;;
 esac
 exec /usr/bin/openssl "$@"
@@ -516,17 +806,65 @@ exec /usr/bin/openssl "$@"
     },
   });
   const libreSslBinary = join(libreSslHome, '.cosyncing', 'bin', 'cosyncing');
-  check('bootstrap installs on a LibreSSL host and states plainly that the signature was not verified',
+  // The install a Mac actually gets. Before the P-256 signature was wired in, this host had no cryptographic
+  // check at all and rested on digests delivered by TLS — which the script's own comment conceded was an
+  // artifact pin, not an independent trust root.
+  check('a LibreSSL host verifies the release with P-256 rather than resting on TLS alone',
     libreSsl.exitCode === 0 && existsSync(libreSslBinary)
-      && /Release signature: skipped \(this openssl cannot verify Ed25519\)/.test(libreSsl.stdout)
-      && /Artifact digest: matched/.test(libreSsl.stdout)
-      && /delivered over TLS/.test(libreSsl.stdout),
+      && /Release signature: verified \(ECDSA P-256 over the signed release manifest and checksum list\)/
+        .test(libreSsl.stdout)
+      && !/delivered over TLS/.test(libreSsl.stdout),
     `${libreSsl.exitCode}: ${libreSsl.stdout.trim().split('\n').slice(-4).join(' | ')}`);
+
+  // Degrading is now reserved for a host that can load NEITHER algorithm, and it must still say so plainly
+  // and still gate the download on the embedded digest.
+  const noSignatureHome = join(root, 'no-signature-home');
+  mkdirSync(noSignatureHome);
+  const noSignature = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    env: {
+      PATH: `${noSignatureBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: noSignatureHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('an openssl that can load neither algorithm degrades and says which check was skipped',
+    noSignature.exitCode === 0
+      && existsSync(join(noSignatureHome, '.cosyncing', 'bin', 'cosyncing'))
+      && /Release signature: skipped \(this openssl can verify neither Ed25519 nor ECDSA P-256\)/
+        .test(noSignature.stdout)
+      && /Artifact digests: matched/.test(noSignature.stdout)
+      && /delivered over TLS/.test(noSignature.stdout),
+    `${noSignature.exitCode}: ${noSignature.stdout.trim().split('\n').slice(-4).join(' | ')}`);
+
+  // A P-256 signature failure must be as fatal as an Ed25519 one. Only inability to verify may degrade, and
+  // a Mac must never fall back to "skipped" because the signature it could check did not match.
+  const p256TamperRelease = join(root, 'p256-tampered-release');
+  cpSync(releaseDirectory, p256TamperRelease, { recursive: true });
+  writeFileSync(join(p256TamperRelease, 'release-manifest.json'), ' ', { flag: 'a' });
+  const p256TamperHome = join(root, 'p256-tampered-home');
+  mkdirSync(p256TamperHome);
+  const p256Tamper = await run(['bash', join(p256TamperRelease, 'install.sh')], {
+    cwd: root,
+    env: {
+      PATH: `${libreSslBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: p256TamperHome,
+      FAKE_RELEASE_ROOT: p256TamperRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a tampered manifest is fatal on the P-256 path too, never a silent degrade',
+    p256Tamper.exitCode !== 0
+      && /manifest signature verification failed/.test(p256Tamper.stderr)
+      && !/skipped/.test(p256Tamper.stdout)
+      && !existsSync(join(p256TamperHome, '.cosyncing')),
+    `${p256Tamper.exitCode}: ${p256Tamper.stderr.trim().slice(0, 160)}`);
 
   // The embedded digest is the whole trust root on LibreSSL, so it must still refuse a corrupted artifact.
   const corruptRelease = join(root, 'libressl-corrupt-release');
   cpSync(releaseDirectory, corruptRelease, { recursive: true });
-  const corruptAsset = join(corruptRelease, 'cosyncing-linux-x64');
+  const corruptAsset = join(corruptRelease, RELEASE_JAVASCRIPT_APP_NAME);
   const corruptBytes = readFileSync(corruptAsset);
   corruptBytes[corruptBytes.length - 1] = (corruptBytes[corruptBytes.length - 1] ?? 0) ^ 0xff;
   writeFileSync(corruptAsset, corruptBytes);
@@ -543,13 +881,13 @@ exec /usr/bin/openssl "$@"
   });
   check('the embedded digest still refuses a flipped byte when no signature check is possible',
     corrupted.exitCode !== 0
-      && /checksum verification failed|artifact size does not match/.test(corrupted.stderr)
+      && /checksum verification failed|size does not match/.test(corrupted.stderr)
       && !existsSync(join(corruptHome, '.cosyncing', 'bin', 'cosyncing')),
     corrupted.stderr.trim().slice(0, 160));
 
   const tamperedArtifactRelease = join(root, 'tampered-artifact-release');
   cpSync(releaseDirectory, tamperedArtifactRelease, { recursive: true });
-  writeFileSync(join(tamperedArtifactRelease, 'cosyncing-linux-x64'), '\n# modified\n', { flag: 'a' });
+  writeFileSync(join(tamperedArtifactRelease, RELEASE_JAVASCRIPT_APP_NAME), '\n# modified\n', { flag: 'a' });
   const tamperedArtifactHome = join(root, 'tampered-artifact-home');
   mkdirSync(tamperedArtifactHome);
   const tamperedArtifact = await run(['bash', join(tamperedArtifactRelease, 'install.sh')], {
@@ -564,9 +902,238 @@ exec /usr/bin/openssl "$@"
   // rejection for the same tamper, so either message is a correct refusal.
   check('bootstrap rejects a modified artifact before installation',
     tamperedArtifact.exitCode !== 0
-      && /checksum verification failed|artifact size does not match/.test(tamperedArtifact.stderr)
+      && /checksum verification failed|size does not match/.test(tamperedArtifact.stderr)
       && !existsSync(join(tamperedArtifactHome, '.cosyncing')),
     tamperedArtifact.stderr.trim().slice(0, 120));
+
+  // The application is fetched and verified before the sidecar, so a corrupted sidecar is the case where
+  // the installer already holds a good bundle and must still refuse rather than leave a broker with no UI.
+  const tamperedWebRelease = join(root, 'tampered-web-release');
+  cpSync(releaseDirectory, tamperedWebRelease, { recursive: true });
+  const tamperedWebAsset = join(tamperedWebRelease, WEB_SIDECAR_NAME);
+  const tamperedWebBytes = readFileSync(tamperedWebAsset);
+  tamperedWebBytes[tamperedWebBytes.length - 1] =
+    (tamperedWebBytes[tamperedWebBytes.length - 1] ?? 0) ^ 0xff;
+  writeFileSync(tamperedWebAsset, tamperedWebBytes);
+  const tamperedWebHome = join(root, 'tampered-web-home');
+  mkdirSync(tamperedWebHome);
+  const tamperedWeb = await run(['bash', join(tamperedWebRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: tamperedWebHome,
+      FAKE_RELEASE_ROOT: tamperedWebRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('bootstrap refuses a corrupted web sidecar and installs no application either',
+    tamperedWeb.exitCode !== 0
+      && /checksum verification failed|size does not match/.test(tamperedWeb.stderr)
+      && !existsSync(join(tamperedWebHome, '.cosyncing', 'bin', 'cosyncing')),
+    tamperedWeb.stderr.trim().slice(0, 160));
+
+  // The bundle carries no interpreter, so a Bun meeting the signed floor is a hard prerequisite. Bun is
+  // downloaded from bun.sh rather than bundled: shipping one would put a JavaScriptCore build back into the
+  // artifact set. The fake bun.sh serves through the same stub curl, keyed on the URL's last path segment.
+  const staleBunBin = join(root, 'stale-bun-bin');
+  mkdirSync(staleBunBin);
+  writeFakeCurl(join(staleBunBin, 'curl'));
+  writeFakeBun(join(staleBunBin, 'bun'), '1.2.99');
+
+  // The runtime that executes every verified artifact is held to the artifacts' own rule. A rendered
+  // installer carries Bun's real published digests for the pinned tag, so a substituted archive is refused
+  // with nothing repointed: the fixture zip simply is not the bytes Bun published.
+  const bunTamperRelease = join(root, 'bun-tamper-release');
+  cpSync(releaseDirectory, bunTamperRelease, { recursive: true });
+  writeFakeBunArchive(bunTamperRelease, 'bun-linux-x64.zip', { version: MINIMUM_BUN_RUNTIME_VERSION });
+  const bunTamperHome = join(root, 'bun-tamper-home');
+  mkdirSync(bunTamperHome);
+  const bunTamper = await run(['bash', join(bunTamperRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: bunTamperHome,
+      FAKE_RELEASE_ROOT: bunTamperRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a substituted Bun archive is refused against the checksum embedded in the installer',
+    bunTamper.exitCode !== 0
+      && /does not match the checksum embedded in this installer/.test(bunTamper.stderr)
+      && !existsSync(join(bunTamperHome, '.bun', 'bin', 'bun'))
+      && !existsSync(join(bunTamperHome, '.cosyncing', 'bin', 'cosyncing')),
+    bunTamper.stderr.trim().slice(0, 200));
+
+  // The pinned table names real ~90 MB Bun archives, which no deterministic suite can host. Repointing it
+  // at fixture archives — and at their true digests — exercises fetch, verify, unpack and probe exactly as
+  // rendered; the check above is what proves the REAL pins are enforced.
+  const bunInstallRelease = join(root, 'bun-install-release');
+  cpSync(releaseDirectory, bunInstallRelease, { recursive: true });
+  const workingArchive = writeFakeBunArchive(bunInstallRelease, 'bun-linux-x64.zip', {
+    version: MINIMUM_BUN_RUNTIME_VERSION,
+  });
+  repinBunTable(join(bunInstallRelease, 'install.sh'),
+    [`linux-x64 bun-linux-x64.zip ${workingArchive.sha256}`]);
+  const bunInstallHome = join(root, 'bun-install-home');
+  mkdirSync(bunInstallHome);
+  const bunInstall = await run(['bash', join(bunInstallRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: bunInstallHome,
+      FAKE_RELEASE_ROOT: bunInstallRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const installedBun = join(bunInstallHome, '.bun', 'bin', 'bun');
+  check('a host whose Bun is below the floor gets the pinned archive, not the stale runtime',
+    bunInstall.exitCode === 0
+      && existsSync(installedBun)
+      && readFileSync(join(bunInstallHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
+        .includes(`runtime=${installedBun}\n`)
+      && bunInstall.stdout.includes('Installing the pinned Bun')
+      && bunInstall.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
+    `${bunInstall.exitCode}: ${bunInstall.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunInstall.stderr.trim().slice(0, 160)}`);
+
+  // One host target is not one binary: musl and pre-AVX2 hosts need a different build of the same release.
+  // A build that cannot run here is the wrong candidate, not a failed install.
+  const bunFallbackRelease = join(root, 'bun-fallback-release');
+  cpSync(releaseDirectory, bunFallbackRelease, { recursive: true });
+  const unrunnable = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64.zip');
+  const fallback = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64-musl.zip', {
+    version: MINIMUM_BUN_RUNTIME_VERSION,
+  });
+  repinBunTable(join(bunFallbackRelease, 'install.sh'), [
+    `linux-x64 bun-linux-x64.zip ${unrunnable.sha256}`,
+    `linux-x64 bun-linux-x64-musl.zip ${fallback.sha256}`,
+  ]);
+  const bunFallbackHome = join(root, 'bun-fallback-home');
+  mkdirSync(bunFallbackHome);
+  const bunFallback = await run(['bash', join(bunFallbackRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: bunFallbackHome,
+      FAKE_RELEASE_ROOT: bunFallbackRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a pinned build that cannot run on this host advances to the next pinned build',
+    bunFallback.exitCode === 0
+      && existsSync(join(bunFallbackHome, '.bun', 'bin', 'bun'))
+      && /does not run on this host; trying the next pinned build/.test(bunFallback.stdout),
+    `${bunFallback.exitCode}: ${bunFallback.stdout.trim().split('\n').slice(-5).join(' | ')} ${bunFallback.stderr.trim().slice(0, 160)}`);
+
+  // An operator who does not want this script installing a runtime gets a refusal that names the floor,
+  // rather than a silent install of a bundle nothing on the host can execute.
+  const optOutHome = join(root, 'bun-opt-out-home');
+  mkdirSync(optOutHome);
+  const optOut = await run(['bash', join(bunInstallRelease, 'install.sh')], {
+    env: {
+      PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: optOutHome,
+      FAKE_RELEASE_ROOT: bunInstallRelease,
+      COSYNCING_SKIP_BUN_INSTALL: '1',
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('COSYNCING_SKIP_BUN_INSTALL=1 refuses by naming the floor instead of downloading a runtime',
+    optOut.exitCode !== 0
+      && optOut.stderr.includes(`Bun ${MINIMUM_BUN_RUNTIME_VERSION} or newer is required`)
+      && optOut.stderr.includes('COSYNCING_SKIP_BUN_INSTALL=1')
+      && !existsSync(join(optOutHome, '.bun'))
+      && !existsSync(join(optOutHome, '.cosyncing', 'bin', 'cosyncing')),
+    optOut.stderr.trim().slice(0, 200));
+
+  // A host with no Bun at all and no reachable release archive must fail loudly. The release copy used here
+  // carries no Bun archive, so the stub curl fails the fetch exactly as an offline host would.
+  const noBunBin = join(root, 'no-bun-bin');
+  mkdirSync(noBunBin);
+  writeFakeCurl(join(noBunBin, 'curl'));
+  const noBunHome = join(root, 'no-bun-home');
+  mkdirSync(noBunHome);
+  const noBun = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    env: {
+      PATH: pathWithoutBun(noBunBin),
+      HOME: noBunHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('an unreachable Bun archive fails the install rather than leaving an unrunnable bundle behind',
+    noBun.exitCode !== 0
+      && /could not download bun-linux-x64\.zip/.test(noBun.stderr)
+      && !existsSync(join(noBunHome, '.cosyncing', 'bin', 'cosyncing')),
+    noBun.stderr.trim().slice(0, 200));
+
+  // Defence in depth, and the one case only the signing key could reach: a manifest that STATES the wrong
+  // digest for the application while the right digest sits elsewhere in the same document. A check that
+  // scanned for the digest anywhere would pass this and call it agreement; reading it from the object the
+  // asset names is what makes the manifest's statement about this artifact rather than about a string.
+  // Re-signed with the fixture key, because an unsigned edit would be refused by the signature first and
+  // would prove nothing about the cross-check.
+  const misboundRelease = join(root, 'misbound-manifest-release');
+  cpSync(releaseDirectory, misboundRelease, { recursive: true });
+  const misboundManifest = JSON.parse(
+    readFileSync(join(misboundRelease, 'release-manifest.json'), 'utf8'),
+  );
+  const trueApplicationDigest = misboundManifest.jsApp.sha256;
+  misboundManifest.jsApp.sha256 = 'f'.repeat(64);
+  // Moved onto a compiled artifact's `sha256`, so the document still contains a literal
+  // `"sha256": "<the application's digest>"` — the exact shape a scan of the whole file would accept.
+  misboundManifest.artifacts[0].sha256 = trueApplicationDigest;
+  const misboundBytes = Buffer.from(`${JSON.stringify(misboundManifest, null, 2)}\n`, 'utf8');
+  writeFileSync(join(misboundRelease, 'release-manifest.json'), misboundBytes);
+  writeFileSync(
+    join(misboundRelease, 'release-manifest.json.sig'),
+    sign(null, misboundBytes, privateKey),
+  );
+  const misboundHome = join(root, 'misbound-manifest-home');
+  mkdirSync(misboundHome);
+  const misbound = await run(['bash', join(misboundRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: misboundHome,
+      FAKE_RELEASE_ROOT: misboundRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('the manifest cross-check reads the digest from the object that names the asset',
+    misbound.exitCode !== 0
+      && /signed manifest and checksum list disagree about/.test(misbound.stderr)
+      && !existsSync(join(misboundHome, '.cosyncing', 'bin', 'cosyncing')),
+    `${misbound.exitCode}: ${misbound.stderr.trim().slice(0, 160)}`);
+
+  // The checksum list refuses a repeated row for one asset; the manifest side must refuse a repeated object
+  // the same way rather than resolving it by taking the first. Reachable only with the signing key, so this
+  // is about the rule being right, not about an exposure.
+  const duplicateRelease = join(root, 'duplicate-manifest-release');
+  cpSync(releaseDirectory, duplicateRelease, { recursive: true });
+  const duplicateManifest = JSON.parse(
+    readFileSync(join(duplicateRelease, 'release-manifest.json'), 'utf8'),
+  );
+  duplicateManifest.artifacts.push({
+    ...duplicateManifest.artifacts[0],
+    name: RELEASE_JAVASCRIPT_APP_NAME,
+    sha256: 'e'.repeat(64),
+  });
+  const duplicateBytes = Buffer.from(`${JSON.stringify(duplicateManifest, null, 2)}\n`, 'utf8');
+  writeFileSync(join(duplicateRelease, 'release-manifest.json'), duplicateBytes);
+  writeFileSync(
+    join(duplicateRelease, 'release-manifest.json.sig'),
+    sign(null, duplicateBytes, privateKey),
+  );
+  const duplicateHome = join(root, 'duplicate-manifest-home');
+  mkdirSync(duplicateHome);
+  const duplicate = await run(['bash', join(duplicateRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: duplicateHome,
+      FAKE_RELEASE_ROOT: duplicateRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a signed manifest that names one asset twice is refused, not resolved to the first entry',
+    duplicate.exitCode !== 0
+      && /signed manifest names cosyncing-app\.js more than once/.test(duplicate.stderr)
+      && !existsSync(join(duplicateHome, '.cosyncing', 'bin', 'cosyncing')),
+    `${duplicate.exitCode}: ${duplicate.stderr.trim().slice(0, 160)}`);
 
   const tamperedManifestRelease = join(root, 'tampered-manifest-release');
   cpSync(releaseDirectory, tamperedManifestRelease, { recursive: true });
@@ -605,10 +1172,13 @@ exec /usr/bin/openssl "$@"
     },
   });
   const appleSiliconReceipt = join(appleSiliconHome, '.cosyncing', 'bootstrap-receipt');
-  check('bootstrap installs the darwin-arm64 artifact on Apple Silicon',
+  // One universal bundle now serves every supported host, so `uname` no longer picks an artifact. It still
+  // decides whether the host is supported at all, and the receipt records which host it ran on.
+  check('bootstrap installs the one universal bundle on Apple Silicon and records the host',
     appleSilicon.exitCode === 0
       && existsSync(join(appleSiliconHome, '.cosyncing', 'bin', 'cosyncing'))
-      && readFileSync(appleSiliconReceipt, 'utf8').includes('target=darwin-arm64'),
+      && readFileSync(appleSiliconReceipt, 'utf8').includes('host=darwin-arm64\n')
+      && readFileSync(appleSiliconReceipt, 'utf8').includes('target=universal\n'),
     `${appleSilicon.exitCode}: ${appleSilicon.stderr.trim().slice(0, 160)}`);
 
   const intelHome = join(root, 'darwin-x64-home');

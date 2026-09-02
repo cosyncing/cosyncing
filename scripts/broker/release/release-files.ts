@@ -14,12 +14,19 @@ import {
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
+  RELEASE_JAVASCRIPT_APP_TARGET,
   releaseManifestSigningPayload,
   verifyReleaseManifest,
   verifyReleasePairing,
   type ReleaseArtifact,
   type ReleaseManifest,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
+import {
+  BUN_RELEASE_DOWNLOAD_BASE,
+  MINIMUM_BUN_RUNTIME_VERSION,
+  PINNED_BUN_RUNTIME_ARCHIVES,
+} from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
@@ -54,6 +61,32 @@ export function releaseTargetArch(target: ReleaseTarget): 'x64' | 'arm64' {
 }
 export const WEB_SIDECAR_NAME = 'cosyncing-web-app.tar.gz' as const;
 
+/** The hosts the shell installer supports, and therefore the hosts it must carry a pinned Bun for. */
+const BOOTSTRAP_HOST_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
+
+/**
+ * The second signature, emitted as a SIBLING FILE rather than a second manifest field.
+ *
+ * A shipped broker hard-rejects any manifest whose `signature.algorithm` is not `ed25519`, so switching the
+ * manifest to another algorithm would strand every installed broker behind a channel it can no longer read —
+ * including the release that would have taught it the new algorithm. Ed25519 therefore stays, unchanged, and
+ * the manifest schema does not grow a second signature field.
+ *
+ * What this adds is a detached ECDSA P-256 signature over the same bytes, for a consumer that cannot verify
+ * Ed25519 at all: Windows PowerShell. PowerShell 5.1 runs on .NET Framework 4.x, Windows CNG exposes no
+ * Ed25519 algorithm identifier, and Windows ships no system OpenSSL — so a PowerShell installer has no way to
+ * check the Ed25519 signature and no WSL to hand off to. P-256 is verifiable there with no dependency.
+ *
+ * Each consumer verifies exactly ONE signature: the broker's own self-update path and `install.sh` verify
+ * Ed25519 as they always have and are untouched; a PowerShell installer verifies P-256. Nobody verifies both,
+ * and neither signature is a fallback for the other.
+ */
+export const P256_PUBLIC_KEY_NAME = 'release-key-p256.pem' as const;
+/** Suffix of a detached P-256 signature file: `<payload>.p256.sig` beside `<payload>.sig`. */
+export const P256_SIGNATURE_SUFFIX = '.p256.sig' as const;
+/** The same signature in the DER SEQUENCE form `openssl dgst -verify` reads. See {@link p1363ToDer}. */
+export const P256_DER_SIGNATURE_SUFFIX = '.p256.der.sig' as const;
+
 export interface PackageEvidence {
   schemaVersion: 1;
   product: typeof PRODUCT_IDENTITY.productName;
@@ -64,6 +97,40 @@ export interface PackageEvidence {
   buildDate: string;
   size: number;
   sha256: string;
+  packaged: true;
+  dirty: false;
+  schemaVersions: PublishedSchemaVersions;
+  contract: PublishedBrokerContract;
+  cleanCheckout: true;
+  offlineVersionCheck: true;
+  forbiddenContentCheck: true;
+  runner: {
+    os: 'linux' | 'darwin';
+    arch: 'x64' | 'arm64';
+    image: string;
+    invocationId: string;
+  };
+}
+
+/**
+ * Evidence for the JavaScript application bundle, alongside the native and web shapes.
+ *
+ * It records `distribution` where the native shape records `target`, because that is the term that actually
+ * distinguishes this artifact from the identical-looking bundle npm publishes. `runner` describes the host
+ * that produced the bytes and is provenance only: the artifact itself is bound to no machine code.
+ */
+export interface JavaScriptPackageEvidence {
+  schemaVersion: 1;
+  product: typeof PRODUCT_IDENTITY.productName;
+  artifact: typeof RELEASE_JAVASCRIPT_APP_NAME;
+  version: string;
+  target: typeof RELEASE_JAVASCRIPT_APP_TARGET;
+  distribution: 'bootstrap-js';
+  sourceCommit: string;
+  buildDate: string;
+  size: number;
+  sha256: string;
+  minimumBunVersion: string;
   packaged: true;
   dirty: false;
   schemaVersions: PublishedSchemaVersions;
@@ -114,6 +181,9 @@ export interface ReleaseAssemblyOptions {
   keyId: string;
   privateKeyPem: string;
   publicKeyPem: string;
+  /** ECDSA P-256 key pair for the sibling signatures. See {@link P256_PUBLIC_KEY_NAME}. */
+  p256PrivateKeyPem: string;
+  p256PublicKeyPem: string;
 }
 
 export interface ReleaseAssemblyResult {
@@ -204,6 +274,39 @@ function readWebEvidence(path: string, options: ReleaseAssemblyOptions): WebPack
   return value as WebPackageEvidence;
 }
 
+function readJavaScriptEvidence(
+  path: string,
+  options: ReleaseAssemblyOptions,
+): JavaScriptPackageEvidence {
+  const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<JavaScriptPackageEvidence>;
+  if (value.schemaVersion !== 1 || value.product !== PRODUCT_IDENTITY.productName
+      || value.artifact !== RELEASE_JAVASCRIPT_APP_NAME || value.version !== options.version
+      || value.target !== RELEASE_JAVASCRIPT_APP_TARGET
+      // The published bundle must be the installer-owned kind. `packaged` is true for the npm build too, so
+      // it cannot tell them apart, and an npm-owned bundle signed into this channel would tell every curl
+      // install to run `npm update` on files npm never placed.
+      || value.distribution !== 'bootstrap-js'
+      || value.sourceCommit !== options.sourceCommit || value.buildDate !== options.publishedAt
+      || value.packaged !== true || value.dirty !== false || value.cleanCheckout !== true
+      || value.offlineVersionCheck !== true || value.forbiddenContentCheck !== true
+      || typeof value.minimumBunVersion !== 'string'
+      || !/^\d+\.\d+\.\d+$/.test(value.minimumBunVersion)
+      || !exactObject(value.schemaVersions, PUBLISHED_SCHEMA_VERSIONS)
+      || !value.contract || !Number.isSafeInteger(value.contract.revision)
+      || !Number.isSafeInteger(value.contract.minimumClientRevision)
+      || typeof value.contract.surfaceHash !== 'string'
+      || !/^fnv1a32:[a-f0-9]{8}$/.test(value.contract.surfaceHash)
+      || !value.runner || (value.runner.os !== 'linux' && value.runner.os !== 'darwin')
+      || (value.runner.arch !== 'x64' && value.runner.arch !== 'arm64')
+      || typeof value.runner.image !== 'string' || !value.runner.image
+      || typeof value.runner.invocationId !== 'string' || !value.runner.invocationId
+      || !Number.isSafeInteger(value.size) || Number(value.size) <= 0
+      || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw new Error('JavaScript package evidence is invalid');
+  }
+  return value as JavaScriptPackageEvidence;
+}
+
 function writeJson(path: string, value: unknown): Uint8Array {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
   writeFileSync(path, bytes, { mode: 0o644 });
@@ -218,29 +321,138 @@ function writeSignature(path: string, bytes: Uint8Array, privateKeyPem: string):
   writeFileSync(path, detachedSignature(bytes, privateKeyPem), { mode: 0o644 });
 }
 
+/**
+ * Detached ECDSA P-256 signature in IEEE P1363 form — the raw 64-byte `r || s`, not a DER SEQUENCE.
+ *
+ * .NET's `ECDsa.VerifyData(byte[], byte[], HashAlgorithmName)` — the only overload Windows PowerShell 5.1's
+ * .NET Framework 4.x offers — reads exactly this layout, so a PowerShell installer verifies with two lines
+ * and no ASN.1 parsing.
+ */
+function detachedP256Signature(bytes: Uint8Array, privateKeyPem: string): Uint8Array {
+  return sign('sha256', bytes, { key: createPrivateKey(privateKeyPem), dsaEncoding: 'ieee-p1363' });
+}
+
+/**
+ * The same signature re-encoded as the DER SEQUENCE `openssl dgst -verify` reads.
+ *
+ * Two encodings exist because the two consumers can each read only one natively, and neither can be asked to
+ * transcode: PowerShell 5.1 has no DER overload, and openssl has no P1363 input. Encoding here rather than
+ * in either consumer keeps ASN.1 out of a shell installer, where getting it wrong is a security bug.
+ *
+ * It is a TRANSCODE of one signature, never a second signing. ECDSA is randomized, so signing twice would
+ * produce two independent signatures that could disagree — one valid and one not — and a host would have no
+ * way to tell which encoding was the broken one. Re-encoding the same `r` and `s` makes the two files two
+ * spellings of a single fact, and both are verified against their own encoder before either is written.
+ */
+function p1363ToDer(signature: Uint8Array): Uint8Array {
+  if (signature.length !== 64) throw new Error('P-256 P1363 signature must be 64 bytes');
+  const integer = (raw: Uint8Array): number[] => {
+    let start = 0;
+    while (start < raw.length - 1 && raw[start] === 0) start += 1;
+    const body = Array.from(raw.subarray(start));
+    // DER integers are signed, so a leading byte with the high bit set needs a zero ahead of it or it
+    // would decode as negative.
+    if ((body[0]! & 0x80) !== 0) body.unshift(0);
+    return [0x02, body.length, ...body];
+  };
+  const r = integer(signature.subarray(0, 32));
+  const s = integer(signature.subarray(32));
+  // A P-256 SEQUENCE is at most 70 bytes, so the length is always a single byte.
+  return Uint8Array.from([0x30, r.length + s.length, ...r, ...s]);
+}
+
+function writeP256Signature(path: string, bytes: Uint8Array, options: {
+  privateKeyPem: string;
+  publicKeyPem: string;
+  derPath: string;
+}): void {
+  const signature = detachedP256Signature(bytes, options.privateKeyPem);
+  const der = p1363ToDer(signature);
+  const publicKey = createPublicKey(options.publicKeyPem);
+  // Self-verify BOTH encodings before either is written. The installer's macOS path now depends on the DER
+  // one, and a transcoding bug there would degrade a verified install into a refused one on exactly the
+  // hosts this signature exists to protect.
+  if (!verify('sha256', bytes, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)
+      || !verify('sha256', bytes, { key: publicKey, dsaEncoding: 'der' }, der)) {
+    throw new Error(`P-256 signature failed its own verification: ${basename(path)}`);
+  }
+  writeFileSync(path, signature, { mode: 0o644 });
+  writeFileSync(options.derPath, der, { mode: 0o644 });
+}
+
 function renderBootstrap(options: {
   version: string;
   baseUrl: string;
   keyId: string;
   publicKeyPem: string;
-  artifacts: readonly ReleaseArtifact[];
+  p256PublicKeyPem: string;
+  minimumBunVersion: string;
+  // The installer places exactly these two files. It no longer selects among per-host machine-code
+  // artifacts: one JavaScript bundle runs on every supported host, and the web client it is paired with
+  // is the same archive everywhere too, so the host only decides whether the install is supported at all.
+  application: { name: string; sha256: string; size: number };
+  webApp: { name: string; sha256: string; size: number };
 }): string {
   const publicKeyB64 = Buffer.from(options.publicKeyPem.trim() + '\n', 'utf8').toString('base64');
+  // Both trust anchors are baked in, for the same reason: the installer must verify against the key IT
+  // carries, never one fetched alongside the thing being verified.
+  const p256PublicKeyB64 = Buffer.from(options.p256PublicKeyPem.trim() + '\n', 'utf8').toString('base64');
   // Bake the per-artifact digests into the script itself. Stock macOS ships LibreSSL, which cannot load an
   // Ed25519 public key at all, so an installer whose ONLY integrity check is an openssl signature simply
   // cannot run there. The embedded table gives every host a real, mandatory check on the bytes it is about
   // to install, with the script — delivered over TLS — as its trust root; signature verification remains
   // required wherever openssl can actually perform it.
-  const artifactTable = options.artifacts
-    .map((artifact) => `${artifact.target} ${artifact.sha256} ${artifact.size}`)
-    .join('\n');
-  if (/['\\]/.test(artifactTable)) throw new Error('artifact table is not safe to embed');
+  //
+  // Rows are keyed by asset NAME rather than by target. The old table was keyed by target because the
+  // installer picked one machine-code artifact out of several; keyed that way, the web sidecar — which has
+  // no target — could not be listed at all, which is why the installer never checked it.
+  const rows = [options.application, options.webApp];
+  const artifactTable = rows.map((row) => `${row.name} ${row.sha256} ${row.size}`).join('\n');
+  // The Bun the installer may place is pinned by the same rule as everything else it places. Rendering it
+  // from the runtime constant rather than restating it here is what keeps the installer's pin and the
+  // floor the application enforces from drifting apart.
+  const bunRows = BOOTSTRAP_HOST_TARGETS.flatMap((host) => {
+    const builds = PINNED_BUN_RUNTIME_ARCHIVES[host];
+    if (!builds || builds.length === 0) {
+      throw new Error(`no pinned Bun build is published for installer host ${host}`);
+    }
+    return builds.map((build) => {
+      if (!/^[a-z0-9][a-z0-9.-]*\.zip$/.test(build.asset) || !/^[a-f0-9]{64}$/.test(build.sha256)) {
+        throw new Error(`pinned Bun build is malformed for ${host}`);
+      }
+      return `${host} ${build.asset} ${build.sha256}`;
+    });
+  });
+  if (new Set(bunRows).size !== bunRows.length) throw new Error('pinned Bun table repeats a build');
+  const bunTable = bunRows.join('\n');
+  const embedded = [
+    artifactTable,
+    bunTable,
+    BUN_RELEASE_DOWNLOAD_BASE,
+    options.version,
+    options.baseUrl,
+    options.keyId,
+    options.minimumBunVersion,
+    options.application.name,
+    options.webApp.name,
+  ].join('\n');
+  // Every one of these is interpolated into a single-quoted shell assignment.
+  if (/['\\]/.test(embedded)) throw new Error('bootstrap substitution is not safe to embed');
+  if (!/^\d+\.\d+\.\d+$/.test(options.minimumBunVersion)) {
+    throw new Error('minimum Bun version is not a release version');
+  }
   return readFileSync(BOOTSTRAP_TEMPLATE, 'utf8')
     .replaceAll('@VERSION@', options.version)
     .replaceAll('@BASE_URL@', options.baseUrl)
     .replaceAll('@KEY_ID@', options.keyId)
     .replaceAll('@PUBLIC_KEY_B64@', publicKeyB64)
-    .replaceAll('@ARTIFACT_TABLE@', artifactTable);
+    .replaceAll('@P256_PUBLIC_KEY_B64@', p256PublicKeyB64)
+    .replaceAll('@APP_ASSET@', options.application.name)
+    .replaceAll('@WEB_ASSET@', options.webApp.name)
+    .replaceAll('@MINIMUM_BUN@', options.minimumBunVersion)
+    .replaceAll('@ARTIFACT_TABLE@', artifactTable)
+    .replaceAll('@BUN_TABLE@', bunTable)
+    .replaceAll('@BUN_RELEASE_BASE@', BUN_RELEASE_DOWNLOAD_BASE);
 }
 
 function provenance(options: {
@@ -282,6 +494,60 @@ function provenance(options: {
         },
         byproducts: [{
           name: 'native-package-evidence',
+          content: {
+            runnerImage: options.evidence.runner.image,
+            runnerArchitecture: options.evidence.runner.arch,
+            offlineVersionCheck: true,
+            forbiddenContentCheck: true,
+          },
+        }],
+      },
+    },
+  };
+}
+
+function javaScriptProvenance(options: {
+  evidence: JavaScriptPackageEvidence;
+  inventorySha256: string;
+  sbomSha256: string;
+}): Record<string, unknown> {
+  return {
+    _type: 'https://in-toto.io/Statement/v1',
+    subject: [{ name: options.evidence.artifact, digest: { sha256: options.evidence.sha256 } }],
+    predicateType: 'https://slsa.dev/provenance/v1',
+    predicate: {
+      buildDefinition: {
+        // A distinct build type from the compiled one, and deliberately so: this artifact is produced
+        // WITHOUT `--compile`, embeds no runtime, and is not governed by the compiled-binary control.
+        buildType: 'https://cosyncing.dev/build/bun-bundle/v1',
+        externalParameters: {
+          version: options.evidence.version,
+          target: options.evidence.target,
+          distribution: options.evidence.distribution,
+          minimumBunVersion: options.evidence.minimumBunVersion,
+          schemaVersions: options.evidence.schemaVersions,
+          contract: options.evidence.contract,
+        },
+        internalParameters: {
+          buildDate: options.evidence.buildDate,
+          cleanCheckout: options.evidence.cleanCheckout,
+          softwareInventorySha256: options.inventorySha256,
+          spdxSbomSha256: options.sbomSha256,
+        },
+        resolvedDependencies: [{
+          uri: 'git+https://github.com/cosyncing/cosyncing',
+          digest: { gitCommit: options.evidence.sourceCommit },
+        }],
+      },
+      runDetails: {
+        builder: { id: `https://github.com/cosyncing/cosyncing/actions/runs/${options.evidence.runner.invocationId}` },
+        metadata: {
+          invocationId: options.evidence.runner.invocationId,
+          startedOn: options.evidence.buildDate,
+          finishedOn: options.evidence.buildDate,
+        },
+        byproducts: [{
+          name: 'javascript-package-evidence',
           content: {
             runnerImage: options.evidence.runner.image,
             runnerArchitecture: options.evidence.runner.arch,
@@ -354,12 +620,35 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   if (!verify(null, keyProbe, publicKey, sign(null, keyProbe, privateKey))) {
     throw new Error('release signing key pair does not match');
   }
+  // The P-256 pair is validated BESIDE the Ed25519 guard above, never in place of it. Relaxing that guard
+  // into "either algorithm" would let a release signed with only the P-256 key through, and every installed
+  // broker would reject it — the exact failure keeping Ed25519 avoids.
+  const p256PrivateKey = createPrivateKey(options.p256PrivateKeyPem);
+  const p256PublicKey = createPublicKey(options.p256PublicKeyPem);
+  if (p256PrivateKey.asymmetricKeyType !== 'ec' || p256PublicKey.asymmetricKeyType !== 'ec'
+      || p256PrivateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+      || p256PublicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw new Error('release sibling signing keys must be ECDSA P-256');
+  }
+  if (!verify(
+    'sha256',
+    keyProbe,
+    { key: p256PublicKey, dsaEncoding: 'ieee-p1363' },
+    sign('sha256', keyProbe, { key: p256PrivateKey, dsaEncoding: 'ieee-p1363' }),
+  )) {
+    throw new Error('release sibling signing key pair does not match');
+  }
 
   mkdirSync(options.outputDirectory, { recursive: true });
   const publicKeyName = 'release-key.pem';
   writeFileSync(
     join(options.outputDirectory, publicKeyName),
     `${options.publicKeyPem.trim()}\n`,
+    { mode: 0o644 },
+  );
+  writeFileSync(
+    join(options.outputDirectory, P256_PUBLIC_KEY_NAME),
+    `${options.p256PublicKeyPem.trim()}\n`,
     { mode: 0o644 },
   );
   const inventory = createCompiledSoftwareInventory({
@@ -438,6 +727,37 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     writeSignature(join(options.outputDirectory, `${name}.sig`), bytes, options.privateKeyPem);
   }
 
+  // The JavaScript application, assembled beside the compiled set and bound to the same broker contract.
+  const jsEvidence = readJavaScriptEvidence(
+    join(options.evidenceDirectory, `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`),
+    options,
+  );
+  if (!exactObject(jsEvidence.contract, nativeContract)) {
+    throw new Error('native and JavaScript package evidence disagree on broker contract identity');
+  }
+  const jsArtifactPath = join(options.artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
+  const jsBytes = readFileSync(jsArtifactPath);
+  const jsStats = statSync(jsArtifactPath);
+  if (!jsStats.isFile() || jsStats.size !== jsEvidence.size || sha256(jsBytes) !== jsEvidence.sha256) {
+    throw new Error('JavaScript application no longer matches package evidence');
+  }
+  writeFileSync(join(options.outputDirectory, RELEASE_JAVASCRIPT_APP_NAME), jsBytes, { mode: 0o755 });
+  const jsProvenanceName = `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl`;
+  const jsStatementBytes = Buffer.from(
+    `${JSON.stringify(javaScriptProvenance({
+      evidence: jsEvidence,
+      inventorySha256: inventoryHash,
+      sbomSha256: sbomHash,
+    }))}\n`,
+    'utf8',
+  );
+  writeFileSync(join(options.outputDirectory, jsProvenanceName), jsStatementBytes, { mode: 0o644 });
+  writeSignature(
+    join(options.outputDirectory, `${jsProvenanceName}.sig`),
+    jsStatementBytes,
+    options.privateKeyPem,
+  );
+
   const webEvidence = readWebEvidence(
     join(options.evidenceDirectory, `${WEB_SIDECAR_NAME}.evidence.json`),
     options,
@@ -490,6 +810,15 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     publishedAt,
     artifacts,
     contract: { ...nativeContract },
+    jsApp: {
+      name: RELEASE_JAVASCRIPT_APP_NAME,
+      target: RELEASE_JAVASCRIPT_APP_TARGET,
+      size: jsEvidence.size,
+      sha256: jsEvidence.sha256,
+      url: `${releaseBase}/${RELEASE_JAVASCRIPT_APP_NAME}`,
+      provenanceUrl: `${releaseBase}/${jsProvenanceName}`,
+      minimumBunVersion: jsEvidence.minimumBunVersion,
+    },
     webApp: {
       name: WEB_SIDECAR_NAME,
       mount: '/cosy/',
@@ -517,10 +846,19 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   for (const target of RELEASE_TARGETS) {
     verifyReleaseManifest({ value: manifest, target, trustedKeys: { [options.keyId]: options.publicKeyPem } });
   }
-  verifyReleasePairing(manifest);
+  const paired = verifyReleasePairing(manifest);
   const manifestName = 'release-manifest.json';
   const manifestBytes = writeJson(join(options.outputDirectory, manifestName), manifest);
   writeSignature(join(options.outputDirectory, `${manifestName}.sig`), manifestBytes, options.privateKeyPem);
+  writeP256Signature(
+    join(options.outputDirectory, `${manifestName}${P256_SIGNATURE_SUFFIX}`),
+    manifestBytes,
+    {
+      privateKeyPem: options.p256PrivateKeyPem,
+      publicKeyPem: options.p256PublicKeyPem,
+      derPath: join(options.outputDirectory, `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`),
+    },
+  );
 
   const bootstrapName = 'install.sh';
   const bootstrap = renderBootstrap({
@@ -528,7 +866,10 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     baseUrl: releaseBase,
     keyId: options.keyId,
     publicKeyPem: options.publicKeyPem,
-    artifacts,
+    p256PublicKeyPem: options.p256PublicKeyPem,
+    minimumBunVersion: paired.jsApp.minimumBunVersion,
+    application: paired.jsApp,
+    webApp: paired.webApp,
   });
   writeFileSync(join(options.outputDirectory, bootstrapName), bootstrap, { mode: 0o755 });
   chmodSync(join(options.outputDirectory, bootstrapName), 0o755);
@@ -536,6 +877,9 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   const checksumCandidates = [
     ...artifacts.map((artifact) => artifact.name),
     ...artifacts.flatMap((artifact) => [`${artifact.name}.intoto.jsonl`, `${artifact.name}.intoto.jsonl.sig`]),
+    RELEASE_JAVASCRIPT_APP_NAME,
+    jsProvenanceName,
+    `${jsProvenanceName}.sig`,
     WEB_SIDECAR_NAME,
     webProvenanceName,
     `${webProvenanceName}.sig`,
@@ -545,8 +889,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     noticeName,
     thirdPartyNoticesName,
     publicKeyName,
+    P256_PUBLIC_KEY_NAME,
     manifestName,
     `${manifestName}.sig`,
+    `${manifestName}${P256_SIGNATURE_SUFFIX}`,
+    `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`,
     bootstrapName,
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
@@ -554,8 +901,23 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   const checksumBytes = Buffer.from(checksums, 'utf8');
   writeFileSync(join(options.outputDirectory, 'SHA256SUMS'), checksumBytes, { mode: 0o644 });
   writeSignature(join(options.outputDirectory, 'SHA256SUMS.sig'), checksumBytes, options.privateKeyPem);
+  writeP256Signature(
+    join(options.outputDirectory, `SHA256SUMS${P256_SIGNATURE_SUFFIX}`),
+    checksumBytes,
+    {
+      privateKeyPem: options.p256PrivateKeyPem,
+      publicKeyPem: options.p256PublicKeyPem,
+      derPath: join(options.outputDirectory, `SHA256SUMS${P256_DER_SIGNATURE_SUFFIX}`),
+    },
+  );
 
-  const publishedFiles = [...checksumCandidates, 'SHA256SUMS', 'SHA256SUMS.sig'].sort();
+  const publishedFiles = [
+    ...checksumCandidates,
+    'SHA256SUMS',
+    'SHA256SUMS.sig',
+    `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
+    `SHA256SUMS${P256_DER_SIGNATURE_SUFFIX}`,
+  ].sort();
   const actualFiles = [...new Bun.Glob('*').scanSync({ cwd: options.outputDirectory, onlyFiles: true })].sort();
   if (JSON.stringify(actualFiles) !== JSON.stringify(publishedFiles)) {
     throw new Error(`release directory contains unexpected files: ${actualFiles.join(', ')}`);
