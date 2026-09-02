@@ -2312,5 +2312,179 @@
         "example": "5"
       }
     }
+  },
+  "usageCardTierOverview": "COSYNCING · 本机概况",
+  "@usageCardTierOverview": {
+    "description": "Green-tier card header. Counts only."
+  },
+  "usageCardTierProjects": "COSYNCING · 项目明细",
+  "@usageCardTierProjects": {
+    "description": "Amber-tier card header. Carries project names."
+  },
+  "usageCardPeriodYtd": "{year} 年 · 年初至今",
+  "@usageCardPeriodYtd": {
+    "description": "Period line on the export card.",
+    "placeholders": {
+      "year": {
+        "type": "String",
+        "example": "2026"
+      }
+    }
+  },
+  "usageCardRange": "{from} – {to} · {machine}全部 agent 活动",
+  "@usageCardRange": {
+    "description": "Scope line on the export card. The machine is a nickname the sender chose; the hostname is never used.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "2026-01-01"
+      },
+      "to": {
+        "type": "String",
+        "example": "2026-09-01"
+      },
+      "machine": {
+        "type": "String",
+        "example": "this machine"
+      }
+    }
+  },
+  "usageCardHeroSub": "token · {sessions} 个会话 · {requests} 次请求",
+  "@usageCardHeroSub": {
+    "description": "Unit and counts under the card hero figure.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "2,545"
+      },
+      "requests": {
+        "type": "String",
+        "example": "435K"
+      }
+    }
+  },
+  "usageCardDaysActive": "{total} 天中 {active} 天有记录",
+  "@usageCardDaysActive": {
+    "description": "Card stat: coverage of the window.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "230"
+      },
+      "total": {
+        "type": "String",
+        "example": "242"
+      }
+    }
+  },
+  "usageCardStreak": "连续编程 {count} 天",
+  "@usageCardStreak": {
+    "description": "Card stat: the current streak.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "171"
+      }
+    }
+  },
+  "usageCardBusiest": "最忙的一天 {date} · {tokens}",
+  "@usageCardBusiest": {
+    "description": "Card stat: the peak day. Overview card only.",
+    "placeholders": {
+      "date": {
+        "type": "String",
+        "example": "Sep 1"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.6B"
+      }
+    }
+  },
+  "usageCardActiveTime": "活跃时间",
+  "@usageCardActiveTime": {
+    "description": "Card stat label for estimated active time."
+  },
+  "usageCardProjectsNote": "项目明细 · 共 {count} 个 · 按 token 排序",
+  "@usageCardProjectsNote": {
+    "description": "Amber section header on the project-detail card.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "257"
+      }
+    }
+  },
+  "usageCardGroupNote": "按仓库分组 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
+  "@usageCardGroupNote": {
+    "description": "Closes the project list by reconciling it against the period total, so a shared image cannot be read as the whole picture.",
+    "placeholders": {
+      "unattributed": {
+        "type": "String",
+        "example": "1%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "10%"
+      }
+    }
+  },
+  "usageCardManifestOverview": "仅统计数字 · 不含项目名称 · 不含提示词原文",
+  "@usageCardManifestOverview": {
+    "description": "The card prints its own content policy: a recipient audits it by reading it."
+  },
+  "usageCardManifestProjects": "含项目名称 · 不含提示词原文 · 请谨慎分享",
+  "@usageCardManifestProjects": {
+    "description": "As above, amber tier."
+  },
+  "usageCardAttribution": "cosyncing · tokdash",
+  "@usageCardAttribution": {
+    "description": "Attribution line in the card footer."
+  },
+  "usageShareTitle": "分享",
+  "@usageShareTitle": {
+    "description": "Share section heading."
+  },
+  "usageSharePreamble": "两张图，两种隐私级别。「本机概况」只含统计数字，不含身份信息，可直接发布；「项目明细」包含项目名称，请谨慎分享或自己留存。费用默认关闭，开启后也始终标注为 API 目录价，而非实际账单。",
+  "@usageSharePreamble": {
+    "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
+  },
+  "usageExportOverview": "导出概况卡片",
+  "@usageExportOverview": {
+    "description": "Action for the green-tier card."
+  },
+  "usageExportProject": "导出项目明细",
+  "@usageExportProject": {
+    "description": "Action for the amber-tier card."
+  },
+  "usageExportBothThemes": "每次导出生成浅色与深色两张 PNG，与 app 当前主题无关。",
+  "@usageExportBothThemes": {
+    "description": "The recipient picks the legible one; the sender never thinks about theme state."
+  },
+  "usageCostToggle": "包含费用（按 API 目录价，非实际账单）",
+  "@usageCostToggle": {
+    "description": "The only toggle on the cards, and it stays inside the green tier."
+  },
+  "usageMachineLabelField": "本机名称",
+  "@usageMachineLabelField": {
+    "description": "Nickname field for the export cards."
+  },
+  "usageExportSaved": "已保存 {light} 与 {dark}",
+  "@usageExportSaved": {
+    "description": "Confirmation naming both written files.",
+    "placeholders": {
+      "light": {
+        "type": "String",
+        "example": "usage-2026-light.png"
+      },
+      "dark": {
+        "type": "String",
+        "example": "usage-2026-dark.png"
+      }
+    }
+  },
+  "usageExportFailed": "导出失败。",
+  "@usageExportFailed": {
+    "description": "Export failure notice."
   }
 }

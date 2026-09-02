@@ -11,6 +11,7 @@ import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_hero.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_podium.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_share_section.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -225,6 +226,8 @@ class _UsageReportBody extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           UsageAgentTable(tools: report.tools, locale: locale),
+          const SizedBox(height: 24),
+          UsageShareSection(report: report, locale: locale),
         ],
         const SizedBox(height: 24),
         _Footer(report: report, locale: locale),

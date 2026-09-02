@@ -102,8 +102,12 @@ void main() {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
-    expect(find.text('19.9B'), findsOneWidget);
+    final hero = find.byKey(const Key('usage-report-hero'));
+    expect(hero, findsOneWidget);
+    expect(
+      find.descendant(of: hero, matching: find.text('19.9B')),
+      findsOneWidget,
+    );
 
     // The scope is the machine, never "your cosyncing sessions": tokdash sees
     // every agent on this host and cosyncing adapts a subset.
@@ -197,10 +201,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('19.9B'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('usage-report-hero')),
+        matching: find.text('19.9B'),
+      ),
+      findsOneWidget,
+    );
     // The qualifier appears wherever a cost does — the sentence, the podium
     // tile, the footer — and never once without one.
     expect(find.textContaining('非实际账单'), findsWidgets);
-    expect(find.textContaining('本机全部 agent 活动'), findsOneWidget);
+    // The export cards carry their own scope line, so this asserts the page's.
+    final scope = tester.widget<Text>(
+      find.byKey(const Key('usage-report-scope')),
+    );
+    expect(scope.data, contains('本机全部 agent 活动'));
   });
 }

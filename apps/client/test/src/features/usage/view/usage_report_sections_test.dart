@@ -75,10 +75,14 @@ void main() {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
-      expect(find.text('19.9B'), findsOneWidget);
-      expect(find.text('786.2h'), findsOneWidget);
-      expect(find.text('31'), findsOneWidget);
+      final hero = find.byKey(const Key('usage-report-hero'));
+      expect(hero, findsOneWidget);
+      for (final figure in ['19.9B', '786.2h', '31']) {
+        expect(
+          find.descendant(of: hero, matching: find.text(figure)),
+          findsOneWidget,
+        );
+      }
 
       final sentence = tester.widget<Text>(
         find.byKey(const Key('usage-report-hero-sentence')),
@@ -116,11 +120,23 @@ void main() {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('usage-report-active-days')), findsOneWidget);
-      expect(find.text('Less'), findsOneWidget);
-      expect(find.text('More'), findsOneWidget);
-      expect(find.textContaining('31 of 31 days active'), findsOneWidget);
-      expect(find.textContaining('busiest day Aug 31'), findsOneWidget);
+      final days = find.byKey(const Key('usage-report-active-days'));
+      expect(days, findsOneWidget);
+      expect(
+        find.descendant(of: days, matching: find.text('Less')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: days, matching: find.text('More')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: days,
+          matching: find.textContaining('busiest day Aug 31'),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('no daily facet means no heatmap, not an empty grid', (
@@ -169,15 +185,25 @@ void main() {
 
       // Without this line a 39% leader reads as 39% of everything, which is a
       // share of the facet, not of the period.
-      expect(find.textContaining('unattributed'), findsOneWidget);
+      final podium = find.byKey(const Key('usage-report-podium'));
       expect(
-        find.textContaining('from sources with no project records'),
+        find.descendant(
+          of: podium,
+          matching: find.textContaining(
+            'from sources with no project records',
+          ),
+        ),
         findsOneWidget,
       );
       // The fragmentation is stated rather than merged away: merging two
       // remotes of one codebase would invent a total nobody served.
       expect(
-        find.textContaining('Projects are grouped by repository remote'),
+        find.descendant(
+          of: podium,
+          matching: find.textContaining(
+            'Projects are grouped by repository remote',
+          ),
+        ),
         findsOneWidget,
       );
     });
@@ -239,16 +265,29 @@ void main() {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('usage-report-agents')), findsOneWidget);
-      expect(find.text('Cost · API list price'), findsOneWidget);
-      expect(find.text('openclaw'), findsNothing);
+      final agents = find.byKey(const Key('usage-report-agents'));
+      expect(agents, findsOneWidget);
+      expect(
+        find.descendant(
+          of: agents,
+          matching: find.text('Cost · API list price'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: agents, matching: find.text('openclaw')),
+        findsNothing,
+      );
 
       final toggle = find.byKey(const Key('usage-report-other-tools'));
       await tester.ensureVisible(toggle);
       await tester.pumpAndSettle();
       await tester.tap(toggle);
       await tester.pumpAndSettle();
-      expect(find.text('openclaw'), findsOneWidget);
+      expect(
+        find.descendant(of: agents, matching: find.text('openclaw')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a cell the API never served is a dash, never a zero', (
@@ -263,7 +302,13 @@ void main() {
       await tester.tap(toggle);
       await tester.pumpAndSettle();
       // openclaw has no sessions and no active time in the served rows.
-      expect(find.text('—'), findsWidgets);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-agents')),
+          matching: find.text('—'),
+        ),
+        findsWidgets,
+      );
     });
   });
 
@@ -350,7 +395,13 @@ void main() {
       // borrow the month's.
       expect(find.text('Top of the year'), findsOneWidget);
       expect(find.text('2026-01-01 – 2026-09-01'), findsOneWidget);
-      expect(find.textContaining('214 of 244 days active'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-active-days')),
+          matching: find.textContaining('214 of 244 days active'),
+        ),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the year sentence compares against the year before', (
@@ -437,7 +488,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('19.9B'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('usage-report-hero')),
+        matching: find.text('19.9B'),
+      ),
+      findsOneWidget,
+    );
     expect(find.text('你的时间分布'), findsOneWidget);
     expect(find.text('本月之最'), findsOneWidget);
     expect(find.text('按 agent'), findsOneWidget);

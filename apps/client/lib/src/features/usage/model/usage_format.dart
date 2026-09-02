@@ -120,6 +120,17 @@ String formatUsageCount(num value, {String? locale}) {
   return _fixed(value, 0, locale);
 }
 
+/// A one-based rank from a zero-based index, e.g. `1`.
+///
+/// Composed here rather than in the widget so a rank cannot pick up a
+/// different notation on a different surface.
+String formatUsageRank(int index, {String? locale}) =>
+    _fixed(index + 1, 0, locale);
+
+/// A one-based rank carrying its number sign, e.g. `#1`.
+String formatUsageRankLabel(int index, {String? locale}) =>
+    '#${formatUsageRank(index, locale: locale)}';
+
 /// A percentage magnitude with one decimal, e.g. `15.5%`.
 ///
 /// Separate from [formatUsageShare], which drops to whole percents above ten:

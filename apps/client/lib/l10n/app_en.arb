@@ -5375,5 +5375,179 @@
         "example": "5"
       }
     }
+  },
+  "usageCardTierOverview": "COSYNCING · THIS MACHINE",
+  "@usageCardTierOverview": {
+    "description": "Green-tier card header. Counts only."
+  },
+  "usageCardTierProjects": "COSYNCING · PROJECT DETAIL",
+  "@usageCardTierProjects": {
+    "description": "Amber-tier card header. Carries project names."
+  },
+  "usageCardPeriodYtd": "{year} · year to date",
+  "@usageCardPeriodYtd": {
+    "description": "Period line on the export card.",
+    "placeholders": {
+      "year": {
+        "type": "String",
+        "example": "2026"
+      }
+    }
+  },
+  "usageCardRange": "{from} – {to} · all agent activity on {machine}",
+  "@usageCardRange": {
+    "description": "Scope line on the export card. The machine is a nickname the sender chose; the hostname is never used.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "2026-01-01"
+      },
+      "to": {
+        "type": "String",
+        "example": "2026-09-01"
+      },
+      "machine": {
+        "type": "String",
+        "example": "this machine"
+      }
+    }
+  },
+  "usageCardHeroSub": "tokens · {sessions} sessions · {requests} requests",
+  "@usageCardHeroSub": {
+    "description": "Unit and counts under the card hero figure.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "2,545"
+      },
+      "requests": {
+        "type": "String",
+        "example": "435K"
+      }
+    }
+  },
+  "usageCardDaysActive": "{active} of {total} days active",
+  "@usageCardDaysActive": {
+    "description": "Card stat: coverage of the window.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "230"
+      },
+      "total": {
+        "type": "String",
+        "example": "242"
+      }
+    }
+  },
+  "usageCardStreak": "{count}-day streak",
+  "@usageCardStreak": {
+    "description": "Card stat: the current streak.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "171"
+      }
+    }
+  },
+  "usageCardBusiest": "Busiest {date} · {tokens}",
+  "@usageCardBusiest": {
+    "description": "Card stat: the peak day. Overview card only.",
+    "placeholders": {
+      "date": {
+        "type": "String",
+        "example": "Sep 1"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.6B"
+      }
+    }
+  },
+  "usageCardActiveTime": "Active time",
+  "@usageCardActiveTime": {
+    "description": "Card stat label for estimated active time."
+  },
+  "usageCardProjectsNote": "Projects · {count} · ranked by tokens",
+  "@usageCardProjectsNote": {
+    "description": "Amber section header on the project-detail card.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "257"
+      }
+    }
+  },
+  "usageCardGroupNote": "Grouped by repository · {unattributed} unattributed · {gap} from sources with no project records",
+  "@usageCardGroupNote": {
+    "description": "Closes the project list by reconciling it against the period total, so a shared image cannot be read as the whole picture.",
+    "placeholders": {
+      "unattributed": {
+        "type": "String",
+        "example": "1%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "10%"
+      }
+    }
+  },
+  "usageCardManifestOverview": "Counts only · no project names · no prompt text",
+  "@usageCardManifestOverview": {
+    "description": "The card prints its own content policy: a recipient audits it by reading it."
+  },
+  "usageCardManifestProjects": "Counts + project names · no prompt text · share deliberately",
+  "@usageCardManifestProjects": {
+    "description": "As above, amber tier."
+  },
+  "usageCardAttribution": "cosyncing · tokdash",
+  "@usageCardAttribution": {
+    "description": "Attribution line in the card footer."
+  },
+  "usageShareTitle": "Share",
+  "@usageShareTitle": {
+    "description": "Share section heading."
+  },
+  "usageSharePreamble": "Two images, two privacy levels. “This machine” contains counts only — nothing identifying, safe to post. “Project detail” adds project names — share it deliberately, or keep it. Cost stays off unless you turn it on, and is always labelled as API list price, never as money spent.",
+  "@usageSharePreamble": {
+    "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
+  },
+  "usageExportOverview": "Export overview card",
+  "@usageExportOverview": {
+    "description": "Action for the green-tier card."
+  },
+  "usageExportProject": "Export project detail",
+  "@usageExportProject": {
+    "description": "Action for the amber-tier card."
+  },
+  "usageExportBothThemes": "Each export writes two PNGs — light and dark — whatever theme the app is in.",
+  "@usageExportBothThemes": {
+    "description": "The recipient picks the legible one; the sender never thinks about theme state."
+  },
+  "usageCostToggle": "Include cost (API list price, not your bill)",
+  "@usageCostToggle": {
+    "description": "The only toggle on the cards, and it stays inside the green tier."
+  },
+  "usageMachineLabelField": "Name for this machine",
+  "@usageMachineLabelField": {
+    "description": "Nickname field for the export cards."
+  },
+  "usageExportSaved": "Saved {light} and {dark}",
+  "@usageExportSaved": {
+    "description": "Confirmation naming both written files.",
+    "placeholders": {
+      "light": {
+        "type": "String",
+        "example": "usage-2026-light.png"
+      },
+      "dark": {
+        "type": "String",
+        "example": "usage-2026-dark.png"
+      }
+    }
+  },
+  "usageExportFailed": "Could not write the export.",
+  "@usageExportFailed": {
+    "description": "Export failure notice."
   }
 }
