@@ -147,6 +147,19 @@ export const TRACE_MANIFEST: TraceManifestEntry[] = [
     ],
   },
   {
+    file: 'scripts/broker/tests_traces/file-viewer-csp-browser-trace.ts',
+    title: 'real Chromium file-viewer rendered-HTML policy trace',
+    optIn: true,
+    coverage: [
+      {
+        fn: 'F16',
+        level: 'L1',
+        agents: 'all',
+        note: 'real browser proves the injected policy blocks stylesheet, font and image loads from a rendered workspace HTML file, with an unpolicied control frame that does load them',
+      },
+    ],
+  },
+  {
     file: 'packages/typescript/broker/test/opencode/test-opencode.ts',
     title: 'OpenCode integration suite including file input/output',
     coverage: [

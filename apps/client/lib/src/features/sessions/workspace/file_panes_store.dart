@@ -41,14 +41,20 @@ class FilePanesState {
                 pane,
       ];
       final rawActive = decoded['active'];
+      final active = <String, String>{
+        if (rawActive is Map)
+          for (final entry in rawActive.entries)
+            if (entry.key is String && entry.value is String)
+              entry.key as String: entry.value as String,
+      };
+      // Bounded on the way in as well as on the way out. `opened` is the only
+      // mutation that grows the set, but `closed`, `reordered` and `activated`
+      // all rebuild and re-serialize whatever they were given, so a row
+      // written by a client that predates the bound would otherwise stay
+      // oversized until the reader happened to open a file.
       return FilePanesState(
-        panes: List.unmodifiable(panes),
-        activeBySession: <String, String>{
-          if (rawActive is Map)
-            for (final entry in rawActive.entries)
-              if (entry.key is String && entry.value is String)
-                entry.key as String: entry.value as String,
-        },
+        panes: List.unmodifiable(_bounded(panes, active)),
+        activeBySession: active,
       );
     } on Object {
       return empty;

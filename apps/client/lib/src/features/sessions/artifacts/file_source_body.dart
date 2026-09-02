@@ -28,6 +28,55 @@ double fileSourceLineExtent(BuildContext context) {
 /// Width of the absolute line-number gutter.
 const double fileSourceGutterWidth = 48;
 
+/// Width of the widest of [lines] as they will actually paint.
+///
+/// The character-count estimate — `length × advance` — is exact for ASCII in a
+/// monospace face and wrong by roughly 2x for anything the font falls back on:
+/// CJK, emoji. That is not cosmetic. Each line is a `maxLines: 1,
+/// softWrap: false` `Text` inside a box of exactly this width, and the
+/// horizontal scroll extent is this width too, so an underestimate clips the
+/// tail of the line and no amount of scrolling brings it back. One Chinese
+/// comment in a source file is enough to lose the end of its longest line.
+///
+/// Still not 20k `TextPainter` layouts: [measure] is called only for lines
+/// carrying a code unit outside ASCII, and the estimate stands for the rest.
+/// A file with no wide glyph measures nothing at all.
+///
+/// [measure] is a parameter rather than a `TextPainter` inside this function
+/// for one reason: `flutter_test` runs on a font where every glyph has the
+/// same advance, CJK included, so a test that paints cannot tell this rule
+/// from the estimate it replaced. Passing the measurement in lets the rule —
+/// and which lines reach it — be tested on any font.
+double fileSourceContentWidth({
+  required List<String> lines,
+  required double advance,
+  required double Function(String line) measure,
+}) {
+  var widest = 0.0;
+  for (final line in lines) {
+    if (!_needsMeasuring(line)) {
+      final estimated = line.length * advance;
+      if (estimated > widest) widest = estimated;
+      continue;
+    }
+    final measured = measure(line);
+    if (measured > widest) widest = measured;
+  }
+  return widest;
+}
+
+/// Whether [line] holds a glyph the monospace advance cannot stand in for.
+///
+/// Plain ASCII is exact in a monospace face. Everything else — a wide CJK
+/// glyph, an emoji, a combining mark that takes no width at all — comes from a
+/// fallback font whose advance is its own business.
+bool _needsMeasuring(String line) {
+  for (final unit in line.codeUnits) {
+    if (unit > 0x7f) return true;
+  }
+  return false;
+}
+
 /// Styles one line of source.
 ///
 /// Returning null renders the line as one plain run — which is what the plain
@@ -165,6 +214,7 @@ class FileSourceBody extends StatelessWidget {
                 scrollDirection: Axis.horizontal,
                 controller: surface.horizontal,
                 child: SizedBox(
+                  key: const Key('file-viewer-content'),
                   width: math.max(contentWidth, 1),
                   child: ListView.builder(
                     key: const Key('file-viewer-lines'),
@@ -186,52 +236,24 @@ class FileSourceBody extends StatelessWidget {
     );
   }
 
-  /// Width of the widest line as it will actually paint.
-  ///
-  /// The character-count estimate is exact for ASCII in a monospace face and
-  /// wrong by roughly 2x for anything the font falls back on — CJK, emoji. It
-  /// is not a cosmetic error: each line is a `maxLines: 1, softWrap: false`
-  /// `Text` inside a box of exactly this width, and the horizontal scroll
-  /// extent is this width too, so an underestimate clips the tail of the line
-  /// and no amount of scrolling brings it back. A Chinese comment in source is
-  /// ordinary, and one is enough to lose the end of the longest line.
-  ///
-  /// Still not 20k `TextPainter` layouts: only lines carrying a code point
-  /// outside ASCII are measured, and the ASCII estimate stands for the rest.
-  /// A file with no wide glyph measures nothing at all.
   double _contentWidth(BuildContext context, TextStyle style) {
-    final advance = _monospaceAdvance(context, style);
-    var widest = 0.0;
     final painter = TextPainter(
       textDirection: Directionality.of(context),
       textScaler: MediaQuery.textScalerOf(context),
       maxLines: 1,
     );
-    for (final line in lines) {
-      if (!_needsMeasuring(line)) {
-        final estimated = line.length * advance;
-        if (estimated > widest) widest = estimated;
-        continue;
-      }
-      painter
-        ..text = TextSpan(text: line, style: style)
-        ..layout();
-      if (painter.width > widest) widest = painter.width;
-    }
+    final width = fileSourceContentWidth(
+      lines: lines,
+      advance: _monospaceAdvance(context, style),
+      measure: (line) {
+        painter
+          ..text = TextSpan(text: line, style: style)
+          ..layout();
+        return painter.width;
+      },
+    );
     painter.dispose();
-    return widest;
-  }
-
-  /// Whether [line] holds a glyph the monospace advance cannot stand in for.
-  ///
-  /// Plain ASCII is exact in a monospace face. Everything else — a wide CJK
-  /// glyph, an emoji, a combining mark that takes no width at all — comes from
-  /// a fallback font whose advance is its own business.
-  static bool _needsMeasuring(String line) {
-    for (final unit in line.codeUnits) {
-      if (unit > 0x7f) return true;
-    }
-    return false;
+    return width;
   }
 
   double _monospaceAdvance(BuildContext context, TextStyle style) {

@@ -225,41 +225,36 @@ void main() {
       expect(washed, findsNothing);
     });
 
-    testWidgets('a wide glyph is reachable, not clipped past the extent', (
+    testWidgets('the horizontal extent is the widest line plus its margin', (
       tester,
     ) async {
-      // The CJK line is SHORTER by character count and WIDER when painted,
-      // which is the case a character-count estimate gets exactly backwards.
-      const wide = '// 这是一个中文注释，说明这个函数的用途和边界情况';
-      const ascii = '// an ascii comment that is longer by character count!!';
-      expect(wide.length, lessThan(ascii.length));
-
+      // The rule this width comes from — that a CJK or emoji line is measured
+      // rather than estimated — cannot be tested here: `flutter_test` paints
+      // on a font where every glyph has the same advance, so the estimate and
+      // the measurement agree and a revert stays green. It is pinned in
+      // `file_source_content_width_test.dart` instead. What this pins is the
+      // wiring: that the scrollable width is that function's answer, plus the
+      // trailing margin, and not something else.
+      const short = 'const a = 1;';
+      const longest = '// a comment long enough to be the widest line here!!';
       await tester.pumpWidget(
-        _host(FileViewerSource(preview: _preview(text: '$ascii\n$wide'))),
+        _host(FileViewerSource(preview: _preview(text: '$short\n$longest'))),
       );
       await tester.pump();
 
-      final body = find.descendant(
-        of: find.byType(SingleChildScrollView),
-        matching: find.byType(SizedBox),
+      final style = fileSourceCodeStyle(
+        tester.element(find.byType(FileViewerPane)),
       );
-      final contentWidth = tester.widgetList<SizedBox>(body).first.width!;
-
       final painter = TextPainter(
-        text: TextSpan(
-          text: wide,
-          style: fileSourceCodeStyle(
-            tester.element(find.byType(FileViewerPane)),
-          ),
-        ),
+        text: TextSpan(text: '0', style: style),
         textDirection: TextDirection.ltr,
       )..layout();
       addTearDown(painter.dispose);
 
-      // Each line is a `maxLines: 1, softWrap: false` Text inside a box of
-      // exactly this width, and the horizontal scroll extent is this width, so
-      // an underestimate clips the tail with no way to scroll to it.
-      expect(contentWidth, greaterThanOrEqualTo(painter.width));
+      final content = tester.widget<SizedBox>(
+        find.byKey(const Key('file-viewer-content')),
+      );
+      expect(content.width, longest.length * painter.width + 16);
     });
 
     testWidgets('wrapped rows do not copy their line numbers', (tester) async {

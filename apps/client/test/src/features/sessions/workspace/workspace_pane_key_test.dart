@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
@@ -135,6 +137,30 @@ void main() {
       // The oldest go, in strip order, and the newest stay.
       expect(state.panes.first.path, 'lib/file20.dart');
       expect(state.panes.last.path, 'lib/file${limit + 19}.dart');
+    });
+
+    test('a row written before the bound is trimmed on the way in', () {
+      // opened() is the only mutation that grows the set, but closed(),
+      // reordered() and activated() all rebuild and re-serialize whatever they
+      // were handed, so an oversized row from an older client would otherwise
+      // survive every one of them.
+      const limit = FilePanesState.workingSetLimit;
+      final oversized = jsonEncode(<String, dynamic>{
+        'panes': [
+          for (var index = 0; index < limit + 40; index++)
+            FilePaneKey(session: _a, path: 'lib/file$index.dart').toJson(),
+        ],
+        'active': {
+          'codex/a': const FilePaneKey(session: _a, path: 'lib/file0.dart').key,
+        },
+      });
+
+      final state = FilePanesState.fromJsonString(oversized);
+
+      expect(state.panes, hasLength(limit));
+      // The active pane is the oldest one here, and it is still spared.
+      expect(state.activeFor(_a)?.path, 'lib/file0.dart');
+      expect(state.panes.last.path, 'lib/file${limit + 39}.dart');
     });
 
     test('the bound never takes a session away from under its reader', () {

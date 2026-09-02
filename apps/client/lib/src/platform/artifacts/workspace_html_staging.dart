@@ -7,7 +7,16 @@ import 'package:path/path.dart' as path;
 /// How long a staged copy is kept, matching the artifact preview's retention.
 const Duration workspaceHtmlStagingRetention = Duration(hours: 24);
 
-/// Extensions a browser already opens as HTML.
+/// Extensions a browser already opens without help.
+///
+/// `.xhtml` is in the list, and that changes more than the name: a browser
+/// parses it as strict XML, where `.html` is error-tolerant. So a malformed
+/// `.xhtml` that used to reach the reader as a rendered page — because it was
+/// staged as `report.xhtml.html` — now reaches them as the browser's parse
+/// error. That is the honest reading of the file, and it matches what the
+/// in-pane renderer already does with the same bytes, but it is a behaviour
+/// change and not only a naming one. The injected policy tag is self-closed,
+/// so well-formed input stays well-formed.
 const List<String> _htmlExtensions = ['.html', '.htm', '.xhtml'];
 
 /// The marker directory staged workspace copies live under.
