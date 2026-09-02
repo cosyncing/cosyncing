@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
 import 'package:cosyncing_client/src/features/settings/view/quota_status_panel.dart';
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_today_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -197,6 +198,11 @@ class _ManagedRuntimeSection extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                 ],
+                // A sum of what happened, directly above the window of what
+                // remains. The card carries the one-line disambiguation on its
+                // last row, which only reads correctly at this adjacency.
+                const UsageTodayCard(),
+                const SizedBox(height: 16),
                 QuotaStatusPanel(quota: quota, loading: quotaLoading),
                 if (data.ownerOperationsAvailable) ...[
                   const SizedBox(height: 12),
