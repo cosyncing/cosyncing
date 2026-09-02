@@ -46,6 +46,11 @@ export const MAX_RELEASE_ARTIFACT_BYTES = 256 * 1024 * 1024;
  *  target, so a mixed linux+darwin manifest verifies unchanged on both and each host ignores the others. */
 export const RELEASE_ARTIFACT_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
 
+/** The single JavaScript application artifact a signed release publishes, for every host at once. */
+export const RELEASE_JAVASCRIPT_APP_NAME = 'cosyncing-app.js' as const;
+/** Its declared target. One bundle runs under any supported Bun, so it names no machine-code binding. */
+export const RELEASE_JAVASCRIPT_APP_TARGET = 'universal' as const;
+
 export interface ReleaseArtifact {
   name: string;
   target: string;
@@ -76,6 +81,32 @@ export interface ReleaseWebSidecar {
   fileCount: number;
 }
 
+/**
+ * The signed JavaScript application artifact: ONE universal bundle, executed by a separately installed Bun.
+ *
+ * It sits beside the compiled artifacts rather than among them, for the same reason `webApp` does: the
+ * `artifacts` array is a per-host machine-code set, keyed by target and selected by matching this build's
+ * own target. A JavaScript bundle has no machine-code target to match, so putting it in that array would
+ * mean inventing a fake one — which is exactly the false claim `universal` exists to avoid.
+ */
+export interface ReleaseJavaScriptApp {
+  name: typeof RELEASE_JAVASCRIPT_APP_NAME;
+  target: typeof RELEASE_JAVASCRIPT_APP_TARGET;
+  size: number;
+  sha256: string;
+  url: string;
+  provenanceUrl: string;
+  /**
+   * The oldest Bun that may execute this bundle.
+   *
+   * A compiled artifact carries its own interpreter, so replacing one can never raise the runtime
+   * requirement out from under a host. A JavaScript artifact can: a release built against a newer Bun would
+   * land on a machine whose Bun cannot run it, and the swap would report success while taking the service
+   * down. Carried inside the SIGNED manifest so the floor cannot be lowered by whoever serves the download.
+   */
+  minimumBunVersion: string;
+}
+
 export interface ReleaseManifest {
   schemaVersion: typeof RELEASE_MANIFEST_SCHEMA_VERSION;
   product: typeof PRODUCT_IDENTITY.productName;
@@ -88,6 +119,8 @@ export interface ReleaseManifest {
   contract?: ReleaseContractIdentity;
   /** Signed web-client half of the broker/web release pair. */
   webApp?: ReleaseWebSidecar;
+  /** Signed JavaScript application. Omitted only by manifests published before the JS channel existed. */
+  jsApp?: ReleaseJavaScriptApp;
   signature: {
     algorithm: 'ed25519';
     keyId: string;
@@ -260,6 +293,19 @@ function validReleaseWebSidecar(value: unknown): value is ReleaseWebSidecar {
     && (value.fileCount as number) <= 100_000;
 }
 
+function validReleaseJavaScriptApp(value: unknown): value is ReleaseJavaScriptApp {
+  if (!plainObject(value)) return false;
+  return value.name === RELEASE_JAVASCRIPT_APP_NAME
+    && value.target === RELEASE_JAVASCRIPT_APP_TARGET
+    && Number.isSafeInteger(value.size) && (value.size as number) > 0
+    && (value.size as number) <= MAX_RELEASE_ARTIFACT_BYTES
+    && validSha(value.sha256)
+    && safeHttpsUrl(value.url)
+    && safeHttpsUrl(value.provenanceUrl)
+    && typeof value.minimumBunVersion === 'string'
+    && /^\d+\.\d+\.\d+$/.test(value.minimumBunVersion);
+}
+
 function parseManifest(value: unknown): ReleaseManifest {
   if (!plainObject(value)
       || value.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION
@@ -273,6 +319,7 @@ function parseManifest(value: unknown): ReleaseManifest {
       || ((value.contract === undefined) !== (value.webApp === undefined))
       || (value.contract !== undefined && !validReleaseContract(value.contract))
       || (value.webApp !== undefined && !validReleaseWebSidecar(value.webApp))
+      || (value.jsApp !== undefined && !validReleaseJavaScriptApp(value.jsApp))
       || !plainObject(value.signature)
       || value.signature.algorithm !== 'ed25519'
       || typeof value.signature.keyId !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(value.signature.keyId)
@@ -286,15 +333,22 @@ function parseManifest(value: unknown): ReleaseManifest {
   return manifest;
 }
 
-/** RG1 promotion gate. Runtime verification still accepts legacy native-only manifests. */
+/**
+ * RG1 promotion gate. Runtime verification still accepts legacy native-only manifests.
+ *
+ * The JavaScript application joins the pair rather than sitting outside it: a release that publishes an
+ * installer pointed at a JS bundle, but no JS bundle, would pass every other check and fail at the moment an
+ * operator ran the one-liner.
+ */
 export function verifyReleasePairing(manifest: ReleaseManifest): {
   contract: ReleaseContractIdentity;
   webApp: ReleaseWebSidecar;
+  jsApp: ReleaseJavaScriptApp;
 } {
-  if (!manifest.contract || !manifest.webApp) {
+  if (!manifest.contract || !manifest.webApp || !manifest.jsApp) {
     throw new Error('release-broker-web-pairing-missing');
   }
-  return { contract: manifest.contract, webApp: manifest.webApp };
+  return { contract: manifest.contract, webApp: manifest.webApp, jsApp: manifest.jsApp };
 }
 
 export function verifyReleaseManifest(options: {

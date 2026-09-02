@@ -26,11 +26,14 @@ import { BROKER_CONFIG_SCHEMA_VERSION } from '../../../../packages/typescript/br
 import { DURABLE_SCHEMA_REGISTRY } from '../../../../packages/typescript/broker/src/security/durable-state.ts';
 import { INSTALL_STATE_SCHEMA_VERSION } from '../../../../packages/typescript/broker/src/installation/install-state.ts';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
+  RELEASE_JAVASCRIPT_APP_TARGET,
   RELEASE_MANIFEST_SCHEMA_VERSION,
   UPGRADE_JOURNAL_SCHEMA_VERSION,
   verifyReleaseManifest,
   verifyReleasePairing,
 } from '../../../../packages/typescript/broker/src/updates/release-upgrade.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   BROKER_CONTRACT,
   CLIENT_MINIMUM_BROKER_CONTRACT_REVISION,
@@ -50,6 +53,7 @@ import {
   WEB_SIDECAR_NAME,
   type PackageEvidence,
   type ReleaseTarget,
+  type JavaScriptPackageEvidence,
   type WebPackageEvidence,
 } from '../../release/release-files.ts';
 import {
@@ -142,6 +146,37 @@ ${JSON.stringify({
   commit,
   buildDate,
   target,
+  packaged: true,
+  dirty: false,
+  schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+  contract: PUBLISHED_BROKER_CONTRACT,
+}, null, 2)}
+JSON
+  exit 0
+fi
+exit 2
+`;
+}
+
+/**
+ * The JavaScript application fixture: a shell script that answers `version --json` exactly as the real
+ * bundle does. The installer runs it through a Bun, never directly, so a fake `bun` on PATH can stand in
+ * for the runtime while every other property under test — digests, signatures, evidence — stays real.
+ */
+function javaScriptAppScript(version: string, commit: string, buildDate: string): string {
+  return `#!/usr/bin/env bash
+if [ "\${1:-}" = version ] && [ "\${2:-}" = --json ]; then
+  cat <<'JSON'
+${JSON.stringify({
+  schemaVersion: 2,
+  product: 'cosyncing',
+  binary: 'cosyncing',
+  alias: 'cosy',
+  version,
+  commit,
+  buildDate,
+  target: RELEASE_JAVASCRIPT_APP_TARGET,
+  distribution: 'bootstrap-js',
   packaged: true,
   dirty: false,
   schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
@@ -276,6 +311,35 @@ try {
       `${JSON.stringify(evidence({ artifactPath, target, version, commit, buildDate }), null, 2)}\n`,
     );
   }
+  const jsArtifactPath = join(artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
+  writeFileSync(jsArtifactPath, javaScriptAppScript(version, commit, buildDate), { mode: 0o755 });
+  const jsBytes = readFileSync(jsArtifactPath);
+  const jsEvidence: JavaScriptPackageEvidence = {
+    schemaVersion: 1,
+    product: 'cosyncing',
+    artifact: RELEASE_JAVASCRIPT_APP_NAME,
+    version,
+    target: RELEASE_JAVASCRIPT_APP_TARGET,
+    distribution: 'bootstrap-js',
+    sourceCommit: commit,
+    buildDate,
+    size: jsBytes.byteLength,
+    sha256: sha256(jsBytes),
+    minimumBunVersion: MINIMUM_BUN_RUNTIME_VERSION,
+    packaged: true,
+    dirty: false,
+    schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+    contract: PUBLISHED_BROKER_CONTRACT,
+    cleanCheckout: true,
+    offlineVersionCheck: true,
+    forbiddenContentCheck: true,
+    runner: { os: 'linux', arch: 'x64', image: 'fixture-universal', invocationId: '1004' },
+  };
+  writeFileSync(
+    join(evidenceDirectory, `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`),
+    `${JSON.stringify(jsEvidence, null, 2)}\n`,
+  );
+
   const webArtifactPath = join(artifactDirectory, WEB_SIDECAR_NAME);
   writeFileSync(webArtifactPath, 'deterministic fixture web sidecar\n');
   const webBytes = readFileSync(webArtifactPath);
@@ -464,6 +528,19 @@ try {
         target: 'linux-x64',
         trustedKeys: { 'test-2026': publicPem },
       }).manifest.version === version);
+
+  check('the signed manifest carries the JavaScript application beside the compiled set',
+    assembled.manifest.jsApp?.name === RELEASE_JAVASCRIPT_APP_NAME
+      && assembled.manifest.jsApp?.target === RELEASE_JAVASCRIPT_APP_TARGET
+      && assembled.manifest.jsApp?.sha256 === jsEvidence.sha256
+      && assembled.manifest.jsApp?.size === jsEvidence.size
+      && assembled.manifest.jsApp?.minimumBunVersion === MINIMUM_BUN_RUNTIME_VERSION
+      // It is NOT in the per-host array: that array is machine-code, keyed by target, and a universal
+      // bundle placed there would have to claim a machine-code binding it does not have.
+      && !assembled.manifest.artifacts.some((item) => item.name === RELEASE_JAVASCRIPT_APP_NAME)
+      && assembled.publishedFiles.includes(RELEASE_JAVASCRIPT_APP_NAME)
+      && assembled.publishedFiles.includes(`${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl.sig`),
+    JSON.stringify(assembled.manifest.jsApp));
 
   const pairing = verifyReleasePairing(assembled.manifest);
   check(

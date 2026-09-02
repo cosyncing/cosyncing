@@ -14,12 +14,15 @@ import {
 } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
+  RELEASE_JAVASCRIPT_APP_TARGET,
   releaseManifestSigningPayload,
   verifyReleaseManifest,
   verifyReleasePairing,
   type ReleaseArtifact,
   type ReleaseManifest,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
   PUBLISHED_SCHEMA_VERSIONS,
   type PublishedBrokerContract,
@@ -85,6 +88,40 @@ export interface PackageEvidence {
   buildDate: string;
   size: number;
   sha256: string;
+  packaged: true;
+  dirty: false;
+  schemaVersions: PublishedSchemaVersions;
+  contract: PublishedBrokerContract;
+  cleanCheckout: true;
+  offlineVersionCheck: true;
+  forbiddenContentCheck: true;
+  runner: {
+    os: 'linux' | 'darwin';
+    arch: 'x64' | 'arm64';
+    image: string;
+    invocationId: string;
+  };
+}
+
+/**
+ * Evidence for the JavaScript application bundle, alongside the native and web shapes.
+ *
+ * It records `distribution` where the native shape records `target`, because that is the term that actually
+ * distinguishes this artifact from the identical-looking bundle npm publishes. `runner` describes the host
+ * that produced the bytes and is provenance only: the artifact itself is bound to no machine code.
+ */
+export interface JavaScriptPackageEvidence {
+  schemaVersion: 1;
+  product: typeof PRODUCT_IDENTITY.productName;
+  artifact: typeof RELEASE_JAVASCRIPT_APP_NAME;
+  version: string;
+  target: typeof RELEASE_JAVASCRIPT_APP_TARGET;
+  distribution: 'bootstrap-js';
+  sourceCommit: string;
+  buildDate: string;
+  size: number;
+  sha256: string;
+  minimumBunVersion: string;
   packaged: true;
   dirty: false;
   schemaVersions: PublishedSchemaVersions;
@@ -228,6 +265,39 @@ function readWebEvidence(path: string, options: ReleaseAssemblyOptions): WebPack
   return value as WebPackageEvidence;
 }
 
+function readJavaScriptEvidence(
+  path: string,
+  options: ReleaseAssemblyOptions,
+): JavaScriptPackageEvidence {
+  const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<JavaScriptPackageEvidence>;
+  if (value.schemaVersion !== 1 || value.product !== PRODUCT_IDENTITY.productName
+      || value.artifact !== RELEASE_JAVASCRIPT_APP_NAME || value.version !== options.version
+      || value.target !== RELEASE_JAVASCRIPT_APP_TARGET
+      // The published bundle must be the installer-owned kind. `packaged` is true for the npm build too, so
+      // it cannot tell them apart, and an npm-owned bundle signed into this channel would tell every curl
+      // install to run `npm update` on files npm never placed.
+      || value.distribution !== 'bootstrap-js'
+      || value.sourceCommit !== options.sourceCommit || value.buildDate !== options.publishedAt
+      || value.packaged !== true || value.dirty !== false || value.cleanCheckout !== true
+      || value.offlineVersionCheck !== true || value.forbiddenContentCheck !== true
+      || typeof value.minimumBunVersion !== 'string'
+      || !/^\d+\.\d+\.\d+$/.test(value.minimumBunVersion)
+      || !exactObject(value.schemaVersions, PUBLISHED_SCHEMA_VERSIONS)
+      || !value.contract || !Number.isSafeInteger(value.contract.revision)
+      || !Number.isSafeInteger(value.contract.minimumClientRevision)
+      || typeof value.contract.surfaceHash !== 'string'
+      || !/^fnv1a32:[a-f0-9]{8}$/.test(value.contract.surfaceHash)
+      || !value.runner || (value.runner.os !== 'linux' && value.runner.os !== 'darwin')
+      || (value.runner.arch !== 'x64' && value.runner.arch !== 'arm64')
+      || typeof value.runner.image !== 'string' || !value.runner.image
+      || typeof value.runner.invocationId !== 'string' || !value.runner.invocationId
+      || !Number.isSafeInteger(value.size) || Number(value.size) <= 0
+      || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw new Error('JavaScript package evidence is invalid');
+  }
+  return value as JavaScriptPackageEvidence;
+}
+
 function writeJson(path: string, value: unknown): Uint8Array {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
   writeFileSync(path, bytes, { mode: 0o644 });
@@ -337,6 +407,60 @@ function provenance(options: {
         },
         byproducts: [{
           name: 'native-package-evidence',
+          content: {
+            runnerImage: options.evidence.runner.image,
+            runnerArchitecture: options.evidence.runner.arch,
+            offlineVersionCheck: true,
+            forbiddenContentCheck: true,
+          },
+        }],
+      },
+    },
+  };
+}
+
+function javaScriptProvenance(options: {
+  evidence: JavaScriptPackageEvidence;
+  inventorySha256: string;
+  sbomSha256: string;
+}): Record<string, unknown> {
+  return {
+    _type: 'https://in-toto.io/Statement/v1',
+    subject: [{ name: options.evidence.artifact, digest: { sha256: options.evidence.sha256 } }],
+    predicateType: 'https://slsa.dev/provenance/v1',
+    predicate: {
+      buildDefinition: {
+        // A distinct build type from the compiled one, and deliberately so: this artifact is produced
+        // WITHOUT `--compile`, embeds no runtime, and is not governed by the compiled-binary control.
+        buildType: 'https://cosyncing.dev/build/bun-bundle/v1',
+        externalParameters: {
+          version: options.evidence.version,
+          target: options.evidence.target,
+          distribution: options.evidence.distribution,
+          minimumBunVersion: options.evidence.minimumBunVersion,
+          schemaVersions: options.evidence.schemaVersions,
+          contract: options.evidence.contract,
+        },
+        internalParameters: {
+          buildDate: options.evidence.buildDate,
+          cleanCheckout: options.evidence.cleanCheckout,
+          softwareInventorySha256: options.inventorySha256,
+          spdxSbomSha256: options.sbomSha256,
+        },
+        resolvedDependencies: [{
+          uri: 'git+https://github.com/cosyncing/cosyncing',
+          digest: { gitCommit: options.evidence.sourceCommit },
+        }],
+      },
+      runDetails: {
+        builder: { id: `https://github.com/cosyncing/cosyncing/actions/runs/${options.evidence.runner.invocationId}` },
+        metadata: {
+          invocationId: options.evidence.runner.invocationId,
+          startedOn: options.evidence.buildDate,
+          finishedOn: options.evidence.buildDate,
+        },
+        byproducts: [{
+          name: 'javascript-package-evidence',
           content: {
             runnerImage: options.evidence.runner.image,
             runnerArchitecture: options.evidence.runner.arch,
@@ -516,6 +640,37 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     writeSignature(join(options.outputDirectory, `${name}.sig`), bytes, options.privateKeyPem);
   }
 
+  // The JavaScript application, assembled beside the compiled set and bound to the same broker contract.
+  const jsEvidence = readJavaScriptEvidence(
+    join(options.evidenceDirectory, `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`),
+    options,
+  );
+  if (!exactObject(jsEvidence.contract, nativeContract)) {
+    throw new Error('native and JavaScript package evidence disagree on broker contract identity');
+  }
+  const jsArtifactPath = join(options.artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
+  const jsBytes = readFileSync(jsArtifactPath);
+  const jsStats = statSync(jsArtifactPath);
+  if (!jsStats.isFile() || jsStats.size !== jsEvidence.size || sha256(jsBytes) !== jsEvidence.sha256) {
+    throw new Error('JavaScript application no longer matches package evidence');
+  }
+  writeFileSync(join(options.outputDirectory, RELEASE_JAVASCRIPT_APP_NAME), jsBytes, { mode: 0o755 });
+  const jsProvenanceName = `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl`;
+  const jsStatementBytes = Buffer.from(
+    `${JSON.stringify(javaScriptProvenance({
+      evidence: jsEvidence,
+      inventorySha256: inventoryHash,
+      sbomSha256: sbomHash,
+    }))}\n`,
+    'utf8',
+  );
+  writeFileSync(join(options.outputDirectory, jsProvenanceName), jsStatementBytes, { mode: 0o644 });
+  writeSignature(
+    join(options.outputDirectory, `${jsProvenanceName}.sig`),
+    jsStatementBytes,
+    options.privateKeyPem,
+  );
+
   const webEvidence = readWebEvidence(
     join(options.evidenceDirectory, `${WEB_SIDECAR_NAME}.evidence.json`),
     options,
@@ -568,6 +723,15 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     publishedAt,
     artifacts,
     contract: { ...nativeContract },
+    jsApp: {
+      name: RELEASE_JAVASCRIPT_APP_NAME,
+      target: RELEASE_JAVASCRIPT_APP_TARGET,
+      size: jsEvidence.size,
+      sha256: jsEvidence.sha256,
+      url: `${releaseBase}/${RELEASE_JAVASCRIPT_APP_NAME}`,
+      provenanceUrl: `${releaseBase}/${jsProvenanceName}`,
+      minimumBunVersion: jsEvidence.minimumBunVersion,
+    },
     webApp: {
       name: WEB_SIDECAR_NAME,
       mount: '/cosy/',
@@ -619,6 +783,9 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   const checksumCandidates = [
     ...artifacts.map((artifact) => artifact.name),
     ...artifacts.flatMap((artifact) => [`${artifact.name}.intoto.jsonl`, `${artifact.name}.intoto.jsonl.sig`]),
+    RELEASE_JAVASCRIPT_APP_NAME,
+    jsProvenanceName,
+    `${jsProvenanceName}.sig`,
     WEB_SIDECAR_NAME,
     webProvenanceName,
     `${webProvenanceName}.sig`,

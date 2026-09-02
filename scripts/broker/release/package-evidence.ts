@@ -17,10 +17,16 @@ import {
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import { BROKER_CONTRACT } from '../../../packages/typescript/protocol/src/index.ts';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
+  RELEASE_JAVASCRIPT_APP_TARGET,
+} from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import {
   KNOWN_RELEASE_TARGETS,
   releaseTargetArch,
   releaseTargetPlatform,
   sha256,
+  type JavaScriptPackageEvidence,
   type PackageEvidence,
   type ReleaseTarget,
 } from './release-files.ts';
@@ -31,6 +37,14 @@ interface EvidenceOptions {
   artifactPath: string;
   outputPath: string;
   target: ReleaseTarget;
+  version: string;
+  sourceCommit: string;
+  buildDate: string;
+}
+
+interface JavaScriptEvidenceOptions {
+  artifactPath: string;
+  outputPath: string;
   version: string;
   sourceCommit: string;
   buildDate: string;
@@ -58,7 +72,7 @@ function gitClean(): boolean {
   return result.success && result.stdout.toString().trim() === '';
 }
 
-function allowedBuildHomePrefixes(target: ReleaseTarget, home: string): string[] {
+function allowedBuildHomePrefixes(target: ReleaseTarget | typeof RELEASE_JAVASCRIPT_APP_TARGET, home: string): string[] {
   // Bun's darwin-arm64 runtime carries WebKit/JSC assertion source paths from Bun's own hosted build.
   // They are part of the upstream runtime even when this artifact is cross-compiled on Linux; they are
   // not paths from the cosyncing build host. Keep the exception exact so any checkout, credential, or
@@ -84,7 +98,7 @@ function hasUnapprovedOccurrence(bytes: Buffer, item: ForbiddenValue): boolean {
 
 export function forbiddenArtifactContent(
   bytes: Buffer,
-  target: ReleaseTarget,
+  target: ReleaseTarget | typeof RELEASE_JAVASCRIPT_APP_TARGET,
   context: ArtifactScanContext = {
     root: ROOT,
     home: process.env.HOME ?? '',
@@ -118,11 +132,18 @@ export function forbiddenArtifactContent(
 
 const architectureForTarget = releaseTargetArch;
 
-async function offlineVersion(binary: string): Promise<BuildInfo> {
+/**
+ * Make the artifact identify itself, offline, in an empty home.
+ *
+ * `runtime` is passed for a JavaScript bundle, which cannot be exec'd on its own here: its shebang resolves
+ * `bun` through PATH and could be answered by a different runtime from the one CI pinned. A compiled
+ * artifact IS its own runtime and is spawned directly.
+ */
+async function offlineVersion(binary: string, runtime?: string): Promise<BuildInfo> {
   const isolated = mkdtempSync(join(tmpdir(), 'cosyncing-package-evidence-'));
   try {
     const home = join(isolated, 'home');
-    const child = Bun.spawn([binary, 'version', '--json'], {
+    const child = Bun.spawn([...(runtime ? [runtime] : []), binary, 'version', '--json'], {
       cwd: isolated,
       env: {
         PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -206,8 +227,80 @@ export async function createPackageEvidence(options: EvidenceOptions): Promise<P
   return evidence;
 }
 
+/**
+ * Evidence for the universal JavaScript application bundle.
+ *
+ * Unlike the native lane this does not require a matching runner: one bundle is the same bytes on every
+ * host, so demanding a per-host builder would prove nothing that is true of the artifact. Everything that
+ * IS about the artifact is unchanged — clean checkout, forbidden-content scan, and an offline
+ * self-identification that must report the installer-owned kind rather than the npm one.
+ */
+export async function createJavaScriptPackageEvidence(
+  options: JavaScriptEvidenceOptions,
+): Promise<JavaScriptPackageEvidence> {
+  if (!gitClean()) throw new Error('JavaScript package evidence requires a clean checkout');
+  const bytes = readFileSync(options.artifactPath);
+  const stats = lstatSync(options.artifactPath);
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.size <= 0) {
+    throw new Error('release artifact is not a regular file');
+  }
+  // Text with an interpreter line, never a machine-code header. This is the same property the npm lane
+  // asserts about the same builder's output, and it is what keeps the compiled-binary distribution control
+  // from reaching this channel: an ELF or Mach-O artifact starts with a magic byte, not `#!`.
+  if (!bytes.subarray(0, 2).equals(Buffer.from('#!'))) {
+    throw new Error('JavaScript application does not begin with an interpreter line');
+  }
+  const forbidden = forbiddenArtifactContent(bytes, RELEASE_JAVASCRIPT_APP_TARGET);
+  if (forbidden) throw new Error(`release artifact contains forbidden ${forbidden}`);
+  if (options.artifactPath.split('/').pop() !== RELEASE_JAVASCRIPT_APP_NAME) {
+    throw new Error(`artifact must be named ${RELEASE_JAVASCRIPT_APP_NAME}`);
+  }
+  const info = await offlineVersion(options.artifactPath, process.execPath);
+  if (info.schemaVersion !== BUILD_INFO_SCHEMA_VERSION || info.version !== options.version
+      || info.commit !== options.sourceCommit
+      || info.buildDate !== options.buildDate
+      || info.target !== RELEASE_JAVASCRIPT_APP_TARGET
+      || info.distribution !== 'bootstrap-js' || info.packaged !== true || info.dirty !== false
+      || JSON.stringify(info.schemaVersions) !== JSON.stringify(PUBLISHED_SCHEMA_VERSIONS)
+      || JSON.stringify(info.contract) !== JSON.stringify(BROKER_CONTRACT)) {
+    throw new Error('offline version metadata does not match the JavaScript package request');
+  }
+  const evidence: JavaScriptPackageEvidence = {
+    schemaVersion: 1,
+    product: PRODUCT_IDENTITY.productName,
+    artifact: RELEASE_JAVASCRIPT_APP_NAME,
+    version: options.version,
+    target: RELEASE_JAVASCRIPT_APP_TARGET,
+    distribution: 'bootstrap-js',
+    sourceCommit: options.sourceCommit,
+    buildDate: options.buildDate,
+    size: stats.size,
+    sha256: sha256(bytes),
+    // The floor the application itself enforces, published so an installer and an upgrade can refuse a host
+    // whose Bun is too old instead of writing a bundle that cannot start.
+    minimumBunVersion: MINIMUM_BUN_RUNTIME_VERSION,
+    packaged: true,
+    dirty: false,
+    schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+    contract: info.contract,
+    cleanCheckout: true,
+    offlineVersionCheck: true,
+    forbiddenContentCheck: true,
+    runner: {
+      os: process.platform === 'darwin' ? 'darwin' : 'linux',
+      arch: process.arch === 'arm64' ? 'arm64' : 'x64',
+      image: process.env.ImageOS && process.env.ImageVersion
+        ? `${process.env.ImageOS}-${process.env.ImageVersion}`
+        : process.env.RUNNER_IMAGE || `local-${process.platform}`,
+      invocationId: process.env.GITHUB_RUN_ID || `local-${options.sourceCommit.slice(0, 12)}`,
+    },
+  };
+  writeFileSync(options.outputPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o644 });
+  return evidence;
+}
+
 function usage(): never {
-  console.error(`Usage: bun run scripts/broker/release/package-evidence.ts --artifact PATH --output PATH --target ${KNOWN_RELEASE_TARGETS.join('|')} --version X.Y.Z --commit HEX --build-date ISO`);
+  console.error(`Usage: bun run scripts/broker/release/package-evidence.ts --artifact PATH --output PATH --target ${KNOWN_RELEASE_TARGETS.join('|')}|${RELEASE_JAVASCRIPT_APP_TARGET} --version X.Y.Z --commit HEX --build-date ISO`);
   process.exit(2);
 }
 
@@ -237,7 +330,39 @@ function parseArgs(argv: string[]): EvidenceOptions {
   };
 }
 
+function parseJavaScriptArgs(argv: string[]): JavaScriptEvidenceOptions {
+  const values = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!key?.startsWith('--') || !value) usage();
+    values.set(key, value);
+  }
+  const artifact = values.get('--artifact');
+  const output = values.get('--output');
+  const version = values.get('--version');
+  const sourceCommit = values.get('--commit');
+  const buildDate = values.get('--build-date');
+  if (!artifact || !output || !version || !sourceCommit || !buildDate) usage();
+  return {
+    artifactPath: resolve(artifact),
+    outputPath: resolve(output),
+    version,
+    sourceCommit,
+    buildDate,
+  };
+}
+
 if (import.meta.main) {
-  const evidence = await createPackageEvidence(parseArgs(process.argv.slice(2)));
+  const argv = process.argv.slice(2);
+  // `--target` selects the lane, because the two artifact classes are attested differently: the native one
+  // must be self-attested ON its own host, and the universal one has no host to be attested on.
+  const targetIndex = argv.indexOf('--target');
+  const requestedTarget = targetIndex >= 0 ? argv[targetIndex + 1] : undefined;
+  const evidence = requestedTarget === RELEASE_JAVASCRIPT_APP_TARGET
+    ? await createJavaScriptPackageEvidence(parseJavaScriptArgs(
+        argv.filter((value, index) => index !== targetIndex && index !== targetIndex + 1),
+      ))
+    : await createPackageEvidence(parseArgs(argv));
   console.log(JSON.stringify(evidence));
 }

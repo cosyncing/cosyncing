@@ -5,6 +5,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import {
+  RELEASE_JAVASCRIPT_APP_NAME,
   verifyReleaseManifest,
   verifyReleasePairing,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
@@ -24,6 +25,9 @@ const artifacts = RELEASE_TARGETS.map((target) => `${PRODUCT_IDENTITY.releaseAss
 export const EXPECTED_CANDIDATE_ASSETS = Object.freeze([
   ...artifacts,
   ...artifacts.flatMap((name) => [`${name}.intoto.jsonl`, `${name}.intoto.jsonl.sig`]),
+  RELEASE_JAVASCRIPT_APP_NAME,
+  `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl`,
+  `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl.sig`,
   WEB_SIDECAR_NAME,
   `${WEB_SIDECAR_NAME}.intoto.jsonl`,
   `${WEB_SIDECAR_NAME}.intoto.jsonl.sig`,
@@ -75,6 +79,12 @@ function signedPairingBlockers(directory: string): string[] {
     if (statSync(webPath).size !== pairing.webApp.size
         || digest !== pairing.webApp.sha256) {
       return ['signed web sidecar size or digest does not match the candidate'];
+    }
+    const jsPath = resolve(directory, pairing.jsApp.name);
+    const jsBytes = readFileSync(jsPath);
+    if (statSync(jsPath).size !== pairing.jsApp.size
+        || createHash('sha256').update(jsBytes).digest('hex') !== pairing.jsApp.sha256) {
+      return ['signed JavaScript application size or digest does not match the candidate'];
     }
     return [];
   } catch (error) {
