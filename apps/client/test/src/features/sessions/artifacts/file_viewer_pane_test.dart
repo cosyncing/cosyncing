@@ -38,6 +38,7 @@ Widget _host(
   Locale locale = const Locale('en'),
   VoidCallback? onClose,
   VoidCallback? onRetry,
+  double width = 700,
 }) {
   final spec = themeSpecById(kDefaultThemeId);
   return MaterialApp(
@@ -52,7 +53,7 @@ Widget _host(
     ),
     home: Scaffold(
       body: SizedBox(
-        width: 700,
+        width: width,
         height: 400,
         child: FileViewerPane(
           content: content,
@@ -91,6 +92,35 @@ void main() {
       expect(find.byKey(const Key('file-viewer-name')), findsOneWidget);
       expect(find.byKey(const Key('file-viewer-path')), findsOneWidget);
       expect(tester.binding.transientCallbackCount, 0);
+    });
+
+    testWidgets('a narrow pane keeps the name whole and drops the owner', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _preview()), width: 420),
+      );
+      await tester.pump();
+
+      // 420dp is the split pane's default width, and this is what it looked
+      // like in a browser: two bare Flexibles shared the row equally, so a
+      // session label ellipsized the file name — the one thing in this header
+      // a reader is looking for.
+      expect(find.byKey(const Key('file-viewer-name')), findsOneWidget);
+      expect(find.byKey(const Key('file-viewer-owner')), findsNothing);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('file-viewer-name'))).data,
+        'a.dart',
+      );
+    });
+
+    testWidgets('a wide pane names the owning session too', (tester) async {
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _preview()), width: 720),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('file-viewer-owner')), findsOneWidget);
     });
 
     testWidgets('the header stays put while the body scrolls', (tester) async {

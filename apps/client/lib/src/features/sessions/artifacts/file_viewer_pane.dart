@@ -162,6 +162,16 @@ class FileViewerPane extends StatefulWidget {
   State<FileViewerPane> createState() => _FileViewerPaneState();
 }
 
+/// Below this header width the owning-session label yields the row.
+///
+/// Measured in a browser rather than guessed. At the split pane's default
+/// 420dp the header also carries the mode toggle, wrap, copy and close, and
+/// what was left for the owner was `fro…` — which cost the file name its last
+/// characters and told the reader nothing. Above this there is room for both;
+/// below it the name takes the row, and the Files slot, which is far wider,
+/// still names the session it belongs to.
+const double _ownerLabelMinWidth = 560;
+
 class _FileViewerPaneState extends State<FileViewerPane> {
   /// The one vertical controller. Anchor reveal, restore-on-reopen and any
   /// scroll-to-line all drive this object, which is what the dialog's
@@ -347,90 +357,109 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         children: [
           SizedBox(
             height: 40,
-            child: Row(
-              children: [
-                const SizedBox(width: 12),
-                FileMarkGlyph(
-                  color: tokens.textSecondary,
-                  foldColor: tokens.surface,
-                ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    content.displayName,
-                    key: const Key('file-viewer-name'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: tokens.textPrimary,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                return Row(
+                  children: [
+                    const SizedBox(width: 12),
+                    FileMarkGlyph(
+                      color: tokens.textSecondary,
+                      foldColor: tokens.surface,
                     ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // The owning session is named once, here, rather than
-                // colour-coded onto every tab.
-                Container(
-                  width: 7,
-                  height: 7,
-                  decoration: BoxDecoration(
-                    color: widget.toolColor,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Flexible(
-                  child: Text(
-                    l10n.fileViewerFromSession(widget.sessionLabel),
-                    key: const Key('file-viewer-owner'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: tokens.textTertiary,
+                    const SizedBox(width: 8),
+                    // The name outranks the owner for space. Sharing the
+                    // row equally -- which two bare Flexibles do -- spent
+                    // half of a 420dp pane on a session label and cut
+                    // `coverage.html` to `cove…`, which is the one thing in
+                    // this header a reader is actually looking for.
+                    Flexible(
+                      flex: 5,
+                      child: Text(
+                        content.displayName,
+                        key: const Key('file-viewer-name'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: tokens.textPrimary,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                const Spacer(),
-                if (descriptor != null && descriptor.modes.length > 1) ...[
-                  _ModeToggle(
-                    tokens: tokens,
-                    mode: _mode,
-                    onChanged: (mode) {
-                      setState(() => _mode = mode);
-                      _reportView();
-                    },
-                    sourceLabel: l10n.fileViewerModeSource,
-                    renderedLabel: l10n.fileViewerModeRendered,
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                if (wrappable)
-                  _HeaderButton(
-                    iconKey: const Key('file-viewer-wrap'),
-                    icon: Icons.wrap_text,
-                    tooltip: l10n.fileViewerWrap,
-                    selected: _wrap,
-                    tokens: tokens,
-                    onPressed: () => setState(() => _wrap = !_wrap),
-                  ),
-                if (preview != null)
-                  _HeaderButton(
-                    iconKey: const Key('file-viewer-copy'),
-                    icon: Icons.content_copy,
-                    tooltip: l10n.transcriptCodeCopy,
-                    tokens: tokens,
-                    onPressed: () => unawaited(_copy(context, preview.text)),
-                  ),
-                if (widget.onClose case final close?)
-                  _HeaderButton(
-                    iconKey: const Key('file-viewer-close'),
-                    icon: Icons.close,
-                    tooltip: l10n.close,
-                    tokens: tokens,
-                    onPressed: close,
-                  ),
-                const SizedBox(width: 8),
-              ],
+                    // Below this the owner yields the row entirely: an
+                    // ellipsized session label says nothing that a truncated
+                    // file name does not cost more. The pane is scoped to one
+                    // session anyway, and the path row still names the file.
+                    if (width >= _ownerLabelMinWidth) ...[
+                      const SizedBox(width: 8),
+                      // The owning session is named once, here, rather than
+                      // colour-coded onto every tab.
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: widget.toolColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        flex: 2,
+                        child: Text(
+                          l10n.fileViewerFromSession(widget.sessionLabel),
+                          key: const Key('file-viewer-owner'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: tokens.textTertiary,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const Spacer(),
+                    if (descriptor != null && descriptor.modes.length > 1) ...[
+                      _ModeToggle(
+                        tokens: tokens,
+                        mode: _mode,
+                        onChanged: (mode) {
+                          setState(() => _mode = mode);
+                          _reportView();
+                        },
+                        sourceLabel: l10n.fileViewerModeSource,
+                        renderedLabel: l10n.fileViewerModeRendered,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    if (wrappable)
+                      _HeaderButton(
+                        iconKey: const Key('file-viewer-wrap'),
+                        icon: Icons.wrap_text,
+                        tooltip: l10n.fileViewerWrap,
+                        selected: _wrap,
+                        tokens: tokens,
+                        onPressed: () => setState(() => _wrap = !_wrap),
+                      ),
+                    if (preview != null)
+                      _HeaderButton(
+                        iconKey: const Key('file-viewer-copy'),
+                        icon: Icons.content_copy,
+                        tooltip: l10n.transcriptCodeCopy,
+                        tokens: tokens,
+                        onPressed: () =>
+                            unawaited(_copy(context, preview.text)),
+                      ),
+                    if (widget.onClose case final close?)
+                      _HeaderButton(
+                        iconKey: const Key('file-viewer-close'),
+                        icon: Icons.close,
+                        tooltip: l10n.close,
+                        tokens: tokens,
+                        onPressed: close,
+                      ),
+                    const SizedBox(width: 8),
+                  ],
+                );
+              },
             ),
           ),
           SizedBox(
