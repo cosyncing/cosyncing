@@ -215,5 +215,6 @@
     "sourceCount": 5
   },
   "sourceErrors": [],
-  "insightsUnavailable": null
+  "insightsUnavailable": null,
+  "projectsUnavailable": null
 }

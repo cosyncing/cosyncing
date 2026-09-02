@@ -10,10 +10,13 @@
  */
 import { strict as assert } from 'node:assert';
 import {
+  checkTokdashReportWindow,
   fetchTokdashReport,
   isTokdashReportDate,
   TokdashReportCache,
   TOKDASH_REPORT_FACETS,
+  TOKDASH_REPORT_WINDOW_FLOOR,
+  withoutProjectNames,
 } from '../../src/installation/tokdash-report.ts';
 import {
   activeTimeFixture as activeTimeBody,
@@ -371,6 +374,139 @@ await test('a non-loopback Tokdash override is refused without echoing the value
     },
   );
   assert.deepEqual(calls, []);
+});
+
+await test('a well-formed window is still bounded in span', async () => {
+  const today = '2026-09-02';
+  assert.equal(checkTokdashReportWindow({ from: '2026-08-01', to: '2026-08-31' }, today), null);
+
+  // The window the reviewer reached for: every date is real, the order is right, and it costs a
+  // full upstream scan over everything Tokdash has ever recorded.
+  assert.equal(
+    checkTokdashReportWindow({ from: '0001-01-01', to: '9999-12-31' }, today),
+    'range-too-early',
+  );
+  assert.equal(checkTokdashReportWindow({ from: '2026-08-31', to: '2026-08-01' }, today),
+    'range-inverted');
+  assert.equal(checkTokdashReportWindow({ from: '2026-01-01', to: '2027-01-01' }, today),
+    'range-in-future');
+});
+
+await test('the bound accommodates the client\'s own all-time window', async () => {
+  // The floor is not a guess. `usageAllTimeFloor` in usage_period.dart is this exact day, and the
+  // all-time period is the widest window the product asks for: a broker that refused it would
+  // refuse its own client rather than an abusive caller.
+  assert.equal(TOKDASH_REPORT_WINDOW_FLOOR, '2000-01-01');
+  assert.equal(
+    checkTokdashReportWindow({ from: TOKDASH_REPORT_WINDOW_FLOOR, to: '2026-09-02' }, '2026-09-02'),
+    null,
+  );
+
+  // A client one timezone ahead asks for a day the broker has not reached. That is not abuse.
+  assert.equal(checkTokdashReportWindow({ from: '2026-09-01', to: '2026-09-03' }, '2026-09-02'),
+    null);
+  assert.equal(checkTokdashReportWindow({ from: '2026-09-01', to: '2026-09-04' }, '2026-09-02'),
+    'range-in-future');
+});
+
+await test('distinct windows queue behind the scan cap instead of fanning out', async () => {
+  const cache = new TokdashReportCache({ maxConcurrentScans: 2 });
+  let peakConcurrent = 0;
+  let running = 0;
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+
+  const started = [0, 1, 2, 3, 4].map((index) => cache.load(
+    { from: `2026-0${index + 1}-01`, to: `2026-0${index + 1}-28` },
+    async () => {
+      running += 1;
+      peakConcurrent = Math.max(peakConcurrent, running);
+      await gate;
+      running -= 1;
+      const { fetch: upstream } = stubFetch();
+      return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+    },
+  ));
+
+  // Five callers are already in flight; only the cap decides how many reach Tokdash.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(cache.runningScans, 2, 'the cap holds while every caller is waiting');
+  assert.equal(cache.queuedScans, 3, 'the rest queue rather than fan out');
+
+  open();
+  await Promise.all(started);
+
+  assert.equal(peakConcurrent, 2, 'five distinct windows never scanned more than twice at once');
+  assert.equal(cache.runningScans, 0, 'every slot is returned');
+  assert.equal(cache.queuedScans, 0, 'nothing is left waiting');
+});
+
+await test('a queued window that arrives already cached spends no scan', async () => {
+  const cache = new TokdashReportCache({ maxConcurrentScans: 1 });
+  const blocker: (() => void)[] = [];
+  let scans = 0;
+  const load = (from: string) => cache.load({ from, to: '2026-08-31' }, async () => {
+    scans += 1;
+    await new Promise<void>((resolve) => blocker.push(resolve));
+    const { fetch: upstream } = stubFetch();
+    return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+  });
+
+  const first = load('2026-08-01');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const queued = load('2026-08-02');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // While the queued window waits, its answer arrives by another route.
+  const { fetch: upstream } = stubFetch();
+  cache.set({ from: '2026-08-02', to: '2026-08-31' },
+    await fetchTokdashReport(undefined, WINDOW, { fetch: upstream }));
+
+  blocker.shift()!();
+  await first;
+  await queued;
+  assert.equal(scans, 1, 'the queued caller read the stored entry instead of scanning');
+});
+
+await test('project names can be withheld without withholding the report', async () => {
+  const { fetch: upstream } = stubFetch();
+  const owner = await fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+  assert.ok((owner.projects?.rows.length ?? 0) > 0, 'the owner sees named projects');
+  assert.equal(owner.projectsUnavailable, null);
+
+  const observer = withoutProjectNames(owner);
+  assert.equal(observer.projects, null, 'the names are gone');
+  assert.equal(observer.projectsUnavailable, 'owner-only', 'and the reason is said, not inferred');
+
+  // Everything that is a count survives: the narrowing is the Amber facet, not the report.
+  assert.equal(observer.totals.tokens, owner.totals.tokens);
+  assert.deepEqual(observer.tools, owner.tools);
+  assert.deepEqual(observer.daily, owner.daily);
+  assert.deepEqual(observer.hourly, owner.hourly);
+  assert.equal(observer.insightsUnavailable, null, 'withholding is not a facet failure');
+
+  // The owner's own copy is never the one that got trimmed.
+  assert.ok((owner.projects?.rows.length ?? 0) > 0);
+
+  // No project name survives anywhere in the observer's serialized answer.
+  const names = owner.projects!.rows.map((row) => row.project);
+  assert.ok(names.length > 0);
+  const wire = JSON.stringify(observer);
+  for (const name of names) {
+    assert.equal(wire.includes(name), false, `withheld report still carries ${name}`);
+  }
+});
+
+await test('withholding a report that never had projects changes nothing', async () => {
+  const { fetch: upstream } = stubFetch({ insights: 404 });
+  const report = await fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+  assert.equal(report.projects, null);
+
+  // An older Tokdash already served no facets. Calling that "owner-only" would blame the caller's
+  // scope for an upstream limitation and send the client to the wrong notice.
+  const withheld = withoutProjectNames(report);
+  assert.equal(withheld.projectsUnavailable, null);
+  assert.equal(withheld.insightsUnavailable, 'unsupported');
 });
 
 console.log(`\nTokdash report: ${passes} passed, ${failures} failed`);

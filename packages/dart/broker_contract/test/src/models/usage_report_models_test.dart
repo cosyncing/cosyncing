@@ -280,4 +280,37 @@ void main() {
       expect(response.report, isNull);
     });
   });
+
+  group('withheld project names', () {
+    test('the reason decodes, and is distinct from an absent facet', () {
+      final withheld = UsageReport.fromJson({
+        ...loadSample(),
+        'projects': null,
+        'projectsUnavailable': 'owner-only',
+      });
+      expect(withheld.projects, isNull);
+      expect(withheld.projectsUnavailable, UsageProjectsRefusal.ownerOnly);
+      expect(withheld.projectsWithheld, isTrue);
+      // Withholding is not a facet failure; conflating them would send the
+      // reader to a notice about Tokdash when the limit is their own scope.
+      expect(withheld.insightsUnavailable, isNull);
+    });
+
+    test('an absent facet with no reason is not a withholding', () {
+      final report = UsageReport.fromJson({...loadSample(), 'projects': null});
+      expect(report.projects, isNull);
+      expect(report.projectsUnavailable, isNull);
+      expect(report.projectsWithheld, isFalse);
+    });
+
+    test('a reason added after this client shipped decodes as unknown', () {
+      final report = UsageReport.fromJson({
+        ...loadSample(),
+        'projects': null,
+        'projectsUnavailable': 'some-later-reason',
+      });
+      expect(report.projectsUnavailable, UsageProjectsRefusal.unknown);
+      expect(report.projectsWithheld, isTrue);
+    });
+  });
 }

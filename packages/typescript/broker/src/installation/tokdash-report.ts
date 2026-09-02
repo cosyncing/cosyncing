@@ -214,7 +214,23 @@ export interface TokdashReport {
   sourceErrors: string[];
   /** Why the facets are absent, when they are. A reason code, never an upstream error string. */
   insightsUnavailable: TokdashReportInsightsRefusal | null;
+  /**
+   * Why the project facet is absent when the other facets are present.
+   *
+   * `projects` alone can be withheld from a caller that is allowed the report but not the names in
+   * it, and that is a different fact from Tokdash not serving facets at all. Without this the client
+   * would have to infer the difference from which fields happen to be null.
+   */
+  projectsUnavailable: TokdashReportProjectsRefusal | null;
 }
+
+/**
+ * Why project names were not served.
+ *
+ * One value today. It is a code rather than a boolean so a later reason — a user preference, say —
+ * does not have to re-shape the field.
+ */
+export type TokdashReportProjectsRefusal = 'owner-only';
 
 /** The closed vocabulary of facet refusals. A code cannot interpolate an upstream error. */
 export type TokdashReportInsightsRefusal = 'unsupported' | 'unavailable' | 'malformed';
@@ -224,6 +240,36 @@ export interface TokdashReportFetchOptions {
   timeoutMs?: number;
   fetch?: typeof fetch;
 }
+
+/**
+ * The earliest day a requested window may reach back to.
+ *
+ * Deliberately equal to the client's own all-time floor (`usageAllTimeFloor` in
+ * `usage_period.dart`), because the all-time period is the widest window the product asks for and
+ * the broker must not refuse its own client. It exists to reject the windows nothing asks for:
+ * `0001-01-01..9999-12-31` costs the same full upstream scan as a real year and turns the
+ * per-window cache into an unbounded key space.
+ */
+export const TOKDASH_REPORT_WINDOW_FLOOR = '2000-01-01';
+
+/**
+ * How far past the broker's own today a window may end.
+ *
+ * One day, not zero: the client computes the window from its own clock, and a client a timezone
+ * ahead legitimately asks for a `to` the broker has not reached yet. Anything beyond that is a
+ * window nobody can have data for.
+ */
+export const TOKDASH_REPORT_FUTURE_DAYS = 1;
+
+/**
+ * How many distinct windows may be scanned upstream at once.
+ *
+ * Coalescing dedupes *identical* windows; it does nothing for distinct ones, and Tokdash sheds
+ * concurrent scans per window with a 503. Two is enough for the one case that legitimately overlaps
+ * — a period switcher leaving one window while entering another — and it makes N distinct requests
+ * cost two scans plus a queue rather than N scans.
+ */
+export const TOKDASH_REPORT_MAX_CONCURRENT_SCANS = 2;
 
 /** A window request. Both bounds are inclusive `YYYY-MM-DD` dates in Tokdash's local zone. */
 export interface TokdashReportWindow {
@@ -243,6 +289,31 @@ export function isTokdashReportDate(value: unknown): value is string {
   if (typeof value !== 'string' || !DATE_PATTERN.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+/** Why a well-formed window was still refused, as a code rather than a sentence. */
+export type TokdashReportWindowRefusal = 'range-inverted' | 'range-too-early' | 'range-in-future';
+
+/**
+ * Checks a window that is already known to hold two real dates.
+ *
+ * Returns a code rather than a message so the route answers in the same vocabulary the module uses
+ * for its other refusals, and so the client can act on the reason without parsing prose.
+ */
+export function checkTokdashReportWindow(
+  window: TokdashReportWindow,
+  today: string,
+): TokdashReportWindowRefusal | null {
+  if (window.from > window.to) return 'range-inverted';
+  if (window.from < TOKDASH_REPORT_WINDOW_FLOOR) return 'range-too-early';
+  return window.to > addDays(today, TOKDASH_REPORT_FUTURE_DAYS) ? 'range-in-future' : null;
+}
+
+/** `YYYY-MM-DD` shifted by whole days, in UTC so no local zone can move the boundary. */
+function addDays(day: string, days: number): string {
+  const shifted = new Date(`${day}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted.toISOString().slice(0, 10);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -669,7 +740,25 @@ export async function fetchTokdashReport(
     coverage: insights === null ? null : parseCoverage(insights),
     sourceErrors: stringList(usageBody.source_errors),
     insightsUnavailable,
+    projectsUnavailable: null,
   };
+}
+
+/**
+ * The same report with the project facet withheld.
+ *
+ * Project names are the one Amber field in an otherwise Green DTO: `cosyncing_private` names work
+ * the reader may not be entitled to know about, and every other field is a count. The route is
+ * observe-scoped because the counts are the point of the feature on a paired device — so the
+ * narrowing belongs to the facet, not to the route, and an observer gets the report without the
+ * names rather than no report at all.
+ *
+ * Applied on the way out of the cache, never on the way in: one stored window serves both callers,
+ * and the owner's view is never the one that got trimmed.
+ */
+export function withoutProjectNames(report: TokdashReport): TokdashReport {
+  if (report.projects === null) return report;
+  return { ...report, projects: null, projectsUnavailable: 'owner-only' };
 }
 
 /** A cached window and when it was built. */
@@ -690,13 +779,51 @@ export class TokdashReportCache {
   readonly #inFlight = new Map<string, Promise<TokdashReportCacheEntry>>();
   readonly #ttlMs: number;
   readonly #maxEntries: number;
+  readonly #maxConcurrentScans: number;
   readonly #now: () => number;
+  #runningScans = 0;
+  readonly #waiting: (() => void)[] = [];
 
   /** Creates a cache. `now` is injectable so expiry is testable without waiting. */
-  constructor(options: { ttlMs?: number; maxEntries?: number; now?: () => number } = {}) {
+  constructor(
+    options: {
+      ttlMs?: number;
+      maxEntries?: number;
+      maxConcurrentScans?: number;
+      now?: () => number;
+    } = {},
+  ) {
     this.#ttlMs = Math.max(0, options.ttlMs ?? TOKDASH_REPORT_CACHE_MS);
     this.#maxEntries = Math.max(1, options.maxEntries ?? TOKDASH_REPORT_CACHE_ENTRIES);
+    this.#maxConcurrentScans = Math.max(
+      1,
+      options.maxConcurrentScans ?? TOKDASH_REPORT_MAX_CONCURRENT_SCANS,
+    );
     this.#now = options.now ?? Date.now;
+  }
+
+  /** How many upstream scans are running right now. Test-visible, not part of the route's answer. */
+  get runningScans(): number {
+    return this.#runningScans;
+  }
+
+  /** How many callers are queued behind the concurrency cap. */
+  get queuedScans(): number {
+    return this.#waiting.length;
+  }
+
+  async #acquireScanSlot(): Promise<void> {
+    if (this.#runningScans < this.#maxConcurrentScans) {
+      this.#runningScans += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.#waiting.push(resolve));
+    this.#runningScans += 1;
+  }
+
+  #releaseScanSlot(): void {
+    this.#runningScans -= 1;
+    this.#waiting.shift()?.();
   }
 
   /** The live entry for a window, or `undefined` when absent or expired. */
@@ -751,13 +878,35 @@ export class TokdashReportCache {
     // an upstream scan; reporting it as a cache hit is the honest half of that.
     if (pending) return { entry: await pending, servedFromCache: true };
 
-    const promise = loader()
-      .then((report) => this.set(window, report))
+    const promise = this.#scan(window, key, loader)
       .finally(() => {
         this.#inFlight.delete(key);
       });
     this.#inFlight.set(key, promise);
     return { entry: await promise, servedFromCache: false };
+  }
+
+  /**
+   * Runs one upstream scan, holding a concurrency slot for its duration.
+   *
+   * The cache is re-read after the slot is granted, not only before: a caller that queued behind two
+   * other windows may find its own window already stored by the time it is let through — by a
+   * later, faster caller for the same window, or by a refresh — and spending a scan on an answer
+   * already in hand is the one thing the queue exists to prevent.
+   */
+  async #scan(
+    window: TokdashReportWindow,
+    key: string,
+    loader: () => Promise<TokdashReport>,
+  ): Promise<TokdashReportCacheEntry> {
+    await this.#acquireScanSlot();
+    try {
+      const stored = this.get(window);
+      if (stored) return stored;
+      return this.set(window, await loader());
+    } finally {
+      this.#releaseScanSlot();
+    }
   }
 
   /** Drops every window. In-flight reads are left to settle into a cache nobody will read. */

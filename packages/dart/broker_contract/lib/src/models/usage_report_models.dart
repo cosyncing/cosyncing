@@ -14,6 +14,30 @@
 ///   [UsageProjectReconciliation].
 library;
 
+/// Why the project facet alone is absent from a report.
+///
+/// Distinct from [UsageInsightsRefusal]: the facets can all be missing because
+/// Tokdash could not serve them, or the project facet alone can be withheld
+/// from a caller allowed the counts but not the names. Those read the same in
+/// the DTO — `projects: null` — and mean different things to the reader.
+enum UsageProjectsRefusal {
+  /// The caller is not the owner, so project names were not served.
+  ownerOnly,
+
+  /// A refusal this client does not know. Newer brokers may add reasons.
+  unknown;
+
+  /// Decodes a served refusal code, tolerating values added after this client
+  /// shipped.
+  static UsageProjectsRefusal? fromJson(Object? value) {
+    if (value == null) return null;
+    return switch (value) {
+      'owner-only' => UsageProjectsRefusal.ownerOnly,
+      _ => UsageProjectsRefusal.unknown,
+    };
+  }
+}
+
 /// Why the insights facets are absent from a report.
 enum UsageInsightsRefusal {
   /// This Tokdash has no insights API — it predates 2.5.0.
@@ -816,6 +840,7 @@ class UsageReport {
     this.firsts,
     this.coverage,
     this.insightsUnavailable,
+    this.projectsUnavailable,
   });
 
   /// Decodes a report.
@@ -861,6 +886,9 @@ class UsageReport {
       coverage: section('coverage', UsageReportCoverage.fromJson),
       insightsUnavailable: UsageInsightsRefusal.fromJson(
         json['insightsUnavailable'],
+      ),
+      projectsUnavailable: UsageProjectsRefusal.fromJson(
+        json['projectsUnavailable'],
       ),
     );
   }
@@ -916,6 +944,12 @@ class UsageReport {
 
   /// Why the facets are absent, when they are.
   final UsageInsightsRefusal? insightsUnavailable;
+
+  /// Why the project facet alone is absent, when it is.
+  final UsageProjectsRefusal? projectsUnavailable;
+
+  /// Whether project names were withheld rather than simply unavailable.
+  bool get projectsWithheld => projectsUnavailable != null;
 
   /// The period reconciliation for the projects facet, or `null` when there is
   /// nothing to sum.
