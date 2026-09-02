@@ -37,6 +37,12 @@ const String brokerDevicesSettingsRoute = '$settingsRoute/broker-devices';
 /// Agent and usage settings category: managed runtimes, quota warnings.
 const String agentsSettingsRoute = '$settingsRoute/agents';
 
+/// Usage overview: totals, trends, and the export cards for this machine.
+///
+/// Nested under Settings rather than promoted to a top-level destination, and
+/// deep-linkable so a future month-end notification can land on a period.
+const String usageReportRoute = '$settingsRoute/usage';
+
 /// General settings category: shortcuts, scheduled sends, transfers.
 const String generalSettingsRoute = '$settingsRoute/general';
 

@@ -69,6 +69,13 @@ class SettingsPage extends StatelessWidget {
                   onTap: () => context.push(agentsSettingsRoute),
                 ),
                 SettingsLinkTile(
+                  tileKey: const Key('settings-category-usage'),
+                  icon: Icons.query_stats_outlined,
+                  title: l10n.usageHubTileTitle,
+                  subtitle: l10n.usageHubTileSubtitle,
+                  onTap: () => context.push(usageReportRoute),
+                ),
+                SettingsLinkTile(
                   tileKey: const Key('settings-category-general'),
                   icon: Icons.tune_outlined,
                   title: l10n.settingsCategoryGeneralTitle,

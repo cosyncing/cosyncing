@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/router/app_routes.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/errors/user_facing_error.dart';
 import 'package:cosyncing_client/src/features/settings/controller/managed_runtime_controller.dart';
@@ -9,6 +10,7 @@ import 'package:cosyncing_client/src/features/settings/view/quota_status_panel.d
 import 'package:cosyncing_client/src/features/settings/view/settings_common.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 /// Settings → Agents & usage: the broker-managed agent runtimes, the broker
 /// build they run against, and the usage warnings derived from them.
@@ -97,7 +99,17 @@ class AgentsSettingsPage extends ConsumerWidget {
     final quotaState = ref.watch(managedRuntimeQuotaProvider);
 
     return Scaffold(
-      appBar: AppBar(title: Text(l10n.settingsCategoryAgentsTitle)),
+      appBar: AppBar(
+        title: Text(l10n.settingsCategoryAgentsTitle),
+        actions: [
+          IconButton(
+            key: const Key('settings-agents-usage-report'),
+            tooltip: l10n.usageHubTileTitle,
+            icon: const Icon(Icons.query_stats_outlined),
+            onPressed: () => context.push(usageReportRoute),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(16),

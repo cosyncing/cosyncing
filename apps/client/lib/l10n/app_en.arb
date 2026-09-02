@@ -150,7 +150,11 @@
   "brokerGateUnreachableTitle": "Can't reach {serverName}",
   "@brokerGateUnreachableTitle": {
     "description": "Title shown when the selected saved server did not respond.",
-    "placeholders": {"serverName": {"type": "String"}}
+    "placeholders": {
+      "serverName": {
+        "type": "String"
+      }
+    }
   },
   "brokerGateUnreachableBodyAt": "The server at {brokerUrl} did not respond. Check that the server is running and that this device is on the correct network, then try again.",
   "@brokerGateUnreachableBodyAt": {
@@ -660,16 +664,40 @@
   },
   "brokerProfilesLoadFailed": "Couldn't load saved servers.",
   "brokerProfileActivated": "{profileName} is now the active server.",
-  "@brokerProfileActivated": {"placeholders": {"profileName": {"type": "String"}}},
+  "@brokerProfileActivated": {
+    "placeholders": {
+      "profileName": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileActivateFailed": "Couldn't switch servers. Try again.",
   "brokerProfileDeleteTitle": "Delete saved server",
   "brokerProfileDeleteWithoutToken": "Delete {profileName}? If it is active, cosyncing will clear the selection.",
-  "@brokerProfileDeleteWithoutToken": {"placeholders": {"profileName": {"type": "String"}}},
+  "@brokerProfileDeleteWithoutToken": {
+    "placeholders": {
+      "profileName": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileDeleteWithToken": "Delete {profileName}? This also removes its saved token. If it is active, cosyncing will clear the selection.",
-  "@brokerProfileDeleteWithToken": {"placeholders": {"profileName": {"type": "String"}}},
+  "@brokerProfileDeleteWithToken": {
+    "placeholders": {
+      "profileName": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileDeleteAction": "Delete",
   "brokerProfileDeleted": "Deleted {profileName}.",
-  "@brokerProfileDeleted": {"placeholders": {"profileName": {"type": "String"}}},
+  "@brokerProfileDeleted": {
+    "placeholders": {
+      "profileName": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileDeleteFailed": "Couldn't delete this saved server. Try again.",
   "brokerProfileUpdated": "Saved server updated.",
   "brokerProfileActive": "Active",
@@ -677,9 +705,21 @@
   "brokerProfileEditTooltip": "Edit server",
   "brokerProfileDeleteTooltip": "Delete server",
   "brokerProfileCreated": "Created: {date}",
-  "@brokerProfileCreated": {"placeholders": {"date": {"type": "String"}}},
+  "@brokerProfileCreated": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileLastUsed": "Last used: {date}",
-  "@brokerProfileLastUsed": {"placeholders": {"date": {"type": "String"}}},
+  "@brokerProfileLastUsed": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "brokerProfileEmptyTitle": "No saved servers yet",
   "brokerProfileEmptyBody": "Open Connection and connect once to save a server. Return here to edit it or switch servers.",
   "brokerProfileOpenConnection": "Open Connection",
@@ -895,11 +935,19 @@
   },
   "settingsRuntimeLoadFailedDetail": "Details: {detail}",
   "@settingsRuntimeLoadFailedDetail": {
-    "placeholders": { "detail": { "type": "String" } }
+    "placeholders": {
+      "detail": {
+        "type": "String"
+      }
+    }
   },
   "settingsRuntimeActionFailed": "Restart failed: {detail}",
   "@settingsRuntimeActionFailed": {
-    "placeholders": { "detail": { "type": "String" } }
+    "placeholders": {
+      "detail": {
+        "type": "String"
+      }
+    }
   },
   "settingsAttentionDeliveryUnavailable": "Couldn't load notification delivery settings.",
   "@settingsAttentionDeliveryUnavailable": {
@@ -1120,12 +1168,33 @@
   "sessionsMachineOwnerNotFound": "This session is no longer available on its reported server.",
   "sessionsMachineNoRoute": "The owning server didn't provide a direct connection address.",
   "sessionsMachineConnectTitle": "Connect to {machine}?",
-  "@sessionsMachineConnectTitle": {"placeholders": {"machine": {"type": "String"}}},
+  "@sessionsMachineConnectTitle": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
   "sessionsMachineConnectBody": "This session belongs to another server. cosyncing will switch to the independently paired “{profileName}” profile.",
-  "@sessionsMachineConnectBody": {"placeholders": {"profileName": {"type": "String"}}},
+  "@sessionsMachineConnectBody": {
+    "placeholders": {
+      "profileName": {
+        "type": "String"
+      }
+    }
+  },
   "sessionsMachinePairTitle": "Pair this server separately",
   "sessionsMachinePairBody": "{machine} owns this session at {brokerUrl}. Save and pair that server as its own profile before connecting. Credentials from the current server are never forwarded.",
-  "@sessionsMachinePairBody": {"placeholders": {"machine": {"type": "String"}, "brokerUrl": {"type": "String"}}},
+  "@sessionsMachinePairBody": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      },
+      "brokerUrl": {
+        "type": "String"
+      }
+    }
+  },
   "sessionsMachineOpenProfiles": "Server Profiles",
   "sessionsMachineRoleLocal": "This device",
   "sessionsMachineRolePeer": "Remote device",
@@ -1135,13 +1204,25 @@
   "sessionsMachineFreshnessUnknown": "Freshness unknown",
   "sessionsMachineDegraded": "Degraded",
   "sessionsMachineInvalidCount": "{count, plural, =1{1 invalid session} other{{count} invalid sessions}}",
-  "@sessionsMachineInvalidCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionsMachineInvalidCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionsMachineRouteLocal": "local",
   "sessionsMachineRouteDirect": "direct",
   "sessionsMachineRouteUnavailable": "route unavailable",
   "sessionsMachineReadOnly": "Read-only",
   "sessionsScheduledConfirmation": "Session scheduled for {date}.",
-  "@sessionsScheduledConfirmation": {"placeholders": {"date": {"type": "String"}}},
+  "@sessionsScheduledConfirmation": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "sessionsLoading": "Loading sessions…",
   "sessionsLoadFailedTitle": "Couldn't load sessions",
   "sessionsLoadFailedBody": "Check the server connection and try again.",
@@ -1160,15 +1241,39 @@
   "schedulesTitle": "Scheduled sends",
   "schedulesLoadFailed": "Couldn't load scheduled sends. Check the server connection and retry.",
   "scheduleNewSessionTarget": "New {tool} session",
-  "@scheduleNewSessionTarget": {"placeholders": {"tool": {"type": "String"}}},
+  "@scheduleNewSessionTarget": {
+    "placeholders": {
+      "tool": {
+        "type": "String"
+      }
+    }
+  },
   "scheduleRepeatDaily": "Daily",
   "scheduleRepeatWeekdays": "Weekdays",
   "scheduleRepeatOnce": "Once",
   "scheduleRepeatCron": "Cron",
   "scheduleRetrySummary": "{count, plural, =1{1 retry} other{{count} retries}} · {minutes} min · {backoff}",
-  "@scheduleRetrySummary": {"placeholders": {"count": {"type": "int"}, "minutes": {"type": "int"}, "backoff": {"type": "String"}}},
+  "@scheduleRetrySummary": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "minutes": {
+        "type": "int"
+      },
+      "backoff": {
+        "type": "String"
+      }
+    }
+  },
   "scheduleNextRetry": "Next retry: {date}",
-  "@scheduleNextRetry": {"placeholders": {"date": {"type": "String"}}},
+  "@scheduleNextRetry": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "scheduleLastFailureDelivery": "The last delivery failed. Check the session and try again.",
   "scheduleLastFailureQuota": "The last delivery stopped because the agent quota was exhausted.",
   "scheduleLastFailureUnknown": "The last delivery failed.",
@@ -1212,13 +1317,28 @@
   "scheduleMessageCreateTitle": "Schedule message",
   "scheduleMessageEditTitle": "Edit scheduled message",
   "scheduleMessageTarget": "To: {sessionTitle} ({tool})",
-  "@scheduleMessageTarget": {"placeholders": {"sessionTitle": {"type": "String"}, "tool": {"type": "String"}}},
+  "@scheduleMessageTarget": {
+    "placeholders": {
+      "sessionTitle": {
+        "type": "String"
+      },
+      "tool": {
+        "type": "String"
+      }
+    }
+  },
   "scheduleSendAtLabel": "Send at",
   "scheduleMessagePolicy": "Uses the session model, mode, and permission settings that are active when the server sends it.",
   "scheduleAction": "Schedule",
   "scheduleMessageRequired": "Enter the message to schedule.",
   "scheduleMessageTooLong": "Scheduled messages can contain at most {count} characters.",
-  "@scheduleMessageTooLong": {"placeholders": {"count": {"type": "int"}}},
+  "@scheduleMessageTooLong": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "scheduleCreateFailed": "Couldn't schedule this message. Check the server connection and try again.",
   "scheduleChange": "Change",
   "scheduleInlineTitle": "Scheduled message",
@@ -1719,9 +1839,13 @@
   },
   "settingsBrokerAndUpdateSection": "Server health & updates",
   "settingsWorkspaceBrowsingSection": "Workspace access",
-  "@settingsWorkspaceBrowsingSection": {"description": "Settings section containing the broker-wide HTTP workspace browsing exposure gate."},
+  "@settingsWorkspaceBrowsingSection": {
+    "description": "Settings section containing the broker-wide HTTP workspace browsing exposure gate."
+  },
   "settingsWorkspaceBrowsingTitle": "Workspace browsing",
-  "@settingsWorkspaceBrowsingTitle": {"description": "Title of the owner-controlled workspace browsing switch."},
+  "@settingsWorkspaceBrowsingTitle": {
+    "description": "Title of the owner-controlled workspace browsing switch."
+  },
   "settingsWorkspaceBrowsingOn": "Authenticated clients with file access can browse files inside session workspaces.",
   "settingsWorkspaceBrowsingOff": "HTTP clients cannot browse workspace files.",
   "settingsWorkspaceBrowsingOwnerOnly": "Only a server owner credential can change this setting.",
@@ -1736,7 +1860,16 @@
   "settingsConnectToInspectBroker": "Connect to a server to inspect its health, version, and available updates.",
   "settingsBrokerTechnicalDetails": "Technical details",
   "settingsBrokerContractDetails": "Contract revision {revision} · {surfaceHash}",
-  "@settingsBrokerContractDetails": {"placeholders": {"revision": {"type": "int"}, "surfaceHash": {"type": "String"}}},
+  "@settingsBrokerContractDetails": {
+    "placeholders": {
+      "revision": {
+        "type": "int"
+      },
+      "surfaceHash": {
+        "type": "String"
+      }
+    }
+  },
   "settingsBrokerHealthTitle": "Server health",
   "@settingsBrokerHealthTitle": {
     "description": "Title of the broker health row."
@@ -2232,7 +2365,13 @@
   "sessionDetailTitleUntitled": "Untitled session",
   "sessionStatusTooltip": "Session status",
   "sessionStatusTooltipWithLabel": "Session status: {label}",
-  "@sessionStatusTooltipWithLabel": {"placeholders": {"label": {"type": "String"}}},
+  "@sessionStatusTooltipWithLabel": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
   "sessionControlSynced": "Synced",
   "sessionControlDriving": "Driving",
   "sessionControlDriverActive": "Driver active",
@@ -2240,7 +2379,13 @@
   "sessionControlObserving": "Observing",
   "sessionControlUnavailable": "Unavailable",
   "sessionScheduledFor": "Message scheduled for {date}",
-  "@sessionScheduledFor": {"placeholders": {"date": {"type": "String"}}},
+  "@sessionScheduledFor": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "sessionConnectionOwnership": "Connection & ownership",
   "sessionControlHeading": "Session control",
   "sessionNotAttached": "Not attached to the session.",
@@ -2308,11 +2453,29 @@
   "sessionFilesConnectPreview": "Connect to the Server before previewing files.",
   "sessionFilesPreviewTextOnly": "Preview is available only for text files.",
   "sessionFilesReading": "Reading {fileName}…",
-  "@sessionFilesReading": {"placeholders": {"fileName": {"type": "String"}}},
+  "@sessionFilesReading": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
+  },
   "sessionFilesPreviewMimeUnavailable": "Text preview isn't available for {mimeType}.",
-  "@sessionFilesPreviewMimeUnavailable": {"placeholders": {"mimeType": {"type": "String"}}},
+  "@sessionFilesPreviewMimeUnavailable": {
+    "placeholders": {
+      "mimeType": {
+        "type": "String"
+      }
+    }
+  },
   "sessionFilesPreviewTruncated": "Preview truncated at {count} bytes.",
-  "@sessionFilesPreviewTruncated": {"placeholders": {"count": {"type": "String"}}},
+  "@sessionFilesPreviewTruncated": {
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "sessionFilesPathNotFound": "The path was not found.",
   "sessionFilesNoWorkingDirectory": "This session does not have a working directory yet.",
   "sessionFilesPathOutsideWorkspace": "That path is outside the session workspace.",
@@ -2334,14 +2497,44 @@
   "sessionFileTypeSymlink": "symlink (cannot open)",
   "sessionFileTypeOther": "other",
   "sessionFileMetadata": "{type} · {count} bytes",
-  "@sessionFileMetadata": {"placeholders": {"type": {"type": "String"}, "count": {"type": "int"}}},
+  "@sessionFileMetadata": {
+    "placeholders": {
+      "type": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionTransfersCount": "Transfers ({count})",
-  "@sessionTransfersCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionTransfersCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "showingLatestEarlier": "Showing latest {visible}; {hidden} earlier",
-  "@showingLatestEarlier": {"placeholders": {"visible": {"type": "int"}, "hidden": {"type": "int"}}},
+  "@showingLatestEarlier": {
+    "placeholders": {
+      "visible": {
+        "type": "int"
+      },
+      "hidden": {
+        "type": "int"
+      }
+    }
+  },
   "mimeTypeLabel": "MIME",
   "sessionArtifactsCount": "File artifacts ({count})",
-  "@sessionArtifactsCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionArtifactsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionArtifactUntitled": "(untitled artifact)",
   "artifactKeyLabel": "Artifact",
   "hashLabel": "Hash",
@@ -2366,22 +2559,55 @@
   "notSuppliedByBroker": "Not supplied by server",
   "duration": "Duration",
   "millisecondsCount": "{count} ms",
-  "@millisecondsCount": {"placeholders": {"count": {"type": "String"}}},
+  "@millisecondsCount": {
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "messageId": "Message ID",
   "terminalOutput": "Terminal output",
   "archiveToStatus": "Archive to Status",
   "runningCommand": "Running command · /{name}",
-  "@runningCommand": {"placeholders": {"name": {"type": "String"}}},
+  "@runningCommand": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "compactionProgress": "Summarizing the conversation to reduce context use…",
   "backgroundWorkflow": "Background workflow",
   "backgroundAgent": "Background agent",
   "backgroundActivity": "Background activity",
   "agentsProgress": "{done}/{total} agents",
-  "@agentsProgress": {"placeholders": {"done": {"type": "int"}, "total": {"type": "int"}}},
+  "@agentsProgress": {
+    "placeholders": {
+      "done": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
   "tokensCount": "↓{count} tokens",
-  "@tokensCount": {"placeholders": {"count": {"type": "String"}}},
+  "@tokensCount": {
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "toolsCount": "{count} tools",
-  "@toolsCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "running": "Running",
   "done": "Done",
   "failed": "Failed",
@@ -2407,9 +2633,30 @@
   "plan": "Plan",
   "tasks": "Tasks",
   "taskSummary": "{total} tasks · {done} done",
-  "@taskSummary": {"placeholders": {"total": {"type": "int"}, "done": {"type": "int"}}},
+  "@taskSummary": {
+    "placeholders": {
+      "total": {
+        "type": "int"
+      },
+      "done": {
+        "type": "int"
+      }
+    }
+  },
   "taskSummaryRunning": "{total} tasks · {done} done · {running} in progress",
-  "@taskSummaryRunning": {"placeholders": {"total": {"type": "int"}, "done": {"type": "int"}, "running": {"type": "int"}}},
+  "@taskSummaryRunning": {
+    "placeholders": {
+      "total": {
+        "type": "int"
+      },
+      "done": {
+        "type": "int"
+      },
+      "running": {
+        "type": "int"
+      }
+    }
+  },
   "noTasksReported": "No tasks reported.",
   "approve": "Approve",
   "revise": "Revise",
@@ -2438,9 +2685,24 @@
   "terminalOutputSummary": "Terminal output.",
   "metadataUpdate": "Metadata update",
   "metadataUpdatedKeyValue": "Metadata updated: {key} = {value}",
-  "@metadataUpdatedKeyValue": {"placeholders": {"key": {"type": "String"}, "value": {"type": "String"}}},
+  "@metadataUpdatedKeyValue": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      },
+      "value": {
+        "type": "String"
+      }
+    }
+  },
   "metadataUpdatedKey": "Metadata updated: {key}",
-  "@metadataUpdatedKey": {"placeholders": {"key": {"type": "String"}}},
+  "@metadataUpdatedKey": {
+    "placeholders": {
+      "key": {
+        "type": "String"
+      }
+    }
+  },
   "metadataUpdated": "Metadata updated.",
   "tokenUsageUpdated": "Token usage updated.",
   "runSummary": "Run summary",
@@ -2457,16 +2719,34 @@
   "unsupportedMessageType": "Unsupported message type",
   "noSummaryAvailable": "No summary is available.",
   "lookupsCount": "{count} lookups",
-  "@lookupsCount": {"placeholders": {"count": {"type": "int"}}},
+  "@lookupsCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "exitCodeMetadata": "exit {code}",
-  "@exitCodeMetadata": {"placeholders": {"code": {"type": "int"}}},
+  "@exitCodeMetadata": {
+    "placeholders": {
+      "code": {
+        "type": "int"
+      }
+    }
+  },
   "truncated": "truncated",
   "noDetails": "No details.",
   "showPreview": "Show preview",
   "showAll": "Show all",
   "toolReturnedOutput": "Tool returned output.",
   "toolCommandWorkingDirectory": "in {path}",
-  "@toolCommandWorkingDirectory": {"placeholders": {"path": {"type": "String"}}},
+  "@toolCommandWorkingDirectory": {
+    "placeholders": {
+      "path": {
+        "type": "String"
+      }
+    }
+  },
   "toolCommandStdout": "stdout",
   "toolCommandStderr": "stderr",
   "toolCommandCombinedOutput": "Combined output",
@@ -2479,7 +2759,13 @@
   "toolCommandStateUnknown": "state unknown",
   "toolOutputTruncated": "Output truncated.",
   "toolOutputTruncatedLines": "Output truncated; {count} earlier lines hidden.",
-  "@toolOutputTruncatedLines": {"placeholders": {"count": {"type": "int"}}},
+  "@toolOutputTruncatedLines": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "toolOutputTruncatedBySource": "Output truncated by the agent before it reached this device.",
   "toolCopyOutput": "Copy output",
   "toolCopyPreview": "Copy preview",
@@ -2491,59 +2777,164 @@
   "toolReadUnavailable": "No preview is available.",
   "toolReadTruncated": "Preview truncated.",
   "toolReadTruncatedOf": "Preview truncated: showing {shown} of {total} lines.",
-  "@toolReadTruncatedOf": {"placeholders": {"shown": {"type": "int"}, "total": {"type": "int"}}},
+  "@toolReadTruncatedOf": {
+    "placeholders": {
+      "shown": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
   "toolSearchScope": "in {scope}",
-  "@toolSearchScope": {"placeholders": {"scope": {"type": "String"}}},
+  "@toolSearchScope": {
+    "placeholders": {
+      "scope": {
+        "type": "String"
+      }
+    }
+  },
   "toolSearchGroupHeader": "{path} ({count})",
-  "@toolSearchGroupHeader": {"placeholders": {"path": {"type": "String"}, "count": {"type": "int"}}},
+  "@toolSearchGroupHeader": {
+    "placeholders": {
+      "path": {
+        "type": "String"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "toolSearchGroupTruncated": "More matches in this file are not shown.",
   "toolSearchTruncated": "More matching files are not shown.",
   "toolSearchNoMatches": "No matches.",
   "toolSearchNoMatchesFor": "No matches for \"{query}\".",
-  "@toolSearchNoMatchesFor": {"placeholders": {"query": {"type": "String"}}},
+  "@toolSearchNoMatchesFor": {
+    "placeholders": {
+      "query": {
+        "type": "String"
+      }
+    }
+  },
   "toolWebNoResults": "No results.",
   "toolWebTruncated": "More results are not shown.",
   "toolSummarySeparator": "{left} · {right}",
-  "@toolSummarySeparator": {"placeholders": {"left": {"type": "String"}, "right": {"type": "String"}}},
+  "@toolSummarySeparator": {
+    "placeholders": {
+      "left": {
+        "type": "String"
+      },
+      "right": {
+        "type": "String"
+      }
+    }
+  },
   "toolSummaryMatches": "{count, plural, =0{no matches} =1{1 match} other{{count} matches}}",
-  "@toolSummaryMatches": {"placeholders": {"count": {"type": "int"}}},
+  "@toolSummaryMatches": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "toolSummaryMatchesInFiles": "{matches, plural, =1{1 match} other{{matches} matches}} in {files, plural, =1{1 file} other{{files} files}}",
-  "@toolSummaryMatchesInFiles": {"placeholders": {"matches": {"type": "int"}, "files": {"type": "int"}}},
+  "@toolSummaryMatchesInFiles": {
+    "placeholders": {
+      "matches": {
+        "type": "int"
+      },
+      "files": {
+        "type": "int"
+      }
+    }
+  },
   "toolSummaryFiles": "{count, plural, =0{no files} =1{1 file} other{{count} files}}",
-  "@toolSummaryFiles": {"placeholders": {"count": {"type": "int"}}},
+  "@toolSummaryFiles": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "toolSummaryResults": "{count, plural, =1{1 result} other{{count} results}}",
-  "@toolSummaryResults": {"placeholders": {"count": {"type": "int"}}},
+  "@toolSummaryResults": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "toolSearchMatchTruncated": "This match line is truncated.",
   "toolWebResultTruncated": "This result's text is truncated.",
   "toolFallbackInput": "Input",
   "toolFallbackOutput": "Output",
   "toolFallbackRedacted": "hidden",
   "toolFallbackRedactedSemantics": "{field}: value hidden because it may contain a secret",
-  "@toolFallbackRedactedSemantics": {"placeholders": {"field": {"type": "String"}}},
+  "@toolFallbackRedactedSemantics": {
+    "placeholders": {
+      "field": {
+        "type": "String"
+      }
+    }
+  },
   "toolFallbackTruncated": "Some fields are not shown.",
   "toolCallRequested": "Tool call requested.",
   "artifactPreviewWindowTitle": "Artifact preview — {fileName}",
-  "@artifactPreviewWindowTitle": {"placeholders": {"fileName": {"type": "String"}}},
+  "@artifactPreviewWindowTitle": {
+    "placeholders": {
+      "fileName": {
+        "type": "String"
+      }
+    }
+  },
   "artifactPreviewLoadFailed": "Couldn't load the preview. Try again.",
   "artifactPreviewBlocked": "The preview blocked a link that would leave this local file.",
   "artifactPreviewBrowserFailed": "Couldn't open the preview in your browser. Try again.",
   "sessionDetailUpdateFailed": "The session couldn't update. Check the Server connection and try again.",
   "sessionForkCreating": "Creating forked session…",
   "sessionForkCreated": "Forked session: {title}",
-  "@sessionForkCreated": {"placeholders": {"title": {"type": "String"}}},
+  "@sessionForkCreated": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "sessionForkFailed": "Couldn't fork this session. Check the Server connection and try again.",
   "sessionCloneCreating": "Creating duplicate session…",
   "sessionCloneCreated": "Duplicated session: {title}",
-  "@sessionCloneCreated": {"placeholders": {"title": {"type": "String"}}},
+  "@sessionCloneCreated": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "sessionCloneFailed": "Couldn't duplicate this session. Check the Server connection and try again.",
   "sessionExportPreparing": "Preparing transcript export…",
   "sessionExportInProgress": "Exporting transcript…",
   "sessionExportReady": "Transcript export is ready in Files.",
   "sessionExportFailed": "Couldn't export the transcript. Check the Server connection and try again.",
   "terminalShowingLatest": "Showing latest {visible} of {total}",
-  "@terminalShowingLatest": {"placeholders": {"visible": {"type": "int"}, "total": {"type": "int"}}},
+  "@terminalShowingLatest": {
+    "placeholders": {
+      "visible": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
   "terminalShowingAll": "Showing all {count}",
-  "@terminalShowingAll": {"placeholders": {"count": {"type": "int"}}},
+  "@terminalShowingAll": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "terminalNothingToCopy": "No visible terminal output to copy.",
   "terminalCopiedVisible": "Visible terminal output copied.",
   "terminalEmpty": "No terminal output yet",
@@ -2562,10 +2953,22 @@
   "noCommandsAvailable": "No commands available",
   "sendCommand": "Send command",
   "readOnlySuffix": "{label} (read-only)",
-  "@readOnlySuffix": {"placeholders": {"label": {"type": "String"}}},
+  "@readOnlySuffix": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      }
+    }
+  },
   "activityChildren": "Activity children",
   "priorityLabel": "{priority} priority",
-  "@priorityLabel": {"placeholders": {"priority": {"type": "String"}}},
+  "@priorityLabel": {
+    "placeholders": {
+      "priority": {
+        "type": "String"
+      }
+    }
+  },
   "inProgress": "In progress",
   "canceled": "Canceled",
   "sessionResumeInTerminal": "Resume in terminal",
@@ -2582,14 +2985,32 @@
   "sessionCommandCopiedHandedOff": "Command copied. Control returned to your terminal.",
   "sessionCommandCopiedHandoffFailed": "Command copied, but control could not return to your terminal.",
   "sessionExportConfirmBody": "Export a redacted {format} copy of the full transcript.",
-  "@sessionExportConfirmBody": {"placeholders": {"format": {"type": "String"}}},
+  "@sessionExportConfirmBody": {
+    "placeholders": {
+      "format": {
+        "type": "String"
+      }
+    }
+  },
   "format": "Format",
   "sizeCap": "Size cap",
   "retention": "Retention",
   "bytesCount": "{count} bytes",
-  "@bytesCount": {"placeholders": {"count": {"type": "int"}}},
+  "@bytesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "minutesCount": "{count} minutes",
-  "@minutesCount": {"placeholders": {"count": {"type": "int"}}},
+  "@minutesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "export": "Export",
   "@sessionDetailTitleUntitled": {
     "description": "Title shown for a session the broker has authoritatively reported with no title. Distinct from the opening placeholder: this session is fully resolved and simply has no name, so saying it is still opening would be false."
@@ -2757,96 +3178,276 @@
   "sessionRosterProjectCounts": "{needsInput} need input · {working} working · {idle} idle",
   "@sessionRosterProjectCounts": {
     "placeholders": {
-      "needsInput": {"type": "int"},
-      "working": {"type": "int"},
-      "idle": {"type": "int"}
+      "needsInput": {
+        "type": "int"
+      },
+      "working": {
+        "type": "int"
+      },
+      "idle": {
+        "type": "int"
+      }
     }
   },
   "sessionRosterProjectNeedsInputCount": "Needs input: {count}",
   "@sessionRosterProjectNeedsInputCount": {
     "description": "Non-zero needs-input session count in a project header.",
-    "placeholders": {"count": {"type": "int"}}
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "sessionRosterProjectWorkingCount": "Working: {count}",
   "@sessionRosterProjectWorkingCount": {
     "description": "Non-zero working session count in a project header.",
-    "placeholders": {"count": {"type": "int"}}
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "sessionRosterProjectIdleCount": "Idle: {count}",
   "@sessionRosterProjectIdleCount": {
     "description": "Non-zero idle session count in a project header.",
-    "placeholders": {"count": {"type": "int"}}
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
   },
   "sessionRosterReadyCount": "{count, plural, =1{1 session ready to review} other{{count} sessions ready to review}}",
-  "@sessionRosterReadyCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterReadyCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterReadyToReview": "Ready to review",
   "sessionRosterNewInProject": "New session in {project}",
-  "@sessionRosterNewInProject": {"placeholders": {"project": {"type": "String"}}},
+  "@sessionRosterNewInProject": {
+    "placeholders": {
+      "project": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterOriginSubagent": "Subagent",
   "sessionRosterChildOf": "Subagent of {parent}",
-  "@sessionRosterChildOf": {"placeholders": {"parent": {"type": "String"}}},
+  "@sessionRosterChildOf": {
+    "placeholders": {
+      "parent": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterShowChildren": "{count, plural, =1{Show 1 linked session} other{Show {count} linked sessions}}",
-  "@sessionRosterShowChildren": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterShowChildren": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterHideChildren": "{count, plural, =1{Hide 1 linked session} other{Hide {count} linked sessions}}",
-  "@sessionRosterHideChildren": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterHideChildren": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterOriginAutomation": "Automation",
   "sessionRosterModelTooltip": "Model: {id}",
-  "@sessionRosterModelTooltip": {"placeholders": {"id": {"type": "String"}}},
+  "@sessionRosterModelTooltip": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterModelTooltipVariant": "Model: {id} · Variant: {variant}",
-  "@sessionRosterModelTooltipVariant": {"placeholders": {"id": {"type": "String"}, "variant": {"type": "String"}}},
+  "@sessionRosterModelTooltipVariant": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      },
+      "variant": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterModelTooltipEffort": "Model: {id} · Effort: {effort}",
-  "@sessionRosterModelTooltipEffort": {"placeholders": {"id": {"type": "String"}, "effort": {"type": "String"}}},
+  "@sessionRosterModelTooltipEffort": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      },
+      "effort": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterModelTooltipFull": "Model: {id} · Variant: {variant} · Effort: {effort}",
-  "@sessionRosterModelTooltipFull": {"placeholders": {"id": {"type": "String"}, "variant": {"type": "String"}, "effort": {"type": "String"}}},
+  "@sessionRosterModelTooltipFull": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      },
+      "variant": {
+        "type": "String"
+      },
+      "effort": {
+        "type": "String"
+      }
+    }
+  },
   "sessionRosterJustNow": "just now",
   "sessionRosterMinutesAgo": "{count}m ago",
-  "@sessionRosterMinutesAgo": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterMinutesAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterHoursAgo": "{count}h ago",
-  "@sessionRosterHoursAgo": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterHoursAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterDaysAgo": "{count}d ago",
-  "@sessionRosterDaysAgo": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionRosterDaysAgo": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionRosterFilteredEmpty": "No sessions match these filters.",
   "foregroundAttentionFallbackTitle": "New notification",
-  "@foregroundAttentionFallbackTitle": {"description": "Fallback title for a foreground attention snackbar whose event title is blank."},
+  "@foregroundAttentionFallbackTitle": {
+    "description": "Fallback title for a foreground attention snackbar whose event title is blank."
+  },
   "foregroundAttentionOpen": "Open",
-  "@foregroundAttentionOpen": {"description": "Action that opens Notifications from the foreground aggregate banner."},
+  "@foregroundAttentionOpen": {
+    "description": "Action that opens Notifications from the foreground aggregate banner."
+  },
   "foregroundAttentionClose": "Close",
-  "@foregroundAttentionClose": {"description": "Visible action that closes the current foreground aggregate."},
+  "@foregroundAttentionClose": {
+    "description": "Visible action that closes the current foreground aggregate."
+  },
   "foregroundAttentionCloseSemantics": "Close this notification",
-  "@foregroundAttentionCloseSemantics": {"description": "Accessible button label for closing the current foreground aggregate."},
+  "@foregroundAttentionCloseSemantics": {
+    "description": "Accessible button label for closing the current foreground aggregate."
+  },
   "foregroundAttentionSessionNeedsInput": "{sessionName} needs input",
-  "@foregroundAttentionSessionNeedsInput": {"placeholders": {"sessionName": {"type": "String"}}},
+  "@foregroundAttentionSessionNeedsInput": {
+    "placeholders": {
+      "sessionName": {
+        "type": "String"
+      }
+    }
+  },
   "foregroundAttentionSessionFinished": "{sessionName} is ready to review.",
-  "@foregroundAttentionSessionFinished": {"placeholders": {"sessionName": {"type": "String"}}},
+  "@foregroundAttentionSessionFinished": {
+    "placeholders": {
+      "sessionName": {
+        "type": "String"
+      }
+    }
+  },
   "foregroundAttentionSessionFailed": "{sessionName} failed.",
-  "@foregroundAttentionSessionFailed": {"placeholders": {"sessionName": {"type": "String"}}},
+  "@foregroundAttentionSessionFailed": {
+    "placeholders": {
+      "sessionName": {
+        "type": "String"
+      }
+    }
+  },
   "foregroundAttentionSessionDegraded": "{sessionName} sync is degraded.",
-  "@foregroundAttentionSessionDegraded": {"placeholders": {"sessionName": {"type": "String"}}},
+  "@foregroundAttentionSessionDegraded": {
+    "placeholders": {
+      "sessionName": {
+        "type": "String"
+      }
+    }
+  },
   "sessionSelectionReadAloud": "Read aloud",
   "sessionSelectionForkFromHere": "Fork from here",
-  "@sessionSelectionForkFromHere": {"description": "Selection-menu action that forks a session from the selected message."},
+  "@sessionSelectionForkFromHere": {
+    "description": "Selection-menu action that forks a session from the selected message."
+  },
   "sessionSelectionDetails": "Details",
-  "@sessionSelectionDetails": {"description": "Selection-menu action that opens metadata for the selected message."},
+  "@sessionSelectionDetails": {
+    "description": "Selection-menu action that opens metadata for the selected message."
+  },
   "sessionOpenCodeRetrying": "OpenCode is retrying.",
-  "@sessionOpenCodeRetrying": {"description": "Primary live status shown while an OpenCode provider request is retrying."},
+  "@sessionOpenCodeRetrying": {
+    "description": "Primary live status shown while an OpenCode provider request is retrying."
+  },
   "sessionOpenCodeRetryDetail": "Provider detail: {detail}",
   "@sessionOpenCodeRetryDetail": {
     "description": "Bounded opaque provider detail shown below the OpenCode retry status.",
-    "placeholders": {"detail": {"type": "String"}}
+    "placeholders": {
+      "detail": {
+        "type": "String"
+      }
+    }
   },
   "foregroundAttentionUntitledSession": "Untitled session",
   "foregroundAttentionUntitledToolSession": "Untitled {tool} session",
-  "@foregroundAttentionUntitledToolSession": {"placeholders": {"tool": {"type": "String"}}},
+  "@foregroundAttentionUntitledToolSession": {
+    "placeholders": {
+      "tool": {
+        "type": "String"
+      }
+    }
+  },
   "foregroundAttentionAggregateTitle": "{count, plural, =1{1 new notification} other{{count} new notifications}}",
-  "@foregroundAttentionAggregateTitle": {"placeholders": {"count": {"type": "int"}}},
+  "@foregroundAttentionAggregateTitle": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "foregroundAttentionNeedsInputCount": "{count, plural, =1{1 needs input} other{{count} need input}}",
-  "@foregroundAttentionNeedsInputCount": {"placeholders": {"count": {"type": "int"}}},
+  "@foregroundAttentionNeedsInputCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "foregroundAttentionFinishedCount": "{count, plural, =1{1 finished} other{{count} finished}}",
-  "@foregroundAttentionFinishedCount": {"placeholders": {"count": {"type": "int"}}},
+  "@foregroundAttentionFinishedCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "foregroundAttentionFailedCount": "{count, plural, =1{1 failed} other{{count} failed}}",
-  "@foregroundAttentionFailedCount": {"placeholders": {"count": {"type": "int"}}},
+  "@foregroundAttentionFailedCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "foregroundAttentionOtherCount": "{count, plural, =1{1 other} other{{count} other}}",
-  "@foregroundAttentionOtherCount": {"placeholders": {"count": {"type": "int"}}},
+  "@foregroundAttentionOtherCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "foregroundAttentionRuntimeUpdate": "Runtime update ready",
   "foregroundAttentionSyncDegraded": "Session sync degraded",
   "foregroundAttentionDevicePaired": "Device paired",
@@ -2891,145 +3492,325 @@
   "attentionPageEmptyTitle": "Nothing needs your attention",
   "attentionPageEmptyBody": "Action requests, background run results, runtime updates, quota warnings, and server health notices appear here.",
   "close": "Close",
-  "@close": {"description": "Generic Close action that dismisses a dialog or sheet."},
+  "@close": {
+    "description": "Generic Close action that dismisses a dialog or sheet."
+  },
   "sessionTurnQueuedBadge": "Queued",
-  "@sessionTurnQueuedBadge": {"description": "Badge on a user prompt that was typed while a turn was running and is still waiting to be delivered."},
+  "@sessionTurnQueuedBadge": {
+    "description": "Badge on a user prompt that was typed while a turn was running and is still waiting to be delivered."
+  },
   "sessionTurnBodyTruncated": "Shortened to fit the history window.",
-  "@sessionTurnBodyTruncated": {"description": "Note under a transcript message whose body the broker shortened so a large history could still be replayed."},
+  "@sessionTurnBodyTruncated": {
+    "description": "Note under a transcript message whose body the broker shortened so a large history could still be replayed."
+  },
   "sessionTurnModelOutputFallback": "Model output received.",
-  "@sessionTurnModelOutputFallback": {"description": "Placeholder body for a model-output turn segment that carried no text."},
+  "@sessionTurnModelOutputFallback": {
+    "description": "Placeholder body for a model-output turn segment that carried no text."
+  },
   "transcriptContextLabel": "Context",
-  "@transcriptContextLabel": {"description": "Collapsed label for agent-visible context material the user never typed (system reminders, host context injections)."},
+  "@transcriptContextLabel": {
+    "description": "Collapsed label for agent-visible context material the user never typed (system reminders, host context injections)."
+  },
   "transcriptContextTruncated": "Shortened. The agent received more than this.",
-  "@transcriptContextTruncated": {"description": "Note under an expanded context block whose body was clipped at the shared length ceiling, so a body that stops part-way is not read as the whole material."},
+  "@transcriptContextTruncated": {
+    "description": "Note under an expanded context block whose body was clipped at the shared length ceiling, so a body that stops part-way is not read as the whole material."
+  },
   "sessionTurnThinkingLabel": "Thinking",
-  "@sessionTurnThinkingLabel": {"description": "Collapsed label for the quiet expandable thinking row inside a conversation turn."},
+  "@sessionTurnThinkingLabel": {
+    "description": "Collapsed label for the quiet expandable thinking row inside a conversation turn."
+  },
   "sessionTurnRanFor": "Ran for {duration}",
-  "@sessionTurnRanFor": {"description": "First half of a turn's runtime footer.", "placeholders": {"duration": {"type": "String"}}},
+  "@sessionTurnRanFor": {
+    "description": "First half of a turn's runtime footer.",
+    "placeholders": {
+      "duration": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnFinishedAt": "Finished at {time}",
-  "@sessionTurnFinishedAt": {"description": "Second half of a turn's runtime footer.", "placeholders": {"time": {"type": "String"}}},
+  "@sessionTurnFinishedAt": {
+    "description": "Second half of a turn's runtime footer.",
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnReadAloudTooltip": "Read aloud",
-  "@sessionTurnReadAloudTooltip": {"description": "Tooltip/semantics for the turn footer action that speaks the model reply."},
+  "@sessionTurnReadAloudTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that speaks the model reply."
+  },
   "sessionTurnStopReadAloudTooltip": "Stop reading",
-  "@sessionTurnStopReadAloudTooltip": {"description": "Tooltip/semantics for the turn footer action that stops an active read-aloud."},
+  "@sessionTurnStopReadAloudTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that stops an active read-aloud."
+  },
   "sessionTurnPauseReadAloudTooltip": "Pause reading",
-  "@sessionTurnPauseReadAloudTooltip": {"description": "Tooltip/semantics for the turn footer action that pauses read-aloud."},
+  "@sessionTurnPauseReadAloudTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that pauses read-aloud."
+  },
   "sessionTurnResumeReadAloudTooltip": "Resume reading",
-  "@sessionTurnResumeReadAloudTooltip": {"description": "Tooltip/semantics for the turn footer action that resumes paused read-aloud."},
+  "@sessionTurnResumeReadAloudTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that resumes paused read-aloud."
+  },
   "sessionTurnRetryReadAloudTooltip": "Retry read aloud",
-  "@sessionTurnRetryReadAloudTooltip": {"description": "Tooltip/semantics for the turn footer action that retries read-aloud after an error."},
+  "@sessionTurnRetryReadAloudTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that retries read-aloud after an error."
+  },
   "sessionTurnCopyTooltip": "Copy reply",
-  "@sessionTurnCopyTooltip": {"description": "Tooltip/semantics for the turn footer action that copies the model reply text."},
+  "@sessionTurnCopyTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that copies the model reply text."
+  },
   "sessionTurnCopyConfirmation": "Copied the model reply.",
-  "@sessionTurnCopyConfirmation": {"description": "Confirmation shown after copying a turn's model reply."},
+  "@sessionTurnCopyConfirmation": {
+    "description": "Confirmation shown after copying a turn's model reply."
+  },
   "sessionTurnTelemetryTooltip": "Turn details",
-  "@sessionTurnTelemetryTooltip": {"description": "Tooltip/semantics for the turn footer action that opens per-turn telemetry."},
+  "@sessionTurnTelemetryTooltip": {
+    "description": "Tooltip/semantics for the turn footer action that opens per-turn telemetry."
+  },
   "sessionTurnTelemetryTitle": "Turn telemetry",
-  "@sessionTurnTelemetryTitle": {"description": "Title of the per-turn telemetry dialog/sheet."},
+  "@sessionTurnTelemetryTitle": {
+    "description": "Title of the per-turn telemetry dialog/sheet."
+  },
   "sessionTurnTelemetryEmpty": "No telemetry reported for this turn.",
-  "@sessionTurnTelemetryEmpty": {"description": "Shown when a turn has no attributable telemetry."},
+  "@sessionTurnTelemetryEmpty": {
+    "description": "Shown when a turn has no attributable telemetry."
+  },
   "sessionTurnTelemetryPartial": "Partial — earlier history isn't loaded.",
-  "@sessionTurnTelemetryPartial": {"description": "Label warning that a turn's telemetry is partial because history was truncated."},
+  "@sessionTurnTelemetryPartial": {
+    "description": "Label warning that a turn's telemetry is partial because history was truncated."
+  },
   "sessionTurnTelemetryStatusLabel": "Status",
-  "@sessionTurnTelemetryStatusLabel": {"description": "Row label for a turn's completion status."},
+  "@sessionTurnTelemetryStatusLabel": {
+    "description": "Row label for a turn's completion status."
+  },
   "sessionTurnStatusDone": "Completed",
-  "@sessionTurnStatusDone": {"description": "Turn status value for a normal completion."},
+  "@sessionTurnStatusDone": {
+    "description": "Turn status value for a normal completion."
+  },
   "sessionTurnStatusError": "Error",
-  "@sessionTurnStatusError": {"description": "Turn status value for an errored turn."},
+  "@sessionTurnStatusError": {
+    "description": "Turn status value for an errored turn."
+  },
   "sessionTurnStatusCancelled": "Cancelled",
-  "@sessionTurnStatusCancelled": {"description": "Turn status value for a cancelled/interrupted turn."},
+  "@sessionTurnStatusCancelled": {
+    "description": "Turn status value for a cancelled/interrupted turn."
+  },
   "sessionTranscriptInterrupted": "Interrupted",
-  "@sessionTranscriptInterrupted": {"description": "Plain inline transcript marker for an interrupted turn."},
+  "@sessionTranscriptInterrupted": {
+    "description": "Plain inline transcript marker for an interrupted turn."
+  },
   "sessionTranscriptInterruptedAutomaticApproval": "Interrupted because automatic permission approval was denied repeatedly.",
-  "@sessionTranscriptInterruptedAutomaticApproval": {"description": "Plain inline transcript marker when repeated automatic permission approval denials caused the turn to stop."},
+  "@sessionTranscriptInterruptedAutomaticApproval": {
+    "description": "Plain inline transcript marker when repeated automatic permission approval denials caused the turn to stop."
+  },
   "sessionTranscriptNotice": "Notice",
-  "@sessionTranscriptNotice": {"description": "Fallback plain inline transcript text when a native notice has no body."},
+  "@sessionTranscriptNotice": {
+    "description": "Fallback plain inline transcript text when a native notice has no body."
+  },
   "sessionTranscriptCompactionComplete": "Compaction complete",
-  "@sessionTranscriptCompactionComplete": {"description": "Plain inline transcript marker after conversation compaction completes."},
+  "@sessionTranscriptCompactionComplete": {
+    "description": "Plain inline transcript marker after conversation compaction completes."
+  },
   "sessionTranscriptHistoryReloaded": "History changed. Transcript reloaded.",
-  "@sessionTranscriptHistoryReloaded": {"description": "Fallback plain inline transcript marker when history was reset without a native notice."},
+  "@sessionTranscriptHistoryReloaded": {
+    "description": "Fallback plain inline transcript marker when history was reset without a native notice."
+  },
   "sessionTurnStatusRunning": "Running",
-  "@sessionTurnStatusRunning": {"description": "Turn status value for a still-running turn."},
+  "@sessionTurnStatusRunning": {
+    "description": "Turn status value for a still-running turn."
+  },
   "sessionTurnStatusUnknown": "Unknown",
-  "@sessionTurnStatusUnknown": {"description": "Turn status value for a missing/future status."},
+  "@sessionTurnStatusUnknown": {
+    "description": "Turn status value for a missing/future status."
+  },
   "sessionTurnTelemetryRuntimeLabel": "Runtime",
-  "@sessionTurnTelemetryRuntimeLabel": {"description": "Row label for a turn's total runtime."},
+  "@sessionTurnTelemetryRuntimeLabel": {
+    "description": "Row label for a turn's total runtime."
+  },
   "sessionTurnTelemetryAgentRuntimeLabel": "Agent runtime",
-  "@sessionTurnTelemetryAgentRuntimeLabel": {"description": "Row label for a turn's agent-side runtime."},
+  "@sessionTurnTelemetryAgentRuntimeLabel": {
+    "description": "Row label for a turn's agent-side runtime."
+  },
   "sessionTurnTelemetryExecutionRuntimeLabel": "Execution runtime",
-  "@sessionTurnTelemetryExecutionRuntimeLabel": {"description": "Row label for a turn's execution-side runtime."},
+  "@sessionTurnTelemetryExecutionRuntimeLabel": {
+    "description": "Row label for a turn's execution-side runtime."
+  },
   "sessionTurnTelemetryTokensLabel": "Tokens",
-  "@sessionTurnTelemetryTokensLabel": {"description": "Row label for a turn's token usage."},
+  "@sessionTurnTelemetryTokensLabel": {
+    "description": "Row label for a turn's token usage."
+  },
   "sessionTurnTokensInput": "in {count}",
-  "@sessionTurnTokensInput": {"description": "Compact input-token count in a turn's token breakdown.", "placeholders": {"count": {"type": "String"}}},
+  "@sessionTurnTokensInput": {
+    "description": "Compact input-token count in a turn's token breakdown.",
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnTokensOutput": "out {count}",
-  "@sessionTurnTokensOutput": {"description": "Compact output-token count in a turn's token breakdown.", "placeholders": {"count": {"type": "String"}}},
+  "@sessionTurnTokensOutput": {
+    "description": "Compact output-token count in a turn's token breakdown.",
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnTokensCacheRead": "cache r {count}",
-  "@sessionTurnTokensCacheRead": {"description": "Compact cache-read token count in a turn's token breakdown.", "placeholders": {"count": {"type": "String"}}},
+  "@sessionTurnTokensCacheRead": {
+    "description": "Compact cache-read token count in a turn's token breakdown.",
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnTokensCacheWrite": "cache w {count}",
-  "@sessionTurnTokensCacheWrite": {"description": "Compact cache-write token count in a turn's token breakdown.", "placeholders": {"count": {"type": "String"}}},
+  "@sessionTurnTokensCacheWrite": {
+    "description": "Compact cache-write token count in a turn's token breakdown.",
+    "placeholders": {
+      "count": {
+        "type": "String"
+      }
+    }
+  },
   "sessionTurnTelemetryCostLabel": "Cost",
-  "@sessionTurnTelemetryCostLabel": {"description": "Row label for a turn's reported cost."},
+  "@sessionTurnTelemetryCostLabel": {
+    "description": "Row label for a turn's reported cost."
+  },
   "sessionTurnTelemetryStartedLabel": "Started",
-  "@sessionTurnTelemetryStartedLabel": {"description": "Row label for a turn's start time."},
+  "@sessionTurnTelemetryStartedLabel": {
+    "description": "Row label for a turn's start time."
+  },
   "sessionTurnTelemetryFinishedLabel": "Finished",
-  "@sessionTurnTelemetryFinishedLabel": {"description": "Row label for a turn's completion time."},
+  "@sessionTurnTelemetryFinishedLabel": {
+    "description": "Row label for a turn's completion time."
+  },
   "sessionTurnTelemetryToolCallsLabel": "Tool calls",
-  "@sessionTurnTelemetryToolCallsLabel": {"description": "Row label for a turn's distinct tool-call count."},
+  "@sessionTurnTelemetryToolCallsLabel": {
+    "description": "Row label for a turn's distinct tool-call count."
+  },
   "sessionTurnTelemetryChildRunsLabel": "Child runs",
-  "@sessionTurnTelemetryChildRunsLabel": {"description": "Row label for a turn's reported child runs (subagents/workflows)."},
+  "@sessionTurnTelemetryChildRunsLabel": {
+    "description": "Row label for a turn's reported child runs (subagents/workflows)."
+  },
   "sessionToolDiffEmpty": "No diff content.",
-  "@sessionToolDiffEmpty": {"description": "Shown when an edit tool reported an empty or unparseable diff."},
+  "@sessionToolDiffEmpty": {
+    "description": "Shown when an edit tool reported an empty or unparseable diff."
+  },
   "sessionToolDiffTruncated": "Diff truncated — open the file to see the rest.",
-  "@sessionToolDiffTruncated": {"description": "Note shown under a large diff when the rendered view was capped."},
+  "@sessionToolDiffTruncated": {
+    "description": "Note shown under a large diff when the rendered view was capped."
+  },
   "sessionToolDiffBinary": "Binary file — no text diff to show.",
-  "@sessionToolDiffBinary": {"description": "Shown when an edit tool result is a binary-file change with no textual diff."},
+  "@sessionToolDiffBinary": {
+    "description": "Shown when an edit tool result is a binary-file change with no textual diff."
+  },
   "sessionToolDiffShowMore": "Show {count} more lines",
-  "@sessionToolDiffShowMore": {"description": "Button that reveals the next chunk of a long diff.", "placeholders": {"count": {"type": "int"}}},
+  "@sessionToolDiffShowMore": {
+    "description": "Button that reveals the next chunk of a long diff.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionToolDiffCopy": "Copy diff",
-  "@sessionToolDiffCopy": {"description": "Tooltip on the button that copies a tool diff to the clipboard."},
+  "@sessionToolDiffCopy": {
+    "description": "Tooltip on the button that copies a tool diff to the clipboard."
+  },
   "sessionToolDiffCopied": "Copied the diff.",
-  "@sessionToolDiffCopied": {"description": "Confirmation shown after copying a tool diff."},
+  "@sessionToolDiffCopied": {
+    "description": "Confirmation shown after copying a tool diff."
+  },
   "sessionToolDiffLoading": "Loading diff…",
-  "@sessionToolDiffLoading": {"description": "Shown while an oversized diff body is fetched on expansion."},
+  "@sessionToolDiffLoading": {
+    "description": "Shown while an oversized diff body is fetched on expansion."
+  },
   "sessionToolDiffUnavailable": "This diff is no longer available.",
-  "@sessionToolDiffUnavailable": {"description": "Shown when an oversized diff body was evicted or its link expired."},
+  "@sessionToolDiffUnavailable": {
+    "description": "Shown when an oversized diff body was evicted or its link expired."
+  },
   "sessionToolDiffError": "Couldn't load the diff.",
-  "@sessionToolDiffError": {"description": "Shown when fetching an oversized diff body failed transiently."},
+  "@sessionToolDiffError": {
+    "description": "Shown when fetching an oversized diff body failed transiently."
+  },
   "sessionToolDiffRetry": "Retry",
-  "@sessionToolDiffRetry": {"description": "Button to retry fetching an oversized diff body."},
+  "@sessionToolDiffRetry": {
+    "description": "Button to retry fetching an oversized diff body."
+  },
   "sessionToolDiffTooLarge": "This diff is too large to load here.",
-  "@sessionToolDiffTooLarge": {"description": "Shown when a referenced diff body exceeds the client fetch ceiling and is rejected without loading."},
+  "@sessionToolDiffTooLarge": {
+    "description": "Shown when a referenced diff body exceeds the client fetch ceiling and is rejected without loading."
+  },
   "sessionToolDiffClipped": "Diff too large — showing the first part only.",
-  "@sessionToolDiffClipped": {"description": "Note shown under a referenced diff whose body the broker clipped at its fetch-size ceiling."},
+  "@sessionToolDiffClipped": {
+    "description": "Note shown under a referenced diff whose body the broker clipped at its fetch-size ceiling."
+  },
   "sessionToolDiffFilesOmitted": "{count, plural, =1{1 more file not shown — diff too large.} other{{count} more files not shown — diff too large.}}",
-  "@sessionToolDiffFilesOmitted": {"description": "Note when a clipped oversized multi-file diff dropped whole trailing files.", "placeholders": {"count": {"type": "int"}}},
+  "@sessionToolDiffFilesOmitted": {
+    "description": "Note when a clipped oversized multi-file diff dropped whole trailing files.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "settingsDeveloperOptionsTitle": "Developer options",
-  "@settingsDeveloperOptionsTitle": {"description": "Settings → General group heading for developer-facing switches."},
+  "@settingsDeveloperOptionsTitle": {
+    "description": "Settings → General group heading for developer-facing switches."
+  },
   "settingsShowDebugViewsTitle": "Show debug views",
-  "@settingsShowDebugViewsTitle": {"description": "Switch label for the default-off gate that reveals read-only Debug views in Session Detail."},
+  "@settingsShowDebugViewsTitle": {
+    "description": "Switch label for the default-off gate that reveals read-only Debug views in Session Detail."
+  },
   "settingsShowDebugViewsSubtitle": "Reveal the read-only Debug timeline in sessions. It can expose raw events and technical identifiers.",
-  "@settingsShowDebugViewsSubtitle": {"description": "Warning subtitle under the Show debug views switch."},
+  "@settingsShowDebugViewsSubtitle": {
+    "description": "Warning subtitle under the Show debug views switch."
+  },
   "sessionDebugTimelineHeading": "Debug timeline",
-  "@sessionDebugTimelineHeading": {"description": "Heading of the read-only Debug timeline panel in Session Detail."},
+  "@sessionDebugTimelineHeading": {
+    "description": "Heading of the read-only Debug timeline panel in Session Detail."
+  },
   "voiceErrorSecureContext": "Voice input needs a secure (https) connection.",
-  "@voiceErrorSecureContext": {"description": "Voice-input failure: the web origin is not a secure context."},
+  "@voiceErrorSecureContext": {
+    "description": "Voice-input failure: the web origin is not a secure context."
+  },
   "voiceErrorPermission": "Microphone access was denied. Allow it in your browser or system settings, then try again.",
-  "@voiceErrorPermission": {"description": "Voice-input failure: microphone/speech permission was denied or revoked."},
+  "@voiceErrorPermission": {
+    "description": "Voice-input failure: microphone/speech permission was denied or revoked."
+  },
   "voiceErrorNoDevice": "No microphone was found. Connect one and try again.",
-  "@voiceErrorNoDevice": {"description": "Voice-input failure: no capture device was available."},
+  "@voiceErrorNoDevice": {
+    "description": "Voice-input failure: no capture device was available."
+  },
   "voiceErrorService": "The speech-recognition service is unavailable right now.",
-  "@voiceErrorService": {"description": "Voice-input failure: the platform speech service is unavailable."},
+  "@voiceErrorService": {
+    "description": "Voice-input failure: the platform speech service is unavailable."
+  },
   "voiceErrorNetwork": "Speech recognition couldn't reach the service. Check your connection and try again.",
-  "@voiceErrorNetwork": {"description": "Voice-input failure: the recognizer could not reach the network service."},
+  "@voiceErrorNetwork": {
+    "description": "Voice-input failure: the recognizer could not reach the network service."
+  },
   "voiceErrorNoSpeech": "No speech was heard. Try again.",
-  "@voiceErrorNoSpeech": {"description": "Voice-input failure: no speech was detected."},
+  "@voiceErrorNoSpeech": {
+    "description": "Voice-input failure: no speech was detected."
+  },
   "voiceErrorBusy": "Speech recognition is busy. Try again in a moment.",
-  "@voiceErrorBusy": {"description": "Voice-input failure: the recognizer is busy with another request."},
+  "@voiceErrorBusy": {
+    "description": "Voice-input failure: the recognizer is busy with another request."
+  },
   "voiceErrorAlreadyActive": "Voice input was already running. Try again.",
-  "@voiceErrorAlreadyActive": {"description": "Voice-input failure: a recognizer was already active (e.g. InvalidStateError)."},
+  "@voiceErrorAlreadyActive": {
+    "description": "Voice-input failure: a recognizer was already active (e.g. InvalidStateError)."
+  },
   "voiceErrorStartFailed": "Voice input couldn't start. Try again.",
-  "@voiceErrorStartFailed": {"description": "Voice-input failure: start failed for an unclassified reason."},
+  "@voiceErrorStartFailed": {
+    "description": "Voice-input failure: start failed for an unclassified reason."
+  },
   "voiceErrorUnsupported": "Voice input isn't available here. Try a secure (https) Chrome or a supported app.",
   "voiceFinalizing": "Finalizing…",
   "voiceFinalizingSemantics": "Finalizing",
@@ -3042,51 +3823,115 @@
   "voiceAllowPlatformService": "Allow device speech service",
   "readAloud": "Read aloud",
   "readAloudRetry": "Retry read aloud",
-  "@voiceErrorUnsupported": {"description": "Voice-input failure: no recognizer on this platform/browser or an insecure origin blocked construction."},
+  "@voiceErrorUnsupported": {
+    "description": "Voice-input failure: no recognizer on this platform/browser or an insecure origin blocked construction."
+  },
   "sessionHistoryLoadingEarlier": "Loading earlier messages…",
-  "@sessionHistoryLoadingEarlier": {"description": "Compact transcript-top status while one older history page is loading."},
+  "@sessionHistoryLoadingEarlier": {
+    "description": "Compact transcript-top status while one older history page is loading."
+  },
   "sessionHistoryLoadEarlier": "Load earlier messages",
-  "@sessionHistoryLoadEarlier": {"description": "Accessible fallback button for loading one older transcript page."},
+  "@sessionHistoryLoadEarlier": {
+    "description": "Accessible fallback button for loading one older transcript page."
+  },
   "sessionHistoryLoadEarlierShortcut": "Load earlier messages (Alt+Page Up)",
-  "@sessionHistoryLoadEarlierShortcut": {"description": "Tooltip describing the transcript history keyboard fallback."},
+  "@sessionHistoryLoadEarlierShortcut": {
+    "description": "Tooltip describing the transcript history keyboard fallback."
+  },
   "sessionHistoryRetry": "Retry",
-  "@sessionHistoryRetry": {"description": "Button to retry one failed older-history page."},
+  "@sessionHistoryRetry": {
+    "description": "Button to retry one failed older-history page."
+  },
   "sessionHistoryLoadFailed": "Couldn't load earlier messages.",
-  "@sessionHistoryLoadFailed": {"description": "Localized retriable older-history failure."},
+  "@sessionHistoryLoadFailed": {
+    "description": "Localized retriable older-history failure."
+  },
   "sessionHistoryReconnectToLoad": "Reconnect to load earlier messages.",
-  "@sessionHistoryReconnectToLoad": {"description": "Quiet transcript-top treatment while older history is unavailable offline."},
+  "@sessionHistoryReconnectToLoad": {
+    "description": "Quiet transcript-top treatment while older history is unavailable offline."
+  },
   "sessionHistoryStart": "Start of session",
-  "@sessionHistoryStart": {"description": "Quiet transcript marker after authoritative end-of-history."},
+  "@sessionHistoryStart": {
+    "description": "Quiet transcript marker after authoritative end-of-history."
+  },
   "sessionHistoryJumpLatest": "Jump to latest",
-  "@sessionHistoryJumpLatest": {"description": "Tooltip and semantic label for the cheap transcript-tail jump."},
+  "@sessionHistoryJumpLatest": {
+    "description": "Tooltip and semantic label for the cheap transcript-tail jump."
+  },
   "sessionHistoryPartialTitle": "Partial history",
-  "@sessionHistoryPartialTitle": {"description": "Compact label for a capped transcript window."},
+  "@sessionHistoryPartialTitle": {
+    "description": "Compact label for a capped transcript window."
+  },
   "sessionHistoryResyncedTitle": "History resynced",
-  "@sessionHistoryResyncedTitle": {"description": "Compact label after a history cursor gap forced a replay."},
+  "@sessionHistoryResyncedTitle": {
+    "description": "Compact label after a history cursor gap forced a replay."
+  },
   "sessionHistoryCursorUnavailable": "The requested history cursor was unavailable ({code}); the server sent a full replay.",
-  "@sessionHistoryCursorUnavailable": {"description": "History gap explanation with broker code.", "placeholders": {"code": {"type": "String"}}},
+  "@sessionHistoryCursorUnavailable": {
+    "description": "History gap explanation with broker code.",
+    "placeholders": {
+      "code": {
+        "type": "String"
+      }
+    }
+  },
   "sessionHistoryUnavailable": "Earlier messages couldn't be read ({code}); anything below is the newest history available.",
-  "@sessionHistoryUnavailable": {"description": "History gap explanation when the broker could not read the history, so no replay was sent.", "placeholders": {"code": {"type": "String"}}},
+  "@sessionHistoryUnavailable": {
+    "description": "History gap explanation when the broker could not read the history, so no replay was sent.",
+    "placeholders": {
+      "code": {
+        "type": "String"
+      }
+    }
+  },
   "sessionHistoryTruncation": "Showing the newest {shown} of {total} messages.",
-  "@sessionHistoryTruncation": {"description": "Initial transcript-tail count summary.", "placeholders": {"shown": {"type": "int"}, "total": {"type": "int"}}},
+  "@sessionHistoryTruncation": {
+    "description": "Initial transcript-tail count summary.",
+    "placeholders": {
+      "shown": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
   "sessionHistoryCapped": "The server returned a capped history window.",
-  "@sessionHistoryCapped": {"description": "Fallback summary when a capped history total is unavailable."},
+  "@sessionHistoryCapped": {
+    "description": "Fallback summary when a capped history total is unavailable."
+  },
   "sessionHistoryDecodedGap": "Some decoded messages were released to stay within the active history limit.",
-  "@sessionHistoryDecodedGap": {"description": "Explicit marker between retained transcript segments."},
+  "@sessionHistoryDecodedGap": {
+    "description": "Explicit marker between retained transcript segments."
+  },
   "sessionHistoryDecodedGapReconnect": "Some recent messages were released. Reconnect to restore them.",
-  "@sessionHistoryDecodedGapReconnect": {"description": "Gap marker when no opaque page cursor can restore locally evicted live rows."},
+  "@sessionHistoryDecodedGapReconnect": {
+    "description": "Gap marker when no opaque page cursor can restore locally evicted live rows."
+  },
   "sessionHistoryLoadGap": "Load gap",
-  "@sessionHistoryLoadGap": {"description": "Button that reloads one page at an evicted transcript gap."},
+  "@sessionHistoryLoadGap": {
+    "description": "Button that reloads one page at an evicted transcript gap."
+  },
   "sessionHistoryResourceLimit": "This history is too large to page safely on this device.",
-  "@sessionHistoryResourceLimit": {"description": "Terminal history paging state for a broker or client resource limit."},
+  "@sessionHistoryResourceLimit": {
+    "description": "Terminal history paging state for a broker or client resource limit."
+  },
   "sessionHistorySourceUnversioned": "This session's native history cannot be paged safely.",
-  "@sessionHistorySourceUnversioned": {"description": "Terminal history paging state for a native source without a trustworthy revision."},
+  "@sessionHistorySourceUnversioned": {
+    "description": "Terminal history paging state for a native source without a trustworthy revision."
+  },
   "sessionHistoryRetryable": "Loading older messages was interrupted while the session was still writing.",
-  "@sessionHistoryRetryable": {"description": "Retriable history paging state when the native source appended during indexing."},
+  "@sessionHistoryRetryable": {
+    "description": "Retriable history paging state when the native source appended during indexing."
+  },
   "sessionCompatibilityClientBehind": "This client is one contract revision behind. Update the app when a new release is available.",
-  "@sessionCompatibilityClientBehind": {"description": "Selectable Session Detail notice when the client is one writable compatibility revision behind the broker."},
+  "@sessionCompatibilityClientBehind": {
+    "description": "Selectable Session Detail notice when the client is one writable compatibility revision behind the broker."
+  },
   "settingsCompatibilityTitle": "Compatibility",
-  "@settingsCompatibilityTitle": {"description": "Settings → Broker & devices section heading for profile-qualified broker/client compatibility guidance."},
+  "@settingsCompatibilityTitle": {
+    "description": "Settings → Broker & devices section heading for profile-qualified broker/client compatibility guidance."
+  },
   "settingsClientBehindMessage": "Client update recommended for {profileName}. Install the latest signed app release to match this server.",
   "@settingsClientBehindMessage": {
     "description": "Selectable Settings fallback for a writable client-behind overlap when no complete web update is waiting.",
@@ -3098,106 +3943,200 @@
     }
   },
   "appUpdateHandoffFailedMessage": "Cosyncing couldn’t switch to the new version automatically. Close the other Cosyncing tabs to finish updating.",
-  "@appUpdateHandoffFailedMessage": {"description": "App-level nonblocking notice shown only after this tab has spent its bounded budget of real web-update handoff attempts; a routine update shows nothing at all."},
+  "@appUpdateHandoffFailedMessage": {
+    "description": "App-level nonblocking notice shown only after this tab has spent its bounded budget of real web-update handoff attempts; a routine update shows nothing at all."
+  },
   "sessionCompatibilityBrokerBehind": "This server is one contract revision behind. Check Settings for a signed server update.",
-  "@sessionCompatibilityBrokerBehind": {"description": "Selectable Session Detail notice when the broker is one writable compatibility revision behind the client."},
+  "@sessionCompatibilityBrokerBehind": {
+    "description": "Selectable Session Detail notice when the broker is one writable compatibility revision behind the client."
+  },
   "sessionCompatibilityHardIncompatible": "This client and server are incompatible. Observe remains available, but controls are disabled until one side is updated.",
-  "@sessionCompatibilityHardIncompatible": {"description": "Selectable Session Detail notice when contract negotiation makes the session read-only."},
+  "@sessionCompatibilityHardIncompatible": {
+    "description": "Selectable Session Detail notice when contract negotiation makes the session read-only."
+  },
   "sessionCompatibilityUnknown": "This server did not provide a complete compatibility identity. Legacy operation remains available.",
-  "@sessionCompatibilityUnknown": {"description": "Selectable Session Detail notice for a legacy broker without complete contract metadata."},
+  "@sessionCompatibilityUnknown": {
+    "description": "Selectable Session Detail notice for a legacy broker without complete contract metadata."
+  },
   "rosterRefresh": "Refresh",
-  "@rosterRefresh": {"description": "Roster action that reloads the authoritative session list."},
+  "@rosterRefresh": {
+    "description": "Roster action that reloads the authoritative session list."
+  },
   "rosterFreshnessLoading": "Loading sessions…",
-  "@rosterFreshnessLoading": {"description": "Roster status slot while the first authoritative roster is in flight."},
+  "@rosterFreshnessLoading": {
+    "description": "Roster status slot while the first authoritative roster is in flight."
+  },
   "rosterFreshnessRefreshing": "Refreshing…",
-  "@rosterFreshnessRefreshing": {"description": "Roster status slot while current rows are being refreshed."},
+  "@rosterFreshnessRefreshing": {
+    "description": "Roster status slot while current rows are being refreshed."
+  },
   "rosterFreshnessReconnecting": "Reconnecting — showing last known",
-  "@rosterFreshnessReconnecting": {"description": "Roster status slot while last-known rows stand in for authoritative ones."},
+  "@rosterFreshnessReconnecting": {
+    "description": "Roster status slot while last-known rows stand in for authoritative ones."
+  },
   "rosterFreshnessFailed": "Couldn't refresh",
-  "@rosterFreshnessFailed": {"description": "Roster status slot after a failed load, next to Retry."},
+  "@rosterFreshnessFailed": {
+    "description": "Roster status slot after a failed load, next to Retry."
+  },
   "sessionControlRefreshing": "Refreshing…",
-  "@sessionControlRefreshing": {"description": "Session Detail control pill while its session frame is not yet authoritative."},
+  "@sessionControlRefreshing": {
+    "description": "Session Detail control pill while its session frame is not yet authoritative."
+  },
   "sessionControlReconnecting": "Reconnecting…",
-  "@sessionControlReconnecting": {"description": "Session Detail control pill while the session transport is being re-established."},
+  "@sessionControlReconnecting": {
+    "description": "Session Detail control pill while the session transport is being re-established."
+  },
   "sessionComposerPromptHint": "Send a prompt",
-  "@sessionComposerPromptHint": {"description": "Placeholder in the Session Detail prompt composer."},
+  "@sessionComposerPromptHint": {
+    "description": "Placeholder in the Session Detail prompt composer."
+  },
   "sessionComposerDraftHint": "Draft a prompt",
-  "@sessionComposerDraftHint": {"description": "Placeholder in the Session Detail composer while prompting is unavailable but local draft editing remains enabled."},
+  "@sessionComposerDraftHint": {
+    "description": "Placeholder in the Session Detail composer while prompting is unavailable but local draft editing remains enabled."
+  },
   "sessionVoiceInputTooltip": "Voice input",
-  "@sessionVoiceInputTooltip": {"description": "Tooltip for the Session Detail voice-input button."},
+  "@sessionVoiceInputTooltip": {
+    "description": "Tooltip for the Session Detail voice-input button."
+  },
   "sessionAttachmentAddTooltip": "Add files",
-  "@sessionAttachmentAddTooltip": {"description": "Tooltip for adding one or more files to the current prompt."},
+  "@sessionAttachmentAddTooltip": {
+    "description": "Tooltip for adding one or more files to the current prompt."
+  },
   "sessionAttachmentDropLabel": "Drop files to add them",
-  "@sessionAttachmentDropLabel": {"description": "Composer-local label shown while compatible desktop files are dragged over the prompt composer."},
+  "@sessionAttachmentDropLabel": {
+    "description": "Composer-local label shown while compatible desktop files are dragged over the prompt composer."
+  },
   "sessionAttachmentUnsupportedTooltip": "Files aren't supported in this session",
-  "@sessionAttachmentUnsupportedTooltip": {"description": "Disabled attachment button tooltip when the active adapter or mode cannot receive files."},
+  "@sessionAttachmentUnsupportedTooltip": {
+    "description": "Disabled attachment button tooltip when the active adapter or mode cannot receive files."
+  },
   "sessionAttachmentReplaceTooltip": "Replace file",
-  "@sessionAttachmentReplaceTooltip": {"description": "Tooltip for replacing one staged prompt file."},
+  "@sessionAttachmentReplaceTooltip": {
+    "description": "Tooltip for replacing one staged prompt file."
+  },
   "sessionAttachmentRemoveTooltip": "Remove file",
-  "@sessionAttachmentRemoveTooltip": {"description": "Tooltip for removing one staged prompt file."},
+  "@sessionAttachmentRemoveTooltip": {
+    "description": "Tooltip for removing one staged prompt file."
+  },
   "sessionAttachmentInlineStatus": "Ready to send",
-  "@sessionAttachmentInlineStatus": {"description": "Status for a small file that will be sent inline with the prompt."},
+  "@sessionAttachmentInlineStatus": {
+    "description": "Status for a small file that will be sent inline with the prompt."
+  },
   "sessionAttachmentReadyStatus": "Ready to stage",
-  "@sessionAttachmentReadyStatus": {"description": "Status for a large file selected for broker staging."},
+  "@sessionAttachmentReadyStatus": {
+    "description": "Status for a large file selected for broker staging."
+  },
   "sessionAttachmentStagingStatus": "Staging…",
-  "@sessionAttachmentStagingStatus": {"description": "Status while a large prompt file uploads to broker staging."},
+  "@sessionAttachmentStagingStatus": {
+    "description": "Status while a large prompt file uploads to broker staging."
+  },
   "sessionAttachmentStagedStatus": "Staged",
-  "@sessionAttachmentStagedStatus": {"description": "Status after a large prompt file is staged and awaiting prompt acknowledgement."},
+  "@sessionAttachmentStagedStatus": {
+    "description": "Status after a large prompt file is staged and awaiting prompt acknowledgement."
+  },
   "sessionAttachmentFailedStatus": "Not delivered — retry by sending",
-  "@sessionAttachmentFailedStatus": {"description": "Status after staging or prompt delivery failed; the file stays available for retry."},
+  "@sessionAttachmentFailedStatus": {
+    "description": "Status after staging or prompt delivery failed; the file stays available for retry."
+  },
   "sessionAttachmentSelectionError": "Couldn't select those files. Try again.",
-  "@sessionAttachmentSelectionError": {"description": "Session composer error after the operating-system file picker fails."},
+  "@sessionAttachmentSelectionError": {
+    "description": "Session composer error after the operating-system file picker fails."
+  },
   "sessionAttachmentIntakeError": "Couldn't add those files. Use readable local files in a supported format.",
-  "@sessionAttachmentIntakeError": {"description": "Session composer error after pasted or dropped files cannot be read safely."},
+  "@sessionAttachmentIntakeError": {
+    "description": "Session composer error after pasted or dropped files cannot be read safely."
+  },
   "sessionAttachmentReplacementError": "Couldn't replace that file. Try again.",
-  "@sessionAttachmentReplacementError": {"description": "Session composer error after replacing one selected file fails."},
+  "@sessionAttachmentReplacementError": {
+    "description": "Session composer error after replacing one selected file fails."
+  },
   "sessionAttachmentLimitError": "Those files exceed the attachment limits.",
-  "@sessionAttachmentLimitError": {"description": "Session composer error when selected files exceed count, per-file, or aggregate limits."},
+  "@sessionAttachmentLimitError": {
+    "description": "Session composer error when selected files exceed count, per-file, or aggregate limits."
+  },
   "sessionAttachmentStagingError": "Couldn't stage every file. Your prompt and files are still here.",
-  "@sessionAttachmentStagingError": {"description": "Session composer error after a large attachment upload fails."},
+  "@sessionAttachmentStagingError": {
+    "description": "Session composer error after a large attachment upload fails."
+  },
   "sessionAttachmentDeliveryError": "The agent didn't receive every file. Your prompt and files are still here.",
-  "@sessionAttachmentDeliveryError": {"description": "Session composer error after the broker NACKs or cannot confirm an attachment prompt."},
+  "@sessionAttachmentDeliveryError": {
+    "description": "Session composer error after the broker NACKs or cannot confirm an attachment prompt."
+  },
   "sessionAttachmentSizeAndStatus": "{byteCount, plural, =1{1 byte · {status}} other{{byteCount} bytes · {status}}}",
   "@sessionAttachmentSizeAndStatus": {
     "description": "Byte size and current status shown in a prompt attachment chip.",
     "placeholders": {
-      "byteCount": {"type": "int"},
-      "status": {"type": "String"}
+      "byteCount": {
+        "type": "int"
+      },
+      "status": {
+        "type": "String"
+      }
     }
   },
   "sessionAttachmentSemanticLabel": "{fileName}, {byteCount, plural, =1{1 byte} other{{byteCount} bytes}}, {status}",
   "@sessionAttachmentSemanticLabel": {
     "description": "Screen-reader label for one prompt attachment chip.",
     "placeholders": {
-      "fileName": {"type": "String"},
-      "byteCount": {"type": "int"},
-      "status": {"type": "String"}
+      "fileName": {
+        "type": "String"
+      },
+      "byteCount": {
+        "type": "int"
+      },
+      "status": {
+        "type": "String"
+      }
     }
   },
   "scheduleDateNext": "Next",
-  "@scheduleDateNext": {"description": "Date-picker action that advances to the time step."},
+  "@scheduleDateNext": {
+    "description": "Date-picker action that advances to the time step."
+  },
   "newSessionModelLabel": "Model",
-  "@newSessionModelLabel": {"description": "Label for the optional model selector in New Session."},
+  "@newSessionModelLabel": {
+    "description": "Label for the optional model selector in New Session."
+  },
   "newSessionModelDefault": "Use tool default",
-  "@newSessionModelDefault": {"description": "New Session model choice that omits an explicit model."},
+  "@newSessionModelDefault": {
+    "description": "New Session model choice that omits an explicit model."
+  },
   "newSessionModelUnavailable": "This agent uses its default model.",
-  "@newSessionModelUnavailable": {"description": "Status when the broker or agent does not expose pre-session model selection."},
+  "@newSessionModelUnavailable": {
+    "description": "Status when the broker or agent does not expose pre-session model selection."
+  },
   "newSessionModelLoading": "Loading models…",
-  "@newSessionModelLoading": {"description": "Status while the selected agent model catalog loads."},
+  "@newSessionModelLoading": {
+    "description": "Status while the selected agent model catalog loads."
+  },
   "newSessionModelEmpty": "No explicit models are available. The tool default will be used.",
-  "@newSessionModelEmpty": {"description": "Status for a fresh but empty model catalog."},
+  "@newSessionModelEmpty": {
+    "description": "Status for a fresh but empty model catalog."
+  },
   "newSessionModelFailed": "Couldn't refresh models.",
-  "@newSessionModelFailed": {"description": "Status after model catalog refresh fails without retained options."},
+  "@newSessionModelFailed": {
+    "description": "Status after model catalog refresh fails without retained options."
+  },
   "newSessionModelStale": "Refresh failed. These model choices are stale.",
-  "@newSessionModelStale": {"description": "Status after refresh fails while retained model options remain visible."},
+  "@newSessionModelStale": {
+    "description": "Status after refresh fails while retained model options remain visible."
+  },
   "newSessionModelStaleNote": "These model choices are stale.",
-  "@newSessionModelStaleNote": {"description": "Qualifier appended when a failed refresh leaves retained model options selectable."},
+  "@newSessionModelStaleNote": {
+    "description": "Qualifier appended when a failed refresh leaves retained model options selectable."
+  },
   "newSessionModelRetired": "The selected model is no longer available. Choose another model or use the tool default.",
-  "@newSessionModelRetired": {"description": "Validation error when a selected model disappears from a fresh catalog."},
+  "@newSessionModelRetired": {
+    "description": "Validation error when a selected model disappears from a fresh catalog."
+  },
   "newSessionModelSourceMismatch": "The selected model belongs to a different server connection. Refresh the model list and choose again.",
-  "@newSessionModelSourceMismatch": {"description": "Validation error when a scheduled session model came from a different broker incarnation."},
+  "@newSessionModelSourceMismatch": {
+    "description": "Validation error when a scheduled session model came from a different broker incarnation."
+  },
   "newSessionModelRefresh": "Refresh models",
-  "@newSessionModelRefresh": {"description": "Button that retries the selected agent model catalog."},
+  "@newSessionModelRefresh": {
+    "description": "Button that retries the selected agent model catalog."
+  },
   "notificationsTitle": "Notifications",
   "connectionTitle": "Connection",
   "connectionDirectTitle": "Connect directly",
@@ -3397,9 +4336,21 @@
   "connectionCheckingBody": "Checking that the server responds…",
   "connectionConnectedTitle": "Connected",
   "connectionConnectedMachine": "Connected to {machine}.",
-  "@connectionConnectedMachine": {"placeholders": {"machine": {"type": "String"}}},
+  "@connectionConnectedMachine": {
+    "placeholders": {
+      "machine": {
+        "type": "String"
+      }
+    }
+  },
   "connectionConnectedAt": "The server at {brokerUrl} is reachable.",
-  "@connectionConnectedAt": {"placeholders": {"brokerUrl": {"type": "String"}}},
+  "@connectionConnectedAt": {
+    "placeholders": {
+      "brokerUrl": {
+        "type": "String"
+      }
+    }
+  },
   "connectionFailedTitle": "Couldn't connect",
   "connectionInvalidUrl": "That server address isn't valid. Check it and try again.",
   "connectionBrokerUnhealthy": "The server responded, but its health check failed. Check the server host, then try again.",
@@ -3442,9 +4393,21 @@
   "toolDisplayFinalTitle": "Final messages only",
   "toolDisplayFinalBody": "Show user turns, final assistant messages, and safety or action surfaces.",
   "transferUploadedBytes": "Uploaded {count} bytes",
-  "@transferUploadedBytes": {"placeholders": {"count": {"type": "int"}}},
+  "@transferUploadedBytes": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transferDownloadedBytes": "Downloaded {count} bytes",
-  "@transferDownloadedBytes": {"placeholders": {"count": {"type": "int"}}},
+  "@transferDownloadedBytes": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transferPreviewCached": "Preview cached",
   "transferWaitingToStart": "Waiting to start",
   "transferUploading": "Uploading…",
@@ -3467,43 +4430,171 @@
   "themeSoftMinimalistDescription": "Gentle off-whites, cool slate, soft corners, and airy spacing.",
   "transcriptUpdatedStatus": "Updated",
   "transcriptTokenInput": "{count} input",
-  "@transcriptTokenInput": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenInput": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenOutput": "{count} output",
-  "@transcriptTokenOutput": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenOutput": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCacheRead": "{count} cache read",
-  "@transcriptTokenCacheRead": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenCacheRead": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCacheWrite": "{count} cache write",
-  "@transcriptTokenCacheWrite": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenCacheWrite": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCost": "cost {cost}",
-  "@transcriptTokenCost": {"placeholders": {"cost": {"type": "String"}}},
+  "@transcriptTokenCost": {
+    "placeholders": {
+      "cost": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTokenTotal": "{count} total",
-  "@transcriptTokenTotal": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenTotal": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenSummary": "Tokens: {details}",
-  "@transcriptTokenSummary": {"placeholders": {"details": {"type": "String"}}},
+  "@transcriptTokenSummary": {
+    "placeholders": {
+      "details": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptRunStatus": "Run {status}",
-  "@transcriptRunStatus": {"placeholders": {"status": {"type": "String"}}},
+  "@transcriptRunStatus": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptGoalSummary": "Goal {status}: {title}",
-  "@transcriptGoalSummary": {"placeholders": {"status": {"type": "String"}, "title": {"type": "String"}}},
+  "@transcriptGoalSummary": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTaskListEmpty": "{title} {status}.",
-  "@transcriptTaskListEmpty": {"placeholders": {"title": {"type": "String"}, "status": {"type": "String"}}},
+  "@transcriptTaskListEmpty": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTaskOpen": "{count} open",
-  "@transcriptTaskOpen": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskOpen": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskInProgress": "{count} in progress",
-  "@transcriptTaskInProgress": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskInProgress": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskDone": "{count} done",
-  "@transcriptTaskDone": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskCanceled": "{count} canceled",
-  "@transcriptTaskCanceled": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskCanceled": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskCount": "{count} tasks",
-  "@transcriptTaskCount": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskListSummary": "{title} {status}: {details}",
-  "@transcriptTaskListSummary": {"placeholders": {"title": {"type": "String"}, "status": {"type": "String"}, "details": {"type": "String"}}},
+  "@transcriptTaskListSummary": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      },
+      "details": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptAgentActivitySummary": "{kind} {status}: {title}",
-  "@transcriptAgentActivitySummary": {"placeholders": {"kind": {"type": "String"}, "status": {"type": "String"}, "title": {"type": "String"}}},
+  "@transcriptAgentActivitySummary": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptToolCalls": "{count} tool calls",
-  "@transcriptToolCalls": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptToolCalls": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionComposerPickerReadOnly": "Read-only for this session.",
-  "@sessionComposerPickerReadOnly": {"description": "Tooltip line on a composer picker that shows a current value but offers nothing to select — a terminal-synced session, or an adapter that advertises no options."},
+  "@sessionComposerPickerReadOnly": {
+    "description": "Tooltip line on a composer picker that shows a current value but offers nothing to select — a terminal-synced session, or an adapter that advertises no options."
+  },
   "sessionPermissionModeFallback": "Permission",
   "sessionPermissionModeTooltip": "Permission mode for prompts and slash commands sent from this composer.",
   "sessionPermissionModeSheetTitle": "Permission mode",
@@ -3513,7 +4604,13 @@
   "sessionPermissionModeFullAccess": "Full access",
   "sessionPermissionModeCustom": "Custom",
   "sessionTerminalOutputCount": "Terminal output ({count})",
-  "@sessionTerminalOutputCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionTerminalOutputCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptCodeCopy": "Copy code",
   "transcriptCodeCopied": "Code copied",
   "sessionProjectRename": "Rename project",
@@ -3543,20 +4640,58 @@
   "sessionAllCacheCleared": "All local session cache was cleared",
   "sessionAllCacheClearFailed": "Couldn't clear all local session cache",
   "transcriptFileLinkSemantics": "Open {path} in Files",
-  "@transcriptFileLinkSemantics": {"description": "Screen-reader label for a workspace path rendered as a link in a transcript row.", "placeholders": {"path": {"type": "String"}}},
+  "@transcriptFileLinkSemantics": {
+    "description": "Screen-reader label for a workspace path rendered as a link in a transcript row.",
+    "placeholders": {
+      "path": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptWebLinkSemantics": "Open link {url}",
-  "@transcriptWebLinkSemantics": {"description": "Screen-reader label for an http(s) link in a transcript message body.", "placeholders": {"url": {"type": "String"}}},
+  "@transcriptWebLinkSemantics": {
+    "description": "Screen-reader label for an http(s) link in a transcript message body.",
+    "placeholders": {
+      "url": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptFileLinkCopyPath": "Copy path",
   "transcriptFileLinkPathCopied": "Path copied",
   "transcriptFileLinkOpenFolder": "Open containing folder",
   "sessionFilesLinksOff": "File paths in this session's transcript stay plain text because workspace browsing is off on this Server.",
-  "@sessionFilesLinksOff": {"description": "The single line explaining why transcript file mentions are not links. Shown once in the Files surface, never per mention."},
+  "@sessionFilesLinksOff": {
+    "description": "The single line explaining why transcript file mentions are not links. Shown once in the Files surface, never per mention."
+  },
   "sessionFilesLinksOffNoWorkspace": "File paths in this session's transcript stay plain text because this session has no working directory.",
-  "@sessionFilesLinksOffNoWorkspace": {"description": "The same single line, for a session whose workspace root cannot be resolved at all."},
+  "@sessionFilesLinksOffNoWorkspace": {
+    "description": "The same single line, for a session whose workspace root cannot be resolved at all."
+  },
   "sessionFilePreviewLineWindow": "Showing lines {first}–{last} of this preview.",
-  "@sessionFilePreviewLineWindow": {"description": "Stated when the viewer renders a bounded window of a long preview instead of all of it.", "placeholders": {"first": {"type": "int"}, "last": {"type": "int"}}},
+  "@sessionFilePreviewLineWindow": {
+    "description": "Stated when the viewer renders a bounded window of a long preview instead of all of it.",
+    "placeholders": {
+      "first": {
+        "type": "int"
+      },
+      "last": {
+        "type": "int"
+      }
+    }
+  },
   "sessionFilePreviewAnchorBeyond": "Line {line} is beyond the {count} lines this preview covers.",
-  "@sessionFilePreviewAnchorBeyond": {"description": "Honest note when a mention's line anchor lies past the bounded prefix the Server returned.", "placeholders": {"line": {"type": "int"}, "count": {"type": "int"}}},
+  "@sessionFilePreviewAnchorBeyond": {
+    "description": "Honest note when a mention's line anchor lies past the bounded prefix the Server returned.",
+    "placeholders": {
+      "line": {
+        "type": "int"
+      },
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionFilePreviewAnchorLine": "Line {line}",
   "@sessionFilePreviewAnchorLine": {"description": "Label for the line a file preview was opened at.", "placeholders": {"line": {"type": "int"}}},
   "fileViewerReading": "Reading file…",
@@ -3606,5 +4741,307 @@
   "workspacePromptTargetNote": "Prompts go to {session}",
   "@workspacePromptTargetNote": {"description": "Quiet trailing note on the composer while a file pane holds focus, naming the session that still receives typing. {session} is already tool-qualified, e.g. codex \u00b7 refactor auth.", "placeholders": {"session": {"type": "String"}}},
   "workspacePromptTargetTooltip": "Typing and shortcuts target this session even while a file pane has focus",
-  "@workspacePromptTargetTooltip": {"description": "Tooltip on the session tab carrying the prompt-target tick."}
+  "@workspacePromptTargetTooltip": {"description": "Tooltip on the session tab carrying the prompt-target tick."},
+  "usageHubTileTitle": "Usage overview",
+  "@usageHubTileTitle": {
+    "description": "Settings hub row leading to the usage report."
+  },
+  "usageHubTileSubtitle": "Activity on this machine — totals, trends, export cards",
+  "@usageHubTileSubtitle": {
+    "description": "Subtitle of the Usage overview row on the Settings hub."
+  },
+  "usageReportTitle": "Usage overview · {period}",
+  "@usageReportTitle": {
+    "description": "Report page title, carrying the period it shows.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August 2026"
+      }
+    }
+  },
+  "usageReportScope": "All agent activity on this machine, including sessions not started from cosyncing.",
+  "@usageReportScope": {
+    "description": "Mandatory scope line under the report title. The scope is the machine, never cosyncing."
+  },
+  "usagePeriodWeek": "Week",
+  "@usagePeriodWeek": {
+    "description": "Report period switcher segment: the current week."
+  },
+  "usagePeriodMonth": "Month",
+  "@usagePeriodMonth": {
+    "description": "Report period switcher segment: the current month."
+  },
+  "usagePeriodYear": "Year",
+  "@usagePeriodYear": {
+    "description": "Report period switcher segment: the current year."
+  },
+  "usagePeriodAllTime": "All time",
+  "@usagePeriodAllTime": {
+    "description": "Report period switcher segment: everything recorded."
+  },
+  "usageWindowRange": "{from} – {to}",
+  "@usageWindowRange": {
+    "description": "Explicit window bounds, printed so a period label never implies more than it covers.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "2026-01-01"
+      },
+      "to": {
+        "type": "String",
+        "example": "2026-09-01"
+      }
+    }
+  },
+  "usageInProgress": "· in progress, {day} of {total} days",
+  "@usageInProgress": {
+    "description": "Report header suffix while the period is still running.",
+    "placeholders": {
+      "day": {
+        "type": "int",
+        "example": "4"
+      },
+      "total": {
+        "type": "int",
+        "example": "7"
+      }
+    }
+  },
+  "usageBrokerTime": "(broker time, {zone})",
+  "@usageBrokerTime": {
+    "description": "Report header suffix naming the zone the day boundaries are cut in.",
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "Europe/London"
+      }
+    }
+  },
+  "usageUnavailable": "Usage history is unavailable.",
+  "@usageUnavailable": {
+    "description": "Shown when the report cannot be read. Never a zero."
+  },
+  "usageLoading": "Reading usage data…",
+  "@usageLoading": {
+    "description": "Shown while the first report read is in flight."
+  },
+  "usageEmptyPeriod": "No activity recorded for this {period}.",
+  "@usageEmptyPeriod": {
+    "description": "Shown when the window resolved but holds no activity.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "month"
+      }
+    }
+  },
+  "usagePartial": "Some tools could not be read: {tools}. Their usage is not included.",
+  "@usagePartial": {
+    "description": "Shown when the broker reported source errors, so the totals are known to be short.",
+    "placeholders": {
+      "tools": {
+        "type": "String",
+        "example": "kimi, grok"
+      }
+    }
+  },
+  "usageOpenReport": "Full report",
+  "@usageOpenReport": {
+    "description": "Action opening the report page from the Settings card."
+  },
+  "usageTodayTitle": "This machine",
+  "@usageTodayTitle": {
+    "description": "Title of the usage card in Settings. Names the scope, not the period."
+  },
+  "usagePeriodToday": "Today",
+  "@usagePeriodToday": {
+    "description": "Usage card period segment: today."
+  },
+  "usagePeriodThisWeek": "This week",
+  "@usagePeriodThisWeek": {
+    "description": "Usage card period segment: the week in progress."
+  },
+  "usagePeriodThisMonth": "This month",
+  "@usagePeriodThisMonth": {
+    "description": "Usage card period segment: the month in progress."
+  },
+  "usageInProgressNote": "In progress · day {day} of {total}",
+  "@usageInProgressNote": {
+    "description": "Note under the usage card header while the period is still running.",
+    "placeholders": {
+      "day": {
+        "type": "int",
+        "example": "2"
+      },
+      "total": {
+        "type": "int",
+        "example": "7"
+      }
+    }
+  },
+  "usageTokensLabel": "Tokens",
+  "@usageTokensLabel": {
+    "description": "Row label for the period token total."
+  },
+  "usageCostLabel": "Cost",
+  "@usageCostLabel": {
+    "description": "Row label for the API list-price equivalent."
+  },
+  "usageCostQualified": "{cost} at API list prices — not your bill",
+  "@usageCostQualified": {
+    "description": "Cost value. The qualifier is part of the string: cost must never render bare, because tokdash reports an API-equivalent figure and not money spent on a plan.",
+    "placeholders": {
+      "cost": {
+        "type": "String",
+        "example": "$899.40"
+      }
+    }
+  },
+  "usageRequestsLabel": "Requests",
+  "@usageRequestsLabel": {
+    "description": "Row label for the request count."
+  },
+  "usageTokenBreakdown": "{input} in · {output} out · {cache} cache read",
+  "@usageTokenBreakdown": {
+    "description": "Sub-line splitting the token total.",
+    "placeholders": {
+      "input": {
+        "type": "String",
+        "example": "469M"
+      },
+      "output": {
+        "type": "String",
+        "example": "51.0M"
+      },
+      "cache": {
+        "type": "String",
+        "example": "17.6B"
+      }
+    }
+  },
+  "usageAgentTimeLabel": "Est. agent time",
+  "@usageAgentTimeLabel": {
+    "description": "Row label for estimated agent activity time."
+  },
+  "usageHoursValue": "{hours}h",
+  "@usageHoursValue": {
+    "description": "A total in decimal hours. The unit is localized; the number is not.",
+    "placeholders": {
+      "hours": {
+        "type": "String",
+        "example": "403.7"
+      }
+    }
+  },
+  "usageActiveEstimatedTip": "Estimated — idle gaps over {minutes} minutes are excluded.",
+  "@usageActiveEstimatedTip": {
+    "description": "Tooltip explaining how agent time is estimated. The gap is served by the broker, never assumed.",
+    "placeholders": {
+      "minutes": {
+        "type": "int",
+        "example": "5"
+      }
+    }
+  },
+  "usageEstimated": "Estimated",
+  "@usageEstimated": {
+    "description": "Pill marking a figure as an estimate."
+  },
+  "usageTopModelLabel": "Top model",
+  "@usageTopModelLabel": {
+    "description": "Row label for the most-used model."
+  },
+  "usageShareOfTokens": "{percent} of tokens",
+  "@usageShareOfTokens": {
+    "description": "Share of the period token total.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "40%"
+      }
+    }
+  },
+  "usageDeltaYesterday": "{delta} vs yesterday",
+  "@usageDeltaYesterday": {
+    "description": "Period-over-period change for the day view.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+39.3%"
+      }
+    }
+  },
+  "usageDeltaPriorDays": "{delta} vs the prior {count} days",
+  "@usageDeltaPriorDays": {
+    "description": "Period-over-period change against the equal-length prior stretch.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+138.4%"
+      },
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "usageDeltaPreviousPeriod": "{delta} vs the previous period",
+  "@usageDeltaPreviousPeriod": {
+    "description": "Period-over-period change when the prior window has no shorter name.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+15.5%"
+      }
+    }
+  },
+  "usageRankHarnesses": "Top harnesses",
+  "@usageRankHarnesses": {
+    "description": "Heading of the per-tool ranking list."
+  },
+  "usageRankModels": "Top models",
+  "@usageRankModels": {
+    "description": "Heading of the per-model ranking list."
+  },
+  "usageVsQuotaNote": "Totals recorded on this machine — separate from the remaining-quota windows below.",
+  "@usageVsQuotaNote": {
+    "description": "Disambiguation line between the usage card and the quota panel. Both say \"usage\"; one is a sum and the other is a window."
+  },
+  "usageCoverageNote": "{named} in named projects · {unattributed} unattributed · {gap} from sources with no project records",
+  "@usageCoverageNote": {
+    "description": "Reconciles a project list against the period total. All three components are printed so the list visibly sums to 100%.",
+    "placeholders": {
+      "named": {
+        "type": "String",
+        "example": "89.3%"
+      },
+      "unattributed": {
+        "type": "String",
+        "example": "0.6%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "10.1%"
+      }
+    }
+  },
+  "usageProjectGroupNote": "Projects are grouped by repository remote — the same codebase under two remotes appears twice.",
+  "@usageProjectGroupNote": {
+    "description": "Explains why two rows can obviously be one codebase. Client-side merging would fabricate a number."
+  },
+  "usageSourceCount": "{count} tool sources",
+  "@usageSourceCount": {
+    "description": "Footer evidence for the scope claim, from the served coverage block.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "23"
+      }
+    }
+  },
+  "usageDayBoundaryNote": "Days begin at this machine's local midnight.",
+  "@usageDayBoundaryNote": {
+    "description": "Footer note fixing what a day means on these surfaces."
+  }
 }
