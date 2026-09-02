@@ -112,46 +112,51 @@ const BEACON_PAGE = `<html>
 `;
 
 const hits: string[] = [];
-const beacon = Bun.serve({
-  port: BEACON_PORT,
-  hostname: '127.0.0.1',
-  fetch(request) {
-    const path = new URL(request.url).pathname;
-    hits.push(path);
-    if (path === '/beacon.css') {
-      return new Response('body{outline:1px solid red}', {
-        headers: { 'content-type': 'text/css', 'access-control-allow-origin': '*' },
-      });
-    }
-    return new Response('beacon', { headers: { 'access-control-allow-origin': '*' } });
-  },
-});
 
-const root = mkdtempSync(join(tmpdir(), 'file-viewer-csp-'));
-const workspace = join(root, 'workspace');
-mkdirSync(join(workspace, 'docs'), { recursive: true });
-writeFileSync(join(workspace, 'docs/coverage.html'), BEACON_PAGE);
-
-const sessionFile = join(root, 'session.jsonl');
-writeFileSync(sessionFile, `${JSON.stringify({ type: 'session', id: 'csp', cwd: workspace })}\n`);
-
-const child = Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
-  cwd: REPO,
-  env: isolatedBrokerFixtureEnvironment(root, {
-    overrides: {
-      PORT: String(PORT),
-      HOST: '127.0.0.1',
-      COSYNCING_CACHE_DIR: join(root, 'cache'),
-      COSYNCING_WEB_DIR: WEB_BUILD,
-      COSYNCING_FS_REMOTE_ENABLED: '1',
-      COSYNCING_PI_SESSIONS_ROOT: '',
-      PI_CODING_AGENT_SESSION_DIR: '',
+function serveBeacon() {
+  return Bun.serve({
+    port: BEACON_PORT,
+    hostname: '127.0.0.1',
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      hits.push(path);
+      if (path === '/beacon.css') {
+        return new Response('body{outline:1px solid red}', {
+          headers: { 'content-type': 'text/css', 'access-control-allow-origin': '*' },
+        });
+      }
+      return new Response('beacon', { headers: { 'access-control-allow-origin': '*' } });
     },
-  }),
-  stdout: 'pipe',
-  stderr: 'pipe',
-});
-const output = captureProcessOutput(child);
+  });
+}
+
+function spawnBroker(root: string) {
+  return Bun.spawn(['bun', 'run', 'packages/typescript/broker/src/main.ts'], {
+    cwd: REPO,
+    env: isolatedBrokerFixtureEnvironment(root, {
+      overrides: {
+        PORT: String(PORT),
+        HOST: '127.0.0.1',
+        COSYNCING_CACHE_DIR: join(root, 'cache'),
+        COSYNCING_WEB_DIR: WEB_BUILD,
+        COSYNCING_FS_REMOTE_ENABLED: '1',
+        COSYNCING_PI_SESSIONS_ROOT: '',
+        PI_CODING_AGENT_SESSION_DIR: '',
+      },
+    }),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+}
+
+// Everything that holds a resource is allocated inside the `try`, so a throw
+// anywhere reaches the `finally`. A listening server started at module scope
+// keeps the event loop alive: the script would hang on the way out instead of
+// exiting non-zero, which is the worst way for a security trace to fail.
+let beacon: ReturnType<typeof serveBeacon> | undefined;
+let child: ReturnType<typeof spawnBroker> | undefined;
+let output: ReturnType<typeof captureProcessOutput> | undefined;
+let root: string | undefined;
 
 function check(name: string, ok: boolean, detail?: unknown): void {
   assertions.push({ name, ok, detail: detail === undefined ? undefined : JSON.stringify(detail) });
@@ -178,6 +183,16 @@ function framed(page: Page): Promise<boolean> {
 }
 
 try {
+  beacon = serveBeacon();
+  root = mkdtempSync(join(tmpdir(), 'file-viewer-csp-'));
+  const workspace = join(root, 'workspace');
+  mkdirSync(join(workspace, 'docs'), { recursive: true });
+  writeFileSync(join(workspace, 'docs/coverage.html'), BEACON_PAGE);
+  const sessionFile = join(root, 'session.jsonl');
+  writeFileSync(sessionFile, `${JSON.stringify({ type: 'session', id: 'csp', cwd: workspace })}\n`);
+  child = spawnBroker(root);
+  output = captureProcessOutput(child);
+
   await waitForBrokerHealth(child, `${ORIGIN}/api/health`);
   const hello = await fetch(`${ORIGIN}/pi/bridge/hello`, {
     method: 'POST',
@@ -250,6 +265,14 @@ try {
   );
 
   // The whole point. Four subresources asked for, none fetched.
+  //
+  // The wait is the assertion, not politeness: `framed()` returning true says
+  // the frame exists, not that it has finished asking for things. Snapshotting
+  // straight after it would let three in-flight requests land after the check
+  // and pass it for the wrong reason — a false green on exactly the failure
+  // this trace exists to catch. Same 4s the control below gets, so the two are
+  // measured over comparable windows.
+  await page.waitForTimeout(4_000);
   const afterRendered = [...hits];
   check('the rendered face requests nothing', afterRendered.length === 0, afterRendered);
 
@@ -276,11 +299,11 @@ try {
   await context.close();
   await browser.close();
 } finally {
-  beacon.stop(true);
-  if (child.exitCode == null) child.kill();
-  await child.exited;
-  writeFileSync(join(outDir, 'broker.log'), await settledProcessOutput(output));
-  rmSync(root, { recursive: true, force: true });
+  beacon?.stop(true);
+  if (child && child.exitCode == null) child.kill();
+  if (child) await child.exited;
+  if (output) writeFileSync(join(outDir, 'broker.log'), await settledProcessOutput(output));
+  if (root) rmSync(root, { recursive: true, force: true });
 }
 
 const failed = assertions.filter((a) => !a.ok);

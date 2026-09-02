@@ -254,7 +254,47 @@ void main() {
       final content = tester.widget<SizedBox>(
         find.byKey(const Key('file-viewer-content')),
       );
-      expect(content.width, longest.length * painter.width + 16);
+      // `closeTo`, not equality: this holds exactly today only because ASCII
+      // never reaches the painter, so both sides multiply one glyph advance.
+      // The moment anything measures this line for real the two part company
+      // around the fourth ulp, and an exact assert would fail on rounding
+      // rather than on a defect.
+      expect(content.width, closeTo(longest.length * painter.width + 16, 0.01));
+    });
+
+    testWidgets('the real measuring closure returns a usable width', (
+      tester,
+    ) async {
+      // `fileSourceContentWidth` is covered with a fake measure; the closure
+      // `_contentWidth` hands it is not. If that closure returned 0 — an
+      // undisposed painter, a span built without the style, a layout that
+      // never ran — a CJK-only file would collapse to `math.max(16, 1)` and
+      // clip every line, and every test using the fake would stay green.
+      //
+      // The uniform test font is enough to catch it: a working painter still
+      // returns roughly length × advance for a CJK run, which a broken one
+      // does not.
+      const cjk = '这是一个中文注释，说明这个函数的用途和边界情况';
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _preview(text: cjk))),
+      );
+      await tester.pump();
+
+      final painter = TextPainter(
+        text: TextSpan(
+          text: '0',
+          style: fileSourceCodeStyle(
+            tester.element(find.byType(FileViewerPane)),
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      addTearDown(painter.dispose);
+
+      final content = tester.widget<SizedBox>(
+        find.byKey(const Key('file-viewer-content')),
+      );
+      expect(content.width, closeTo(cjk.length * painter.width + 16, 0.01));
     });
 
     testWidgets('wrapped rows do not copy their line numbers', (tester) async {

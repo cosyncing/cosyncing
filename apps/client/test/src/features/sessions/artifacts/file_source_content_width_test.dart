@@ -59,7 +59,17 @@ void main() {
     test('only the lines that need it are measured', () {
       final measured = <String>[];
       fileSourceContentWidth(
-        lines: const ['ascii', '中文', 'more ascii', 'é', '🙂'],
+        // Precomposed e-acute, then e + U+0301, then an emoji. The second is
+        // the interesting one: two code units that paint as one glyph, so its
+        // character count overstates its width where the others understate it.
+        lines: const [
+          'ascii',
+          '\u4e2d\u6587',
+          'more ascii',
+          '\u00e9',
+          'e\u0301',
+          '\u{1f642}',
+        ],
         advance: advance,
         measure: (line) {
           measured.add(line);
@@ -67,9 +77,9 @@ void main() {
         },
       );
 
-      // A combining mark takes no width of its own and an emoji takes two, and
-      // neither is knowable from a character count — both go to the font.
-      expect(measured, ['中文', 'é', '🙂']);
+      // None of these is knowable from a character count, in either direction,
+      // so all of them go to the font.
+      expect(measured, ['\u4e2d\u6587', '\u00e9', 'e\u0301', '\u{1f642}']);
     });
 
     test('the widest wins whichever kind it is', () {
