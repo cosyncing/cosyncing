@@ -150,10 +150,37 @@ $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.Security
 
 const ENCODED_POWERSHELL = Buffer.from(POWERSHELL_SOURCE, 'utf16le').toString('base64');
 
-function powershellExecutable(env: NodeJS.ProcessEnv): string {
+function windowsSystemRoot(env: NodeJS.ProcessEnv): string {
   const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
   if (!systemRoot) throw new Error('Windows SystemRoot is unavailable for DACL enforcement');
-  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return systemRoot;
+}
+
+function powershellExecutable(env: NodeJS.ProcessEnv): string {
+  return join(windowsSystemRoot(env), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
+/**
+ * Environment for the Windows PowerShell child, with the module path pinned to the system module store.
+ *
+ * This provider runs Windows PowerShell 5.1 explicitly. Any host with PowerShell 7 installed exports a
+ * PSModulePath naming 7's module roots, and 5.1 inheriting that cannot auto-load
+ * Microsoft.PowerShell.Security -- `Get-Acl` then fails and takes every owner-only write with it: setup,
+ * durable state, credentials. The cmdlets are already module-qualified, but a qualified name still has to
+ * be discoverable, and pinning the system store additionally stops a user-writable module from shadowing
+ * Get-Acl or Set-Acl in a path whose whole job is deciding who may read a secret.
+ */
+export function windowsDaclChildEnvironment(
+  env: NodeJS.ProcessEnv,
+  request: { target: string; operation: string; kind: WindowsSecurePathKind },
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    PSModulePath: join(windowsSystemRoot(env), 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+    COSYNCING_WINDOWS_DACL_TARGET: request.target,
+    COSYNCING_WINDOWS_DACL_OPERATION: request.operation,
+    COSYNCING_WINDOWS_DACL_KIND: request.kind,
+  };
 }
 
 function runWindowsDaclOperation(
@@ -166,12 +193,7 @@ function runWindowsDaclOperation(
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_POWERSHELL],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        COSYNCING_WINDOWS_DACL_TARGET: target,
-        COSYNCING_WINDOWS_DACL_OPERATION: operation,
-        COSYNCING_WINDOWS_DACL_KIND: kind,
-      },
+      env: windowsDaclChildEnvironment(process.env, { target, operation, kind }),
       maxBuffer: POWERSHELL_MAX_BUFFER,
       timeout: POWERSHELL_TIMEOUT_MS,
       windowsHide: true,
