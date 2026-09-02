@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import {
   classifyWindowsOwnerOnlyDacl,
+  WINDOWS_DACL_POWERSHELL_SOURCE,
+  windowsDaclChildEnvironment,
   type WindowsDaclSnapshot,
 } from '../../src/security/windows-dacl.ts';
 
@@ -57,4 +59,34 @@ rejected('partial rights', (candidate) => { candidate.rules[0]!.rights = 1_179_7
 rejected('file inheritance', (candidate) => { candidate.rules[0]!.inheritanceFlags = 3; }, 'unsafe-inheritance');
 rejected('propagation flags', (candidate) => { candidate.rules[0]!.propagationFlags = 1; }, 'unsafe-inheritance');
 
-console.log('PASS 12/12 Windows DACL policy checks');
+// Enforcement runs inside Windows PowerShell, so these two properties cannot be exercised from a POSIX
+// gate. Pin them in the script text instead: both were live defects. Inheriting a foreign PSModulePath
+// left 5.1 unable to load Microsoft.PowerShell.Security, and demanding the user SID as prior owner made
+// the product reject files it had itself just created whenever it ran elevated, since Windows stamps
+// BUILTIN\\Administrators as owner for an elevated token.
+assert.match(
+  WINDOWS_DACL_POWERSHELL_SOURCE,
+  /\$tokenOwnerSid = \[System\.Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)\.Owner/,
+  'the script must know the owner this token stamps on objects it creates',
+);
+assert.match(
+  WINDOWS_DACL_POWERSHELL_SOURCE,
+  /\$priorOwnerSid -ne \$currentSid\.Value -and \$priorOwnerSid -ne \$tokenOwnerSid\.Value/,
+  'enforcement must accept the user SID or this token\'s own default owner, and nothing else',
+);
+assert.equal(
+  WINDOWS_DACL_POWERSHELL_SOURCE.includes('$security.SetOwner($currentSid)'),
+  true,
+  'enforcement still rewrites the owner to the user, so acceptance never leaves Administrators owning it',
+);
+{
+  const inherited = 'C:\\Program Files\\PowerShell\\7\\Modules';
+  const child = windowsDaclChildEnvironment(
+    { SystemRoot: 'C:\\Windows', PSModulePath: inherited },
+    { target: 'C:\\t', operation: 'inspect', kind: 'file' },
+  );
+  assert.notEqual(child.PSModulePath, inherited, 'the child must not inherit a foreign module path');
+  assert.match(String(child.PSModulePath), /WindowsPowerShell/);
+}
+
+console.log('PASS 16/16 Windows DACL policy checks');

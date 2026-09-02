@@ -75,7 +75,7 @@ export function classifyWindowsOwnerOnlyDacl(
   return { ok: true };
 }
 
-const POWERSHELL_SOURCE = String.raw`
+export const WINDOWS_DACL_POWERSHELL_SOURCE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $target = [Environment]::GetEnvironmentVariable('COSYNCING_WINDOWS_DACL_TARGET', 'Process')
@@ -85,6 +85,10 @@ if ([string]::IsNullOrEmpty($target)) { throw 'missing DACL target' }
 if ($kind -ne 'file' -and $kind -ne 'directory') { throw 'invalid DACL target kind' }
 
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+# The SID Windows stamps as owner on objects THIS token creates. It equals the user on an ordinary
+# session, and BUILTIN\Administrators on an elevated one, so an object this process just created can
+# come back owned by Administrators rather than by the user who ran the command.
+$tokenOwnerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().Owner
 $systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
 $administratorsSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
 
@@ -95,7 +99,14 @@ if ($operation -eq 'enforce' -or $operation -eq 'create-directory') {
   if ($operation -eq 'enforce') {
     $prior = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $target
     $priorOwnerSid = $prior.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($priorOwnerSid -ne $currentSid.Value) { throw 'DACL target is not owned by the current user' }
+    # Accept an object owned by this token's own default owner as well as by the user. Refusing it made
+    # the product reject files it had just created itself whenever it ran elevated -- Node opens the temp
+    # file, Windows stamps Administrators as its owner, and enforcement then called it foreign. On an
+    # ordinary session the two SIDs are identical, so nothing widens there. Either way the owner is
+    # rewritten to the user below, so the object still ends up owned by the person who ran the command.
+    if ($priorOwnerSid -ne $currentSid.Value -and $priorOwnerSid -ne $tokenOwnerSid.Value) {
+      throw 'DACL target is not owned by the current user'
+    }
   }
   if ($kind -eq 'directory') {
     $security = New-Object System.Security.AccessControl.DirectorySecurity
@@ -148,7 +159,7 @@ $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.Security
 } | ConvertTo-Json -Compress -Depth 5
 `;
 
-const ENCODED_POWERSHELL = Buffer.from(POWERSHELL_SOURCE, 'utf16le').toString('base64');
+const ENCODED_POWERSHELL = Buffer.from(WINDOWS_DACL_POWERSHELL_SOURCE, 'utf16le').toString('base64');
 
 function windowsSystemRoot(env: NodeJS.ProcessEnv): string {
   const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
