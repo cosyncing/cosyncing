@@ -2438,7 +2438,18 @@ try {
 
   // omp setup owns bridge installation independently of session discovery. A first run must install and
   // receipt the extension even though omp has never created its sessions directory yet.
-  {
+  //
+  // Skipped on Windows, and NOT because the product cannot do this there. The fixture describes an omp
+  // install in POSIX terms -- a `#!/bin/sh` launcher, an executable bit, and a symlink onto PATH --
+  // and Windows expresses none of the three, so `resolveInvocation` finds nothing and the run reports
+  // "omp is not installed" rather than exercising the bridge install. The Windows shape of this is a
+  // `.cmd` shim resolved through PATHEXT, which the readiness code already has a branch for
+  // (`invocation.kind === 'batch'`) and which no fixture builds yet. Writing that fixture is the work;
+  // pretending this check ran is not.
+  if (process.platform === 'win32') {
+    skip('the omp bridge install lane',
+      'the fixture describes a POSIX omp install; the Windows shape is a .cmd shim and has no fixture yet');
+  } else {
     const machine = join(root, 'omp-fresh-install-no-sessions');
     const { context, bridge } = supportedOmpFixture(machine);
     const sessions = join(machine, '.omp', 'agent', 'sessions');

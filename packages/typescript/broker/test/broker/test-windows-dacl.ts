@@ -1,13 +1,11 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import {
   classifyWindowsOwnerOnlyDacl,
-  WINDOWS_DACL_POWERSHELL_SOURCE,
-  windowsDaclChildEnvironment,
+  windowsOwnerOnlySddl,
   type WindowsDaclSnapshot,
 } from '../../src/security/windows-dacl.ts';
-import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 
 const USER_SID = 'S-1-5-21-1000-1000-1000-1001';
 const FULL_CONTROL = 2_032_127;
@@ -61,68 +59,36 @@ rejected('partial rights', (candidate) => { candidate.rules[0]!.rights = 1_179_7
 rejected('file inheritance', (candidate) => { candidate.rules[0]!.inheritanceFlags = 3; }, 'unsafe-inheritance');
 rejected('propagation flags', (candidate) => { candidate.rules[0]!.propagationFlags = 1; }, 'unsafe-inheritance');
 
-// Enforcement runs inside Windows PowerShell, so these two properties cannot be exercised from a POSIX
-// gate. Pin them in the script text instead: both were live defects. Inheriting a foreign PSModulePath
-// left 5.1 unable to load Microsoft.PowerShell.Security, and demanding the user SID as prior owner made
-// the product reject files it had itself just created whenever it ran elevated, since Windows stamps
-// BUILTIN\\Administrators as owner for an elevated token.
-assert.match(
-  WINDOWS_DACL_POWERSHELL_SOURCE,
-  /\$tokenOwnerSid = \[System\.Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)\.Owner/,
-  'the script must know the owner this token stamps on objects it creates',
-);
-assert.match(
-  WINDOWS_DACL_POWERSHELL_SOURCE,
-  /\$priorOwnerSid -ne \$currentSid\.Value -and \$priorOwnerSid -ne \$tokenOwnerSid\.Value/,
-  'enforcement must accept the user SID or this token\'s own default owner, and nothing else',
-);
-assert.equal(
-  WINDOWS_DACL_POWERSHELL_SOURCE.includes('$security.SetOwner($currentSid)'),
-  true,
-  'enforcement still rewrites the owner to the user, so acceptance never leaves Administrators owning it',
-);
+// Enforcement runs against the Windows API, so applying it cannot be exercised from a POSIX gate.
+// What CAN be pinned here is the policy it applies and the mechanism it applies it through.
 {
-  const inherited = 'C:\\Program Files\\PowerShell\\7\\Modules';
-  const child = windowsDaclChildEnvironment(
-    { SystemRoot: 'C:\\Windows', PSModulePath: inherited },
-    { target: 'C:\\t', operation: 'inspect', kind: 'file' },
+  const file = windowsOwnerOnlySddl(USER_SID, 'file');
+  const directory = windowsOwnerOnlySddl(USER_SID, 'directory');
+  assert.equal(file, `O:${USER_SID}G:${USER_SID}D:P(A;;FA;;;${USER_SID})(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)`);
+  // `OICI` is what carries the grant to whatever is created inside the directory. Without it the
+  // directory would be owner-only and everything written into it would inherit from somewhere else.
+  assert.equal(
+    directory,
+    `O:${USER_SID}G:${USER_SID}D:P`
+      + `(A;OICI;FA;;;${USER_SID})(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;S-1-5-32-544)`,
   );
-  assert.notEqual(child.PSModulePath, inherited, 'the child must not inherit a foreign module path');
-  assert.match(String(child.PSModulePath), /WindowsPowerShell/);
+  // `P` is the whole point: a descriptor without it accepts inherited ACEs and is not owner-only.
+  assert.match(file, /D:P\(/, 'the DACL must be protected from inheritance');
+  assert.equal(file.includes('OICI'), false, 'a file contains nothing that could inherit the grant');
+  // The three principals are closed. A fourth would be a hole this policy exists to prevent.
+  assert.equal(file.match(/\(A;/g)?.length, 3);
+  assert.equal(directory.match(/\(A;/g)?.length, 3);
 }
-// ONE rule, in one place. The DACL provider was pinned first and the ownership probe next to it was
-// not, so `Get-Acl` still failed there -- and a probe that answers 'unknown' instead of throwing
-// spent that failure silently: the OpenCode shim's receipt proof declined, and setup reported the
-// shim as applied-but-unverified with nothing naming PowerShell. Every 5.1 spawn now builds its
-// environment from the same helper.
 {
-  const inherited = 'C:\\Program Files\\PowerShell\\7\\Modules';
-  const pinned = windowsPowerShellChildEnvironment({
-    SystemRoot: 'C:\\Windows',
-    PSModulePath: inherited,
-    PATH: 'C:\\keep-me',
-  });
-  // Built with `join`, like the helper: this suite runs on POSIX too, where the separator differs.
-  assert.equal(
-    pinned.PSModulePath,
-    join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+  // The mechanism itself, pinned in the source: the provider must reach the operating system
+  // directly. Every defect this rewrite closed -- Get-Acl unresolvable under an inherited
+  // PSModulePath, a compile blocking startup past twenty seconds, 271ms per operation against
+  // 0.143ms -- came from asking a shell. A reintroduced spawn brings all of them back at once.
+  const provider = readFileSync(
+    new URL('../../src/security/windows-dacl.ts', import.meta.url), 'utf8',
   );
-  assert.equal(pinned.PATH, 'C:\\keep-me', 'pinning the module path changes nothing else');
-  assert.equal(
-    windowsDaclChildEnvironment(
-      { SystemRoot: 'C:\\Windows', PSModulePath: inherited },
-      { target: 'C:\\t', operation: 'inspect', kind: 'file' },
-    ).PSModulePath,
-    pinned.PSModulePath,
-    'the DACL provider pins through the shared helper rather than a second copy of the rule',
-  );
-  // A probe degrades to 'unknown' without a SystemRoot; owner-only enforcement must not degrade at
-  // all, so it keeps refusing where the shared helper hands back an unpinned copy.
-  assert.equal(windowsPowerShellChildEnvironment({ PATH: 'x' }).PSModulePath, undefined);
-  assert.throws(() => windowsDaclChildEnvironment(
-    { PATH: 'x' },
-    { target: 'C:\\t', operation: 'inspect', kind: 'file' },
-  ), /SystemRoot/);
+  assert.equal(/spawnSync|powershell|PSModulePath/i.test(provider), false,
+    'owner-only enforcement must not reach the operating system through a shell');
 }
 
-console.log('PASS 21/21 Windows DACL policy checks');
+console.log('PASS 24/24 Windows DACL policy checks');

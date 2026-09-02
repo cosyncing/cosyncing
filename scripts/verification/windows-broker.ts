@@ -43,23 +43,32 @@ interface LaneSuite {
  * product could not prove it owned, and state files it wrote through a creation path Windows would not
  * let it read back.
  *
- * `test:broker-lifecycle` is by far the most expensive member: about 16 minutes natively against 94
- * seconds for the twenty-one original suites combined. The job allows 60. A CI runner is slower than the
- * qualification host, so that headroom is the thing to watch when adding anything else heavy.
+ * Measured again 2026-09-02, after owner-only enforcement stopped shelling out: the lane cost 102
+ * minutes and 94 of them were two suites, `test:broker-setup` at 66 and `test:broker-lifecycle` at
+ * 28, against 51 seconds and 17 on POSIX. None of that was the suites. One setup run performs about
+ * 4,470 owner-only filesystem operations -- counted, not estimated -- and each one spawned a
+ * `powershell.exe` process to rewrite an ACL, at 271ms measured. The same operation through the
+ * Windows API costs 0.143ms, so those 4,470 operations went from twenty minutes at best to under a
+ * second, and the lane fits in single-digit minutes.
  *
- * Measured again 2026-08-28, later the same day: doctor and transactional setup — the last two of
- * Phase 7's named areas — now PASS natively and are members. Doctor took 119 seconds. Setup took 47
- * minutes, and reports 149 of the 154 checks its POSIX runs report: the five it does not ask are the
- * live service lane, which is systemd end to end, and it prints and tallies that skip rather than
- * quietly returning a smaller total. The Windows service lifecycle is a different manager, covered by
- * `test:broker-windows-service` above; the skipped lane is not a substitute for it and vice versa.
- *
- * Setup's 47 minutes are almost all owner-only enforcement: a PowerShell process per operation, 202ms
- * measured, up to four per file write. That is what moved this job's budget from 60 minutes to 120 —
- * lifecycle's 16 plus setup's 47 leaves 60 with no room for a CI runner being slower than the
- * qualification host. A persistent PowerShell host, measured at 11ms per operation against the 202ms a
- * spawn costs, would take most of it back and is the obvious next lever if this job gets tight.
+ * Nothing was pruned to get there, and nothing should be. The cost was never in the suite list, and
+ * the cheap members are not passengers: `test:broker-protocol-journal` is 60ms of pure logic that
+ * caught a real Windows defect -- a temp root built at a literal `/tmp`, which on Windows is the
+ * current DRIVE's root -- precisely because it RAN on Windows rather than because it tests anything
+ * Windows-specific. A suite that only proves the product works on this platform at all is the
+ * cheapest coverage in the lane.
  */
+/**
+ * What this lane is allowed to cost, as a number rather than as an intention.
+ *
+ * A required check nobody wants to wait for is a check people work around. Reported on every run and
+ * carried in the report, so the slide back is visible in the run that starts it rather than in the
+ * quarter that ends with a two-hour gate. Deliberately NOT a failure: a loaded runner having a bad
+ * day is not a regression, and a gate that goes red for being slow teaches people to rerun it. The
+ * job's own 20-minute timeout is the hard stop.
+ */
+const LANE_BUDGET_MS = 15 * 60_000;
+
 const LANE: readonly LaneSuite[] = [
   { suite: 'test:broker-windows-process', area: 'host primitives' },
   { suite: 'test:broker-windows-dacl', area: 'secure files' },
@@ -220,6 +229,18 @@ try {
 }
 
 const failed = results.filter((result) => !result.passed);
+const totalMs = results.reduce((sum, result) => sum + result.durationMs, 0);
+const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 3);
+console.log(
+  `windows-broker: ${(totalMs / 60_000).toFixed(1)} min of a ${LANE_BUDGET_MS / 60_000} min budget`
+  + ` — slowest: ${slowest.map((r) => `${r.suite} ${(r.durationMs / 1000).toFixed(0)}s`).join(', ')}`,
+);
+if (totalMs > LANE_BUDGET_MS) {
+  console.warn(
+    `windows-broker: OVER BUDGET by ${((totalMs - LANE_BUDGET_MS) / 60_000).toFixed(1)} min.`
+    + ' Something on the owner-only path is spawning processes again, or a suite has grown one.',
+  );
+}
 const reportDirectory = join(repositoryRoot, 'output', 'check', 'windows-broker');
 mkdirSync(reportDirectory, { recursive: true });
 await Bun.write(
@@ -230,6 +251,7 @@ await Bun.write(
     host: { platform: process.platform, arch: process.arch },
     runtime: { bun: Bun.version },
     counts: { total: results.length, passed: results.length - failed.length, failed: failed.length },
+    budget: { totalMs, budgetMs: LANE_BUDGET_MS, withinBudget: totalMs <= LANE_BUDGET_MS },
     suites: results,
     cleanup: { stateRootRemoved: stateRemoved, scheduledTasksRemoved: sweptTasks },
   }, null, 2)}\n`,

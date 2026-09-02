@@ -10,7 +10,7 @@ import {
   windowsServiceInstallPaths,
   windowsServiceVersionKey,
 } from '../../src/installation/windows-service-install.ts';
-import { windowsDaclChildEnvironment } from '../../src/security/windows-dacl.ts';
+import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 import {
   classifyWindowsScheduledTask,
   classifyWindowsTaskFolders,
@@ -198,21 +198,18 @@ function check(name: string, ok: boolean, detail?: string): void {
     repairableFolder.shared === 'current' && repairableFolder.sidFolder === 'drifted'
       && blockedFolder.sidFolder === 'conflict' && blockedFolder.foreignChildren[0] === 'folder:Foreign'
       && incompatibleShared.shared === 'conflict');
-  // A host with PowerShell 7 installed exports a PSModulePath naming 7's module roots. This provider runs
-  // Windows PowerShell 5.1 explicitly, and 5.1 inheriting that path cannot auto-load
-  // Microsoft.PowerShell.Security, so Get-Acl fails and every owner-only write fails with it. The child
-  // environment must therefore replace an inherited PSModulePath rather than pass it through.
+  // The Task Scheduler executor is the LAST Windows PowerShell caller left: owner-only enforcement now
+  // reaches the operating system directly, but registering a scheduled task still goes through the
+  // ScheduledTasks module. A host with PowerShell 7 installed exports a PSModulePath naming 7's module
+  // roots, and 5.1 inheriting that auto-loads neither ScheduledTasks nor Security, so this child must
+  // replace an inherited module path rather than pass it through.
   {
     const hostile = 'C:\\Users\\someone\\Documents\\PowerShell\\Modules;C:\\Program Files\\PowerShell\\7\\Modules';
-    const childEnv = windowsDaclChildEnvironment(
-      { SystemRoot: 'C:\\Windows', PSModulePath: hostile },
-      { target: 'C:\\Users\\Fixture\\.cosyncing', operation: 'enforce', kind: 'directory' },
-    );
-    check('the Windows DACL child never inherits a foreign PowerShell module path',
+    const childEnv = windowsPowerShellChildEnvironment({ SystemRoot: 'C:\\Windows', PSModulePath: hostile });
+    check('the Windows PowerShell child never inherits a foreign module path',
       childEnv.PSModulePath !== hostile
         && childEnv.PSModulePath!.includes('WindowsPowerShell')
-        && childEnv.PSModulePath!.includes('Modules')
-        && childEnv.COSYNCING_WINDOWS_DACL_OPERATION === 'enforce',
+        && childEnv.PSModulePath!.includes('Modules'),
       childEnv.PSModulePath);
   }
 

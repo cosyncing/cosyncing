@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      windows_relevant: ${{ steps.classify.outputs.windows_relevant }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -165,13 +166,19 @@ jobs:
   windows-broker:
     name: Windows broker lane
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    # Skipped on a pull request that cannot reach a Windows broker -- documentation, or the Flutter
+    # client. ALWAYS run on a push, so nothing reaches main without the lane having seen it: a
+    # path filter is a way to spend less on pull requests, not a way to merge unverified.
+    if: >-
+      ${{ needs.changes.outputs.docs_only != 'true'
+          && (github.event_name != 'pull_request' || needs.changes.outputs.windows_relevant == 'true') }}
     runs-on: windows-2025
-    # 120, not 60: transactional setup joined this lane at 47 minutes measured natively and broker
-    # lifecycle costs 16, which leaves 60 with no headroom for a CI runner being slower than the
-    # qualification host. Almost all of setup's time is one PowerShell process per owner-only
-    # operation; a persistent host would take most of it back and this could come down again.
-    timeout-minutes: 120
+    # 20. The lane used to need 120 because owner-only enforcement spawned a `powershell.exe` process
+    # per filesystem operation -- 4,470 of them in one transactional-setup run, measured, which is
+    # 66 minutes on a runner. Those operations now call the Windows API directly at 0.143ms each, so
+    # the whole lane costs single-digit minutes and this bound is what holds it there: a change that
+    # puts a process back on that path fails here rather than quietly restoring the old cost.
+    timeout-minutes: 20
     env:
       # Every run names its own state, and any Scheduled Task it registers carries the same name. A
       # durable name is how one run's leftovers become the next run's failure on a reused runner;
@@ -207,11 +214,21 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          WINDOWS_RELEVANT: ${{ needs.changes.outputs.windows_relevant }}
         run: |
           test "$(jq -r '.changes.result' <<< "$NEEDS_JSON")" = success
           if [ "$DOCS_ONLY" = true ]; then
             test "$(jq -r '[to_entries[] | select(.key != "changes") | .value.result] | all(. == "skipped")' <<< "$NEEDS_JSON")" = true
             echo 'Documentation-only change: build, browser, package, and verification jobs were intentionally skipped.'
           else
-            test "$(jq -r '[to_entries[] | select(.key != "changes") | .value.result] | all(. == "success")' <<< "$NEEDS_JSON")" = true
+            # Every gate must have SUCCEEDED. The one exemption is the Windows lane on a pull request
+            # that cannot reach it, and it is keyed to the same classification that caused the skip --
+            # so a lane that was cancelled, or skipped for any other reason, still fails here.
+            test "$(jq -r '[to_entries[] | select(.key != "changes" and .key != "windows-broker") | .value.result] | all(. == "success")' <<< "$NEEDS_JSON")" = true
+            windows_broker="$(jq -r '."windows-broker".result' <<< "$NEEDS_JSON")"
+            if [ "$windows_broker" != success ]; then
+              test "$windows_broker" = skipped
+              test "$WINDOWS_RELEVANT" != true
+              echo 'No path in this change can reach a Windows broker: the Windows lane was intentionally skipped.'
+            fi
           fi

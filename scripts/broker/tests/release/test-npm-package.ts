@@ -29,12 +29,9 @@ import {
   isSupportedBrokerProcessTuple,
 } from '../../../../packages/typescript/broker/src/installation/supported-hosts.ts';
 import {
-  parseWindowsMachineArchitecture,
-  PROBE_TIMEOUT_MS,
+  classifyWindowsMachine,
   windowsNativeMachineArchitecture,
   windowsPowerShellChildEnvironment,
-  WINDOWS_MACHINE_PROBE_TIMEOUT_MS,
-  type WindowsMachineProbeResult,
 } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import { validateWebBuildShape } from '../../release/package-web-sidecar.ts';
 import { writeStampedWebBuild, STAMPED_WEB_FIXTURE_COMMIT } from '../../../../packages/typescript/broker/test/helpers/stamped-web-build.ts';
@@ -223,46 +220,55 @@ try {
     hostOutcomes.every((outcome) => outcome.ok),
     hostOutcomes.map((outcome) => `${outcome.label}=${outcome.actual}`).join(' | '));
   // The PROVIDER, not only the verdict that consumes it. Every case above injects an architecture string
-  // directly, so none of them exercises what the probe does with what PowerShell actually returns — the
-  // one part that had no coverage at all until its x64 success path ran on a physical host.
-  const probeCases: Array<[string, WindowsMachineProbeResult, string]> = [
-    ['amd64', { status: 0, stdout: '8664\n' }, 'x64'],
-    ['arm64', { status: 0, stdout: 'AA64\r\n' }, 'arm64'],
-    ['padded', { status: 0, stdout: '  8664  ' }, 'x64'],
-    ['other-machine', { status: 0, stdout: '01c4\n' }, 'other'],
-    ['self-declared-unknown', { status: 0, stdout: 'unknown\n' }, 'unknown'],
-    ['empty', { status: 0, stdout: '' }, 'unknown'],
-    ['malformed', { status: 0, stdout: 'not-a-machine\n' }, 'unknown'],
-    ['nonzero-exit', { status: 1, stdout: '8664\n' }, 'unknown'],
-    ['spawn-failure-or-timeout', { status: null, stdout: '' }, 'unknown'],
+  // directly, so none of them exercises what the probe does with what the machine actually reports.
+  const machineCases: Array<[string, number | undefined, string]> = [
+    ['amd64', 0x8664, 'x64'],
+    ['arm64', 0xaa64, 'arm64'],
+    ['other-machine', 0x01c4, 'other'],
+    // IMAGE_FILE_MACHINE_UNKNOWN: the call succeeded and declined to name the machine.
+    ['declined', 0x0000, 'unknown'],
+    // The call failed, or the library could not be loaded at all.
+    ['unreadable', undefined, 'unknown'],
   ];
-  const probeOutcomes = probeCases.map(([label, result, expected]) => {
-    const actual = parseWindowsMachineArchitecture(result);
+  const machineOutcomes = machineCases.map(([label, word, expected]) => {
+    const actual = classifyWindowsMachine(word);
     return { label, actual, ok: actual === expected };
   });
-  check('the native-architecture probe maps every answer, refusal and failure it can receive',
-    probeOutcomes.every((outcome) => outcome.ok),
-    probeOutcomes.map((outcome) => `${outcome.label}=${outcome.actual}`).join(' | '));
-  // A non-zero exit carrying a VALID machine word must not be believed: that is the shape a probe takes
-  // when the script failed after printing, and trusting stdout alone would admit a host on partial output.
-  check('a probe that answers correctly but exits non-zero is still unproven',
-    parseWindowsMachineArchitecture({ status: 1, stdout: '8664' }) === 'unknown'
-      && parseWindowsMachineArchitecture({ status: 0, stdout: '8664' }) === 'x64');
-  // End to end through the exported entry point, with the spawn injected: proves the seam the physical
-  // host exercises is the same one these cases do, rather than a parser nothing calls.
-  check('the probe entry point returns what its injected runner reports',
-    windowsNativeMachineArchitecture(() => ({ status: 0, stdout: 'aa64' })) === 'arm64'
-      && windowsNativeMachineArchitecture(() => ({ status: 0, stdout: '8664' })) === 'x64'
-      && windowsNativeMachineArchitecture(() => { throw new Error('powershell missing'); }) === 'unknown');
-  // This probe compiles C# to answer, and a host with a cold module-analysis cache rebuilds that on
-  // the same call. Sharing the read-only probes' budget spent the difference as a REFUSAL, which is
-  // the one wrong answer that stops a supported machine from starting a broker at all.
-  check('the machine probe is budgeted for a compile, not for a read',
-    WINDOWS_MACHINE_PROBE_TIMEOUT_MS >= 4 * PROBE_TIMEOUT_MS,
-    `machine=${WINDOWS_MACHINE_PROBE_TIMEOUT_MS}ms read=${PROBE_TIMEOUT_MS}ms`);
-  // 5.1 is named explicitly by every spawn here, and a host with PowerShell 7 exports module roots
-  // 5.1 cannot use. Pinned, the child sees the system store and nothing else.
-  check('every Windows PowerShell child is pinned to the system module store',
+  check('the native-architecture probe maps every answer and refusal it can receive',
+    machineOutcomes.every((outcome) => outcome.ok),
+    machineOutcomes.map((outcome) => `${outcome.label}=${outcome.actual}`).join(' | '));
+  // A machine that named itself and is not one we have qualified is NOT the same as one that could not
+  // be asked. Both refuse the host, but only the second is worth retrying, and an operator reading
+  // "unverified" about a machine that answered plainly would go looking for the wrong fault.
+  check('a real answer we do not recognise is distinguished from no answer at all',
+    classifyWindowsMachine(0x01c4) === 'other' && classifyWindowsMachine(undefined) === 'unknown');
+  // End to end through the exported entry point, with the reader injected: proves the seam the physical
+  // host exercises is the same one these cases do, rather than a classifier nothing calls.
+  check('the probe entry point returns what its injected reader reports',
+    windowsNativeMachineArchitecture(() => 0xaa64) === 'arm64'
+      && windowsNativeMachineArchitecture(() => 0x8664) === 'x64'
+      && windowsNativeMachineArchitecture(() => undefined) === 'unknown');
+  // The machine question is answered by calling the kernel export directly. It used to spawn PowerShell
+  // to COMPILE C# to reach the same function -- 332ms measured against 0.003ms, and on a host with a cold
+  // module-analysis cache it blocked past twenty seconds and refused a supported machine at startup.
+  // Pinned in the source, because the cost and the hang are both invisible from a POSIX gate.
+  {
+    const source = readFileSync(
+      join(ROOT, 'packages/typescript/adapter-api/src/host-process.ts'), 'utf8',
+    );
+    // Comments stripped first. The function's own comment RECORDS that it used to spawn PowerShell,
+    // and a scan that reads prose would fail on the sentence explaining why it no longer does.
+    const code = source
+      .slice(source.indexOf('export function windowsNativeMachineArchitecture'))
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    check('the machine probe reaches the kernel directly, with no shell and no compiler',
+      !/Add-Type|powershell|spawnSync/i.test(code) && code.includes('windowsFfi()'),
+      code.slice(0, 0));
+  }
+  // Task Scheduler registration is the one Windows PowerShell caller left, and 5.1 is named explicitly.
+  // A host with PowerShell 7 exports module roots 5.1 cannot use; pinned, the child sees the system store.
+  check('every remaining Windows PowerShell child is pinned to the system module store',
     windowsPowerShellChildEnvironment({
       SystemRoot: 'C:\\Windows', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules',
     }).PSModulePath === join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'));

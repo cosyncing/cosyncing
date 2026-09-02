@@ -6,7 +6,22 @@ require 'optparse'
 require 'pathname'
 
 module DocsOnlyChangePolicy
-  Result = Struct.new(:docs_only, :reason, :paths, keyword_init: true)
+  Result = Struct.new(:docs_only, :reason, :paths, keyword_init: true) do
+    # Whether this diff can change how the broker behaves on Windows.
+    #
+    # Asked of the SAME diff as docs_only, in the same place, because both questions are "what did
+    # this change touch" and a second script would be a second git range to keep in agreement.
+    #
+    # Deliberately broad and fail-open: anything under the TypeScript packages, the scripts tree, the
+    # workspace manifests, or CI itself counts. What it excludes is what demonstrably cannot reach a
+    # broker running on Windows -- documentation and the Flutter client. A narrower list would skip
+    # the lane on a change that breaks it, and the cost of being wrong in that direction is a Windows
+    # regression discovered after merge.
+    def windows_relevant?
+      return true unless reason == 'all-paths-are-documentation' || paths.any?
+      paths.any? { |path| DocsOnlyChangePolicy.windows_relevant_path?(path) }
+    end
+  end
   ZERO_SHA = '0' * 40
 
   module_function
@@ -17,6 +32,16 @@ module DocsOnlyChangePolicy
     return false if path.split('/').any? { |part| part.empty? || %w[. ..].include?(part) }
 
     (!path.include?('/') && path.start_with?('README')) || path.start_with?('docs/')
+  end
+
+  # Paths that cannot reach a Windows broker. Everything else can.
+  IRRELEVANT_PREFIXES = ['docs/', 'apps/client/', 'apps/android/', 'apps/ios/'].freeze
+
+  def windows_relevant_path?(path)
+    return true unless path.is_a?(String) && path.valid_encoding?
+    return false if documentation_path?(path)
+
+    IRRELEVANT_PREFIXES.none? { |prefix| path.start_with?(prefix) }
   end
 
   def commit_exists?(root, revision)
@@ -78,6 +103,7 @@ module DocsOnlyChangePolicy
 
     File.open(path, 'a', encoding: 'UTF-8') do |output|
       output.puts "docs_only=#{result.docs_only}"
+      output.puts "windows_relevant=#{result.windows_relevant?}"
       output.puts "reason=#{result.reason}"
       output.puts "changed_count=#{result.paths.length}"
     end
@@ -107,6 +133,7 @@ if $PROGRAM_NAME == __FILE__
     head: options[:head].to_s
   )
   DocsOnlyChangePolicy.write_github_output(options[:output], result)
-  puts "docs_only=#{result.docs_only} reason=#{result.reason} changed_count=#{result.paths.length}"
+  puts "docs_only=#{result.docs_only} windows_relevant=#{result.windows_relevant?} "\
+       "reason=#{result.reason} changed_count=#{result.paths.length}"
   result.paths.each { |path| puts "  #{path}" }
 end

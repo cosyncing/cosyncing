@@ -1,31 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { windowsFfi } from './windows-ffi.ts';
 
 const WINDOWS_SNAPSHOT_TTL_MS = 250;
 /** Budget for a probe that READS something (an ACL, a process table). Exported so a claim can hold
  *  the machine probe's own budget above it rather than restating a number. */
 export const PROBE_TIMEOUT_MS = 5_000;
 
-/**
- * The native-machine probe's own budget, which is not comparable to the others'.
- *
- * The probes above ask PowerShell to read something. This one asks it to COMPILE something:
- * `Add-Type -MemberDefinition` builds a C# assembly at runtime to reach `IsWow64Process2`, and that
- * runs csc. On top of it, a PowerShell host whose `%LOCALAPPDATA%` has no module-analysis cache -- a
- * fresh profile, which every isolated test fixture creates and a service account can have too --
- * rebuilds that cache on the same call.
- *
- * Both costs land on the ONE call that decides whether this host is qualified at all. Under the
- * shared 5s budget the Windows broker lane's isolated fixtures exited at startup with
- * `windows-machine-architecture-unverified`, each suite ending 5.39-5.50s after it began, against a
- * budget of exactly 5.000. A refusal is the failure this probe exists to produce for an unqualified
- * machine, so spending it on a slow compile is the worst way to be wrong: a supported host is
- * declined and the operator is told their machine is unverified. Timing out remains possible -- this
- * is a bound, not its removal -- but a bound wide enough that reaching it means something is wrong
- * with the host rather than busy on it.
- */
-export const WINDOWS_MACHINE_PROBE_TIMEOUT_MS = 20_000;
 const WINDOWS_MAX_BUFFER = 4 * 1024 * 1024;
 
 export interface HostProcessIdentity {
@@ -407,37 +389,12 @@ export function terminateHostProcessTree(pid: number, force: boolean): void {
 export function windowsPathOwnedByCurrentUser(target: string): 'yes' | 'no' | 'unknown' {
   if (process.platform !== 'win32') return 'unknown';
   if (typeof target !== 'string' || target.length === 0) return 'unknown';
-  const executable = windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
-  if (!executable) return 'unknown';
-  // The path travels in the ENVIRONMENT, never interpolated into the script text, so a filename
-  // containing quotes or `$(...)` cannot become PowerShell source. It cannot travel in argv either:
-  // `-Command` treats every remaining argument as more command TEXT rather than binding $args, so the
-  // `--` separator parsed as a unary operator and powershell exited non-zero on every call, which this
-  // function reported as 'unknown'. Windows ownership was therefore never provable, and callers that
-  // require a definite 'yes' — the OpenCode shim's receipt proof among them — declined every time.
-  const script = "$ErrorActionPreference='Stop'\n"
-    + 'try {\n'
-    + "  $p = [Environment]::GetEnvironmentVariable('COSYNCING_OWNER_PROBE_TARGET','Process')\n"
-    + '  $acl = Get-Acl -LiteralPath $p\n'
-    + '  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value\n'
-    + '  $me = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value\n'
-    + "  if ($owner -eq $me) { 'yes' } else { 'no' }\n"
-    + "} catch { 'unknown' }\n";
+  const ffi = windowsFfi();
+  if (!ffi) return 'unknown';
   try {
-    const result = spawnSync(
-      executable,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      {
-        encoding: 'utf8',
-        env: { ...windowsPowerShellChildEnvironment(), COSYNCING_OWNER_PROBE_TARGET: target },
-        maxBuffer: 64 * 1024,
-        timeout: PROBE_TIMEOUT_MS, windowsHide: true,
-      },
-    );
-    if (result.status !== 0) return 'unknown';
-    const answer = (result.stdout ?? '').trim();
-    return answer === 'yes' ? 'yes' : answer === 'no' ? 'no' : 'unknown';
+    return ffi.pathOwnerSid(target) === ffi.currentUserSid() ? 'yes' : 'no';
   } catch {
+    // A path that cannot be read is not a path we can claim. 'unknown' is not 'yes'.
     return 'unknown';
   }
 }
@@ -455,70 +412,37 @@ export function windowsPathOwnedByCurrentUser(target: string): 'yes' | 'no' | 'u
  * Returns 'unknown' when the machine will not answer. Callers must treat that as unproven rather than as
  * either answer: the whole point of asking is that a host we cannot identify is not one we have qualified.
  */
-export type WindowsMachineProbeResult = {
-  readonly status: number | null;
-  readonly stdout: string;
-};
+/**
+ * The reader, separated from the decision so the policy can be exercised on any host.
+ *
+ * Returns the machine word `IsWow64Process2` reported, or undefined where the machine would not say.
+ */
+export type WindowsMachineReader = () => number | undefined;
 
 /**
- * The parsing and failure policy, separated from the spawn so it can be exercised without a Windows host.
- * The image-file machine constants are the ones IsWow64Process2 documents: 0x8664 AMD64, 0xAA64 ARM64.
+ * The classification, given a machine word.
  *
- * Anything that is not one of those two, and not an explicit refusal to answer, is 'other': a machine that
- * gave a real answer we do not recognise is not the same as one that could not be asked, and neither is
- * qualified. A non-zero exit, a missing status (spawn failure or timeout), or unparsable output is
- * 'unknown' — unproven rather than either answer.
+ * The constants are the ones `IsWow64Process2` documents: 0x8664 AMD64, 0xAA64 ARM64. Anything else
+ * that is a real answer is 'other' -- a machine that named itself and is not one we have qualified is
+ * not the same as one that could not be asked, and neither is qualified. `IMAGE_FILE_MACHINE_UNKNOWN`
+ * and an absent reading are 'unknown': unproven, rather than either answer.
  */
-export function parseWindowsMachineArchitecture(
-  result: WindowsMachineProbeResult,
-): 'x64' | 'arm64' | 'other' | 'unknown' {
-  if (result.status !== 0) return 'unknown';
-  const answer = (result.stdout ?? '').trim().toLowerCase();
-  switch (answer) {
-    case '8664': return 'x64';
-    case 'aa64': return 'arm64';
-    case 'unknown': case '': return 'unknown';
-    default: return /^[0-9a-f]{1,8}$/.test(answer) ? 'other' : 'unknown';
-  }
+export function classifyWindowsMachine(word: number | undefined): 'x64' | 'arm64' | 'other' | 'unknown' {
+  if (word === undefined || !Number.isInteger(word) || word === 0x0000) return 'unknown';
+  if (word === 0x8664) return 'x64';
+  if (word === 0xaa64) return 'arm64';
+  return 'other';
 }
 
 export function windowsNativeMachineArchitecture(
-  runProbe?: (executable: string, script: string) => WindowsMachineProbeResult,
+  readMachine?: WindowsMachineReader,
 ): 'x64' | 'arm64' | 'other' | 'unknown' {
-  if (!runProbe && process.platform !== 'win32') return 'unknown';
-  const executable = runProbe
-    ? 'powershell.exe'
-    : windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
-  if (!executable) return 'unknown';
-  // Fixed text with nothing interpolated into it, as with the ownership probe above.
-  const script = "$ErrorActionPreference='Stop'\n"
-    + 'try {\n'
-    + "  Add-Type -Namespace Cosyncing -Name Wow -MemberDefinition '\n"
-    + '[DllImport(\"kernel32.dll\", SetLastError=true)]\n'
-    + 'public static extern bool IsWow64Process2(IntPtr h, out ushort processMachine, out ushort nativeMachine);\n'
-    + "' | Out-Null\n"
-    + '  [uint16]$processMachine = 0\n'
-    + '  [uint16]$nativeMachine = 0\n'
-    + '  $handle = [System.Diagnostics.Process]::GetCurrentProcess().Handle\n'
-    + '  if ([Cosyncing.Wow]::IsWow64Process2($handle, [ref]$processMachine, [ref]$nativeMachine)) {\n'
-    + "    '{0:x4}' -f $nativeMachine\n"
-    + "  } else { 'unknown' }\n"
-    + "} catch { 'unknown' }\n";
-  try {
-    if (runProbe) return parseWindowsMachineArchitecture(runProbe(executable, script));
-    const result = spawnSync(
-      executable,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      {
-        encoding: 'utf8',
-        env: windowsPowerShellChildEnvironment(),
-        maxBuffer: 64 * 1024,
-        timeout: WINDOWS_MACHINE_PROBE_TIMEOUT_MS,
-        windowsHide: true,
-      },
-    );
-    return parseWindowsMachineArchitecture({ status: result.status, stdout: result.stdout ?? '' });
-  } catch {
-    return 'unknown';
-  }
+  if (readMachine) return classifyWindowsMachine(readMachine());
+  if (process.platform !== 'win32') return 'unknown';
+  const ffi = windowsFfi();
+  // A machine that cannot be asked is unproven, exactly as one that refuses to answer is. This used
+  // to spawn PowerShell to compile C# at runtime to reach the same kernel export -- 332ms measured
+  // where the direct call costs 0.003ms, and on a host with a cold module-analysis cache it blocked
+  // past twenty seconds and refused a supported machine at broker startup.
+  return ffi ? ffi.nativeMachine() : 'unknown';
 }
