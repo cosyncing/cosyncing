@@ -25,6 +25,7 @@ import type {
   AttentionEventView,
 } from '@cosyncing/protocol';
 import { ATTENTION_BULK_DISMISS_MAX } from '@cosyncing/protocol';
+import { atomicWriteOwnerOnly } from '../security/secure-files.ts';
 import { setupStateHome } from '../installation/setup-state.ts';
 
 export const ATTENTION_RESOLVED_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -1051,21 +1052,18 @@ export class AttentionStore {
 
   private save(state: AttentionStoreFile): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.${process.pid}.${++this.tempSequence}.tmp`;
-    let fd: number | undefined;
     try {
-      fd = openSync(tmp, 'w', 0o600);
-      writeFileSync(fd, JSON.stringify(state, null, 2) + '\n', 'utf8');
-      fsyncSync(fd);
-      closeSync(fd);
-      fd = undefined;
-      renameSync(tmp, this.path);
+      // Every other durable store writes through this helper, and this one used to hand-roll the same
+      // sequence with `openSync(tmp, 'w', 0o600)`. That mode secures the file on POSIX and says nothing
+      // about a Windows ACL, so on Windows the store inherited its parent descriptor and then failed the
+      // product's own owner-only check: `repair` reported the attention store as needing explicit recovery
+      // and refused to apply anything, on a healthy installation. The helper is strictly stronger than what
+      // it replaces -- same fsync and atomic rename, plus inherited access stripped before any bytes are
+      // written, symlink rechecks either side of the replacement, a directory fsync, and the DACL enforced
+      // again after the rename.
+      atomicWriteOwnerOnly(this.path, JSON.stringify(state, null, 2) + '\n');
       try { this.options.onPersistenceResult?.(true); } catch { /* observer-only */ }
     } catch (error) {
-      if (fd !== undefined) {
-        try { closeSync(fd); } catch { /* best effort */ }
-      }
-      try { unlinkSync(tmp); } catch { /* best effort */ }
       try { this.options.onPersistenceResult?.(false); } catch { /* observer-only */ }
       throw error;
     }

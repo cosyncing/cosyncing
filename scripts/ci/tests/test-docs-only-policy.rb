@@ -204,8 +204,11 @@ def workflow_contract_errors(source, heavy_jobs)
     block = job_block(source, id)
     errors << "missing heavy job #{id}" if block.empty?
     errors << "#{id} does not need classification" unless block.include?('needs: changes')
+    # The guard must be PRESENT, not the whole condition: a heavy job may add its own conjunct -- the
+    # Windows lane also asks whether any changed path can reach it -- and must still refuse to run on
+    # a documentation-only change. Removing the guard is what this detects, not narrowing beside it.
     errors << "#{id} does not fail closed on classification" unless
-      block.include?("if: ${{ needs.changes.outputs.docs_only != 'true' }}")
+      block.include?("needs.changes.outputs.docs_only != 'true'")
   end
   required = job_block(source, 'required')
   expected_needs = "needs: [changes, #{heavy_jobs.join(', ')}]"
@@ -218,7 +221,7 @@ def workflow_contract_errors(source, heavy_jobs)
 end
 
 workflow_cases = {
-  '.github/workflows/ci.yml' => %w[current-host linux-android apple windows],
+  '.github/workflows/ci.yml' => %w[current-host linux-android apple windows windows-broker],
   '.github/workflows/broker-release-gate.yml' => %w[native-package broker-web-pair]
 }
 workflow_cases.each do |path, heavy_jobs|
@@ -241,7 +244,64 @@ workflow_cases.each do |path, heavy_jobs|
     "#{path} mutation: docs-only public-tree bypass is detected",
     !workflow_contract_errors(mutation, heavy_jobs).empty?
   )
+  # A heavy job that keeps only its OWN condition and drops the docs-only guard is the shape the
+  # relaxed check above could have admitted, so it is mutated for explicitly.
+  mutation = source.sub(
+    "needs.changes.outputs.docs_only != 'true'\n          &&", 'true &&'
+  )
+  if mutation != source
+    record(
+      "#{path} mutation: dropping the docs-only guard beside another condition is detected",
+      !workflow_contract_errors(mutation, heavy_jobs).empty?
+    )
+  end
 end
+
+# The Windows lane is a REQUIRED check that this classification is allowed to skip, so the
+# classification is the thing standing between a Windows regression and main. Both directions
+# matter: skipping the lane on a change that reaches it is the expensive mistake, and running it on
+# a change that cannot is only the cheap one.
+def relevance(paths)
+  reason =
+    if paths.empty?
+      'empty-diff'
+    elsif paths.all? { |path| DocsOnlyChangePolicy.documentation_path?(path) }
+      'all-paths-are-documentation'
+    else
+      'non-documentation-path'
+    end
+  DocsOnlyChangePolicy::Result.new(
+    docs_only: reason == 'all-paths-are-documentation', reason: reason, paths: paths
+  ).windows_relevant?
+end
+
+{
+  'broker source is Windows-relevant' => [['packages/typescript/broker/src/main.ts'], true],
+  'adapter-api is Windows-relevant' => [['packages/typescript/adapter-api/src/windows-ffi.ts'], true],
+  'the scripts tree is Windows-relevant' => [['scripts/verification/windows-broker.ts'], true],
+  'a workflow change is Windows-relevant' => [['.github/workflows/ci.yml'], true],
+  'a lockfile change is Windows-relevant' => [['bun.lock'], true],
+  'an unrecognised top-level path is Windows-relevant' => [['Makefile'], true],
+  'documentation is not' => [['docs/a.md', 'README.md'], false],
+  'the Flutter client is not' => [['apps/client/lib/main.dart'], false],
+  'one relevant path among irrelevant ones still counts' =>
+    [['apps/client/lib/main.dart', 'packages/typescript/broker/src/main.ts'], true],
+  # A diff the classifier could not read must run the lane, never skip it.
+  'an unreadable diff fails closed' => [[], true],
+}.each do |name, (paths, expected)|
+  actual = relevance(paths)
+  record("windows relevance: #{name}", actual == expected, "expected #{expected}, got #{actual}")
+end
+
+ci = File.read(ROOT.join('.github/workflows/ci.yml'))
+record(
+  'the Windows lane always runs on a push, whatever the paths say',
+  ci.include?("github.event_name != 'pull_request' || needs.changes.outputs.windows_relevant == 'true'")
+)
+record(
+  'CI required refuses a Windows lane that was skipped for any other reason',
+  ci.include?('test "$windows_broker" = skipped') && ci.include?('test "$WINDOWS_RELEVANT" != true')
+)
 
 if FAILURES.empty?
   puts 'PASS: docs-only workflow policy regressions hold.'

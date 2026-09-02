@@ -346,6 +346,24 @@ async function withSourceBroker(
       windowsBootstrap.includes("join(versionRoot, 'cosyncing')") &&
       !windowsBootstrap.includes('.cmd'));
 
+  // Task Scheduler runs this bootstrap under an interactive logon token, which gives a console
+  // application a console window lasting as long as the service. The broker child already carries
+  // `windowsHide`; the supervisor has to release its own. The service path does that and the
+  // log-following path must not, because an operator ran `logs` and is waiting on stdout.
+  const serviceEntry = windowsBootstrap.indexOf('async function runBroker()');
+  // Exactly one call site, and it is the service path's: counting is what proves the log-following path
+  // never releases the console, without depending on where the helper happens to be defined.
+  const releaseCalls = windowsBootstrap.split('await releaseServiceConsole()').length - 1;
+  const releaseInService = windowsBootstrap.indexOf('await releaseServiceConsole()');
+  check('the Windows service path releases its console and the log-following path keeps stdout',
+    windowsBootstrap.includes('async function releaseServiceConsole()')
+      && windowsBootstrap.includes('GetConsoleWindow')
+      && windowsBootstrap.includes('FreeConsole')
+      && releaseCalls === 1
+      && releaseInService > serviceEntry
+      && releaseInService < windowsBootstrap.indexOf('rotateLog()', serviceEntry)
+      && windowsBootstrap.includes("process.stdout.write(trailingLog("));
+
   // Neither service manager may be left holding a licence to kill our children.
   //
   // Both default to signalling the whole group — systemd's KillMode is

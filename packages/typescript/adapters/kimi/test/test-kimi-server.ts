@@ -28,7 +28,7 @@ export {};
 import { KimiAdapter } from '../src/index.ts';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import {
   KimiReadOnlyHttp,
   KIMI_DEFAULT_PORT,
@@ -209,6 +209,56 @@ function boundMeta(extra: Record<string, unknown> = {}): Record<string, unknown>
     resolveKimiHome({ KIMI_CODE_HOME: '/custom/home' }, '/fixture/home') === '/custom/home'
       && resolveKimiHome({}, '/fixture/home') === '/fixture/home/.kimi-code',
   );
+
+  // The home an adapter resolves for itself must never be RELATIVE.
+  //
+  // `resolveKimiHome` is total over whatever home directory it is handed, so the
+  // defect this guards was one level up: the constructor sourced that directory
+  // from `HOME` alone, which is a POSIX variable Windows does not set, and the
+  // empty-string fallback turned every derived path — instance registry, server
+  // token, session store — into a path resolved against the broker's working
+  // directory. A native Windows Phase 6 run measured exactly that: a
+  // default-constructed adapter reporting `.kimi-code` as its home.
+  //
+  // The assertion is "absolute", not "equals some expected path", because the
+  // right answer differs per platform and per environment; what must hold
+  // everywhere is that no environment produces a relative one.
+  {
+    const homeOf = async (env: Record<string, string | undefined>): Promise<string | undefined> =>
+      (await new KimiAdapter({ env }).describeManagedHost())?.identityKey;
+    const posixOnly = await homeOf({ HOME: '/fixture/home' });
+    const windowsOnly = await homeOf({ USERPROFILE: 'C:\\Users\\fixture' });
+    const neither = await homeOf({});
+    check(
+      'an adapter resolves an absolute home from HOME, from USERPROFILE, and from neither',
+      posixOnly === '/fixture/home/.kimi-code'
+        && windowsOnly === join('C:\\Users\\fixture', '.kimi-code')
+        && typeof neither === 'string' && neither.length > 0 && isAbsolute(neither),
+      `${posixOnly} | ${windowsOnly} | ${neither}`,
+    );
+
+    // The launch must NAME the home the descriptor is scoped to.
+    //
+    // Inheriting it was enough only while the adapter's environment and the
+    // broker's were the same object, which `managedHostIdentity` exists to say
+    // they need not be. A child that resolved a different home registers where
+    // this broker never looks, so `isAvailable` polls an empty registry while a
+    // perfectly healthy server heartbeats elsewhere — and the start is abandoned
+    // as `host-not-ready-in-time`. A native Windows Phase 6 run measured that:
+    // 105 seconds of a live, heartbeating `kimi web` reported as a host that
+    // never became ready.
+    const described = await new KimiAdapter({
+      env: { KIMI_CODE_HOME: '/custom/home', PATH: process.env.PATH },
+      homeDir: '/fixture/home',
+      resolveExecutable: (command: string) => (command === 'kimi' ? '/usr/bin/kimi' : undefined),
+    }).describeManagedHost();
+    check(
+      'the managed-host launch names the home the descriptor is scoped to',
+      described?.identityKey === '/custom/home'
+        && described?.launch?.env?.KIMI_CODE_HOME === '/custom/home',
+      `${described?.identityKey} | ${described?.launch?.env?.KIMI_CODE_HOME}`,
+    );
+  }
 
   // Ports are derived from the adapter's own constant rather than written as
   // literals: this suite binds nothing on them, and a literal `host:port` reads

@@ -36,7 +36,7 @@ import {
 } from './install-state.ts';
 import { serviceFlutterWebRoot, type RuntimeAssetReport } from '../runtime/runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
-import { isSupportedBrokerHost, supportedBrokerHostList } from './supported-hosts.ts';
+import { brokerHostVerdict, supportedBrokerHostList } from './supported-hosts.ts';
 import { shippedAdapters } from './shipped-adapters.ts';
 import { brokerManagedHostIdentities } from './managed-host-posture.ts';
 import { inspectOwnerOnlyDirectory, inspectOwnerOnlyFile } from '../security/secure-files.ts';
@@ -577,6 +577,27 @@ function isWsl(context: SetupDiagnosisContext): boolean {
 function hostChecks(context: SetupDiagnosisContext, arch: string): { checks: SetupCheck[]; wsl: boolean } {
   const wsl = isWsl(context);
   let host: SetupCheck;
+  // One verdict for every platform, so setup, doctor and broker startup cannot disagree about what this
+  // host is. On Windows it also asks what the MACHINE is: an x64 process emulated on ARM64 reports x64 for
+  // itself, so admitting it would be silent, and refusing `arch === 'arm64'` alone would never fire.
+  const verdict = brokerHostVerdict({
+    platform: context.platform,
+    arch,
+    ...(context.windowsMachineArchitecture ? { windowsMachineArchitecture: context.windowsMachineArchitecture } : {}),
+  });
+  if (verdict.status === 'refused') {
+    return {
+      checks: [{
+        id: 'host.platform',
+        status: 'fail',
+        detailCode: verdict.code,
+        summary: verdict.summary,
+        evidence: { platform: context.platform, arch, supported: supportedBrokerHostList() },
+        remediation: { kind: 'manual', message: verdict.remediation },
+      }],
+      wsl,
+    };
+  }
   if (context.platform === 'linux' || context.platform === 'darwin') {
     // The architecture is probed now, which it never used to be.
     //
@@ -584,20 +605,6 @@ function hostChecks(context: SetupDiagnosisContext, arch: string): { checks: Set
     // artifact to install, so it could not reach this check with a packaged build at all. One universal
     // JavaScript bundle runs wherever a supported Bun runs, so the absence of an artifact no longer refuses
     // anything, and an unverified host would otherwise be told it is supported.
-    if (!isSupportedBrokerHost(context.platform, arch)) {
-      host = {
-        id: 'host.platform',
-        status: 'fail',
-        detailCode: 'host-architecture-unsupported',
-        summary: `${context.platform}-${arch} is not a supported ${PRODUCT_IDENTITY.productName} broker host.`,
-        evidence: { platform: context.platform, arch, supported: supportedBrokerHostList() },
-        remediation: {
-          kind: 'manual',
-          message: 'Run the broker on a supported host: linux-x64, linux-arm64, or darwin-arm64.',
-        },
-      };
-      return { checks: [host], wsl };
-    }
     host = context.platform === 'linux'
       ? {
         id: 'host.platform',
@@ -616,10 +623,10 @@ function hostChecks(context: SetupDiagnosisContext, arch: string): { checks: Set
   } else {
     host = {
       id: 'host.platform',
-      status: 'fail',
-      detailCode: 'native-windows-not-v1',
-      summary: 'Native Windows broker hosting is a named near-term follow-up, not part of v1.',
-      remediation: { kind: 'manual', message: 'Run the broker inside the supported WSL subset.' },
+      status: 'pass',
+      detailCode: 'windows-supported',
+      summary: 'Windows on x64 is a supported broker host.',
+      evidence: { platform: 'win32', arch },
     };
   }
   return { checks: [host], wsl };
@@ -642,7 +649,8 @@ async function launchdServiceChecks(context: SetupDiagnosisContext): Promise<Set
       remediation: remediation(`${PRODUCT_IDENTITY.primaryBinary} broker`, 'Run the broker in the foreground on this host.'),
     }];
   }
-  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : '';
+  const uid = context.currentUid?.()
+    ?? (typeof process.getuid === 'function' ? String(process.getuid()) : '');
   const probe = /^\d{1,10}$/.test(uid)
     ? await context.runReadOnly(launchctl, ['print', `gui/${uid}`])
     : undefined;
@@ -1061,7 +1069,8 @@ async function installedServicePosture(
       activeState: firstOutputWord(active.stdout, active.stderr),
     };
   }
-  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : '';
+  const uid = context.currentUid?.()
+    ?? (typeof process.getuid === 'function' ? String(process.getuid()) : '');
   if (!/^\d{1,10}$/.test(uid)) return { enabledState: '', activeState: '' };
   const printed = await context.runReadOnly(manager, ['print', `gui/${uid}/${LAUNCHD_SERVICE_LABEL}`]);
   const state = parseLaunchdPrintState({
@@ -1253,7 +1262,8 @@ async function installedBrokerServiceChecks(
       remediation: remediation('cosyncing repair', 'Restore loginctl or decline lingering explicitly.'),
     }];
   }
-  const userIdentifier = typeof process.getuid === 'function' ? String(process.getuid()) : context.env.USER?.trim();
+  const userIdentifier = context.currentUid?.()
+    ?? (typeof process.getuid === 'function' ? String(process.getuid()) : context.env.USER?.trim());
   if (!userIdentifier || !/^[A-Za-z0-9._-]{1,128}$/.test(userIdentifier)) {
     return [serviceCheck, agentPathCheck, {
       id: 'service.systemd-lingering',

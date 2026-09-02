@@ -58,7 +58,14 @@ export interface SetupTransactionAction {
     context: Readonly<SetupTransactionContext>,
   ): Promise<SetupActionOutcome | void> | SetupActionOutcome | void;
   verify(context: Readonly<SetupTransactionContext>): Promise<boolean> | boolean;
-  rollback(
+  /**
+   * Omitted by MONOTONIC actions — ones that only ever narrow what is permitted. Reversing such an action
+   * means restoring a weaker state than the one in force, from a record written before it was applied, so
+   * these declare that they are never undone instead of pretending recovery can widen access safely. The
+   * matching plan entry carries `reversible: false`, and a rollback that reaches one treats it as settled
+   * rather than as cleanup that failed. Every action that MUTATES CONTENT still has to define this.
+   */
+  rollback?(
     context: Readonly<SetupTransactionContext>,
     record: Readonly<SetupRollbackRecord>,
   ): Promise<void> | void;
@@ -388,7 +395,9 @@ async function rollbackJournal(options: {
     try {
       const action = actions.get(applied.id);
       if (!action) throw new SetupTransactionError('rollback-action-missing');
-      await action.rollback(context, applied.rollback);
+      // A monotonic action has nothing to undo, and its absence of a rollback is a settled outcome, not
+      // an incomplete one: there is no weaker state that recovery is entitled to restore.
+      if (action.rollback) await action.rollback(context, applied.rollback);
     } catch (error) {
       firstFailure ??= error;
       continue;

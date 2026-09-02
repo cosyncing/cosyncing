@@ -176,6 +176,7 @@
     "release:assemble": "bun run scripts/broker/release/assemble-release.ts",
     "release:package-web": "bun run scripts/broker/release/package-web-sidecar.ts",
     "release:verify-pair": "bun run scripts/broker/release/verify-candidate-pair.ts",
+    "verification:windows-broker": "bun run scripts/verification/windows-broker.ts",
     "verification:validate": "bun run scripts/verification/validate-verification-graph.ts",
     "verification:generate-completeness-anchor": "bun run scripts/verification/generate-verification-completeness-anchor.ts",
     "verification:isolation-audit": "bun run scripts/verification/audit-suite-isolation.ts --json output/verification/suite-isolation.json",

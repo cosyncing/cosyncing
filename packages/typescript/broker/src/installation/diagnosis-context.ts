@@ -9,7 +9,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, parse, posix, win32 } from 'node:path';
 import { connect } from 'node:net';
-import { resolveInvocation, spawnResolvedInvocation } from '@cosyncing/adapter-api';
+import { resolveInvocation, spawnResolvedInvocation, windowsNativeMachineArchitecture } from '@cosyncing/adapter-api';
 import type {
   SetupCommandProbe,
   SetupDiagnosisContext,
@@ -335,6 +335,8 @@ export function createSetupDiagnosisContext(options: SetupDiagnosisContextOption
     probeTcp,
     listDirectory,
     processAlive,
+    currentUid: () => (typeof process.getuid === 'function' ? String(process.getuid()) : undefined),
+    windowsMachineArchitecture: () => windowsNativeMachineArchitecture(),
     displayPath,
   };
 }

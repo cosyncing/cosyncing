@@ -42,12 +42,12 @@ import {
   type SessionInfo,
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
-import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME } from './diagnostics.ts';
+import { diagnoseDshSetup, DSH_AGENT_ID, DSH_DISPLAY_NAME, resolveDshHome } from './diagnostics.ts';
+import { homedir } from 'node:os';
 import { DshDriver, dshModelDisplayName, dshModelOptions } from './drive.ts';
 import { mapDshSession, type DshSessionSummary, type DshWorkspaceSummary } from './mapping.ts';
 import { DshSessionConnection, type DshConnectionOptions } from './observe.ts';
 import {
-  DSH_DEFAULT_BASE_URL,
   DshDownlinks,
   DshRpcClient,
   resolveDshBaseUrl,
@@ -436,9 +436,19 @@ export class DshAdapter implements AgentBackend {
     return resolveDshBaseUrl(this.env, this.options.baseUrl);
   }
 
-  /** Where a managed host would run from. Injected first, then the environment. */
+  /**
+   * Where a managed host would run from. Injected first, then the environment.
+   *
+   * The final fallback is `homedir()` rather than `'.'`. A relative home is not
+   * a smaller version of a wrong home: it makes every derived path — the config
+   * root, the profile the `web` template resolves — depend on the directory the
+   * broker happened to start in, and a broker started as a service starts from
+   * `/`. The Kimi adapter shipped the same shape and a native Windows run
+   * measured what it cost, so this one is closed on the same evidence rather
+   * than waiting to be measured separately.
+   */
   private homeDir(): string {
-    return this.options.homeDir ?? this.env.HOME ?? this.env.USERPROFILE ?? '.';
+    return this.options.homeDir ?? this.env.HOME ?? this.env.USERPROFILE ?? homedir();
   }
 
   private rpc(): DshRpcClient {
@@ -541,13 +551,32 @@ export class DshAdapter implements AgentBackend {
     const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost'
       || url.hostname === '::1' || url.hostname === '[::1]';
     const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
-    // The launch is `dsh web` with no flags, which is the invocation whose
-    // behavior is known — and `dsh web` with no flags serves the default base
-    // URL. So it may only be used when that is exactly where the adapter is
-    // pointed; the comparison is on the resolved address rather than on "did
-    // the operator configure anything", so an operator who explicitly sets the
-    // default still gets a startable host.
-    const launchable = loopback && baseUrl === DSH_DEFAULT_BASE_URL;
+    // The launch NAMES the port it was described for.
+    //
+    // It used to be `dsh web` with no flags, which serves the default address,
+    // so a host configured anywhere else was watchable but not startable —
+    // starting one would have watched an empty port, called the child dead, and
+    // stopped it while the host it really started kept serving somewhere else.
+    // That restriction was correct while the only invocation whose behaviour was
+    // known was the flagless one.
+    //
+    // `--port` is now source-verified rather than assumed: `dsh --profile web
+    // --help` documents `--host <host>` and `--port <port>` as first-class
+    // options ("listen port; pass 0 to let the OS pick a free one") and gives
+    // `--port 8080` as a worked example. Two native Windows runs booted
+    // `dsh web --port N` and reached it over the RPC dialect. So the launch can
+    // honestly produce a host at the address the locator watches, for any
+    // loopback port, and an operator who moves dsh off 3080 gets a managed host
+    // instead of a watched-only one.
+    //
+    // `--host` is deliberately NOT passed, and that is what bounds this to IPv4
+    // loopback and `localhost`: dsh's own default bind is what those two resolve
+    // to, so omitting the flag cannot disagree with the described address. The
+    // IPv6 loopback form keeps its watched-but-never-launched status rather than
+    // having a `--host ::1` behaviour invented for it.
+    const launchableHost = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
+    const launchable = loopback && launchableHost && url.protocol === 'http:'
+      && Number.isInteger(port) && port > 0 && port <= 65_535;
     const resolve = this.options.resolveExecutable ?? ((command: string) => Bun.which(command) ?? undefined);
     const executable = launchable ? resolve('dsh') : undefined;
     return {
@@ -558,13 +587,25 @@ export class DshAdapter implements AgentBackend {
       launch: executable
         ? {
           command: executable,
-          args: ['web'],
+          // Passed even when it IS the default, so there is one launch shape
+          // rather than two, and the port the descriptor advertises is always
+          // the port the child was told to serve.
+          args: ['web', '--port', String(port)],
           // Watching files by polling instead of inotify. The physical DSH
           // qualification on this platform found the host needs it — inotify
           // instances were exhausted host-wide (121/128 in use), and a `dsh web`
           // that cannot watch its own workspace reports no changes rather than
           // failing loudly, which is the worst way for this to go wrong.
-          env: { CHOKIDAR_USEPOLLING: '1' },
+          //
+          // `DSH_HOME` is named explicitly for the same reason Kimi names its
+          // home: the adapter resolves the config root from ITS environment,
+          // which is not required to be the broker's, and a child that inherited
+          // a different one would serve a different profile than the adapter
+          // diagnosed and reported. Less severe here than for Kimi — DSH locates
+          // its host by port, so a mismatched home cannot make the lookup miss —
+          // but a managed host serving the wrong profile is still wrong, and the
+          // pinned `cwd` below is already deriving from the same resolution.
+          env: { CHOKIDAR_USEPOLLING: '1', DSH_HOME: resolveDshHome(this.env, this.homeDir()) },
           // Pinned, not inherited: a broker running as a service starts from `/`,
           // and a host that resolves anything against its cwd would then behave
           // differently depending on how the broker was launched. dsh keeps its

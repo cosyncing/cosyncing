@@ -31,6 +31,18 @@
         "output/release-checkpoint/report.md",
         "output/release-checkpoint/cosyncing-linux-x64"
       ]
+    },
+    "windowsBroker": {
+      "command": ["bun", "run", "verification:windows-broker"],
+      "executionGroups": ["windows-broker-lane"],
+      "exclusions": [
+        "release-publication",
+        "runtime-replacement",
+        "physical-multi-host-real-agent"
+      ],
+      "expectedArtifacts": [
+        "output/check/windows-broker/report.json"
+      ]
     }
   },
   "exclusions": [
@@ -189,7 +201,8 @@
     {"id": "browser.cache-model", "description": "The service-worker cache model passes deterministic mutation tests."},
     {"id": "browser.update-handoff", "description": "A verified web update hands every open tab over automatically, or defers silently."},
     {"id": "repository.source-stability", "description": "All cumulative results describe one unchanged source state."},
-    {"id": "release.candidate-pair", "description": "One broker and canonical web sidecar share exact contract and build identity."}
+    {"id": "release.candidate-pair", "description": "One broker and canonical web sidecar share exact contract and build identity."},
+    {"id": "broker.windows-lane", "description": "The measured Windows broker suites pass on a native Windows host."}
   ],
   "executionGroups": [
     {
@@ -243,6 +256,12 @@
       "mode": "serial",
       "resourceClass": "heavyweight",
       "gates": ["release-candidate-pair"]
+    },
+    {
+      "id": "windows-broker-lane",
+      "mode": "serial",
+      "resourceClass": "heavyweight",
+      "gates": ["windows-broker"]
     }
   ],
   "gates": [
@@ -858,6 +877,25 @@
       "focusedDiagnostics": [["flutter","test"]],"dependencies":["dart-broker-crypto-dependencies"],
       "expectedArtifacts":[{"path":"output/check/logs/dart-broker-crypto-test.log","kind":"log"}],
       "timeoutClass":"medium","resourceClass":"standard","platformExclusions":[],"sourceOwners":["packages/dart/broker_crypto/test"]
+    },
+    {
+      "id": "windows-broker",
+      "releaseDomain": "broker acceptance",
+      "claimIds": ["broker.windows-lane"],
+      "command": ["bun", "run", "verification:windows-broker"],
+      "focusedDiagnostics": [["bun", "run", "verification:windows-broker"]],
+      "dependencies": [],
+      "expectedArtifacts": [
+        {"path": "output/check/windows-broker/report.json", "kind": "report"}
+      ],
+      "timeoutClass": "long",
+      "resourceClass": "heavyweight",
+      "platformExclusions": ["cross-platform-builds"],
+      "sourceOwners": [
+        "scripts/verification/windows-broker.ts",
+        "scripts/broker/windows/phase7-suite-survey.ts",
+        ".github/workflows/ci.yml"
+      ]
     }
   ]
 }

@@ -1,9 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { windowsFfi } from './windows-ffi.ts';
 
 const WINDOWS_SNAPSHOT_TTL_MS = 250;
-const PROBE_TIMEOUT_MS = 5_000;
+/** Budget for a probe that READS something (an ACL, a process table). Exported so a claim can hold
+ *  the machine probe's own budget above it rather than restating a number. */
+export const PROBE_TIMEOUT_MS = 5_000;
+
 const WINDOWS_MAX_BUFFER = 4 * 1024 * 1024;
 
 export interface HostProcessIdentity {
@@ -132,6 +136,34 @@ function windowsExecutable(name: string, env: NodeJS.ProcessEnv): string | null 
   return systemRoot ? join(systemRoot, 'System32', name) : null;
 }
 
+/**
+ * The environment for a Windows PowerShell 5.1 child, with its module path pinned to the system store.
+ *
+ * Every PowerShell spawn in this repository names 5.1 explicitly, by absolute path. A host with
+ * PowerShell 7 installed -- every GitHub-hosted Windows runner, and most developer machines --
+ * exports a `PSModulePath` naming 7's module roots, and 5.1 inheriting that cannot auto-load its own
+ * `Microsoft.PowerShell.Security`. `Get-Acl` then does not resolve, the probe that needed it exits
+ * non-zero, and a caller that requires a definite answer about who owns a file gets `unknown` and
+ * declines. Pinning the system store additionally stops a user-writable module directory from
+ * shadowing a cmdlet whose whole job is deciding who may read a secret.
+ *
+ * Every module these probes use -- Security, Utility, CimCmdlets, NetTCPIP, ScheduledTasks -- ships in
+ * that one directory, so pinning it costs nothing any of them needs.
+ *
+ * Returns a plain copy when `SystemRoot` is absent: a caller that cannot name the system store is in
+ * no position to pin it, and the executable lookup above has already failed for the same reason.
+ */
+export function windowsPowerShellChildEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  if (!systemRoot) return { ...env };
+  return {
+    ...env,
+    PSModulePath: join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+  };
+}
+
 export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
   const executable = windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
   if (!executable) return null;
@@ -139,7 +171,7 @@ export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
     executable,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_WINDOWS_SNAPSHOT],
     {
-      encoding: 'utf8', env: { ...process.env }, maxBuffer: WINDOWS_MAX_BUFFER,
+      encoding: 'utf8', env: windowsPowerShellChildEnvironment(), maxBuffer: WINDOWS_MAX_BUFFER,
       timeout: PROBE_TIMEOUT_MS, windowsHide: true,
     },
   );
@@ -332,4 +364,85 @@ export function terminateHostProcessTree(pid: number, force: boolean): void {
     return;
   }
   try { process.kill(pid, force ? 'SIGKILL' : 'SIGTERM'); } catch { /* already gone */ }
+}
+
+/**
+ * Whether a path's owner is the user this process is running as.
+ *
+ * The Windows counterpart of the `stat.uid === process.getuid()` check that
+ * guards every file the product is willing to modify or delete. `process.getuid`
+ * does not exist on Windows, so callers that only had the POSIX test were not
+ * failing there — they were SKIPPING the ownership question entirely and then
+ * treating a file of unknown provenance as their own. That is the fail-open
+ * direction, on exactly the check that exists to prevent touching somebody
+ * else's file.
+ *
+ * Compared by SID, never by account name: names are localized and renameable,
+ * SIDs are neither. This is deliberately NOT the owner-only-DACL inspection used
+ * for secret material — an ordinary rc file or shell script inherits its ACL and
+ * would fail that test while being perfectly, unremarkably the user's own. The
+ * question here is only "is this mine".
+ *
+ * Returns 'unknown' when the machine will not answer, which callers must treat
+ * as "not proven mine" rather than as "not mine" or "mine".
+ */
+export function windowsPathOwnedByCurrentUser(target: string): 'yes' | 'no' | 'unknown' {
+  if (process.platform !== 'win32') return 'unknown';
+  if (typeof target !== 'string' || target.length === 0) return 'unknown';
+  const ffi = windowsFfi();
+  if (!ffi) return 'unknown';
+  try {
+    return ffi.pathOwnerSid(target) === ffi.currentUserSid() ? 'yes' : 'no';
+  } catch {
+    // A path that cannot be read is not a path we can claim. 'unknown' is not 'yes'.
+    return 'unknown';
+  }
+}
+
+/**
+ * The architecture of the MACHINE, as distinct from the architecture of this process.
+ *
+ * Windows on ARM64 runs x64 binaries under emulation, and an emulated process describes itself as x64
+ * everywhere a program would normally look: `process.arch` reports the binary's architecture, and
+ * `PROCESSOR_ARCHITECTURE` reports the emulated one. `PROCESSOR_ARCHITEW6432` does carry the native
+ * answer, but it is ordinary process environment data that any parent can set, so it is evidence and a
+ * test fixture — never the gate. `IsWow64Process2` is the documented kernel answer and reports both
+ * machines in one call, which is why the question is asked of the OS rather than of the environment.
+ *
+ * Returns 'unknown' when the machine will not answer. Callers must treat that as unproven rather than as
+ * either answer: the whole point of asking is that a host we cannot identify is not one we have qualified.
+ */
+/**
+ * The reader, separated from the decision so the policy can be exercised on any host.
+ *
+ * Returns the machine word `IsWow64Process2` reported, or undefined where the machine would not say.
+ */
+export type WindowsMachineReader = () => number | undefined;
+
+/**
+ * The classification, given a machine word.
+ *
+ * The constants are the ones `IsWow64Process2` documents: 0x8664 AMD64, 0xAA64 ARM64. Anything else
+ * that is a real answer is 'other' -- a machine that named itself and is not one we have qualified is
+ * not the same as one that could not be asked, and neither is qualified. `IMAGE_FILE_MACHINE_UNKNOWN`
+ * and an absent reading are 'unknown': unproven, rather than either answer.
+ */
+export function classifyWindowsMachine(word: number | undefined): 'x64' | 'arm64' | 'other' | 'unknown' {
+  if (word === undefined || !Number.isInteger(word) || word === 0x0000) return 'unknown';
+  if (word === 0x8664) return 'x64';
+  if (word === 0xaa64) return 'arm64';
+  return 'other';
+}
+
+export function windowsNativeMachineArchitecture(
+  readMachine?: WindowsMachineReader,
+): 'x64' | 'arm64' | 'other' | 'unknown' {
+  if (readMachine) return classifyWindowsMachine(readMachine());
+  if (process.platform !== 'win32') return 'unknown';
+  const ffi = windowsFfi();
+  // A machine that cannot be asked is unproven, exactly as one that refuses to answer is. This used
+  // to spawn PowerShell to compile C# at runtime to reach the same kernel export -- 332ms measured
+  // where the direct call costs 0.003ms, and on a host with a cold module-analysis cache it blocked
+  // past twenty seconds and refused a supported machine at broker startup.
+  return ffi ? ffi.nativeMachine() : 'unknown';
 }

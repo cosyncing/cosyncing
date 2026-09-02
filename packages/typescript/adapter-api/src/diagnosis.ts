@@ -99,6 +99,20 @@ export interface SetupDiagnosisContext {
    * adapter needs to tell a live registry record from a stale one.
    */
   processAlive(pid: number): boolean;
+  /**
+   * The current POSIX uid, as a decimal string, or undefined where the host has none. A seam rather
+   * than a direct `process.getuid` call because a diagnosis context can describe a platform other than
+   * the one running it: a darwin context evaluated on Windows has a platform, an arch, and a home, and
+   * it needs a uid for the same reason — otherwise the launchd domain probe is unreachable from any
+   * host that lacks uids, and the check silently degrades instead of running.
+   */
+  currentUid?(): string | undefined;
+  /**
+   * The native machine architecture on Windows, which is not the same question as `arch`: an emulated x64
+   * process reports x64 for itself while running on an ARM64 machine. Seamed so a fixture can present a
+   * host it does not have.
+   */
+  windowsMachineArchitecture?(): 'x64' | 'arm64' | 'other' | 'unknown';
   readPackageVersion(executable: string, packageNames: readonly string[]): string | undefined;
   runReadOnly(executable: string, args: readonly string[], timeoutMs?: number): Promise<SetupCommandProbe>;
   /**

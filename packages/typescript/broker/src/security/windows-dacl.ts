@@ -1,11 +1,8 @@
-import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { windowsFfi } from '@cosyncing/adapter-api';
 
 const LOCAL_SYSTEM_SID = 'S-1-5-18';
 const BUILTIN_ADMINISTRATORS_SID = 'S-1-5-32-544';
 const FULL_CONTROL = 2_032_127;
-const POWERSHELL_TIMEOUT_MS = 15_000;
-const POWERSHELL_MAX_BUFFER = 128 * 1024;
 
 export type WindowsSecurePathKind = 'file' | 'directory';
 
@@ -20,6 +17,13 @@ export interface WindowsDaclRule {
 
 export interface WindowsDaclSnapshot {
   currentUserSid: string;
+  /**
+   * The SID this process's token stamps as owner on objects IT creates.
+   *
+   * Equal to the user on an ordinary session and `BUILTIN\Administrators` on an elevated one.
+   * Optional so a caller that has not asked keeps the strict comparison it had.
+   */
+  tokenOwnerSid?: string;
   ownerSid: string;
   protected: boolean;
   rules: WindowsDaclRule[];
@@ -49,7 +53,22 @@ export function classifyWindowsOwnerOnlyDacl(
   snapshot: WindowsDaclSnapshot,
   kind: WindowsSecurePathKind,
 ): WindowsDaclInspection {
-  if (snapshot.ownerSid !== snapshot.currentUserSid) return { ok: false, problem: 'wrong-owner' };
+  // Owned by the user, or by the owner this very token stamps on what it creates.
+  //
+  // The enforce path already accepted both, for a reason that applies just as much here: run
+  // elevated, Windows stamps BUILTIN\Administrators as the owner of every file the product creates,
+  // so a file it wrote itself came back reading as somebody else's. On the enforcement side that was
+  // a refusal to write. Here it is worse and quieter -- `wrong-owner` is the ONE problem durable
+  // state will not repair, because a foreign file must never be laundered by tightening it, so
+  // loose-but-ours legacy state became an unfixable setup blocker on every elevated host.
+  //
+  // Nothing about ACCESS widens: every rule below still has to hold, so the DACL must still name
+  // exactly the user, SYSTEM and Administrators at full control, protected and uninherited.
+  // Enforcement rewrites the owner to the user regardless, and on an ordinary session the two SIDs
+  // are the same value.
+  const ownedByUs = snapshot.ownerSid === snapshot.currentUserSid
+    || (snapshot.tokenOwnerSid !== undefined && snapshot.ownerSid === snapshot.tokenOwnerSid);
+  if (!ownedByUs) return { ok: false, problem: 'wrong-owner' };
   if (!snapshot.protected) return { ok: false, problem: 'inherited-access' };
 
   const expected = new Set([
@@ -75,85 +94,57 @@ export function classifyWindowsOwnerOnlyDacl(
   return { ok: true };
 }
 
-const POWERSHELL_SOURCE = String.raw`
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$target = [Environment]::GetEnvironmentVariable('COSYNCING_WINDOWS_DACL_TARGET', 'Process')
-$operation = [Environment]::GetEnvironmentVariable('COSYNCING_WINDOWS_DACL_OPERATION', 'Process')
-$kind = [Environment]::GetEnvironmentVariable('COSYNCING_WINDOWS_DACL_KIND', 'Process')
-if ([string]::IsNullOrEmpty($target)) { throw 'missing DACL target' }
-if ($kind -ne 'file' -and $kind -ne 'directory') { throw 'invalid DACL target kind' }
-
-$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$systemSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-$administratorsSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-
-if ($operation -eq 'enforce' -or $operation -eq 'create-directory') {
-  if ($operation -eq 'create-directory' -and $kind -ne 'directory') {
-    throw 'DACL create operation requires a directory target'
-  }
-  if ($operation -eq 'enforce') {
-    $prior = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $target
-    $priorOwnerSid = $prior.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($priorOwnerSid -ne $currentSid.Value) { throw 'DACL target is not owned by the current user' }
-  }
-  if ($kind -eq 'directory') {
-    $security = New-Object System.Security.AccessControl.DirectorySecurity
-    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-  } else {
-    $security = New-Object System.Security.AccessControl.FileSecurity
-    $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
-  }
-  $security.SetOwner($currentSid)
-  $security.SetAccessRuleProtection($true, $false)
-  foreach ($sid in @($currentSid, $systemSid, $administratorsSid)) {
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-      $sid,
-      [System.Security.AccessControl.FileSystemRights]::FullControl,
-      $inheritance,
-      [System.Security.AccessControl.PropagationFlags]::None,
-      [System.Security.AccessControl.AccessControlType]::Allow
-    )
-    [void]$security.AddAccessRule($rule)
-  }
-  if ($operation -eq 'create-directory') {
-    $directory = New-Object System.IO.DirectoryInfo($target)
-    $directory.Create($security)
-  } elseif ($kind -eq 'directory') {
-    [System.IO.Directory]::SetAccessControl($target, $security)
-  } else {
-    [System.IO.File]::SetAccessControl($target, $security)
-  }
-} elseif ($operation -ne 'inspect') {
-  throw 'invalid DACL operation'
+/**
+ * The owner-only policy, as the SDDL the operating system will store.
+ *
+ * `FA` is FILE_ALL_ACCESS -- the same 2032127 the classifier above compares against -- and `P`
+ * protects the DACL from inheritance. `OICI` on a directory carries the grant to what is created
+ * inside it, and is absent on a file, which contains nothing to inherit it.
+ *
+ * The three principals are deliberate and closed: the user, SYSTEM, and Administrators. The first
+ * two are the object's working owners; the third is on the machine's own recovery path and can take
+ * ownership regardless, so naming it changes nothing it could not already do while keeping the
+ * stored ACL honest about who has access.
+ */
+export function windowsOwnerOnlySddl(sid: string, kind: WindowsSecurePathKind): string {
+  const inherit = kind === 'directory' ? 'OICI' : '';
+  return `O:${sid}G:${sid}D:P`
+    + `(A;${inherit};FA;;;${sid})`
+    + `(A;${inherit};FA;;;${LOCAL_SYSTEM_SID})`
+    + `(A;${inherit};FA;;;${BUILTIN_ADMINISTRATORS_SID})`;
 }
 
-$acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $target
-$ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {
-  [ordered]@{
-    sid = $_.IdentityReference.Value
-    type = $_.AccessControlType.ToString()
-    rights = [int]$_.FileSystemRights
-    inherited = [bool]$_.IsInherited
-    inheritanceFlags = [int]$_.InheritanceFlags
-    propagationFlags = [int]$_.PropagationFlags
-  }
-})
-[ordered]@{
-  currentUserSid = $currentSid.Value
-  ownerSid = $ownerSid
-  protected = [bool]$acl.AreAccessRulesProtected
-  rules = $rules
-} | ConvertTo-Json -Compress -Depth 5
-`;
+/**
+ * The Windows security primitives, or a refusal.
+ *
+ * Owner-only enforcement is the one caller that must not degrade. A probe that cannot reach the
+ * operating system can answer 'unknown' and let its caller decide; this cannot, because the next
+ * thing that happens is a secret being written to the path whose access it just failed to
+ * establish. So a missing library is an error here rather than a fallback.
+ */
+function windowsSecurity(): NonNullable<ReturnType<typeof windowsFfi>> {
+  const ffi = windowsFfi();
+  if (!ffi) throw new Error('the Windows security primitives are unavailable; refusing to write owner-only state');
+  return ffi;
+}
 
-const ENCODED_POWERSHELL = Buffer.from(POWERSHELL_SOURCE, 'utf16le').toString('base64');
-
-function powershellExecutable(env: NodeJS.ProcessEnv): string {
-  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
-  if (!systemRoot) throw new Error('Windows SystemRoot is unavailable for DACL enforcement');
-  return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+function snapshotOf(target: string): WindowsDaclSnapshot {
+  const security = windowsSecurity();
+  const read = security.readSecurity(target);
+  return {
+    currentUserSid: security.currentUserSid(),
+    tokenOwnerSid: security.currentTokenOwnerSid(),
+    ownerSid: read.ownerSid,
+    protected: read.protected,
+    rules: read.aces.map((ace) => ({
+      sid: ace.sid,
+      type: ace.type,
+      rights: ace.rights,
+      inherited: ace.inherited,
+      inheritanceFlags: ace.inheritanceFlags,
+      propagationFlags: ace.propagationFlags,
+    })),
+  };
 }
 
 function runWindowsDaclOperation(
@@ -161,31 +152,26 @@ function runWindowsDaclOperation(
   kind: WindowsSecurePathKind,
   operation: 'inspect' | 'enforce' | 'create-directory',
 ): WindowsDaclSnapshot {
-  const result = spawnSync(
-    powershellExecutable(process.env),
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_POWERSHELL],
-    {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        COSYNCING_WINDOWS_DACL_TARGET: target,
-        COSYNCING_WINDOWS_DACL_OPERATION: operation,
-        COSYNCING_WINDOWS_DACL_KIND: kind,
-      },
-      maxBuffer: POWERSHELL_MAX_BUFFER,
-      timeout: POWERSHELL_TIMEOUT_MS,
-      windowsHide: true,
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const stderr = result.stderr.trim();
-    const detail = stderr.slice(Math.max(0, stderr.length - 2_048));
-    throw new Error(`Windows DACL ${operation} failed${detail ? `: ${detail}` : ''}`);
+  const security = windowsSecurity();
+  if (operation === 'create-directory') {
+    if (kind !== 'directory') throw new Error('Windows DACL create operation requires a directory target');
+    security.createDirectory(target, windowsOwnerOnlySddl(security.currentUserSid(), 'directory'));
+  } else if (operation === 'enforce') {
+    // Accept an object owned by this token's own default owner as well as by the user. Refusing it
+    // made the product reject files it had just created itself whenever it ran elevated -- the file
+    // is opened, Windows stamps Administrators as its owner, and enforcement then called it foreign.
+    // On an ordinary session the two SIDs are identical, so nothing widens there. Either way the
+    // owner is rewritten to the user below, so the object still ends up owned by the person who ran
+    // the command.
+    const prior = security.pathOwnerSid(target);
+    if (prior !== security.currentUserSid() && prior !== security.currentTokenOwnerSid()) {
+      throw new Error('DACL target is not owned by the current user');
+    }
+    security.applySecurity(target, windowsOwnerOnlySddl(security.currentUserSid(), kind));
   }
-  const parsed = JSON.parse(result.stdout.trim()) as WindowsDaclSnapshot;
-  if (!parsed || !Array.isArray(parsed.rules)) throw new Error('Windows DACL provider returned invalid output');
-  return parsed;
+  // Read back in every case, including `inspect`. The verdict is what the operating system stored,
+  // never what we asked it to store.
+  return snapshotOf(target);
 }
 
 export function inspectWindowsOwnerOnlyDacl(

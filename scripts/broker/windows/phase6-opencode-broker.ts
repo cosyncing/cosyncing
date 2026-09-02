@@ -157,6 +157,7 @@ await Bun.write(Bun.stdout, `${JSON.stringify(report)}\n`);
 // alive by construction — correct for a broker, fatal for a one-shot process someone is reading.
 //
 // This is also the faithful restart. `process.exit` runs the module's registered exit teardown, so
-// `start` leaves exactly what a service restart leaves: on Windows that teardown kills the cmd.exe
-// wrapper and orphans the opencode.exe holding the port, which is the state the next broker meets.
+// `start` leaves exactly what a graceful broker shutdown leaves — which, since that teardown began
+// taking the whole process tree, is nothing. The state the next broker has to meet is the one
+// `crash` produces, and that is why `crash` exists.
 process.exit(0);

@@ -3,7 +3,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 // @ts-expect-error Bun's text loader embeds the shell source in source and packaged builds.
 import opencodeShimModule from '../assets/opencode-shim.sh' with { type: 'text' };
-import type { SetupDiagnosisContext } from '@cosyncing/adapter-api';
+import { windowsPathOwnedByCurrentUser, type SetupDiagnosisContext } from '@cosyncing/adapter-api';
 import { resolveLocalOpencodeBaseUrl } from './implementation.ts';
 
 /** The package-owned R1 asset: the `opencode()` shell function sourced by the managed rc block. */
@@ -103,8 +103,23 @@ export function opencodeShimShellPath(stateHome: string): string {
   return join(stateHome, 'shell', 'opencode-shim.sh');
 }
 
-/** The candidate interactive rc files. Callers install only into the ones that already exist. */
-export function opencodeShimRcCandidates(context: Pick<SetupDiagnosisContext, 'homeDir'>): OpencodeShimRcTarget[] {
+/**
+ * The candidate interactive rc files. Callers install only into the ones that already exist.
+ *
+ * EMPTY on Windows, deliberately. These are POSIX interactive shell rc files, and no Windows shell
+ * sources them: `cmd` and PowerShell have their own profile mechanisms and read neither. A Windows
+ * user who has a `.bashrc` at all has it because Git Bash or MSYS put it there, and installing a
+ * routing block into it would report success for a block that the terminal the user actually types
+ * in never reads. Whether Git-Bash-only routing is worth supporting is a product question; writing
+ * a file nothing sources and calling it done is not an answer to it.
+ *
+ * Returning nothing here is the structural half of the refusal — even a caller that skips the setup
+ * planner cannot install a block on Windows. The planner reports the refusal in words.
+ */
+export function opencodeShimRcCandidates(
+  context: Pick<SetupDiagnosisContext, 'homeDir' | 'platform'>,
+): OpencodeShimRcTarget[] {
+  if (context.platform === 'win32') return [];
   return [
     { id: 'bash', resourceId: OPENCODE_SHIM_RC_RESOURCE_IDS.bash, path: join(context.homeDir, '.bashrc') },
     { id: 'zsh', resourceId: OPENCODE_SHIM_RC_RESOURCE_IDS.zsh, path: join(context.homeDir, '.zshrc') },
@@ -122,10 +137,29 @@ export type OpencodeShimStatus = 'owned' | 'drifted' | 'foreign' | 'missing';
  *   foreign — a symlink, a non-regular file, or one owned by another uid: structurally unsafe, never touched.
  *   missing — not present.
  */
-export function inspectOpencodeShim(path: string): OpencodeShimStatus {
+export interface OpencodeShimProof {
+  status: OpencodeShimStatus;
+  /** The proving hash when the file is structurally safe and ours to act on; undefined otherwise. */
+  actualSha256: string | undefined;
+}
+
+/**
+ * The status and its proving hash from ONE pass over the file.
+ *
+ * Both answers come from the same structural-safety proof, and on Windows that proof costs a PowerShell
+ * process to establish ownership. A caller wanting both — setup's inspection does — otherwise pays for
+ * that proof twice for a single file, because the status form computes the hash and then discards it.
+ */
+export function proveOpencodeShim(path: string): OpencodeShimProof {
   const sha = opencodeShimActualSha256(path);
-  if (sha !== undefined) return sha === OPENCODE_SHIM_SHA256 ? 'owned' : 'drifted';
-  return existsSync(path) ? 'foreign' : 'missing';
+  if (sha !== undefined) {
+    return { status: sha === OPENCODE_SHIM_SHA256 ? 'owned' : 'drifted', actualSha256: sha };
+  }
+  return { status: existsSync(path) ? 'foreign' : 'missing', actualSha256: undefined };
+}
+
+export function inspectOpencodeShim(path: string): OpencodeShimStatus {
+  return proveOpencodeShim(path).status;
 }
 
 function assertNoSymlinkParents(target: string): void {
@@ -150,8 +184,20 @@ export function opencodeShimActualSha256(path: string): string | undefined {
     if (!existsSync(path)) return undefined;
     const stat = lstatSync(path);
     if (stat.isSymbolicLink() || !stat.isFile()) return undefined;
-    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-    if (uid !== undefined && stat.uid !== uid) return undefined;
+    // Ownership must be PROVEN, on every platform. The old form asked
+    // `process.getuid` and, finding it absent on Windows, simply skipped the
+    // question — so a file owned by another account hashed as ours and was
+    // eligible to be modified or deleted. That is fail-open on the one check
+    // that exists to stop us touching somebody else's file.
+    if (typeof process.getuid === 'function') {
+      if (stat.uid !== process.getuid()) return undefined;
+    } else if (process.platform === 'win32') {
+      // 'unknown' is not 'yes'. A machine that will not say who owns a file has
+      // not told us it is ours.
+      if (windowsPathOwnedByCurrentUser(path) !== 'yes') return undefined;
+    } else {
+      return undefined; // no way to establish ownership here; claim nothing
+    }
     return createHash('sha256').update(readFileSync(path)).digest('hex');
   } catch {
     return undefined;

@@ -53,13 +53,14 @@ import {
   watch,
   type FSWatcher,
 } from 'node:fs';
-import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { connect, type Socket } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { join, basename, dirname, resolve, relative, sep, extname } from 'node:path';
 import {
   PRODUCT_IDENTITY,
   HostProcessProvider,
+  terminateHostProcessTree,
   summarizeDiff,
   gitDiffPath,
   type AgentBackend,
@@ -3727,7 +3728,13 @@ export class ClaudeResumeConnection implements SessionConnection {
       /* ignore */
     }
     try {
-      p.kill('SIGTERM');
+      // On Windows `claude` resolves through PATHEXT to `claude.cmd`, and batch has no exec: the shim
+      // CALLS the real executable, so the handle we hold is a cmd.exe and the process doing the work
+      // is its child. Signalling the handle ends the shell and leaves that child alive — holding the
+      // transcript, and on a real account still spending quota, with nothing left able to stop it.
+      // Take the tree there. POSIX keeps SIGTERM on the child itself, unchanged.
+      if (process.platform === 'win32' && p.pid) terminateHostProcessTree(p.pid, true);
+      else p.kill('SIGTERM');
     } catch {
       /* ignore */
     }
@@ -6889,41 +6896,69 @@ function runAgentsJson(store: ClaudeStore): Promise<LiveStatusProbe> {
   if (!bin) return Promise.resolve({ ok: true, map: m });
   const rank: Record<RawStatus, number> = { 'needs-input': 0, working: 1, idle: 2 };
   return new Promise((resolveStatus) => {
-    execFile(
-      bin,
-      ['agents', '--json'],
-      {
-        timeout: 2000,
-        maxBuffer: 16 * 1024 * 1024,
-        encoding: 'utf8',
-        env: { ...process.env, CLAUDE_CONFIG_DIR: store.configDir },
-      },
-      (err, stdout) => {
-        try {
-          if (err || !stdout) {
-            resolveStatus({ ok: false, map: m });
-            return;
-          }
-          const arr = JSON.parse(stdout);
-          if (!Array.isArray(arr)) {
-            resolveStatus({ ok: false, map: m });
-            return;
-          }
-          for (const a of arr) {
-            const id = a?.sessionId;
-            if (!id) continue;
-            const s = a?.status;
-            const status: RawStatus = s === 'busy' ? 'working' : s === 'waiting' ? 'needs-input' : 'idle';
-            const prev = m.get(String(id));
-            if (prev && rank[prev.status] <= rank[status]) continue; // keep the more-actionable existing row
-            m.set(String(id), { status, waitingFor: typeof a?.waitingFor === 'string' ? a.waitingFor : undefined });
-          }
-          resolveStatus({ ok: true, map: m });
-        } catch {
-          resolveStatus({ ok: false, map: m });
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: store.configDir };
+    // `claude` is a `.cmd` shim on Windows, and execFile on a batch file bypasses the shared
+    // invocation boundary every other launch goes through. Bun 1.4.0 refuses that outright — spawn
+    // EINVAL — so live status threw on Windows there while 1.3.8 allowed it. Resolve it properly.
+    const invocation = resolveInvocation(bin, { env, platform: process.platform });
+    if (!invocation) {
+      resolveStatus({ ok: false, map: m });
+      return;
+    }
+    let child: ReturnType<typeof spawnResolvedInvocation>;
+    try {
+      child = spawnResolvedInvocation(invocation, ['agents', '--json'], {
+        env,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      resolveStatus({ ok: false, map: m });
+      return;
+    }
+    let stdout = '';
+    let settled = false;
+    const finish = (probe: LiveStatusProbe): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveStatus(probe);
+    };
+    // execFile's `timeout` signalled the handle, which on Windows is the shim and not the process
+    // doing the work — the same orphan this adapter's drive path had. Take the tree.
+    const timer = setTimeout(() => {
+      if (child.pid) terminateHostProcessTree(child.pid, true);
+      finish({ ok: false, map: m });
+    }, 2000);
+    child.stdout?.on('data', (b: Buffer) => {
+      if (stdout.length < 16 * 1024 * 1024) stdout += b.toString('utf8');
+    });
+    child.on('error', () => finish({ ok: false, map: m }));
+    child.on('close', () => {
+      try {
+        if (!stdout) {
+          finish({ ok: false, map: m });
+          return;
         }
-      },
-    );
+        const arr = JSON.parse(stdout);
+        if (!Array.isArray(arr)) {
+          finish({ ok: false, map: m });
+          return;
+        }
+        for (const a of arr) {
+          const id = a?.sessionId;
+          if (!id) continue;
+          const s = a?.status;
+          const status: RawStatus = s === 'busy' ? 'working' : s === 'waiting' ? 'needs-input' : 'idle';
+          const prev = m.get(String(id));
+          if (prev && rank[prev.status] <= rank[status]) continue; // keep the more-actionable existing row
+          m.set(String(id), { status, waitingFor: typeof a?.waitingFor === 'string' ? a.waitingFor : undefined });
+        }
+        finish({ ok: true, map: m });
+      } catch {
+        finish({ ok: false, map: m });
+      }
+    });
   });
 }
 

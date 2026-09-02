@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { win32 } from 'node:path';
+import { windowsPowerShellChildEnvironment } from '@cosyncing/adapter-api';
 import {
   WINDOWS_TASK_NAME,
   WINDOWS_TASK_ROOT_PATH,
-  windowsTaskSchedulerCanonicalSddl,
   type WindowsScheduledTaskDefinition,
   type WindowsScheduledTaskIdentity,
   type WindowsTaskSchedulerSnapshot,
@@ -181,7 +181,16 @@ function Assert-OwnedTask($task) {
 }
 
 function Test-ExpectedSddl($value) {
-  return ([string] $value -eq [string] $payload.expectedSddl -or [string] $value -eq [string] $payload.canonicalSddl)
+  $text = [string] $value
+  if ([string]::IsNullOrEmpty($text)) { return $false }
+  try { $descriptor = New-Object Security.AccessControl.RawSecurityDescriptor($text) } catch { return $false }
+  # An audit ACL is one this provider never writes, so its presence is a foreign edit.
+  if ($null -ne $descriptor.SystemAcl) { return $false }
+  # Windows fills the primary group in from the creating token -- a local account carries None (RID 513)
+  # rather than its own SID -- so only the DACL and the owner are ours to predict.
+  if ($null -ne $descriptor.Owner -and $descriptor.Owner.Value -ne [string] $payload.sid) { return $false }
+  try { $dacl = $descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access) } catch { return $false }
+  return ($dacl -eq [string] $payload.expectedSddl)
 }
 
 function Assert-EmptyFolder($folder) {
@@ -348,8 +357,10 @@ export class NativeWindowsTaskSchedulerExecutor implements WindowsTaskSchedulerE
       {
         encoding: 'utf8',
         input: WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE,
+        // Pinned, like every other 5.1 spawn here: a host with PowerShell 7 installed exports its
+        // module roots, and 5.1 inheriting them auto-loads neither ScheduledTasks nor Security.
         env: {
-          ...this.env,
+          ...windowsPowerShellChildEnvironment(this.env),
           COSYNCING_SCHEDULER_OPERATION: operation,
           COSYNCING_SCHEDULER_INPUT: encodedInput,
         },
@@ -441,7 +452,6 @@ export class WindowsTaskSchedulerPowerShellBackend {
       ...commonInput(options.identity),
       definition: options.definition,
       expectedSddl: options.expectedSddl,
-      canonicalSddl: windowsTaskSchedulerCanonicalSddl(options.identity.sid),
       sidFolderOwned: options.sidFolderOwned,
     }), options.identity);
   }

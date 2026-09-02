@@ -74,6 +74,60 @@ try {
     'broker state must be fixture-owned',
   );
   assert(isolated.PORT === '18734', 'explicit fixture port must be retained');
+
+  // The Windows shape, exercised from any host.
+  //
+  // The allowlist was POSIX-only, so a fixture built on Windows had no `SystemRoot`, no `ComSpec`,
+  // and no `PATHEXT` — and `PATHEXT` is the whole mechanism by which an npm-installed agent resolves
+  // to its `.cmd` shim, which is the case this repository's Windows work is about. Nor did it own
+  // the per-user locations: an unset `USERPROFILE` does not isolate anything, because `os.homedir()`
+  // then asks the OS and gets the operator's real profile directory back.
+  const windowsHostile = {
+    ...hostile,
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\system32\\cmd.exe',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    USERPROFILE: 'C:\\Users\\host-operator',
+    APPDATA: 'C:\\Users\\host-operator\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\host-operator\\AppData\\Local',
+  };
+  const windows = isolatedBrokerFixtureEnvironment(root, {
+    source: windowsHostile,
+    platform: 'win32',
+  });
+  for (const key of ['SystemRoot', 'ComSpec', 'PATHEXT'] as const) {
+    assert(
+      windows[key] === windowsHostile[key],
+      `a Windows fixture must inherit the machine-scoped ${key}`,
+    );
+  }
+  assert(
+    windows.USERPROFILE === join(root, 'home'),
+    'the Windows profile directory must be fixture-owned',
+  );
+  for (const key of ['APPDATA', 'LOCALAPPDATA'] as const) {
+    assert(
+      windows[key] !== undefined && windows[key] !== windowsHostile[key],
+      `the Windows ${key} location must not be the operator's`,
+    );
+  }
+  // Case is whatever whoever set the variable chose, and an object source does not fold it.
+  const foldedCase = isolatedBrokerFixtureEnvironment(root, {
+    source: { ...hostile, SYSTEMROOT: 'C:\\Windows', pathext: '.EXE;.CMD' },
+    platform: 'win32',
+  });
+  assert(
+    foldedCase.SystemRoot === 'C:\\Windows' && foldedCase.PATHEXT === '.EXE;.CMD',
+    'Windows environment names must be matched without regard to case',
+  );
+  // And none of it may reach a POSIX fixture.
+  const posix = isolatedBrokerFixtureEnvironment(root, {
+    source: windowsHostile,
+    platform: 'linux',
+  });
+  for (const key of ['SystemRoot', 'ComSpec', 'PATHEXT', 'USERPROFILE'] as const) {
+    assert(posix[key] === undefined, `a POSIX fixture must not carry ${key}`);
+  }
   for (const key of [
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',

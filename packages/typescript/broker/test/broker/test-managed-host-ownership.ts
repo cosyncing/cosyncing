@@ -22,7 +22,7 @@ export {};
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import {
   classifyManagedHost,
   ensureManagedHost,
@@ -122,6 +122,12 @@ function fakeEffects(options: {
    * a process is provably gone.
    */
   missingProcess?: LiveProcess;
+  /**
+   * Descendant relationships this fixture can PROVE, as pid -> ancestor pid.
+   * Any pair not listed answers 'unknown', which is what a real provider says
+   * on every platform but Windows.
+   */
+  descendants?: Map<number, number>;
 }): {
   effects: ManagedHostEffects;
   signals: Array<{ pid: number; signal: string }>;
@@ -183,6 +189,12 @@ function fakeEffects(options: {
       return { expired, cancel: () => clearTimeout(timer) };
     },
     selfPid: () => options.selfPid ?? 111_111,
+    descendsFrom: (pid, ancestorPid) => {
+      if (pid === ancestorPid) return 'yes';
+      const parent = options.descendants?.get(pid);
+      if (parent === undefined) return 'unknown';
+      return parent === ancestorPid ? 'yes' : 'no';
+    },
   };
   return { effects, signals, spawns, table };
 }
@@ -1138,6 +1150,120 @@ try {
       outcome.action === 'started' && (outcome as { servingProven: boolean }).servingProven === true
         && records.get(AGENT)?.pid === spawnPid,
       JSON.stringify(outcome));
+  }
+  // ── the launch command is not always the thing that serves ────────────────
+  //
+  // On Windows a CLI installed by npm is a `.cmd` shim; batch has no exec, so
+  // the shim CALLS the real program. The pid the broker spawns is `cmd.exe` and
+  // the server is its child, which is the pid the adapter's locator names. A
+  // native Windows Phase 6 run measured what that cost: a Kimi host spawned into
+  // an EMPTY disposable home came back `already-serving` with verdict 'foreign'
+  // — the engine stopped the host it had just started, and the record it kept
+  // named a shim, so the serving process classified 'foreign' ever after and
+  // could never be reaped.
+  const SHIM_PID = 8100;
+  const SERVER_PID = 8101;
+  const shimTable = () => new Map([
+    [SHIM_PID, { pid: SHIM_PID, start: '20', boot: BOOT, comm: 'cmd.exe' }],
+    [SERVER_PID, { pid: SERVER_PID, start: '21', boot: BOOT, comm: 'node' }],
+  ]);
+  /** Ready only once spawned, and the locator names the SERVER, never the shim. */
+  const shimBackend = (started: () => boolean) => backend({
+    isAvailable: async () => started(),
+    describeManagedHost: async () => ({
+      identityKey: KEY,
+      locator: started() ? { kind: 'pid' as const, pid: SERVER_PID } : { kind: 'absent' as const },
+      launch: { command: '/fixture/bin/kimi.cmd', args: ['web', '--no-open'] },
+      readyTimeoutMs: 300,
+      stopGraceMs: 100,
+    }),
+  });
+  {
+    const { effects, signals } = fakeEffects({
+      identities: shimTable(), spawnPid: SHIM_PID, missingProcess: PROCESS_ABSENT,
+      descendants: new Map([[SERVER_PID, SHIM_PID]]),
+    });
+    const { store, records } = memoryStore();
+    let started = false;
+    const outcome = await ensureManagedHost(
+      shimBackend(() => started) as never,
+      { ...effects, spawn: (launch: ManagedHostLaunch) => { started = true; return effects.spawn(launch); } },
+      store, AUTHORIZED);
+    check('a serving process PROVEN to descend from the spawned child is ours, not a competitor',
+      outcome.action === 'started'
+        && (outcome as { servingProven: boolean }).servingProven === true
+        && (outcome as { pid: number }).pid === SERVER_PID
+        && signals.length === 0,
+      JSON.stringify({ outcome, signals }));
+    check('the record is RE-KEYED onto the serving process, so it still proves ownership later',
+      records.get(AGENT)?.pid === SERVER_PID
+        && records.get(AGENT)?.comm === 'node'
+        && classifyManagedHost(records.get(AGENT)!, running(shimTable().get(SERVER_PID)!), KEY) === 'owned',
+      JSON.stringify(records.get(AGENT)));
+  }
+  {
+    // Descent PROVEN ABSENT is the competitor case, and it must still stop our
+    // child. This is the assertion that the change above did not simply teach
+    // the engine to adopt whatever happens to be serving.
+    const { effects, signals } = fakeEffects({
+      identities: shimTable(), spawnPid: SHIM_PID, missingProcess: PROCESS_ABSENT,
+      childDiesOn: 'SIGTERM',
+      onSignal: (pid, signal, live) => { if (signal === 'SIGTERM') live.delete(pid); },
+      descendants: new Map([[SERVER_PID, 9999]]),
+    });
+    const { store, records } = memoryStore();
+    let started = false;
+    const outcome = await ensureManagedHost(
+      shimBackend(() => started) as never,
+      { ...effects, spawn: (launch: ManagedHostLaunch) => { started = true; return effects.spawn(launch); } },
+      store, AUTHORIZED);
+    check('a serving process proven NOT to descend from our child is still a competitor',
+      outcome.action === 'already-serving'
+        && signals.some((entry) => entry.pid === SHIM_PID)
+        && records.size === 0,
+      JSON.stringify({ outcome, signals }));
+  }
+  {
+    // 'unknown' is not 'yes'. Every platform but Windows answers this way, so
+    // this is the case that pins the no-change guarantee for them.
+    const { effects, signals } = fakeEffects({
+      identities: shimTable(), spawnPid: SHIM_PID, missingProcess: PROCESS_ABSENT,
+      childDiesOn: 'SIGTERM',
+      onSignal: (pid, signal, live) => { if (signal === 'SIGTERM') live.delete(pid); },
+    });
+    const { store } = memoryStore();
+    let started = false;
+    const outcome = await ensureManagedHost(
+      shimBackend(() => started) as never,
+      { ...effects, spawn: (launch: ManagedHostLaunch) => { started = true; return effects.spawn(launch); } },
+      store, AUTHORIZED);
+    check('a machine that cannot say whether it descends behaves exactly as before',
+      outcome.action === 'already-serving' && signals.some((entry) => entry.pid === SHIM_PID),
+      JSON.stringify({ outcome, signals }));
+  }
+  {
+    // Proven ours, but the serving identity cannot be read, so there is nothing
+    // to re-key the record ONTO. The host is not stopped and the record is not
+    // rewritten from an unreadable process; the start simply declines to claim
+    // which process serves.
+    const { effects, signals } = fakeEffects({
+      identities: new Map([[SHIM_PID, { pid: SHIM_PID, start: '20', boot: BOOT, comm: 'cmd.exe' }]]),
+      spawnPid: SHIM_PID,
+      descendants: new Map([[SERVER_PID, SHIM_PID]]),
+    });
+    const { store, records } = memoryStore();
+    let started = false;
+    const outcome = await ensureManagedHost(
+      shimBackend(() => started) as never,
+      { ...effects, spawn: (launch: ManagedHostLaunch) => { started = true; return effects.spawn(launch); } },
+      store, AUTHORIZED);
+    check('an unreadable serving identity leaves the record on the child and claims nothing more',
+      outcome.action === 'started'
+        && (outcome as { servingProven: boolean }).servingProven === false
+        && (outcome as { pid: number }).pid === SHIM_PID
+        && records.get(AGENT)?.pid === SHIM_PID
+        && signals.length === 0,
+      JSON.stringify({ outcome, record: records.get(AGENT) }));
   }
   {
     // A competing pid appears while the new host is coming up, and the live
@@ -2170,18 +2296,65 @@ try {
       dshDescribed?.locator.kind === 'tcp-port' && dshDescribed.locator.port === 3080
         && dshDescribed.identityKey === 'http://127.0.0.1:3080'
         && dshDescribed.launch?.command === '/usr/bin/dsh'
-        && dshDescribed.launch.args.join(' ') === 'web',
+        && dshDescribed.launch.args.join(' ') === 'web --port 3080',
       JSON.stringify(dshDescribed));
-    // The launch has to produce a host at the address the locator WATCHES.
-    // `dsh web` with no flags serves the default, so any other configured port
-    // is describable and watchable but not startable — starting one there would
-    // watch an empty port, call the child dead, and stop it while the host it
-    // really started kept running somewhere else.
+    // The launch must NAME the config root the adapter resolved, for the same
+    // reason Kimi's does: the adapter's environment is not required to be the
+    // broker's, and a child that inherited a different one would serve a
+    // different profile than the adapter diagnosed and reported.
+    check('the dsh launch names the config root and the poll-watcher it needs',
+      dshDescribed?.launch?.env?.DSH_HOME === '/fixture/agent-root/.dsh'
+        && dshDescribed.launch.env.CHOKIDAR_USEPOLLING === '1'
+        && dshDescribed.launch.cwd === '/fixture/agent-root',
+      JSON.stringify(dshDescribed?.launch));
+    check('an explicit DSH_HOME is what the launch carries, not the derived default',
+      (await dsh({ env: { DSH_HOME: '/custom/dsh-root' } }).describeManagedHost())
+        ?.launch?.env?.DSH_HOME === '/custom/dsh-root',
+      'explicit DSH_HOME');
+    // No environment may produce a RELATIVE home: every profile path is built
+    // from it, and a broker started as a service starts from `/`. Constructed
+    // with an EMPTY environment and no injected homeDir, which is the shape
+    // that used to fall through to `'.'`.
+    const rootless = await new DshAdapter({
+      env: {},
+      baseUrl: 'http://127.0.0.1:3080',
+      resolveExecutable: (command) => (command === 'dsh' ? '/usr/bin/dsh' : undefined),
+    }).describeManagedHost();
+    check('a dsh adapter with nothing in its environment still resolves an absolute home',
+      typeof rootless?.launch?.cwd === 'string' && isAbsolute(rootless.launch.cwd)
+        && typeof rootless.launch.env?.DSH_HOME === 'string'
+        && isAbsolute(rootless.launch.env.DSH_HOME),
+      JSON.stringify({ cwd: rootless?.launch?.cwd, home: rootless?.launch?.env?.DSH_HOME }));
+    // The launch has to produce a host at the address the locator WATCHES, and
+    // it now does that by NAMING the port rather than by being restricted to the
+    // one address the flagless invocation happens to serve.
+    //
+    // `--port` is source-verified: `dsh --profile web --help` documents it, and
+    // native Windows runs booted `dsh web --port N` and reached it. So a host
+    // configured off the default is startable, which is what an operator who
+    // moved dsh off 3080 — or whose 3080 is taken by something else — needs.
     const shifted = await dsh({ baseUrl: 'http://127.0.0.1:3999' }).describeManagedHost();
-    check('a dsh host configured off the default port is watched but NEVER launched',
+    check('a dsh host configured off the default port is launched AT that port',
       shifted?.locator.kind === 'tcp-port' && shifted.locator.port === 3999
-        && shifted.launch === null,
+        && shifted.launch?.args.join(' ') === 'web --port 3999',
       JSON.stringify(shifted));
+    check('the default port is named too, so there is one launch shape rather than two',
+      dshDescribed?.launch?.args.join(' ') === 'web --port 3080',
+      JSON.stringify(dshDescribed?.launch?.args));
+    check('localhost is launchable and resolves to the same watched port',
+      (await dsh({ baseUrl: 'http://localhost:4123' }).describeManagedHost())
+        ?.launch?.args.join(' ') === 'web --port 4123',
+      'localhost');
+    // `--host` is never passed, so only the forms dsh's own default bind already
+    // resolves to may be launched. An invented `--host ::1` is exactly the kind
+    // of unverified flag this descriptor refuses to emit.
+    const sixLoopback = await dsh({ baseUrl: 'http://[::1]:3080' }).describeManagedHost();
+    check('the IPv6 loopback form is watched but NEVER launched',
+      sixLoopback?.locator.kind === 'tcp-port' && sixLoopback.launch === null,
+      JSON.stringify(sixLoopback));
+    const secure = await dsh({ baseUrl: 'https://127.0.0.1:3080' }).describeManagedHost();
+    check('an https address is watched but NEVER launched, since dsh web serves http',
+      secure?.launch === null, JSON.stringify(secure));
     check('the launchable dsh invocation pins its watch mode and its working directory',
       dshDescribed?.launch?.env?.CHOKIDAR_USEPOLLING === '1'
         && dshDescribed.launch.cwd === '/fixture/agent-root',

@@ -19,6 +19,16 @@ The official installer works on Linux and macOS:
 curl -fsSL https://bun.com/install | bash
 ```
 
+On Windows x64, install Bun with PowerShell:
+
+```powershell
+powershell -c "irm bun.com/install.ps1 | iex"
+```
+
+Windows ARM64 is not a qualified broker host yet, and the broker refuses it —
+including an x64 process running under ARM64 emulation, which reports itself as
+x64, so the broker asks Windows what the underlying machine is.
+
 Open a new login shell, then verify the selected executable:
 
 ```bash

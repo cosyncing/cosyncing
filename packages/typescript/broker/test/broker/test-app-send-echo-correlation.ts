@@ -19,6 +19,7 @@
  */
 export {};
 import { mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage, SessionInfo } from '../../../adapter-api/src/index.ts';
 import { ClaudeObserveConnection } from '../../../adapters/claude/src/implementation.ts';
@@ -46,7 +47,7 @@ const userEchoes = (messages: AgentMessage[]): UserEcho[] =>
 
 // ── OpenCode serve end-to-end: native messageID correlation ─────────────────
 {
-  const DIR = '/tmp/cosyncing-c1r-opencode';
+  const DIR = join(tmpdir(), 'cosyncing-c1r-opencode');
   mkdirSync(DIR, { recursive: true });
   const SESSION = {
     id: 'ses_c1r',
@@ -198,7 +199,7 @@ const userEchoes = (messages: AgentMessage[]): UserEcho[] =>
 
 // ── Claude observe tail: NO text-based stamping on this surface ─────────────
 {
-  const dir = join('/tmp', `cosyncing-c1r-claude-${Math.random().toString(36).slice(2, 8)}`);
+  const dir = join(tmpdir(), `cosyncing-c1r-claude-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const jsonl = join(dir, 'session.jsonl');
   const line = (o: unknown) => JSON.stringify(o) + '\n';

@@ -10,13 +10,16 @@ import {
   windowsServiceInstallPaths,
   windowsServiceVersionKey,
 } from '../../src/installation/windows-service-install.ts';
+import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 import {
   classifyWindowsScheduledTask,
   classifyWindowsTaskFolders,
+  WINDOWS_TASK_RESOURCE_ID,
+  WINDOWS_TASK_ROOT_PATH,
+  windowsTaskSchedulerOwnership,
   WINDOWS_SHARED_FOLDER_RESOURCE_ID,
   WINDOWS_SID_FOLDER_RESOURCE_ID,
   windowsTaskSchedulerReceiptOwnership,
-  windowsTaskSchedulerCanonicalSddl,
   windowsTaskSchedulerSddl,
   windowsScheduledTaskIdentity,
   type WindowsScheduledTaskDefinition,
@@ -195,15 +198,45 @@ function check(name: string, ok: boolean, detail?: string): void {
     repairableFolder.shared === 'current' && repairableFolder.sidFolder === 'drifted'
       && blockedFolder.sidFolder === 'conflict' && blockedFolder.foreignChildren[0] === 'folder:Foreign'
       && incompatibleShared.shared === 'conflict');
-  const canonical = windowsTaskSchedulerCanonicalSddl(identity.sid);
-  const canonicalized = classifyWindowsTaskFolders({
+  // The Task Scheduler executor is the LAST Windows PowerShell caller left: owner-only enforcement now
+  // reaches the operating system directly, but registering a scheduled task still goes through the
+  // ScheduledTasks module. A host with PowerShell 7 installed exports a PSModulePath naming 7's module
+  // roots, and 5.1 inheriting that auto-loads neither ScheduledTasks nor Security, so this child must
+  // replace an inherited module path rather than pass it through.
+  {
+    const hostile = 'C:\\Users\\someone\\Documents\\PowerShell\\Modules;C:\\Program Files\\PowerShell\\7\\Modules';
+    const childEnv = windowsPowerShellChildEnvironment({ SystemRoot: 'C:\\Windows', PSModulePath: hostile });
+    check('the Windows PowerShell child never inherits a foreign module path',
+      childEnv.PSModulePath !== hostile
+        && childEnv.PSModulePath!.includes('WindowsPowerShell')
+        && childEnv.PSModulePath!.includes('Modules'),
+      childEnv.PSModulePath);
+  }
+
+  const classifyBoth = (value: string) => classifyWindowsTaskFolders({
     identity, expectedSddl: sddl,
-    shared: { ...shared, sddl: canonical },
-    sidFolder: { ...ownedFolder, sddl: canonical },
+    shared: { ...shared, sddl: value },
+    sidFolder: { ...ownedFolder, sddl: value },
     sidFolderReceiptOwned: true,
   });
-  check('scheduler security accepts only the supplied DACL and its exact native owner/group canonical form',
-    canonicalized.shared === 'current' && canonicalized.sidFolder === 'current');
+  // Native inspection reads owner, group and DACL back together, and Task Scheduler fills the primary
+  // group in from the creating token. A local Windows account carries None (RID 513) there rather than
+  // its own SID, so a descriptor is ours whatever group it came back with.
+  const ownGroup = classifyBoth(`O:${identity.sid}G:${identity.sid}${sddl}`);
+  const localAccountGroup = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513${sddl}`);
+  const daclOnly = classifyBoth(sddl);
+  check('scheduler security accepts the stored descriptor whichever primary group the token carried',
+    ownGroup.shared === 'current' && ownGroup.sidFolder === 'current'
+      && localAccountGroup.shared === 'current' && localAccountGroup.sidFolder === 'current'
+      && daclOnly.shared === 'current' && daclOnly.sidFolder === 'current');
+  const foreignOwner = classifyBoth(`O:S-1-5-21-1-2-3-1002G:S-1-5-21-1-2-3-513${sddl}`);
+  const widenedDacl = classifyBoth(
+    `O:${identity.sid}G:S-1-5-21-1-2-3-513D:PAI(A;;FA;;;${identity.sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)`);
+  const audited = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513${sddl}S:(AU;SA;FA;;;WD)`);
+  const unprotected = classifyBoth(`O:${identity.sid}G:S-1-5-21-1-2-3-513D:AI(A;;FA;;;${identity.sid})(A;;FA;;;SY)(A;;FA;;;BA)`);
+  check('scheduler security still rejects a foreign owner, a widened or unprotected DACL, and an audit ACL',
+    [foreignOwner, widenedDacl, audited, unprotected]
+      .every((entry) => entry.shared === 'conflict' && entry.sidFolder === 'drifted'));
 }
 
 {
@@ -259,7 +292,7 @@ function check(name: string, ok: boolean, detail?: string): void {
         && entry.input.ownershipMarker === identity.ownershipMarker)
       && operations[2]?.input.definition === definition
       && operations[2]?.input.sidFolderOwned === false
-      && operations[2]?.input.canonicalSddl === windowsTaskSchedulerCanonicalSddl(identity.sid));
+      && operations[2]?.input.expectedSddl === windowsTaskSchedulerSddl(identity.sid));
 
   let malformedRejected = false;
   try {
@@ -320,6 +353,168 @@ function check(name: string, ok: boolean, detail?: string): void {
     WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('function Set-OwnedTaskEnabled')
       && WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('$definition.Settings.Enabled = $enabled')
       && !WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE.includes('$task.Enabled = [bool] $payload.enabled'));
+}
+
+{
+  // ---- The ownership VERDICT, derived the way the provider derives it ------------------------------
+  //
+  // Ownership and health are different questions, and setup once answered the first with the second: it
+  // read a Windows install's `drifted` status as proof of ownership, which would have accepted an
+  // owner-only environment file whose contents were not ours with no receipt consulted at all. These
+  // cases run the real classifiers over real receipts, so they check the derivation rather than a
+  // verdict handed to them.
+  const identity = windowsScheduledTaskIdentity('install-verdict', 'S-1-5-21-1-2-3-1001');
+  const environmentPath = 'C:\\Users\\Fixture\\.cosyncing\\service\\broker.env';
+  const versionKey = 'version-7';
+  const definition: WindowsScheduledTaskDefinition = {
+    principalSid: identity.sid,
+    runLevel: 'least-privilege',
+    logonType: 'interactive-token',
+    executable: 'C:\\Tools\\bun.exe',
+    arguments: '"C:\\Users\\Fixture\\.cosyncing\\service\\windows\\service-bootstrap.mjs"',
+    workingDirectory: 'C:\\Users\\Fixture\\.cosyncing',
+    triggers: ['logon-current-user'],
+    settings: {
+      logonTriggerEnabled: true,
+      allowDemandStart: true,
+      executionTimeLimit: 'none',
+      restartOnFailure: true,
+      restartCount: 3,
+      restartInterval: 'PT1M',
+      multipleInstances: 'ignore-new',
+      allowStartOnBattery: true,
+      doNotStopOnBattery: true,
+      startWhenAvailable: true,
+    },
+    enabled: true,
+  };
+  const exactReceipts: InstalledResourceRecord[] = [
+    { id: WINDOWS_TASK_RESOURCE_ID, kind: 'service', target: identity.taskPath,
+      ownership: { proof: 'receipt', marker: identity.ownershipMarker } },
+    { id: WINDOWS_SID_FOLDER_RESOURCE_ID, kind: 'other', target: identity.sidFolderPath,
+      ownership: { proof: 'receipt' } },
+    { id: 'service-environment', kind: 'environment-file', target: environmentPath,
+      ownership: { proof: 'receipt', marker: versionKey } },
+  ];
+  const folderSnapshot = (tasks: Array<{ name: string; ownershipMarker?: string }>) => ({
+    path: identity.sidFolderPath,
+    sddl: windowsTaskSchedulerSddl(identity.sid),
+    childFolders: [] as string[],
+    tasks,
+  });
+  const verdictFor = (options: {
+    resources?: InstalledResourceRecord[];
+    marker?: string;
+    taskDefinition?: WindowsScheduledTaskDefinition;
+  } = {}) => {
+    const actualMarker = options.marker ?? identity.ownershipMarker;
+    return windowsTaskSchedulerOwnership({
+      resources: options.resources ?? exactReceipts,
+      identity,
+      environmentPath,
+      versionKey,
+      task: classifyWindowsScheduledTask({
+        actual: {
+          path: identity.taskPath,
+          ownershipMarker: actualMarker,
+          definition: options.taskDefinition ?? definition,
+          enabled: 'enabled',
+          active: 'active',
+        },
+        expectedIdentity: identity,
+        expectedDefinition: definition,
+      }),
+      folders: classifyWindowsTaskFolders({
+        identity,
+        expectedSddl: windowsTaskSchedulerSddl(identity.sid),
+        shared: { path: WINDOWS_TASK_ROOT_PATH, sddl: windowsTaskSchedulerSddl(identity.sid), childFolders: [], tasks: [] },
+        sidFolder: folderSnapshot([{ name: 'Broker', ownershipMarker: actualMarker }]),
+        sidFolderReceiptOwned: (options.resources ?? exactReceipts)
+          .some((resource) => resource.id === WINDOWS_SID_FOLDER_RESOURCE_ID),
+      }),
+    });
+  };
+
+  const owned = verdictFor();
+  check('exact receipts, marker, folder authority and SDDL make the install owned',
+    owned.definition === 'owned' && owned.environment === 'owned',
+    `${owned.definition}/${owned.environment}`);
+
+  // Definition drift is a repair job, not a stranger's task. Denying ownership here would block setup
+  // exactly when reconciliation is what the operator came for.
+  const drifted = verdictFor({ taskDefinition: { ...definition, executable: 'C:\\Other\\bun.exe' } });
+  check('an owned task whose definition drifted is still owned, so setup can reconcile it',
+    drifted.definition === 'owned' && drifted.environment === 'owned',
+    `${drifted.definition}/${drifted.environment}`);
+
+  // The environment file's CONTENTS are health. Its ownership is the version-key receipt, and that is the
+  // only thing that says this installation wrote it.
+  check('a modified environment file with a valid receipt stays owned',
+    verdictFor().environment === 'owned');
+
+  const missing = verdictFor({ resources: exactReceipts.filter((r) => r.id !== 'service-environment') });
+  check('a missing environment receipt denies environment ownership',
+    missing.definition === 'owned' && missing.environment === 'unowned',
+    `${missing.definition}/${missing.environment}`);
+
+  // Two receipts under one id mean the state file disagrees with itself; picking the matching one would
+  // be choosing the answer.
+  const duplicated = verdictFor({ resources: [...exactReceipts, exactReceipts[0]!] });
+  check('duplicate receipts for one resource deny ownership',
+    duplicated.definition !== 'owned', duplicated.definition);
+
+  const wrongTarget = verdictFor({
+    resources: exactReceipts.map((r) => (r.id === WINDOWS_TASK_RESOURCE_ID
+      ? { ...r, target: '\\Cosyncing\\S-1-5-21-1-2-3-1001\\Other' } : r)),
+  });
+  check('a receipt naming a different target denies ownership', wrongTarget.definition !== 'owned',
+    wrongTarget.definition);
+
+  const wrongMarker = verdictFor({
+    resources: exactReceipts.map((r) => (r.id === WINDOWS_TASK_RESOURCE_ID
+      ? { ...r, ownership: { proof: 'receipt' as const, marker: 'cosyncing:task-scheduler:v1:someone-else' } } : r)),
+  });
+  check('a receipt carrying another installation\'s marker denies ownership',
+    wrongMarker.definition !== 'owned', wrongMarker.definition);
+
+  // "No marker expected" has to mean the receipt carries none. Admitting any marker where none was
+  // expected -- which is every SID-folder receipt -- contradicts the exactly-one-matching-receipt rule
+  // this function exists to enforce.
+  const sidFolderMarker = verdictFor({
+    resources: exactReceipts.map((r) => (r.id === WINDOWS_SID_FOLDER_RESOURCE_ID
+      ? { ...r, ownership: { proof: 'receipt' as const, marker: 'cosyncing:task-scheduler:v1:elsewhere' } } : r)),
+  });
+  check('a SID-folder receipt carrying an unexpected marker denies ownership',
+    sidFolderMarker.definition !== 'owned', sidFolderMarker.definition);
+
+  // A task wearing someone else's marker is theirs, however healthy it looks.
+  const foreign = verdictFor({ marker: 'cosyncing:task-scheduler:v1:foreign-install' });
+  check('a foreign task marker is refused as unowned', foreign.definition === 'unowned', foreign.definition);
+
+  const unsafeSddl = windowsTaskSchedulerOwnership({
+    resources: exactReceipts,
+    identity,
+    environmentPath,
+    versionKey,
+    task: classifyWindowsScheduledTask({
+      actual: {
+        path: identity.taskPath, ownershipMarker: identity.ownershipMarker,
+        definition, enabled: 'enabled', active: 'active',
+      },
+      expectedIdentity: identity,
+      expectedDefinition: definition,
+    }),
+    folders: classifyWindowsTaskFolders({
+      identity,
+      expectedSddl: windowsTaskSchedulerSddl(identity.sid),
+      shared: { path: WINDOWS_TASK_ROOT_PATH, sddl: windowsTaskSchedulerSddl(identity.sid), childFolders: [], tasks: [] },
+      // A folder holding a task that is not ours is contested, whatever the receipts say.
+      sidFolder: { ...folderSnapshot([{ name: 'Intruder', ownershipMarker: 'foreign' }]), sddl: 'D:PAI' },
+      sidFolderReceiptOwned: true,
+    }),
+  });
+  check('a contested SID folder denies ownership even with exact receipts',
+    unsafeSddl.definition === 'unowned', unsafeSddl.definition);
 }
 
 {
@@ -685,6 +880,90 @@ function check(name: string, ok: boolean, detail?: string): void {
       && executed.includes('reconcile'),
     `${effective.config.broker.internalUrl}:${executed.join(',')}`);
   rmSync(home, { recursive: true, force: true });
+}
+
+{
+  // ---- The cached verdict may never outlive the inspection that produced it ------------------------
+  //
+  // The verdict used to be published as soon as the classifications existed, while the filesystem and
+  // environment inspections still had to run. An exception from either then left an `owned` answer
+  // standing for an inspection that never completed -- and setup reads that answer to decide whether it
+  // may touch the service at all.
+  const sid = 'S-1-5-21-4-5-6-1001';
+  const identity = windowsScheduledTaskIdentity('install-verdict-seq', sid);
+  const paths = windowsServiceInstallPaths('C:\\Users\\Fixture\\.cosyncing', 'version-1');
+  let filesystemState: 'missing' | 'current' = 'missing';
+  let filesystemThrows = false;
+  let snapshot: Record<string, unknown> = { currentUserSid: sid };
+  const executor: WindowsTaskSchedulerExecutor = {
+    execute(operation, input) {
+      if (operation === 'current-user') return { currentUserSid: sid };
+      if (operation === 'reconcile') {
+        const definition = structuredClone(input.definition);
+        snapshot = {
+          currentUserSid: sid,
+          shared: { path: input.sharedPath, sddl: input.expectedSddl, childFolders: [sid], tasks: [] },
+          sidFolder: {
+            path: input.sidFolderPath, sddl: input.expectedSddl, childFolders: [],
+            tasks: [{ name: 'Broker', ownershipMarker: input.ownershipMarker }],
+          },
+          task: {
+            path: input.taskPath, ownershipMarker: input.ownershipMarker, definition,
+            taskSddl: input.expectedSddl, enabled: 'enabled', active: 'active', lastResult: 0, xml: '<Task/>',
+          },
+        };
+      }
+      return structuredClone(snapshot);
+    },
+  };
+  const provider = new WindowsTaskSchedulerServiceProvider({
+    context: { platform: 'win32' } as never,
+    homeDir: 'C:\\Users\\Fixture',
+    stateHome: 'C:\\Users\\Fixture\\.cosyncing',
+    installationId: 'install-verdict-seq',
+    versionKey: 'version-1',
+    cacheRoot: 'C:\\Users\\Fixture\\AppData\\Local\\cosyncing-cache',
+    executablePath: 'C:\\Acquisition\\cosyncing',
+    acquisitionExecutablePath: 'C:\\Acquisition\\cosyncing',
+    distribution: 'bun-js',
+    runtimePath: 'C:\\Tools\\bun.exe',
+    webDir: 'C:\\Acquisition\\web',
+    environmentEntries: [['COSYNCING_HOME', 'C:\\Users\\Fixture\\.cosyncing']],
+    backend: new WindowsTaskSchedulerPowerShellBackend(executor),
+    taskSchedulerReceiptResources: [
+      { id: WINDOWS_TASK_RESOURCE_ID, kind: 'service', target: identity.taskPath,
+        ownership: { proof: 'receipt', marker: identity.ownershipMarker } },
+      { id: WINDOWS_SID_FOLDER_RESOURCE_ID, kind: 'other', target: identity.sidFolderPath,
+        ownership: { proof: 'receipt' } },
+      { id: 'service-environment', kind: 'environment-file', target: paths.environmentPath,
+        ownership: { proof: 'receipt', marker: 'version-1' } },
+    ],
+    environmentState: () => 'current',
+    stageFiles: () => { filesystemState = 'current'; },
+    filesystemState: () => {
+      if (filesystemThrows) throw new Error('filesystem inspection failed');
+      return filesystemState;
+    },
+  });
+
+  check('a provider that has not inspected yet claims nothing',
+    provider.ownership().definition === 'unknown' && provider.ownership().environment === 'unknown',
+    `${provider.ownership().definition}/${provider.ownership().environment}`);
+
+  await provider.installDefinition();
+  await provider.inspect();
+  const afterSuccess = provider.ownership();
+  check('a completed inspection publishes the verdict it derived',
+    afterSuccess.definition === 'owned' && afterSuccess.environment === 'owned',
+    `${afterSuccess.definition}/${afterSuccess.environment}`);
+
+  filesystemThrows = true;
+  let threw = false;
+  try { await provider.inspect(); } catch { threw = true; }
+  const afterFailure = provider.ownership();
+  check('an inspection that throws after classifying leaves unknown, not the previous owned verdict',
+    threw && afterFailure.definition === 'unknown' && afterFailure.environment === 'unknown',
+    `threw=${threw} ${afterFailure.definition}/${afterFailure.environment}`);
 }
 
 const failed = results.filter((result) => !result.ok);

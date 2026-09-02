@@ -1,18 +1,18 @@
 import { randomBytes } from 'node:crypto';
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
   lstatSync,
-  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { setupStateHome } from './setup-state.ts';
-import { ensureOwnerOnlyDirectory, inspectOwnerOnlyFile } from '../security/secure-files.ts';
+import {
+  createOwnerOnlyFileExclusive,
+  ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
+} from '../security/secure-files.ts';
 
 export const INSTALLATION_LOCK_SCHEMA_VERSION = 1 as const;
 export const INSTALLATION_LOCK_FILENAME = 'installation.lock';
@@ -76,17 +76,6 @@ function parseRecord(path: string): InstallationLockRecord {
   return record as unknown as InstallationLockRecord;
 }
 
-function writeExclusive(path: string, record: InstallationLockRecord): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'wx', 0o600);
-    writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 /** Acquire the one cross-command mutation lock, recovering only a parseable record whose PID is gone. */
 export function acquireInstallationLock(options: {
   command: InstallationMutation;
@@ -118,11 +107,10 @@ export function acquireInstallationLock(options: {
     command: options.command,
     acquiredAt: (options.now?.() ?? new Date()).toISOString(),
   };
-  try {
-    writeExclusive(path, record);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new InstallationLockError('busy');
-    throw error;
+  // The shared primitive is the only creation path that is owner-only on every supported host; a private
+  // openSync would leave the lock carrying inherited Windows access and fail its own inspectOwnerOnlyFile.
+  if (createOwnerOnlyFileExclusive(path, `${JSON.stringify(record, null, 2)}\n`) === 'exists') {
+    throw new InstallationLockError('busy');
   }
 
   let released = false;

@@ -7,6 +7,7 @@
  * Run: `bun run packages/typescript/broker/src/runtime/runtime.ts`  (or `bun run broker`)
  * Source-development env: PORT (7734), COSYNCING_MACHINE, OPENCODE_URL.
  */
+import { assertSupportedBrokerHost } from './assert-supported-host.ts';
 import os from 'node:os';
 import { closeSync, createReadStream, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -377,6 +378,8 @@ export function overlayFreshTerminalPresence(info: SessionInfo, fresh: readonly 
 
 /** Start the broker daemon. Importing this module alone performs no runtime or filesystem mutation. */
 export function startBrokerRuntime(): BrokerRuntime {
+  // First, before any durable write below: an unqualified host is refused at START, not at import.
+  assertSupportedBrokerHost();
 let server: Server<any> | undefined;
 let shuttingDown = false;
 const LOG_PREFIX = `[${PRODUCT_IDENTITY.productName}]`;

@@ -2,6 +2,11 @@ import { copyFileSync, mkdirSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
+import {
+  inspectOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
+  ownerOnlyMode,
+} from '../../src/security/secure-files.ts';
 
 const SAFE_HOST_ENVIRONMENT_KEYS = new Set([
   'CI',
@@ -22,6 +27,31 @@ const SAFE_HOST_ENVIRONMENT_KEYS = new Set([
 ]);
 
 /**
+ * Machine-scoped Windows variables that a spawned process cannot run without.
+ *
+ * The allowlist above is POSIX-shaped: it names HOME's neighbours and nothing Windows needs. A
+ * fixture built from it on Windows hands its broker an environment with no `SystemRoot` (winsock
+ * initialisation reads it), no `ComSpec` (spawning through cmd.exe), and — the one that matters most
+ * to this repository — no `PATHEXT`, which is the mechanism by which an npm-installed agent resolves
+ * to its `.cmd` shim at all. The whole batch-shim ownership problem is invisible to a fixture that
+ * cannot resolve a shim in the first place.
+ *
+ * These are properties of the machine, not of the operator: they are identical for every user on the
+ * host and carry nothing personal, which is why they are inherited rather than synthesised. The
+ * per-user locations are NOT here; they are owned below, pointed at the fixture root.
+ */
+const SAFE_WINDOWS_HOST_ENVIRONMENT_KEYS = new Set([
+  'ComSpec',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+  'PATHEXT',
+  'PROCESSOR_ARCHITECTURE',
+  'SystemDrive',
+  'SystemRoot',
+  'windir',
+]);
+
+/**
  * Where a fixture's adapter endpoints point when nothing sets them.
  *
  * Port 1 on loopback: nothing binds it, and a connection is refused
@@ -33,6 +63,14 @@ const UNROUTABLE_FIXTURE_ORIGIN = 'http://127.0.0.1:1';
 export interface IsolatedFixtureEnvironmentOptions {
   source?: NodeJS.ProcessEnv;
   overrides?: NodeJS.ProcessEnv;
+  /**
+   * Which platform's environment shape to build. Defaults to the host.
+   *
+   * A parameter rather than a direct `process.platform` read so the Windows shape is reachable from
+   * a test on any host: an isolation rule that only its own platform can check is a rule nobody
+   * checks until it has already leaked.
+   */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -45,10 +83,24 @@ export function isolatedBrokerFixtureEnvironment(
 ): NodeJS.ProcessEnv {
   const root = resolve(fixtureRoot);
   const source = options.source ?? process.env;
+  const platform = options.platform ?? process.platform;
   const environment: NodeJS.ProcessEnv = {};
   for (const key of SAFE_HOST_ENVIRONMENT_KEYS) {
     const value = source[key];
     if (value !== undefined) environment[key] = value;
+  }
+  if (platform === 'win32') {
+    // Windows environment names are case-insensitive, and the case a variable arrives in is the
+    // case whoever set it chose. Node's own `process.env` folds case for us, but `options.source`
+    // is an ordinary object in the tests that exercise this, so the lookup folds it here instead of
+    // betting on the caller.
+    const byFoldedName = new Map(
+      Object.entries(source).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    for (const key of SAFE_WINDOWS_HOST_ENVIRONMENT_KEYS) {
+      const value = byFoldedName.get(key.toLowerCase());
+      if (value !== undefined) environment[key] = value;
+    }
   }
 
   const owned = {
@@ -64,6 +116,19 @@ export function isolatedBrokerFixtureEnvironment(
     COSYNCING_OMP_AGENT_DIR: join(root, 'omp-agent'),
     COSYNCING_OMP_SESSIONS_ROOT: join(root, 'omp-sessions'),
     COSYNCING_HOME: join(root, 'cosyncing-home'),
+    // Windows per-user locations, owned for the same reason HOME is owned above.
+    //
+    // Leaving them unset does not isolate anything: `os.homedir()` falls back to the OS, which
+    // answers with the operator's REAL profile directory, so an unset `USERPROFILE` reaches the same
+    // place an inherited one would — just without saying so. They are pointed at the fixture root so
+    // a suite that writes to the profile writes here.
+    ...(platform === 'win32'
+      ? {
+        USERPROFILE: join(root, 'home'),
+        APPDATA: join(root, 'appdata', 'Roaming'),
+        LOCALAPPDATA: join(root, 'appdata', 'Local'),
+      }
+      : {}),
   };
   for (const directory of Object.values(owned)) {
     mkdirSync(directory, { recursive: true });
@@ -435,6 +500,26 @@ export interface FixtureBrokerChild {
   exited: Promise<number>;
 }
 
+/** How much of a dead broker's output travels with the failure. Its refusal prints early. */
+export const FIXTURE_FAILED_START_OUTPUT_BUDGET = 4_000;
+
+/**
+ * The start failure, carrying whatever the child said before it died.
+ *
+ * Returned rather than thrown so the call site still reads as a `throw`, and
+ * the original is kept as `cause` so nothing that inspected the old error stops
+ * working.
+ */
+function failedStartError(error: unknown, captured: string | undefined): unknown {
+  const said = captured?.trim();
+  if (!said) return error;
+  const tail = said.length > FIXTURE_FAILED_START_OUTPUT_BUDGET
+    ? said.slice(0, FIXTURE_FAILED_START_OUTPUT_BUDGET) + '\n[...truncated]'
+    : said;
+  const message = `${(error as Error)?.message ?? String(error)}\n--- broker output ---\n${tail}`;
+  return new Error(message, { cause: error });
+}
+
 /**
  * How long a fixture broker may be alive, silent, and not listening before the
  * start is treated as STALLED rather than slow.
@@ -636,9 +721,17 @@ export async function startHealthyFixtureBroker<C extends FixtureBrokerChild>(
       const settled = options.capture
         ? () => settledProcessOutput(options.capture!(child))
         : options.readSettledOutput && (() => options.readSettledOutput!(child));
-      const output = (await settled?.()) ?? `${(error as Error)?.message ?? ''}`;
+      const captured = await settled?.();
+      const output = captured ?? `${(error as Error)?.message ?? ''}`;
       const collided = await failedOnPortCollision(port, output);
-      if (!collided || bindRetries >= bindCeiling - 1) throw error;
+      // The child's own words are the diagnosis. Reading them and then throwing
+      // the bare `broker exited with code 1` leaves the caller with the fact of
+      // the death and none of its cause, which on a machine nobody can attach
+      // to -- a CI runner -- is the difference between a fixed defect and
+      // another round of guessing. Attached only when there WAS a reader: with
+      // none, `output` is this error's own message and repeating it says
+      // nothing.
+      if (!collided || bindRetries >= bindCeiling - 1) throw failedStartError(error, captured);
       // A survivor must never be left behind a respawn. It still holds whatever
       // it holds, and the next attempt would be racing the corpse of this one.
       if (!reaped) throw new Error(`${UNREAPED_CHILD_PREFIX} on port ${port}; refusing to respawn`);
@@ -777,4 +870,62 @@ export async function fixtureWsUrl(
   );
   return `${wsBaseUrl}/api/sessions/${encodeURIComponent(tool)}/${encodeURIComponent(sessionId)}`
     + `/stream?wsAuthTicket=${encodeURIComponent(ticket)}`;
+}
+
+/**
+ * "Owner-only" is a DACL on Windows and a permission mode on POSIX. Node reports 0o666 or 0o444 for every
+ * file on Windows, so an assertion that a mode equals 0o600 tests the platform rather than the product and
+ * can never pass there. Assert the product's own gate on every host, and keep the exact POSIX bits on the
+ * hosts that have them, so neither platform loses coverage it already had.
+ */
+export function isOwnerOnlyFile(path: string, posixMode = 0o600): boolean {
+  if (inspectOwnerOnlyFile(path).status !== 'ok') return false;
+  return process.platform === 'win32' || ownerOnlyMode(path) === posixMode;
+}
+
+export function isOwnerOnlyDirectory(path: string): boolean {
+  if (inspectOwnerOnlyDirectory(path).status !== 'ok') return false;
+  return process.platform === 'win32' || ownerOnlyMode(path) === 0o700;
+}
+
+/**
+ * The full command line of a LIVE process, for proving a credential never reached it.
+ *
+ * `ps -o args=` is POSIX-only. The Windows equivalent is the CommandLine property of the process's
+ * Win32_Process record, which matters at least as much there: an argument that leaks a token is visible
+ * to any process that can enumerate processes on either platform.
+ *
+ * Returns '' when the process is gone or the command line cannot be read. Callers asserting that a
+ * secret is ABSENT must therefore also assert that something was actually read — '' contains no
+ * credential and would satisfy the absence test without having looked at anything.
+ */
+export function processCommandLine(pid: number): string {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return '';
+  if (process.platform !== 'win32') {
+    return Bun.spawnSync(['ps', '-o', 'args=', '-p', String(pid)]).stdout.toString();
+  }
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+  if (!systemRoot) return '';
+  const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  // The pid is validated as a positive integer above, so it cannot carry PowerShell syntax into the filter.
+  const script = `$ErrorActionPreference='Stop'\n`
+    + `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine\n`;
+  const probe = Bun.spawnSync(
+    [powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    { stdout: 'pipe', stderr: 'pipe' },
+  );
+  return probe.stdout.toString();
+}
+
+/**
+ * The counterpart to isOwnerOnlyFile: a file the product has NOT tightened.
+ *
+ * Several checks prove a negative — that setup refused to launder a malformed file, or that a rollback
+ * put loose permissions back. On POSIX that is an exact mode; on Windows there are no permission bits,
+ * and the equivalent of a loose file is one the owner-only gate still rejects because it carries the
+ * access it inherited. Asserting the gate on both hosts keeps the negative meaningful on each.
+ */
+export function isLooseFile(path: string, posixMode = 0o644): boolean {
+  if (inspectOwnerOnlyFile(path).status === 'ok') return false;
+  return process.platform === 'win32' || ownerOnlyMode(path) === posixMode;
 }
