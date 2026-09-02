@@ -509,5 +509,40 @@ await test('withholding a report that never had projects changes nothing', async
   assert.equal(withheld.insightsUnavailable, 'unsupported');
 });
 
+await test('the scan cap holds through the hand-off gap', async () => {
+  const cache = new TokdashReportCache({ maxConcurrentScans: 2 });
+  let running = 0;
+  let peak = 0;
+  const readings: number[] = [];
+
+  const load = (index: number) => cache.load(
+    { from: `2026-01-${String((index % 28) + 1).padStart(2, '0')}`, to: '2026-12-31' },
+    async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      readings.push(cache.runningScans);
+      await Promise.resolve();
+      running -= 1;
+      const { fetch: upstream } = stubFetch();
+      return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+    },
+  );
+
+  const started: Promise<unknown>[] = [];
+  for (let index = 0; index < 24; index += 1) {
+    started.push(load(index));
+    // Arriving continuously rather than all at once is the point: a caller that
+    // lands between a release and the woken waiter's continuation is exactly the
+    // window in which a slot could be counted twice.
+    await Promise.resolve();
+  }
+  await Promise.all(started);
+
+  assert.equal(peak <= 2, true, `peak concurrent scans was ${peak}`);
+  assert.equal(Math.max(...readings) <= 2, true, `cap read ${Math.max(...readings)}`);
+  assert.equal(cache.runningScans, 0, 'every slot is accounted for');
+  assert.equal(cache.queuedScans, 0, 'nothing is left waiting');
+});
+
 console.log(`\nTokdash report: ${passes} passed, ${failures} failed`);
 if (failures) process.exit(1);

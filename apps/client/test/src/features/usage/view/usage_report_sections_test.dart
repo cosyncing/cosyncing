@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
 import 'package:flutter/material.dart';
@@ -573,6 +574,92 @@ void main() {
         find.byKey(const Key('usage-export-projectDetail')),
         findsOneWidget,
       );
+    });
+  });
+
+  group('the activity grid', () {
+    Map<String, dynamic> allTime() {
+      // The shape a live all-time window actually returns: tokdash echoes the
+      // requested floor and counts every day in it, while serving rows only for
+      // the days it has.
+      final data = sampleReport();
+      (data['range']! as Map<String, dynamic>)
+        ..['from'] = '2000-01-01'
+        ..['to'] = '2026-09-01'
+        ..['days'] = 9742;
+      data['firsts'] = {'firstActiveDay': '2025-11-19'};
+      return data;
+    }
+
+    test(
+      'the grid starts at the first served day, not the requested floor',
+      () {
+        final report = UsageReportResponse.fromJson({
+          'ok': true,
+          'data': allTime(),
+        }).report!;
+        final requested = DateTime.parse('2000-01-01');
+
+        final start = usageHeatmapStart(requested, report);
+        expect(start.isAfter(requested), isTrue);
+        // Drawn from 2000 this is ~1,392 non-lazy week columns, 97% of them
+        // holes, and a quarter century of empty weeks before the data.
+        final weeks = DateTime.parse('2026-09-01').difference(start).inDays / 7;
+        expect(weeks, lessThan(60));
+      },
+    );
+
+    test('a window with no rows keeps the window it asked for', () {
+      final data = allTime()
+        ..remove('daily')
+        ..remove('firsts');
+      final report = UsageReportResponse.fromJson({
+        'ok': true,
+        'data': data,
+      }).report!;
+      final requested = DateTime.parse('2000-01-01');
+
+      // Nothing served is not evidence about when work started, so the grid
+      // stays the window rather than collapsing to a day.
+      expect(usageHeatmapStart(requested, report), requested);
+    });
+
+    test('a served day before the window does not drag the grid back', () {
+      final report = UsageReportResponse.fromJson({
+        'ok': true,
+        'data': sampleReport(),
+      }).report!;
+      final requested = DateTime.parse('2026-08-15');
+
+      // The month windows already start after their first served row; the grid
+      // must never reach outside the window the report covers.
+      expect(usageHeatmapStart(requested, report), requested);
+    });
+
+    testWidgets('an all-time window renders a grid the reader can reach', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: allTime()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('usage-report-active-days')),
+        findsOneWidget,
+      );
+      // The grid scrolls horizontally, so its own box is the viewport and says
+      // nothing about how much was built. The week Row inside the scroll view
+      // is the intrinsic extent, and that is what the reader has to scroll.
+      final weekRow = find
+          .descendant(
+            of: find.descendant(
+              of: find.byKey(const Key('usage-report-active-days')),
+              matching: find.byType(UsageHeatmap),
+            ),
+            matching: find.byType(Row),
+          )
+          .first;
+      // Untrimmed this is ~1,392 week columns and roughly 10,000px.
+      expect(tester.getSize(weekRow).width, lessThan(2000));
     });
   });
 }

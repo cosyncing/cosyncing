@@ -161,6 +161,32 @@ String usageWindowTitle(
   };
 }
 
+/// The first day the activity grid should draw.
+///
+/// The later of the served window's start and the first day with a served row.
+/// A window whose start predates every record — all-time always does — would
+/// otherwise draw one column per week back to the requested floor.
+///
+/// Falls back to the requested start when nothing is served, which keeps an
+/// empty window rendering as the window it asked for rather than as nothing.
+DateTime usageHeatmapStart(DateTime requestedFrom, UsageReport report) {
+  DateTime? earliest;
+  for (final day in report.daily ?? const <UsageReportDay>[]) {
+    final parsed = DateTime.tryParse(day.date);
+    if (parsed == null) continue;
+    if (earliest == null || parsed.isBefore(earliest)) earliest = parsed;
+  }
+  final firstActive = DateTime.tryParse(report.firsts?.firstActiveDay ?? '');
+  if (firstActive != null &&
+      (earliest == null || firstActive.isBefore(earliest))) {
+    earliest = firstActive;
+  }
+  if (earliest == null || earliest.isBefore(requestedFrom)) {
+    return requestedFrom;
+  }
+  return earliest;
+}
+
 class _UsageReportBody extends StatelessWidget {
   const _UsageReportBody({required this.period, required this.response});
 
@@ -259,9 +285,19 @@ class _ActiveDays extends StatelessWidget {
     final daily = report.daily;
     if (daily == null || daily.isEmpty) return const SizedBox.shrink();
 
-    final from = DateTime.tryParse(report.range.from);
+    final requestedFrom = DateTime.tryParse(report.range.from);
     final to = DateTime.tryParse(report.range.to);
-    if (from == null || to == null) return const SizedBox.shrink();
+    if (requestedFrom == null || to == null) return const SizedBox.shrink();
+
+    // The grid starts where the data does, not where the request did.
+    //
+    // All-time asks from `usageAllTimeFloor`, and tokdash echoes it: a live
+    // all-time window answers `from: 2000-01-01` with `days: 9742` and 233
+    // daily rows. Drawn from the requested day that is ~1,392 non-lazy week
+    // columns, 97% of them holes, and the reader scrolls a quarter century of
+    // empty weeks to reach their own history. The header still prints the
+    // window that was asked for; only the grid is trimmed to what exists.
+    final from = usageHeatmapStart(requestedFrom, report);
 
     final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
     // A year of week columns will not fit any phone, so the cells shrink with

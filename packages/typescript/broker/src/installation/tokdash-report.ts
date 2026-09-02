@@ -817,13 +817,22 @@ export class TokdashReportCache {
       this.#runningScans += 1;
       return;
     }
+    // A woken waiter is handed the slot its releaser held, so it must not take
+    // one of its own: the count was never given back.
     await new Promise<void>((resolve) => this.#waiting.push(resolve));
-    this.#runningScans += 1;
   }
 
   #releaseScanSlot(): void {
+    // Handed over, not returned and re-taken. Resolving a waiter only queues its
+    // continuation, so a decrement here would leave the slot free for the length
+    // of a microtask — long enough for a caller arriving in that gap to take it
+    // as well, and for the count to transiently exceed the cap.
+    const next = this.#waiting.shift();
+    if (next !== undefined) {
+      next();
+      return;
+    }
     this.#runningScans -= 1;
-    this.#waiting.shift()?.();
   }
 
   /** The live entry for a window, or `undefined` when absent or expired. */
