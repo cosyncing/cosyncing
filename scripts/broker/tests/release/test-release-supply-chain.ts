@@ -1100,6 +1100,41 @@ exec /usr/bin/openssl "$@"
       && !existsSync(join(misboundHome, '.cosyncing', 'bin', 'cosyncing')),
     `${misbound.exitCode}: ${misbound.stderr.trim().slice(0, 160)}`);
 
+  // The checksum list refuses a repeated row for one asset; the manifest side must refuse a repeated object
+  // the same way rather than resolving it by taking the first. Reachable only with the signing key, so this
+  // is about the rule being right, not about an exposure.
+  const duplicateRelease = join(root, 'duplicate-manifest-release');
+  cpSync(releaseDirectory, duplicateRelease, { recursive: true });
+  const duplicateManifest = JSON.parse(
+    readFileSync(join(duplicateRelease, 'release-manifest.json'), 'utf8'),
+  );
+  duplicateManifest.artifacts.push({
+    ...duplicateManifest.artifacts[0],
+    name: RELEASE_JAVASCRIPT_APP_NAME,
+    sha256: 'e'.repeat(64),
+  });
+  const duplicateBytes = Buffer.from(`${JSON.stringify(duplicateManifest, null, 2)}\n`, 'utf8');
+  writeFileSync(join(duplicateRelease, 'release-manifest.json'), duplicateBytes);
+  writeFileSync(
+    join(duplicateRelease, 'release-manifest.json.sig'),
+    sign(null, duplicateBytes, privateKey),
+  );
+  const duplicateHome = join(root, 'duplicate-manifest-home');
+  mkdirSync(duplicateHome);
+  const duplicate = await run(['bash', join(duplicateRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: duplicateHome,
+      FAKE_RELEASE_ROOT: duplicateRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a signed manifest that names one asset twice is refused, not resolved to the first entry',
+    duplicate.exitCode !== 0
+      && /signed manifest names cosyncing-app\.js more than once/.test(duplicate.stderr)
+      && !existsSync(join(duplicateHome, '.cosyncing', 'bin', 'cosyncing')),
+    `${duplicate.exitCode}: ${duplicate.stderr.trim().slice(0, 160)}`);
+
   const tamperedManifestRelease = join(root, 'tampered-manifest-release');
   cpSync(releaseDirectory, tamperedManifestRelease, { recursive: true });
   writeFileSync(join(tamperedManifestRelease, 'release-manifest.json'), ' ', { flag: 'a' });

@@ -37,6 +37,20 @@ the protected `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` variable is exactly
 the complete licence set are resolved under
 [Compiled broker distribution readiness](../legal/binary-distribution-readiness.md).
 
+Each release is signed by a key **pair**, not a key: Ed25519 for the manifest a
+broker verifies, and ECDSA P-256 beside it for installers whose crypto library
+cannot load an Ed25519 SPKI — stock macOS LibreSSL, and Windows PowerShell. The
+P-256 signature is published in two encodings of the same signature: raw `r||s`
+for .NET, and a DER SEQUENCE for `openssl dgst -verify`.
+
+The manifest carries one `keyId` for the pair. **Rotate both keys together, under
+one new identifier.** Replacing only one leaves a release whose manifest claims an
+identity that half its signatures no longer belong to, and the failure appears on
+whichever hosts use the key that did not move — macOS and Windows for P-256, every
+Linux host and every self-update for Ed25519. Installers pin both public keys, so
+a rotated pair reaches operators only through a reviewed release, exactly as a
+single key does.
+
 If a signing key may be compromised, stop candidate creation and stable
 promotion, remove affected drafts, revoke the key identifier from the trusted
 key set, rotate protected environment secrets, and publish a security advisory.

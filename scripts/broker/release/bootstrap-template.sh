@@ -142,11 +142,16 @@ printf '%s' "$P256_PUBLIC_KEY_B64" | base64 --decode > "$WORK/release-key-p256.p
 # manifest that named this asset in one object and carried the digest in another. The scan starts at the
 # object whose `name` is this asset and stops at the next `name`, so the two are read from one object or not
 # at all. A manifest whose shape changed would find nothing and fail closed rather than pass loosely.
+#
+# A second object naming the same asset is refused rather than resolved by taking the first, matching how the
+# checksum list treats a repeated row. Neither is reachable without the signing key; a rule that silently
+# picked one of two answers would still be the wrong rule to have written down.
 manifest_digest_for() {
   awk -v want="\"name\": \"$1\"" '
-    index($0, want) { inside = 1; next }
+    index($0, want) { named++; inside = 1; next }
     inside && index($0, "\"name\": \"") { inside = 0 }
-    inside && (at = index($0, "\"sha256\": \"")) { print substr($0, at + 11, 64); exit }
+    inside && !found && (at = index($0, "\"sha256\": \"")) { digest = substr($0, at + 11, 64); found = 1 }
+    END { if (named > 1) exit 2; if (found) print digest }
   ' "$WORK/release-manifest.json"
 }
 
@@ -158,7 +163,8 @@ assert_signed_artifact() {
   signed="$(awk -v asset="$1" '$2 == asset { if (seen++) exit 2; print $1 }' "$WORK/SHA256SUMS")" \
     || fail 'checksum list contains duplicate artifact rows'
   [ "${#signed}" -eq 64 ] || fail "artifact checksum is missing or malformed: $1"
-  stated="$(manifest_digest_for "$1")"
+  stated="$(manifest_digest_for "$1")" \
+    || fail "signed manifest names $1 more than once"
   [ -n "$stated" ] || fail "signed manifest does not name $1"
   [ "$stated" = "$signed" ] \
     || fail "signed manifest and checksum list disagree about $1"
@@ -214,6 +220,10 @@ if [ -n "$SIGNATURE_ALGORITHM" ]; then
 
   grep -Fq "\"version\": \"$VERSION\"" "$WORK/release-manifest.json" \
     || fail 'signed manifest version does not match this pinned installer'
+  # One key id covers both signatures, because the Ed25519 and P-256 keys are one release identity rather
+  # than two independent trust anchors: a release is signed by the pair, and this installer carries the pair.
+  # So the P-256 path verifies with the P-256 key and still asserts the manifest's single identity — they
+  # cannot be rotated apart without also changing this id. See docs/release/broker-release-signing.md.
   grep -Fq "\"keyId\": \"$KEY_ID\"" "$WORK/release-manifest.json" \
     || fail 'signed manifest key id does not match this pinned installer'
 
