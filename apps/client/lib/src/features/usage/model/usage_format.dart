@@ -110,6 +110,32 @@ String formatUsageCountWithShare(
     '${formatCompactCount(count, locale: locale)}'
     ' \u00b7 ${formatUsageShare(share, locale: locale)}';
 
+/// A whole count with locale grouping, e.g. `2,545`.
+///
+/// Session counts are printed in full rather than compacted: `2.5K sessions`
+/// in a sentence reads as an approximation of something that was counted
+/// exactly.
+String formatUsageCount(num value, {String? locale}) {
+  if (value is double && !value.isFinite) return '';
+  return _fixed(value, 0, locale);
+}
+
+/// A percentage magnitude with one decimal, e.g. `15.5%`.
+///
+/// Separate from [formatUsageShare], which drops to whole percents above ten:
+/// the hero delta and the night-owl index are quoted to a tenth in the design,
+/// and rounding 15.5% to 16% would change a stated figure.
+///
+/// Past 100% the tenth is dropped. A first-year comparison against a window
+/// that predates the user's data produces figures in the hundreds of
+/// thousands of percent — a real, served number, but one where a decimal
+/// place is noise rather than precision.
+String formatUsagePercent(double percent, {String? locale}) {
+  if (!percent.isFinite) return '';
+  final magnitude = percent.abs();
+  return '${_fixed(magnitude, magnitude >= 100 ? 0 : 1, locale)}%';
+}
+
 /// A signed period-over-period change, e.g. `+15.5%`.
 String formatUsageDelta(double percent, {String? locale}) {
   if (!percent.isFinite) return '';

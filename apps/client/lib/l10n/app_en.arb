@@ -5043,5 +5043,337 @@
   "usageDayBoundaryNote": "Days begin at this machine's local midnight.",
   "@usageDayBoundaryNote": {
     "description": "Footer note fixing what a day means on these surfaces."
+  },
+  "usageHeroTokens": "tokens",
+  "@usageHeroTokens": {
+    "description": "Unit under the hero token figure."
+  },
+  "usageHeroActiveTime": "active time",
+  "@usageHeroActiveTime": {
+    "description": "Unit under the hero active-time figure."
+  },
+  "usageHeroActiveDays": "active days",
+  "@usageHeroActiveDays": {
+    "description": "Unit under the hero active-days figure."
+  },
+  "usageEstimatedShort": "est.",
+  "@usageEstimatedShort": {
+    "description": "Pill on the hero active-time cell; the estimation rule is on its tooltip."
+  },
+  "usageHeroSentence": "In {period} you drove {sessions} sessions and used {tokens} tokens ({cost}), {delta} than {previous}.",
+  "@usageHeroSentence": {
+    "description": "The one sentence carrying the report voice. Every part is a served figure; the sentence adds no claim of its own.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "≈12,977 at API list prices — not your bill"
+      },
+      "delta": {
+        "type": "String",
+        "example": "15.5% more"
+      },
+      "previous": {
+        "type": "String",
+        "example": "July"
+      }
+    }
+  },
+  "usageHeroSentencePlain": "In {period} you drove {sessions} sessions and used {tokens} tokens ({cost}).",
+  "@usageHeroSentencePlain": {
+    "description": "The hero sentence for a period with nothing to compare against. A missing comparison is dropped, never rendered as a zero delta.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "$12,977"
+      }
+    }
+  },
+  "usageDeltaMore": "{percent} more",
+  "@usageDeltaMore": {
+    "description": "Rising half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageDeltaLess": "{percent} less",
+  "@usageDeltaLess": {
+    "description": "Falling half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageActiveDaysTitle": "Active days",
+  "@usageActiveDaysTitle": {
+    "description": "Heatmap section heading."
+  },
+  "usageStreakLine": "{streak}-day streak · {active} of {total} days active · busiest day {date} ({tokens} tokens)",
+  "@usageStreakLine": {
+    "description": "Line under the heatmap, entirely from the served streaks and firsts facets.",
+    "placeholders": {
+      "streak": {
+        "type": "String",
+        "example": "171"
+      },
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageDaysBusiestLine": "{active} of {total} days active · busiest day {date} ({tokens} tokens)",
+  "@usageDaysBusiestLine": {
+    "description": "The heatmap line for a window that has already closed. A *current* streak is a fact about today, so printing it beside a past month would attach a number to a window it does not describe.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageStreakLineShort": "{active} of {total} days active",
+  "@usageStreakLineShort": {
+    "description": "The streak line when the facets served no streak or busiest day.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      }
+    }
+  },
+  "usageLegendLess": "Less",
+  "@usageLegendLess": {
+    "description": "Left end of the heatmap legend."
+  },
+  "usageLegendMore": "More",
+  "@usageLegendMore": {
+    "description": "Right end of the heatmap legend."
+  },
+  "usagePodiumTitleWeek": "Top of the week",
+  "@usagePodiumTitleWeek": {
+    "description": "Podium heading for the week period."
+  },
+  "usagePodiumTitleMonth": "Top of the month",
+  "@usagePodiumTitleMonth": {
+    "description": "Podium heading for the month period."
+  },
+  "usagePodiumTitleYear": "Top of the year",
+  "@usagePodiumTitleYear": {
+    "description": "Podium heading for the year period."
+  },
+  "usagePodiumTitleAllTime": "All-time top",
+  "@usagePodiumTitleAllTime": {
+    "description": "Podium heading for the all-time period."
+  },
+  "usagePodiumHarness": "Top harness",
+  "@usagePodiumHarness": {
+    "description": "Podium tile label for the leading harness."
+  },
+  "usagePodiumProject": "Top project",
+  "@usagePodiumProject": {
+    "description": "Podium tile label for the leading project."
+  },
+  "usagePodiumHarnessDetail": "{sessions} sessions · {hours}",
+  "@usagePodiumHarnessDetail": {
+    "description": "Sub-line on the harness podium tile.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "119"
+      },
+      "hours": {
+        "type": "String",
+        "example": "220.5h"
+      }
+    }
+  },
+  "usagePodiumProjectNote": "{count} projects · ranked by tokens · {unattributed} unattributed · {gap} from sources with no project records",
+  "@usagePodiumProjectNote": {
+    "description": "Reconciles the project facet against the period total, so the podium share cannot be read as the whole picture.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "41"
+      },
+      "unattributed": {
+        "type": "String",
+        "example": "0.8%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "4.1%"
+      }
+    }
+  },
+  "usageWhenTitle": "When you work",
+  "@usageWhenTitle": {
+    "description": "Hour-of-day section heading."
+  },
+  "usageWhenTz": "Local time · {zone}",
+  "@usageWhenTz": {
+    "description": "Names the zone the hour buckets were cut in; the buckets are meaningless without it.",
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "BST"
+      }
+    }
+  },
+  "usageWhenPeakHour": "Peak hour",
+  "@usageWhenPeakHour": {
+    "description": "Peak-hour row label."
+  },
+  "usageWhenNightOwl": "Night-owl index",
+  "@usageWhenNightOwl": {
+    "description": "Night-share row label."
+  },
+  "usageWhenNightNote": "share of tokens, {window}",
+  "@usageWhenNightNote": {
+    "description": "Names the served night window rather than implying a fixed one.",
+    "placeholders": {
+      "window": {
+        "type": "String",
+        "example": "22:00 – 02:00"
+      }
+    }
+  },
+  "usageWhenPeakDay": "Peak day",
+  "@usageWhenPeakDay": {
+    "description": "Peak-weekday row label."
+  },
+  "usageWhenBlocked": "Hour-of-day data unavailable. tokdash on this machine does not serve the insights hourly/weekday facets (they landed in 2.5.0), so this section has no honest source and collapses to this notice.",
+  "@usageWhenBlocked": {
+    "description": "Honest degradation when the insights facets are absent: the section says what is missing instead of drawing an empty chart."
+  },
+  "usageHourRange": "{from} – {to}",
+  "@usageHourRange": {
+    "description": "An hour window, e.g. the peak hour.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "15:00"
+      },
+      "to": {
+        "type": "String",
+        "example": "16:00"
+      }
+    }
+  },
+  "usageByAgent": "By agent",
+  "@usageByAgent": {
+    "description": "Per-agent table section heading."
+  },
+  "usageColAgent": "Agent",
+  "@usageColAgent": {
+    "description": "Table column: tool."
+  },
+  "usageColSessions": "Sessions",
+  "@usageColSessions": {
+    "description": "Table column: session count."
+  },
+  "usageColIn": "In",
+  "@usageColIn": {
+    "description": "Table column: input tokens."
+  },
+  "usageColOut": "Out",
+  "@usageColOut": {
+    "description": "Table column: output tokens."
+  },
+  "usageColCache": "Cache read",
+  "@usageColCache": {
+    "description": "Table column: cache-read tokens."
+  },
+  "usageColCost": "Cost · API list price",
+  "@usageColCost": {
+    "description": "Table column: the qualifier rides in the header so cells stay bare figures."
+  },
+  "usageColActive": "Active",
+  "@usageColActive": {
+    "description": "Table column: active time."
+  },
+  "usageOtherToolsCount": "Other tools on this machine · {count} sessions",
+  "@usageOtherToolsCount": {
+    "description": "Expander row for tools cosyncing does not adapt.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "48"
+      }
+    }
+  },
+  "usageOtherTools": "Other tools on this machine",
+  "@usageOtherTools": {
+    "description": "The expander row when the active-time API served no session count."
+  },
+  "usageCostFooterNote": "Cost figures are API list-price equivalents, not billed spend.",
+  "@usageCostFooterNote": {
+    "description": "Footer restatement of the cost qualifier, so the page carries it once more outside any single figure."
+  },
+  "usageActiveTimeNote": "Active time excludes idle gaps over {minutes} minutes.",
+  "@usageActiveTimeNote": {
+    "description": "Footer note; the gap is served, never assumed.",
+    "placeholders": {
+      "minutes": {
+        "type": "String",
+        "example": "5"
+      }
+    }
   }
 }

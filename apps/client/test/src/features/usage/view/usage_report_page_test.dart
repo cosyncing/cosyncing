@@ -47,6 +47,7 @@ void main() {
     UsageReportResponse? response,
     Locale locale = const Locale('en'),
     Brightness brightness = Brightness.light,
+    Size size = const Size(1000, 2400),
   }) {
     final spec = themeSpecById(kDefaultThemeId);
     final tokens = brightness == Brightness.dark ? spec.dark : spec.light;
@@ -60,7 +61,10 @@ void main() {
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: buildAppTheme(tokens, brightness),
-        home: const UsageReportPage(),
+        home: MediaQuery(
+          data: MediaQueryData(size: size),
+          child: const UsageReportPage(),
+        ),
       ),
     );
   }
@@ -73,7 +77,7 @@ void main() {
 
     expect(find.text('Usage history is unavailable.'), findsOneWidget);
     // Zero tokens and no reading are different claims, and only one is true.
-    expect(find.byKey(const Key('usage-report-totals')), findsNothing);
+    expect(find.byKey(const Key('usage-report-hero')), findsNothing);
     expect(find.textContaining('0'), findsNothing);
   });
 
@@ -88,7 +92,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Usage history is unavailable.'), findsOneWidget);
-    expect(find.byKey(const Key('usage-report-totals')), findsNothing);
+    expect(find.byKey(const Key('usage-report-hero')), findsNothing);
     expect(find.textContaining('19.9B'), findsNothing);
   });
 
@@ -98,7 +102,7 @@ void main() {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('usage-report-totals')), findsOneWidget);
+    expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
     expect(find.text('19.9B'), findsOneWidget);
 
     // The scope is the machine, never "your cosyncing sessions": tokdash sees
@@ -120,7 +124,7 @@ void main() {
     // tokdash reports an API-equivalent figure, not money spent on a plan.
     expect(
       find.textContaining('at API list prices — not your bill'),
-      findsOneWidget,
+      findsWidgets,
     );
     expect(find.text(r'$12,977'), findsNothing, reason: 'never bare');
   });
@@ -145,7 +149,7 @@ void main() {
 
     expect(find.textContaining('kimi, grok'), findsOneWidget);
     // A short total is still a total: the report renders beside the warning.
-    expect(find.byKey(const Key('usage-report-totals')), findsOneWidget);
+    expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
   });
 
   testWidgets('the period switcher offers the four report periods', (
@@ -194,7 +198,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('19.9B'), findsOneWidget);
-    expect(find.textContaining('非实际账单'), findsOneWidget);
+    // The qualifier appears wherever a cost does — the sentence, the podium
+    // tile, the footer — and never once without one.
+    expect(find.textContaining('非实际账单'), findsWidgets);
     expect(find.textContaining('本机全部 agent 活动'), findsOneWidget);
   });
 }

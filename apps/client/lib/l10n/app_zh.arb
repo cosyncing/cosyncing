@@ -1980,5 +1980,337 @@
   "usageDayBoundaryNote": "每日按本机零点划分。",
   "@usageDayBoundaryNote": {
     "description": "Footer note fixing what a day means on these surfaces."
+  },
+  "usageHeroTokens": "token",
+  "@usageHeroTokens": {
+    "description": "Unit under the hero token figure."
+  },
+  "usageHeroActiveTime": "活跃时间",
+  "@usageHeroActiveTime": {
+    "description": "Unit under the hero active-time figure."
+  },
+  "usageHeroActiveDays": "活跃天数",
+  "@usageHeroActiveDays": {
+    "description": "Unit under the hero active-days figure."
+  },
+  "usageEstimatedShort": "估算",
+  "@usageEstimatedShort": {
+    "description": "Pill on the hero active-time cell; the estimation rule is on its tooltip."
+  },
+  "usageHeroSentence": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}），比{previous}{delta}。",
+  "@usageHeroSentence": {
+    "description": "The one sentence carrying the report voice. Every part is a served figure; the sentence adds no claim of its own.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "≈12,977 at API list prices — not your bill"
+      },
+      "delta": {
+        "type": "String",
+        "example": "15.5% more"
+      },
+      "previous": {
+        "type": "String",
+        "example": "July"
+      }
+    }
+  },
+  "usageHeroSentencePlain": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}）。",
+  "@usageHeroSentencePlain": {
+    "description": "The hero sentence for a period with nothing to compare against. A missing comparison is dropped, never rendered as a zero delta.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "$12,977"
+      }
+    }
+  },
+  "usageDeltaMore": "多 {percent}",
+  "@usageDeltaMore": {
+    "description": "Rising half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageDeltaLess": "少 {percent}",
+  "@usageDeltaLess": {
+    "description": "Falling half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageActiveDaysTitle": "活跃天数",
+  "@usageActiveDaysTitle": {
+    "description": "Heatmap section heading."
+  },
+  "usageStreakLine": "连续编程 {streak} 天 · {total} 天中 {active} 天有记录 · 最忙的一天 {date}（{tokens} token）",
+  "@usageStreakLine": {
+    "description": "Line under the heatmap, entirely from the served streaks and firsts facets.",
+    "placeholders": {
+      "streak": {
+        "type": "String",
+        "example": "171"
+      },
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageDaysBusiestLine": "{total} 天中 {active} 天有记录 · 最忙的一天 {date}（{tokens} token）",
+  "@usageDaysBusiestLine": {
+    "description": "The heatmap line for a window that has already closed. A *current* streak is a fact about today, so printing it beside a past month would attach a number to a window it does not describe.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageStreakLineShort": "{total} 天中 {active} 天有记录",
+  "@usageStreakLineShort": {
+    "description": "The streak line when the facets served no streak or busiest day.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      }
+    }
+  },
+  "usageLegendLess": "少",
+  "@usageLegendLess": {
+    "description": "Left end of the heatmap legend."
+  },
+  "usageLegendMore": "多",
+  "@usageLegendMore": {
+    "description": "Right end of the heatmap legend."
+  },
+  "usagePodiumTitleWeek": "本周之最",
+  "@usagePodiumTitleWeek": {
+    "description": "Podium heading for the week period."
+  },
+  "usagePodiumTitleMonth": "本月之最",
+  "@usagePodiumTitleMonth": {
+    "description": "Podium heading for the month period."
+  },
+  "usagePodiumTitleYear": "本年之最",
+  "@usagePodiumTitleYear": {
+    "description": "Podium heading for the year period."
+  },
+  "usagePodiumTitleAllTime": "历来之最",
+  "@usagePodiumTitleAllTime": {
+    "description": "Podium heading for the all-time period."
+  },
+  "usagePodiumHarness": "最常用 harness",
+  "@usagePodiumHarness": {
+    "description": "Podium tile label for the leading harness."
+  },
+  "usagePodiumProject": "投入最多的项目",
+  "@usagePodiumProject": {
+    "description": "Podium tile label for the leading project."
+  },
+  "usagePodiumHarnessDetail": "{sessions} 个会话 · {hours}",
+  "@usagePodiumHarnessDetail": {
+    "description": "Sub-line on the harness podium tile.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "119"
+      },
+      "hours": {
+        "type": "String",
+        "example": "220.5h"
+      }
+    }
+  },
+  "usagePodiumProjectNote": "{count} 个项目 · 按 token 排序 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
+  "@usagePodiumProjectNote": {
+    "description": "Reconciles the project facet against the period total, so the podium share cannot be read as the whole picture.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "41"
+      },
+      "unattributed": {
+        "type": "String",
+        "example": "0.8%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "4.1%"
+      }
+    }
+  },
+  "usageWhenTitle": "你的时间分布",
+  "@usageWhenTitle": {
+    "description": "Hour-of-day section heading."
+  },
+  "usageWhenTz": "本机时区 · {zone}",
+  "@usageWhenTz": {
+    "description": "Names the zone the hour buckets were cut in; the buckets are meaningless without it.",
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "BST"
+      }
+    }
+  },
+  "usageWhenPeakHour": "高峰时段",
+  "@usageWhenPeakHour": {
+    "description": "Peak-hour row label."
+  },
+  "usageWhenNightOwl": "夜猫子指数",
+  "@usageWhenNightOwl": {
+    "description": "Night-share row label."
+  },
+  "usageWhenNightNote": "{window} 的 token 占比",
+  "@usageWhenNightNote": {
+    "description": "Names the served night window rather than implying a fixed one.",
+    "placeholders": {
+      "window": {
+        "type": "String",
+        "example": "22:00 – 02:00"
+      }
+    }
+  },
+  "usageWhenPeakDay": "高峰日",
+  "@usageWhenPeakDay": {
+    "description": "Peak-weekday row label."
+  },
+  "usageWhenBlocked": "按小时数据不可用。本机 tokdash 不提供 insights 的 hourly/weekday 数据（2.5.0 才加入），这一区没有诚实的数据来源，折叠为本提示。",
+  "@usageWhenBlocked": {
+    "description": "Honest degradation when the insights facets are absent: the section says what is missing instead of drawing an empty chart."
+  },
+  "usageHourRange": "{from} – {to}",
+  "@usageHourRange": {
+    "description": "An hour window, e.g. the peak hour.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "15:00"
+      },
+      "to": {
+        "type": "String",
+        "example": "16:00"
+      }
+    }
+  },
+  "usageByAgent": "按 agent",
+  "@usageByAgent": {
+    "description": "Per-agent table section heading."
+  },
+  "usageColAgent": "Agent",
+  "@usageColAgent": {
+    "description": "Table column: tool."
+  },
+  "usageColSessions": "会话",
+  "@usageColSessions": {
+    "description": "Table column: session count."
+  },
+  "usageColIn": "输入",
+  "@usageColIn": {
+    "description": "Table column: input tokens."
+  },
+  "usageColOut": "输出",
+  "@usageColOut": {
+    "description": "Table column: output tokens."
+  },
+  "usageColCache": "缓存读取",
+  "@usageColCache": {
+    "description": "Table column: cache-read tokens."
+  },
+  "usageColCost": "费用 · 目录价",
+  "@usageColCost": {
+    "description": "Table column: the qualifier rides in the header so cells stay bare figures."
+  },
+  "usageColActive": "活跃",
+  "@usageColActive": {
+    "description": "Table column: active time."
+  },
+  "usageOtherToolsCount": "本机其他工具 · {count} 个会话",
+  "@usageOtherToolsCount": {
+    "description": "Expander row for tools cosyncing does not adapt.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "48"
+      }
+    }
+  },
+  "usageOtherTools": "本机其他工具",
+  "@usageOtherTools": {
+    "description": "The expander row when the active-time API served no session count."
+  },
+  "usageCostFooterNote": "费用为 API 目录价估算，非实际账单。",
+  "@usageCostFooterNote": {
+    "description": "Footer restatement of the cost qualifier, so the page carries it once more outside any single figure."
+  },
+  "usageActiveTimeNote": "活跃时间不计超过 {minutes} 分钟的空闲。",
+  "@usageActiveTimeNote": {
+    "description": "Footer note; the gap is served, never assumed.",
+    "placeholders": {
+      "minutes": {
+        "type": "String",
+        "example": "5"
+      }
+    }
   }
 }

@@ -2,10 +2,16 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_table.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_hero.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_podium.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -176,6 +182,7 @@ class _UsageReportBody extends StatelessWidget {
     }
 
     final locale = Localizations.localeOf(context).toLanguageTag();
+    final active = report.activeTime;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -195,11 +202,158 @@ class _UsageReportBody extends StatelessWidget {
               usagePeriodLabel(l10n, period).toLowerCase(),
             ),
           )
-        else
-          _Totals(report: report, locale: locale),
+        else ...[
+          UsageHero(
+            period: period,
+            report: report,
+            periodLabel: usageWindowTitle(l10n, period, report.range, locale),
+            locale: locale,
+            activeTimeTooltip: active == null
+                ? null
+                : usageEstimatedTip(l10n, active),
+          ),
+          const SizedBox(height: 24),
+          _ActiveDays(report: report, locale: locale),
+          const SizedBox(height: 24),
+          UsagePodium(period: period, report: report, locale: locale),
+          const SizedBox(height: 24),
+          UsageWhenYouWork(
+            hourly: report.hourly,
+            weekday: report.weekday,
+            timezone: report.timezone,
+            locale: locale,
+          ),
+          const SizedBox(height: 24),
+          UsageAgentTable(tools: report.tools, locale: locale),
+        ],
         const SizedBox(height: 24),
         _Footer(report: report, locale: locale),
       ],
+    );
+  }
+}
+
+/// The heatmap, its legend, and the one line of streak evidence beneath it.
+class _ActiveDays extends StatelessWidget {
+  const _ActiveDays({required this.report, required this.locale});
+
+  final UsageReport report;
+  final String locale;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    final daily = report.daily;
+    if (daily == null || daily.isEmpty) return const SizedBox.shrink();
+
+    final from = DateTime.tryParse(report.range.from);
+    final to = DateTime.tryParse(report.range.to);
+    if (from == null || to == null) return const SizedBox.shrink();
+
+    final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
+    // A year of week columns will not fit any phone, so the cells shrink with
+    // the window rather than the grid dropping weeks it cannot show.
+    final wide = to.difference(from).inDays > 120;
+    final cellSize = wide ? (compact ? 5.0 : 7.0) : (compact ? 10.0 : 12.0);
+
+    // "Still running" is decided against the served window's own end, not the
+    // client clock's idea of the period.
+    final today = DateTime.now();
+    final windowIsOpen = !to.isBefore(
+      DateTime(today.year, today.month, today.day),
+    );
+    final streak = _streakLine(
+      l10n,
+      report,
+      locale,
+      windowIsOpen: windowIsOpen,
+    );
+    return Column(
+      key: const Key('usage-report-active-days'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        UsageSectionTitle(title: l10n.usageActiveDaysTitle),
+        UsageHeatmap(
+          from: from,
+          to: to,
+          intensityByDate: {
+            for (final day in daily)
+              if (day.intensity != null) day.date: day.intensity!,
+          },
+          cellSize: cellSize,
+          gap: wide ? 2 : 3,
+          weekdayLabels: _weekdayLabels(locale, sparse: compact || wide),
+        ),
+        const SizedBox(height: 8),
+        UsageHeatmapLegend(
+          lessLabel: l10n.usageLegendLess,
+          moreLabel: l10n.usageLegendMore,
+        ),
+        if (streak != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            streak,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: context.tokens.textSecondary,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Mon/Wed/Fri only where a full gutter would not fit.
+  static Map<int, String> _weekdayLabels(
+    String locale, {
+    required bool sparse,
+  }) {
+    const shown = [1, 3, 5];
+    return {
+      for (var weekday = 1; weekday <= 7; weekday++)
+        if (!sparse || shown.contains(weekday))
+          weekday: usageWeekdayName(weekday - 1, locale, const []),
+    };
+  }
+
+  /// The line under the heatmap, degrading rather than inventing a figure.
+  ///
+  /// The streak clause only appears on a window that is still running. The
+  /// facet's `currentStreak` is a fact about *today*; printing it beside a
+  /// closed August would attach a number to a window it does not describe —
+  /// and a served `0` beside "31 of 31 days active" reads as a contradiction
+  /// rather than as two different measurements.
+  static String? _streakLine(
+    AppLocalizations l10n,
+    UsageReport report,
+    String locale, {
+    required bool windowIsOpen,
+  }) {
+    final streaks = report.streaks;
+    final activeDays = streaks?.activeDays;
+    final totalDays = streaks?.totalDays;
+    if (activeDays == null || totalDays == null) return null;
+
+    final active = formatCompactCount(activeDays, locale: locale);
+    final total = formatCompactCount(totalDays, locale: locale);
+    final busiest = report.firsts?.busiestDay;
+    final busiestTokens = report.firsts?.busiestDayTokens;
+    final busiestDate = busiest == null ? null : DateTime.tryParse(busiest);
+    if (busiestDate == null || busiestTokens == null) {
+      return l10n.usageStreakLineShort(active, total);
+    }
+
+    final date = DateFormat.MMMd(locale).format(busiestDate);
+    final tokens = formatCompactCount(busiestTokens, locale: locale);
+    final current = streaks?.currentStreak;
+    if (!windowIsOpen || current == null || current <= 0) {
+      return l10n.usageDaysBusiestLine(active, total, date, tokens);
+    }
+    return l10n.usageStreakLine(
+      formatCompactCount(current, locale: locale),
+      active,
+      total,
+      date,
+      tokens,
     );
   }
 }
@@ -285,70 +439,6 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _Totals extends StatelessWidget {
-  const _Totals({required this.report, required this.locale});
-
-  final UsageReport report;
-  final String locale;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    return Column(
-      key: const Key('usage-report-totals'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        UsageFigureRow(
-          label: l10n.usageTokensLabel,
-          value: formatCompactCount(report.totals.tokens, locale: locale),
-          detail: usageTokenBreakdownText(l10n, report.totals, locale),
-        ),
-        UsageFigureRow(
-          label: l10n.usageCostLabel,
-          // Never bare: the qualifier is inside the string, so a future edit
-          // cannot drop it and leave a figure that reads as money spent.
-          value: l10n.usageCostQualified(
-            formatUsageCost(report.totals.cost, locale: locale, compact: true),
-          ),
-        ),
-        UsageFigureRow(
-          label: l10n.usageRequestsLabel,
-          value: formatCompactCount(report.totals.requests, locale: locale),
-        ),
-        if (report.activeTime?.activeMsSum != null)
-          UsageFigureRow(
-            label: l10n.usageAgentTimeLabel,
-            value: l10n.usageHoursValue(
-              formatUsageHours(
-                report.activeTime!.activeMsSum!,
-                locale: locale,
-              ),
-            ),
-            tooltip: usageEstimatedTip(l10n, report.activeTime!),
-            trailing: StatusPill(
-              label: l10n.usageEstimated,
-              color: context.tokens.statusIdle,
-            ),
-          ),
-        if (report.topModelsByTokens.isNotEmpty)
-          UsageFigureRow(
-            label: l10n.usageTopModelLabel,
-            value: report.topModelsByTokens.first.name,
-            detail: report.totals.tokens > 0
-                ? l10n.usageShareOfTokens(
-                    formatUsageShare(
-                      report.topModelsByTokens.first.tokens /
-                          report.totals.tokens,
-                      locale: locale,
-                    ),
-                  )
-                : null,
-          ),
-      ],
-    );
-  }
-}
-
 /// The in/out/cache split, or `null` when the broker served no split.
 String? usageTokenBreakdownText(
   AppLocalizations l10n,
@@ -367,12 +457,17 @@ String? usageTokenBreakdownText(
 }
 
 /// How the agent-time estimate is made, using the served idle-gap cap.
-String usageEstimatedTip(AppLocalizations l10n, UsageReportActiveTime active) {
+String usageEstimatedTip(AppLocalizations l10n, UsageReportActiveTime active) =>
+    l10n.usageActiveEstimatedTip(usageIdleGapMinutes(active));
+
+/// The served idle-gap cap in whole minutes.
+///
+/// Falls back to five only because that is Tokdash's own default; the served
+/// value wins whenever there is one, so the note never states a rule the
+/// broker is not actually applying.
+int usageIdleGapMinutes(UsageReportActiveTime active) {
   final cap = active.gapCapMs;
-  final minutes = cap == null
-      ? 5
-      : (cap / Duration.millisecondsPerMinute).round();
-  return l10n.usageActiveEstimatedTip(minutes);
+  return cap == null ? 5 : (cap / Duration.millisecondsPerMinute).round();
 }
 
 class _Footer extends StatelessWidget {
@@ -384,8 +479,12 @@ class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final active = report.activeTime;
     final notes = <String>[
       l10n.usageDayBoundaryNote,
+      l10n.usageCostFooterNote,
+      if (active != null)
+        l10n.usageActiveTimeNote(usageIdleGapMinutes(active).toString()),
       if (report.coverage != null)
         l10n.usageSourceCount(report.coverage!.sourceCount),
     ];
