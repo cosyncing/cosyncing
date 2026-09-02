@@ -216,12 +216,26 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                             // the same shape the detail route uses, and the
                             // reason the second pane never enters the URL.
                             redirect: (context, state) {
-                              if (!_expandedShowsWorkspace(context)) {
-                                return null;
-                              }
                               final tool = state.pathParameters['tool'] ?? '';
                               final id = state.pathParameters['id'] ?? '';
                               final path = state.uri.queryParameters['path'];
+                              // A file route naming no file is the session it
+                              // belongs to. Left alone it read the workspace
+                              // root, which the broker refuses as
+                              // NOT_REGULAR_FILE, so a truncated link landed
+                              // on an error panel instead of the session the
+                              // rest of the URL already names.
+                              if ((path == null || path.isEmpty) &&
+                                  tool.isNotEmpty &&
+                                  id.isNotEmpty) {
+                                return sessionDetailLocation(
+                                  tool: tool,
+                                  sessionId: id,
+                                );
+                              }
+                              if (!_expandedShowsWorkspace(context)) {
+                                return null;
+                              }
                               if (tool.isEmpty ||
                                   id.isEmpty ||
                                   path == null ||

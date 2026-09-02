@@ -95,14 +95,45 @@ class FilePanesState {
   /// Opens [path] in [session], or activates it when already open.
   FilePanesState opened(SessionDetailKey session, String path) {
     final pane = FilePaneKey(session: session, path: path);
+    final next = <FilePaneKey>[
+      for (final existing in panes)
+        if (existing.key != pane.key) existing,
+      pane,
+    ];
+    final active = <String, String>{..._active, _sessionKey(session): pane.key};
     return FilePanesState(
-      panes: List.unmodifiable([
-        for (final existing in panes)
-          if (existing.key != pane.key) existing,
-        pane,
-      ]),
-      activeBySession: {..._active, _sessionKey(session): pane.key},
+      panes: List.unmodifiable(_bounded(next, active)),
+      activeBySession: active,
     );
+  }
+
+  /// How many file panes the working set keeps.
+  ///
+  /// Closing a session deliberately keeps its files so they come back with it,
+  /// and nothing else prunes them — so without a cap the persisted row grows
+  /// once for every file ever opened in every session that ever existed under
+  /// one broker. 200 is far past any working set a person maintains by hand,
+  /// and reaching it costs the oldest tab in strip order, never one that is
+  /// some session's active file.
+  static const int workingSetLimit = 200;
+
+  /// [next] trimmed to [workingSetLimit], oldest first, active tabs spared.
+  static List<FilePaneKey> _bounded(
+    List<FilePaneKey> next,
+    Map<String, String> active,
+  ) {
+    if (next.length <= workingSetLimit) return next;
+    final spared = active.values.toSet();
+    final trimmed = [...next];
+    var index = 0;
+    while (trimmed.length > workingSetLimit && index < trimmed.length) {
+      if (spared.contains(trimmed[index].key)) {
+        index++;
+        continue;
+      }
+      trimmed.removeAt(index);
+    }
+    return trimmed;
   }
 
   /// Closes one file pane.
@@ -163,15 +194,6 @@ class FilePanesState {
       activeBySession: _active,
     );
   }
-
-  /// Closes every file pane belonging to [session].
-  FilePanesState sessionClosed(SessionDetailKey session) => FilePanesState(
-    panes: List.unmodifiable([
-      for (final pane in panes)
-        if (pane.session != session) pane,
-    ]),
-    activeBySession: {..._active}..remove(_sessionKey(session)),
-  );
 
   Map<String, String> get _active => activeBySession;
 

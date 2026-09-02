@@ -122,16 +122,33 @@ void main() {
       expect(state.isEmpty, isFalse);
     });
 
-    test('closing a session takes its files and nothing else', () {
-      var state = opened([
-        (_a, 'lib/one.dart'),
-        (_b, 'lib/other.dart'),
-        (_a, 'lib/two.dart'),
-      ]);
-      state = state.sessionClosed(_a);
-      expect(state.forSession(_a), isEmpty);
-      expect(state.activeFor(_a), isNull);
+    test('the working set stops growing at the bound', () {
+      // Closing a session keeps its files so they come back with it, and
+      // nothing else prunes them: without this cap the persisted row grows
+      // once per file ever opened under one broker.
+      const limit = FilePanesState.workingSetLimit;
+      var state = FilePanesState.empty;
+      for (var index = 0; index < limit + 20; index++) {
+        state = state.opened(_a, 'lib/file$index.dart');
+      }
+      expect(state.panes, hasLength(limit));
+      // The oldest go, in strip order, and the newest stay.
+      expect(state.panes.first.path, 'lib/file20.dart');
+      expect(state.panes.last.path, 'lib/file${limit + 19}.dart');
+    });
+
+    test('the bound never takes a session away from under its reader', () {
+      const limit = FilePanesState.workingSetLimit;
+      var state = FilePanesState.empty;
+      state = state.opened(_b, 'lib/pinned.dart');
+      for (var index = 0; index < limit + 20; index++) {
+        state = state.opened(_a, 'lib/file$index.dart');
+      }
+      // _b's only file is its active one, so trimming must skip it rather
+      // than collapse a pane the other session is still reading.
       expect(state.forSession(_b), hasLength(1));
+      expect(state.activeFor(_b)?.path, 'lib/pinned.dart');
+      expect(state.panes, hasLength(limit));
     });
 
     test('reordering one session leaves every other session alone', () {

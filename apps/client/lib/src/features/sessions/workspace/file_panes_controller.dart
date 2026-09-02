@@ -102,18 +102,6 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
   Future<void> reorder(SessionDetailKey session, int oldIndex, int newIndex) =>
       _mutate((current) => current.reordered(session, oldIndex, newIndex));
 
-  /// Closes every file pane belonging to [session].
-  Future<void> closeSession(SessionDetailKey session) async {
-    await _mutate((current) => current.sessionClosed(session));
-    final sessionKey = SessionPaneKey(session: session).key;
-    final focused = ref.read(focusedPaneProvider);
-    if (focused != null &&
-        isWorkspaceFilePaneKey(focused) &&
-        workspacePaneSessionKey(focused) == sessionKey) {
-      _releaseFocus(focused);
-    }
-  }
-
   /// Keeps a focused file pane pointing at the file it is actually showing.
   ///
   /// Focus moves on a click — that is the whole rule — but the pane's content

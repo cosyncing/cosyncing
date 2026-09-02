@@ -104,12 +104,20 @@ class FileSourceBody extends StatelessWidget {
           itemBuilder: (context, index) => Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              FileSourceGutterCell(
-                number: index + 1,
-                anchored: index + 1 == anchor,
-                tokens: tokens,
-                style: style,
-                height: extent,
+              // Non-wrap keeps the gutter outside the `SelectionArea` as a
+              // sibling; wrapped rows cannot, because the number has to sit
+              // beside its own wrapped block. Without this the drag that
+              // copies two wrapped lines also copies the two line numbers
+              // between them, and the pane's rule is that a drag copies
+              // source and not chrome.
+              SelectionContainer.disabled(
+                child: FileSourceGutterCell(
+                  number: index + 1,
+                  anchored: index + 1 == anchor,
+                  tokens: tokens,
+                  style: style,
+                  height: extent,
+                ),
               ),
               Expanded(
                 child: Padding(
@@ -123,14 +131,7 @@ class FileSourceBody extends StatelessWidget {
       );
     }
 
-    // Monospace makes the content width exact rather than a guess: one glyph
-    // advance times the longest line, with no need to measure 20k rows.
-    final advance = _monospaceAdvance(context, style);
-    var longest = 0;
-    for (final line in lines) {
-      if (line.length > longest) longest = line.length;
-    }
-    final contentWidth = longest * advance + 16;
+    final contentWidth = _contentWidth(context, style) + 16;
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -183,6 +184,54 @@ class FileSourceBody extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// Width of the widest line as it will actually paint.
+  ///
+  /// The character-count estimate is exact for ASCII in a monospace face and
+  /// wrong by roughly 2x for anything the font falls back on — CJK, emoji. It
+  /// is not a cosmetic error: each line is a `maxLines: 1, softWrap: false`
+  /// `Text` inside a box of exactly this width, and the horizontal scroll
+  /// extent is this width too, so an underestimate clips the tail of the line
+  /// and no amount of scrolling brings it back. A Chinese comment in source is
+  /// ordinary, and one is enough to lose the end of the longest line.
+  ///
+  /// Still not 20k `TextPainter` layouts: only lines carrying a code point
+  /// outside ASCII are measured, and the ASCII estimate stands for the rest.
+  /// A file with no wide glyph measures nothing at all.
+  double _contentWidth(BuildContext context, TextStyle style) {
+    final advance = _monospaceAdvance(context, style);
+    var widest = 0.0;
+    final painter = TextPainter(
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    );
+    for (final line in lines) {
+      if (!_needsMeasuring(line)) {
+        final estimated = line.length * advance;
+        if (estimated > widest) widest = estimated;
+        continue;
+      }
+      painter
+        ..text = TextSpan(text: line, style: style)
+        ..layout();
+      if (painter.width > widest) widest = painter.width;
+    }
+    painter.dispose();
+    return widest;
+  }
+
+  /// Whether [line] holds a glyph the monospace advance cannot stand in for.
+  ///
+  /// Plain ASCII is exact in a monospace face. Everything else — a wide CJK
+  /// glyph, an emoji, a combining mark that takes no width at all — comes from
+  /// a fallback font whose advance is its own business.
+  static bool _needsMeasuring(String line) {
+    for (final unit in line.codeUnits) {
+      if (unit > 0x7f) return true;
+    }
+    return false;
   }
 
   double _monospaceAdvance(BuildContext context, TextStyle style) {

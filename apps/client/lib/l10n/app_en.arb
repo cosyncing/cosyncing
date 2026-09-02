@@ -3589,8 +3589,6 @@
   "@fileViewerRendererPlain": {"description": "Header chip naming the active renderer when the file has no source language."},
   "fileViewerHighlightingOff": "Syntax highlighting is off \u2014 at {size} this file exceeds the highlighting budget. The text is complete, not truncated.",
   "@fileViewerHighlightingOff": {"description": "Host notice above the renderer when the highlighter declined. Says the text is complete so a grey body does not read as a truncated one.", "placeholders": {"size": {"type": "String"}}},
-  "fileViewerDownload": "Download",
-  "@fileViewerDownload": {"description": "Action fetching the raw bytes from a state panel."},
   "fileViewerNoFilesTitle": "No files open",
   "@fileViewerNoFilesTitle": {"description": "Resting state of the file pane when the session showing has opened no files. The pane stays rather than collapsing the layout the reader arranged."},
   "fileViewerNoFilesBody": "Open a file from the transcript or the Files tab.",

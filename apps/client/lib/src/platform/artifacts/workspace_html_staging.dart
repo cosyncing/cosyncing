@@ -7,6 +7,9 @@ import 'package:path/path.dart' as path;
 /// How long a staged copy is kept, matching the artifact preview's retention.
 const Duration workspaceHtmlStagingRetention = Duration(hours: 24);
 
+/// Extensions a browser already opens as HTML.
+const List<String> _htmlExtensions = ['.html', '.htm', '.xhtml'];
+
 /// The marker directory staged workspace copies live under.
 ///
 /// Deliberately a *sibling* of the artifact preview's marker rather than the
@@ -109,9 +112,13 @@ Future<File> stageWorkspaceHtmlFile({
   await scope.create(recursive: true);
   final name = workspacePath.split('/').last;
   final safe = name.replaceAll(RegExp('[^A-Za-z0-9._-]'), '_');
-  final file = File(
-    path.join(scope.path, safe.endsWith('.html') ? safe : '$safe.html'),
-  );
+  // Every extension a browser already opens as HTML keeps its own name; only
+  // something else gains one. Appending unconditionally produced
+  // `report.htm.html`, which is the name the reader then sees in their
+  // browser's title bar and in their downloads.
+  final lower = safe.toLowerCase();
+  final named = _htmlExtensions.any(lower.endsWith) ? safe : '$safe.html';
+  final file = File(path.join(scope.path, named));
   // The browser runs this page with full local privileges, which is a weaker
   // posture than every in-app renderer. Injecting the restrictive policy --
   // and stripping any the file declared for itself -- closes most of that

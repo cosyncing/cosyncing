@@ -1,9 +1,11 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 SessionFilePreview _preview({
@@ -221,6 +223,97 @@ void main() {
         (w) => w is ColoredBox && w.color == tokens.accentSurface,
       );
       expect(washed, findsNothing);
+    });
+
+    testWidgets('a wide glyph is reachable, not clipped past the extent', (
+      tester,
+    ) async {
+      // The CJK line is SHORTER by character count and WIDER when painted,
+      // which is the case a character-count estimate gets exactly backwards.
+      const wide = '// 这是一个中文注释，说明这个函数的用途和边界情况';
+      const ascii = '// an ascii comment that is longer by character count!!';
+      expect(wide.length, lessThan(ascii.length));
+
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _preview(text: '$ascii\n$wide'))),
+      );
+      await tester.pump();
+
+      final body = find.descendant(
+        of: find.byType(SingleChildScrollView),
+        matching: find.byType(SizedBox),
+      );
+      final contentWidth = tester.widgetList<SizedBox>(body).first.width!;
+
+      final painter = TextPainter(
+        text: TextSpan(
+          text: wide,
+          style: fileSourceCodeStyle(
+            tester.element(find.byType(FileViewerPane)),
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      addTearDown(painter.dispose);
+
+      // Each line is a `maxLines: 1, softWrap: false` Text inside a box of
+      // exactly this width, and the horizontal scroll extent is this width, so
+      // an underestimate clips the tail with no way to scroll to it.
+      expect(contentWidth, greaterThanOrEqualTo(painter.width));
+    });
+
+    testWidgets('wrapped rows do not copy their line numbers', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          FileViewerSource(
+            preview: _preview(text: 'alpha alpha alpha\nbeta beta beta'),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('file-viewer-wrap')));
+      await tester.pumpAndSettle();
+
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      // The keyboard's own route rather than `copySelection`, which is
+      // deprecated: select everything, then invoke the copy intent Ctrl+C
+      // resolves to, so this asserts what actually reaches the clipboard.
+      tester
+          .state<SelectableRegionState>(find.byType(SelectableRegion))
+          .selectAll();
+      await tester.pump();
+      // A context BELOW the region: it registers its copy action inside its
+      // own build, so the region's own element cannot see it.
+      Actions.invoke(
+        tester.element(find.byKey(const Key('file-viewer-lines'))),
+        CopySelectionTextIntent.copy,
+      );
+      await tester.pumpAndSettle();
+
+      // Non-wrap keeps the gutter outside the SelectionArea as a sibling;
+      // wrapped rows cannot, so the numbers have to be excluded explicitly or
+      // a drag across two lines interleaves them into the clipboard.
+      expect(copied, isNotNull);
+      expect(copied, contains('alpha'));
+      expect(copied, contains('beta'));
+      expect(copied, isNot(contains('1')));
+      expect(copied, isNot(contains('2')));
     });
 
     testWidgets('wrap is offered on source and drops the pinned gutter', (

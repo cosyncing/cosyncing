@@ -1,6 +1,7 @@
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_view.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_html_policy.dart';
 import 'package:flutter/widgets.dart';
 
 /// Registry id of the HTML renderer.
@@ -36,6 +37,18 @@ FileRenderPreparation _prepareHtml(FileRenderRequest request) =>
           : FileRenderNotice.htmlSourceOnly,
     );
 
+/// [html] with the app's restrictive policy injected, ready for a frame.
+///
+/// Named and public because the frame itself is unreachable where the goldens
+/// and the test suite run — `canRenderHtmlInPane` is false on Linux — so this
+/// is the only place the guarantee can be asserted by a test that actually
+/// runs. Both frame implementations receive the output of this and nothing
+/// else.
+String hardenHtmlForPassiveFrame(String html) =>
+    SessionArtifactPreviewHtmlPolicy.injectRestrictiveContentSecurityPolicy(
+      html,
+    );
+
 Widget _buildHtml(BuildContext context, FileRenderRequest request) {
   if (request.mode == FileViewMode.source || !canRenderHtmlInPane) {
     // Plain, not highlighted: an HTML file shown as source is markup the
@@ -48,10 +61,27 @@ Widget _buildHtml(BuildContext context, FileRenderRequest request) {
       anchorLine: request.anchorLine,
     );
   }
+  final text = request.content is TextFileContent
+      ? (request.content as TextFileContent).text
+      : '';
   return buildPassiveHtmlView(
     key: const Key('file-viewer-html'),
-    html: request.content is TextFileContent
-        ? (request.content as TextFileContent).text
-        : '',
+    // The sandbox and JavaScriptMode.disabled stop scripts, forms, navigation
+    // and popups. They do not stop SUBRESOURCE loads: `<img src="https://…">`,
+    // a stylesheet link, `@font-face`, `<video>` all still fetch. Rendering a
+    // workspace file an agent wrote, in a repo the reader may not control,
+    // would otherwise make their device request attacker-chosen URLs — with
+    // their IP — the moment they tap Rendered.
+    //
+    // So the badge's "no network" half is this line, not the sandbox. Same
+    // policy the artifact preview and this lane's own browser hand-off inject,
+    // and the function is pure (`package:path` only), so it is web-safe.
+    //
+    // Two details worth knowing rather than rediscovering: `frame-ancestors`
+    // in a meta tag is ignored by every browser (harmless, it is part of the
+    // shared constant), and under the frame's opaque origin `'self'` matches
+    // nothing — so only `data:` images and inline styles survive, which is
+    // exactly the contract.
+    html: hardenHtmlForPassiveFrame(text),
   );
 }

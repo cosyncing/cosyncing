@@ -414,6 +414,41 @@ void main() {
       expect(find.byKey(const Key('session-file-page')), findsNothing);
     });
 
+    testWidgets('a file link with no path falls back to the session', (
+      tester,
+    ) async {
+      final router = await pumpApp(
+        tester,
+        surfaceSize: const Size(420, 900),
+        // A hand-trimmed or truncated link. Without the fallback this resolves
+        // to the workspace root and the reader gets a NOT_REGULAR_FILE panel
+        // for a file they never named.
+        initialLocation: '/sessions/claude/session-a/file',
+        overrides: [
+          activeBrokerProfileProvider.overrideWith(
+            (ref) => BrokerProfile(
+              id: 'p1',
+              displayName: 'p1',
+              baseUri: Uri.parse('http://127.0.0.1:17734'),
+              createdAt: DateTime(2026),
+              incarnationId: 'inc-a',
+            ),
+          ),
+          brokerClientProvider.overrideWith((_) async => null),
+          sessionArtifactTransferRepositoryProvider.overrideWithValue(
+            InMemorySessionArtifactTransferRepository(),
+          ),
+        ],
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        router.routerDelegate.currentConfiguration.uri.path,
+        sessionDetailLocation(tool: 'claude', sessionId: 'session-a'),
+      );
+      expect(find.byKey(const Key('session-file-page')), findsNothing);
+    });
+
     testWidgets('settings can open the transfer manager route', (tester) async {
       await pumpApp(
         tester,

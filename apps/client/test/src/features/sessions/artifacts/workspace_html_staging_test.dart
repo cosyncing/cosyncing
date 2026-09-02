@@ -72,6 +72,38 @@ void main() {
       },
     );
 
+    test('an HTML extension the file already has is not doubled', () async {
+      final root = _root();
+      for (final name in ['report.htm', 'page.XHTML', 'index.html']) {
+        final file = await stageWorkspaceHtmlFile(
+          sessionKey: 'codex/a',
+          workspacePath: 'docs/$name',
+          html: '<html><body>hi</body></html>',
+          size: 28,
+          truncated: false,
+          rootDirectory: root,
+        );
+        // A doubled suffix reads as a different file to the reader who is
+        // about to see it in their browser's title bar and downloads list.
+        expect(p.basename(file.path), name);
+      }
+    });
+
+    test('a name with no HTML extension gets one', () async {
+      final root = _root();
+      final file = await stageWorkspaceHtmlFile(
+        sessionKey: 'codex/a',
+        workspacePath: 'docs/report',
+        html: '<html><body>hi</body></html>',
+        size: 28,
+        truncated: false,
+        rootDirectory: root,
+      );
+
+      // Without it the browser has nothing to dispatch on and offers a save.
+      expect(p.basename(file.path), 'report.html');
+    });
+
     test('the sweep drops stale copies and keeps fresh ones', () async {
       final root = _root();
       final staging = workspaceHtmlStagingRoot(rootDirectory: root)
