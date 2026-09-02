@@ -226,6 +226,18 @@ final class FileSourceSurface {
 enum FileRenderNotice {
   /// Highlighting was declined, and the text is nonetheless complete.
   highlightingOff,
+
+  /// The rendered face is a frame that runs nothing.
+  ///
+  /// Shown on the rendered face only. The host decides that, not the renderer:
+  /// preparation runs per file, not per face.
+  passivePreview,
+
+  /// This platform has no embeddable browser view, so there is only source.
+  ///
+  /// Carries the host's hand-off with it — an explicit, labelled "Open in
+  /// browser" rather than a dead end.
+  htmlSourceOnly,
 }
 
 /// Per-file work a renderer wants done once rather than on every rebuild.

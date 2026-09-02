@@ -224,6 +224,14 @@ class _FilesPanelState extends ConsumerState<_FilesPanel> {
         onBrowseFiles: () => ref
             .read(sessionFileBrowserControllerProvider(browserKey).notifier)
             .closePreview(),
+        onOpenExternally: () => openWorkspaceHtmlInBrowser(
+          sessionKey:
+              '${widget.sessionKey.tool}/${widget.sessionKey.sessionId}',
+          path: preview.path,
+          html: preview.text,
+          size: preview.size,
+          truncated: preview.truncated,
+        ),
       );
     }
 

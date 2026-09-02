@@ -1,6 +1,7 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
@@ -139,6 +140,16 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
       content: content,
       initialView: memory.read(pane.key),
       onViewChanged: (view) => memory.write(pane.key, view),
+      onOpenExternally: switch (content) {
+        FileViewerSource(:final preview) => () => openWorkspaceHtmlInBrowser(
+          sessionKey: '${pane.session.tool}/${pane.session.sessionId}',
+          path: pane.path,
+          html: preview.text,
+          size: preview.size,
+          truncated: preview.truncated,
+        ),
+        _ => null,
+      },
       sessionLabel: '${pane.session.tool} · ${pane.session.sessionId}',
       toolColor: tokens.toolColor(pane.session.tool),
       onRetry: () => ref.invalidate(filePaneReadProvider(pane)),

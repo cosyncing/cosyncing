@@ -111,6 +111,7 @@ class FileViewerPane extends StatefulWidget {
     this.onRetry,
     this.initialView,
     this.onViewChanged,
+    this.onOpenExternally,
     super.key,
   });
 
@@ -147,6 +148,15 @@ class FileViewerPane extends StatefulWidget {
 
   /// Reports the face and offset, so a crossing can resume where this left off.
   final ValueChanged<FilePaneView>? onViewChanged;
+
+  /// Hands this file to the platform browser, reporting whether it opened.
+  ///
+  /// Supplied by whoever mounts the pane rather than done here: staging a
+  /// local copy needs `dart:io` and the owning session's identity, and the
+  /// pane holds neither. Null where there is nothing to hand off to, which is
+  /// also what keeps the action from appearing on platforms that render HTML
+  /// in place.
+  final Future<bool> Function()? onOpenExternally;
 
   @override
   State<FileViewerPane> createState() => _FileViewerPaneState();
@@ -492,6 +502,33 @@ class _FileViewerPaneState extends State<FileViewerPane> {
             l10n.bytesCount(preview.size),
           ),
         ),
+      // Placement is the host's, and it is per-face: preparation runs once per
+      // file, so the renderer cannot know which face is showing. A badge about
+      // the frame belongs on the face that has one.
+      if (_preparedNotice == FileRenderNotice.passivePreview &&
+          _mode == FileViewMode.rendered)
+        _Notice(
+          noticeKey: const Key('file-viewer-passive-preview'),
+          tokens: tokens,
+          message: l10n.fileViewerPassivePreview,
+        ),
+      if (_preparedNotice == FileRenderNotice.htmlSourceOnly)
+        _Notice(
+          noticeKey: const Key('file-viewer-html-source-only'),
+          tokens: tokens,
+          message: l10n.fileViewerHtmlSourceOnly,
+          // A dead end on two of six platforms does not serve the reader, and
+          // the escape hatch has to be labelled rather than implied.
+          action: widget.onOpenExternally == null
+              ? null
+              : _HandoffAction(
+                  actionKey: const Key('file-viewer-open-in-browser'),
+                  tokens: tokens,
+                  label: l10n.fileViewerOpenInBrowser,
+                  tooltip: l10n.fileViewerOpenInBrowserHint,
+                  onPressed: _openInBrowser,
+                ),
+        ),
       // The existing honest note, preserved: silently landing on line 1 would
       // read as "the mention was wrong" rather than "the read was bounded".
       if (preview.anchorBeyondPreview)
@@ -504,6 +541,22 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           ),
         ),
     ];
+  }
+
+  /// Hands this file to the platform browser, and says so if it did not go.
+  Future<void> _openInBrowser() async {
+    final handoff = widget.onOpenExternally;
+    if (handoff == null) return;
+    final l10n = AppLocalizations.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final opened = await handoff();
+    if (opened || !mounted) return;
+    messenger?.showSnackBar(
+      SnackBar(
+        key: const Key('file-viewer-open-in-browser-failed'),
+        content: Text(l10n.fileViewerOpenInBrowserFailed),
+      ),
+    );
   }
 
   Widget _body(
@@ -713,11 +766,15 @@ class _Notice extends StatelessWidget {
     required this.noticeKey,
     required this.tokens,
     required this.message,
+    this.action,
   });
 
   final Key noticeKey;
   final AppTokens tokens;
   final String message;
+
+  /// What the reader can do about it, when there is something.
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -743,7 +800,45 @@ class _Notice extends StatelessWidget {
               ),
             ),
           ),
+          if (action case final action?) ...[const SizedBox(width: 8), action],
         ],
+      ),
+    );
+  }
+}
+
+/// The labelled way out of a platform limit.
+class _HandoffAction extends StatelessWidget {
+  const _HandoffAction({
+    required this.actionKey,
+    required this.tokens,
+    required this.label,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final Key actionKey;
+  final AppTokens tokens;
+  final String label;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Tooltip(
+      message: tooltip,
+      child: TextButton(
+        key: actionKey,
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          minimumSize: Size.zero,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          foregroundColor: tokens.accent,
+          textStyle: theme.textTheme.labelSmall,
+        ),
+        child: Text(label),
       ),
     );
   }

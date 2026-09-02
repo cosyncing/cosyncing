@@ -3594,5 +3594,15 @@
   "fileViewerNoFilesTitle": "No files open",
   "@fileViewerNoFilesTitle": {"description": "Resting state of the file pane when the session showing has opened no files. The pane stays rather than collapsing the layout the reader arranged."},
   "fileViewerNoFilesBody": "Open a file from the transcript or the Files tab.",
-  "@fileViewerNoFilesBody": {"description": "How to fill the empty file pane."}
+  "@fileViewerNoFilesBody": {"description": "How to fill the empty file pane."},
+  "fileViewerPassivePreview": "Passive preview — scripts disabled",
+  "@fileViewerPassivePreview": {"description": "Badge on the rendered face of an HTML file. States what the frame will not do; on web the browser enforces it through the sandbox attribute, natively the WebView has JavaScript disabled."},
+  "fileViewerHtmlSourceOnly": "Rendered preview is unavailable on this platform — no embeddable browser view exists. Showing source.",
+  "@fileViewerHtmlSourceOnly": {"description": "Why an HTML file has no Rendered face on Linux and Windows. The limit is that the available WebView opens a detached OS window, which cannot be composited into a pane."},
+  "fileViewerOpenInBrowser": "Open in browser",
+  "@fileViewerOpenInBrowser": {"description": "The labelled hand-off out of the source-only limit."},
+  "fileViewerOpenInBrowserHint": "Opens a local copy in your default browser, outside cosyncing.",
+  "@fileViewerOpenInBrowserHint": {"description": "Tooltip on the hand-off. Says local copy because the workspace path names a file on the broker's machine, which may not be this one."},
+  "fileViewerOpenInBrowserFailed": "That file could not be opened in a browser.",
+  "@fileViewerOpenInBrowserFailed": {"description": "Shown when staging or launching the local copy failed."}
 }

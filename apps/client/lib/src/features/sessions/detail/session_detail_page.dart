@@ -19,6 +19,7 @@ import 'package:cosyncing_client/src/features/schedules/controller/inline_schedu
 import 'package:cosyncing_client/src/features/schedules/view/inline_schedule_action_message.dart';
 import 'package:cosyncing_client/src/features/schedules/view/inline_scheduled_message_card.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_message_sheet.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_handoff.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';

@@ -1,5 +1,6 @@
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_diff_renderer.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_html_renderer.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
@@ -23,6 +24,7 @@ const String markdownFileRendererId = 'markdown';
 /// renderer, and the specific one has to win.
 List<FileRendererDescriptor> builtInFileRenderers() => [
   diffFileRenderer(),
+  htmlFileRenderer(),
   const FileRendererDescriptor(
     id: markdownFileRendererId,
     source: BuiltInRendererSource(),

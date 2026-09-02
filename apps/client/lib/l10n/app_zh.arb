@@ -1528,5 +1528,10 @@
   "fileViewerHighlightingOff": "语法高亮已关闭——该文件 {size}，超出高亮预算。文本是完整的，并未被截断。",
   "fileViewerDownload": "下载",
   "fileViewerNoFilesTitle": "没有打开的文件",
-  "fileViewerNoFilesBody": "从转录或“文件”页打开一个文件。"
+  "fileViewerNoFilesBody": "从转录或“文件”页打开一个文件。",
+  "fileViewerPassivePreview": "被动预览——脚本已禁用",
+  "fileViewerHtmlSourceOnly": "当前平台无法内嵌浏览器视图，暂不支持渲染预览，显示源码。",
+  "fileViewerOpenInBrowser": "在浏览器中打开",
+  "fileViewerOpenInBrowserHint": "在 cosyncing 之外，用你的默认浏览器打开本地副本。",
+  "fileViewerOpenInBrowserFailed": "无法在浏览器中打开该文件。"
 }
