@@ -19,6 +19,7 @@ import 'package:cosyncing_client/src/features/schedules/controller/inline_schedu
 import 'package:cosyncing_client/src/features/schedules/view/inline_schedule_action_message.dart';
 import 'package:cosyncing_client/src/features/schedules/view/inline_scheduled_message_card.dart';
 import 'package:cosyncing_client/src/features/schedules/view/schedule_message_sheet.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_descriptor.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_file_service.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_artifact_preview_presenter.dart';
@@ -1276,13 +1277,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       ref.read(sessionFileBrowserKeyProvider(_key));
 
   Future<void> _previewSessionFile(FsDirEntry entry) async {
-    final preview = await ref
+    // No dialog and no navigation: the read lands in browser state and the
+    // Files slot renders `FileViewerPane` over its own listing.
+    await ref
         .read(sessionFileBrowserControllerProvider(_fileBrowserKey).notifier)
         .previewFile(entry);
-    if (!mounted || preview == null) {
-      return;
-    }
-    await _showSessionFilePreviewDialog(context, preview);
   }
 
   /// Stable identity so the link scope only notifies on a real gate change.
@@ -1298,7 +1297,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
   /// error would cost the reader their place for nothing.
   Future<void> _openFileReference(SessionFileReference reference) async {
     final browserKey = _fileBrowserKey;
-    final preview = await ref
+    await ref
         .read(sessionFileBrowserControllerProvider(browserKey).notifier)
         .openReference(reference);
     if (!mounted) return;
@@ -1315,9 +1314,11 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
       );
       return;
     }
+    // The view switch stays for now: at this commit the viewer is docked in
+    // the Files slot, so a mention that did not switch would open the file
+    // where nobody can see it. The second split pane is what removes this —
+    // it shows the file beside the transcript instead of instead of it.
     _selectView(_SessionDetailView.files);
-    if (preview == null || !mounted) return;
-    await _showSessionFilePreviewDialog(context, preview);
   }
 
   /// Probes the workspace-file gate once per attach.
@@ -2460,6 +2461,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                           child: _FilesPanel(
                             key: const Key('session-detail-tab-panel-files'),
                             sessionKey: _key,
+                            sessionLabel: '${_key.tool} · $visibleTitle',
                             isConnected: isConnected,
                             descriptors: state.fileArtifactDescriptors,
                             actionStates: state.artifactActionStates,

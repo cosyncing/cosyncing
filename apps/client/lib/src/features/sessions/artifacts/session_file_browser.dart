@@ -635,6 +635,16 @@ class SessionFileBrowserController
     }
   }
 
+  /// Closes the open preview, keeping the listing behind it.
+  ///
+  /// The viewer is a pane now, not a dialog, so closing it is a state change
+  /// rather than a `Navigator.pop`. The listing is deliberately kept: the
+  /// reader closed a file, not the workspace.
+  void closePreview() {
+    if (state.preview == null) return;
+    state = state.copyWith(clearPreview: true, clearNotice: true);
+  }
+
   /// Navigates to a directory entry.
   Future<void> openDirectory(FsDirEntry entry) async {
     if (entry.type != 'directory') {

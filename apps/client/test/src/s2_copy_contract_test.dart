@@ -188,6 +188,11 @@ const _reviewedLiteralByLocation = <String>{
       r'${widget.detail.label}: $visibleText',
   'lib/src/features/sessions/roster/cached_roster_pane.dart::'
       r'${group.rootCount}',
+  // A gutter line number. Deliberately raw rather than locale-formatted: a
+  // grouping separator would break the monospace column the gutter exists to
+  // hold, and would stop matching the number an editor shows for that line.
+  'lib/src/features/sessions/artifacts/file_viewer_pane.dart::'
+      r'$number',
   'lib/src/features/sessions/list/new_session_sheet.dart::'
       r'$projectContextLabel · ${widget.initialDirectory}',
   'lib/src/features/sessions/detail/session_detail_chrome.dart::'

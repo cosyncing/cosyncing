@@ -64,13 +64,19 @@ void main() {
           find.byKey(const Key('session-detail-tab-panel-files')),
           findsOneWidget,
         );
+        // A pane, not a popup. The dialog is gone and must not come back.
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(find.byKey(const Key('file-viewer-pane')), findsOneWidget);
+        // The anchor is carried by the gutter alone — an accent line number
+        // and a 2dp accent edge, with no wash behind the code.
         expect(
-          find.byKey(
-            const ValueKey('session-detail-files-preview-anchor-lib/a.dart'),
-          ),
+          find.byKey(const Key('file-viewer-anchor-number')),
           findsOneWidget,
         );
-        expect(find.text('Line 3'), findsOneWidget);
+        expect(
+          find.byKey(const Key('file-viewer-anchor-edge')),
+          findsOneWidget,
+        );
         expect(find.text('gamma'), findsOneWidget);
         expect(find.text('3'), findsOneWidget);
       },
@@ -125,11 +131,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(
-          const ValueKey(
-            'session-detail-files-preview-anchor-beyond-lib/a.dart',
-          ),
-        ),
+        find.byKey(const Key('file-viewer-anchor-beyond')),
         findsOneWidget,
       );
       expect(
