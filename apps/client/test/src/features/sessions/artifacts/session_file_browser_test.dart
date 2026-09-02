@@ -171,6 +171,102 @@ void main() {
       expect(repository.lastReadMaxBytes, sessionFilePreviewDefaultMaxBytes);
     });
 
+    test(
+      'a utf8 read previews whatever the broker guessed the MIME to be',
+      () async {
+        // The headline defect: `mimeTypeForPath` had no arm for `.py`, so every
+        // source file arrived labelled `application/octet-stream` and the client
+        // threw away bytes the broker had already decoded. Brokers upgrade
+        // independently of clients, so the client must not need the new label.
+        repository.readResult = const FsReadResult(
+          path: 'main.py',
+          size: 11,
+          limit: 1024,
+          truncated: false,
+          encoding: 'utf8',
+          data: 'print("hi")',
+          mimeType: 'application/octet-stream',
+        );
+
+        final preview = await container
+            .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+            .previewFile(
+              const FsDirEntry(
+                name: 'main.py',
+                path: 'main.py',
+                type: 'file',
+                size: 11,
+                mtimeMs: 0,
+              ),
+            );
+
+        expect(preview?.text, 'print("hi")');
+        expect(
+          container
+              .read(sessionFileBrowserControllerProvider(browserKey))
+              .notice,
+          isNot(SessionFileBrowserNotice.previewMimeUnavailable),
+        );
+      },
+    );
+
+    test('a base64 read gets no such bypass', () async {
+      // `encoding == 'utf8'` is the broker's own byte-level finding and is what
+      // earns the bypass. base64 means the bytes did not decode, so the label
+      // still decides — and `application/octet-stream` still refuses rather than
+      // rendering mojibake.
+      repository.readResult = FsReadResult(
+        path: 'image.png',
+        size: 5,
+        limit: 1024,
+        truncated: false,
+        encoding: 'base64',
+        data: base64.encode(<int>[0x89, 0x50, 0x4e, 0x47, 0x00]),
+        mimeType: 'image/png',
+      );
+
+      final preview = await container
+          .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+          .previewFile(
+            const FsDirEntry(
+              name: 'image.png',
+              path: 'image.png',
+              type: 'file',
+              size: 5,
+              mtimeMs: 0,
+            ),
+          );
+
+      expect(preview, isNull);
+      expect(
+        container.read(sessionFileBrowserControllerProvider(browserKey)).notice,
+        SessionFileBrowserNotice.previewMimeUnavailable,
+      );
+    });
+
+    test('a directory is refused before any read is issued', () async {
+      // `_isPreviewableEntry` was a predicate with no predicate in it; the
+      // check it stood for is real and has to survive its deletion.
+      final preview = await container
+          .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+          .previewFile(
+            const FsDirEntry(
+              name: 'src',
+              path: 'src',
+              type: 'directory',
+              size: 0,
+              mtimeMs: 0,
+            ),
+          );
+
+      expect(preview, isNull);
+      expect(repository.lastReadPath, isNull);
+      expect(
+        container.read(sessionFileBrowserControllerProvider(browserKey)).notice,
+        SessionFileBrowserNotice.previewTextOnly,
+      );
+    });
+
     group('gate probe', () {
       test('a workspace-root answer opens the gate', () async {
         await container

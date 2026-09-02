@@ -3487,8 +3487,18 @@ function attachmentFilename(name: string): string {
   return cleaned || 'download';
 }
 
+/**
+ * Best-effort content type for a workspace path.
+ *
+ * The suffix is all we have — `/fs/read` and `/fs/download` never sniff bytes for
+ * this — so the table is a hint, not an authority, and a client must treat it as
+ * one. Source suffixes all resolve to a `text/*` type on purpose: a client that
+ * predates this table admits `text/*` wholesale, so widening the guess here takes
+ * effect without a client upgrade.
+ */
 function mimeTypeForPath(path: string): string {
-  const ext = path.split('/').pop()?.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
+  const name = path.split('/').pop()?.toLowerCase() ?? '';
+  const ext = name.match(/\.([a-z0-9]+)$/)?.[1] ?? '';
   switch (ext) {
     case 'html':
       return 'text/html; charset=utf-8';
@@ -3513,9 +3523,70 @@ function mimeTypeForPath(path: string): string {
       return 'image/svg+xml';
     case 'webp':
       return 'image/webp';
-    default:
-      return 'application/octet-stream';
+    case 'py':
+      return 'text/x-python; charset=utf-8';
+    case 'dart':
+      return 'text/x-dart; charset=utf-8';
+    case 'ts':
+    case 'tsx':
+      return 'text/x-typescript; charset=utf-8';
+    case 'js':
+    case 'jsx':
+      return 'text/javascript; charset=utf-8';
+    case 'rs':
+      return 'text/x-rust; charset=utf-8';
+    case 'go':
+      return 'text/x-go; charset=utf-8';
+    case 'sh':
+    case 'bash':
+    case 'zsh':
+      return 'text/x-shellscript; charset=utf-8';
+    case 'yaml':
+    case 'yml':
+      return 'text/x-yaml; charset=utf-8';
+    case 'toml':
+      return 'text/x-toml; charset=utf-8';
+    case 'c':
+    case 'h':
+      return 'text/x-c; charset=utf-8';
+    case 'cc':
+    case 'cpp':
+    case 'hpp':
+      return 'text/x-c++; charset=utf-8';
+    case 'java':
+      return 'text/x-java; charset=utf-8';
+    case 'kt':
+      return 'text/x-kotlin; charset=utf-8';
+    case 'swift':
+      return 'text/x-swift; charset=utf-8';
+    case 'rb':
+      return 'text/x-ruby; charset=utf-8';
+    case 'sql':
+      return 'text/x-sql; charset=utf-8';
+    case 'css':
+      return 'text/css; charset=utf-8';
+    case 'xml':
+      return 'text/xml; charset=utf-8';
+    case 'makefile':
+      return 'text/x-makefile; charset=utf-8';
+    case 'dockerfile':
+      return 'text/x-dockerfile; charset=utf-8';
+    case 'ini':
+    case 'cfg':
+    case 'conf':
+    case 'env':
+    case 'gitignore':
+      return 'text/plain; charset=utf-8';
   }
+  // The suffix match above needs a dot, so build files that are named rather than
+  // suffixed have to be recognised by basename or they stay octet-stream.
+  switch (name) {
+    case 'makefile':
+      return 'text/x-makefile; charset=utf-8';
+    case 'dockerfile':
+      return 'text/x-dockerfile; charset=utf-8';
+  }
+  return 'application/octet-stream';
 }
 
 class HttpStatusError extends Error {

@@ -245,6 +245,16 @@ await test('w3 session workspace API is read-only, bounded, and safe', async () 
   mkdirSync(join(sessionCwd, 'nested'));
   writeFileSync(join(sessionCwd, 'nested', 'note.txt'), 'nested-note');
   writeFileSync(join(sessionCwd, 'binary.bin'), new Uint8Array([0xff, 0x00, 0x10, 0x80, 0x41]));
+  // Source files the suffix table used to label `application/octet-stream`, which the
+  // client then refused — the defect that kept the viewer from opening Python at all.
+  writeFileSync(join(sessionCwd, 'main.py'), 'print("hi")\n');
+  writeFileSync(join(sessionCwd, 'lib.rs'), 'fn main() {}\n');
+  writeFileSync(join(sessionCwd, 'app.tsx'), 'export const A = 1;\n');
+  writeFileSync(join(sessionCwd, 'conf.toml'), '[a]\nb = 1\n');
+  writeFileSync(join(sessionCwd, '.gitignore'), 'node_modules\n');
+  writeFileSync(join(sessionCwd, 'Makefile'), 'all:\n\t@true\n');
+  writeFileSync(join(sessionCwd, 'Dockerfile'), 'FROM scratch\n');
+  writeFileSync(join(sessionCwd, 'notes.unknownext'), 'still octet-stream\n');
   writeFileSync(secretFile, 'do not serve this');
   symlinkSync(secretFile, join(sessionCwd, 'link-to-secret'));
 
@@ -296,6 +306,29 @@ await test('w3 session workspace API is read-only, bounded, and safe', async () 
     const readBinary = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=binary.bin`);
     assert.equal(readBinary.res.status, 200);
     assert.equal(readBinary.body.encoding, 'base64');
+
+    // Source suffixes resolve to `text/*` so a client older than this table — which
+    // admits `text/*` wholesale — sees them as previewable without an upgrade.
+    const sourceMimes: Array<[string, string]> = [
+      ['main.py', 'text/x-python; charset=utf-8'],
+      ['lib.rs', 'text/x-rust; charset=utf-8'],
+      ['app.tsx', 'text/x-typescript; charset=utf-8'],
+      ['conf.toml', 'text/x-toml; charset=utf-8'],
+      ['.gitignore', 'text/plain; charset=utf-8'],
+      ['Makefile', 'text/x-makefile; charset=utf-8'],
+      ['Dockerfile', 'text/x-dockerfile; charset=utf-8'],
+    ];
+    for (const [name, mime] of sourceMimes) {
+      const read = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=${encodeURIComponent(name)}`);
+      assert.equal(read.res.status, 200, `${name} read status`);
+      assert.equal(read.body.encoding, 'utf8', `${name} encoding`);
+      assert.equal(read.body.mimeType, mime, `${name} mimeType`);
+      assert.equal(read.body.mimeType.startsWith('text/'), true, `${name} is text/*`);
+    }
+    // An unrecognised suffix still gets no guess — the label is a hint, not a sniff.
+    const unknown = await requestJson(`/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/read?path=notes.unknownext`);
+    assert.equal(unknown.body.mimeType, 'application/octet-stream');
+    assert.equal(unknown.body.encoding, 'utf8');
 
     const download = await fetch(`${base}/api/sessions/opencode/${encodeURIComponent(sessionId)}/fs/download?path=nested/note.txt`, {
       headers: { 'x-cosyncing-token': TOK },
