@@ -475,6 +475,76 @@
       "path": "apps/client/test/src/features/settings/view/goldens/read_aloud_rate_light_zh.png",
       "owner": "apps/client/test/src/features/settings/view/general_settings_page_test.dart",
       "family": "read-aloud-rate"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_dark_roomy_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_light_compact_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_card_unavailable_dark_compact_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_export_overview_dark_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-export-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_export_overview_light_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-export-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_export_projects_dark_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-export-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_export_projects_light_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-export-card"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_dark_compact_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_empty_dark_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_light_medium_zh.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_light_roomy_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_no_insights_dark_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_partial_light_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
+    },
+    {
+      "path": "apps/client/test/src/features/usage/view/goldens/usage_report_unavailable_light_en.png",
+      "owner": "apps/client/test/src/features/usage/view/usage_golden_test.dart",
+      "family": "usage-report"
     }
   ]
 }

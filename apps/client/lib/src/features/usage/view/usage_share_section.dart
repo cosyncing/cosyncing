@@ -3,8 +3,8 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/design/theme_spec.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
-import 'package:cosyncing_client/src/features/settings/controller/theme_controller.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_export_card.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
@@ -113,10 +113,11 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
         : _machine.text.trim();
     // Both previews build their own theme, but they stay in the palette the
     // app is actually wearing, so an export looks like the product it came
-    // from rather than like a stock template.
-    final themeId =
-        ref.watch(themeControllerProvider).valueOrNull?.themeId ??
-        kDefaultThemeId;
+    // from rather than like a stock template. Read off the ambient tokens
+    // rather than the theme controller: the controller reaches the on-disk
+    // preferences store, and a report page should not open a database to
+    // decide what colour to draw a preview.
+    final spec = usageThemeSpecFor(context.tokens);
 
     return Column(
       key: const Key('usage-report-share'),
@@ -156,7 +157,7 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
                 _CardColumn(
                   kind: kind,
                   boundaries: _boundaries,
-                  themeId: themeId,
+                  spec: spec,
                   report: widget.report,
                   machineLabel: machineLabel,
                   locale: widget.locale,
@@ -199,6 +200,26 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
   }
 }
 
+/// The registered theme whose palette the app is currently wearing.
+///
+/// Matched by palette rather than by a stored id, so the previews follow the
+/// live theme without the share section depending on where that id is kept.
+/// An unrecognized palette falls back to the default theme, which is the same
+/// answer the id lookup gives for an unknown id.
+ThemeSpec usageThemeSpecFor(AppTokens tokens) {
+  for (final spec in kAppThemes) {
+    for (final candidate in [spec.light, spec.dark]) {
+      if (identical(candidate, tokens) ||
+          (candidate.accent == tokens.accent &&
+              candidate.canvas == tokens.canvas &&
+              candidate.surface2 == tokens.surface2)) {
+        return spec;
+      }
+    }
+  }
+  return themeSpecById(kDefaultThemeId);
+}
+
 /// Both themes, light first.
 ///
 /// `Brightness.values` is dark-first, and the copy promises "light and dark" —
@@ -224,7 +245,7 @@ class _CardColumn extends StatelessWidget {
   const _CardColumn({
     required this.kind,
     required this.boundaries,
-    required this.themeId,
+    required this.spec,
     required this.report,
     required this.machineLabel,
     required this.locale,
@@ -235,7 +256,7 @@ class _CardColumn extends StatelessWidget {
 
   final UsageExportCardKind kind;
   final Map<(UsageExportCardKind, Brightness), GlobalKey> boundaries;
-  final String themeId;
+  final ThemeSpec spec;
   final UsageReport report;
   final String machineLabel;
   final String locale;
@@ -259,7 +280,7 @@ class _CardColumn extends StatelessWidget {
                 child: _Preview(
                   boundaryKey: boundaries[(kind, brightness)]!,
                   brightness: brightness,
-                  themeId: themeId,
+                  spec: spec,
                   kind: kind,
                   report: report,
                   machineLabel: machineLabel,
@@ -297,7 +318,7 @@ class _Preview extends StatelessWidget {
   const _Preview({
     required this.boundaryKey,
     required this.brightness,
-    required this.themeId,
+    required this.spec,
     required this.kind,
     required this.report,
     required this.machineLabel,
@@ -307,7 +328,7 @@ class _Preview extends StatelessWidget {
 
   final GlobalKey boundaryKey;
   final Brightness brightness;
-  final String themeId;
+  final ThemeSpec spec;
   final UsageExportCardKind kind;
   final UsageReport report;
   final String machineLabel;
@@ -316,7 +337,6 @@ class _Preview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final spec = themeSpecById(themeId);
     final tokens = brightness == Brightness.dark ? spec.dark : spec.light;
     // Every export writes both themes whatever the app is set to, so the
     // preview builds its own theme rather than inheriting the ambient one.

@@ -13,6 +13,7 @@ module FlutterGoldenPolicy
     apps/client/test/src/features/sessions/detail/goldens
     apps/client/test/src/features/sessions/artifacts/goldens
     apps/client/test/src/features/settings/view/goldens
+    apps/client/test/src/features/usage/view/goldens
   ].freeze
   MAX_FILE_BYTES = 4 * 1024 * 1024
   MAX_WIDTH = 4096
@@ -185,6 +186,64 @@ module FlutterGoldenPolicy
         "'goldens/file_pane_${state}_${brightness.name}_'",
         "'${locale.languageCode}.png'",
         "matchesGoldenFile('goldens/file_pane_strip_overflow_light_en.png')"
+      ]
+    },
+    # The usage surfaces. One test file owns three families because the three
+    # subjects are separate widgets sampled on separate axes; splitting the
+    # owner would only duplicate the harness.
+    'usage-card' => {
+      owner: 'apps/client/test/src/features/usage/view/usage_golden_test.dart',
+      root: 'apps/client/test/src/features/usage/view/goldens',
+      names: %w[
+        usage_card_dark_roomy_zh.png
+        usage_card_light_compact_en.png
+        usage_card_unavailable_dark_compact_en.png
+      ],
+      fragments: [
+        "matchesGoldenFile('goldens/$name.png')",
+        "name: 'usage_card_dark_roomy_zh'",
+        "name: 'usage_card_light_compact_en'",
+        "name: 'usage_card_unavailable_dark_compact_en'"
+      ]
+    },
+    'usage-report' => {
+      owner: 'apps/client/test/src/features/usage/view/usage_golden_test.dart',
+      root: 'apps/client/test/src/features/usage/view/goldens',
+      names: %w[
+        usage_report_dark_compact_zh.png
+        usage_report_empty_dark_zh.png
+        usage_report_light_medium_zh.png
+        usage_report_light_roomy_en.png
+        usage_report_no_insights_dark_en.png
+        usage_report_partial_light_en.png
+        usage_report_unavailable_light_en.png
+      ],
+      fragments: [
+        "matchesGoldenFile('goldens/$name.png')",
+        "name: 'usage_report_dark_compact_zh'",
+        "name: 'usage_report_empty_dark_zh'",
+        "name: 'usage_report_light_medium_zh'",
+        "name: 'usage_report_light_roomy_en'",
+        "name: 'usage_report_no_insights_dark_en'",
+        "name: 'usage_report_partial_light_en'",
+        "name: 'usage_report_unavailable_light_en'"
+      ]
+    },
+    'usage-export-card' => {
+      owner: 'apps/client/test/src/features/usage/view/usage_golden_test.dart',
+      root: 'apps/client/test/src/features/usage/view/goldens',
+      names: %w[
+        usage_export_overview_dark_zh.png
+        usage_export_overview_light_en.png
+        usage_export_projects_dark_en.png
+        usage_export_projects_light_zh.png
+      ],
+      fragments: [
+        "matchesGoldenFile('goldens/$name.png')",
+        "name: 'usage_export_overview_dark_zh'",
+        "name: 'usage_export_overview_light_en'",
+        "name: 'usage_export_projects_dark_en'",
+        "name: 'usage_export_projects_light_zh'"
       ]
     },
     # Exact single-path fixture used by the mutation suite. It grants no
