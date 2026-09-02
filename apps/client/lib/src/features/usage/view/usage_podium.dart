@@ -46,7 +46,10 @@ class UsagePodium extends StatelessWidget {
     final project = (projects == null || projects.rows.isEmpty)
         ? null
         : projects.rows.first;
-    if (harness == null && model == null && project == null) {
+    if (harness == null &&
+        model == null &&
+        project == null &&
+        !report.projectsWithheld) {
       return const SizedBox.shrink();
     }
 
@@ -136,6 +139,12 @@ class UsagePodium extends StatelessWidget {
           // Fragmentation the reader can see in the list is better stated than
           // silently merged: merging two remotes would invent a total.
           UsageFootnote(text: l10n.usageProjectGroupNote),
+        ],
+        // Said, not silently omitted. A missing tile reads as "no projects",
+        // which is a claim about the work rather than about this caller.
+        if (report.projectsWithheld) ...[
+          const SizedBox(height: 8),
+          UsageFootnote(text: l10n.usageProjectsOwnerOnly),
         ],
       ],
     );

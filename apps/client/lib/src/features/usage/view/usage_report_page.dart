@@ -24,14 +24,21 @@ import 'package:intl/intl.dart';
 /// so in a subtitle that is not optional.
 class UsageReportPage extends ConsumerStatefulWidget {
   /// Creates the usage report page.
-  const UsageReportPage({super.key});
+  const UsageReportPage({this.initialPeriod, super.key});
+
+  /// The period to open on. Defaults to the month.
+  ///
+  /// Set from the route's `?period=` so a link can name the period it means —
+  /// a month-end notification opening on the month it is about, rather than on
+  /// whatever the page's default happens to be.
+  final UsagePeriod? initialPeriod;
 
   @override
   ConsumerState<UsageReportPage> createState() => _UsageReportPageState();
 }
 
 class _UsageReportPageState extends ConsumerState<UsageReportPage> {
-  UsagePeriod _period = UsagePeriod.month;
+  late UsagePeriod _period = widget.initialPeriod ?? UsagePeriod.month;
 
   @override
   Widget build(BuildContext context) {
@@ -174,11 +181,14 @@ class _UsageReportBody extends StatelessWidget {
       );
     }
     // An unrecognized window silently resolved to all time upstream, so every
-    // figure below it would be true of a period nobody asked about.
+    // figure below it would be true of a period nobody asked about. Said in its
+    // own words: the report arrived, and it is this period that could not be
+    // resolved — which is a different thing from Tokdash being unreachable, and
+    // the reader's next move differs accordingly.
     if (!report.range.recognized) {
       return InlineNotice(
         icon: Icons.help_outline,
-        text: l10n.usageUnavailable,
+        text: l10n.usageWindowUnrecognized,
       );
     }
 

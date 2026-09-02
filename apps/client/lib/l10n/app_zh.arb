@@ -2486,5 +2486,21 @@
   "usageExportFailed": "导出失败。",
   "@usageExportFailed": {
     "description": "Export failure notice."
+  },
+  "usageProjectsOwnerOnly": "项目名称仅提供给 broker 所有者。本页所有统计数字仍包含这些项目。",
+  "@usageProjectsOwnerOnly": {
+    "description": "Shown when the broker withheld the project facet from a non-owner. Says the names are missing, not the work."
+  },
+  "usageExportDesktopOnly": "导出功能可在桌面端与网页端使用。手机端没有可写入的文件夹。",
+  "@usageExportDesktopOnly": {
+    "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
+  },
+  "usageExportBrowserPrompt": "一次点击会生成两个文件，浏览器可能会询问是否允许多个下载。",
+  "@usageExportBrowserPrompt": {
+    "description": "Web only. The page cannot tell whether the browser dropped the second download, so it says the prompt is expected."
+  },
+  "usageWindowUnrecognized": "tokdash 未能识别该时间段，返回的是无人请求的区间数据，因此不显示任何数字。",
+  "@usageWindowUnrecognized": {
+    "description": "Distinct from the unavailable notice: the report arrived, and it is this period that could not be resolved."
   }
 }

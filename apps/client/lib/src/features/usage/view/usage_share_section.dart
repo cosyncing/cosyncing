@@ -111,6 +111,13 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
     final machineLabel = _machine.text.trim().isEmpty
         ? l10n.usageTodayTitle
         : _machine.text.trim();
+    // A card whose whole purpose is project names has nothing to carry when the
+    // broker withheld them, and offering it would promise a tier this caller
+    // cannot export.
+    final offered = [
+      for (final kind in UsageExportCardKind.values)
+        if (!(kind.carriesProjectNames && widget.report.projectsWithheld)) kind,
+    ];
     // Both previews build their own theme, but they stay in the palette the
     // app is actually wearing, so an export looks like the product it came
     // from rather than like a stock template. Read off the ambient tokens
@@ -118,6 +125,25 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
     // preferences store, and a report page should not open a database to
     // decide what colour to draw a preview.
     final spec = usageThemeSpecFor(context.tokens);
+
+    // The section still explains the two tiers where it cannot produce them:
+    // the reader learns the export exists and where to run it, rather than
+    // finding a button that fails.
+    if (!ref.watch(usageExportSupportedProvider)) {
+      return Column(
+        key: const Key('usage-report-share'),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          UsageSectionTitle(title: l10n.usageShareTitle),
+          const SizedBox(height: 4),
+          InlineNotice(
+            key: const Key('usage-export-unsupported'),
+            icon: Icons.desktop_windows_outlined,
+            text: l10n.usageExportDesktopOnly,
+          ),
+        ],
+      );
+    }
 
     return Column(
       key: const Key('usage-report-share'),
@@ -153,7 +179,7 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
         LayoutBuilder(
           builder: (context, constraints) {
             final columns = <Widget>[
-              for (final kind in UsageExportCardKind.values)
+              for (final kind in offered)
                 _CardColumn(
                   kind: kind,
                   boundaries: _boundaries,
@@ -191,6 +217,10 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
         ),
         const SizedBox(height: 8),
         UsageFootnote(text: l10n.usageExportBothThemes),
+        // Two downloads from one press is exactly what a browser asks about,
+        // and this sink cannot tell whether the second one landed.
+        if (ref.watch(usageExportIsBrowserProvider))
+          UsageFootnote(text: l10n.usageExportBrowserPrompt),
         if (_status != null) ...[
           const SizedBox(height: 8),
           InlineNotice(icon: Icons.check_circle_outline, text: _status!),

@@ -40,6 +40,33 @@ enum UsagePeriod {
   ];
 }
 
+/// The `?period=` name for a period, and back again.
+///
+/// A stable link vocabulary, deliberately not `UsagePeriod.name`: the enum is
+/// free to be renamed, and a link that shipped in a notification is not.
+extension UsagePeriodLink on UsagePeriod {
+  /// The name this period carries in a link.
+  String get linkName => switch (this) {
+    UsagePeriod.today => 'today',
+    UsagePeriod.week => 'week',
+    UsagePeriod.month => 'month',
+    UsagePeriod.year => 'year',
+    UsagePeriod.allTime => 'all-time',
+  };
+
+  /// Reads a link name, or `null` for anything the report does not offer.
+  ///
+  /// `today` parses to `null` deliberately: it is a Today-card period, and the
+  /// report's switcher has no seat for it.
+  static UsagePeriod? parse(String? value) {
+    if (value == null) return null;
+    for (final period in UsagePeriod.report) {
+      if (period.linkName == value) return period;
+    }
+    return null;
+  }
+}
+
 /// The earliest day an all-time window reaches back to.
 ///
 /// Tokdash bounds the answer by what it actually recorded — a 244-day window

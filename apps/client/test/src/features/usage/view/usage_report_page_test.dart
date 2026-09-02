@@ -6,6 +6,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -48,6 +49,7 @@ void main() {
     Locale locale = const Locale('en'),
     Brightness brightness = Brightness.light,
     Size size = const Size(1000, 2400),
+    Widget page = const UsageReportPage(),
   }) {
     final spec = themeSpecById(kDefaultThemeId);
     final tokens = brightness == Brightness.dark ? spec.dark : spec.light;
@@ -63,7 +65,7 @@ void main() {
         theme: buildAppTheme(tokens, brightness),
         home: MediaQuery(
           data: MediaQueryData(size: size),
-          child: const UsageReportPage(),
+          child: page,
         ),
       ),
     );
@@ -91,7 +93,13 @@ void main() {
     await tester.pumpWidget(buildSubject(response: served(data)));
     await tester.pumpAndSettle();
 
-    expect(find.text('Usage history is unavailable.'), findsOneWidget);
+    // Its own notice, not the unavailable one: the report arrived, and it is
+    // the period that could not be resolved. The reader's next move differs.
+    expect(
+      find.textContaining('tokdash did not recognize this period'),
+      findsOneWidget,
+    );
+    expect(find.text('Usage history is unavailable.'), findsNothing);
     expect(find.byKey(const Key('usage-report-hero')), findsNothing);
     expect(find.textContaining('19.9B'), findsNothing);
   });
@@ -216,5 +224,33 @@ void main() {
       find.byKey(const Key('usage-report-scope')),
     );
     expect(scope.data, contains('本机全部 agent 活动'));
+  });
+
+  testWidgets('the page opens on the period a link names', (tester) async {
+    await tester.pumpWidget(
+      buildSubject(
+        response: served(sampleReport()),
+        page: const UsageReportPage(initialPeriod: UsagePeriod.year),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // A month-end notification opens on the period it is about, rather than on
+    // whatever the page's default happens to be.
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('usage-period-switcher')),
+        matching: find.text('Year'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('2026'), findsWidgets);
+  });
+
+  testWidgets('no link period leaves the default alone', (tester) async {
+    await tester.pumpWidget(buildSubject(response: served(sampleReport())));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('August 2026'), findsWidgets);
   });
 }

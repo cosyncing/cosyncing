@@ -307,6 +307,9 @@ void main() {
           usageExportCaptureProvider.overrideWithValue(
             (key) async => Uint8List.fromList(const [137, 80, 78, 71]),
           ),
+          // flutter_test reports Android, where the export is deliberately not
+          // offered. Pinned so these cases exercise the platforms that have it.
+          usageExportSupportedProvider.overrideWithValue(true),
         ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -390,5 +393,96 @@ void main() {
         findsOneWidget,
       );
     });
+  });
+
+  group('platforms without a directory sink', () {
+    Widget subject({bool supported = true, bool isBrowser = false}) {
+      final spec = themeSpecById(kDefaultThemeId);
+      return ProviderScope(
+        overrides: [
+          usageNowProvider.overrideWithValue(() => DateTime(2026, 9, 2)),
+          usageReportApiProvider.overrideWithValue(_StubApi()),
+          usageExportCaptureProvider.overrideWithValue((key) async => null),
+          usageExportSupportedProvider.overrideWithValue(supported),
+          usageExportIsBrowserProvider.overrideWithValue(isBrowser),
+        ],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          theme: buildAppTheme(spec.light, Brightness.light),
+          home: const MediaQuery(
+            data: MediaQueryData(size: Size(1100, 3400)),
+            child: UsageReportPage(),
+          ),
+        ),
+      );
+    }
+
+    testWidgets('mobile is told where export runs, not given a dead button', (
+      tester,
+    ) async {
+      await tester.pumpWidget(subject(supported: false));
+      await tester.pumpAndSettle();
+
+      // Not a button that fails: `file_selector_ios` has no directory picker at
+      // all, and Android's answers with a path scoped storage will not let this
+      // app write. A failing press would read as a bug in the report.
+      expect(find.byKey(const Key('usage-export-unsupported')), findsOneWidget);
+      expect(find.byKey(const Key('usage-export-overview')), findsNothing);
+      expect(find.byKey(const Key('usage-export-projectDetail')), findsNothing);
+      expect(find.byKey(const Key('usage-export-cost')), findsNothing);
+    });
+
+    test('the capability names the two platforms with no sink', () {
+      expect(usageExportSupportedOn(TargetPlatform.iOS), isFalse);
+      expect(usageExportSupportedOn(TargetPlatform.android), isFalse);
+      expect(usageExportSupportedOn(TargetPlatform.linux), isTrue);
+      expect(usageExportSupportedOn(TargetPlatform.macOS), isTrue);
+      expect(usageExportSupportedOn(TargetPlatform.windows), isTrue);
+    });
+
+    testWidgets('the browser is told it may be asked about the second file', (
+      tester,
+    ) async {
+      await tester.pumpWidget(subject(isBrowser: true));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('may ask to allow multiple downloads'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('that note is absent where the app owns the destination', (
+      tester,
+    ) async {
+      await tester.pumpWidget(subject());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('may ask to allow multiple downloads'),
+        findsNothing,
+      );
+    });
+  });
+
+  test('the browser sink spaces its two handovers', () async {
+    final order = <String>[];
+    final sink = BrowserUsageExportSink(
+      betweenFiles: const Duration(milliseconds: 40),
+      handOver: (file) async => order.add(file.name),
+    );
+
+    final written = sink.write([
+      UsageExportFile(name: 'light.png', bytes: Uint8List.fromList(const [1])),
+      UsageExportFile(name: 'dark.png', bytes: Uint8List.fromList(const [2])),
+    ]);
+    // Chrome gates a second download from one gesture, and a page that starts
+    // both in the same tick can have the second dropped with nothing to catch.
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(order, ['light.png'], reason: 'both files went over in one tick');
+
+    expect(await written, ['light.png', 'dark.png']);
+    expect(order, ['light.png', 'dark.png']);
   });
 }

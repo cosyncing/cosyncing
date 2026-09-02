@@ -63,6 +63,9 @@ void main() {
         usageReportApiProvider.overrideWithValue(_StubApi(data)),
         // A golden must not depend on a rasterizer running inside a golden.
         usageExportCaptureProvider.overrideWithValue((key) async => null),
+        // flutter_test reports Android, where the export is deliberately not
+        // offered. Pinned so these cases exercise the platforms that have it.
+        usageExportSupportedProvider.overrideWithValue(true),
       ],
       child: MaterialApp(
         locale: locale,

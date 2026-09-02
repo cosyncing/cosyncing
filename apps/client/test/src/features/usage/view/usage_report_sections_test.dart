@@ -5,6 +5,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
@@ -54,6 +55,10 @@ void main() {
       overrides: [
         usageNowProvider.overrideWithValue(() => now),
         usageReportApiProvider.overrideWithValue(_StubApi(served(data))),
+        // flutter_test reports Android, where the share section is a notice.
+        // Pinned so the export controls are actually in the tree to assert on.
+        usageExportSupportedProvider.overrideWithValue(true),
+        usageExportCaptureProvider.overrideWithValue((key) async => null),
       ],
       child: MaterialApp(
         locale: locale,
@@ -498,5 +503,76 @@ void main() {
     expect(find.text('你的时间分布'), findsOneWidget);
     expect(find.text('本月之最'), findsOneWidget);
     expect(find.text('按 agent'), findsOneWidget);
+  });
+
+  group('withheld project names', () {
+    Map<String, dynamic> withheld() {
+      // Exactly what a non-owner is served: the facet gone, the reason said.
+      final data = sampleReport()
+        ..remove('projects')
+        ..['projectsUnavailable'] = 'owner-only';
+      return data;
+    }
+
+    testWidgets('the podium says the names were withheld, not absent', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: withheld()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Project names are served to the broker owner'),
+        findsOneWidget,
+      );
+      // The counts are untouched, so the rest of the page still stands.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-hero')),
+          matching: find.text('19.9B'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('no project name reaches the tree', (tester) async {
+      await tester.pumpWidget(buildSubject(data: withheld()));
+      await tester.pumpAndSettle();
+
+      final names =
+          (sampleReport()['projects']! as Map<String, dynamic>)['rows']!
+              as List<dynamic>;
+      expect(names, isNotEmpty);
+      for (final row in names) {
+        final project = (row as Map<String, dynamic>)['project']! as String;
+        expect(
+          find.textContaining(project),
+          findsNothing,
+          reason: 'withheld report still rendered $project',
+        );
+      }
+    });
+
+    testWidgets('the project-detail export is not offered', (tester) async {
+      await tester.pumpWidget(buildSubject(data: withheld()));
+      await tester.pumpAndSettle();
+
+      // A card whose whole content is project names has nothing to carry —
+      // while the counts-only card, which never had names, still does.
+      expect(find.byKey(const Key('usage-export-overview')), findsOneWidget);
+      expect(find.byKey(const Key('usage-export-projectDetail')), findsNothing);
+    });
+
+    testWidgets('both exports are offered when the names are served', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('usage-export-overview')), findsOneWidget);
+      expect(
+        find.byKey(const Key('usage-export-projectDetail')),
+        findsOneWidget,
+      );
+    });
   });
 }

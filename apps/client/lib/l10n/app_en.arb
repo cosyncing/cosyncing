@@ -5549,5 +5549,21 @@
   "usageExportFailed": "Could not write the export.",
   "@usageExportFailed": {
     "description": "Export failure notice."
+  },
+  "usageProjectsOwnerOnly": "Project names are served to the broker owner only. Every count on this page still includes them.",
+  "@usageProjectsOwnerOnly": {
+    "description": "Shown when the broker withheld the project facet from a non-owner. Says the names are missing, not the work."
+  },
+  "usageExportDesktopOnly": "Export runs on desktop and in the web app. There is no folder to write to on a phone.",
+  "@usageExportDesktopOnly": {
+    "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
+  },
+  "usageExportBrowserPrompt": "One press writes two files, so your browser may ask to allow multiple downloads.",
+  "@usageExportBrowserPrompt": {
+    "description": "Web only. The page cannot tell whether the browser dropped the second download, so it says the prompt is expected."
+  },
+  "usageWindowUnrecognized": "tokdash did not recognize this period, so it answered for a window nobody asked about. No figures are shown.",
+  "@usageWindowUnrecognized": {
+    "description": "Distinct from the unavailable notice: the report arrived, and it is this period that could not be resolved."
   }
 }

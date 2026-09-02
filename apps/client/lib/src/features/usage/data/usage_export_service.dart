@@ -74,24 +74,48 @@ Future<void> _writeFile(String path, Uint8List bytes) async {
 }
 
 /// Web: the browser owns the destination, so each file is handed over in turn.
+///
+/// Handing two downloads to a browser is not the same as writing two files.
+/// Chrome gates a second download from the same gesture behind a permission
+/// prompt, and a page that starts them in the same tick can have the second
+/// dropped without an error anyone can catch. The gap gives the browser a
+/// chance to present them as two downloads rather than a burst, and the section
+/// says out loud that the browser may ask — because this sink cannot find out
+/// whether it did.
 class BrowserUsageExportSink implements UsageExportSink {
   /// Creates the sink.
-  const BrowserUsageExportSink();
+  const BrowserUsageExportSink({
+    this.betweenFiles = _betweenBrowserDownloads,
+    this.handOver = _handOverToBrowser,
+  });
+
+  /// Pause between handovers. Injectable so a test does not wait for it.
+  final Duration betweenFiles;
+
+  /// Handover boundary, for the same reason the directory sink has one.
+  final Future<void> Function(UsageExportFile file) handOver;
 
   @override
   Future<List<String>?> write(List<UsageExportFile> files) async {
     final written = <String>[];
     for (final file in files) {
-      await XFile.fromData(
-        file.bytes,
-        name: file.name,
-        mimeType: 'image/png',
-      ).saveTo('');
+      if (written.isNotEmpty) await Future<void>.delayed(betweenFiles);
+      await handOver(file);
       written.add(file.name);
     }
     return written;
   }
 }
+
+Future<void> _handOverToBrowser(UsageExportFile file) async {
+  await XFile.fromData(
+    file.bytes,
+    name: file.name,
+    mimeType: 'image/png',
+  ).saveTo('');
+}
+
+const Duration _betweenBrowserDownloads = Duration(milliseconds: 400);
 
 /// The sink for this platform.
 final Provider<UsageExportSink> usageExportSinkProvider =
@@ -100,6 +124,34 @@ final Provider<UsageExportSink> usageExportSinkProvider =
           ? const BrowserUsageExportSink()
           : const DirectoryUsageExportSink(),
     );
+
+/// Whether this platform can write an export at all.
+///
+/// False on iOS and Android, and the reason is the directory picker rather than
+/// anything about the card. `file_selector_ios` does not implement
+/// `getDirectoryPath`, so the platform-interface default throws; the Android
+/// plugin implements it but answers by converting a Storage Access Framework
+/// tree URI back into a raw path, which throws for anything but the primary
+/// volume and, when it does succeed, hands back a path scoped storage will not
+/// let this app write — it holds no storage permission.
+///
+/// Left as a capability check rather than a `try` around the export, because a
+/// button that always fails is worse than a button that is not there: the
+/// failure looks like a bug in the report, and it is a missing platform sink.
+bool usageExportSupportedOn(TargetPlatform platform) {
+  if (kIsWeb) return true;
+  return platform != TargetPlatform.iOS && platform != TargetPlatform.android;
+}
+
+/// Whether export is offered here. Overridable so a test can pin either answer.
+final Provider<bool> usageExportSupportedProvider = Provider<bool>(
+  (ref) => usageExportSupportedOn(defaultTargetPlatform),
+);
+
+/// Whether the destination is a browser. Overridable for the same reason.
+final Provider<bool> usageExportIsBrowserProvider = Provider<bool>(
+  (ref) => kIsWeb,
+);
 
 /// Captures one laid-out `RepaintBoundary` as PNG bytes.
 typedef UsageExportCapture = Future<Uint8List?> Function(GlobalKey boundaryKey);

@@ -135,4 +135,27 @@ void main() {
       }
     });
   });
+
+  group('link names', () {
+    test('every report period round-trips through its link name', () {
+      for (final period in UsagePeriod.report) {
+        expect(UsagePeriodLink.parse(period.linkName), period);
+      }
+    });
+
+    test('the names are the stable vocabulary, not the enum spelling', () {
+      // A link that shipped in a notification outlives any rename here.
+      expect(UsagePeriod.allTime.linkName, 'all-time');
+      expect(UsagePeriod.month.linkName, 'month');
+    });
+
+    test('a period the report does not offer parses to nothing', () {
+      // `today` is a Today-card period; the report switcher has no seat for it,
+      // so a link naming it opens on the default rather than on a missing tab.
+      expect(UsagePeriodLink.parse('today'), isNull);
+      expect(UsagePeriodLink.parse('fortnight'), isNull);
+      expect(UsagePeriodLink.parse(null), isNull);
+      expect(UsagePeriodLink.parse(''), isNull);
+    });
+  });
 }
