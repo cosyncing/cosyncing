@@ -1,5 +1,6 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:flutter/material.dart';
@@ -27,7 +28,11 @@ SessionFilePreview _diffPreview([String text = _patch]) => SessionFilePreview(
   text: text,
 );
 
-Widget _host(SessionFilePreview preview) {
+Widget _host(
+  SessionFilePreview preview, {
+  FilePaneView? initialView,
+  ValueChanged<FilePaneView>? onViewChanged,
+}) {
   final spec = themeSpecById(kDefaultThemeId);
   return MaterialApp(
     localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -41,6 +46,8 @@ Widget _host(SessionFilePreview preview) {
           content: FileViewerSource(preview: preview),
           sessionLabel: 'codex · patch',
           toolColor: spec.light.toolCodex,
+          initialView: initialView,
+          onViewChanged: onViewChanged,
         ),
       ),
     ),
@@ -48,6 +55,41 @@ Widget _host(SessionFilePreview preview) {
 }
 
 void main() {
+  group('a resumed read', () {
+    testWidgets('opens on the handed-over face, not the default one', (
+      tester,
+    ) async {
+      // A patch is the one file that defaults to rendered, so it is the only
+      // fixture where "the handed-over face won" is distinguishable from
+      // "nothing happened".
+      await tester.pumpWidget(
+        _host(
+          _diffPreview(),
+          initialView: (mode: FileViewMode.source, offset: 0),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('file-viewer-lines')), findsOneWidget);
+      expect(find.byKey(const Key('file-viewer-diff')), findsNothing);
+    });
+
+    testWidgets('reports the face it was switched to', (tester) async {
+      final reported = <FilePaneView>[];
+      await tester.pumpWidget(
+        _host(_diffPreview(), onViewChanged: reported.add),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('file-viewer-mode-source')));
+      await tester.pump();
+
+      // Without this the crossing would resume on the renderer's default face
+      // and silently undo the reader's choice.
+      expect(reported.last.mode, FileViewMode.source);
+    });
+  });
+
   group('rendered diff', () {
     testWidgets('a patch opens rendered, unlike every other file', (
       tester,

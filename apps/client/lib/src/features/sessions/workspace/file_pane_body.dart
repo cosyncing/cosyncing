@@ -3,6 +3,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_view_memory.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:flutter/material.dart';
@@ -131,13 +132,22 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
         displayName: displayName,
       ),
     );
+    // Read once, at mount: the memory is a handoff across a resize, not a
+    // binding. Watching it would make every scroll frame a rebuild.
+    final memory = ref.read(filePaneViewMemoryProvider);
     return FileViewerPane(
       content: content,
+      initialView: memory.read(pane.key),
+      onViewChanged: (view) => memory.write(pane.key, view),
       sessionLabel: '${pane.session.tool} · ${pane.session.sessionId}',
       toolColor: tokens.toolColor(pane.session.tool),
       onRetry: () => ref.invalidate(filePaneReadProvider(pane)),
-      onClose: () =>
-          ref.read(filePanesControllerProvider.notifier).close(pane).ignore(),
+      onClose: () {
+        // Closing a file forgets where you were in it: reopening it later is
+        // a new read, not a resumed one.
+        memory.forget(pane.key);
+        ref.read(filePanesControllerProvider.notifier).close(pane).ignore();
+      },
     );
   }
 }

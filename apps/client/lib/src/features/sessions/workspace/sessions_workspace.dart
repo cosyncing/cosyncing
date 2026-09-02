@@ -25,7 +25,7 @@ import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state
 import 'package:cosyncing_client/src/features/sessions/roster/roster_freshness_slot.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_projection.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
-import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_surface.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
@@ -631,39 +631,6 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
   ///
   /// The strip is in the pane, never in the top scroller — that one stays
   /// sessions-only, so the two kinds can never be confused there.
-  Widget _buildFilePane({
-    required AppTokens tokens,
-    required SessionDetailKey session,
-    required List<FilePaneKey> panes,
-    required FilePaneKey? activeFile,
-  }) {
-    final controller = ref.read(filePanesControllerProvider.notifier);
-    return DecoratedBox(
-      decoration: BoxDecoration(color: tokens.surface2),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          FileTabsStrip(
-            panes: panes,
-            activeKey: activeFile?.key,
-            onSelect: (pane) => unawaited(controller.activate(pane)),
-            onClose: (pane) => unawaited(controller.close(pane)),
-            onReorder: (oldIndex, newIndex) =>
-                unawaited(controller.reorder(session, oldIndex, newIndex)),
-          ),
-          Expanded(
-            child: activeFile == null
-                ? const SizedBox.shrink()
-                : WorkspaceFilePaneBody(
-                    key: ValueKey<String>(activeFile.key),
-                    pane: activeFile,
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildSplit({
     required AppTokens tokens,
     required AppLocalizations l10n,
@@ -683,27 +650,29 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         final available = constraints.maxWidth;
         final rosterWidth = _clampWidth(_rosterWidth, available);
         // No phantom pane: the second sash and the file pane exist precisely
-        // while the active session has a file open. With none, this is exactly
+        // while *some* session has a file open. With none, this is exactly
         // today's two-column workspace and there is no empty third column.
+        //
+        // Deliberately the whole working set, not the active session's slice.
+        // Keying it on the active session would collapse the layout out from
+        // under a reader every time they switched tabs, and rebuild it when
+        // they switched back; a session that has opened nothing rests instead.
         final activeSession = active == null
             ? null
             : SessionDetailKey(tool: active.tool, sessionId: active.id);
+        final fileState =
+            ref.watch(filePanesControllerProvider).valueOrNull ??
+            FilePanesState.empty;
         final filePanes = activeSession == null
             ? const <FilePaneKey>[]
-            : (ref.watch(filePanesControllerProvider).valueOrNull ??
-                      FilePanesState.empty)
-                  .forSession(activeSession);
-        final activeFile = activeSession == null
-            ? null
-            : (ref.watch(filePanesControllerProvider).valueOrNull ??
-                      FilePanesState.empty)
-                  .activeFor(activeSession);
+            : fileState.forSession(activeSession);
         // The split is an Expanded-width affordance. Below that the compact
         // route carries the file instead, so a narrow window never has to fit
         // three columns.
         final fileWidth = _clampFileWidth(_fileWidth, available);
         final showFilePane =
-            filePanes.isNotEmpty &&
+            activeSession != null &&
+            fileState.panes.isNotEmpty &&
             available >=
                 SessionsWorkspace.detailMinPaneWidth +
                     SessionsWorkspace.minFilePaneWidth;
@@ -816,12 +785,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                     SizedBox(
                       key: const Key('workspace-file-pane'),
                       width: fileWidth,
-                      child: _buildFilePane(
-                        tokens: tokens,
-                        session: activeSession!,
-                        panes: filePanes,
-                        activeFile: activeFile,
-                      ),
+                      child: FilePaneSurface(session: activeSession),
                     ),
                   ],
                 ],

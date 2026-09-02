@@ -10,8 +10,11 @@ import '../../../../support/session_detail_page_test_harness.dart';
 
 void main() {
   group('transcript file links, end to end', () {
+    // These two mount the page without a router, which is the case where the
+    // Files slot is the only surface there is. The drill-in half — where a
+    // route exists to push — is the test below them.
     testWidgets(
-      'tapping a read path opens the Files view at that file, anchored',
+      'with no route to push, a read path opens the Files view, anchored',
       (tester) async {
         final brokerClient = _client()
           ..fsListingsByPath[''] = _directory('')
@@ -81,6 +84,47 @@ void main() {
         expect(find.text('3'), findsOneWidget);
       },
     );
+
+    testWidgets('a read path drills in to the file route, carrying its line', (
+      tester,
+    ) async {
+      final brokerClient = _client()
+        ..fsListingsByPath[''] = _directory('')
+        ..fsListingsByPath['/repo/lib/a.dart'] = _file('lib/a.dart')
+        ..fsReadResult = const FsReadResult(
+          path: 'lib/a.dart',
+          size: 40,
+          limit: 1024 * 1024,
+          truncated: false,
+          encoding: 'utf8',
+          data: 'alpha\nbeta\ngamma\ndelta',
+          mimeType: 'text/plain',
+        );
+
+      await tester.pumpWidget(
+        buildSessionDetailTestPage(
+          events: const [_readRow],
+          brokerClient: brokerClient,
+          withRouter: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('tool-r1-details')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tool-read-path')));
+      await tester.pumpAndSettle();
+
+      // The path the broker resolved it to, and the mention's own line. The
+      // transcript is not swapped away for it — it is underneath on the stack.
+      expect(find.text('file route lib/a.dart#3'), findsOneWidget);
+      // And the Files slot is not left holding a second copy of the same file
+      // for the reader to find on Back.
+      expect(
+        find.byKey(const Key('session-detail-tab-panel-files')),
+        findsNothing,
+      );
+    });
 
     testWidgets('a line past a truncated read says so, never lands on line 1', (
       tester,

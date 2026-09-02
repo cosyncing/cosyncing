@@ -41,6 +41,12 @@ enum FileViewMode {
   rendered,
 }
 
+/// What a reader had done to one file pane: which face, and how far down.
+///
+/// Lives beside [FileViewMode] rather than beside the memory that holds it,
+/// so the viewer never has to depend on the workspace that hosts it.
+typedef FilePaneView = ({FileViewMode mode, double offset});
+
 /// What the host is willing to let a renderer ask for.
 ///
 /// A renderer never acts: it asks, through the callbacks on

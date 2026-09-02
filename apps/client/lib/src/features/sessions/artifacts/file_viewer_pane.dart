@@ -109,6 +109,8 @@ class FileViewerPane extends StatefulWidget {
     this.onClose,
     this.onBrowseFiles,
     this.onRetry,
+    this.initialView,
+    this.onViewChanged,
     super.key,
   });
 
@@ -136,6 +138,16 @@ class FileViewerPane extends StatefulWidget {
   /// Re-issues the read from a state panel.
   final VoidCallback? onRetry;
 
+  /// The face and offset to open on, when this pane is resuming a read.
+  ///
+  /// Null on a fresh open, where the renderer's own default face and the top
+  /// of the file are correct. Set when the same file is being handed between
+  /// the split's second pane and the compact route across a resize.
+  final FilePaneView? initialView;
+
+  /// Reports the face and offset, so a crossing can resume where this left off.
+  final ValueChanged<FilePaneView>? onViewChanged;
+
   @override
   State<FileViewerPane> createState() => _FileViewerPaneState();
 }
@@ -159,6 +171,12 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   bool _revealScheduled = false;
   FileViewMode _mode = FileViewMode.source;
 
+  /// Whether [FileViewerPane.initialView]'s offset has been applied.
+  ///
+  /// One-shot: it is a handoff, not a binding. Re-applying it would fight
+  /// every subsequent scroll.
+  bool _restoredOffset = false;
+
   /// Memoized per-file renderer preparation.
   ///
   /// Keyed rather than recomputed because a preparer walks the whole file: the
@@ -172,8 +190,11 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   @override
   void initState() {
     super.initState();
-    _vertical.addListener(_syncGutter);
+    _vertical
+      ..addListener(_syncGutter)
+      ..addListener(_reportView);
     _scheduleAnchorReveal();
+    _scheduleOffsetRestore();
   }
 
   @override
@@ -181,9 +202,11 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.content.path != widget.content.path) {
       _wrap = false;
+      _restoredOffset = false;
       // _mode is not reset here: the next _resolve sets it from the incoming
       // file's own renderer, which is not always source.
       _scheduleAnchorReveal();
+      _scheduleOffsetRestore();
     } else if (oldWidget.content is! FileViewerSource &&
         widget.content is FileViewerSource) {
       _scheduleAnchorReveal();
@@ -194,10 +217,37 @@ class _FileViewerPaneState extends State<FileViewerPane> {
   void dispose() {
     _vertical
       ..removeListener(_syncGutter)
+      ..removeListener(_reportView)
       ..dispose();
     _gutter.dispose();
     _horizontal.dispose();
     super.dispose();
+  }
+
+  /// Records the current face and offset for a possible width crossing.
+  void _reportView() {
+    if (!_vertical.hasClients) return;
+    widget.onViewChanged?.call((mode: _mode, offset: _vertical.offset));
+  }
+
+  /// Restores a handed-over offset once the body has a viewport.
+  ///
+  /// Runs after the anchor reveal is scheduled and wins over it only when
+  /// there is something to restore, because a resume is a continuation of a
+  /// read the anchor already served.
+  void _scheduleOffsetRestore() {
+    final view = widget.initialView;
+    if (view == null || _restoredOffset) return;
+    _restoredOffset = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_vertical.hasClients) return;
+      _vertical.jumpTo(
+        view.offset.clamp(
+          _vertical.position.minScrollExtent,
+          _vertical.position.maxScrollExtent,
+        ),
+      );
+    });
   }
 
   void _syncGutter() {
@@ -335,7 +385,10 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                   _ModeToggle(
                     tokens: tokens,
                     mode: _mode,
-                    onChanged: (mode) => setState(() => _mode = mode),
+                    onChanged: (mode) {
+                      setState(() => _mode = mode);
+                      _reportView();
+                    },
                     sourceLabel: l10n.fileViewerModeSource,
                     renderedLabel: l10n.fileViewerModeRendered,
                   ),
@@ -579,8 +632,9 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     if (_preparedKey != key) {
       _lines = preview.text.isEmpty ? const [] : preview.text.split('\n');
       // Each renderer opens on its own default face. Source for everything
-      // except a patch, where the presentation is the point of the file.
-      _mode = descriptor.defaultMode;
+      // except a patch, where the presentation is the point of the file — but
+      // a handed-over face wins, since a resume is the same read continuing.
+      _mode = widget.initialView?.mode ?? descriptor.defaultMode;
       final prepared = descriptor.prepare?.call(
         _request(context, tokens, descriptor, preview, prepared: null),
       );

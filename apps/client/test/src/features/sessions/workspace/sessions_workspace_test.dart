@@ -281,10 +281,12 @@ void main() {
       await tester.tap(find.byKey(const Key('session-row-codex/b')));
       await tester.pumpAndSettle();
 
-      // A session with no open files shows no pane rather than the other
-      // session's files.
+      // A session with no open files rests rather than showing the other
+      // session's files -- and rather than collapsing the split, which would
+      // rearrange the layout every time the reader switched tabs.
       expect(fileTab('mine.dart'), findsNothing);
-      expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(find.byKey(const Key('file-pane-no-files')), findsOneWidget);
 
       await openFile(tester, container, 'codex', 'b', 'lib/theirs.dart');
       expect(fileTab('theirs.dart'), findsOneWidget);
@@ -308,6 +310,20 @@ void main() {
 
       expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
       expect(find.byType(WorkspaceSplitSash), findsOneWidget);
+    });
+
+    testWidgets('a file open in another session keeps the pane resting', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'codex', 'b', 'lib/theirs.dart');
+
+      // D-2 is about the working set, not the visible slice: the pane exists
+      // while any session has a file open, so switching to a session with
+      // none does not take the third column away and give it back.
+      expect(find.byKey(const Key('workspace-file-pane')), findsOneWidget);
+      expect(find.byKey(const Key('file-pane-no-files')), findsOneWidget);
+      expect(fileTab('theirs.dart'), findsNothing);
     });
 
     testWidgets('dragging past the snap collapses to the document rail', (

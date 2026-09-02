@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/app/router/session_routes.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/data/credential_store.dart';
 import 'package:cosyncing_client/src/features/broker_profiles/model/broker_profile.dart';
@@ -28,6 +29,7 @@ import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 
 import 'in_memory_session_display_preferences_store.dart';
 import 'in_memory_session_live_state_view_store.dart';
@@ -92,6 +94,7 @@ Widget buildSessionDetailTestPage({
   List<Override> extraOverrides = const [],
   List<ProviderObserver> observers = const [],
   Widget Function(Widget sessionDetailPage)? homeBuilder,
+  bool withRouter = false,
 }) {
   final effectiveBrokerProfile = brokerProfile ?? createTestBrokerProfile();
   final scriptedConnection =
@@ -216,34 +219,88 @@ Widget buildSessionDetailTestPage({
     sessionId: sessionId,
     embedded: embedded,
   );
+  // homeBuilder lets lifecycle tests wrap the page in the widgets that own it
+  // in production — a credential gate barrier, the open-session supervisor —
+  // without duplicating this harness's override wiring.
+  final home = _maybeScaleText(
+    textScale,
+    homeBuilder == null ? sessionDetailPage : homeBuilder(sessionDetailPage),
+  );
+  final effectiveTheme =
+      theme ??
+      ThemeData(
+        splashFactory: InkRipple.splashFactory,
+        extensions: [themeSpecById(kDefaultThemeId).light],
+      );
   return ProviderScope(
     overrides: overrides,
     observers: observers,
-    child: MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      // Left null by default so tests keep resolving the system locale, as
-      // before. Pass one to assert that a string is genuinely localized rather
-      // than merely centralized in the ARB.
-      locale: locale,
-      theme:
-          theme ??
-          ThemeData(
-            splashFactory: InkRipple.splashFactory,
-            extensions: [themeSpecById(kDefaultThemeId).light],
+    child: withRouter
+        ? MaterialApp.router(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            locale: locale,
+            theme: effectiveTheme,
+            routerConfig: _harnessRouter(
+              home,
+              tool: tool,
+              sessionId: sessionId,
+            ),
+          )
+        : MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            // Left null by default so tests keep resolving the system locale,
+            // as before. Pass one to assert that a string is genuinely
+            // localized rather than merely centralized in the ARB.
+            locale: locale,
+            theme: effectiveTheme,
+            home: home,
           ),
-      // homeBuilder lets lifecycle tests wrap the page in the widgets that
-      // own it in production — a credential gate barrier, the open-session
-      // supervisor — without duplicating this harness's override wiring.
-      home: _maybeScaleText(
-        textScale,
-        homeBuilder == null
-            ? sessionDetailPage
-            : homeBuilder(sessionDetailPage),
-      ),
-    ),
   );
 }
+
+/// A router around [home], for tests of behaviour that pushes a route.
+///
+/// The page is also mounted without a router, which is why it must never
+/// assume one; this is how the router-bearing half of that gets covered.
+///
+/// The route shape mirrors the app's, because the page builds its own
+/// locations from the centralized helpers: a stub at some other path would
+/// simply not be matched.
+GoRouter _harnessRouter(
+  Widget home, {
+  required String tool,
+  required String sessionId,
+}) => GoRouter(
+  initialLocation: sessionDetailLocation(tool: tool, sessionId: sessionId),
+  routes: [
+    GoRoute(
+      path: '/sessions',
+      builder: (context, state) => const Scaffold(body: SizedBox.shrink()),
+      routes: [
+        GoRoute(
+          path: ':tool/:id',
+          builder: (context, state) => home,
+          routes: [
+            // Stands in for the app's compact file drill-in. Only that it
+            // was reached, and with which parameters, matters here; the real
+            // route's body has its own tests.
+            GoRoute(
+              path: 'file',
+              builder: (context, state) => Scaffold(
+                body: Text(
+                  'file route ${state.uri.queryParameters['path']}'
+                  '#${state.uri.queryParameters['line']}',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  ],
+);
 
 /// Semantic viewport seed for transcript restoration widget tests.
 final class SessionViewportSeed {

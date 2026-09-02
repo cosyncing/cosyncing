@@ -51,9 +51,14 @@ class FilePanesController extends AsyncNotifier<FilePanesState> {
     // Serialized: two rapid opens must not both read the same prior state and
     // write back a set missing one of them.
     final work = _tail.then((_) async {
+      // Wait for the restore before mutating. Writing on top of an in-flight
+      // build() is silently undone when it resolves and overwrites `state`,
+      // and that is not a theoretical window: a deep link into a file opens a
+      // pane on its first frame, before the set has finished loading, so the
+      // pane it opened would vanish every single time.
+      final current = await future;
       final sourceKey = _sourceKey;
       if (sourceKey == null) return;
-      final current = state.valueOrNull ?? FilePanesState.empty;
       final next = change(current);
       state = AsyncData(next);
       await _store.save(sourceKey, next);

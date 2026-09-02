@@ -10,6 +10,8 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/list/sessions_branch_screen.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
@@ -181,7 +183,10 @@ void main() {
         routes: [
           GoRoute(
             path: '/sessions',
-            builder: (context, state) => const SessionsBranchScreen(),
+            // The real shell puts the workspace inside a Scaffold; the file
+            // pane's tabs are InkWells and need that Material ancestor.
+            builder: (context, state) =>
+                const Scaffold(body: SessionsBranchScreen()),
             routes: [
               GoRoute(
                 path: ':tool/:id',
@@ -199,6 +204,16 @@ void main() {
                     sessionId: sessionId,
                   );
                 },
+                routes: [
+                  GoRoute(
+                    path: 'file',
+                    builder: (context, state) => Scaffold(
+                      body: Text(
+                        'file stub ${state.uri.queryParameters['path']}',
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -237,6 +252,49 @@ void main() {
         reason: 'collapsing should push the open session, not the roster',
       );
       expect(find.text('detail stub'), findsOneWidget);
+    });
+
+    testWidgets('collapsing carries the open file, not the session under it', (
+      tester,
+    ) async {
+      final store = _FakeOpenSessionsStore()
+        ..saved['p1'] = const OpenSessionsSnapshot(
+          refs: [
+            SessionRef(
+              tool: 'claude',
+              id: 'a',
+              title: 'First',
+              status: SessionStatus.idle,
+            ),
+          ],
+          activeKey: 'claude/a',
+        );
+
+      resize(tester, const Size(1100, 800));
+      await tester.pumpWidget(buildRouted(store: store));
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsWorkspace)),
+      );
+      await container
+          .read(filePanesControllerProvider.notifier)
+          .open(
+            const SessionDetailKey(tool: 'claude', sessionId: 'a'),
+            'x.dart',
+          );
+      await tester.pumpAndSettle();
+
+      resize(tester, const Size(400, 800));
+      await tester.pumpAndSettle();
+
+      // The file was what the reader was looking at, so it is what survives.
+      expect(
+        router.state.uri.path,
+        '/sessions/claude/a/file',
+        reason: 'collapsing should carry the open file, not just its session',
+      );
+      expect(router.state.uri.queryParameters['path'], 'x.dart');
+      expect(find.text('file stub x.dart'), findsOneWidget);
     });
 
     testWidgets(
@@ -346,6 +404,7 @@ List<Override> _sessionStoreOverrides() => <Override>[
   sessionDisplayPreferencesStoreProvider.overrideWithValue(
     InMemorySessionDisplayPreferencesStore(),
   ),
+  filePanesStoreProvider.overrideWithValue(_FakeFilePanesStore()),
   workspacePrefsStoreProvider.overrideWithValue(_FakeWorkspacePrefsStore()),
   sessionLiveStateViewStoreProvider.overrideWithValue(
     InMemorySessionLiveStateViewStore(),
@@ -419,4 +478,16 @@ class _FakeWorkspacePrefsStore implements WorkspacePrefsStore {
   }
 
   WorkspaceRosterPrefs? savedFilePane;
+}
+
+class _FakeFilePanesStore implements FilePanesStore {
+  FilePanesState _state = FilePanesState.empty;
+
+  @override
+  Future<FilePanesState> load(String sourceKey) async => _state;
+
+  @override
+  Future<void> save(String sourceKey, FilePanesState state) async {
+    _state = state;
+  }
 }

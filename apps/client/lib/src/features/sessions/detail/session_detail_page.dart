@@ -1329,6 +1329,32 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
     if (preview != null && _openInFilePane(preview.path, reference.line)) {
       return;
     }
+    // `maybeOf`, not `of`: the drill-in needs a router, and this page is also
+    // mounted without one. Where there is no route to push, the Files slot is
+    // the only surface there is and switching to it stays correct.
+    final router = GoRouter.maybeOf(context);
+    if (preview != null && router != null) {
+      // No room for a second pane, so the file is a pushed route instead --
+      // the transcript stays on the stack underneath rather than being
+      // swapped away, which is what switching to the Files slot used to cost.
+      // The browser's own preview is closed on the way out: the drill-in is
+      // now the surface showing this file, and leaving a second copy behind
+      // the route would greet the reader on Back.
+      ref
+          .read(sessionFileBrowserControllerProvider(browserKey).notifier)
+          .closePreview();
+      unawaited(
+        router.push(
+          sessionFileLocation(
+            tool: _key.tool,
+            sessionId: _key.sessionId,
+            path: preview.path,
+            line: reference.line,
+          ),
+        ),
+      );
+      return;
+    }
     _selectView(_SessionDetailView.files);
   }
 
