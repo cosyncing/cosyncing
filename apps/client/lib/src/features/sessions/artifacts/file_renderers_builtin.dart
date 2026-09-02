@@ -1,4 +1,5 @@
 import 'package:cosyncing_client/src/design/app_tokens.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_diff_renderer.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
 import 'package:cosyncing_client/src/features/sessions/renderers/message_renderer_registry.dart';
@@ -21,6 +22,7 @@ const String markdownFileRendererId = 'markdown';
 /// `.html` is claimed by both the markup-aware renderers and the code
 /// renderer, and the specific one has to win.
 List<FileRendererDescriptor> builtInFileRenderers() => [
+  diffFileRenderer(),
   const FileRendererDescriptor(
     id: markdownFileRendererId,
     source: BuiltInRendererSource(),

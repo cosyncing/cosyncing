@@ -181,7 +181,8 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.content.path != widget.content.path) {
       _wrap = false;
-      _mode = FileViewMode.source;
+      // _mode is not reset here: the next _resolve sets it from the incoming
+      // file's own renderer, which is not always source.
       _scheduleAnchorReveal();
     } else if (oldWidget.content is! FileViewerSource &&
         widget.content is FileViewerSource) {
@@ -577,6 +578,9 @@ class _FileViewerPaneState extends State<FileViewerPane> {
         '\u0000${preview.text.hashCode}\u0000${descriptor.id}';
     if (_preparedKey != key) {
       _lines = preview.text.isEmpty ? const [] : preview.text.split('\n');
+      // Each renderer opens on its own default face. Source for everything
+      // except a patch, where the presentation is the point of the file.
+      _mode = descriptor.defaultMode;
       final prepared = descriptor.prepare?.call(
         _request(context, tokens, descriptor, preview, prepared: null),
       );

@@ -193,6 +193,10 @@ const _reviewedLiteralByLocation = <String>{
   // hold, and would stop matching the number an editor shows for that line.
   'lib/src/features/sessions/artifacts/file_source_body.dart::'
       r'$number',
+  // One rendered diff row: the patch's own bytes behind their +/-/space
+  // marker. Translating either half would be translating the file.
+  'lib/src/features/sessions/artifacts/file_diff_renderer.dart::'
+      r'$marker${line.text}',
   'lib/src/features/sessions/list/new_session_sheet.dart::'
       r'$projectContextLabel · ${widget.initialDirectory}',
   'lib/src/features/sessions/detail/session_detail_chrome.dart::'
