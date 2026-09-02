@@ -3604,5 +3604,9 @@
   "fileViewerOpenInBrowserHint": "Opens a local copy in your default browser, outside cosyncing.",
   "@fileViewerOpenInBrowserHint": {"description": "Tooltip on the hand-off. Says local copy because the workspace path names a file on the broker's machine, which may not be this one."},
   "fileViewerOpenInBrowserFailed": "That file could not be opened in a browser.",
-  "@fileViewerOpenInBrowserFailed": {"description": "Shown when staging or launching the local copy failed."}
+  "@fileViewerOpenInBrowserFailed": {"description": "Shown when staging or launching the local copy failed."},
+  "workspacePromptTargetNote": "Prompts go to {session}",
+  "@workspacePromptTargetNote": {"description": "Quiet trailing note on the composer while a file pane holds focus, naming the session that still receives typing. {session} is already tool-qualified, e.g. codex \u00b7 refactor auth.", "placeholders": {"session": {"type": "String"}}},
+  "workspacePromptTargetTooltip": "Typing and shortcuts target this session even while a file pane has focus",
+  "@workspacePromptTargetTooltip": {"description": "Tooltip on the session tab carrying the prompt-target tick."}
 }

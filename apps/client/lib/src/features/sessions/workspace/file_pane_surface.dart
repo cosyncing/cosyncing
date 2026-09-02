@@ -3,12 +3,41 @@ import 'dart:async';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_detail_state.dart';
+import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_list_presentation.dart';
+import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// How a session names itself on a file pane: `codex · refactor auth`.
+///
+/// The file pane is the one surface in the app that shows a session it is not
+/// inside, so it has to name that session the way the tab strip and the detail
+/// header do. Never the session id: it is a native fingerprint, it disagrees
+/// with every other surface naming the same session, and in the pane header it
+/// is the text that gets ellipsised first — leaving `codex · 01JQ…` where the
+/// design asked for a name.
+///
+/// [open] is the opened-sessions working set, the same source the tab strip
+/// reads, so the two labels cannot drift apart.
+String workspaceSessionLabel({
+  required SessionDetailKey session,
+  required OpenSessionsState? open,
+  required AppLocalizations l10n,
+}) {
+  final paneKey = SessionPaneKey(session: session).key;
+  String? title;
+  for (final ref in open?.refs ?? const <SessionRef>[]) {
+    if (ref.key != paneKey) continue;
+    title = knownSessionTitle([ref.title], sessionId: ref.id);
+    break;
+  }
+  return '${session.tool} · ${title ?? l10n.sessionDetailTitleUntitled}';
+}
 
 /// One session's open files: their tab strip, and the active one below it.
 ///
@@ -36,6 +65,7 @@ class FilePaneSurface extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tokens = context.tokens;
+    final l10n = AppLocalizations.of(context);
     final async = ref.watch(filePanesControllerProvider);
     final state = async.valueOrNull;
     final panes = state?.forSession(session) ?? const <FilePaneKey>[];
@@ -72,6 +102,13 @@ class FilePaneSurface extends ConsumerWidget {
                 : WorkspaceFilePaneBody(
                     key: ValueKey<String>(activeFile.key),
                     pane: activeFile,
+                    sessionLabel: workspaceSessionLabel(
+                      session: session,
+                      open: ref
+                          .watch(openSessionsControllerProvider)
+                          .valueOrNull,
+                      l10n: l10n,
+                    ),
                   ),
           ),
         ],

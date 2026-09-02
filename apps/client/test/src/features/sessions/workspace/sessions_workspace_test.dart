@@ -26,6 +26,8 @@ import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/sessions_workspace.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
@@ -371,6 +373,146 @@ void main() {
       // The compact route carries the file at these widths instead, so the
       // split never has to fit a third column it cannot honour.
       expect(find.byKey(const Key('workspace-file-pane')), findsNothing);
+    });
+
+    testWidgets('the focus hairline follows focusedPaneProvider', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      const sessionHairline = Key('workspace-focus-hairline-claude/a');
+      const fileHairline = Key(
+        'workspace-focus-hairline-claude/a#lib/one.dart',
+      );
+
+      // The transcript owns focus on arrival: nothing has been clicked, and
+      // the session pane is the one the composer belongs to.
+      expect(container.read<String?>(focusedPaneProvider), 'claude/a');
+      expect(find.byKey(sessionHairline), findsOneWidget);
+      expect(find.byKey(fileHairline), findsNothing);
+
+      await tester.tap(find.byKey(const Key('workspace-file-pane')));
+      await tester.pumpAndSettle();
+
+      // One at a time, and it moved on the press rather than on a rebuild.
+      expect(
+        container.read<String?>(focusedPaneProvider),
+        'claude/a#lib/one.dart',
+      );
+      expect(find.byKey(fileHairline), findsOneWidget);
+      expect(find.byKey(sessionHairline), findsNothing);
+
+      await tester.tap(find.text('DETAIL claude/a'));
+      await tester.pumpAndSettle();
+
+      expect(container.read<String?>(focusedPaneProvider), 'claude/a');
+      expect(find.byKey(sessionHairline), findsOneWidget);
+      expect(find.byKey(fileHairline), findsNothing);
+    });
+
+    testWidgets('a rebuilding session page does not take focus back', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.tap(find.byKey(const Key('workspace-file-pane')));
+      await tester.pumpAndSettle();
+      expect(
+        container.read<String?>(focusedPaneProvider),
+        'claude/a#lib/one.dart',
+      );
+
+      // A second file opening rebuilds the whole workspace, the session page
+      // included. Before the publish guard this pulled focus straight back out
+      // of the pane the reader was in.
+      await openFile(tester, container, 'claude', 'a', 'lib/two.dart');
+
+      expect(
+        container.read<String?>(focusedPaneProvider),
+        'claude/a#lib/two.dart',
+      );
+      expect(
+        find.byKey(const Key('workspace-focus-hairline-claude/a')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('closing the focused file hands focus back to its session', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      await tester.tap(find.byKey(const Key('workspace-file-pane')));
+      await tester.pumpAndSettle();
+
+      await container
+          .read(filePanesControllerProvider.notifier)
+          .close(
+            const FilePaneKey(
+              session: SessionDetailKey(tool: 'claude', sessionId: 'a'),
+              path: 'lib/one.dart',
+            ),
+          );
+      await tester.pumpAndSettle();
+
+      // Otherwise the hairline would sit on a pane that no longer exists, and
+      // nothing else republishes: the session page refuses to take focus off a
+      // file of its own session.
+      expect(container.read<String?>(focusedPaneProvider), 'claude/a');
+    });
+
+    testWidgets('a focused file marks its session tab as the prompt target', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      // The strip only draws with a second tab open, which is also the only
+      // case where naming the input owner distinguishes anything.
+      await tester.tap(find.byKey(const Key('session-row-codex/b')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('open-session-tab-claude/a')));
+      await tester.pumpAndSettle();
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+      const tick = Key('open-session-tab-prompt-target-claude/a');
+
+      // Nothing to say while the session pane has focus: the active tab is
+      // both the focused pane and the prompt target.
+      expect(find.byKey(tick), findsNothing);
+
+      await tester.tap(find.byKey(const Key('workspace-file-pane')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(tick), findsOneWidget);
+      expect(
+        find.byKey(const Key('open-session-tab-prompt-target-codex/b')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the file pane names its session, never its id', (
+      tester,
+    ) async {
+      final container = await openSession(tester);
+      await openFile(tester, container, 'claude', 'a', 'lib/one.dart');
+
+      // The owner label yields the header row below 560dp, so widen the pane
+      // past that threshold before asking whether it is right.
+      await tester.drag(
+        find.byKey(const Key('workspace-file-split-sash')),
+        const Offset(-200, 0),
+      );
+      await tester.pumpAndSettle();
+
+      // `a` is the session id; the roster fixture titles the session. A
+      // fingerprint here would disagree with the tab strip and the detail
+      // header, which name the same session by its title.
+      expect(find.textContaining('claude · a'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('workspace-file-pane')),
+          matching: find.textContaining('claude · title'),
+        ),
+        findsOneWidget,
+      );
     });
   });
 

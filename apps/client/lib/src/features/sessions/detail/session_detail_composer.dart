@@ -707,6 +707,8 @@ bool _sameModel(ModelOption model, SessionCurrentModel? selected) =>
 
 class _PromptComposer extends ConsumerStatefulWidget {
   const _PromptComposer({
+    required this.sessionPaneKey,
+    required this.sessionLabel,
     required this.controller,
     required this.focusNode,
     required this.enabled,
@@ -745,6 +747,14 @@ class _PromptComposer extends ConsumerStatefulWidget {
   /// Slash commands advertised for this session, used by the inline palette
   /// that opens when the prompt starts with `/`.
   final List<SlashCommand> commands;
+
+  /// This session's `WorkspacePaneKey.key`, used to tell a file pane of *this*
+  /// session from one belonging to a session in another tab.
+  final String sessionPaneKey;
+
+  /// How this session is named in the prompt-target note.
+  final String sessionLabel;
+
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool enabled;
@@ -1458,6 +1468,17 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
       },
     );
 
+    // Only a file pane of *this* session moves the note in. A file pane in
+    // another tab is not on screen beside this composer, and a session pane
+    // holding focus is the ordinary case the note would only add noise to.
+    final focusedPane = ref.watch(focusedPaneProvider);
+    final promptTargetLabel =
+        focusedPane != null &&
+            isWorkspaceFilePaneKey(focusedPane) &&
+            workspacePaneSessionKey(focusedPane) == widget.sessionPaneKey
+        ? widget.sessionLabel
+        : null;
+
     final composer = MouseRegion(
       onEnter: (_) => _setHovered(true),
       onExit: (_) => _setHovered(false),
@@ -1579,6 +1600,31 @@ class _PromptComposerState extends ConsumerState<_PromptComposer>
                   busy: widget.isSubmitting || widget.isPickingAttachments,
                   onReplace: widget.onReplaceAttachment,
                   onRemove: widget.onRemoveAttachment,
+                ),
+              ),
+            if (promptTargetLabel != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.subdirectory_arrow_right,
+                      size: 12,
+                      color: tokens.accent,
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        key: const Key('session-composer-prompt-target'),
+                        l10n.workspacePromptTargetNote(promptTargetLabel),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: tokens.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             Padding(

@@ -90,10 +90,21 @@ filePaneReadProvider = FutureProvider.autoDispose
 /// The body of the workspace's second pane: one file, read on its own.
 class WorkspaceFilePaneBody extends ConsumerWidget {
   /// Shows [pane].
-  const WorkspaceFilePaneBody({required this.pane, super.key});
+  const WorkspaceFilePaneBody({
+    required this.pane,
+    required this.sessionLabel,
+    super.key,
+  });
 
   /// Which file this pane holds.
   final FilePaneKey pane;
+
+  /// How the owning session is named in the header, already resolved.
+  ///
+  /// Passed in rather than derived here: the name lives in the opened-sessions
+  /// working set, and a pane that looked it up itself would be a second place
+  /// for the app to decide what a session is called.
+  final String sessionLabel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -150,7 +161,7 @@ class WorkspaceFilePaneBody extends ConsumerWidget {
         ),
         _ => null,
       },
-      sessionLabel: '${pane.session.tool} · ${pane.session.sessionId}',
+      sessionLabel: sessionLabel,
       toolColor: tokens.toolColor(pane.session.tool),
       onRetry: () => ref.invalidate(filePaneReadProvider(pane)),
       onClose: () {

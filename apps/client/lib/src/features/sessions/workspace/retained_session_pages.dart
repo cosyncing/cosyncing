@@ -4,6 +4,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_contro
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_ref.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/voice/controller/read_aloud_controller.dart';
 import 'package:cosyncing_client/src/features/voice/controller/voice_input_controller.dart';
 import 'package:flutter/material.dart';
@@ -154,7 +155,23 @@ class _RetainedSessionPagesState extends ConsumerState<RetainedSessionPages>
       final notifier = container.read(focusedPaneProvider.notifier);
       if (!notifier.mounted) return;
       final focused = _focusedKey;
-      if (notifier.state != focused) notifier.state = focused;
+      final current = notifier.state;
+      // A file pane of this same session keeps what it took. This page
+      // republishes on every dependency and widget change — a transcript
+      // frame, a tab reorder, a visibility flip — and each one would otherwise
+      // pull focus back out of the file the reader had just clicked into,
+      // typically within the same second.
+      //
+      // Only a *different* session reclaims it, which is right: switching tabs
+      // swaps the file pane's whole strip, so the file that held focus is no
+      // longer on screen to hold it.
+      if (focused != null &&
+          current != null &&
+          isWorkspaceFilePaneKey(current) &&
+          workspacePaneSessionKey(current) == focused) {
+        return;
+      }
+      if (current != focused) notifier.state = focused;
     });
   }
 

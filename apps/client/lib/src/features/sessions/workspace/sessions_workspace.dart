@@ -30,6 +30,7 @@ import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_cont
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_tabs_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/retained_session_pages.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_prefs_store.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_split_sash.dart';
@@ -670,6 +671,16 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         // route carries the file instead, so a narrow window never has to fit
         // three columns.
         final fileWidth = _clampFileWidth(_fileWidth, available);
+        final focusedPane = ref.watch(focusedPaneProvider);
+        // The tick names the session that still owns typing, which is only a
+        // question worth answering while the focused pane is a file.
+        final promptTargetKey =
+            focusedPane != null && isWorkspaceFilePaneKey(focusedPane)
+            ? workspacePaneSessionKey(focusedPane)
+            : null;
+        final sessionPaneKey = activeSession == null
+            ? null
+            : SessionPaneKey(session: activeSession).key;
         final showFilePane =
             activeSession != null &&
             fileState.panes.isNotEmpty &&
@@ -718,50 +729,56 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                   ),
                 ],
                 Expanded(
-                  child: Column(
-                    children: [
-                      OpenSessionsTabStrip(
-                        refs: open.refs,
-                        activeKey: open.activeKey,
-                        // The controller's reorder had no production caller
-                        // until now; the strip had no way to ask for one.
-                        onReorder: (oldIndex, newIndex) => ref
-                            .read(openSessionsControllerProvider.notifier)
-                            .reorder(oldIndex, newIndex),
-                        onSelect: (key) => ref
-                            .read(openSessionsControllerProvider.notifier)
-                            .activate(key),
-                        onClose: (key) => unawaited(
-                          ref
+                  child: WorkspaceFocusablePane(
+                    paneKey: sessionPaneKey,
+                    enabled: showFilePane,
+                    child: Column(
+                      children: [
+                        OpenSessionsTabStrip(
+                          refs: open.refs,
+                          activeKey: open.activeKey,
+                          // The controller's reorder had no production caller
+                          // until now; the strip had no way to ask for one.
+                          onReorder: (oldIndex, newIndex) => ref
                               .read(openSessionsControllerProvider.notifier)
-                              .close(key),
+                              .reorder(oldIndex, newIndex),
+                          onSelect: (key) => ref
+                              .read(openSessionsControllerProvider.notifier)
+                              .activate(key),
+                          onClose: (key) => unawaited(
+                            ref
+                                .read(openSessionsControllerProvider.notifier)
+                                .close(key),
+                          ),
+                          promptTargetKey: promptTargetKey,
                         ),
-                      ),
-                      Expanded(
-                        child: active == null
-                            ? !hasActiveBrokerClient
-                                  ? const SessionsEmptyState(
-                                      hasActiveBrokerClient: false,
-                                      creationAvailability:
-                                          SessionCreationAvailability.checking,
-                                    )
-                                  : hasCompletedEmptyRoster
-                                  ? _PaneMessage(
-                                      icon: Icons.inbox_outlined,
-                                      message: emptyRosterMessage,
-                                    )
-                                  : _PaneMessage(
-                                      icon: Icons.terminal_outlined,
-                                      message:
-                                          l10n.sessionsWorkspaceSelectPrompt,
-                                    )
-                            : RetainedSessionPages(
-                                source: activeSource,
-                                open: open,
-                                builder: buildDetail,
-                              ),
-                      ),
-                    ],
+                        Expanded(
+                          child: active == null
+                              ? !hasActiveBrokerClient
+                                    ? const SessionsEmptyState(
+                                        hasActiveBrokerClient: false,
+                                        creationAvailability:
+                                            SessionCreationAvailability
+                                                .checking,
+                                      )
+                                    : hasCompletedEmptyRoster
+                                    ? _PaneMessage(
+                                        icon: Icons.inbox_outlined,
+                                        message: emptyRosterMessage,
+                                      )
+                                    : _PaneMessage(
+                                        icon: Icons.terminal_outlined,
+                                        message:
+                                            l10n.sessionsWorkspaceSelectPrompt,
+                                      )
+                              : RetainedSessionPages(
+                                  source: activeSource,
+                                  open: open,
+                                  builder: buildDetail,
+                                ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
                 if (showFilePane) ...[
@@ -785,7 +802,10 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                     SizedBox(
                       key: const Key('workspace-file-pane'),
                       width: fileWidth,
-                      child: FilePaneSurface(session: activeSession),
+                      child: WorkspaceFocusablePane(
+                        paneKey: fileState.activeFor(activeSession)?.key,
+                        child: FilePaneSurface(session: activeSession),
+                      ),
                     ),
                   ],
                 ],

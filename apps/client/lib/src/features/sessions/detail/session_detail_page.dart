@@ -65,6 +65,7 @@ import 'package:cosyncing_client/src/features/sessions/transcript/tool_display_m
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/session_viewport_registry.dart';
+import 'package:cosyncing_client/src/features/sessions/workspace/workspace_focus.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/workspace_pane_key.dart';
 import 'package:cosyncing_client/src/features/settings/controller/broker_credentials_controller.dart';
 import 'package:cosyncing_client/src/features/settings/controller/debug_views_controller.dart';
@@ -2429,6 +2430,7 @@ class _SessionDetailPageState extends ConsumerState<SessionDetailPage>
                             child: _ChatPanel(
                               key: const Key('session-detail-tab-panel-chat'),
                               sessionKey: _key,
+                              sessionLabel: '${_key.tool} · $visibleTitle',
                               state: state,
                               controller: controller,
                               commands: commands,

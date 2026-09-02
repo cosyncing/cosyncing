@@ -101,3 +101,18 @@ final class FilePaneKey extends WorkspacePaneKey {
   @override
   int get hashCode => Object.hash('file', session, path);
 }
+
+/// The session-pane key underlying [paneKey], whichever kind it addresses.
+///
+/// A file pane's key is its session's key, a `#`, and the workspace-relative
+/// path, so this is how a caller asks "which session does this pane belong
+/// to?" without having to know which kind it is holding — the question both
+/// prompt-target signals ask, and the answer that keeps input visibly bound to
+/// a session while the reader's focus is inside one of its files.
+String workspacePaneSessionKey(String paneKey) {
+  final separator = paneKey.indexOf('#');
+  return separator < 0 ? paneKey : paneKey.substring(0, separator);
+}
+
+/// Whether [paneKey] addresses a file pane rather than a session pane.
+bool isWorkspaceFilePaneKey(String paneKey) => paneKey.contains('#');

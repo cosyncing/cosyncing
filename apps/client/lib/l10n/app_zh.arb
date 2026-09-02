@@ -1533,5 +1533,7 @@
   "fileViewerHtmlSourceOnly": "当前平台无法内嵌浏览器视图，暂不支持渲染预览，显示源码。",
   "fileViewerOpenInBrowser": "在浏览器中打开",
   "fileViewerOpenInBrowserHint": "在 cosyncing 之外，用你的默认浏览器打开本地副本。",
-  "fileViewerOpenInBrowserFailed": "无法在浏览器中打开该文件。"
+  "fileViewerOpenInBrowserFailed": "无法在浏览器中打开该文件。",
+  "workspacePromptTargetNote": "输入目标是 {session}",
+  "workspacePromptTargetTooltip": "即使文件面板获得焦点，输入和快捷键仍指向此会话"
 }
