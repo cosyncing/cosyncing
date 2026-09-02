@@ -7,6 +7,7 @@ VERSION='@VERSION@'
 BASE_URL='@BASE_URL@'
 KEY_ID='@KEY_ID@'
 PUBLIC_KEY_B64='@PUBLIC_KEY_B64@'
+P256_PUBLIC_KEY_B64='@P256_PUBLIC_KEY_B64@'
 # The JavaScript application bundle and the web client sidecar this release publishes.
 APP_ASSET='@APP_ASSET@'
 WEB_ASSET='@WEB_ASSET@'
@@ -132,52 +133,93 @@ WEB_EXPECTED_SIZE="$ARTIFACT_SIZE"
 
 printf '%s' "$PUBLIC_KEY_B64" | base64 --decode > "$WORK/release-key.pem" \
   || fail 'embedded release key is invalid'
+printf '%s' "$P256_PUBLIC_KEY_B64" | base64 --decode > "$WORK/release-key-p256.pem" \
+  || fail 'embedded P-256 release key is invalid'
+
+# The digest the signed manifest states FOR THIS ASSET.
+#
+# Scanning for the digest anywhere in the manifest would be a weaker claim than it looks: it would pass for a
+# manifest that named this asset in one object and carried the digest in another. The scan starts at the
+# object whose `name` is this asset and stops at the next `name`, so the two are read from one object or not
+# at all. A manifest whose shape changed would find nothing and fail closed rather than pass loosely.
+manifest_digest_for() {
+  awk -v want="\"name\": \"$1\"" '
+    index($0, want) { inside = 1; next }
+    inside && index($0, "\"name\": \"") { inside = 0 }
+    inside && (at = index($0, "\"sha256\": \"")) { print substr($0, at + 11, 64); exit }
+  ' "$WORK/release-manifest.json"
+}
 
 # Cross-check ONE artifact against all three statements of what it should be: the signed checksum list, the
-# signed manifest, and the digest baked into this script. Run in the current shell, never a substitution, so
-# a `fail` here stops the install instead of returning an empty string to a caller.
+# signed manifest, and the digest baked into this script. Each of the three binds the NAME to the digest, so
+# agreement is about this artifact rather than about a digest appearing somewhere. Run in the current shell,
+# never a substitution, so a `fail` here stops the install instead of returning an empty string to a caller.
 assert_signed_artifact() {
   signed="$(awk -v asset="$1" '$2 == asset { if (seen++) exit 2; print $1 }' "$WORK/SHA256SUMS")" \
     || fail 'checksum list contains duplicate artifact rows'
   [ "${#signed}" -eq 64 ] || fail "artifact checksum is missing or malformed: $1"
-  grep -Fq "\"sha256\": \"$signed\"" "$WORK/release-manifest.json" \
+  stated="$(manifest_digest_for "$1")"
+  [ -n "$stated" ] || fail "signed manifest does not name $1"
+  [ "$stated" = "$signed" ] \
     || fail "signed manifest and checksum list disagree about $1"
   [ "$signed" = "$2" ] \
     || fail "signed checksum list disagrees with the digest embedded in this installer for $1"
 }
 
-# Ed25519 signature verification is attempted, and REQUIRED wherever the local openssl can do it. Stock
-# macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all (no flag changes that), so requiring it
-# unconditionally would make the installer impossible to run there. Probe the capability, never the platform:
-# a Mac with real OpenSSL on PATH gets the full check, and a Linux box somehow lacking it degrades the same
-# way. Signature FAILURE is always fatal; only genuine inability to verify degrades.
-SIGNATURE_STATE='skipped (this openssl cannot verify Ed25519)'
+# Signature verification is REQUIRED wherever the local openssl can do it, and the release is signed twice
+# over the same bytes so that "can do it" covers every supported host.
+#
+# Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — no flag changes that. It has no
+# trouble with ECDSA P-256, so a Mac verifies the P-256 signature instead of falling back to bytes delivered
+# by TLS alone. Probe the capability, never the platform: a Mac with real OpenSSL on PATH takes the Ed25519
+# branch, and a Linux box somehow lacking it takes the same P-256 branch a Mac does.
+#
+# Signature FAILURE is always fatal, in either branch. Only genuine inability to verify — neither algorithm
+# loadable — degrades, and it says so.
+SIGNATURE_ALGORITHM=''
 if openssl pkey -pubin -in "$WORK/release-key.pem" -noout >/dev/null 2>&1; then
-  download 'release-manifest.json' "$WORK/release-manifest.json"
-  download 'release-manifest.json.sig' "$WORK/release-manifest.json.sig"
-  download 'SHA256SUMS' "$WORK/SHA256SUMS"
-  download 'SHA256SUMS.sig' "$WORK/SHA256SUMS.sig"
+  SIGNATURE_ALGORITHM='ed25519'
+elif openssl pkey -pubin -in "$WORK/release-key-p256.pem" -noout >/dev/null 2>&1; then
+  SIGNATURE_ALGORITHM='p256'
+fi
 
-  openssl pkeyutl -verify -pubin -inkey "$WORK/release-key.pem" -rawin \
-    -in "$WORK/release-manifest.json" -sigfile "$WORK/release-manifest.json.sig" >/dev/null 2>&1 \
-    || fail 'release manifest signature verification failed'
-  openssl pkeyutl -verify -pubin -inkey "$WORK/release-key.pem" -rawin \
-    -in "$WORK/SHA256SUMS" -sigfile "$WORK/SHA256SUMS.sig" >/dev/null 2>&1 \
-    || fail 'checksum-list signature verification failed'
+SIGNATURE_STATE='skipped (this openssl can verify neither Ed25519 nor ECDSA P-256)'
+if [ -n "$SIGNATURE_ALGORITHM" ]; then
+  download 'release-manifest.json' "$WORK/release-manifest.json"
+  download 'SHA256SUMS' "$WORK/SHA256SUMS"
+
+  if [ "$SIGNATURE_ALGORITHM" = ed25519 ]; then
+    download 'release-manifest.json.sig' "$WORK/release-manifest.json.sig"
+    download 'SHA256SUMS.sig' "$WORK/SHA256SUMS.sig"
+    openssl pkeyutl -verify -pubin -inkey "$WORK/release-key.pem" -rawin \
+      -in "$WORK/release-manifest.json" -sigfile "$WORK/release-manifest.json.sig" >/dev/null 2>&1 \
+      || fail 'release manifest signature verification failed'
+    openssl pkeyutl -verify -pubin -inkey "$WORK/release-key.pem" -rawin \
+      -in "$WORK/SHA256SUMS" -sigfile "$WORK/SHA256SUMS.sig" >/dev/null 2>&1 \
+      || fail 'checksum-list signature verification failed'
+    SIGNATURE_STATE='verified (Ed25519 over the signed release manifest and checksum list)'
+  else
+    # `dgst -verify` rather than `pkeyutl`: it is the spelling LibreSSL has always had, and the DER sibling
+    # is published precisely because openssl cannot read the raw r||s form the Windows consumer needs.
+    download 'release-manifest.json.p256.der.sig' "$WORK/release-manifest.json.p256.der.sig"
+    download 'SHA256SUMS.p256.der.sig' "$WORK/SHA256SUMS.p256.der.sig"
+    openssl dgst -sha256 -verify "$WORK/release-key-p256.pem" \
+      -signature "$WORK/release-manifest.json.p256.der.sig" "$WORK/release-manifest.json" >/dev/null 2>&1 \
+      || fail 'release manifest signature verification failed'
+    openssl dgst -sha256 -verify "$WORK/release-key-p256.pem" \
+      -signature "$WORK/SHA256SUMS.p256.der.sig" "$WORK/SHA256SUMS" >/dev/null 2>&1 \
+      || fail 'checksum-list signature verification failed'
+    SIGNATURE_STATE='verified (ECDSA P-256 over the signed release manifest and checksum list)'
+  fi
 
   grep -Fq "\"version\": \"$VERSION\"" "$WORK/release-manifest.json" \
     || fail 'signed manifest version does not match this pinned installer'
   grep -Fq "\"keyId\": \"$KEY_ID\"" "$WORK/release-manifest.json" \
     || fail 'signed manifest key id does not match this pinned installer'
-  grep -Fq "\"name\": \"$APP_ASSET\"" "$WORK/release-manifest.json" \
-    || fail 'signed manifest does not contain the application bundle'
-  grep -Fq "\"name\": \"$WEB_ASSET\"" "$WORK/release-manifest.json" \
-    || fail 'signed manifest does not contain the web client sidecar'
 
   # The signed chain and the baked-in table must name the same bytes, or one of the two was tampered with.
   assert_signed_artifact "$APP_ASSET" "$APP_EXPECTED"
   assert_signed_artifact "$WEB_ASSET" "$WEB_EXPECTED"
-  SIGNATURE_STATE='verified (Ed25519 over the signed release manifest and checksum list)'
 fi
 
 fetch_verified() {

@@ -344,8 +344,15 @@ jobs:
             --p256-public-key "$RUNNER_TEMP/cosyncing-release-p256.pub.pem"
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/cosyncing-release.pub.pem" -rawin \
             -in output/release/release-manifest.json -sigfile output/release/release-manifest.json.sig
-          # openssl cannot check the sibling signature: it is IEEE P1363 (raw r||s), the layout .NET reads,
-          # and openssl expects a DER SEQUENCE. bun is already on this runner and verifies it directly.
+          # The DER sibling is what the shell installer verifies on macOS, and openssl reads it directly.
+          for payload in release-manifest.json SHA256SUMS; do
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" \
+              -signature "output/release/$payload.p256.der.sig" "output/release/$payload"
+          done
+          # openssl cannot check the P1363 sibling: it is raw r||s, the layout .NET reads, and openssl
+          # expects a DER SEQUENCE. bun is already on this runner and verifies it directly. Both encodings
+          # are checked because a release that published only one working encoding would break exactly one
+          # of the two installers, on hosts neither CI job runs on.
           bun -e '
             const { createPublicKey, verify } = await import("node:crypto");
             const key = createPublicKey(await Bun.file(`${process.env.RUNNER_TEMP}/cosyncing-release-p256.pub.pem`).text());

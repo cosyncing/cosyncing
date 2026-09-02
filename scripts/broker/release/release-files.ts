@@ -84,6 +84,8 @@ const BOOTSTRAP_HOST_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwi
 export const P256_PUBLIC_KEY_NAME = 'release-key-p256.pem' as const;
 /** Suffix of a detached P-256 signature file: `<payload>.p256.sig` beside `<payload>.sig`. */
 export const P256_SIGNATURE_SUFFIX = '.p256.sig' as const;
+/** The same signature in the DER SEQUENCE form `openssl dgst -verify` reads. See {@link p1363ToDer}. */
+export const P256_DER_SIGNATURE_SUFFIX = '.p256.der.sig' as const;
 
 export interface PackageEvidence {
   schemaVersion: 1;
@@ -322,32 +324,60 @@ function writeSignature(path: string, bytes: Uint8Array, privateKeyPem: string):
 /**
  * Detached ECDSA P-256 signature in IEEE P1363 form — the raw 64-byte `r || s`, not a DER SEQUENCE.
  *
- * The format is chosen by the one consumer this signature exists for. .NET's `ECDsa.VerifyData(byte[],
- * byte[], HashAlgorithmName)` — the only overload Windows PowerShell 5.1's .NET Framework 4.x offers — reads
- * exactly this layout, so a PowerShell installer verifies with two lines and no ASN.1 parsing. DER would be
- * the friendlier choice for `openssl dgst -verify`, but no Unix consumer needs this signature: on Unix the
- * Ed25519 signature is the one that is checked, and it is unchanged.
+ * .NET's `ECDsa.VerifyData(byte[], byte[], HashAlgorithmName)` — the only overload Windows PowerShell 5.1's
+ * .NET Framework 4.x offers — reads exactly this layout, so a PowerShell installer verifies with two lines
+ * and no ASN.1 parsing.
  */
 function detachedP256Signature(bytes: Uint8Array, privateKeyPem: string): Uint8Array {
   return sign('sha256', bytes, { key: createPrivateKey(privateKeyPem), dsaEncoding: 'ieee-p1363' });
 }
 
+/**
+ * The same signature re-encoded as the DER SEQUENCE `openssl dgst -verify` reads.
+ *
+ * Two encodings exist because the two consumers can each read only one natively, and neither can be asked to
+ * transcode: PowerShell 5.1 has no DER overload, and openssl has no P1363 input. Encoding here rather than
+ * in either consumer keeps ASN.1 out of a shell installer, where getting it wrong is a security bug.
+ *
+ * It is a TRANSCODE of one signature, never a second signing. ECDSA is randomized, so signing twice would
+ * produce two independent signatures that could disagree — one valid and one not — and a host would have no
+ * way to tell which encoding was the broken one. Re-encoding the same `r` and `s` makes the two files two
+ * spellings of a single fact, and both are verified against their own encoder before either is written.
+ */
+function p1363ToDer(signature: Uint8Array): Uint8Array {
+  if (signature.length !== 64) throw new Error('P-256 P1363 signature must be 64 bytes');
+  const integer = (raw: Uint8Array): number[] => {
+    let start = 0;
+    while (start < raw.length - 1 && raw[start] === 0) start += 1;
+    const body = Array.from(raw.subarray(start));
+    // DER integers are signed, so a leading byte with the high bit set needs a zero ahead of it or it
+    // would decode as negative.
+    if ((body[0]! & 0x80) !== 0) body.unshift(0);
+    return [0x02, body.length, ...body];
+  };
+  const r = integer(signature.subarray(0, 32));
+  const s = integer(signature.subarray(32));
+  // A P-256 SEQUENCE is at most 70 bytes, so the length is always a single byte.
+  return Uint8Array.from([0x30, r.length + s.length, ...r, ...s]);
+}
+
 function writeP256Signature(path: string, bytes: Uint8Array, options: {
   privateKeyPem: string;
   publicKeyPem: string;
+  derPath: string;
 }): void {
   const signature = detachedP256Signature(bytes, options.privateKeyPem);
-  // Self-verify every P-256 signature as it is written. Nothing in this repository consumes these files yet,
-  // so a silently malformed signature would first be discovered by a Windows operator months from now.
-  if (!verify(
-    'sha256',
-    bytes,
-    { key: createPublicKey(options.publicKeyPem), dsaEncoding: 'ieee-p1363' },
-    signature,
-  )) {
+  const der = p1363ToDer(signature);
+  const publicKey = createPublicKey(options.publicKeyPem);
+  // Self-verify BOTH encodings before either is written. The installer's macOS path now depends on the DER
+  // one, and a transcoding bug there would degrade a verified install into a refused one on exactly the
+  // hosts this signature exists to protect.
+  if (!verify('sha256', bytes, { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)
+      || !verify('sha256', bytes, { key: publicKey, dsaEncoding: 'der' }, der)) {
     throw new Error(`P-256 signature failed its own verification: ${basename(path)}`);
   }
   writeFileSync(path, signature, { mode: 0o644 });
+  writeFileSync(options.derPath, der, { mode: 0o644 });
 }
 
 function renderBootstrap(options: {
@@ -355,6 +385,7 @@ function renderBootstrap(options: {
   baseUrl: string;
   keyId: string;
   publicKeyPem: string;
+  p256PublicKeyPem: string;
   minimumBunVersion: string;
   // The installer places exactly these two files. It no longer selects among per-host machine-code
   // artifacts: one JavaScript bundle runs on every supported host, and the web client it is paired with
@@ -363,6 +394,9 @@ function renderBootstrap(options: {
   webApp: { name: string; sha256: string; size: number };
 }): string {
   const publicKeyB64 = Buffer.from(options.publicKeyPem.trim() + '\n', 'utf8').toString('base64');
+  // Both trust anchors are baked in, for the same reason: the installer must verify against the key IT
+  // carries, never one fetched alongside the thing being verified.
+  const p256PublicKeyB64 = Buffer.from(options.p256PublicKeyPem.trim() + '\n', 'utf8').toString('base64');
   // Bake the per-artifact digests into the script itself. Stock macOS ships LibreSSL, which cannot load an
   // Ed25519 public key at all, so an installer whose ONLY integrity check is an openssl signature simply
   // cannot run there. The embedded table gives every host a real, mandatory check on the bytes it is about
@@ -412,6 +446,7 @@ function renderBootstrap(options: {
     .replaceAll('@BASE_URL@', options.baseUrl)
     .replaceAll('@KEY_ID@', options.keyId)
     .replaceAll('@PUBLIC_KEY_B64@', publicKeyB64)
+    .replaceAll('@P256_PUBLIC_KEY_B64@', p256PublicKeyB64)
     .replaceAll('@APP_ASSET@', options.application.name)
     .replaceAll('@WEB_ASSET@', options.webApp.name)
     .replaceAll('@MINIMUM_BUN@', options.minimumBunVersion)
@@ -818,7 +853,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   writeP256Signature(
     join(options.outputDirectory, `${manifestName}${P256_SIGNATURE_SUFFIX}`),
     manifestBytes,
-    { privateKeyPem: options.p256PrivateKeyPem, publicKeyPem: options.p256PublicKeyPem },
+    {
+      privateKeyPem: options.p256PrivateKeyPem,
+      publicKeyPem: options.p256PublicKeyPem,
+      derPath: join(options.outputDirectory, `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`),
+    },
   );
 
   const bootstrapName = 'install.sh';
@@ -827,6 +866,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     baseUrl: releaseBase,
     keyId: options.keyId,
     publicKeyPem: options.publicKeyPem,
+    p256PublicKeyPem: options.p256PublicKeyPem,
     minimumBunVersion: paired.jsApp.minimumBunVersion,
     application: paired.jsApp,
     webApp: paired.webApp,
@@ -853,6 +893,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     manifestName,
     `${manifestName}.sig`,
     `${manifestName}${P256_SIGNATURE_SUFFIX}`,
+    `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`,
     bootstrapName,
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
@@ -863,7 +904,11 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   writeP256Signature(
     join(options.outputDirectory, `SHA256SUMS${P256_SIGNATURE_SUFFIX}`),
     checksumBytes,
-    { privateKeyPem: options.p256PrivateKeyPem, publicKeyPem: options.p256PublicKeyPem },
+    {
+      privateKeyPem: options.p256PrivateKeyPem,
+      publicKeyPem: options.p256PublicKeyPem,
+      derPath: join(options.outputDirectory, `SHA256SUMS${P256_DER_SIGNATURE_SUFFIX}`),
+    },
   );
 
   const publishedFiles = [
@@ -871,6 +916,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     'SHA256SUMS',
     'SHA256SUMS.sig',
     `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
+    `SHA256SUMS${P256_DER_SIGNATURE_SUFFIX}`,
   ].sort();
   const actualFiles = [...new Bun.Glob('*').scanSync({ cwd: options.outputDirectory, onlyFiles: true })].sort();
   if (JSON.stringify(actualFiles) !== JSON.stringify(publishedFiles)) {

@@ -71,8 +71,15 @@ jobs:
           cmp "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" output/promotion/release-key-p256.pem
           openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/cosyncing-release.pub.pem" -rawin \
             -in output/promotion/release-manifest.json -sigfile output/promotion/release-manifest.json.sig
-          # The sibling signature is IEEE P1363, which openssl will not read; bun verifies it in the layout
-          # a PowerShell installer will. A candidate that cannot be verified here must not become stable.
+          # The DER sibling is what the shell installer verifies on macOS, and openssl reads it directly.
+          for payload in release-manifest.json SHA256SUMS; do
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/cosyncing-release-p256.pub.pem" \
+              -signature "output/promotion/$payload.p256.der.sig" "output/promotion/$payload"
+          done
+          # The P1363 sibling is raw r||s, which openssl will not read; bun verifies it in the layout a
+          # PowerShell installer will. Both encodings are checked because a candidate that published only
+          # one working encoding would break exactly one installer, on hosts this job does not run on. A
+          # candidate that cannot be verified here must not become stable.
           bun -e '
             const { createPublicKey, verify } = await import("node:crypto");
             const key = createPublicKey(await Bun.file(`${process.env.RUNNER_TEMP}/cosyncing-release-p256.pub.pem`).text());

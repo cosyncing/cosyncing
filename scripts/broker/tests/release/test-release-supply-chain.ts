@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Deterministic release, signature, inventory, and bootstrap acceptance. */
-import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -566,9 +566,9 @@ try {
         trustedKeys: { 'test-2026': publicPem },
       }).artifact.target === target));
 
-  // The sibling P-256 signature. Nothing in this repository verifies it yet — the PowerShell installer that
-  // will is a separate lane — so these are the only checks standing between a malformed signature and a
-  // Windows operator discovering it months from now.
+  // The sibling P-256 signature, published in two encodings because the two consumers can each read only
+  // one: PowerShell 5.1 has no DER overload, and openssl has no P1363 input. The installer's macOS path
+  // depends on the DER one, so it is no longer an unverified emit.
   const p256PublicKeyObject = createPublicKey(
     readFileSync(join(releaseDirectory, 'release-key-p256.pem'), 'utf8'),
   );
@@ -578,6 +578,38 @@ try {
     { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
     readFileSync(join(releaseDirectory, signature)),
   );
+  const verifiesP256Der = (payload: string, signature: string): boolean => verify(
+    'sha256',
+    readFileSync(join(releaseDirectory, payload)),
+    { key: p256PublicKeyObject, dsaEncoding: 'der' },
+    readFileSync(join(releaseDirectory, signature)),
+  );
+  // The DER file must be a re-encoding of the SAME signature, not a second one. ECDSA is randomized, so two
+  // signings would produce two independent signatures that could disagree — one valid and one not — and a
+  // host would have no way to tell which encoding was broken. Decoding r and s back out and comparing them
+  // to the P1363 halves is what proves they are two spellings of one fact.
+  const derToRawScalars = (der: Uint8Array): string => {
+    if (der[0] !== 0x30) throw new Error('P-256 DER signature is not a SEQUENCE');
+    const scalars: string[] = [];
+    let at = 2;
+    for (let index = 0; index < 2; index += 1) {
+      if (der[at] !== 0x02) throw new Error('P-256 DER signature member is not an INTEGER');
+      const length = der[at + 1]!;
+      const body = Buffer.from(der.subarray(at + 2, at + 2 + length));
+      scalars.push(body.toString('hex').replace(/^0+/, '').padStart(64, '0'));
+      at += 2 + length;
+    }
+    if (at !== der.length) throw new Error('P-256 DER signature has trailing bytes');
+    return scalars.join('');
+  };
+  check('both P-256 encodings verify and carry the same signature, not two independent ones',
+    ['release-manifest.json', 'SHA256SUMS'].every((payload) => {
+      const p1363 = readFileSync(join(releaseDirectory, `${payload}.p256.sig`));
+      const der = readFileSync(join(releaseDirectory, `${payload}.p256.der.sig`));
+      return p1363.byteLength === 64
+        && verifiesP256Der(payload, `${payload}.p256.der.sig`)
+        && derToRawScalars(der) === p1363.toString('hex');
+    }));
   check('the manifest and checksum list carry sibling P-256 signatures a PowerShell host can verify',
     verifiesP256('release-manifest.json', 'release-manifest.json.p256.sig')
       && verifiesP256('SHA256SUMS', 'SHA256SUMS.p256.sig')
@@ -716,19 +748,48 @@ try {
     install.stdout.trim().split('\n').slice(-4).join(' | '));
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.
-  // The installer must still work there, must SAY it skipped signature verification, and must still gate the
-  // download on the digest baked into the script. `openssl pkey -pubin` failing is the capability probe.
+  // It has no trouble with ECDSA P-256, so the stub refuses Ed25519 SPECIFICALLY rather than refusing every
+  // key: a stub that failed both would model a host that does not exist and would hide the branch that
+  // matters. Every Mac takes this path, and it is the one that decides whether a Mac gets a cryptographic
+  // check or bytes delivered by TLS alone.
   const libreSslBin = join(root, 'libressl-bin');
   mkdirSync(libreSslBin);
   writeFakeCurl(join(libreSslBin, 'curl'));
   writeFakeBun(join(libreSslBin, 'bun'));
-  writeFileSync(join(libreSslBin, 'openssl'), `#!/usr/bin/env bash
-# Reproduces LibreSSL 3.3.6: every other subcommand works, but anything that must LOAD an Ed25519 public
-# key fails the way LibreSSL fails ("unable to load Public Key").
+  const libreSslOpenssl = `#!/usr/bin/env bash
+# Reproduces LibreSSL 3.3.6: every other subcommand works, and so does every other key type, but anything
+# that must LOAD an Ed25519 public key fails the way LibreSSL fails ("unable to load Public Key").
+subject=''
+previous=''
+for argument in "$@"; do
+  case "$previous" in
+    -in|-inkey|-verify) subject="$argument" ;;
+  esac
+  previous="$argument"
+done
 case "\${1:-}" in
   pkey|pkeyutl)
+    if [ -z "$subject" ] || /usr/bin/openssl pkey -pubin -in "$subject" -noout -text 2>/dev/null \
+        | grep -qi 'ED25519'; then
+      echo 'unable to load Public Key' >&2
+      echo 'digital envelope routines: unsupported algorithm' >&2
+      exit 1
+    fi ;;
+esac
+exec /usr/bin/openssl "$@"
+`;
+  writeFileSync(join(libreSslBin, 'openssl'), libreSslOpenssl, { mode: 0o755 });
+
+  // A host whose openssl can load NEITHER algorithm is the only one that may degrade. Separated from the
+  // LibreSSL stub above so "degrades" and "verifies with the other algorithm" cannot be confused.
+  const noSignatureBin = join(root, 'no-signature-bin');
+  mkdirSync(noSignatureBin);
+  writeFakeCurl(join(noSignatureBin, 'curl'));
+  writeFakeBun(join(noSignatureBin, 'bun'));
+  writeFileSync(join(noSignatureBin, 'openssl'), `#!/usr/bin/env bash
+case "\${1:-}" in
+  pkey|pkeyutl|dgst)
     echo 'unable to load Public Key' >&2
-    echo 'digital envelope routines: unsupported algorithm' >&2
     exit 1 ;;
 esac
 exec /usr/bin/openssl "$@"
@@ -745,12 +806,60 @@ exec /usr/bin/openssl "$@"
     },
   });
   const libreSslBinary = join(libreSslHome, '.cosyncing', 'bin', 'cosyncing');
-  check('bootstrap installs on a LibreSSL host and states plainly that the signature was not verified',
+  // The install a Mac actually gets. Before the P-256 signature was wired in, this host had no cryptographic
+  // check at all and rested on digests delivered by TLS — which the script's own comment conceded was an
+  // artifact pin, not an independent trust root.
+  check('a LibreSSL host verifies the release with P-256 rather than resting on TLS alone',
     libreSsl.exitCode === 0 && existsSync(libreSslBinary)
-      && /Release signature: skipped \(this openssl cannot verify Ed25519\)/.test(libreSsl.stdout)
-      && /Artifact digests: matched/.test(libreSsl.stdout)
-      && /delivered over TLS/.test(libreSsl.stdout),
+      && /Release signature: verified \(ECDSA P-256 over the signed release manifest and checksum list\)/
+        .test(libreSsl.stdout)
+      && !/delivered over TLS/.test(libreSsl.stdout),
     `${libreSsl.exitCode}: ${libreSsl.stdout.trim().split('\n').slice(-4).join(' | ')}`);
+
+  // Degrading is now reserved for a host that can load NEITHER algorithm, and it must still say so plainly
+  // and still gate the download on the embedded digest.
+  const noSignatureHome = join(root, 'no-signature-home');
+  mkdirSync(noSignatureHome);
+  const noSignature = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    env: {
+      PATH: `${noSignatureBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: noSignatureHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('an openssl that can load neither algorithm degrades and says which check was skipped',
+    noSignature.exitCode === 0
+      && existsSync(join(noSignatureHome, '.cosyncing', 'bin', 'cosyncing'))
+      && /Release signature: skipped \(this openssl can verify neither Ed25519 nor ECDSA P-256\)/
+        .test(noSignature.stdout)
+      && /Artifact digests: matched/.test(noSignature.stdout)
+      && /delivered over TLS/.test(noSignature.stdout),
+    `${noSignature.exitCode}: ${noSignature.stdout.trim().split('\n').slice(-4).join(' | ')}`);
+
+  // A P-256 signature failure must be as fatal as an Ed25519 one. Only inability to verify may degrade, and
+  // a Mac must never fall back to "skipped" because the signature it could check did not match.
+  const p256TamperRelease = join(root, 'p256-tampered-release');
+  cpSync(releaseDirectory, p256TamperRelease, { recursive: true });
+  writeFileSync(join(p256TamperRelease, 'release-manifest.json'), ' ', { flag: 'a' });
+  const p256TamperHome = join(root, 'p256-tampered-home');
+  mkdirSync(p256TamperHome);
+  const p256Tamper = await run(['bash', join(p256TamperRelease, 'install.sh')], {
+    cwd: root,
+    env: {
+      PATH: `${libreSslBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: p256TamperHome,
+      FAKE_RELEASE_ROOT: p256TamperRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a tampered manifest is fatal on the P-256 path too, never a silent degrade',
+    p256Tamper.exitCode !== 0
+      && /manifest signature verification failed/.test(p256Tamper.stderr)
+      && !/skipped/.test(p256Tamper.stdout)
+      && !existsSync(join(p256TamperHome, '.cosyncing')),
+    `${p256Tamper.exitCode}: ${p256Tamper.stderr.trim().slice(0, 160)}`);
 
   // The embedded digest is the whole trust root on LibreSSL, so it must still refuse a corrupted artifact.
   const corruptRelease = join(root, 'libressl-corrupt-release');
@@ -952,6 +1061,44 @@ exec /usr/bin/openssl "$@"
       && /could not download bun-linux-x64\.zip/.test(noBun.stderr)
       && !existsSync(join(noBunHome, '.cosyncing', 'bin', 'cosyncing')),
     noBun.stderr.trim().slice(0, 200));
+
+  // Defence in depth, and the one case only the signing key could reach: a manifest that STATES the wrong
+  // digest for the application while the right digest sits elsewhere in the same document. A check that
+  // scanned for the digest anywhere would pass this and call it agreement; reading it from the object the
+  // asset names is what makes the manifest's statement about this artifact rather than about a string.
+  // Re-signed with the fixture key, because an unsigned edit would be refused by the signature first and
+  // would prove nothing about the cross-check.
+  const misboundRelease = join(root, 'misbound-manifest-release');
+  cpSync(releaseDirectory, misboundRelease, { recursive: true });
+  const misboundManifest = JSON.parse(
+    readFileSync(join(misboundRelease, 'release-manifest.json'), 'utf8'),
+  );
+  const trueApplicationDigest = misboundManifest.jsApp.sha256;
+  misboundManifest.jsApp.sha256 = 'f'.repeat(64);
+  // Moved onto a compiled artifact's `sha256`, so the document still contains a literal
+  // `"sha256": "<the application's digest>"` — the exact shape a scan of the whole file would accept.
+  misboundManifest.artifacts[0].sha256 = trueApplicationDigest;
+  const misboundBytes = Buffer.from(`${JSON.stringify(misboundManifest, null, 2)}\n`, 'utf8');
+  writeFileSync(join(misboundRelease, 'release-manifest.json'), misboundBytes);
+  writeFileSync(
+    join(misboundRelease, 'release-manifest.json.sig'),
+    sign(null, misboundBytes, privateKey),
+  );
+  const misboundHome = join(root, 'misbound-manifest-home');
+  mkdirSync(misboundHome);
+  const misbound = await run(['bash', join(misboundRelease, 'install.sh')], {
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: misboundHome,
+      FAKE_RELEASE_ROOT: misboundRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('the manifest cross-check reads the digest from the object that names the asset',
+    misbound.exitCode !== 0
+      && /signed manifest and checksum list disagree about/.test(misbound.stderr)
+      && !existsSync(join(misboundHome, '.cosyncing', 'bin', 'cosyncing')),
+    `${misbound.exitCode}: ${misbound.stderr.trim().slice(0, 160)}`);
 
   const tamperedManifestRelease = join(root, 'tampered-manifest-release');
   cpSync(releaseDirectory, tamperedManifestRelease, { recursive: true });
