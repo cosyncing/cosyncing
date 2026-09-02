@@ -99,6 +99,7 @@ import { decideCodexDaemonOwnership } from '../../../adapters/codex/src/index.ts
 import type { CodexDaemonStatus } from '../../src/installation/broker-lifecycle.ts';
 import { LEGACY_TAILSCALE_RESOURCE_ID } from '../../src/installation/legacy-connectivity-migration.ts';
 import {
+  captureProcessOutput,
   isolatedBrokerFixtureEnvironment,
   reserveLoopbackFixturePort,
   waitForBrokerHealth,
@@ -2174,11 +2175,18 @@ try {
             COSYNCING_CODEX_APP_SERVER_SOCK: '',
             COSYNCING_CODEX_REMOTE_ADDR: '',
           } }),
-          stdout: 'ignore',
-          stderr: 'ignore',
+          stdout: 'pipe',
+          stderr: 'pipe',
         });
+        // Captured, not ignored: a candidate that refuses to start says WHY on stderr, and discarding
+        // it turns "the fence held" and "the broker never ran" into the same silent outcome here.
+        const candidateOutput = captureProcessOutput(child);
         try {
-          await waitForBrokerHealth(child, `http://127.0.0.1:${candidatePort}/api/health`);
+          await waitForBrokerHealth(child, `http://127.0.0.1:${candidatePort}/api/health`)
+            .catch((error: Error) => {
+              const said = candidateOutput.read().trim();
+              throw said ? new Error(`${error.message}\n${said.slice(-2_000)}`) : error;
+            });
         } finally {
           if (child.exitCode == null) child.kill();
           await child.exited;

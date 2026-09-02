@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { win32 } from 'node:path';
+import { windowsPowerShellChildEnvironment } from '@cosyncing/adapter-api';
 import {
   WINDOWS_TASK_NAME,
   WINDOWS_TASK_ROOT_PATH,
@@ -356,8 +357,10 @@ export class NativeWindowsTaskSchedulerExecutor implements WindowsTaskSchedulerE
       {
         encoding: 'utf8',
         input: WINDOWS_TASK_SCHEDULER_POWERSHELL_SOURCE,
+        // Pinned, like every other 5.1 spawn here: a host with PowerShell 7 installed exports its
+        // module roots, and 5.1 inheriting them auto-loads neither ScheduledTasks nor Security.
         env: {
-          ...this.env,
+          ...windowsPowerShellChildEnvironment(this.env),
           COSYNCING_SCHEDULER_OPERATION: operation,
           COSYNCING_SCHEDULER_INPUT: encodedInput,
         },

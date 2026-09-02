@@ -500,6 +500,26 @@ export interface FixtureBrokerChild {
   exited: Promise<number>;
 }
 
+/** How much of a dead broker's output travels with the failure. Its refusal prints early. */
+export const FIXTURE_FAILED_START_OUTPUT_BUDGET = 4_000;
+
+/**
+ * The start failure, carrying whatever the child said before it died.
+ *
+ * Returned rather than thrown so the call site still reads as a `throw`, and
+ * the original is kept as `cause` so nothing that inspected the old error stops
+ * working.
+ */
+function failedStartError(error: unknown, captured: string | undefined): unknown {
+  const said = captured?.trim();
+  if (!said) return error;
+  const tail = said.length > FIXTURE_FAILED_START_OUTPUT_BUDGET
+    ? said.slice(0, FIXTURE_FAILED_START_OUTPUT_BUDGET) + '\n[...truncated]'
+    : said;
+  const message = `${(error as Error)?.message ?? String(error)}\n--- broker output ---\n${tail}`;
+  return new Error(message, { cause: error });
+}
+
 /**
  * How long a fixture broker may be alive, silent, and not listening before the
  * start is treated as STALLED rather than slow.
@@ -701,9 +721,17 @@ export async function startHealthyFixtureBroker<C extends FixtureBrokerChild>(
       const settled = options.capture
         ? () => settledProcessOutput(options.capture!(child))
         : options.readSettledOutput && (() => options.readSettledOutput!(child));
-      const output = (await settled?.()) ?? `${(error as Error)?.message ?? ''}`;
+      const captured = await settled?.();
+      const output = captured ?? `${(error as Error)?.message ?? ''}`;
       const collided = await failedOnPortCollision(port, output);
-      if (!collided || bindRetries >= bindCeiling - 1) throw error;
+      // The child's own words are the diagnosis. Reading them and then throwing
+      // the bare `broker exited with code 1` leaves the caller with the fact of
+      // the death and none of its cause, which on a machine nobody can attach
+      // to -- a CI runner -- is the difference between a fixed defect and
+      // another round of guessing. Attached only when there WAS a reader: with
+      // none, `output` is this error's own message and repeating it says
+      // nothing.
+      if (!collided || bindRetries >= bindCeiling - 1) throw failedStartError(error, captured);
       // A survivor must never be left behind a respawn. It still holds whatever
       // it holds, and the next attempt would be racing the corpse of this one.
       if (!reaped) throw new Error(`${UNREAPED_CHILD_PREFIX} on port ${port}; refusing to respawn`);

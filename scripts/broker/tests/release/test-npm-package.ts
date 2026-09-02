@@ -30,7 +30,10 @@ import {
 } from '../../../../packages/typescript/broker/src/installation/supported-hosts.ts';
 import {
   parseWindowsMachineArchitecture,
+  PROBE_TIMEOUT_MS,
   windowsNativeMachineArchitecture,
+  windowsPowerShellChildEnvironment,
+  WINDOWS_MACHINE_PROBE_TIMEOUT_MS,
   type WindowsMachineProbeResult,
 } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import { validateWebBuildShape } from '../../release/package-web-sidecar.ts';
@@ -251,6 +254,18 @@ try {
     windowsNativeMachineArchitecture(() => ({ status: 0, stdout: 'aa64' })) === 'arm64'
       && windowsNativeMachineArchitecture(() => ({ status: 0, stdout: '8664' })) === 'x64'
       && windowsNativeMachineArchitecture(() => { throw new Error('powershell missing'); }) === 'unknown');
+  // This probe compiles C# to answer, and a host with a cold module-analysis cache rebuilds that on
+  // the same call. Sharing the read-only probes' budget spent the difference as a REFUSAL, which is
+  // the one wrong answer that stops a supported machine from starting a broker at all.
+  check('the machine probe is budgeted for a compile, not for a read',
+    WINDOWS_MACHINE_PROBE_TIMEOUT_MS >= 4 * PROBE_TIMEOUT_MS,
+    `machine=${WINDOWS_MACHINE_PROBE_TIMEOUT_MS}ms read=${PROBE_TIMEOUT_MS}ms`);
+  // 5.1 is named explicitly by every spawn here, and a host with PowerShell 7 exports module roots
+  // 5.1 cannot use. Pinned, the child sees the system store and nothing else.
+  check('every Windows PowerShell child is pinned to the system module store',
+    windowsPowerShellChildEnvironment({
+      SystemRoot: 'C:\\Windows', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules',
+    }).PSModulePath === join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'));
 
   // The refusal has to READ as "not yet", or an operator concludes the platform is impossible rather than
   // unqualified — and the next person to qualify it inherits that impression from our own copy.

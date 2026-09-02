@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { windowsPowerShellChildEnvironment } from '@cosyncing/adapter-api';
 
 const LOCAL_SYSTEM_SID = 'S-1-5-18';
 const BUILTIN_ADMINISTRATORS_SID = 'S-1-5-32-544';
@@ -185,9 +186,13 @@ export function windowsDaclChildEnvironment(
   env: NodeJS.ProcessEnv,
   request: { target: string; operation: string; kind: WindowsSecurePathKind },
 ): NodeJS.ProcessEnv {
+  // The SystemRoot read is kept, and kept FIRST: the shared helper answers a missing SystemRoot by
+  // returning the environment unpinned, which is the right answer for a probe that degrades to
+  // 'unknown' and the wrong one here, where an unpinned 5.1 loses Get-Acl and takes every owner-only
+  // write with it. This provider refuses instead.
+  windowsSystemRoot(env);
   return {
-    ...env,
-    PSModulePath: join(windowsSystemRoot(env), 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+    ...windowsPowerShellChildEnvironment(env),
     COSYNCING_WINDOWS_DACL_TARGET: request.target,
     COSYNCING_WINDOWS_DACL_OPERATION: request.operation,
     COSYNCING_WINDOWS_DACL_KIND: request.kind,

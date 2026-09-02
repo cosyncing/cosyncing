@@ -3,7 +3,29 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const WINDOWS_SNAPSHOT_TTL_MS = 250;
-const PROBE_TIMEOUT_MS = 5_000;
+/** Budget for a probe that READS something (an ACL, a process table). Exported so a claim can hold
+ *  the machine probe's own budget above it rather than restating a number. */
+export const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * The native-machine probe's own budget, which is not comparable to the others'.
+ *
+ * The probes above ask PowerShell to read something. This one asks it to COMPILE something:
+ * `Add-Type -MemberDefinition` builds a C# assembly at runtime to reach `IsWow64Process2`, and that
+ * runs csc. On top of it, a PowerShell host whose `%LOCALAPPDATA%` has no module-analysis cache -- a
+ * fresh profile, which every isolated test fixture creates and a service account can have too --
+ * rebuilds that cache on the same call.
+ *
+ * Both costs land on the ONE call that decides whether this host is qualified at all. Under the
+ * shared 5s budget the Windows broker lane's isolated fixtures exited at startup with
+ * `windows-machine-architecture-unverified`, each suite ending 5.39-5.50s after it began, against a
+ * budget of exactly 5.000. A refusal is the failure this probe exists to produce for an unqualified
+ * machine, so spending it on a slow compile is the worst way to be wrong: a supported host is
+ * declined and the operator is told their machine is unverified. Timing out remains possible -- this
+ * is a bound, not its removal -- but a bound wide enough that reaching it means something is wrong
+ * with the host rather than busy on it.
+ */
+export const WINDOWS_MACHINE_PROBE_TIMEOUT_MS = 20_000;
 const WINDOWS_MAX_BUFFER = 4 * 1024 * 1024;
 
 export interface HostProcessIdentity {
@@ -132,6 +154,34 @@ function windowsExecutable(name: string, env: NodeJS.ProcessEnv): string | null 
   return systemRoot ? join(systemRoot, 'System32', name) : null;
 }
 
+/**
+ * The environment for a Windows PowerShell 5.1 child, with its module path pinned to the system store.
+ *
+ * Every PowerShell spawn in this repository names 5.1 explicitly, by absolute path. A host with
+ * PowerShell 7 installed -- every GitHub-hosted Windows runner, and most developer machines --
+ * exports a `PSModulePath` naming 7's module roots, and 5.1 inheriting that cannot auto-load its own
+ * `Microsoft.PowerShell.Security`. `Get-Acl` then does not resolve, the probe that needed it exits
+ * non-zero, and a caller that requires a definite answer about who owns a file gets `unknown` and
+ * declines. Pinning the system store additionally stops a user-writable module directory from
+ * shadowing a cmdlet whose whole job is deciding who may read a secret.
+ *
+ * Every module these probes use -- Security, Utility, CimCmdlets, NetTCPIP, ScheduledTasks -- ships in
+ * that one directory, so pinning it costs nothing any of them needs.
+ *
+ * Returns a plain copy when `SystemRoot` is absent: a caller that cannot name the system store is in
+ * no position to pin it, and the executable lookup above has already failed for the same reason.
+ */
+export function windowsPowerShellChildEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const systemRoot = env.SystemRoot ?? env.SYSTEMROOT;
+  if (!systemRoot) return { ...env };
+  return {
+    ...env,
+    PSModulePath: join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+  };
+}
+
 export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
   const executable = windowsExecutable(join('WindowsPowerShell', 'v1.0', 'powershell.exe'), process.env);
   if (!executable) return null;
@@ -139,7 +189,7 @@ export function captureWindowsProcessSnapshot(): WindowsProcessSnapshot | null {
     executable,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', ENCODED_WINDOWS_SNAPSHOT],
     {
-      encoding: 'utf8', env: { ...process.env }, maxBuffer: WINDOWS_MAX_BUFFER,
+      encoding: 'utf8', env: windowsPowerShellChildEnvironment(), maxBuffer: WINDOWS_MAX_BUFFER,
       timeout: PROBE_TIMEOUT_MS, windowsHide: true,
     },
   );
@@ -379,7 +429,7 @@ export function windowsPathOwnedByCurrentUser(target: string): 'yes' | 'no' | 'u
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
       {
         encoding: 'utf8',
-        env: { ...process.env, COSYNCING_OWNER_PROBE_TARGET: target },
+        env: { ...windowsPowerShellChildEnvironment(), COSYNCING_OWNER_PROBE_TARGET: target },
         maxBuffer: 64 * 1024,
         timeout: PROBE_TIMEOUT_MS, windowsHide: true,
       },
@@ -461,9 +511,9 @@ export function windowsNativeMachineArchitecture(
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
       {
         encoding: 'utf8',
-        env: { ...process.env },
+        env: windowsPowerShellChildEnvironment(),
         maxBuffer: 64 * 1024,
-        timeout: PROBE_TIMEOUT_MS,
+        timeout: WINDOWS_MACHINE_PROBE_TIMEOUT_MS,
         windowsHide: true,
       },
     );

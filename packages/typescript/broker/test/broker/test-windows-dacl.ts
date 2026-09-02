@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import {
   classifyWindowsOwnerOnlyDacl,
   WINDOWS_DACL_POWERSHELL_SOURCE,
   windowsDaclChildEnvironment,
   type WindowsDaclSnapshot,
 } from '../../src/security/windows-dacl.ts';
+import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 
 const USER_SID = 'S-1-5-21-1000-1000-1000-1001';
 const FULL_CONTROL = 2_032_127;
@@ -88,5 +90,39 @@ assert.equal(
   assert.notEqual(child.PSModulePath, inherited, 'the child must not inherit a foreign module path');
   assert.match(String(child.PSModulePath), /WindowsPowerShell/);
 }
+// ONE rule, in one place. The DACL provider was pinned first and the ownership probe next to it was
+// not, so `Get-Acl` still failed there -- and a probe that answers 'unknown' instead of throwing
+// spent that failure silently: the OpenCode shim's receipt proof declined, and setup reported the
+// shim as applied-but-unverified with nothing naming PowerShell. Every 5.1 spawn now builds its
+// environment from the same helper.
+{
+  const inherited = 'C:\\Program Files\\PowerShell\\7\\Modules';
+  const pinned = windowsPowerShellChildEnvironment({
+    SystemRoot: 'C:\\Windows',
+    PSModulePath: inherited,
+    PATH: 'C:\\keep-me',
+  });
+  // Built with `join`, like the helper: this suite runs on POSIX too, where the separator differs.
+  assert.equal(
+    pinned.PSModulePath,
+    join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+  );
+  assert.equal(pinned.PATH, 'C:\\keep-me', 'pinning the module path changes nothing else');
+  assert.equal(
+    windowsDaclChildEnvironment(
+      { SystemRoot: 'C:\\Windows', PSModulePath: inherited },
+      { target: 'C:\\t', operation: 'inspect', kind: 'file' },
+    ).PSModulePath,
+    pinned.PSModulePath,
+    'the DACL provider pins through the shared helper rather than a second copy of the rule',
+  );
+  // A probe degrades to 'unknown' without a SystemRoot; owner-only enforcement must not degrade at
+  // all, so it keeps refusing where the shared helper hands back an unpinned copy.
+  assert.equal(windowsPowerShellChildEnvironment({ PATH: 'x' }).PSModulePath, undefined);
+  assert.throws(() => windowsDaclChildEnvironment(
+    { PATH: 'x' },
+    { target: 'C:\\t', operation: 'inspect', kind: 'file' },
+  ), /SystemRoot/);
+}
 
-console.log('PASS 16/16 Windows DACL policy checks');
+console.log('PASS 21/21 Windows DACL policy checks');

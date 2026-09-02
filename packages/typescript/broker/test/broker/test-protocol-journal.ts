@@ -2,6 +2,7 @@
 /** Durable attach-checkpoint and clientMessageId journal tests. No broker/model required. */
 import { strict as assert } from 'node:assert';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mutationFingerprint, ProtocolJournal } from '../../src/sessions/protocol-journal.ts';
 
@@ -21,7 +22,7 @@ const message = { kind: 'prompt', text: 'secret prompt text', clientMessageId: '
 const fingerprint = mutationFingerprint(message);
 
 await run('terminal ack survives restart without retaining mutation content', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   try {
     const first = new ProtocolJournal({ path });
@@ -39,7 +40,7 @@ await run('terminal ack survives restart without retaining mutation content', ()
 });
 
 await run('a failed draft clear survives restart and duplicate replay intact', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   try {
     // DR1: the outbox replay after a crash re-sends the SAME prompt frame, so this record is
@@ -81,7 +82,7 @@ await run('a failed clear without a usable retry target is rejected', () => {
   // would accept — a negative or unsafe value is dropped there and degrades the same way.
   const unusable: unknown[] = [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4'];
   for (const draftRevision of unusable) {
-    const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+    const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
     const path = join(home, 'journal.json');
     try {
       writeFileSync(
@@ -118,7 +119,7 @@ await run('a failed clear without a usable retry target is rejected', () => {
 });
 
 await run('restart resolves an in-flight mutation to a durable unknown-outcome nack', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   try {
     const first = new ProtocolJournal({ path });
@@ -136,7 +137,7 @@ await run('restart resolves an in-flight mutation to a durable unknown-outcome n
 });
 
 await run('conflicting reuse fails while identity and session namespaces remain independent', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   try {
     const journal = new ProtocolJournal({ path: join(home, 'journal.json') });
     assert.equal(journal.claim(scope, 'request-1', 'prompt', fingerprint).status, 'new');
@@ -150,7 +151,7 @@ await run('conflicting reuse fails while identity and session namespaces remain 
 });
 
 await run('terminal nack replay, retention expiry, and bounded eviction are deterministic', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   let now = 1_000;
   try {
@@ -172,7 +173,7 @@ await run('terminal nack replay, retention expiry, and bounded eviction are dete
 });
 
 await run('attach receipt survives restart, is identity-bound, and conflicting receipt fails', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   try {
     const issued = new ProtocolJournal({ path });
@@ -194,7 +195,7 @@ await run('attach receipt survives restart, is identity-bound, and conflicting r
 });
 
 await run('corrupt or unsupported journal is quarantined and starts empty', () => {
-  const home = mkdtempSync('/tmp/cosyncing-protocol-journal-');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-protocol-journal-'));
   const path = join(home, 'journal.json');
   const warnings: string[] = [];
   try {
