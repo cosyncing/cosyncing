@@ -5904,25 +5904,19 @@ server = Bun.serve<WsData>({
         return json({ ok: false, code: 'BAD_PARAM', error: 'from must not be after to' }, 400);
       }
       const window = { from, to };
-      const cached = tokdashReportCache.get(window);
-      if (cached) {
-        return json({
-          ok: true,
-          baseUrl: TOKDASH_URL,
-          cachedAt: cached.cachedAt,
-          servedFromCache: true,
-          data: cached.report,
-        });
-      }
       try {
-        const report = await fetchTokdashReport(TOKDASH_URL, window);
-        const entry = tokdashReportCache.set(window, report);
+        // Coalesced: a cold year window is a tens-of-seconds upstream scan, and a second caller
+        // arriving mid-scan must join it rather than start a duplicate Tokdash refuses.
+        const { entry, servedFromCache } = await tokdashReportCache.load(
+          window,
+          () => fetchTokdashReport(TOKDASH_URL, window),
+        );
         return json({
           ok: true,
           baseUrl: TOKDASH_URL,
           cachedAt: entry.cachedAt,
-          servedFromCache: false,
-          data: report,
+          servedFromCache,
+          data: entry.report,
         });
       } catch (error) {
         return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 502);

@@ -33,8 +33,17 @@ export const TOKDASH_REPORT_FACETS = [
   'firsts',
 ] as const;
 
-const DEFAULT_TIMEOUT_MS = 15_000;
-const MAX_TIMEOUT_MS = 60_000;
+/**
+ * Bounds sized against a real cold year window, not against a quota poll.
+ *
+ * The quota read is a 2.5s call because it reads one small live table. A report window is a full
+ * scan: measured cold on this host at year-to-date scope, `/api/active-time` alone took 34s, and
+ * `/api/usage` took long enough to blow a 15s budget before Tokdash cached it. Serving the year view
+ * at all is the headline deliverable, so the budget has to cover the slowest honest read rather than
+ * turning the first open of the page into a failure that a second open silently fixes.
+ */
+const DEFAULT_TIMEOUT_MS = 60_000;
+const MAX_TIMEOUT_MS = 180_000;
 
 /** Default per-`(from, to)` cache lifetime. */
 export const TOKDASH_REPORT_CACHE_MS = 5 * 60_000;
@@ -678,6 +687,7 @@ export interface TokdashReportCacheEntry {
  */
 export class TokdashReportCache {
   readonly #entries = new Map<string, TokdashReportCacheEntry>();
+  readonly #inFlight = new Map<string, Promise<TokdashReportCacheEntry>>();
   readonly #ttlMs: number;
   readonly #maxEntries: number;
   readonly #now: () => number;
@@ -718,7 +728,39 @@ export class TokdashReportCache {
     return entry;
   }
 
-  /** Drops every window. */
+  /**
+   * Serve a window, reading it at most once however many callers ask at the same time.
+   *
+   * A cold year scan takes tens of seconds upstream, and Tokdash sheds concurrent requests for a
+   * window it is still computing with a 503. Without coalescing, a second viewer — or a rebuild, or
+   * a period switcher returning to a window whose first read has not landed — starts a duplicate
+   * scan and is the one that gets refused, so the same window both succeeds and fails depending on
+   * who asked first. Sharing the in-flight promise makes the second caller wait for the first
+   * caller's answer, which is the answer it wanted anyway.
+   */
+  async load(
+    window: TokdashReportWindow,
+    loader: () => Promise<TokdashReport>,
+  ): Promise<{ entry: TokdashReportCacheEntry; servedFromCache: boolean }> {
+    const cached = this.get(window);
+    if (cached) return { entry: cached, servedFromCache: true };
+
+    const key = cacheKey(window);
+    const pending = this.#inFlight.get(key);
+    // A caller that joins an in-flight read did not serve a stored entry, but it also did not spend
+    // an upstream scan; reporting it as a cache hit is the honest half of that.
+    if (pending) return { entry: await pending, servedFromCache: true };
+
+    const promise = loader()
+      .then((report) => this.set(window, report))
+      .finally(() => {
+        this.#inFlight.delete(key);
+      });
+    this.#inFlight.set(key, promise);
+    return { entry: await promise, servedFromCache: false };
+  }
+
+  /** Drops every window. In-flight reads are left to settle into a cache nobody will read. */
   clear(): void {
     this.#entries.clear();
   }

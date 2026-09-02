@@ -438,6 +438,56 @@ await test('a cached window is not re-read from Tokdash', async () => {
   assert.equal(calls.length, 3, 'a cache hit costs no upstream reads');
 });
 
+await test('concurrent readers of one window share a single upstream scan', async () => {
+  const { fetch: upstream, calls } = stubFetch();
+  const cache = new TokdashReportCache({ ttlMs: 60_000, now: () => 0 });
+  let loads = 0;
+  const loader = () => {
+    loads++;
+    return fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
+  };
+
+  // Started together, before any of them can have finished: this is the shape that made Tokdash
+  // refuse the second caller with a 503 while the first one succeeded.
+  const [first, second, third] = await Promise.all([
+    cache.load(WINDOW, loader),
+    cache.load(WINDOW, loader),
+    cache.load(WINDOW, loader),
+  ]);
+
+  assert.equal(loads, 1, 'one upstream scan serves every concurrent caller');
+  assert.equal(calls.length, 3, 'three GETs total, not nine');
+  assert.equal(first.servedFromCache, false, 'the caller that started the scan says so');
+  assert.equal(second.servedFromCache, true);
+  assert.equal(third.servedFromCache, true);
+  for (const result of [first, second, third]) {
+    assert.equal(result.entry.report.totals.tokens, 19_893_991_786);
+  }
+
+  // The settled window is now a plain cache hit and costs nothing more.
+  const later = await cache.load(WINDOW, loader);
+  assert.equal(loads, 1);
+  assert.equal(later.servedFromCache, true);
+});
+
+await test('a failed scan is not cached and does not poison the next reader', async () => {
+  const cache = new TokdashReportCache({ ttlMs: 60_000, now: () => 0 });
+  let attempt = 0;
+  const loader = () => {
+    attempt++;
+    const stub = attempt === 1 ? stubFetch({ usage: 'fail' }) : stubFetch();
+    return fetchTokdashReport(undefined, WINDOW, { fetch: stub.fetch });
+  };
+
+  await assert.rejects(() => cache.load(WINDOW, loader), /HTTP 500/);
+  assert.equal(cache.size, 0, 'a failure leaves no entry behind');
+
+  // A transient upstream failure must not be remembered as this window's answer.
+  const recovered = await cache.load(WINDOW, loader);
+  assert.equal(attempt, 2, 'the next reader retries rather than replaying the failure');
+  assert.equal(recovered.entry.report.totals.tokens, 19_893_991_786);
+});
+
 await test('a non-loopback Tokdash override is refused without echoing the value', async () => {
   const { fetch: upstream, calls } = stubFetch();
   await assert.rejects(
