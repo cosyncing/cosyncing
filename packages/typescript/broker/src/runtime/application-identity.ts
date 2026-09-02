@@ -3,23 +3,31 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
 /**
- * How this build was produced, and therefore what can execute it.
+ * How this build was produced, and therefore what can execute it — and who owns the files it was written to.
  *
  * `packaged` alone used to carry three separate meanings — "not a contributor checkout", "safe to install as
  * a durable service", and "eligible for the signed native binary swap". A JavaScript distribution is the
  * first two and emphatically NOT the third, so the three had to stop sharing one boolean.
  *
- *   source  — a contributor checkout executed through Bun from repository sources.
- *   bun-js  — the published npm application: ONE self-contained JavaScript bundle, executed by a separately
- *             installed Bun runtime. Carries no interpreter of its own.
- *   native  — a `bun build --compile` executable with Bun embedded. Distribution of this artifact is gated
- *             (docs/legal/binary-distribution-readiness.md); it remains buildable for CI and future work.
+ *   source       — a contributor checkout executed through Bun from repository sources.
+ *   bun-js       — the published npm application: ONE self-contained JavaScript bundle, executed by a
+ *                  separately installed Bun runtime. Carries no interpreter of its own.
+ *   bootstrap-js — the same bundle and the same external Bun, placed by cosyncing's own signed installer
+ *                  into `$COSYNCING_HOME/bin` instead of by a package manager.
+ *   native       — a `bun build --compile` executable with Bun embedded. Distribution of this artifact is
+ *                  gated (docs/legal/binary-distribution-readiness.md); it stays buildable for CI.
  *
- * Fail-closed by construction: only the exact string `native` selects the signed native replacement path, so
- * a dropped or corrupted build define degrades to `source` (which cannot self-replace at all) rather than to
- * a distribution that would download and swap machine code.
+ * `bun-js` and `bootstrap-js` are the same shape of artifact and differ in exactly one thing: who placed the
+ * files. That is not cosmetic — it decides whether cosyncing may replace them. npm owns what npm installed
+ * and cosyncing must not fight the tool that owns those files; nothing but cosyncing claims
+ * `$COSYNCING_HOME/bin`. Two install methods, two honest answers to "update me", and this kind is what tells
+ * them apart.
+ *
+ * Fail-closed by construction: only the exact string `native` selects the signed MACHINE-CODE replacement
+ * path, and only the exact string `bootstrap-js` selects the signed JavaScript one, so a dropped or
+ * corrupted build define degrades to `source`, which cannot self-replace at all.
  */
-export const DISTRIBUTION_KINDS = Object.freeze(['source', 'bun-js', 'native'] as const);
+export const DISTRIBUTION_KINDS = Object.freeze(['source', 'bun-js', 'bootstrap-js', 'native'] as const);
 
 export type DistributionKind = typeof DISTRIBUTION_KINDS[number];
 
@@ -269,7 +277,9 @@ export function resolveApplicationIdentity(options: {
       packaged,
     };
   }
-  const candidate = options.distribution === 'bun-js' ? options.mainPath : options.sourceEntry;
+  // Every packaged JavaScript kind is the bundle Bun is executing; only a contributor checkout has no
+  // packaged artifact and falls back to whichever module the contributor ran.
+  const candidate = options.distribution === 'source' ? options.sourceEntry : options.mainPath;
   if (!candidate) {
     throw new ApplicationIdentityError(
       'application-entry-unresolved',
