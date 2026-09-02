@@ -1,4 +1,5 @@
 import 'package:cosyncing_client/l10n/app_localizations.dart';
+import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/file_viewer_pane.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
@@ -19,6 +20,16 @@ SessionFilePreview _preview({
   truncated: truncated,
   text: text,
   anchorLine: anchorLine,
+);
+
+SessionFilePreview _markdown({required String text}) => SessionFilePreview(
+  path: 'docs/notes.md',
+  displayName: 'notes.md',
+  mimeType: 'text/markdown',
+  size: text.length,
+  limit: 1024 * 1024,
+  truncated: false,
+  text: text,
 );
 
 Widget _host(
@@ -310,6 +321,131 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    testWidgets('a source language is highlighted and named', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          FileViewerSource(
+            preview: _preview(text: "final a = 'b'; // c"),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // The chip is the renderer identity, not decoration.
+      final chip = tester.widget<MetadataChip>(
+        find.byKey(const Key('file-viewer-renderer')),
+      );
+      expect(chip.label, 'dart');
+
+      final rich = tester
+          .widgetList<Text>(
+            find.descendant(
+              of: find.byKey(const Key('file-viewer-lines')),
+              matching: find.byType(Text),
+            ),
+          )
+          .where((text) => text.textSpan != null);
+      expect(rich, isNotEmpty);
+      expect(
+        find.byKey(const Key('file-viewer-highlighting-off')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a declined line says so, and shows no syntax spans', (
+      tester,
+    ) async {
+      // One line of ~5,200 alternating runs: past the token bound, far under
+      // the 128 KB units bound. D-10's case -- the text is complete and must
+      // say so, rather than arriving as undifferentiated grey with no signal.
+      // Identifier/string alternation, because digits are identifier-part
+      // characters, so `a1a1...` would lex as one run and decline nothing.
+      await tester.pumpWidget(
+        _host(
+          FileViewerSource(
+            preview: _preview(text: 'final a = 1;\n${'a"x"' * 2600}'),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const Key('file-viewer-highlighting-off')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('complete'), findsOneWidget);
+      final rich = tester
+          .widgetList<Text>(
+            find.descendant(
+              of: find.byKey(const Key('file-viewer-lines')),
+              matching: find.byType(Text),
+            ),
+          )
+          .where((text) => text.textSpan != null);
+      expect(rich, isEmpty);
+    });
+
+    testWidgets('markdown offers both faces and code offers one', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _preview())),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('file-viewer-mode-source')), findsNothing);
+
+      await tester.pumpWidget(
+        _host(
+          FileViewerSource(
+            preview: _markdown(text: '# Title\n\nBody text.'),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('file-viewer-mode-source')), findsOneWidget);
+      expect(
+        find.byKey(const Key('file-viewer-mode-rendered')),
+        findsOneWidget,
+      );
+      // Source is the default everywhere, so raw markdown is what opens.
+      expect(find.byKey(const Key('file-viewer-lines')), findsOneWidget);
+      expect(find.text('# Title'), findsOneWidget);
+    });
+
+    testWidgets('wrap is withdrawn in a rendered view', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          FileViewerSource(
+            preview: _markdown(text: '# Title\n\nBody text.'),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('file-viewer-wrap')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('file-viewer-mode-rendered')));
+      await tester.pump();
+
+      // A rendered view reflows on its own; offering wrap there would be a
+      // control that does nothing, and on a rendered diff it would lie.
+      expect(find.byKey(const Key('file-viewer-wrap')), findsNothing);
+      expect(find.byKey(const Key('file-viewer-rendered')), findsOneWidget);
+      expect(find.byKey(const Key('file-viewer-lines')), findsNothing);
+      expect(find.text('# Title'), findsNothing);
+      expect(find.text('Title'), findsOneWidget);
+    });
+
+    testWidgets('a mode switch still holds no ticker', (tester) async {
+      await tester.pumpWidget(
+        _host(FileViewerSource(preview: _markdown(text: '# Title'))),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('file-viewer-mode-rendered')));
+      await tester.pumpAndSettle();
+      expect(tester.binding.transientCallbackCount, 0);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
     testWidgets('renders in zh without a hard-coded English string', (

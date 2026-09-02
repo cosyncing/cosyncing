@@ -3581,6 +3581,14 @@
   "@fileViewerNoPreview": {"description": "State panel title for content the viewer will not guess at."},
   "fileViewerBinaryBody": "{type} · {size} · binary content. The viewer will not guess at it.",
   "@fileViewerBinaryBody": {"description": "State panel body naming what the bytes are instead of rendering mojibake.", "placeholders": {"type": {"type": "String"}, "size": {"type": "String"}}},
+  "fileViewerModeSource": "Source",
+  "@fileViewerModeSource": {"description": "Segmented control: show the file's bytes as they are."},
+  "fileViewerModeRendered": "Rendered",
+  "@fileViewerModeRendered": {"description": "Segmented control: show the renderer's presentation of the file."},
+  "fileViewerRendererPlain": "Plain text",
+  "@fileViewerRendererPlain": {"description": "Header chip naming the active renderer when the file has no source language."},
+  "fileViewerHighlightingOff": "Syntax highlighting is off \u2014 at {size} this file exceeds the highlighting budget. The text is complete, not truncated.",
+  "@fileViewerHighlightingOff": {"description": "Host notice above the renderer when the highlighter declined. Says the text is complete so a grey body does not read as a truncated one.", "placeholders": {"size": {"type": "String"}}},
   "fileViewerDownload": "Download",
   "@fileViewerDownload": {"description": "Action fetching the raw bytes from a state panel."}
 }

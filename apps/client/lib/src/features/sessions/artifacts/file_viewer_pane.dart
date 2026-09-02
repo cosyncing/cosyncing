@@ -1,9 +1,11 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/components.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_renderers_builtin.dart';
+import 'package:cosyncing_client/src/features/sessions/artifacts/file_source_body.dart';
 import 'package:cosyncing_client/src/features/sessions/artifacts/session_file_browser.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -155,6 +157,17 @@ class _FileViewerPaneState extends State<FileViewerPane> {
 
   bool _wrap = false;
   bool _revealScheduled = false;
+  FileViewMode _mode = FileViewMode.source;
+
+  /// Memoized per-file renderer preparation.
+  ///
+  /// Keyed rather than recomputed because a preparer walks the whole file: the
+  /// code renderer's carry pass over a 1 MB payload must not run again every
+  /// time the wrap toggle flips.
+  String? _preparedKey;
+  Object? _preparedState;
+  FileRenderNotice? _preparedNotice;
+  List<String> _lines = const [];
 
   @override
   void initState() {
@@ -168,6 +181,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.content.path != widget.content.path) {
       _wrap = false;
+      _mode = FileViewMode.source;
       _scheduleAnchorReveal();
     } else if (oldWidget.content is! FileViewerSource &&
         widget.content is FileViewerSource) {
@@ -210,7 +224,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
       final anchor = content.preview.anchorLine;
       if (anchor == null || content.preview.anchorBeyondPreview) return;
       if (!_vertical.hasClients) return;
-      final extent = _lineExtent(context);
+      final extent = fileSourceLineExtent(context);
       final viewport = _vertical.position.viewportDimension;
       final target = (anchor - 1) * extent - (viewport - extent) / 2;
       _vertical.jumpTo(
@@ -222,24 +236,14 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     });
   }
 
-  /// Height of one code row, scaled with the ambient text scale.
-  double _lineExtent(BuildContext context) {
-    final style = _codeStyle(context);
-    final scaled = MediaQuery.textScalerOf(context).scale(style.fontSize!);
-    return (scaled * 1.5).ceilToDouble();
-  }
-
-  TextStyle _codeStyle(BuildContext context) {
-    final theme = Theme.of(context);
-    return (theme.textTheme.bodySmall ?? const TextStyle(fontSize: 12))
-        .copyWith(fontFamily: 'monospace', height: 1.5, fontSize: 12);
-  }
-
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final l10n = AppLocalizations.of(context);
     final content = widget.content;
+    final descriptor = content is FileViewerSource
+        ? _resolve(context, tokens, content.preview)
+        : null;
     return Column(
       key: const Key('file-viewer-pane'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -250,12 +254,12 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _header(context, tokens, l10n, content),
+              _header(context, tokens, l10n, content, descriptor),
               ..._notices(context, tokens, l10n, content),
             ],
           ),
         ),
-        Expanded(child: _body(context, tokens, l10n, content)),
+        Expanded(child: _body(context, tokens, l10n, content, descriptor)),
       ],
     );
   }
@@ -265,10 +269,13 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     AppTokens tokens,
     AppLocalizations l10n,
     FileViewerContent content,
+    FileRendererDescriptor? descriptor,
   ) {
     final theme = Theme.of(context);
     final preview = content is FileViewerSource ? content.preview : null;
-    final wrappable = content is FileViewerSource;
+    // Wrap is a source-view affordance only. A rendered view reflows on its
+    // own, and a wrapped diff is a broken diff.
+    final wrappable = preview != null && _mode == FileViewMode.source;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: tokens.surface,
@@ -323,6 +330,16 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                   ),
                 ),
                 const Spacer(),
+                if (descriptor != null && descriptor.modes.length > 1) ...[
+                  _ModeToggle(
+                    tokens: tokens,
+                    mode: _mode,
+                    onChanged: (mode) => setState(() => _mode = mode),
+                    sourceLabel: l10n.fileViewerModeSource,
+                    renderedLabel: l10n.fileViewerModeRendered,
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 if (wrappable)
                   _HeaderButton(
                     iconKey: const Key('file-viewer-wrap'),
@@ -366,6 +383,13 @@ class _FileViewerPaneState extends State<FileViewerPane> {
                     ),
                   ),
                 ),
+                if (preview != null && descriptor != null) ...[
+                  const SizedBox(width: 8),
+                  MetadataChip(
+                    key: const Key('file-viewer-renderer'),
+                    label: _rendererLabel(l10n, descriptor, preview.path),
+                  ),
+                ],
                 if (preview != null) ...[
                   const SizedBox(width: 8),
                   MetadataChip(label: l10n.bytesCount(preview.size)),
@@ -406,6 +430,14 @@ class _FileViewerPaneState extends State<FileViewerPane> {
           // bytes that were withheld — so there is no honest "of N" to state.
           message: l10n.fileViewerTruncated(preview.previewedLineCount),
         ),
+      if (_preparedNotice == FileRenderNotice.highlightingOff)
+        _Notice(
+          noticeKey: const Key('file-viewer-highlighting-off'),
+          tokens: tokens,
+          message: l10n.fileViewerHighlightingOff(
+            l10n.bytesCount(preview.size),
+          ),
+        ),
       // The existing honest note, preserved: silently landing on line 1 would
       // read as "the mention was wrong" rather than "the read was bounded".
       if (preview.anchorBeyondPreview)
@@ -425,12 +457,22 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     AppTokens tokens,
     AppLocalizations l10n,
     FileViewerContent content,
+    FileRendererDescriptor? descriptor,
   ) {
     return ColoredBox(
       color: tokens.surface2,
       child: switch (content) {
         FileViewerReading() => _skeleton(context, tokens),
-        FileViewerSource(:final preview) => _source(context, tokens, preview),
+        FileViewerSource(:final preview) => descriptor!.build(
+          context,
+          _request(
+            context,
+            tokens,
+            descriptor,
+            preview,
+            prepared: _preparedState,
+          ),
+        ),
         FileViewerGone() => _StatePanel(
           panelKey: const Key('file-viewer-gone'),
           tokens: tokens,
@@ -477,7 +519,7 @@ class _FileViewerPaneState extends State<FileViewerPane> {
 
   /// A gutter-and-line skeleton. Deliberately not a spinner.
   Widget _skeleton(BuildContext context, AppTokens tokens) {
-    final extent = _lineExtent(context);
+    final extent = fileSourceLineExtent(context);
     return ListView.builder(
       key: const Key('file-viewer-skeleton'),
       physics: const NeverScrollableScrollPhysics(),
@@ -514,125 +556,88 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     );
   }
 
-  Widget _source(
+  /// The renderer for the file on screen, prepared once per file.
+  ///
+  /// Resolution and preparation both happen during build rather than in
+  /// initState because the pane is handed content by its parent rather than
+  /// fetching it, and preparation needs the resolved descriptor.
+  FileRendererDescriptor _resolve(
     BuildContext context,
     AppTokens tokens,
     SessionFilePreview preview,
   ) {
-    final lines = preview.text.isEmpty
-        ? const <String>[]
-        : preview.text.split('\n');
-    final style = _codeStyle(context);
-    final extent = _lineExtent(context);
-    final anchor = preview.anchorBeyondPreview ? null : preview.anchorLine;
-
-    // Wrapped mode has no horizontal axis to pin a gutter against, and rows
-    // stop being uniform, so it is a different layout rather than a flag on
-    // this one: one list, gutter top-aligned beside its wrapped block.
-    if (_wrap) {
-      return SelectionArea(
-        child: ListView.builder(
-          key: const Key('file-viewer-lines'),
-          controller: _vertical,
-          padding: const EdgeInsets.only(top: 8, bottom: 16),
-          itemCount: lines.length,
-          itemBuilder: (context, index) => Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _GutterCell(
-                number: index + 1,
-                anchored: index + 1 == anchor,
-                tokens: tokens,
-                style: style,
-                height: extent,
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 16),
-                  child: Text(lines[index], style: style),
-                ),
-              ),
-            ],
-          ),
-        ),
+    final descriptor = resolveFileRenderer(
+      builtInFileRenderers(),
+      path: preview.path,
+      fallbackId: plainFileRendererId,
+      mimeType: preview.mimeType,
+    );
+    final key =
+        '${preview.path}\u0000${preview.text.length}'
+        '\u0000${preview.text.hashCode}\u0000${descriptor.id}';
+    if (_preparedKey != key) {
+      _lines = preview.text.isEmpty ? const [] : preview.text.split('\n');
+      final prepared = descriptor.prepare?.call(
+        _request(context, tokens, descriptor, preview, prepared: null),
       );
+      _preparedKey = key;
+      _preparedState = prepared?.state;
+      _preparedNotice = prepared?.notice;
     }
+    return descriptor;
+  }
 
-    // Monospace makes the content width exact rather than a guess: one glyph
-    // advance times the longest line, with no need to measure 20k rows.
-    final advance = _monospaceAdvance(context, style);
-    var longest = 0;
-    for (final line in lines) {
-      if (line.length > longest) longest = line.length;
-    }
-    final contentWidth = longest * advance + 16;
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Pinned: outside the horizontal viewport entirely, so it cannot
-        // scroll sideways. It follows the body vertically through _syncGutter.
-        SizedBox(
-          width: 48,
-          child: ListView.builder(
-            key: const Key('file-viewer-gutter'),
-            controller: _gutter,
-            physics: const NeverScrollableScrollPhysics(),
-            itemExtent: extent,
-            padding: const EdgeInsets.only(top: 8, bottom: 16),
-            itemCount: lines.length,
-            itemBuilder: (context, index) => _GutterCell(
-              number: index + 1,
-              anchored: index + 1 == anchor,
-              tokens: tokens,
-              style: style,
-              height: extent,
-            ),
-          ),
-        ),
-        Expanded(
-          child: SelectionArea(
-            child: Scrollbar(
-              controller: _horizontal,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                controller: _horizontal,
-                child: SizedBox(
-                  width: math.max(contentWidth, 1),
-                  child: ListView.builder(
-                    key: const Key('file-viewer-lines'),
-                    controller: _vertical,
-                    itemExtent: extent,
-                    padding: const EdgeInsets.only(top: 8, bottom: 16),
-                    itemCount: lines.length,
-                    itemBuilder: (context, index) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        lines[index],
-                        style: style,
-                        softWrap: false,
-                        maxLines: 1,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
+  FileRenderRequest _request(
+    BuildContext context,
+    AppTokens tokens,
+    FileRendererDescriptor descriptor,
+    SessionFilePreview preview, {
+    required Object? prepared,
+  }) {
+    return FileRenderRequest(
+      path: preview.path,
+      displayName: preview.displayName,
+      mimeType: preview.mimeType,
+      languageId: fileLanguageIdFor(preview.path),
+      size: preview.size,
+      limit: preview.limit,
+      truncated: preview.truncated,
+      content: TextFileContent(preview.text),
+      lines: _lines,
+      mode: _mode,
+      tokens: tokens,
+      locale: Localizations.localeOf(context),
+      granted: descriptor.granted,
+      surface: FileSourceSurface(
+        vertical: _vertical,
+        gutter: _gutter,
+        horizontal: _horizontal,
+        // Wrap is a source-view affordance only: a rendered view reflows on
+        // its own, and a wrapped diff is a broken diff.
+        wrap: _wrap && _mode == FileViewMode.source,
+      ),
+      prepared: prepared,
+      anchorLine: preview.anchorBeyondPreview ? null : preview.anchorLine,
+      anchorColumn: preview.anchorColumn,
+      onCopy: (text) => unawaited(_copy(context, text)),
     );
   }
 
-  double _monospaceAdvance(BuildContext context, TextStyle style) {
-    final painter = TextPainter(
-      text: TextSpan(text: '0', style: style),
-      textDirection: Directionality.of(context),
-      textScaler: MediaQuery.textScalerOf(context),
-    )..layout();
-    final width = painter.width;
-    painter.dispose();
-    return width;
+  /// Names what is rendering the file.
+  ///
+  /// The source language when the renderer has one, the renderer's own name
+  /// otherwise. Language names stay literals; renderer names are localized.
+  String _rendererLabel(
+    AppLocalizations l10n,
+    FileRendererDescriptor descriptor,
+    String path,
+  ) {
+    final language = fileLanguageIdFor(path);
+    if (language != null) return language;
+    return switch (descriptor.id) {
+      markdownFileRendererId => 'Markdown',
+      _ => l10n.fileViewerRendererPlain,
+    };
   }
 
   Future<void> _copy(BuildContext context, String text) async {
@@ -641,62 +646,6 @@ class _FileViewerPaneState extends State<FileViewerPane> {
     await Clipboard.setData(ClipboardData(text: text));
     messenger?.showSnackBar(
       SnackBar(content: Text(l10n.transcriptCodeCopied)),
-    );
-  }
-}
-
-/// One absolute line number.
-///
-/// The anchor reveal lives entirely here: an `accent` number and a 2dp accent
-/// edge. There is deliberately no row wash — `accentSurface` cannot sit behind
-/// highlighted code without dropping syntax tokens under the 4.5:1 bar the
-/// theme sweep enforces (`accent_surface_token_test.dart` carries the numbers).
-class _GutterCell extends StatelessWidget {
-  const _GutterCell({
-    required this.number,
-    required this.anchored,
-    required this.tokens,
-    required this.style,
-    required this.height,
-  });
-
-  final int number;
-  final bool anchored;
-  final AppTokens tokens;
-  final TextStyle style;
-  final double height;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 48,
-      height: height,
-      child: Row(
-        children: [
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: Text(
-                  '$number',
-                  key: anchored ? const Key('file-viewer-anchor-number') : null,
-                  maxLines: 1,
-                  style: style.copyWith(
-                    color: anchored ? tokens.accent : tokens.textTertiary,
-                    fontWeight: anchored ? FontWeight.w600 : FontWeight.normal,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Container(
-            key: anchored ? const Key('file-viewer-anchor-edge') : null,
-            width: 2,
-            color: anchored ? tokens.accent : Colors.transparent,
-          ),
-        ],
-      ),
     );
   }
 }
@@ -919,6 +868,71 @@ class _StatePanel extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The Source/Rendered switch, shown only when a renderer offers both faces.
+///
+/// A segmented pair rather than an icon: which face is showing is a fact the
+/// reader needs at a glance, and an icon that toggles state silently is how a
+/// rendered view gets mistaken for the file's actual bytes.
+class _ModeToggle extends StatelessWidget {
+  const _ModeToggle({
+    required this.tokens,
+    required this.mode,
+    required this.onChanged,
+    required this.sourceLabel,
+    required this.renderedLabel,
+  });
+
+  final AppTokens tokens;
+  final FileViewMode mode;
+  final ValueChanged<FileViewMode> onChanged;
+  final String sourceLabel;
+  final String renderedLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    Widget segment(FileViewMode value, String label, Key key) {
+      final selected = value == mode;
+      return InkWell(
+        key: key,
+        onTap: selected ? null : () => onChanged(value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          child: Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: selected ? tokens.accent : tokens.textTertiary,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: tokens.separator),
+        borderRadius: BorderRadius.circular(tokens.radiusXs),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          segment(
+            FileViewMode.source,
+            sourceLabel,
+            const Key('file-viewer-mode-source'),
+          ),
+          segment(
+            FileViewMode.rendered,
+            renderedLabel,
+            const Key('file-viewer-mode-rendered'),
+          ),
+        ],
       ),
     );
   }

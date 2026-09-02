@@ -1522,5 +1522,9 @@
   "fileViewerTryAgain": "重试",
   "fileViewerNoPreview": "暂不支持预览此类型。",
   "fileViewerBinaryBody": "{type} · {size} · 二进制内容。查看器不会臆测其内容。",
+  "fileViewerModeSource": "源码",
+  "fileViewerModeRendered": "渲染",
+  "fileViewerRendererPlain": "纯文本",
+  "fileViewerHighlightingOff": "语法高亮已关闭——该文件 {size}，超出高亮预算。文本是完整的，并未被截断。",
   "fileViewerDownload": "下载"
 }
