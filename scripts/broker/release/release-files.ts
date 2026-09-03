@@ -40,7 +40,20 @@ import {
 } from './software-inventory.ts';
 
 const ROOT = resolve(import.meta.dir, '../../..');
-const BOOTSTRAP_TEMPLATE = join(import.meta.dir, 'bootstrap-template.sh');
+
+/**
+ * The installers this release publishes, by published name.
+ *
+ * Two scripts, one substitution table, one set of digests. `install.ps1` is not a fork of `install.sh`:
+ * both are rendered from the same pins in the same step, so a release cannot ship a Windows installer that
+ * points at a different artifact from the Unix one — the way it could if either were assembled separately.
+ */
+export const BOOTSTRAP_TEMPLATES = Object.freeze({
+  'install.sh': join(import.meta.dir, 'bootstrap-template.sh'),
+  'install.ps1': join(import.meta.dir, 'bootstrap-template.ps1'),
+} as const);
+
+export type BootstrapName = keyof typeof BOOTSTRAP_TEMPLATES;
 
 /**
  * Targets every assembled release MUST publish; assembly fails without all of them. macOS is a first-class
@@ -61,8 +74,20 @@ export function releaseTargetArch(target: ReleaseTarget): 'x64' | 'arm64' {
 }
 export const WEB_SIDECAR_NAME = 'cosyncing-web-app.tar.gz' as const;
 
-/** The hosts the shell installer supports, and therefore the hosts it must carry a pinned Bun for. */
-const BOOTSTRAP_HOST_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
+/**
+ * The hosts cosyncing's own installers support, and therefore the hosts the rendered Bun table must cover.
+ *
+ * The union rather than one list per script, because one substitution table renders both installers. Each
+ * one filters the table by the host it resolved, so the rows it cannot use are inert — and a release that
+ * published a Bun table missing a host either installer supports would fail assembly rather than ship an
+ * installer with nothing to fetch.
+ */
+const BOOTSTRAP_HOST_TARGETS = Object.freeze([
+  'linux-x64',
+  'linux-arm64',
+  'darwin-arm64',
+  'windows-x64',
+] as const);
 
 /**
  * The second signature, emitted as a SIBLING FILE rather than a second manifest field.
@@ -380,7 +405,7 @@ function writeP256Signature(path: string, bytes: Uint8Array, options: {
   writeFileSync(options.derPath, der, { mode: 0o644 });
 }
 
-function renderBootstrap(options: {
+function renderBootstraps(options: {
   version: string;
   baseUrl: string;
   keyId: string;
@@ -392,7 +417,7 @@ function renderBootstrap(options: {
   // is the same archive everywhere too, so the host only decides whether the install is supported at all.
   application: { name: string; sha256: string; size: number };
   webApp: { name: string; sha256: string; size: number };
-}): string {
+}): Record<BootstrapName, string> {
   const publicKeyB64 = Buffer.from(options.publicKeyPem.trim() + '\n', 'utf8').toString('base64');
   // Both trust anchors are baked in, for the same reason: the installer must verify against the key IT
   // carries, never one fetched alongside the thing being verified.
@@ -436,23 +461,46 @@ function renderBootstrap(options: {
     options.application.name,
     options.webApp.name,
   ].join('\n');
-  // Every one of these is interpolated into a single-quoted shell assignment.
+  // Every one of these is interpolated into a single-quoted assignment in BOTH templates. PowerShell
+  // escapes `'` by doubling it rather than with a backslash, so the two languages need different escapes
+  // and neither is applied: the values are digests, URLs, asset names and versions, which never
+  // legitimately contain either character, so one refusal covers both templates.
   if (/['\\]/.test(embedded)) throw new Error('bootstrap substitution is not safe to embed');
   if (!/^\d+\.\d+\.\d+$/.test(options.minimumBunVersion)) {
     throw new Error('minimum Bun version is not a release version');
   }
-  return readFileSync(BOOTSTRAP_TEMPLATE, 'utf8')
-    .replaceAll('@VERSION@', options.version)
-    .replaceAll('@BASE_URL@', options.baseUrl)
-    .replaceAll('@KEY_ID@', options.keyId)
-    .replaceAll('@PUBLIC_KEY_B64@', publicKeyB64)
-    .replaceAll('@P256_PUBLIC_KEY_B64@', p256PublicKeyB64)
-    .replaceAll('@APP_ASSET@', options.application.name)
-    .replaceAll('@WEB_ASSET@', options.webApp.name)
-    .replaceAll('@MINIMUM_BUN@', options.minimumBunVersion)
-    .replaceAll('@ARTIFACT_TABLE@', artifactTable)
-    .replaceAll('@BUN_TABLE@', bunTable)
-    .replaceAll('@BUN_RELEASE_BASE@', BUN_RELEASE_DOWNLOAD_BASE);
+  // ONE table, both installers. `@PUBLIC_KEY_B64@` is in it and appears only in the shell template:
+  // Windows CNG has no Ed25519 algorithm identifier and .NET Framework no implementation, so the
+  // PowerShell installer omits that token rather than embedding a trust anchor it cannot use. The
+  // no-token-left assertion below is what keeps that an omission rather than an oversight.
+  const substitutions: ReadonlyArray<readonly [string, string]> = [
+    ['@VERSION@', options.version],
+    ['@BASE_URL@', options.baseUrl],
+    ['@KEY_ID@', options.keyId],
+    ['@PUBLIC_KEY_B64@', publicKeyB64],
+    ['@P256_PUBLIC_KEY_B64@', p256PublicKeyB64],
+    ['@APP_ASSET@', options.application.name],
+    ['@WEB_ASSET@', options.webApp.name],
+    ['@MINIMUM_BUN@', options.minimumBunVersion],
+    ['@ARTIFACT_TABLE@', artifactTable],
+    ['@BUN_TABLE@', bunTable],
+    ['@BUN_RELEASE_BASE@', BUN_RELEASE_DOWNLOAD_BASE],
+  ];
+  const rendered = {} as Record<BootstrapName, string>;
+  for (const [name, templatePath] of Object.entries(BOOTSTRAP_TEMPLATES) as Array<[BootstrapName, string]>) {
+    let script = readFileSync(templatePath, 'utf8');
+    for (const [token, value] of substitutions) script = script.replaceAll(token, value);
+    // A template that grew a token nobody renders would publish an installer carrying the literal
+    // `@SOMETHING@` where a digest or a URL belongs, and would fail at the operator rather than here.
+    const unresolved = /@[A-Z0-9_]+@/.exec(script);
+    if (unresolved) throw new Error(`${name} still carries the unrendered token ${unresolved[0]}`);
+    rendered[name] = script;
+  }
+  // Stated as an assertion, not as a comment: the Windows installer must not carry the Ed25519 key.
+  if (rendered['install.ps1'].includes(publicKeyB64)) {
+    throw new Error('install.ps1 embeds the Ed25519 release key, which it cannot verify');
+  }
+  return rendered;
 }
 
 function provenance(options: {
@@ -860,8 +908,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     },
   );
 
-  const bootstrapName = 'install.sh';
-  const bootstrap = renderBootstrap({
+  const bootstraps = renderBootstraps({
     version: releaseVersion,
     baseUrl: releaseBase,
     keyId: options.keyId,
@@ -871,8 +918,13 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     application: paired.jsApp,
     webApp: paired.webApp,
   });
-  writeFileSync(join(options.outputDirectory, bootstrapName), bootstrap, { mode: 0o755 });
-  chmodSync(join(options.outputDirectory, bootstrapName), 0o755);
+  const bootstrapNames = Object.keys(bootstraps).sort() as BootstrapName[];
+  for (const name of bootstrapNames) {
+    // 0o755 for both. `install.ps1` is never exec'd through a mode bit — PowerShell reads it — but the
+    // release directory is served over HTTPS and a file another local user cannot read is not publishable.
+    writeFileSync(join(options.outputDirectory, name), bootstraps[name], { mode: 0o755 });
+    chmodSync(join(options.outputDirectory, name), 0o755);
+  }
 
   const checksumCandidates = [
     ...artifacts.map((artifact) => artifact.name),
@@ -894,7 +946,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     `${manifestName}.sig`,
     `${manifestName}${P256_SIGNATURE_SUFFIX}`,
     `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`,
-    bootstrapName,
+    ...bootstrapNames,
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
     `${sha256(readFileSync(join(options.outputDirectory, name)))}  ${name}`).join('\n')}\n`;

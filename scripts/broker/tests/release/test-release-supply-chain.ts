@@ -686,6 +686,85 @@ try {
       && assembled.publishedFiles.includes(WEB_SIDECAR_NAME)
       && assembled.publishedFiles.includes(`${WEB_SIDECAR_NAME}.intoto.jsonl.sig`)
       && readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8').includes('  install.sh\n'));
+
+  // The PowerShell installer, asserted from Linux. Nothing here runs it — that is the windows-broker
+  // lane's job — but every property that is decided at RENDER time is decided on this gate, which is the
+  // one that runs on every change.
+  const shellInstaller = readFileSync(join(releaseDirectory, 'install.sh'), 'utf8');
+  const powerShellInstaller = readFileSync(join(releaseDirectory, 'install.ps1'), 'utf8');
+  const singleQuoted = (source: string, assignment: string): string =>
+    new RegExp(`^${assignment}'([^']*)'$`, 'm').exec(source)?.[1] ?? '';
+  check('the PowerShell installer is published and checksummed beside the shell one',
+    assembled.publishedFiles.includes('install.ps1')
+      && readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8').includes('  install.ps1\n')
+      && candidateAssetBlockers(releaseDirectory).length === 0);
+  check('the PowerShell installer has every token substituted',
+    !/@[A-Z0-9_]+@/.test(powerShellInstaller)
+      && singleQuoted(powerShellInstaller, '\\$VERSION = ') === version
+      && singleQuoted(powerShellInstaller, '\\$KEY_ID = ') === 'test-2026'
+      && singleQuoted(powerShellInstaller, '\\$BASE_URL = ')
+        === `https://releases.example/cosyncing/v${version}`
+      && singleQuoted(powerShellInstaller, '\\$MINIMUM_BUN = ') === MINIMUM_BUN_RUNTIME_VERSION,
+    /@[A-Z0-9_]+@/.exec(powerShellInstaller)?.[0] ?? 'no unrendered token');
+  // Windows CNG exposes no Ed25519 algorithm identifier, so the Ed25519 key in this installer would be a
+  // trust anchor it cannot use and a reader could believe it had been checked. Its absence is the claim.
+  const p256KeyB64 = Buffer.from(`${p256PublicPem.trim()}\n`, 'utf8').toString('base64');
+  const ed25519KeyB64 = Buffer.from(`${publicPem.trim()}\n`, 'utf8').toString('base64');
+  check('the PowerShell installer carries the P-256 key and not the Ed25519 one',
+    singleQuoted(powerShellInstaller, '\\$P256_PUBLIC_KEY_B64 = ') === p256KeyB64
+      && !powerShellInstaller.includes(ed25519KeyB64)
+      && !/PUBLIC_KEY_B64\s*=\s*'-----|\$PUBLIC_KEY_B64/.test(powerShellInstaller)
+      // The shell installer is unchanged: it still carries both, because openssl can use either.
+      && shellInstaller.includes(ed25519KeyB64) && shellInstaller.includes(p256KeyB64));
+  check('the PowerShell installer carries the windows-x64 Bun rows it will fetch',
+    singleQuoted(powerShellInstaller, '\\$BUN_TABLE = ').split('\n')
+      .filter((row) => row.startsWith('windows-x64 '))
+      .map((row) => row.split(' ')[1])
+      .join(',') === 'bun-windows-x64.zip,bun-windows-x64-baseline.zip',
+    singleQuoted(powerShellInstaller, '\\$BUN_TABLE = ').replaceAll('\n', ' | '));
+  // One release, two installers, ONE set of digests. Rendered from one substitution table, so this is
+  // true by construction — asserted anyway, because the failure it guards against (a Windows installer
+  // pointing at a different artifact from the Unix one) is silent and only reachable on Windows.
+  check('install.ps1 and install.sh were rendered from the same artifact and Bun tables',
+    singleQuoted(powerShellInstaller, '\\$ARTIFACT_TABLE = ')
+        === singleQuoted(shellInstaller, 'ARTIFACT_TABLE=')
+      && singleQuoted(powerShellInstaller, '\\$BUN_TABLE = ') === singleQuoted(shellInstaller, 'BUN_TABLE=')
+      && singleQuoted(powerShellInstaller, '\\$APP_ASSET = ') === RELEASE_JAVASCRIPT_APP_NAME
+      && singleQuoted(powerShellInstaller, '\\$WEB_ASSET = ') === WEB_SIDECAR_NAME
+      && singleQuoted(powerShellInstaller, '\\$ARTIFACT_TABLE = ').split('\n').length === 2,
+    singleQuoted(powerShellInstaller, '\\$ARTIFACT_TABLE = ').replaceAll('\n', ' | '));
+  // The host refusal has to ask the kernel, and this gate is the only place that can check it: the
+  // Windows suite cannot make its host be an ARM64 machine, so it stubs the probe's answer and would
+  // still pass against a script that asked the wrong API. `RuntimeInformation.OSArchitecture` on .NET
+  // Framework is `GetNativeSystemInfo`, which reports the EMULATED architecture to an x64 process on an
+  // ARM64 machine — so an installer deciding on it alone would admit the host the product refuses.
+  check('install.ps1 asks the same kernel export brokerHostVerdict does about the native machine',
+    powerShellInstaller.includes('IsWow64Process2')
+      && powerShellInstaller.includes('0xAA64')
+      // Present only as the fallback, and never the value a refusal is taken on.
+      && !/^\s*\$machine(Architecture)? = \[System\.Runtime\.InteropServices\.RuntimeInformation\]/m
+        .test(powerShellInstaller),
+    powerShellInstaller.includes('IsWow64Process2') ? 'asks the kernel' : 'does not ask the kernel');
+  // The template refuses to depend on module auto-load, because a 5.1 session that inherited a
+  // PowerShell 7 PSModulePath cannot do it. `Get-Acl` was the known case; `Expand-Archive` is the same
+  // dependency in Microsoft.PowerShell.Archive, on the one path that runs only when a host has no usable
+  // Bun. `tar.exe` is already a hard requirement and bsdtar reads zip, so nothing needs either module.
+  // Comments stripped, because the template NAMES these cmdlets to explain why it does not call them.
+  const powerShellCode = powerShellInstaller
+    .replace(/<#[\s\S]*?#>/g, '')
+    .split('\n')
+    .map((line) => line.replace(/#.*$/, ''))
+    .join('\n');
+  const moduleBackedCall = /^\s*(Expand-Archive|Compress-Archive|Get-Acl|Set-Acl|Import-Module)\b/m
+    .exec(powerShellCode);
+  check('install.ps1 depends on no auto-loaded PowerShell module',
+    moduleBackedCall === null,
+    moduleBackedCall?.[1] ?? 'no module-backed cmdlet');
+  // The shell installer's Windows refusal used to send an operator to WSL. It now names the installer
+  // that actually works there, and this is the assertion that keeps the two from drifting apart again.
+  check('the shell installer points a Windows shell at install.ps1 rather than at WSL',
+    shellInstaller.includes('on Windows x64, run install.ps1 from PowerShell instead')
+      && !/install into a WSL distribution/.test(shellInstaller));
   const thirdPartyNotices = readFileSync(
     join(releaseDirectory, 'THIRD_PARTY_NOTICES.txt'),
     'utf8',

@@ -391,8 +391,9 @@ runtime: install Bun first, then install this package. It provides two commands,
 - Bun \`${requiredBunRange()}\` — install it from <https://bun.sh>.
 - A supported broker host: ${supportedBrokerHostList()}.
 
-Windows is not supported; run the broker inside WSL. Intel macOS is not a supported
-broker host — \`${primary} doctor\` says so rather than failing later.
+Windows x64 runs the broker natively; WSL is no longer required. Windows ARM64 is not
+qualified yet, and neither is Intel macOS — \`${primary} doctor\` says so by name rather
+than failing later.
 
 ## Install
 

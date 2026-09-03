@@ -409,13 +409,16 @@ try {
       && !!threw(() => resolveApplicationIdentity({
         distribution: 'bun-js', execPath: bunRuntime, sourceEntry: sourceCheckoutEntry,
       })));
-  // The curl installer digest-pins every artifact it places; the runtime that executes them is held to the
-  // same rule, so the table it renders from has to be complete and well-formed for every host it supports.
+  // The installers digest-pin every artifact they place; the runtime that executes them is held to the same
+  // rule, so the table they render from has to be complete and well-formed for every host they support.
   // Nothing offline can prove these digests belong to MINIMUM_BUN_RUNTIME_VERSION — Bun's asset names carry
-  // no version — so what is checkable is asserted, and the binding stays a review obligation.
-  const pinnedHosts = ['linux-x64', 'linux-arm64', 'darwin-arm64'] as const;
+  // no version — so what is checkable is asserted, and the binding stays a review obligation. Deliberately
+  // NOT a comparison against digests restated in this file: a fixture authored from the same keystrokes as
+  // the value under test proves only that both were typed the same way. The pins are diffed against Bun's
+  // published `SHASUMS256.txt` for the tag at review time, which is the only place that binding exists.
+  const pinnedHosts = ['linux-x64', 'linux-arm64', 'darwin-arm64', 'windows-x64'] as const;
   const pinnedBuilds = pinnedHosts.flatMap((host) => PINNED_BUN_RUNTIME_ARCHIVES[host] ?? []);
-  check('every host the shell installer supports has at least one pinned Bun build',
+  check('every host an installer supports has at least one pinned Bun build',
     pinnedHosts.every((host) => (PINNED_BUN_RUNTIME_ARCHIVES[host]?.length ?? 0) > 0)
       && Object.keys(PINNED_BUN_RUNTIME_ARCHIVES).every((host) =>
         (pinnedHosts as readonly string[]).includes(host)),
@@ -431,6 +434,13 @@ try {
   check('the x64 pins cover the musl and baseline builds the same release publishes',
     (PINNED_BUN_RUNTIME_ARCHIVES['linux-x64'] ?? []).some((build) => build.asset.includes('-musl'))
       && (PINNED_BUN_RUNTIME_ARCHIVES['linux-x64'] ?? []).some((build) => build.asset.includes('-baseline')));
+  // Windows has no musl and no qualified ARM64 host, so its pins are the plain and baseline x64 builds and
+  // nothing else. Asserted because a Windows row copied from the Linux one would name archives Bun does not
+  // publish for this platform, and the installer would fail only on a pre-AVX2 machine nobody tests on.
+  check('the Windows pins are the two x64 builds Bun publishes for this platform',
+    (PINNED_BUN_RUNTIME_ARCHIVES['windows-x64'] ?? []).map((build) => build.asset).join(',')
+      === 'bun-windows-x64.zip,bun-windows-x64-baseline.zip',
+    (PINNED_BUN_RUNTIME_ARCHIVES['windows-x64'] ?? []).map((build) => build.asset).join(','));
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

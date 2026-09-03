@@ -13,6 +13,14 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- Added `install.ps1`, a PowerShell installer for the Windows x64 broker, published
+  beside `install.sh` by the same release step. It verifies the release with the
+  ECDSA P-256 signature the manifest is already signed with, places the JavaScript
+  application and the web client under `%COSYNCING_HOME%\bin`, installs a
+  digest-pinned Bun when the host has none new enough, writes a `cosy.cmd` shim, and
+  prints the `setup` command. It refuses an elevated install, and refuses Windows
+  ARM64 and an x64 process emulated on ARM64. Both installers are now documented in
+  [installing with cosyncing's own installer](installation/script-install.md).
 - Added omp (oh-my-pi) session discovery, Drive/resume, live bridge sync, model and
   command controls, New Session, setup/repair ownership, and client roster identity.
   OMP 17.4.2 or newer is required; older clients do not receive OMP roster rows.

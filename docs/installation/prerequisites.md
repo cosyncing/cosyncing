@@ -29,6 +29,10 @@ Windows ARM64 is not a qualified broker host yet, and the broker refuses it —
 including an x64 process running under ARM64 emulation, which reports itself as
 x64, so the broker asks Windows what the underlying machine is.
 
+You can skip this step on Windows if you install cosyncing with
+[its own installer](script-install.md): `install.ps1` installs a digest-pinned
+Bun for you when the host has none new enough.
+
 Open a new login shell, then verify the selected executable:
 
 ```bash
