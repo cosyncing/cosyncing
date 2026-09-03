@@ -671,7 +671,15 @@ export class ManagedConn {
    *  Source-code churn (.ts/.py/…) is excluded by {@link DELIVERABLE}; edits aren't 'write'. */
   private maybeSurfaceWrite(message: AgentMessage): void {
     if (message.type !== 'tool-result' || message.isError) return;
-    if (message.toolName !== 'write') return; // file-creating tool (opencode); other adapters extend later
+    // Case-INSENSITIVE. Each adapter chooses the string it normalises its
+    // native write tool to, and the comparison here used to be exact: OpenCode
+    // emits 'write' and matched, while Claude and Kimi both emit 'Write' and
+    // were excluded from a working feature by a capital letter. Auto-surface
+    // was OpenCode-only by accident, not by design. Every other guard is
+    // unchanged — isError above, DELIVERABLE, containment, and the symlink and
+    // regular-file checks below — because ownership comes from the ManagedConn
+    // that received the tool-result, not from the name on it.
+    if (message.toolName?.toLowerCase() !== 'write') return;
     const p = message.path;
     if (!p || !this.cwd) return;
     if (!DELIVERABLE.has(extname(p).toLowerCase())) return;
@@ -683,7 +691,11 @@ export class ManagedConn {
       if (st.isSymbolicLink() || !st.isFile()) return;
       // The exact session's native write result is the ownership proof. The
       // artifact store content-addresses repeats and versions changed bytes.
-      this.emitArtifact(abs, basename(abs), st.size, { proactive: true });
+      // NO `proactive`: the agent wrote this file, it did not send it. Stamping
+      // it here is what made the flag unreadable — a `.md` the agent merely
+      // wrote looked identical to one it handed over. The card carries the same
+      // open and download actions either way.
+      this.emitArtifact(abs, basename(abs), st.size);
     } catch {
       /* gone/unreadable */
     }

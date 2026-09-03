@@ -2536,6 +2536,10 @@
     }
   },
   "sessionArtifactUntitled": "(untitled artifact)",
+  "sessionArtifactSentToYou": "Sent to you",
+  "@sessionArtifactSentToYou": {
+    "description": "Badge beside an artifact name when the agent sent the file to the user, rather than the broker surfacing a file the agent wrote."
+  },
   "artifactKeyLabel": "Artifact",
   "hashLabel": "Hash",
   "sizeLabel": "Size",

@@ -17,6 +17,7 @@ class SessionArtifactDescriptor {
     this.redactionSummary,
     this.expiresAt,
     this.interactionPolicy,
+    this.proactive = false,
   });
 
   /// Human-readable file name if known.
@@ -60,6 +61,10 @@ class SessionArtifactDescriptor {
 
   /// Broker-owned structured interaction policy.
   final ArtifactInteractionPolicy? interactionPolicy;
+
+  /// Whether the agent SENT this file, rather than the broker surfacing a write
+  /// it happened to see.
+  final bool proactive;
 
   /// Whether the broker supplied a supported signed interaction reference.
   bool get isInteractable => interactionPolicy?.canInteract ?? false;
@@ -169,6 +174,7 @@ class SessionArtifactDescriptor {
       interactionPolicy: ArtifactInteractionPolicy.fromJson(
         message.raw['interactionPolicy'],
       ),
+      proactive: message.fileArtifactProactive,
     );
   }
 }

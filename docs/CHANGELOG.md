@@ -26,9 +26,47 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   owner only. This raises the broker contract to revision 20, so clients 0.5.1
   and earlier need the next client release before they can use a broker that
   carries it.
+- Artifact downloads are served in byte ranges. The broker answers `Range` on
+  artifact downloads, so any client that speaks it — `curl -C -`, a download
+  manager — can resume one. The app now pulls an artifact in 512 KiB chunks
+  instead of buffering the whole file, retries a failed chunk from where it
+  stopped, and resumes at the same offset when its download ticket has to be
+  refreshed mid-transfer. Each chunk is validated against the representation the
+  download started on, so a file that changed underneath restarts cleanly rather
+  than splicing two versions. Resuming *across* attempts — after you cancel, or
+  after the app is killed — is not in this release; the next attempt starts over.
+- A file the agent sent you now carries a "Sent to you" badge in the transcript.
+  Files you attached, and files the broker surfaced because the agent wrote them
+  into the workspace, are not badged — the badge means the agent chose to hand
+  you that file. It survives a restart.
 
 ### Changed
 
+- The broker collects session inboxes. A file you attach to a prompt is staged
+  in `<workspace>/.cosyncing/inbox` so the agent can read it; until now nothing
+  ever removed it, so a workspace accumulated every screenshot you had ever
+  pasted. The broker now sweeps hourly: an attachment older than 14 days is
+  removed, and an inbox over 256 MB or 200 files is trimmed oldest-first back to
+  the cap, never below the newest 8 files. This reaches the inboxes that filled
+  up before this release, not only new ones: a workspace with a live session is
+  collected whether or not you have attached anything to it since upgrading. A
+  file a staged upload still points at is never touched, and neither is an inbox
+  reached through a symlink. `COSYNCING_INBOX_RETENTION_MS`,
+  `COSYNCING_INBOX_MAX_BYTES`, and `COSYNCING_INBOX_MAX_FILES` override the three
+  defaults; `COSYNCING_INBOX_RETENTION_MS=0` turns the sweep off.
+- Claude Code and Kimi Code surface a deliverable the agent writes inside the
+  session workspace as a file artifact, the way OpenCode already did. The rule
+  is unchanged — the write must succeed, must be a deliverable rather than
+  source churn, and must land inside the session's own directory — but the
+  broker matched the tool name case-sensitively against `write`, and both agents
+  report it as `Write`, so neither ever qualified.
+- Prompt image attachments are bounded. A prompt carries at most 8 images within
+  a 1.5 MB encoded budget, each at most 1 MB decoded, each needing a MIME type
+  and canonical raw base64 — the same limits already applied to file
+  attachments. An image over the line is refused with `ATTACHMENT_LIMIT_EXCEEDED`
+  or `ATTACHMENT_INVALID` before its bytes are decoded, rather than being
+  forwarded to the agent unchecked. An adapter without native file input refuses
+  images outright instead of silently dropping them.
 - Setup no longer reverses a permission repair. Tightening durable-state
   permissions is a monotonic action: it is applied once and is not undone if a
   later step fails, on every platform. Rollback still restores the file contents

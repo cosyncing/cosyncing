@@ -193,7 +193,13 @@ await run('opening Observe leaves the workspace byte-for-byte unchanged', async 
     assert.equal(existsSync(join(workspace, '.cosyncing')), false);
 
     // Workspace writes do not become artifacts without an exact producer route.
+    // This is the invariant the retired shared-cwd outbox watcher broke, and
+    // the one the case-insensitive auto-surface gate must not weaken: matching
+    // 'Write' as well as 'write' widens which TOOL-RESULTS qualify, never
+    // whether a bare filesystem write does. `.txt` and `.html` are both
+    // deliverable types, so neither is excluded for the wrong reason.
     writeFileSync(join(workspace, 'unclaimed.txt'), 'not an artifact');
+    writeFileSync(join(workspace, 'unclaimed.html'), '<h1>not an artifact</h1>');
     await delay(100);
     assert(!frames.some((message) => message.type === 'file-artifact'));
 
@@ -354,6 +360,34 @@ await run('authenticated resume, full-access peer, scoped Pi credential, and inv
         (frame) => frame.kind === 'nack' && frame.clientMessageId === 'invalid-mode-1');
       // The wired mutation boundary validates the exact adapter-advertised value and returns one stable code.
       assert.equal(nack.code, 'PERMISSION_MODE_UNSUPPORTED');
+
+      // The same boundary now bounds `images`, which used to reach the adapter
+      // unvalidated behind nothing but the 32 MiB inbound frame cap. Asserted
+      // on the WIRE rather than against the validator, because the defect was
+      // that the prompt path never consulted one.
+      shared.socket.send(JSON.stringify({
+        kind: 'prompt',
+        text: 'must not reach Pi',
+        images: {},
+        clientMessageId: 'invalid-images-shape',
+      }));
+      const shapeNack = await waitForFrame(shared.frames,
+        (frame) => frame.kind === 'nack' && frame.clientMessageId === 'invalid-images-shape');
+      assert.equal(shapeNack.code, 'ATTACHMENT_INVALID');
+
+      shared.socket.send(JSON.stringify({
+        kind: 'prompt',
+        text: 'must not reach Pi',
+        images: Array.from({ length: 9 }, () => ({
+          data: Buffer.from('89504e470d0a1a0a', 'hex').toString('base64'),
+          mimeType: 'image/png',
+        })),
+        clientMessageId: 'invalid-images-count',
+      }));
+      const countNack = await waitForFrame(shared.frames,
+        (frame) => frame.kind === 'nack' && frame.clientMessageId === 'invalid-images-count');
+      assert.equal(countNack.code, 'ATTACHMENT_LIMIT_EXCEEDED');
+
       const pollOutcome = await Promise.race([
         commandPoll.then((commands) => ({ state: 'resolved' as const, commands })),
         Bun.sleep(100).then(() => ({ state: 'pending' as const })),

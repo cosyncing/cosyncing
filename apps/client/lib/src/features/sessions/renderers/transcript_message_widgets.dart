@@ -324,6 +324,10 @@ class _TranscriptArtifactRow extends StatelessWidget {
         : l10n.sessionArtifactUntitled;
     final size = descriptor?.size;
     final userSent = message.isUserAttachment;
+    // Only a file the AGENT handed over is badged. A file it merely wrote and
+    // the broker surfaced carries the same actions but makes no such claim,
+    // and a user's own attachment is already right-aligned as theirs.
+    final sentToYou = !userSent && (descriptor?.proactive ?? false);
     final alignment = userSent ? Alignment.centerRight : Alignment.centerLeft;
 
     return Align(
@@ -355,14 +359,30 @@ class _TranscriptArtifactRow extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: tokens.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      // Name and badge share one flex child so the badge hugs
+                      // the name's right edge instead of drifting across to
+                      // the size, and a long name still ellipsizes rather than
+                      // pushing the badge out of the row.
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: tokens.textPrimary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (sentToYou) ...[
+                            const SizedBox(width: 8),
+                            MetadataChip(
+                              label: l10n.sessionArtifactSentToYou,
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                     if (size != null && !compactAtLargeText) ...[

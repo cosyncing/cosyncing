@@ -1008,6 +1008,48 @@ void main() {
       );
     });
 
+    // The badge answers one question: did the agent HAND this file over, or
+    // did the broker surface a file it happened to write? Both cards carry the
+    // same open and download actions, so the badge is the only difference —
+    // and the flag it keys on was stamped on every artifact until now.
+    group('sent-to-you badge', () {
+      AgentMessage artifact({bool? proactive, String? userMessageKey}) =>
+          AgentMessage.fromJson({
+            'type': 'file-artifact',
+            'artifactKey': 'artifact-1',
+            'name': 'report.pdf',
+            'mimeType': 'application/pdf',
+            'size': 1240,
+            if (proactive != null) 'proactive': proactive,
+            if (userMessageKey != null) 'userMessageKey': userMessageKey,
+          });
+
+      testWidgets('renders for a file the agent sent', (tester) async {
+        await _pumpRenderer(tester, artifact(proactive: true));
+        expect(find.text('Sent to you'), findsOneWidget);
+        expect(find.text('report.pdf'), findsOneWidget);
+      });
+
+      testWidgets('is absent when the field is missing', (tester) async {
+        await _pumpRenderer(tester, artifact());
+        expect(find.text('Sent to you'), findsNothing);
+        expect(find.text('report.pdf'), findsOneWidget);
+      });
+
+      testWidgets('is absent when the field is false', (tester) async {
+        await _pumpRenderer(tester, artifact(proactive: false));
+        expect(find.text('Sent to you'), findsNothing);
+      });
+
+      testWidgets('is absent on a user attachment', (tester) async {
+        await _pumpRenderer(
+          tester,
+          artifact(proactive: true, userMessageKey: 'user-1'),
+        );
+        expect(find.text('Sent to you'), findsNothing);
+      });
+    });
+
     // P6. An image the user SENT used to arrive as a standalone artifact card
     // on the agent side of the transcript, detached from the prompt it went
     // with. `file-artifact.userMessageKey` is the ownership link.

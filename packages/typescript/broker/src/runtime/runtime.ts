@@ -211,6 +211,7 @@ import { canMutateSession, canPromptSession } from '../sessions/session-owner.ts
 import { ClientHandoffSequencer } from '../sessions/client-handoff-sequencer.ts';
 import { APP_MOUNT_PATH, APP_PATH } from '../transport/http-contracts.ts';
 import {
+  assertBoundedPromptImages,
   ClientMessagePolicyError,
   validatePlanActionRequest,
   validateRequestedAgent,
@@ -1352,8 +1353,24 @@ const ompBridgeSweepTimer = setInterval(() => {
 }, 30_000);
 ompBridgeSweepTimer.unref?.();
 const uploadStaging = new UploadStaging({ maxBytes: UPLOAD_MAX_BYTES });
-const uploadGcTimer = setInterval(() => uploadStaging.sweepExpired(), 60 * 60 * 1000);
+/** Cwds an attachment may still be referenced from, for the inbox grace rule. */
+const liveSessionCwds = (): string[] => hub
+  .liveSnapshot()
+  .map((entry) => entry.info.cwd)
+  .filter((cwd): cwd is string => typeof cwd === 'string' && cwd.length > 0);
+/**
+ * The one upload GC pass. Staging metadata expires; delivered attachments are
+ * collected out of `<cwd>/.cosyncing/inbox`, which nothing used to clean.
+ */
+const sweepUploads = (): void => {
+  uploadStaging.sweepExpired();
+  uploadStaging.sweepInboxes(Date.now(), { liveCwds: liveSessionCwds });
+};
+const uploadGcTimer = setInterval(sweepUploads, 60 * 60 * 1000);
 uploadGcTimer.unref?.();
+// One sweep at start, deferred off the startup path — the constructor's own
+// `sweepExpired` already runs there and broker start does enough IO as it is.
+queueMicrotask(sweepUploads);
 // Claude live-sync via HOOKS (Tier-1; replaces the archived claude/channel). An in-session PreToolUse hook
 // relays permission/question prompts here and blocks for the phone's answer. Same adopt/evict lifecycle.
 const claudeHooks = new ClaudeHooksRegistry(
@@ -3032,6 +3049,15 @@ async function handleManagedClientMessage(
           'this session mode has no attachment workspace',
         );
       }
+      // `images` predates `files` and was forwarded to the adapter unvalidated:
+      // nothing but the 32 MiB inbound frame cap stood between a client and an
+      // adapter that declares no file input at all. It is bounded here rather
+      // than dropped — `PromptInput` is both the wire DTO and the adapter-facing
+      // interface, DSH folds broker-staged files into `input.images` as its one
+      // policy seam, and removing a DTO field is a structural change this repo
+      // requires a revision for. The ceilings are the ones inline `files`
+      // already obey, so an adapter sees one policy rather than two.
+      assertBoundedPromptImages(msg.images, backend?.capabilities.supportsNativeFileInput === true);
       let prepared;
       try {
         prepared = hasFiles
@@ -4501,7 +4527,10 @@ server = Bun.serve<WsData>({
         url.searchParams.get('expires'),
         url.searchParams.get('sig'),
         artifactAuthorization(principal),
+        req.headers,
       );
+      // A `HEAD` answers headers only, including the 206 and `content-range` a
+      // ranged `HEAD` earns — the same shape the workspace route gives.
       return req.method === 'HEAD'
         ? new Response(null, { status: response.status, headers: response.headers })
         : response;

@@ -63,6 +63,10 @@ import {
   writeFakeAgyBinary,
   FIXTURE,
 } from '../../../adapters/antigravity/test/fixtures/tree.ts';
+import {
+  assertBoundedPromptImages,
+  ClientMessagePolicyError,
+} from '../../src/sessions/client-message-policy.ts';
 import { shippedAdapters } from '../../src/installation/shipped-adapters.ts';
 import { agentSummaries } from '../../src/installation/setup.ts';
 import { setupMessages } from '../../src/installation/setup-i18n.ts';
@@ -352,6 +356,32 @@ try {
   check('...and the adapter declares no external host to manage',
     agyShipped?.integration?.externalHost === undefined,
     JSON.stringify(agyShipped?.integration?.externalHost));
+
+  // ── Declaring NO file input is enforced, not merely advertised ────────────
+  //
+  // agy's dead `images` branch was reachable: the prompt path bounded `files`
+  // against `supportsNativeFileInput` and forwarded `images` beside it with no
+  // check at all. The refusal is bound to agy's OWN declared capability here
+  // rather than to a hand-written `false`, so an adapter that later gains file
+  // input does not leave a stale refusal behind.
+  {
+    const refusal = ((): string => {
+      try {
+        assertBoundedPromptImages(
+          [{
+            data: Buffer.from('89504e470d0a1a0a', 'hex').toString('base64'),
+            mimeType: 'image/png',
+          }],
+          adapterWithBinary().capabilities.supportsNativeFileInput === true,
+        );
+        return 'accepted';
+      } catch (error) {
+        return error instanceof ClientMessagePolicyError ? error.code : String(error);
+      }
+    })();
+    check('a prompt carrying images is refused before any agy call, because agy declares no file input',
+      refusal === 'ATTACHMENT_UNSUPPORTED', refusal);
+  }
 
   // ── The declared modes and the honoured modes are the SAME set ────────────
   {

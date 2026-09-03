@@ -617,7 +617,200 @@ void main() {
         expect(File('${cached.cachedFilePath}.part').existsSync(), isFalse);
       },
     );
+
+    test(
+      'an artifact download continues from each offset instead of restarting',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-range-resume',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(
+          512 * 1024 * 2 + 100,
+          (index) => index % 251,
+        );
+        final backend = _FakeRangedArtifactBackend(bytes);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            artifactKey: 'artifact-ranged',
+            fetchUrl: 'https://broker/sessions/unit/artifact/ranged',
+            mimeType: 'application/octet-stream',
+          ),
+        );
+
+        // Successive offsets and no second request at 0: an artifact download
+        // that outlives its signature is resumed at the byte it reached rather
+        // than restarted, which is the whole point of the range plumbing.
+        expect(backend.rangeStarts, [0, 512 * 1024, 512 * 1024 * 2]);
+        expect(backend.wholeFetches, 0);
+        expect(backend.ifRanges, [null, '"v1"', '"v1"']);
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+        expect(cached.byteLength, bytes.length);
+        expect(File('${cached.cachedFilePath}.part').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'an artifact whose representation changes mid-download discards the '
+      'partial',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-range-changed',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(
+          512 * 1024 * 2 + 100,
+          (index) => index % 251,
+        );
+        final backend = _FakeRangedArtifactBackend(bytes, revalidateAfter: 1);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            fetchUrl: 'https://broker/sessions/unit/artifact/changed',
+            mimeType: 'application/octet-stream',
+          ),
+        );
+
+        // The new representation is never appended to the old one: the partial
+        // is truncated and the transfer starts again from 0, exactly once.
+        expect(backend.rangeStarts.first, 0);
+        expect(backend.rangeStarts.where((start) => start == 0), hasLength(2));
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+        expect(File('${cached.cachedFilePath}.part').existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'an artifact 206 without a validator falls back to one whole fetch',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-range-validatorless',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = utf8.encode('validatorless artifact');
+        final backend = _FakeRangedArtifactBackend(bytes, withValidator: false);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'plain.txt',
+            fetchUrl: 'https://broker/sessions/unit/artifact/plain',
+            mimeType: 'text/plain',
+          ),
+        );
+
+        // A 206 carrying no validator cannot guard the next range, so resuming
+        // would be unsafe: it fails closed to one un-ranged fetch.
+        expect(backend.wholeFetches, 1);
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+      },
+    );
   });
+}
+
+/// A backend that serves signed artifacts as ranges, the way the broker does.
+///
+/// [revalidateAfter] flips the ETag once after that many ranged responses, to
+/// model the artifact being replaced mid-transfer. [withValidator] false serves
+/// 206 responses carrying no ETag and no Last-Modified at all.
+class _FakeRangedArtifactBackend
+    implements ArtifactDownloadBackend, ResumableSignedArtifactDownloadBackend {
+  _FakeRangedArtifactBackend(
+    List<int> bytes, {
+    this.revalidateAfter,
+    this.withValidator = true,
+  }) : bytes = List<int>.unmodifiable(bytes);
+
+  final List<int> bytes;
+  final int? revalidateAfter;
+  final bool withValidator;
+  final List<int> rangeStarts = [];
+  final List<String?> ifRanges = [];
+  int wholeFetches = 0;
+  var _served = 0;
+  var _revalidated = false;
+
+  String get _etag => _revalidated ? '"v2"' : '"v1"';
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrl(String url) async {
+    wholeFetches++;
+    return ArtifactDownload(
+      bytes: bytes,
+      contentLength: bytes.length,
+      contentType: 'application/octet-stream',
+    );
+  }
+
+  @override
+  Future<ArtifactDownload> fetchSessionFile(
+    String tool,
+    String sessionId,
+    String path,
+  ) async => throw UnimplementedError();
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrlRange(
+    String url, {
+    required int rangeStart,
+    required int rangeEnd,
+    String? ifRange,
+  }) async {
+    rangeStarts.add(rangeStart);
+    ifRanges.add(ifRange);
+    if (revalidateAfter != null &&
+        !_revalidated &&
+        _served == revalidateAfter) {
+      _revalidated = true;
+    }
+    _served++;
+    if (rangeStart >= bytes.length) {
+      return ArtifactDownload(
+        bytes: const [],
+        statusCode: 416,
+        acceptRanges: 'bytes',
+        contentRange: 'bytes */${bytes.length}',
+        etag: withValidator ? _etag : null,
+      );
+    }
+    final end = rangeEnd.clamp(rangeStart, bytes.length - 1);
+    final chunk = bytes.sublist(rangeStart, end + 1);
+    return ArtifactDownload(
+      bytes: chunk,
+      statusCode: 206,
+      contentLength: chunk.length,
+      contentType: 'application/octet-stream',
+      acceptRanges: 'bytes',
+      contentRange: 'bytes $rangeStart-$end/${bytes.length}',
+      etag: withValidator ? _etag : null,
+    );
+  }
 }
 
 class _FakeBrowserBoundedDownloadBackend

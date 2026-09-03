@@ -27,6 +27,8 @@ rmSync(DIR, { recursive: true, force: true });
 mkdirSync(DIR, { recursive: true });
 const shot = join(DIR, 'shot.png');
 writeFileSync(shot, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])); // 8 bytes, enough to base64
+const requested = join(DIR, 'requested.png');
+writeFileSync(requested, Buffer.from([0x89, 0x50, 0x4e, 0x47, 5, 6, 7, 8]));
 
 const lines: any[] = [
   // (1) SendUserFile: a tool_use + a user tool_result whose toolUseResult carries attachments (proactive).
@@ -43,6 +45,17 @@ const lines: any[] = [
   { type: 'user', uuid: 'u2', message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/webp', data: 'AAAABBBB' } }, { type: 'text', text: 'look at this' }] } },
   // (3) an assistant-emitted inline image (the arm that was previously absent)
   { type: 'assistant', uuid: 'a2', message: { role: 'assistant', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCCDDDD' } }] } },
+  // (4) SendUserFile with any OTHER status. `proactive` used to be read from
+  // this field, i.e. UNPROMPTED, so a file the user asked for and the agent
+  // then sent carried nothing. It is a file the agent sent either way.
+  { type: 'assistant', uuid: 'a3', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu2', name: 'SendUserFile', input: { files: [requested] } }] } },
+  {
+    type: 'user', uuid: 'u3',
+    toolUseResult: { status: 'requested', attachments: [
+      { path: requested, size: 8, isImage: true, media_type: 'image/png', file_uuid: 'fu3' },
+    ] },
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu2', content: 'sent' }] },
+  },
 ];
 
 const msgs = mapTranscript(lines);
@@ -53,8 +66,13 @@ const byPath = new Map(arts.map((a: any) => [a.path, a]));
 const sent = byPath.get(shot) as any;
 check('SendUserFile attachment → file-artifact', !!sent && sent.type === 'file-artifact');
 check('  name = basename, mime = media_type', sent?.name === 'shot.png' && sent?.mimeType === 'image/png');
-check('  proactive flag carried from status', sent?.proactive === true);
+check('  proactive: the agent sent this file', sent?.proactive === true);
 check('  bytes inlined as data: URL', typeof sent?.url === 'string' && sent.url.startsWith('data:image/png;base64,'), (sent?.url || '').slice(0, 30));
+
+// A SendUserFile delivery the user asked for is still one the agent sent.
+const requestedArtifact = byPath.get(requested) as any;
+check('SendUserFile with a non-proactive status is still proactive on the wire',
+  requestedArtifact?.proactive === true, String(requestedArtifact?.proactive));
 
 // SendUserFile attachment whose file is missing → emitted but header-only (no url)
 const missing = byPath.get(join(DIR, 'missing.png')) as any;

@@ -173,6 +173,23 @@ abstract interface class BoundedArtifactDownloadBackend {
   });
 }
 
+/// Optional signed-artifact Range capability.
+///
+/// Separately optional from [ResumableArtifactDownloadBackend]: a backend may
+/// resume workspace files against a broker whose artifact route still answers
+/// only whole representations, and the service falls back to one un-ranged
+/// fetch in that case rather than failing.
+// ignore: one_member_abstracts
+abstract interface class ResumableSignedArtifactDownloadBackend {
+  /// Fetches one range of a signed artifact URL.
+  Future<ArtifactDownload> fetchArtifactUrlRange(
+    String url, {
+    required int rangeStart,
+    required int rangeEnd,
+    String? ifRange,
+  });
+}
+
 /// Optional backend capability for bounded Range/If-Range requests.
 // ignore: one_member_abstracts
 abstract interface class ResumableArtifactDownloadBackend {
@@ -183,6 +200,20 @@ abstract interface class ResumableArtifactDownloadBackend {
     String path, {
     required int rangeStart,
     required int rangeEnd,
+    String? ifRange,
+  });
+}
+
+/// Optional web-safe signed-artifact range capability. Each response is
+/// cancelled while receiving if it exceeds its caller-provided byte ceiling.
+// ignore: one_member_abstracts
+abstract interface class BoundedResumableSignedArtifactDownloadBackend {
+  /// Fetches one authenticated, bounded range of a signed artifact URL.
+  Future<ArtifactDownload> fetchArtifactUrlRangeBounded(
+    String url, {
+    required int rangeStart,
+    required int rangeEnd,
+    required int maxBytes,
     String? ifRange,
   });
 }
@@ -208,6 +239,8 @@ final class BrokerArtifactDownloadBackend
     implements
         ArtifactDownloadBackend,
         BoundedArtifactDownloadBackend,
+        ResumableSignedArtifactDownloadBackend,
+        BoundedResumableSignedArtifactDownloadBackend,
         ResumableArtifactDownloadBackend,
         BoundedResumableArtifactDownloadBackend {
   /// Creates a [BrokerArtifactDownloadBackend].
@@ -226,6 +259,38 @@ final class BrokerArtifactDownloadBackend
     required int maxBytes,
   }) {
     return _client.fetchArtifactUrlBounded(url, maxBytes: maxBytes);
+  }
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrlRange(
+    String url, {
+    required int rangeStart,
+    required int rangeEnd,
+    String? ifRange,
+  }) {
+    return _client.fetchArtifactUrl(
+      url,
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      ifRange: ifRange,
+    );
+  }
+
+  @override
+  Future<ArtifactDownload> fetchArtifactUrlRangeBounded(
+    String url, {
+    required int rangeStart,
+    required int rangeEnd,
+    required int maxBytes,
+    String? ifRange,
+  }) {
+    return _client.fetchArtifactUrlBounded(
+      url,
+      maxBytes: maxBytes,
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      ifRange: ifRange,
+    );
   }
 
   @override
@@ -658,10 +723,28 @@ final class BrowserSessionArtifactFileService
       );
     }
     final boundedBackend = backend as BoundedArtifactDownloadBackend;
-    final download = await boundedBackend.fetchArtifactUrlBounded(
-      source,
-      maxBytes: _browserArtifactCacheMaxBytes,
-    );
+    // Chunk it where the backend can, so one oversized artifact is refused at
+    // the first range rather than after a whole bounded response arrives.
+    final download = backend is BoundedResumableSignedArtifactDownloadBackend
+        ? await _fetchBoundedRanged(
+            ({
+              required rangeStart,
+              required rangeEnd,
+              required maxBytes,
+              ifRange,
+            }) => (backend as BoundedResumableSignedArtifactDownloadBackend)
+                .fetchArtifactUrlRangeBounded(
+                  source,
+                  rangeStart: rangeStart,
+                  rangeEnd: rangeEnd,
+                  maxBytes: maxBytes,
+                  ifRange: ifRange,
+                ),
+          )
+        : await boundedBackend.fetchArtifactUrlBounded(
+            source,
+            maxBytes: _browserArtifactCacheMaxBytes,
+          );
     final expectedArtifactKey = descriptor.artifactKey?.trim();
     if (expectedArtifactKey != null &&
         expectedArtifactKey.isNotEmpty &&
@@ -695,12 +778,43 @@ final class BrowserSessionArtifactFileService
       );
     }
     final boundedBackend = backend as BoundedResumableArtifactDownloadBackend;
+    return _fetchBoundedRanged(
+      ({required rangeStart, required rangeEnd, required maxBytes, ifRange}) =>
+          boundedBackend.fetchSessionFileRangeBounded(
+            tool,
+            sessionId,
+            path,
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            maxBytes: maxBytes,
+            ifRange: ifRange,
+          ),
+    );
+  }
+
+  /// The shared bounded chunk loop behind both browser download paths.
+  ///
+  /// Web has no `.part` file to resume from, so this loop is about the CEILING
+  /// rather than restart-safety: it keeps a single response from ever exceeding
+  /// the cache bound while the bytes are arriving. Workspace files and signed
+  /// artifacts differ only in how one bounded range is fetched.
+  Future<ArtifactDownload> _fetchBoundedRanged(
+    Future<ArtifactDownload> Function({
+      required int rangeStart,
+      required int rangeEnd,
+      required int maxBytes,
+      String? ifRange,
+    })
+    fetchRange,
+  ) async {
     final bytes = BytesBuilder(copy: false);
     var offset = 0;
     int? totalBytes;
     String? etag;
     String? lastModified;
     String? contentType;
+    String? artifactKey;
+    String? contentHash;
     while (totalBytes == null || offset < totalBytes) {
       final remaining = _browserArtifactCacheMaxBytes - offset;
       if (remaining <= 0) {
@@ -713,16 +827,15 @@ final class BrowserSessionArtifactFileService
           ? remaining
           : _browserSessionFileRangeBytes;
       final validator = etag ?? lastModified;
-      final download = await boundedBackend.fetchSessionFileRangeBounded(
-        tool,
-        sessionId,
-        path,
+      final download = await fetchRange(
         rangeStart: offset,
         rangeEnd: offset + requestBytes - 1,
         maxBytes: requestBytes,
         ifRange: offset == 0 ? null : validator,
       );
       contentType = download.contentType ?? contentType;
+      artifactKey = download.artifactKey ?? artifactKey;
+      contentHash = download.contentHash ?? contentHash;
       final range = _parseContentRange(download.contentRange);
       if (download.statusCode == 416) {
         if (range?.total == offset) {
@@ -802,6 +915,8 @@ final class BrowserSessionArtifactFileService
       contentLength: totalBytes,
       etag: etag,
       lastModified: lastModified,
+      artifactKey: artifactKey,
+      contentHash: contentHash,
     );
   }
 
@@ -1001,6 +1116,67 @@ final class DefaultSessionArtifactFileService
       throw StateError('Artifact does not provide a download source.');
     }
 
+    // The chunked machinery already existed and was proven, so it is reused
+    // here rather than reimplemented: bounded ranges, `If-Range` validation,
+    // and no whole-file buffering. It is NOT resumed across attempts — no
+    // checkpoint is threaded in, so each call starts at byte 0. Wiring the
+    // transfer ledger's checkpoint through, the way
+    // `cacheSessionFileResumable` does, is the separate piece of work.
+    final rangedBackend = switch (_downloadBackend) {
+      final ResumableSignedArtifactDownloadBackend value => value,
+      _ => null,
+    };
+    if (rangedBackend != null) {
+      final cached = await _resumableChunkedDownload(
+        fetchRange: ({required rangeStart, required rangeEnd, ifRange}) =>
+            rangedBackend.fetchArtifactUrlRange(
+              source,
+              rangeStart: rangeStart,
+              rangeEnd: rangeEnd,
+              ifRange: ifRange,
+            ),
+        fetchWhole: (resolvedMime) => _wholeArtifactDownload(
+          descriptor,
+          source,
+          cancellationToken: cancellationToken,
+          onProgress: onProgress,
+        ),
+        resolveFileName: (resolvedMime) => resolveSafeFileName(
+          descriptor,
+          contentType: resolvedMime ?? descriptor.mimeType,
+        ),
+        mimeType: descriptor.mimeType,
+        cancellationToken: cancellationToken,
+        onProgress: onProgress,
+      );
+      return SessionArtifactCachedFile(
+        cachedFilePath: cached.cachedFilePath,
+        fileName: cached.fileName,
+        contentType: cached.contentType ?? descriptor.mimeType,
+        byteLength: cached.byteLength,
+        artifactKey: descriptor.artifactKey ?? cached.artifactKey,
+        contentHash: descriptor.contentHash ?? cached.contentHash,
+      );
+    }
+
+    return _wholeArtifactDownload(
+      descriptor,
+      source,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
+
+  /// One un-ranged artifact fetch through the shared atomic staging path.
+  ///
+  /// Used when the backend advertises no artifact Range capability, and as the
+  /// fail-closed fallback when a 206 arrives with no representation validator.
+  Future<SessionArtifactCachedFile> _wholeArtifactDownload(
+    SessionArtifactDescriptor descriptor,
+    String source, {
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
     final fetched = await _fetchBytes(descriptor, source);
     final safeFileName = resolveSafeFileName(
       descriptor,
@@ -1056,7 +1232,6 @@ final class DefaultSessionArtifactFileService
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) async {
-    const chunkBytes = 512 * 1024;
     cancellationToken?.throwIfCanceled();
     final backend = _downloadBackend;
     if (backend == null) {
@@ -1078,10 +1253,66 @@ final class DefaultSessionArtifactFileService
         onProgress: onProgress,
       );
     }
+    return _resumableChunkedDownload(
+      fetchRange: ({required rangeStart, required rangeEnd, ifRange}) =>
+          resumableBackend.fetchSessionFileRange(
+            tool,
+            sessionId,
+            path,
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            ifRange: ifRange,
+          ),
+      fetchWhole: (resolvedMime) => _fullSessionFileDownload(
+        backend,
+        tool: tool,
+        sessionId: sessionId,
+        path: path,
+        fileName: fileName,
+        mimeType: resolvedMime,
+        cancellationToken: cancellationToken,
+        onProgress: onProgress,
+      ),
+      resolveFileName: (resolvedMime) =>
+          _resolveSessionFileName(fileName, resolvedMime),
+      mimeType: mimeType,
+      checkpoint: checkpoint,
+      onCheckpoint: onCheckpoint,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
 
+  /// The shared resumable chunk loop behind both cached download paths.
+  ///
+  /// A workspace file and a signed artifact differ only in HOW one range is
+  /// fetched and where the final name comes from. Everything else the loop does
+  /// — the `.part` staging file, the `If-Range` validator, 416 and
+  /// representation-change recovery, the checkpoint callbacks, the fail-closed
+  /// fallback when a 206 arrives with no validator — is identical, and was
+  /// proven on the workspace path long before an artifact could use it. Two
+  /// copies of this would be two chances to get resume wrong.
+  Future<SessionArtifactCachedFile> _resumableChunkedDownload({
+    required Future<ArtifactDownload> Function({
+      required int rangeStart,
+      required int rangeEnd,
+      String? ifRange,
+    })
+    fetchRange,
+    required Future<SessionArtifactCachedFile> Function(String? mimeType)
+    fetchWhole,
+    required String Function(String? mimeType) resolveFileName,
+    String? mimeType,
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
+    SessionArtifactCancellationToken? cancellationToken,
+    SessionArtifactProgressCallback? onProgress,
+  }) async {
+    const chunkBytes = 512 * 1024;
+    cancellationToken?.throwIfCanceled();
     final cacheDirectory = await _cacheDirectoryProvider.cacheDirectory();
     cancellationToken?.throwIfCanceled();
-    final safeFileName = _resolveSessionFileName(fileName, mimeType);
+    final safeFileName = resolveFileName(mimeType);
     var partialPath = _validatedPartialPath(
       checkpoint?.partialFilePath,
       cacheDirectory,
@@ -1101,6 +1332,8 @@ final class DefaultSessionArtifactFileService
     var etag = offset > 0 ? checkpoint?.etag : null;
     var lastModified = offset > 0 ? checkpoint?.lastModified : null;
     var resolvedMime = mimeType;
+    String? servedArtifactKey;
+    String? servedContentHash;
 
     if (offset > 0 && etag == null && lastModified == null) {
       await partialFile.writeAsBytes(const [], flush: true);
@@ -1119,16 +1352,15 @@ final class DefaultSessionArtifactFileService
     while (totalBytes == null || offset < totalBytes) {
       cancellationToken?.throwIfCanceled();
       final validator = etag ?? lastModified;
-      final download = await resumableBackend.fetchSessionFileRange(
-        tool,
-        sessionId,
-        path,
+      final download = await fetchRange(
         rangeStart: offset,
         rangeEnd: offset + chunkBytes - 1,
         ifRange: offset == 0 ? null : validator,
       );
       cancellationToken?.throwIfCanceled();
       resolvedMime = download.contentType ?? resolvedMime;
+      servedArtifactKey = download.artifactKey ?? servedArtifactKey;
+      servedContentHash = download.contentHash ?? servedContentHash;
       final range = _parseContentRange(download.contentRange);
 
       if (download.statusCode == 416) {
@@ -1184,16 +1416,7 @@ final class DefaultSessionArtifactFileService
               bytesTransferred: 0,
             ),
           );
-          return _fullSessionFileDownload(
-            backend,
-            tool: tool,
-            sessionId: sessionId,
-            path: path,
-            fileName: fileName,
-            mimeType: resolvedMime,
-            cancellationToken: cancellationToken,
-            onProgress: onProgress,
-          );
+          return fetchWhole(resolvedMime);
         }
         if (range == null ||
             range.total == null ||
@@ -1274,7 +1497,7 @@ final class DefaultSessionArtifactFileService
     // staging name keeps its original derivation; only the rename target picks
     // up the server-sniffed extension.
     final targetDirectory = partialFile.parent.path;
-    final resolvedFileName = _resolveSessionFileName(fileName, resolvedMime);
+    final resolvedFileName = resolveFileName(resolvedMime);
     var finalPath = '$targetDirectory/$resolvedFileName';
     if (File(finalPath).existsSync()) {
       finalPath = _nextAvailablePath(targetDirectory, resolvedFileName);
@@ -1285,6 +1508,8 @@ final class DefaultSessionArtifactFileService
       fileName: _filenameFromPath(finalPath),
       contentType: resolvedMime,
       byteLength: offset,
+      artifactKey: servedArtifactKey,
+      contentHash: servedContentHash,
     );
   }
 

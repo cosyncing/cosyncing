@@ -13,8 +13,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Default byte cap for read-only file previews.
 ///
-/// Mirrors the broker's default `/fs/read` cap. Downloads remain full-file
-/// fetches because the broker does not support Range requests yet.
+/// Mirrors the broker's default `/fs/read` cap. It bounds the PREVIEW only:
+/// the workspace and signed-artifact download routes both support Range, so a
+/// download is chunked and resumable however large the file is.
 const int sessionFilePreviewDefaultMaxBytes = 1024 * 1024;
 
 /// Repository boundary for read-only session workspace browsing.
