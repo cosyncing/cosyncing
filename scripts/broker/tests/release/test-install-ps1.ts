@@ -335,6 +335,52 @@ public static class FakeBun {
     ...signing,
   });
 
+  /** The declaration the elevation refusal hangs off, stubbed below in copies of the rendered script. */
+  const ELEVATION_PROBE = 'function Test-ElevatedProcess {';
+  /** Insert a `return` as the first statement of one function in a RENDERED installer. */
+  function stubProbe(installer: string, declaration: string, value: string): void {
+    const source = readFileSync(installer, 'utf8');
+    if (!source.includes(declaration)) throw new Error(`rendered installer has no ${declaration}`);
+    writeFileSync(installer, source.replace(declaration, `${declaration}\n  return ${value}`));
+  }
+
+  /**
+   * The rendered installer every check below starts from, with ONE host property neutralised where the
+   * host forces it.
+   *
+   * `install.ps1` refuses an elevated install, and every GitHub-hosted Windows runner runs as a local
+   * administrator with a full token — so on CI the refusal is correct and fires before the installer does
+   * anything, and the suite could otherwise never execute a single line past it. The product itself is not
+   * this strict: `windows-dacl.ts` deliberately accepts an object owned by an elevated token's default
+   * owner, because refusing it "made the product reject files it had just created itself". The refusal is
+   * this installer's own policy, mirroring the shell installer's root refusal.
+   *
+   * So on an elevated host the probe is stubbed to `$false` once, here, and every check runs the real
+   * logic against real DACLs. That is not a hole in the refusal: the template writes `O:<user>` explicitly
+   * into every descriptor and `$CURRENT_USER_SID` is the token's USER SID, which is the person either way,
+   * so what the owner-only inspection reads is the same object it would read unelevated. On an unelevated
+   * host — the physical one this lane was built against — nothing is touched and the pristine script runs.
+   *
+   * The refusal itself is proven separately, and deterministically on both kinds of host, by forcing the
+   * probe the other way.
+   */
+  const elevationProbeScript = join(root, 'elevation-probe.ps1');
+  writeFileSync(elevationProbeScript, `Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal $identity
+Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+`);
+  const elevationProbe = await runPowerShell({
+    script: elevationProbeScript,
+    arguments: [],
+    stage: 'elevation probe',
+  });
+  const HOST_IS_ELEVATED = /^\s*True\s*$/i.test(elevationProbe.stdout);
+  const pristineInstaller = readFileSync(join(releaseDirectory, 'install.ps1'), 'utf8');
+  if (HOST_IS_ELEVATED) stubProbe(join(releaseDirectory, 'install.ps1'), ELEVATION_PROBE, '$false');
+  console.log(`      (host is ${HOST_IS_ELEVATED ? 'ELEVATED, probe neutralised' : 'unelevated, script pristine'})`);
+
   /**
    * A second release, correctly signed, whose web sidecar is not a tarball.
    *
@@ -361,6 +407,8 @@ public static class FakeBun {
       outputDirectory: output,
       ...signing,
     });
+    // Freshly rendered, so it needs the same neutralisation the shared release got.
+    if (HOST_IS_ELEVATED) stubProbe(join(output, 'install.ps1'), ELEVATION_PROBE, '$false');
     return output;
   }
 
@@ -821,6 +869,24 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
           .test(run.stderr)
         && !existsSync(run.home),
       `${run.exitCode}: ${run.stderr.trim().slice(0, 200)}`);
+  }
+
+  // The elevation refusal, forced on whatever kind of host this is. On the physical unelevated host the
+  // probe is stubbed `$true`; on an elevated runner the pristine script is restored and refuses for real.
+  // Either way the assertion is identical, so the refusal is proven on both rather than being a property
+  // of how the suite happened to be launched.
+  {
+    const release = releaseCopy('elevated');
+    const installer = join(release, 'install.ps1');
+    writeFileSync(installer, pristineInstaller);
+    if (!HOST_IS_ELEVATED) stubProbe(installer, ELEVATION_PROBE, '$true');
+    const run = await install({ release, stage: 'elevated install', bun: currentBun });
+    check('an elevated install is refused before anything is created',
+      run.exitCode !== 0
+        && /refusing an elevated install/.test(run.stderr)
+        && /as the user who will own the broker/.test(run.stderr)
+        && !existsSync(run.home),
+      `${HOST_IS_ELEVATED ? 'real' : 'stubbed'} — ${run.exitCode}: ${run.stderr.trim().slice(0, 160)}`);
   }
 
   // The one refusal an operator can trigger by typing, and the only place the template reads a path it

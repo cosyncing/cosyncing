@@ -509,6 +509,16 @@ than a wasted download.
 Both are wrapped so a host that cannot compile at all — Constrained Language Mode, a locked-down
 compiler — degrades instead of failing. See each caller for what degraded means there.
 #>
+# TRUE when this process holds an elevated token. Its own function for the same reason
+# `Get-NativeMachineValue` is: a host property a test cannot change about itself has to be replaceable in
+# a copy of the rendered script, since the alternative is an environment override — and a refusal that an
+# environment variable can switch off is not a refusal.
+function Test-ElevatedProcess {
+  param([Parameter(Mandatory = $true)] $Identity)
+  return (New-Object Security.Principal.WindowsPrincipal $Identity).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Initialize-NativeProbe {
   if ('CosyncingInstall.Native' -as [type]) { return $true }
   try {
@@ -712,8 +722,7 @@ try {
   # BUILTIN\Administrators as the owner of every file it creates — which the product's own owner-only
   # inspection then reads as somebody else's state.
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-  if ((New-Object Security.Principal.WindowsPrincipal $identity).IsInRole(
-      [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  if (Test-ElevatedProcess -Identity $identity) {
     Fail ('refusing an elevated install; run this in an ordinary PowerShell window as the user who will ' +
       'own the broker')
   }

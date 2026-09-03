@@ -760,6 +760,21 @@ try {
   check('install.ps1 depends on no auto-loaded PowerShell module',
     moduleBackedCall === null,
     moduleBackedCall?.[1] ?? 'no module-backed cmdlet');
+  // Every host refusal in this installer is replaceable only by rewriting the rendered script, never by
+  // setting a variable — a refusal an environment variable can switch off is not a refusal. The way to
+  // hold that is to pin the whole set of variables the script reads, so a future override cannot be added
+  // quietly to make some test easier. `USERPROFILE` and `SystemRoot` are Windows' own.
+  const environmentReads = [
+    ...new Set([...powerShellInstaller.matchAll(/Get-EnvironmentValue '([A-Z_]+)'/g)].map((m) => m[1])),
+  ].sort();
+  const providerReads = [
+    ...new Set([...powerShellInstaller.matchAll(/\$env:([A-Za-z_]+)/g)].map((m) => m[1])),
+  ].sort();
+  check('install.ps1 reads exactly the documented environment, and no refusal override',
+    environmentReads.join(',') === 'BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,USERPROFILE'
+      && providerReads.join(',') === 'SystemRoot'
+      && powerShellInstaller.includes('refusing an elevated install'),
+    `${environmentReads.join(',')} | $env:${providerReads.join(',$env:')}`);
   // The shell installer's Windows refusal used to send an operator to WSL. It now names the installer
   // that actually works there, and this is the assertion that keeps the two from drifting apart again.
   check('the shell installer points a Windows shell at install.ps1 rather than at WSL',
