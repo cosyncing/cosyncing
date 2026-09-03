@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
@@ -50,6 +51,7 @@ void main() {
     required Map<String, dynamic> data,
     Locale locale = const Locale('en'),
     Size size = const Size(1000, 2400),
+    UsagePeriod? initialPeriod,
   }) {
     final spec = themeSpecById(kDefaultThemeId);
     return ProviderScope(
@@ -68,7 +70,7 @@ void main() {
         theme: buildAppTheme(spec.light, Brightness.light),
         home: MediaQuery(
           data: MediaQueryData(size: size),
-          child: const UsageReportPage(),
+          child: UsageReportPage(initialPeriod: initialPeriod),
         ),
       ),
     );
@@ -636,10 +638,73 @@ void main() {
       expect(usageHeatmapStart(requested, report), requested);
     });
 
+    Finder weekRowIn(Key section) => find
+        .descendant(
+          of: find.descendant(
+            of: find.byKey(section),
+            matching: find.byType(UsageHeatmap),
+          ),
+          matching: find.byType(Row),
+        )
+        .first;
+
+    Map<String, dynamic> month({required String firstRow}) {
+      // A bounded window whose first activity is late in it. The report covered
+      // every day from the 1st; the user simply did nothing until `firstRow`.
+      final data = sampleReport();
+      (data['range']! as Map<String, dynamic>)
+        ..['from'] = '2025-11-01'
+        ..['to'] = '2025-11-30'
+        ..['days'] = 30;
+      data['daily'] = [
+        {
+          'date': firstRow,
+          'tokens': 1000,
+          'cost': 1.0,
+          'requests': 10,
+          'intensity': 2,
+        },
+      ];
+      data['firsts'] = {'firstActiveDay': firstRow};
+      return data;
+    }
+
+    testWidgets('a month draws every day it covered, idle ones included', (
+      tester,
+    ) async {
+      // The month's own grid must not move with its first active day: days
+      // before it are covered days the user was idle on, and the heatmap draws
+      // those as inactive cells. A hole means "not covered" -- a different
+      // claim, and the one streaks and the weekday facet are built against.
+      await tester.pumpWidget(
+        buildSubject(data: month(firstRow: '2025-11-03')),
+      );
+      await tester.pumpAndSettle();
+      final early = tester
+          .getSize(weekRowIn(const Key('usage-report-active-days')))
+          .width;
+
+      await tester.pumpWidget(
+        buildSubject(data: month(firstRow: '2025-11-19')),
+      );
+      await tester.pumpAndSettle();
+      final late = tester
+          .getSize(weekRowIn(const Key('usage-report-active-days')))
+          .width;
+
+      // Same window, same grid. Trimming to the first row would drop the two
+      // week columns covering November 1-16.
+      expect(late, early);
+    });
+
     testWidgets('an all-time window renders a grid the reader can reach', (
       tester,
     ) async {
-      await tester.pumpWidget(buildSubject(data: allTime()));
+      // On the all-time period, not merely holding an all-time payload: the
+      // trim is a property of the period the reader chose.
+      await tester.pumpWidget(
+        buildSubject(data: allTime(), initialPeriod: UsagePeriod.allTime),
+      );
       await tester.pumpAndSettle();
 
       expect(
@@ -649,16 +714,8 @@ void main() {
       // The grid scrolls horizontally, so its own box is the viewport and says
       // nothing about how much was built. The week Row inside the scroll view
       // is the intrinsic extent, and that is what the reader has to scroll.
-      final weekRow = find
-          .descendant(
-            of: find.descendant(
-              of: find.byKey(const Key('usage-report-active-days')),
-              matching: find.byType(UsageHeatmap),
-            ),
-            matching: find.byType(Row),
-          )
-          .first;
-      // Untrimmed this is ~1,392 week columns and roughly 10,000px.
+      // Untrimmed this is ~1,392 week columns and 12,569px.
+      final weekRow = weekRowIn(const Key('usage-report-active-days'));
       expect(tester.getSize(weekRow).width, lessThan(2000));
     });
   });

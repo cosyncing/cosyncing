@@ -161,11 +161,16 @@ String usageWindowTitle(
   };
 }
 
-/// The first day the activity grid should draw.
+/// The first day an all-time activity grid should draw.
 ///
 /// The later of the served window's start and the first day with a served row.
 /// A window whose start predates every record — all-time always does — would
 /// otherwise draw one column per week back to the requested floor.
+///
+/// Only all-time. For a bounded period the untouched days before the first
+/// active one are days the report covered and the user was idle on, which the
+/// grid draws as inactive cells and which streaks and the weekday facet are
+/// built from. Trimming those would restate idleness as absence of coverage.
 ///
 /// Falls back to the requested start when nothing is served, which keeps an
 /// empty window rendering as the window it asked for rather than as nothing.
@@ -250,7 +255,7 @@ class _UsageReportBody extends StatelessWidget {
                 : usageEstimatedTip(l10n, active),
           ),
           const SizedBox(height: 24),
-          _ActiveDays(report: report, locale: locale),
+          _ActiveDays(period: period, report: report, locale: locale),
           const SizedBox(height: 24),
           UsagePodium(period: period, report: report, locale: locale),
           const SizedBox(height: 24),
@@ -274,8 +279,13 @@ class _UsageReportBody extends StatelessWidget {
 
 /// The heatmap, its legend, and the one line of streak evidence beneath it.
 class _ActiveDays extends StatelessWidget {
-  const _ActiveDays({required this.report, required this.locale});
+  const _ActiveDays({
+    required this.period,
+    required this.report,
+    required this.locale,
+  });
 
+  final UsagePeriod period;
   final UsageReport report;
   final String locale;
 
@@ -289,7 +299,7 @@ class _ActiveDays extends StatelessWidget {
     final to = DateTime.tryParse(report.range.to);
     if (requestedFrom == null || to == null) return const SizedBox.shrink();
 
-    // The grid starts where the data does, not where the request did.
+    // All-time, and only all-time, starts where the data does.
     //
     // All-time asks from `usageAllTimeFloor`, and tokdash echoes it: a live
     // all-time window answers `from: 2000-01-01` with `days: 9742` and 233
@@ -297,7 +307,15 @@ class _ActiveDays extends StatelessWidget {
     // columns, 97% of them holes, and the reader scrolls a quarter century of
     // empty weeks to reach their own history. The header still prints the
     // window that was asked for; only the grid is trimmed to what exists.
-    final from = usageHeatmapStart(requestedFrom, report);
+    //
+    // Every other period keeps its requested start, because there the days
+    // before the first active one are days the report DID cover and the user
+    // was idle on. An empty cell says that; a hole says "not covered", and
+    // trimming would turn one into the other -- silently dropping the first
+    // half of a month whose work started on the 19th.
+    final from = period == UsagePeriod.allTime
+        ? usageHeatmapStart(requestedFrom, report)
+        : requestedFrom;
 
     final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
     // A year of week columns will not fit any phone, so the cells shrink with

@@ -753,6 +753,12 @@ export async function fetchTokdashReport(
  * narrowing belongs to the facet, not to the route, and an observer gets the report without the
  * names rather than no report at all.
  *
+ * The whole facet goes, not just the `project` strings on the rows. `unattributed`,
+ * `attributedCount` and the rows' counts could survive a name-only strip, but the client's
+ * reconciliation footnote is computed from this facet against the period total, so nameless rows
+ * would have it state a coverage split the reader cannot see any part of. Withholding the facet
+ * makes the client say "owner-only" instead of narrating a breakdown it cannot show.
+ *
  * Applied on the way out of the cache, never on the way in: one stored window serves both callers,
  * and the owner's view is never the one that got trimmed.
  */
