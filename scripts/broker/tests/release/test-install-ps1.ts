@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -42,7 +43,10 @@ import {
   MINIMUM_BUN_RUNTIME_VERSION,
   PINNED_BUN_RUNTIME_ARCHIVES,
 } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
-import { inspectOwnerOnlyDirectory } from '../../../../packages/typescript/broker/src/security/secure-files.ts';
+import {
+  ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyDirectory,
+} from '../../../../packages/typescript/broker/src/security/secure-files.ts';
 import { windowsPowerShellChildEnvironment } from '../../../../packages/typescript/adapter-api/src/host-process.ts';
 import {
   BROKER_CONTRACT,
@@ -134,7 +138,13 @@ async function runPowerShell(options: {
   return { exitCode: child.exitCode, stdout: child.stdout, stderr: child.stderr };
 }
 
-const root = mkdtempSync(join(tmpdir(), 'cosyncing-install-ps1-'));
+// `realpathSync.native` because Windows hands the same directory back under two names: on a host whose
+// profile name is longer than 8.3 allows — every hosted runner — `tmpdir()` reports the truncated short
+// form, while the paths the installer prints and records come back in full. Both address one directory,
+// so an install is correct either way, but a suite comparing them as strings would report a mismatch that
+// is only a spelling. Canonicalise once, here, and every path built from it is the form the installer
+// will echo back.
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'cosyncing-install-ps1-')));
 try {
   // ---- Fixtures -----------------------------------------------------------------------------------
   const fixtures = join(root, 'fixtures');
@@ -785,7 +795,12 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // leave a Scheduled Task naming a file that is no longer an executable.
   {
     const home = join(root, 'home-compiled-install');
-    mkdirSync(join(home, 'bin'), { recursive: true });
+    // The product's own creator, not `mkdirSync`. These stand in for a directory a PRIOR install left,
+    // and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of anything created
+    // without an explicit descriptor — which the installer then correctly refuses as unowned, before it
+    // can reach the refusal each of these cases is actually about. This writes the user as owner the way
+    // a real install would, elevated or not.
+    ensureOwnerOnlyDirectory(join(home, 'bin'));
     writeFileSync(join(home, 'bin', 'cosyncing'), 'fixture compiled build\n');
     writeFileSync(join(home, 'bootstrap-receipt'), [
       'schemaVersion=1',
@@ -812,7 +827,12 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // An existing `cosy.cmd` that this installer did not write is somebody else's file.
   {
     const home = join(root, 'home-foreign-shim');
-    mkdirSync(join(home, 'bin'), { recursive: true });
+    // The product's own creator, not `mkdirSync`. These stand in for a directory a PRIOR install left,
+    // and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of anything created
+    // without an explicit descriptor — which the installer then correctly refuses as unowned, before it
+    // can reach the refusal each of these cases is actually about. This writes the user as owner the way
+    // a real install would, elevated or not.
+    ensureOwnerOnlyDirectory(join(home, 'bin'));
     writeFileSync(join(home, 'bin', 'cosy.cmd'), '@echo somebody else owns this name\r\n');
     const run = await install({
       release: releaseDirectory,
