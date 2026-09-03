@@ -19,6 +19,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 - Windows x64 is a supported broker host. The npm package now declares `win32`,
   and setup, doctor, and broker startup all accept the platform natively rather
   than directing you to WSL. WSL remains supported as a Linux host.
+- Added a Usage report under Settings: totals for today, this week, this month,
+  this year, and all time, read from the host's Tokdash, with an activity
+  heatmap, top projects, a working-hours profile, and export cards. The broker
+  serves it read-only at `/api/tokdash/report`; project names are shown to the
+  owner only. This raises the broker contract to revision 20, so clients 0.5.1
+  and earlier need the next client release before they can use a broker that
+  carries it.
 
 ### Changed
 

@@ -210,6 +210,9 @@ void main() {
         ('settings-category-notifications', 'Notifications'),
         ('settings-category-broker', 'Servers'),
         ('settings-category-agents', 'Agents & usage'),
+        // Directly after Agents & usage, keeping the two usage surfaces
+        // adjacent rather than scattering usage across the hub.
+        ('settings-category-usage', 'Usage overview'),
         ('settings-category-general', 'General'),
       ]) {
         expect(find.byKey(Key(entry.$1)), findsOneWidget);
@@ -217,7 +220,7 @@ void main() {
       }
 
       expect(find.byKey(const Key('servers-remove-credential')), findsNothing);
-      expect(find.byIcon(Icons.chevron_right), findsNWidgets(5));
+      expect(find.byIcon(Icons.chevron_right), findsNWidgets(6));
 
       // Controls that moved to layer two must not linger on the hub.
       expect(find.byKey(const Key('settings-managed-runtimes')), findsNothing);
@@ -365,6 +368,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-managed-runtimes')),
         300,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
 
@@ -414,6 +418,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-managed-runtimes')),
         300,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
 
@@ -469,6 +474,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-quota-panel')),
         300,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
 
@@ -503,6 +509,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-managed-runtimes')),
         300,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
       await tester.ensureVisible(
@@ -527,6 +534,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-managed-runtimes')),
         300,
+        scrollable: find.byType(Scrollable).first,
       );
       await tester.pumpAndSettle();
       await tester.ensureVisible(

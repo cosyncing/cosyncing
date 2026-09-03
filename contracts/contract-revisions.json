@@ -108,6 +108,13 @@
       "minimumClientRevision": 17,
       "clientMinimumBrokerRevision": 16,
       "change": "First-party clients add complete omp roster identity, agent color, and New Session support. Brokers use revision 19 as omp's visibility floor so revision-18 clients do not receive a second-class omp row."
+    },
+    {
+      "revision": 20,
+      "surfaceHash": "fnv1a32:4195eec0",
+      "minimumClientRevision": 17,
+      "clientMinimumBrokerRevision": 16,
+      "change": "Clients can read an aggregated, read-only usage report for one date window through /api/tokdash/report. The broker projects Tokdash's usage, active-time and composite insights scans into one DTO by explicit field selection, so prompt text (display_name) cannot cross the wire, and serves the period token total beside the project facet rows so a client can reconcile the share of tokens the facet does not cover. Project names are owner-only: an observe-scoped principal is served the same report with the project facet withheld. The requested window is bounded in span and its upstream scans are capped in concurrency. Adding the route moves the registry surface hash; the route is additive and raises no minimum. Note that 18 is the revision shipped clients advertise, so a revision-19-or-later client ships before this broker."
     }
   ]
 }

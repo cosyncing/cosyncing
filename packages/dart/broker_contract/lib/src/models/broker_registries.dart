@@ -64,6 +64,7 @@ const List<String> brokerRoutes = <String>[
   '/api/tokdash/usage',
   '/api/tokdash/quota',
   '/api/tokdash/quota-preference',
+  '/api/tokdash/report',
   '/api/tool/send_file',
   '/api/transport/envelopes',
   '/api/transport/peers',

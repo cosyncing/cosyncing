@@ -1402,9 +1402,21 @@
   "toolDisplayFinalTitle": "仅显示最终消息",
   "toolDisplayFinalBody": "显示用户轮次、助手最终消息，以及安全或需要操作的界面。",
   "transferUploadedBytes": "已上传 {count} 字节",
-  "@transferUploadedBytes": {"placeholders": {"count": {"type": "int"}}},
+  "@transferUploadedBytes": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transferDownloadedBytes": "已下载 {count} 字节",
-  "@transferDownloadedBytes": {"placeholders": {"count": {"type": "int"}}},
+  "@transferDownloadedBytes": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transferPreviewCached": "预览已缓存",
   "transferWaitingToStart": "等待开始",
   "transferUploading": "正在上传…",
@@ -1427,41 +1439,167 @@
   "themeSoftMinimalistDescription": "柔和米白与冷灰色，配合圆角和宽松留白。",
   "transcriptUpdatedStatus": "已更新",
   "transcriptTokenInput": "输入 {count}",
-  "@transcriptTokenInput": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenInput": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenOutput": "输出 {count}",
-  "@transcriptTokenOutput": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenOutput": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCacheRead": "缓存读取 {count}",
-  "@transcriptTokenCacheRead": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenCacheRead": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCacheWrite": "缓存写入 {count}",
-  "@transcriptTokenCacheWrite": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenCacheWrite": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenCost": "费用 {cost}",
-  "@transcriptTokenCost": {"placeholders": {"cost": {"type": "String"}}},
+  "@transcriptTokenCost": {
+    "placeholders": {
+      "cost": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTokenTotal": "合计 {count}",
-  "@transcriptTokenTotal": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTokenTotal": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTokenSummary": "Token：{details}",
-  "@transcriptTokenSummary": {"placeholders": {"details": {"type": "String"}}},
+  "@transcriptTokenSummary": {
+    "placeholders": {
+      "details": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptRunStatus": "运行状态：{status}",
-  "@transcriptRunStatus": {"placeholders": {"status": {"type": "String"}}},
+  "@transcriptRunStatus": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptGoalSummary": "目标状态：{status}；{title}",
-  "@transcriptGoalSummary": {"placeholders": {"status": {"type": "String"}, "title": {"type": "String"}}},
+  "@transcriptGoalSummary": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTaskListEmpty": "{title}：{status}。",
-  "@transcriptTaskListEmpty": {"placeholders": {"title": {"type": "String"}, "status": {"type": "String"}}},
+  "@transcriptTaskListEmpty": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptTaskOpen": "待处理 {count}",
-  "@transcriptTaskOpen": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskOpen": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskInProgress": "进行中 {count}",
-  "@transcriptTaskInProgress": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskInProgress": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskDone": "已完成 {count}",
-  "@transcriptTaskDone": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskDone": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskCanceled": "已取消 {count}",
-  "@transcriptTaskCanceled": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskCanceled": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskCount": "{count} 个任务",
-  "@transcriptTaskCount": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptTaskCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptTaskListSummary": "{title}（{status}）：{details}",
-  "@transcriptTaskListSummary": {"placeholders": {"title": {"type": "String"}, "status": {"type": "String"}, "details": {"type": "String"}}},
+  "@transcriptTaskListSummary": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      },
+      "details": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptAgentActivitySummary": "{kind}（{status}）：{title}",
-  "@transcriptAgentActivitySummary": {"placeholders": {"kind": {"type": "String"}, "status": {"type": "String"}, "title": {"type": "String"}}},
+  "@transcriptAgentActivitySummary": {
+    "placeholders": {
+      "kind": {
+        "type": "String"
+      },
+      "status": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "transcriptToolCalls": "{count} 次工具调用",
-  "@transcriptToolCalls": {"placeholders": {"count": {"type": "int"}}},
+  "@transcriptToolCalls": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "sessionComposerPickerReadOnly": "此会话为只读。",
   "sessionPermissionModeFallback": "权限",
   "sessionPermissionModeTooltip": "适用于从此输入框发送的提示词和斜杠命令的权限模式。",
@@ -1472,7 +1610,13 @@
   "sessionPermissionModeFullAccess": "完全访问",
   "sessionPermissionModeCustom": "自定义",
   "sessionTerminalOutputCount": "终端输出（{count}）",
-  "@sessionTerminalOutputCount": {"placeholders": {"count": {"type": "int"}}},
+  "@sessionTerminalOutputCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
   "transcriptCodeCopy": "复制代码",
   "transcriptCodeCopied": "代码已复制",
   "sessionProjectRename": "重命名项目",
@@ -1534,5 +1678,829 @@
   "fileViewerOpenInBrowserHint": "在 cosyncing 之外，用你的默认浏览器打开本地副本。",
   "fileViewerOpenInBrowserFailed": "无法在浏览器中打开该文件。",
   "workspacePromptTargetNote": "输入目标是 {session}",
-  "workspacePromptTargetTooltip": "即使文件面板获得焦点，输入和快捷键仍指向此会话"
+  "workspacePromptTargetTooltip": "即使文件面板获得焦点，输入和快捷键仍指向此会话",
+  "usageHubTileTitle": "使用概况",
+  "@usageHubTileTitle": {
+    "description": "Settings hub row leading to the usage report."
+  },
+  "usageHubTileSubtitle": "本机活动 —— 总量、趋势与分享卡片",
+  "@usageHubTileSubtitle": {
+    "description": "Subtitle of the Usage overview row on the Settings hub."
+  },
+  "usageReportTitle": "使用概况 · {period}",
+  "@usageReportTitle": {
+    "description": "Report page title, carrying the period it shows.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August 2026"
+      }
+    }
+  },
+  "usageReportScope": "本机全部 agent 活动，含未通过 cosyncing 启动的会话。",
+  "@usageReportScope": {
+    "description": "Mandatory scope line under the report title. The scope is the machine, never cosyncing."
+  },
+  "usagePeriodWeek": "周",
+  "@usagePeriodWeek": {
+    "description": "Report period switcher segment: the current week."
+  },
+  "usagePeriodMonth": "月",
+  "@usagePeriodMonth": {
+    "description": "Report period switcher segment: the current month."
+  },
+  "usagePeriodYear": "年",
+  "@usagePeriodYear": {
+    "description": "Report period switcher segment: the current year."
+  },
+  "usagePeriodAllTime": "全部",
+  "@usagePeriodAllTime": {
+    "description": "Report period switcher segment: everything recorded."
+  },
+  "usageWindowRange": "{from} – {to}",
+  "@usageWindowRange": {
+    "description": "Explicit window bounds, printed so a period label never implies more than it covers.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "2026-01-01"
+      },
+      "to": {
+        "type": "String",
+        "example": "2026-09-01"
+      }
+    }
+  },
+  "usageInProgress": "· 进行中，{total} 天中的第 {day} 天",
+  "@usageInProgress": {
+    "description": "Report header suffix while the period is still running.",
+    "placeholders": {
+      "day": {
+        "type": "int",
+        "example": "4"
+      },
+      "total": {
+        "type": "int",
+        "example": "7"
+      }
+    }
+  },
+  "usageBrokerTime": "（服务器时间，{zone}）",
+  "@usageBrokerTime": {
+    "description": "Report header suffix naming the zone the day boundaries are cut in.",
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "Europe/London"
+      }
+    }
+  },
+  "usageUnavailable": "无法获取使用记录。",
+  "@usageUnavailable": {
+    "description": "Shown when the report cannot be read. Never a zero."
+  },
+  "usageLoading": "正在读取使用数据……",
+  "@usageLoading": {
+    "description": "Shown while the first report read is in flight."
+  },
+  "usageEmptyPeriod": "本{period}暂无记录。",
+  "@usageEmptyPeriod": {
+    "description": "Shown when the window resolved but holds no activity.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "month"
+      }
+    }
+  },
+  "usagePartial": "部分工具读取失败：{tools}，其用量未计入。",
+  "@usagePartial": {
+    "description": "Shown when the broker reported source errors, so the totals are known to be short.",
+    "placeholders": {
+      "tools": {
+        "type": "String",
+        "example": "kimi, grok"
+      }
+    }
+  },
+  "usageOpenReport": "完整报告",
+  "@usageOpenReport": {
+    "description": "Action opening the report page from the Settings card."
+  },
+  "usageTodayTitle": "本机",
+  "@usageTodayTitle": {
+    "description": "Title of the usage card in Settings. Names the scope, not the period."
+  },
+  "usagePeriodToday": "今日",
+  "@usagePeriodToday": {
+    "description": "Usage card period segment: today."
+  },
+  "usagePeriodThisWeek": "本周",
+  "@usagePeriodThisWeek": {
+    "description": "Usage card period segment: the week in progress."
+  },
+  "usagePeriodThisMonth": "本月",
+  "@usagePeriodThisMonth": {
+    "description": "Usage card period segment: the month in progress."
+  },
+  "usageInProgressNote": "进行中 · {total} 天中的第 {day} 天",
+  "@usageInProgressNote": {
+    "description": "Note under the usage card header while the period is still running.",
+    "placeholders": {
+      "day": {
+        "type": "int",
+        "example": "2"
+      },
+      "total": {
+        "type": "int",
+        "example": "7"
+      }
+    }
+  },
+  "usageTokensLabel": "Token",
+  "@usageTokensLabel": {
+    "description": "Row label for the period token total."
+  },
+  "usageCostLabel": "费用",
+  "@usageCostLabel": {
+    "description": "Row label for the API list-price equivalent."
+  },
+  "usageCostQualified": "按 API 目录价估算 {cost}，非实际账单",
+  "@usageCostQualified": {
+    "description": "Cost value. The qualifier is part of the string: cost must never render bare, because tokdash reports an API-equivalent figure and not money spent on a plan.",
+    "placeholders": {
+      "cost": {
+        "type": "String",
+        "example": "$899.40"
+      }
+    }
+  },
+  "usageRequestsLabel": "请求",
+  "@usageRequestsLabel": {
+    "description": "Row label for the request count."
+  },
+  "usageTokenBreakdown": "输入 {input} · 输出 {output} · 缓存读取 {cache}",
+  "@usageTokenBreakdown": {
+    "description": "Sub-line splitting the token total.",
+    "placeholders": {
+      "input": {
+        "type": "String",
+        "example": "469M"
+      },
+      "output": {
+        "type": "String",
+        "example": "51.0M"
+      },
+      "cache": {
+        "type": "String",
+        "example": "17.6B"
+      }
+    }
+  },
+  "usageAgentTimeLabel": "Agent 时间（估算）",
+  "@usageAgentTimeLabel": {
+    "description": "Row label for estimated agent activity time."
+  },
+  "usageHoursValue": "{hours} 小时",
+  "@usageHoursValue": {
+    "description": "A total in decimal hours. The unit is localized; the number is not.",
+    "placeholders": {
+      "hours": {
+        "type": "String",
+        "example": "403.7"
+      }
+    }
+  },
+  "usageActiveEstimatedTip": "为估算值，超过 {minutes} 分钟的空闲不计入。",
+  "@usageActiveEstimatedTip": {
+    "description": "Tooltip explaining how agent time is estimated. The gap is served by the broker, never assumed.",
+    "placeholders": {
+      "minutes": {
+        "type": "int",
+        "example": "5"
+      }
+    }
+  },
+  "usageEstimated": "估算",
+  "@usageEstimated": {
+    "description": "Pill marking a figure as an estimate."
+  },
+  "usageTopModelLabel": "最常用模型",
+  "@usageTopModelLabel": {
+    "description": "Row label for the most-used model."
+  },
+  "usageShareOfTokens": "占 token 总量 {percent}",
+  "@usageShareOfTokens": {
+    "description": "Share of the period token total.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "40%"
+      }
+    }
+  },
+  "usageDeltaYesterday": "较昨日 {delta}",
+  "@usageDeltaYesterday": {
+    "description": "Period-over-period change for the day view.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+39.3%"
+      }
+    }
+  },
+  "usageDeltaPriorDays": "较之前 {count} 天 {delta}",
+  "@usageDeltaPriorDays": {
+    "description": "Period-over-period change against the equal-length prior stretch.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+138.4%"
+      },
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "usageDeltaPreviousPeriod": "较上一周期 {delta}",
+  "@usageDeltaPreviousPeriod": {
+    "description": "Period-over-period change when the prior window has no shorter name.",
+    "placeholders": {
+      "delta": {
+        "type": "String",
+        "example": "+15.5%"
+      }
+    }
+  },
+  "usageRankHarnesses": "Harness 排名",
+  "@usageRankHarnesses": {
+    "description": "Heading of the per-tool ranking list."
+  },
+  "usageRankModels": "模型排名",
+  "@usageRankModels": {
+    "description": "Heading of the per-model ranking list."
+  },
+  "usageVsQuotaNote": "本机累计用量，与下方剩余额度窗口互不相干。",
+  "@usageVsQuotaNote": {
+    "description": "Disambiguation line between the usage card and the quota panel. Both say \"usage\"; one is a sum and the other is a window."
+  },
+  "usageCoverageNote": "{named} 归属到项目 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
+  "@usageCoverageNote": {
+    "description": "Reconciles a project list against the period total. All three components are printed so the list visibly sums to 100%.",
+    "placeholders": {
+      "named": {
+        "type": "String",
+        "example": "89.3%"
+      },
+      "unattributed": {
+        "type": "String",
+        "example": "0.6%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "10.1%"
+      }
+    }
+  },
+  "usageProjectGroupNote": "项目按仓库 remote 分组 —— 同一代码库挂在两个 remote 下会出现两次。",
+  "@usageProjectGroupNote": {
+    "description": "Explains why two rows can obviously be one codebase. Client-side merging would fabricate a number."
+  },
+  "usageSourceCount": "{count} 个工具来源",
+  "@usageSourceCount": {
+    "description": "Footer evidence for the scope claim, from the served coverage block.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "23"
+      }
+    }
+  },
+  "usageDayBoundaryNote": "每日按本机零点划分。",
+  "@usageDayBoundaryNote": {
+    "description": "Footer note fixing what a day means on these surfaces."
+  },
+  "usageHeroTokens": "token",
+  "@usageHeroTokens": {
+    "description": "Unit under the hero token figure."
+  },
+  "usageHeroActiveTime": "活跃时间",
+  "@usageHeroActiveTime": {
+    "description": "Unit under the hero active-time figure."
+  },
+  "usageHeroActiveDays": "活跃天数",
+  "@usageHeroActiveDays": {
+    "description": "Unit under the hero active-days figure."
+  },
+  "usageEstimatedShort": "估算",
+  "@usageEstimatedShort": {
+    "description": "Pill on the hero active-time cell; the estimation rule is on its tooltip."
+  },
+  "usageHeroSentence": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}），比{previous}{delta}。",
+  "@usageHeroSentence": {
+    "description": "The one sentence carrying the report voice. Every part is a served figure; the sentence adds no claim of its own.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "≈12,977 at API list prices — not your bill"
+      },
+      "delta": {
+        "type": "String",
+        "example": "15.5% more"
+      },
+      "previous": {
+        "type": "String",
+        "example": "July"
+      }
+    }
+  },
+  "usageHeroSentencePlain": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}）。",
+  "@usageHeroSentencePlain": {
+    "description": "The hero sentence for a period with nothing to compare against. A missing comparison is dropped, never rendered as a zero delta.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "August"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "422"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "19.9B"
+      },
+      "cost": {
+        "type": "String",
+        "example": "$12,977"
+      }
+    }
+  },
+  "usageDeltaMore": "多 {percent}",
+  "@usageDeltaMore": {
+    "description": "Rising half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageDeltaLess": "少 {percent}",
+  "@usageDeltaLess": {
+    "description": "Falling half of the hero delta phrase.",
+    "placeholders": {
+      "percent": {
+        "type": "String",
+        "example": "15.5%"
+      }
+    }
+  },
+  "usageActiveDaysTitle": "活跃天数",
+  "@usageActiveDaysTitle": {
+    "description": "Heatmap section heading."
+  },
+  "usageStreakLine": "连续编程 {streak} 天 · {total} 天中 {active} 天有记录 · 最忙的一天 {date}（{tokens} token）",
+  "@usageStreakLine": {
+    "description": "Line under the heatmap, entirely from the served streaks and firsts facets.",
+    "placeholders": {
+      "streak": {
+        "type": "String",
+        "example": "171"
+      },
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageDaysBusiestLine": "{total} 天中 {active} 天有记录 · 最忙的一天 {date}（{tokens} token）",
+  "@usageDaysBusiestLine": {
+    "description": "The heatmap line for a window that has already closed. A *current* streak is a fact about today, so printing it beside a past month would attach a number to a window it does not describe.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      },
+      "date": {
+        "type": "String",
+        "example": "Aug 31"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.1B"
+      }
+    }
+  },
+  "usageStreakLineShort": "{total} 天中 {active} 天有记录",
+  "@usageStreakLineShort": {
+    "description": "The streak line when the facets served no streak or busiest day.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "31"
+      },
+      "total": {
+        "type": "String",
+        "example": "31"
+      }
+    }
+  },
+  "usageLegendLess": "少",
+  "@usageLegendLess": {
+    "description": "Left end of the heatmap legend."
+  },
+  "usageLegendMore": "多",
+  "@usageLegendMore": {
+    "description": "Right end of the heatmap legend."
+  },
+  "usagePodiumTitleWeek": "本周之最",
+  "@usagePodiumTitleWeek": {
+    "description": "Podium heading for the week period."
+  },
+  "usagePodiumTitleMonth": "本月之最",
+  "@usagePodiumTitleMonth": {
+    "description": "Podium heading for the month period."
+  },
+  "usagePodiumTitleYear": "本年之最",
+  "@usagePodiumTitleYear": {
+    "description": "Podium heading for the year period."
+  },
+  "usagePodiumTitleAllTime": "历来之最",
+  "@usagePodiumTitleAllTime": {
+    "description": "Podium heading for the all-time period."
+  },
+  "usagePodiumHarness": "最常用 harness",
+  "@usagePodiumHarness": {
+    "description": "Podium tile label for the leading harness."
+  },
+  "usagePodiumProject": "投入最多的项目",
+  "@usagePodiumProject": {
+    "description": "Podium tile label for the leading project."
+  },
+  "usagePodiumHarnessDetail": "{sessions} 个会话 · {hours}",
+  "@usagePodiumHarnessDetail": {
+    "description": "Sub-line on the harness podium tile.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "119"
+      },
+      "hours": {
+        "type": "String",
+        "example": "220.5h"
+      }
+    }
+  },
+  "usagePodiumProjectNote": "{count} 个项目 · 按 token 排序 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
+  "@usagePodiumProjectNote": {
+    "description": "Reconciles the project facet against the period total, so the podium share cannot be read as the whole picture.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "41"
+      },
+      "unattributed": {
+        "type": "String",
+        "example": "0.8%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "4.1%"
+      }
+    }
+  },
+  "usageWhenTitle": "你的时间分布",
+  "@usageWhenTitle": {
+    "description": "Hour-of-day section heading."
+  },
+  "usageWhenTz": "本机时区 · {zone}",
+  "@usageWhenTz": {
+    "description": "Names the zone the hour buckets were cut in; the buckets are meaningless without it.",
+    "placeholders": {
+      "zone": {
+        "type": "String",
+        "example": "BST"
+      }
+    }
+  },
+  "usageWhenPeakHour": "高峰时段",
+  "@usageWhenPeakHour": {
+    "description": "Peak-hour row label."
+  },
+  "usageWhenNightOwl": "夜猫子指数",
+  "@usageWhenNightOwl": {
+    "description": "Night-share row label."
+  },
+  "usageWhenNightNote": "{window} 的 token 占比",
+  "@usageWhenNightNote": {
+    "description": "Names the served night window rather than implying a fixed one.",
+    "placeholders": {
+      "window": {
+        "type": "String",
+        "example": "22:00 – 02:00"
+      }
+    }
+  },
+  "usageWhenPeakDay": "高峰日",
+  "@usageWhenPeakDay": {
+    "description": "Peak-weekday row label."
+  },
+  "usageWhenBlocked": "按小时数据不可用。本机 tokdash 不提供 insights 的 hourly/weekday 数据（2.5.0 才加入），这一区没有诚实的数据来源，折叠为本提示。",
+  "@usageWhenBlocked": {
+    "description": "Honest degradation when the insights facets are absent: the section says what is missing instead of drawing an empty chart."
+  },
+  "usageHourRange": "{from} – {to}",
+  "@usageHourRange": {
+    "description": "An hour window, e.g. the peak hour.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "15:00"
+      },
+      "to": {
+        "type": "String",
+        "example": "16:00"
+      }
+    }
+  },
+  "usageByAgent": "按 agent",
+  "@usageByAgent": {
+    "description": "Per-agent table section heading."
+  },
+  "usageColAgent": "Agent",
+  "@usageColAgent": {
+    "description": "Table column: tool."
+  },
+  "usageColSessions": "会话",
+  "@usageColSessions": {
+    "description": "Table column: session count."
+  },
+  "usageColIn": "输入",
+  "@usageColIn": {
+    "description": "Table column: input tokens."
+  },
+  "usageColOut": "输出",
+  "@usageColOut": {
+    "description": "Table column: output tokens."
+  },
+  "usageColCache": "缓存读取",
+  "@usageColCache": {
+    "description": "Table column: cache-read tokens."
+  },
+  "usageColCost": "费用 · 目录价",
+  "@usageColCost": {
+    "description": "Table column: the qualifier rides in the header so cells stay bare figures."
+  },
+  "usageColActive": "活跃",
+  "@usageColActive": {
+    "description": "Table column: active time."
+  },
+  "usageOtherToolsCount": "本机其他工具 · {count} 个会话",
+  "@usageOtherToolsCount": {
+    "description": "Expander row for tools cosyncing does not adapt.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "48"
+      }
+    }
+  },
+  "usageOtherTools": "本机其他工具",
+  "@usageOtherTools": {
+    "description": "The expander row when the active-time API served no session count."
+  },
+  "usageCostFooterNote": "费用为 API 目录价估算，非实际账单。",
+  "@usageCostFooterNote": {
+    "description": "Footer restatement of the cost qualifier, so the page carries it once more outside any single figure."
+  },
+  "usageActiveTimeNote": "活跃时间不计超过 {minutes} 分钟的空闲。",
+  "@usageActiveTimeNote": {
+    "description": "Footer note; the gap is served, never assumed.",
+    "placeholders": {
+      "minutes": {
+        "type": "String",
+        "example": "5"
+      }
+    }
+  },
+  "usageCardTierOverview": "COSYNCING · 本机概况",
+  "@usageCardTierOverview": {
+    "description": "Green-tier card header. Counts only."
+  },
+  "usageCardTierProjects": "COSYNCING · 项目明细",
+  "@usageCardTierProjects": {
+    "description": "Amber-tier card header. Carries project names."
+  },
+  "usageCardPeriodYtd": "{year} 年 · 年初至今",
+  "@usageCardPeriodYtd": {
+    "description": "Period line on the export card.",
+    "placeholders": {
+      "year": {
+        "type": "String",
+        "example": "2026"
+      }
+    }
+  },
+  "usageCardRange": "{from} – {to} · {machine}全部 agent 活动",
+  "@usageCardRange": {
+    "description": "Scope line on the export card. The machine is a nickname the sender chose; the hostname is never used.",
+    "placeholders": {
+      "from": {
+        "type": "String",
+        "example": "2026-01-01"
+      },
+      "to": {
+        "type": "String",
+        "example": "2026-09-01"
+      },
+      "machine": {
+        "type": "String",
+        "example": "this machine"
+      }
+    }
+  },
+  "usageCardHeroSub": "token · {sessions} 个会话 · {requests} 次请求",
+  "@usageCardHeroSub": {
+    "description": "Unit and counts under the card hero figure.",
+    "placeholders": {
+      "sessions": {
+        "type": "String",
+        "example": "2,545"
+      },
+      "requests": {
+        "type": "String",
+        "example": "435K"
+      }
+    }
+  },
+  "usageCardDaysActive": "{total} 天中 {active} 天有记录",
+  "@usageCardDaysActive": {
+    "description": "Card stat: coverage of the window.",
+    "placeholders": {
+      "active": {
+        "type": "String",
+        "example": "230"
+      },
+      "total": {
+        "type": "String",
+        "example": "242"
+      }
+    }
+  },
+  "usageCardStreak": "连续编程 {count} 天",
+  "@usageCardStreak": {
+    "description": "Card stat: the current streak.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "171"
+      }
+    }
+  },
+  "usageCardBusiest": "最忙的一天 {date} · {tokens}",
+  "@usageCardBusiest": {
+    "description": "Card stat: the peak day. Overview card only.",
+    "placeholders": {
+      "date": {
+        "type": "String",
+        "example": "Sep 1"
+      },
+      "tokens": {
+        "type": "String",
+        "example": "1.6B"
+      }
+    }
+  },
+  "usageCardActiveTime": "活跃时间",
+  "@usageCardActiveTime": {
+    "description": "Card stat label for estimated active time."
+  },
+  "usageCardProjectsNote": "项目明细 · 共 {count} 个 · 按 token 排序",
+  "@usageCardProjectsNote": {
+    "description": "Amber section header on the project-detail card.",
+    "placeholders": {
+      "count": {
+        "type": "String",
+        "example": "257"
+      }
+    }
+  },
+  "usageCardGroupNote": "按仓库分组 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
+  "@usageCardGroupNote": {
+    "description": "Closes the project list by reconciling it against the period total, so a shared image cannot be read as the whole picture.",
+    "placeholders": {
+      "unattributed": {
+        "type": "String",
+        "example": "1%"
+      },
+      "gap": {
+        "type": "String",
+        "example": "10%"
+      }
+    }
+  },
+  "usageCardManifestOverview": "仅统计数字 · 不含项目名称 · 不含提示词原文",
+  "@usageCardManifestOverview": {
+    "description": "The card prints its own content policy: a recipient audits it by reading it."
+  },
+  "usageCardManifestProjects": "含项目名称 · 不含提示词原文 · 请谨慎分享",
+  "@usageCardManifestProjects": {
+    "description": "As above, amber tier."
+  },
+  "usageCardAttribution": "cosyncing · tokdash",
+  "@usageCardAttribution": {
+    "description": "Attribution line in the card footer."
+  },
+  "usageShareTitle": "分享",
+  "@usageShareTitle": {
+    "description": "Share section heading."
+  },
+  "usageSharePreamble": "两张图，两种隐私级别。「本机概况」只含统计数字，不含身份信息，可直接发布；「项目明细」包含项目名称，请谨慎分享或自己留存。费用默认关闭，开启后也始终标注为 API 目录价，而非实际账单。",
+  "@usageSharePreamble": {
+    "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
+  },
+  "usageExportOverview": "导出概况卡片",
+  "@usageExportOverview": {
+    "description": "Action for the green-tier card."
+  },
+  "usageExportProject": "导出项目明细",
+  "@usageExportProject": {
+    "description": "Action for the amber-tier card."
+  },
+  "usageExportBothThemes": "每次导出生成浅色与深色两张 PNG，与 app 当前主题无关。",
+  "@usageExportBothThemes": {
+    "description": "The recipient picks the legible one; the sender never thinks about theme state."
+  },
+  "usageCostToggle": "包含费用（按 API 目录价，非实际账单）",
+  "@usageCostToggle": {
+    "description": "The only toggle on the cards, and it stays inside the green tier."
+  },
+  "usageMachineLabelField": "本机名称",
+  "@usageMachineLabelField": {
+    "description": "Nickname field for the export cards."
+  },
+  "usageExportSaved": "已保存 {light} 与 {dark}",
+  "@usageExportSaved": {
+    "description": "Confirmation naming both written files.",
+    "placeholders": {
+      "light": {
+        "type": "String",
+        "example": "usage-2026-light.png"
+      },
+      "dark": {
+        "type": "String",
+        "example": "usage-2026-dark.png"
+      }
+    }
+  },
+  "usageExportFailed": "导出失败。",
+  "@usageExportFailed": {
+    "description": "Export failure notice."
+  },
+  "usageProjectsOwnerOnly": "项目名称仅提供给 broker 所有者。本页所有统计数字仍包含这些项目。",
+  "@usageProjectsOwnerOnly": {
+    "description": "Shown when the broker withheld the project facet from a non-owner. Says the names are missing, not the work."
+  },
+  "usageExportDesktopOnly": "导出功能可在桌面端与网页端使用。手机端没有可写入的文件夹。",
+  "@usageExportDesktopOnly": {
+    "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
+  },
+  "usageExportBrowserPrompt": "一次点击会生成两个文件，浏览器可能会询问是否允许多个下载。",
+  "@usageExportBrowserPrompt": {
+    "description": "Web only. The page cannot tell whether the browser dropped the second download, so it says the prompt is expected."
+  },
+  "usageWindowUnrecognized": "tokdash 未能识别该时间段，返回的是无人请求的区间数据，因此不显示任何数字。",
+  "@usageWindowUnrecognized": {
+    "description": "Distinct from the unavailable notice: the report arrived, and it is this period that could not be resolved."
+  }
 }

@@ -96,6 +96,7 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/tokdash/quota', methods: ['GET'], policy: OBSERVE },
   { route: '/api/tokdash/quota-preference', methods: ['GET'], policy: OBSERVE },
   { route: '/api/tokdash/quota-preference', methods: ['POST'], policy: OWNER_ONLY },
+  { route: '/api/tokdash/report', methods: ['GET'], policy: OBSERVE },
   { route: '/api/tool/send_file', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/transport/envelopes', methods: ['GET', 'POST'], policy: OBSERVE },
   { route: '/api/transport/peers', methods: ['GET'], policy: OWNER_ONLY },

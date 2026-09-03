@@ -82,6 +82,7 @@
     {"id": "broker.typecheck", "description": "The release source graph typechecks."},
     {"id": "broker.conformance", "description": "Canonical messages and registered adapters conform."},
     {"id": "broker.surface", "description": "Routes, error codes, frames, and client messages do not drift."},
+    {"id": "broker.tokdash-report", "description": "The aggregated usage report projects Tokdash by explicit field selection: prompt text never reaches the DTO, the period total travels beside the facet rows, an older Tokdash degrades to a report without facets, and windows are cached per range."},
     {"id": "broker.codex-permissions", "description": "Codex reviewer state and native permission modes survive resume."},
     {"id": "broker.cli-package-boundary", "description": "CLI, first-run, cleanup, signals, and packaged process boundaries hold."},
     {"id": "broker.compiled-assets", "description": "Compiled runtime assets and packaged hook exclusions are correct."},
@@ -497,7 +498,8 @@
         "broker.agy-store", "broker.agy-mapping", "broker.agy-observe",
         "broker.agy-drive", "broker.agy-identity",
         "broker.agy-registration-gate", "broker.agy-cross-client-join",
-        "broker.session-truth-conformance"
+        "broker.session-truth-conformance",
+        "broker.tokdash-report"
       ],
       "command": ["bun", "run", "test:broker:deterministic", "--json", "output/check/broker/report.json", "--audit", "output/check/broker/report.md", "--logs", "output/check/logs/broker"],
       "focusedDiagnostics": [
@@ -521,7 +523,7 @@
           "mode": "parallel",
           "resourceClass": "standard",
           "subSuites": [
-            "broker-surface", "route-authorization", "codex-permissions", "web-origin", "systemd-fixtures", "application-identity",
+            "broker-surface", "route-authorization", "tokdash-report", "codex-permissions", "web-origin", "systemd-fixtures", "application-identity",
             "opencode-shim-symmetry", "roster-revision", "adapter-discovery-bounds", "managed-host-ownership",
             "sync-degraded-integration", "live-session-coherence",
             "roster-publication-qualification", "roster-watcher-publication-live",
@@ -576,6 +578,7 @@
         {"id":"conformance","claimId":"broker.conformance","command":["bun","run","scripts/broker/conformance.ts","--render"],"sourceOwners":["scripts/broker/conformance.ts"]},
         {"id":"broker-surface","claimId":"broker.surface","command":["bun","run","check:broker-surface"],"sourceOwners":["scripts/broker/check-broker-surface.ts","packages/typescript/broker/src/sessions/client-message-policy.ts"]},
         {"id":"route-authorization","claimId":"broker.surface","command":["bun","run","test:broker-route-authorization"],"sourceOwners":["packages/typescript/broker/src/security/route-authorization.ts","packages/typescript/broker/test/broker/test-route-authorization.ts"]},
+        {"id":"tokdash-report","claimId":"broker.tokdash-report","command":["bun","run","test:broker-tokdash-report"],"sourceOwners":["packages/typescript/broker/src/installation/tokdash-report.ts","packages/typescript/broker/test/broker/test-tokdash-report.ts"]},
         {"id":"codex-permissions","claimId":"broker.codex-permissions","command":["bun","run","packages/typescript/broker/test/codex/resume-fake.ts"],"sourceOwners":["packages/typescript/broker/test/codex/resume-fake.ts"]},
         {"id":"cli-package-boundary","claimId":"broker.cli-package-boundary","command":["bun","run","test:broker-cli"],"sourceOwners":["packages/typescript/broker/test/broker/test-cli.ts"]},
         {"id":"compiled-assets","claimId":"broker.compiled-assets","command":["bun","run","test:broker-assets"],"sourceOwners":["packages/typescript/broker/test/broker/test-runtime-assets.ts"]},

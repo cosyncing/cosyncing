@@ -16,6 +16,31 @@ import { connect, createServer, type Socket } from 'node:net';
 import { WsAuthTicketRegistry } from '../../src/security/ws-auth-tickets.ts';
 import { defaultBrokerConfig, writeBrokerConfig } from '../../src/runtime/configuration.ts';
 import { tokenHash } from '../../src/transport/transport-pairing.ts';
+import {
+  activeTimeFixture,
+  insightsFixture,
+  usageFixture,
+} from '../fixtures/tokdash-report-fixtures.ts';
+
+// A loopback Tokdash the report route can actually read, so the owner/observer
+// difference is observed on the wire rather than asserted about a helper.
+const tokdashStub = Bun.serve({
+  port: 0,
+  hostname: '127.0.0.1',
+  fetch(request) {
+    const { pathname } = new URL(request.url);
+    const body = pathname.startsWith('/api/usage')
+      ? usageFixture()
+      : pathname.startsWith('/api/active-time')
+        ? activeTimeFixture()
+        : pathname.startsWith('/api/insights')
+          ? insightsFixture()
+          : null;
+    return body === null
+      ? new Response('nope', { status: 404 })
+      : Response.json(body);
+  },
+});
 
 const results: { name: string; ok: boolean; detail: string }[] = [];
 const check = (name: string, ok: boolean, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`); };
@@ -177,7 +202,10 @@ const SENSITIVE_GETS = [
 
 let piCredentialFile = '';
 let ompCredentialFile = '';
-const tokened = await spawnBroker(7796, { COSYNCING_TOKEN: TOKEN }, (home) => {
+const tokened = await spawnBroker(7796, {
+  COSYNCING_TOKEN: TOKEN,
+  COSYNCING_TOKDASH_URL: `http://127.0.0.1:${tokdashStub.port}`,
+}, (home) => {
   const secrets = join(home, 'secrets');
   mkdirSync(secrets, { recursive: true, mode: 0o700 });
   piCredentialFile = join(secrets, 'pi-integration.json');
@@ -581,12 +609,50 @@ try {
   check('quota recovery requires an exhausted native quota failure',
     noQuotaEvidence.status === 409 && noQuotaEvidenceBody.code === 'SCHEDULE_QUOTA_RECOVERY_UNAVAILABLE',
     `status=${noQuotaEvidence.status} code=${String(noQuotaEvidenceBody.code)}`);
+
+  // The usage report is observe-scoped because its counts are the point of the
+  // feature on a paired device. Project names are the one Amber field in it, so
+  // it is the facet that narrows for a non-owner, not the route.
+  const reportWindow = '/api/tokdash/report?from=2026-08-01&to=2026-08-31';
+  const ownerReport = await fetch(`${tokened.base}${reportWindow}`, {
+    headers: { 'x-cosyncing-token': TOKEN },
+  });
+  const ownerBody = await ownerReport.json().catch(() => ({})) as any;
+  const ownerNames = (ownerBody.data?.projects?.rows ?? []).map((row: any) => row.project);
+  check('owner reads the usage report with project names',
+    ownerReport.status === 200 && ownerNames.length > 0 && ownerBody.data.projectsUnavailable === null,
+    `status=${ownerReport.status} names=${ownerNames.length}`);
+
+  const peerReport = await fetch(`${tokened.base}${reportWindow}`, { headers: peerHeaders });
+  const peerBody = await peerReport.json().catch(() => ({})) as any;
+  const peerWire = JSON.stringify(peerBody);
+  check('paired device reads the same report without the project names',
+    peerReport.status === 200
+      && peerBody.data?.projects === null
+      && peerBody.data?.projectsUnavailable === 'owner-only'
+      && ownerNames.every((name: string) => !peerWire.includes(name)),
+    `status=${peerReport.status} projects=${String(peerBody.data?.projects)}`);
+  check('the observer keeps every count the owner sees',
+    peerBody.data?.totals?.tokens === ownerBody.data?.totals?.tokens
+      && peerBody.data?.insightsUnavailable === null,
+    `tokens=${String(peerBody.data?.totals?.tokens)}`);
+
+  // The window is bounded before anything upstream is touched.
+  const unbounded = await fetch(
+    `${tokened.base}/api/tokdash/report?from=0001-01-01&to=9999-12-31`,
+    { headers: { 'x-cosyncing-token': TOKEN } },
+  );
+  const unboundedBody = await unbounded.json().catch(() => ({})) as any;
+  check('an unbounded report window is refused before the upstream scan',
+    unbounded.status === 400 && unboundedBody.error === 'range-too-early',
+    `status=${unbounded.status} error=${String(unboundedBody.error)}`);
 } finally {
   tokened.broker.kill();
   await tokened.broker.exited.catch(() => null);
   rmSync(tokened.home, { recursive: true, force: true });
   delete process.env.COSYNCING_PI_INTEGRATION_FILE;
   delete process.env.COSYNCING_OMP_INTEGRATION_FILE;
+  tokdashStub.stop(true);
 }
 
 const featureEnabled = await spawnBroker(7798, { COSYNCING_TOKEN: TOKEN }, (home) => {

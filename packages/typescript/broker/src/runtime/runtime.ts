@@ -185,6 +185,13 @@ import {
   tokdashRejectionReason,
   TokdashQuotaEvaluator,
 } from '../installation/tokdash-quota.ts';
+import {
+  checkTokdashReportWindow,
+  fetchTokdashReport,
+  isTokdashReportDate,
+  withoutProjectNames,
+  TokdashReportCache,
+} from '../installation/tokdash-report.ts';
 import { AttentionReminderScheduler } from '../attention/attention-reminder-scheduler.ts';
 import {
   isValidTimeZone,
@@ -1253,6 +1260,13 @@ function scheduleBrokerHealthAttentionReconcile(): void {
 }
 
 const tokdashQuotaEvaluator = new TokdashQuotaEvaluator();
+/**
+ * Per-window report cache. The composite insights scan is a full pass over Tokdash's SQLite, and the
+ * report page's period switcher walks the same handful of windows repeatedly.
+ */
+const tokdashReportCache = new TokdashReportCache({
+  ttlMs: Math.max(0, envNumber('COSYNCING_TOKDASH_REPORT_CACHE_MS', 5 * 60_000)),
+});
 async function reconcileTokdashQuota(): Promise<void> {
   const optedIn = getQuotaWarningsEnabled();
   let lifecycle;
@@ -5877,6 +5891,50 @@ server = Bun.serve<WsData>({
 
     if (path === '/api/tokdash/quota-preference' && req.method === 'GET') {
       return json({ ok: true, enabled: getQuotaWarningsEnabled() });
+    }
+
+    if (path === '/api/tokdash/report' && req.method === 'GET') {
+      const from = url.searchParams.get('from') ?? '';
+      const to = url.searchParams.get('to') ?? '';
+      if (!isTokdashReportDate(from) || !isTokdashReportDate(to)) {
+        return json(
+          { ok: false, code: 'BAD_PARAM', error: 'from and to must be YYYY-MM-DD dates' },
+          400,
+        );
+      }
+      const window = { from, to };
+      // Bounded before anything upstream is touched. Each distinct window is a full Tokdash scan,
+      // so an unbounded range is both an unbounded cost and an unbounded cache key space.
+      const refused = checkTokdashReportWindow(window, new Date().toISOString().slice(0, 10));
+      if (refused !== null) {
+        return json({ ok: false, code: 'BAD_PARAM', error: refused }, 400);
+      }
+      try {
+        // Coalesced: a cold year window is a tens-of-seconds upstream scan, and a second caller
+        // arriving mid-scan must join it rather than start a duplicate Tokdash refuses. Distinct
+        // windows queue behind the cache's scan cap rather than fanning out.
+        const { entry, servedFromCache } = await tokdashReportCache.load(
+          window,
+          () => fetchTokdashReport(TOKDASH_URL, window),
+        );
+        // Project names are owner-only. The route stays observe-scoped because the counts are what
+        // a paired device came for; it is the Amber facet that narrows, not the whole report.
+        const owned = principal?.kind === 'owner';
+        return json({
+          ok: true,
+          baseUrl: TOKDASH_URL,
+          cachedAt: entry.cachedAt,
+          servedFromCache,
+          data: owned ? entry.report : withoutProjectNames(entry.report),
+        });
+      } catch (error) {
+        // A reason code, never the upstream string — the same rule the module applies to a refused
+        // facet. An upstream message can carry the Tokdash URL, a SQLite path, or a row of data,
+        // and none of that belongs in an answer this route hands to an observer.
+        console.warn(`${LOG_PREFIX} tokdash report read failed:`,
+          error instanceof Error ? error.message : String(error));
+        return json({ ok: false, error: 'upstream-unavailable' }, 502);
+      }
     }
 
     if (path === '/api/tokdash/quota-preference' && req.method === 'POST') {

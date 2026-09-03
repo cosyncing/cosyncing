@@ -2,9 +2,15 @@ import 'package:broker_client/broker_client.dart';
 import 'package:broker_contract/broker_contract.dart';
 import 'package:test/test.dart';
 
-const _identityQuery =
-    'clientVersion=0.0.0-dev&contractRevision=19&minimumBrokerRevision=16&'
-    'contractSurfaceHash=fnv1a32%3A4531a029';
+/// Built from the generated identity rather than spelled out, so a contract
+/// revision bump moves this expectation with the code instead of failing
+/// fourteen unrelated URL assertions.
+final _identityQuery =
+    'clientVersion=$cosyncingClientVersion'
+    '&contractRevision=$cosyncingClientContractRevision'
+    '&minimumBrokerRevision=$cosyncingClientMinimumBrokerRevision'
+    '&contractSurfaceHash='
+    '${Uri.encodeQueryComponent(cosyncingClientContractSurfaceHash)}';
 
 void main() {
   group('EndpointResolver', () {
@@ -83,6 +89,22 @@ void main() {
       expect(
         resolver.tokdashQuotaEndpoint,
         'http://127.0.0.1:7734/api/tokdash/quota',
+      );
+    });
+
+    test('tokdashReportEndpoint carries the window as query parameters', () {
+      expect(
+        resolver.tokdashReportEndpoint(from: '2026-01-01', to: '2026-09-01'),
+        'http://127.0.0.1:7734/api/tokdash/report'
+        '?from=2026-01-01&to=2026-09-01',
+      );
+    });
+
+    test('tokdashReportEndpoint encodes a hostile window', () {
+      expect(
+        resolver.tokdashReportEndpoint(from: 'a&b=c', to: '../../etc'),
+        'http://127.0.0.1:7734/api/tokdash/report'
+        '?from=a%26b%3Dc&to=..%2F..%2Fetc',
       );
     });
 

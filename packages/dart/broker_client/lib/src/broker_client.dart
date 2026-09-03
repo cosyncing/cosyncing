@@ -409,6 +409,22 @@ class BrokerClient {
     return TokdashQuotaResponse.fromJson(response);
   }
 
+  /// Gets the aggregated usage report for one inclusive date window.
+  ///
+  /// `GET /api/tokdash/report?from&to`
+  /// Both bounds are `YYYY-MM-DD` in the broker host's local zone. The broker
+  /// drops prompt text before building the DTO and caches each window, so
+  /// repeated period switching is cheap.
+  Future<UsageReportResponse> getTokdashReport({
+    required String from,
+    required String to,
+  }) async {
+    final response = await _get<Map<String, dynamic>>(
+      _resolver.tokdashReportEndpoint(from: from, to: to),
+    );
+    return UsageReportResponse.fromJson(response);
+  }
+
   /// Gets quota warning preference.
   ///
   /// `GET /api/tokdash/quota-preference`

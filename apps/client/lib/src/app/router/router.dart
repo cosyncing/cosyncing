@@ -35,6 +35,8 @@ import 'package:cosyncing_client/src/features/settings/view/notification_setting
 import 'package:cosyncing_client/src/features/settings/view/settings_page.dart';
 import 'package:cosyncing_client/src/features/settings/view/tool_display_settings_page.dart';
 import 'package:cosyncing_client/src/features/transfers/view/transfer_manager_page.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -326,6 +328,14 @@ GoRouter createGoRouter({String initialLocation = sessionsRoute}) {
                         path: 'general',
                         builder: (context, state) =>
                             const GeneralSettingsPage(),
+                      ),
+                      GoRoute(
+                        path: 'usage',
+                        builder: (context, state) => UsageReportPage(
+                          initialPeriod: UsagePeriodLink.parse(
+                            state.uri.queryParameters['period'],
+                          ),
+                        ),
                       ),
                       // Leaf pages. These predate the hierarchy and keep their
                       // original paths so existing deep links stay valid.
