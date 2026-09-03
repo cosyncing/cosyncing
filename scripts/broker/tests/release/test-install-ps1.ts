@@ -44,6 +44,7 @@ import {
   PINNED_BUN_RUNTIME_ARCHIVES,
 } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
 import {
+  enforceOwnerOnlyFile,
   ensureOwnerOnlyDirectory,
   inspectOwnerOnlyDirectory,
 } from '../../../../packages/typescript/broker/src/security/secure-files.ts';
@@ -795,13 +796,14 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // leave a Scheduled Task naming a file that is no longer an executable.
   {
     const home = join(root, 'home-compiled-install');
-    // The product's own creator, not `mkdirSync`. These stand in for a directory a PRIOR install left,
-    // and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of anything created
-    // without an explicit descriptor — which the installer then correctly refuses as unowned, before it
-    // can reach the refusal each of these cases is actually about. This writes the user as owner the way
-    // a real install would, elevated or not.
+    // The product's own creators, not `mkdirSync`/`writeFileSync` alone. These stand in for what a PRIOR
+    // install left, and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of
+    // anything created without an explicit descriptor — which the installer then correctly refuses as
+    // unowned, before it can reach the refusal each of these cases is actually about. Every path a real
+    // install would own is written the way a real install writes it, elevated or not.
     ensureOwnerOnlyDirectory(join(home, 'bin'));
     writeFileSync(join(home, 'bin', 'cosyncing'), 'fixture compiled build\n');
+    enforceOwnerOnlyFile(join(home, 'bin', 'cosyncing'));
     writeFileSync(join(home, 'bootstrap-receipt'), [
       'schemaVersion=1',
       'product=cosyncing',
@@ -811,6 +813,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       `sha256=${sha256(readFileSync(join(home, 'bin', 'cosyncing')))}`,
       '',
     ].join('\n'));
+    enforceOwnerOnlyFile(join(home, 'bootstrap-receipt'));
     const run = await install({
       release: releaseDirectory,
       stage: 'compiled receipt',
@@ -827,13 +830,14 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // An existing `cosy.cmd` that this installer did not write is somebody else's file.
   {
     const home = join(root, 'home-foreign-shim');
-    // The product's own creator, not `mkdirSync`. These stand in for a directory a PRIOR install left,
-    // and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of anything created
-    // without an explicit descriptor — which the installer then correctly refuses as unowned, before it
-    // can reach the refusal each of these cases is actually about. This writes the user as owner the way
-    // a real install would, elevated or not.
+    // The product's own creators, not `mkdirSync`/`writeFileSync` alone. These stand in for what a PRIOR
+    // install left, and on an elevated host Windows stamps `BUILTIN\Administrators` as the owner of
+    // anything created without an explicit descriptor — which the installer then correctly refuses as
+    // unowned, before it can reach the refusal each of these cases is actually about. Every path a real
+    // install would own is written the way a real install writes it, elevated or not.
     ensureOwnerOnlyDirectory(join(home, 'bin'));
     writeFileSync(join(home, 'bin', 'cosy.cmd'), '@echo somebody else owns this name\r\n');
+    enforceOwnerOnlyFile(join(home, 'bin', 'cosy.cmd'));
     const run = await install({
       release: releaseDirectory,
       stage: 'foreign shim',
