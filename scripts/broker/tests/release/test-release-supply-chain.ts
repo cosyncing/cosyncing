@@ -776,6 +776,23 @@ try {
       && inventory.packages
         .filter((item: any) => !item.internal)
         .every((item: any) => thirdPartyNotices.includes(`${item.name}@${item.version}`)));
+  // The Bun section embeds a TRACKED licence file, and a checkout with `core.autocrlf=true` — every
+  // hosted Windows runner — delivers that file CRLF. It used to be hashed as-checked-out, which failed
+  // the digest pin inside `assembleRelease` and meant no release could be assembled on a Windows
+  // checkout at all. The pin is over the licence text now, and this asserts the consequence: that
+  // section is the same bytes whichever host assembled the release.
+  //
+  // Scoped to that section on purpose. The dependency closure below it carries each package's licence
+  // exactly as npm published it, CRLF included, and rewriting a third party's licence bytes to satisfy
+  // a test would be the wrong fix — those come from the tarball, not from this checkout, so they do not
+  // vary by host anyway.
+  const bunNoticeSection = thirdPartyNotices.slice(
+    thirdPartyNotices.indexOf('Bun 1.3.8 runtime'),
+    thirdPartyNotices.indexOf('Compiled npm dependency closure'),
+  );
+  check('the tracked Bun licence is emitted host-independently, with no carriage return',
+    bunNoticeSection.length > 1000 && !bunNoticeSection.includes('\r'),
+    `${bunNoticeSection.length} bytes, ${bunNoticeSection.split('\r').length - 1} carriage returns`);
 
   const fakeBin = join(root, 'fake-bin');
   mkdirSync(fakeBin);
