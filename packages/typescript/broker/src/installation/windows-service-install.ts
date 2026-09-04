@@ -49,8 +49,15 @@ function safeId(value: string, label: string): string {
   return value;
 }
 
+/**
+ * The immutable directory key one built artifact is filed under.
+ *
+ * The parameter names exactly the terms the key hashes, rather than a whole `BuildInfo` minus two fields:
+ * an upgrade derives this from the CANDIDATE's self-check, which reports build terms and not a BuildInfo,
+ * and a signature that asked for more than the key reads would have to be satisfied with invented values.
+ */
 export function windowsServiceVersionKey(
-  build: Readonly<Omit<BuildInfo, 'schemaVersions' | 'contract'>>,
+  build: Readonly<Pick<BuildInfo, 'version' | 'commit' | 'dirty' | 'target' | 'buildDate'>>,
 ): string {
   const value = [
     build.version,
@@ -60,6 +67,18 @@ export function windowsServiceVersionKey(
     build.buildDate ?? 'undated',
   ].join('-').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
   return safeId(value, 'Windows service version key');
+}
+
+/**
+ * The pointer file, which is the ONE path in the Windows service layout that carries no version key.
+ *
+ * Everything else under `service\windows` is either version-scoped or the bootstrap that reads this file,
+ * so a caller that wants to know which version the service is pointed at cannot be made to supply a
+ * version key first. {@link windowsServiceInstallPaths} builds the same path from the same rule.
+ */
+export function windowsServiceActiveManifestPath(stateHome: string): string {
+  const stateRoot = cleanWindowsAbsolutePath(stateHome, 'Windows state home');
+  return win32.join(stateRoot, 'service', 'windows', WINDOWS_ACTIVE_INSTALL_FILENAME);
 }
 
 export function windowsServiceInstallPaths(stateHome: string, versionKey: string): WindowsServiceInstallPaths {
@@ -72,7 +91,7 @@ export function windowsServiceInstallPaths(stateHome: string, versionKey: string
   return {
     serviceRoot,
     bootstrapPath: win32.join(serviceRoot, WINDOWS_SERVICE_BOOTSTRAP_FILENAME),
-    activeManifestPath: win32.join(serviceRoot, WINDOWS_ACTIVE_INSTALL_FILENAME),
+    activeManifestPath: windowsServiceActiveManifestPath(stateRoot),
     versionsRoot,
     versionRoot,
     applicationPath: win32.join(versionRoot, PRODUCT_IDENTITY.primaryBinary),

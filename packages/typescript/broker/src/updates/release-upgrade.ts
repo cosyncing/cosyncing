@@ -2,13 +2,11 @@ import { createHash, verify as verifySignature } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { BuildInfo } from '../runtime/build-info.ts';
@@ -31,11 +29,20 @@ import {
   type InstalledResourceRecord,
 } from '../installation/install-state.ts';
 import { acquireInstallationLock, type InstallationLockHandle } from '../installation/installation-lock.ts';
+import type {
+  DurableServiceVersionActivation,
+  DurableServiceVersionBuild,
+  DurableServiceVersionRecord,
+  DurableServiceVersions,
+} from '../installation/service-manager.ts';
 import { PRODUCT_IDENTITY } from '@cosyncing/protocol';
 import {
   assertNoSymlinkComponents,
   atomicWriteJsonOwnerOnly,
   atomicWriteOwnerOnly,
+  enforceOwnerOnlyTree,
+  ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyDirectory,
   inspectOwnerOnlyFile,
 } from '../security/secure-files.ts';
 
@@ -162,6 +169,14 @@ export interface UpgradeServiceController {
   inspect(): Promise<{ active: boolean }>;
   stop(): Promise<void>;
   start(): Promise<void>;
+  /**
+   * Moving the service from the installed version to the candidate, where the two are not the same thing.
+   *
+   * Attached to the controller rather than passed separately because the invariant is exactly that: the
+   * component that starts the service is the component that decides which version starts. Absent on a host
+   * whose unit execs the installed binary directly.
+   */
+  versions?: DurableServiceVersions;
 }
 
 export interface UpgradeBinaryResult {
@@ -185,7 +200,12 @@ export interface UpgradeCommandResult {
 interface UpgradeJournal {
   schemaVersion: typeof UPGRADE_JOURNAL_SCHEMA_VERSION;
   product: typeof PRODUCT_IDENTITY.productName;
-  phase: 'prepared' | 'switching' | 'switched';
+  /**
+   * `activating` is written BEFORE the service pointer can move, exactly as `switching` is written before
+   * the binary is replaced. It is therefore the only phase in which `active-install.json` may name the
+   * candidate, and the only one whose recovery writes that file at all.
+   */
+  phase: 'prepared' | 'switching' | 'switched' | 'activating';
   fromVersion: string;
   toVersion: string;
   targetPath: string;
@@ -196,6 +216,8 @@ interface UpgradeJournal {
   serviceWasActive: boolean;
   /** False means this upgrade may be the one that crossed the revision-16 rollback fence. */
   authorizationFenceWasActive?: boolean;
+  /** Absent on a host that keeps no versioned service root, and on every journal written before it did. */
+  serviceVersion?: DurableServiceVersionRecord;
   updatedAt: string;
 }
 
@@ -225,7 +247,8 @@ export interface UpgradeDependencies {
   acquireLock?: (options: { command: 'upgrade'; home: string }) => InstallationLockHandle;
   now?: () => Date;
   /** Deterministic crash injection for the upgrade acceptance lane. */
-  faultAfter?: 'journal-prepared' | 'service-stopped' | 'binary-switched' | 'receipt-committed';
+  faultAfter?: 'journal-prepared' | 'service-stopped' | 'binary-switched' | 'version-activated'
+    | 'receipt-committed';
 }
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -577,10 +600,13 @@ async function installReleaseWebSidecar(options: {
     `.${PRODUCT_IDENTITY.releaseAssetPrefix}-web.staging-${options.version}`,
   );
   removeOwnedDirectory(staging);
-  mkdirSync(staging, { mode: 0o700 });
+  // `mkdirSync(..., { mode })` is a no-op on Windows, so the staging directory used to be created with
+  // whatever its parent handed down and the whole unpacked tree inherited that. Every other directory this
+  // product creates goes through the owner-only primitive; this one now does too.
+  ensureOwnerOnlyDirectory(staging);
   try {
     const archive = join(staging, 'sidecar.tar.gz');
-    writeFileSync(archive, bytes, { mode: 0o600 });
+    atomicWriteOwnerOnly(archive, bytes, { mode: 0o600 });
     // The archive holds one `app/` tree. `tar` is spawned rather than reimplemented: it is present on every
     // host this distribution installs on, and it is the same tool the bootstrap installer already uses.
     const unpack = Bun.spawnSync(['tar', '-xzf', archive, '-C', staging], {
@@ -591,6 +617,11 @@ async function installReleaseWebSidecar(options: {
     if (!unpack.success) throw new Error('release-web-sidecar-unpack-failed');
     const unpacked = join(staging, 'app');
     if (!existsSync(join(unpacked, 'index.html'))) throw new Error('release-web-sidecar-invalid');
+    // `tar` writes the tree with the archive's own modes, and on Windows with the ACEs the staging
+    // directory handed down -- inherited access, which is exactly what the owner-only inspection refuses.
+    // Tighten every node BEFORE the tree is published, so the directory the broker serves from is
+    // owner-only at the instant it appears rather than a moment afterwards.
+    enforceOwnerOnlyTree(unpacked);
     const target = resolveFlutterWebRoot({
       packaged: true,
       executablePath: options.applicationPath,
@@ -598,6 +629,11 @@ async function installReleaseWebSidecar(options: {
     });
     removeOwnedDirectory(target);
     renameSync(unpacked, target);
+    // Proven, not assumed: a rename within one volume is supposed to carry the descriptor with the object,
+    // and that property is what the tightening above rests on.
+    if (inspectOwnerOnlyDirectory(target).status !== 'ok') {
+      throw new Error('release-web-sidecar-target-unsafe');
+    }
   } finally {
     try { removeOwnedDirectory(staging); } catch { /* never mask the failure that brought us here */ }
   }
@@ -611,6 +647,29 @@ async function installReleaseWebSidecar(options: {
  * directory — deleting it would blank the web client of a broker serving it at that moment. Anything older
  * belongs to a previous upgrade and nothing references it.
  */
+/**
+ * The web root belonging to a version this run installed and then abandoned.
+ *
+ * Resolved through the SAME rule that installed it, never by re-deriving the directory name here: two
+ * spellings of one path is how a cleanup comes to miss the thing it was written to remove.
+ *
+ * Removing it is unconditionally safe on any path that ends at the previous version. A candidate version
+ * is strictly greater than the installed one, so this directory can never be the root the running service
+ * is serving, and nothing else names it: the receipt in force after a rollback is the one from before the
+ * upgrade, which knows nothing about it.
+ */
+function abandonedCandidateWebRoot(applicationPath: string, version: string): string {
+  return resolveFlutterWebRoot({ packaged: true, executablePath: applicationPath, version });
+}
+
+/** The install state with the rollback copy's receipt dropped, for a path that removes the file with it. */
+function withoutPreviousBinaryReceipt(state: CommittedInstallState): CommittedInstallState {
+  return {
+    ...state,
+    resources: state.resources.filter((resource) => resource.id !== 'broker-binary-previous'),
+  };
+}
+
 function pruneReleaseWebRoots(applicationPath: string, keep: readonly string[]): void {
   const binDirectory = dirname(resolve(applicationPath));
   const kept = new Set(keep.map((version) => `${PRODUCT_IDENTITY.releaseAssetPrefix}-web-${version}`));
@@ -837,6 +896,48 @@ function safeInstalledBinaryPath(
   return target;
 }
 
+/**
+ * The installation and version identifiers a service-version undo is driven from.
+ *
+ * Validated to the same shape the Windows service layer accepts, here rather than there: a journal is
+ * read back by a LATER process from a file on disk, so what it carries is input, not a value this run
+ * placed. A malformed record must fail the journal rather than reach a path that removes directories.
+ */
+function validServiceVersionRecord(value: unknown): boolean {
+  if (!plainObject(value)) return false;
+  const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+  const identifiers = ['installationId', 'fromVersionKey', 'toVersionKey'] as const;
+  return identifiers.every((key) => typeof value[key] === 'string' && safeId.test(value[key] as string))
+    && Object.keys(value).every((key) => (identifiers as readonly string[]).includes(key));
+}
+
+/**
+ * The candidate's own build terms, taken from the self-check it has just passed.
+ *
+ * The version alone cannot identify a build, so a versioned service root is keyed on all of them. Reading
+ * them from the candidate is the only honest source: a key string-formatted from the version would name a
+ * directory the candidate itself would never resolve.
+ */
+function candidateBuildTerms(
+  value: Record<string, unknown> | undefined,
+): DurableServiceVersionBuild | undefined {
+  const term = (candidate: unknown): candidate is string =>
+    typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 128
+      && !/[\0\r\n]/.test(candidate);
+  if (!value || !term(value.version) || !term(value.commit) || !term(value.target)
+      || !term(value.distribution)
+      || (value.buildDate !== null && !term(value.buildDate))
+      || (value.dirty !== null && typeof value.dirty !== 'boolean')) return undefined;
+  return {
+    version: value.version,
+    commit: value.commit,
+    buildDate: value.buildDate as string | null,
+    target: value.target,
+    dirty: value.dirty as boolean | null,
+    distribution: value.distribution as DistributionKind,
+  };
+}
+
 function upgradeJournalPath(home: string): string {
   return join(home, 'upgrade-journal.json');
 }
@@ -855,7 +956,7 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
   if (!plainObject(value)
       || value.schemaVersion !== UPGRADE_JOURNAL_SCHEMA_VERSION
       || value.product !== PRODUCT_IDENTITY.productName
-      || !['prepared', 'switching', 'switched'].includes(String(value.phase))
+      || !['prepared', 'switching', 'switched', 'activating'].includes(String(value.phase))
       || !validVersion(value.fromVersion) || !validVersion(value.toVersion)
       || typeof value.targetPath !== 'string' || resolve(value.targetPath) !== resolve(targetPath)
       || typeof value.previousPath !== 'string'
@@ -866,6 +967,7 @@ function parseJournal(home: string, targetPath: string): UpgradeJournal | undefi
       || typeof value.serviceWasActive !== 'boolean'
       || (value.authorizationFenceWasActive !== undefined
         && typeof value.authorizationFenceWasActive !== 'boolean')
+      || (value.serviceVersion !== undefined && !validServiceVersionRecord(value.serviceVersion))
       || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))) {
     throw new Error('upgrade-journal-malformed');
   }
@@ -894,6 +996,15 @@ async function recoverUpgrade(options: {
       && journal.authorizationFenceWasActive !== true) {
     throw new Error('upgrade-authorization-fence-crossed');
   }
+  // Before the restore, and only past `prepared`: at that phase the transaction had not stopped the
+  // service yet and the old build is what is running, so touching it would be a mutation with no cause.
+  // At `switching`/`switched` the transaction already stopped it and this is idempotent; at `activating`
+  // it is required, because the crashed run may have started the candidate and `versions.restore` below
+  // deletes the version root it is executing from. Tolerated failure, as in the rollback path: a service
+  // that will not stop must not by itself abandon a recovery that can still put the machine back.
+  if (journal.phase !== 'prepared' && journal.serviceWasActive && options.service) {
+    try { await options.service.stop(); } catch { /* the restore below is still the best outcome */ }
+  }
   if (journal.phase !== 'prepared') {
     assertNoSymlinkComponents(journal.previousPath, false);
     if (!existsSync(journal.previousPath)) throw new Error('upgrade-rollback-binary-missing');
@@ -920,6 +1031,19 @@ async function recoverUpgrade(options: {
       installedSha256: journal.previousSha256,
     },
   });
+  // The rollback copy is removed below, so its receipt goes with it. Only when THIS journal wrote the
+  // copy: at `prepared` the file on disk is still whatever an earlier successful upgrade left, and that
+  // one is measured by a receipt that is still true.
+  if (journal.phase !== 'prepared') resources.delete('broker-binary-previous');
+  // `activating` is the only phase in which the service pointer can name the candidate, so it is the only
+  // one whose recovery writes that file. The receipts move with it: a crash after the candidate's were
+  // committed would otherwise leave the state naming a version root this is about to delete.
+  if (journal.phase === 'activating' && journal.serviceVersion && options.service?.versions) {
+    await options.service.versions.restore(journal.serviceVersion);
+    for (const record of options.service.versions.resources(journal.serviceVersion.fromVersionKey)) {
+      resources.set(record.id, record);
+    }
+  }
   const installer = plainObject(install.state.installer) ? install.state.installer : {};
   writeInstallState({
     ...install.state,
@@ -928,7 +1052,14 @@ async function recoverUpgrade(options: {
   }, options.home);
   if (journal.serviceWasActive && options.service) await options.service.start();
   unlinkRegular(journal.stagingPath);
+  // The journal goes before the rollback copy it names. Removing the copy first would leave a journal
+  // whose recovery source is missing, and the NEXT run reads that as a failed recovery needing manual
+  // cleanup -- on a machine whose binary has already been correctly restored.
   unlinkRegular(upgradeJournalPath(options.home));
+  if (journal.phase !== 'prepared') unlinkRegular(journal.previousPath);
+  try {
+    removeOwnedDirectory(abandonedCandidateWebRoot(journal.targetPath, journal.toVersion));
+  } catch { /* an unreferenced web root is inert; never fail a completed recovery for one */ }
   return true;
 }
 
@@ -957,8 +1088,10 @@ function updateBinaryReceipt(
   version: string,
   installedSha256: string,
   previousSha256: string,
+  additional: readonly InstalledResourceRecord[] = [],
 ): CommittedInstallState {
   const resources = new Map(state.resources.map((resource) => [resource.id, resource]));
+  for (const record of additional) resources.set(record.id, record);
   resources.set('broker-binary', {
     id: 'broker-binary',
     kind: 'binary',
@@ -1130,6 +1263,7 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     const binDirectory = dirname(targetPath);
     const stagingPath = join(binDirectory, `${PRODUCT_IDENTITY.primaryBinary}.staging-${toVersion}`);
     const previousPath = join(binDirectory, `${PRODUCT_IDENTITY.primaryBinary}.previous`);
+    let candidateBuild: DurableServiceVersionBuild | undefined;
     try {
       unlinkRegular(stagingPath);
       atomicWriteOwnerOnly(stagingPath, artifactBytes, { mode: 0o700 });
@@ -1152,9 +1286,34 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
           || selfCheckBuild?.distribution !== candidate.expectedDistribution) {
         throw new Error('release-offline-self-check-failed');
       }
+      candidateBuild = candidateBuildTerms(selfCheckBuild);
+      // Required only where a versioned service root is keyed on these terms. Demanding them everywhere
+      // would turn fields this check has never read into a new way for an upgrade to be refused.
+      if (!candidateBuild && dependencies.service?.versions) {
+        throw new Error('release-offline-self-check-failed');
+      }
     } catch (error) {
       try { unlinkRegular(stagingPath); } catch { /* report original pre-switch failure */ }
       return result('failed', 1, error instanceof Error ? error.message : 'release-offline-self-check-failed', 'The candidate failed its offline self-check; the installed binary was not changed.', fromVersion, recovered, toVersion);
+    }
+
+    // Which version root the service would move to, read while a refusal still costs nothing: the journal
+    // has not opened, the service is running, and not one byte on this machine has changed. Planning after
+    // the switch would turn an unreadable pointer into a rollback rather than a refusal.
+    let activation: DurableServiceVersionActivation | undefined;
+    try {
+      activation = candidateBuild ? dependencies.service?.versions?.plan(candidateBuild) : undefined;
+    } catch (error) {
+      try { unlinkRegular(stagingPath); } catch { /* report the original pre-switch failure */ }
+      return result(
+        'blocked',
+        1,
+        error instanceof Error ? error.message : 'service-version-unresolved',
+        'The installed service could not say which version it runs; run cosyncing doctor.',
+        fromVersion,
+        recovered,
+        toVersion,
+      );
     }
 
     // The web client is versioned with the application, so a swap that moved only the application would
@@ -1178,60 +1337,57 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
     const previousSha256 = sha256(previousBytes);
     const now = () => (dependencies.now?.() ?? new Date()).toISOString();
     let serviceWasActive = false;
+    // The rollback copy is written mid-transaction, so a failure before that point leaves whatever an
+    // earlier upgrade put at `previousPath` -- a file its own receipt still measures. Only a run that
+    // overwrote it may remove it.
+    let previousWritten = false;
+    let serviceVersion: DurableServiceVersionRecord | undefined;
     const authorizationFenceWasActive = authorizationMigrationRollbackFenceActive(dependencies.home);
+    // One journal, written at each phase from the transaction's own live state. The four writes used to be
+    // four copies of the same object literal, which is one copy per opportunity for a later field to be
+    // carried by three of them.
+    const journalAt = (phase: UpgradeJournal['phase']): void => writeJournal(dependencies.home, {
+      schemaVersion: UPGRADE_JOURNAL_SCHEMA_VERSION,
+      product: PRODUCT_IDENTITY.productName,
+      phase,
+      fromVersion,
+      toVersion,
+      targetPath,
+      previousPath,
+      stagingPath,
+      expectedSha256: candidate.sha256,
+      previousSha256,
+      serviceWasActive,
+      authorizationFenceWasActive,
+      ...(serviceVersion ? { serviceVersion } : {}),
+      updatedAt: now(),
+    });
     try {
       serviceWasActive = dependencies.service ? (await dependencies.service.inspect()).active : false;
-      writeJournal(dependencies.home, {
-        schemaVersion: UPGRADE_JOURNAL_SCHEMA_VERSION,
-        product: PRODUCT_IDENTITY.productName,
-        phase: 'prepared',
-        fromVersion,
-        toVersion,
-        targetPath,
-        previousPath,
-        stagingPath,
-        expectedSha256: candidate.sha256,
-        previousSha256,
-        serviceWasActive,
-        authorizationFenceWasActive,
-        updatedAt: now(),
-      });
+      journalAt('prepared');
       if (dependencies.faultAfter === 'journal-prepared') throw new Error('upgrade-fixture-interrupted');
       if (serviceWasActive && dependencies.service) await dependencies.service.stop();
       if (dependencies.faultAfter === 'service-stopped') throw new Error('upgrade-fixture-interrupted');
       atomicWriteOwnerOnly(previousPath, previousBytes, { mode: 0o700 });
-      writeJournal(dependencies.home, {
-        schemaVersion: UPGRADE_JOURNAL_SCHEMA_VERSION,
-        product: PRODUCT_IDENTITY.productName,
-        phase: 'switching',
-        fromVersion,
-        toVersion,
-        targetPath,
-        previousPath,
-        stagingPath,
-        expectedSha256: candidate.sha256,
-        previousSha256,
-        serviceWasActive,
-        authorizationFenceWasActive,
-        updatedAt: now(),
-      });
+      previousWritten = true;
+      journalAt('switching');
       atomicWriteOwnerOnly(targetPath, readFileSync(stagingPath), { mode: 0o700 });
-      writeJournal(dependencies.home, {
-        schemaVersion: UPGRADE_JOURNAL_SCHEMA_VERSION,
-        product: PRODUCT_IDENTITY.productName,
-        phase: 'switched',
-        fromVersion,
-        toVersion,
-        targetPath,
-        previousPath,
-        stagingPath,
-        expectedSha256: candidate.sha256,
-        previousSha256,
-        serviceWasActive,
-        authorizationFenceWasActive,
-        updatedAt: now(),
-      });
+      journalAt('switched');
       if (dependencies.faultAfter === 'binary-switched') throw new Error('upgrade-fixture-interrupted');
+      // Replacing the binary is the whole of a version change only where the service execs it. On Windows
+      // the Scheduled Task execs a bootstrap that reads `active-install.json` at every start and runs the
+      // version root named there, so a service restarted now would come back on the version it already
+      // had -- and the health poll below would read that old version thirty times and roll a perfectly
+      // good candidate back. That is what `upgrade` did on every Windows host.
+      //
+      // The record is journaled BEFORE the pointer can move, exactly as `switching` precedes the binary
+      // write, so a crash anywhere inside the activation leaves a state recovery can put back.
+      if (activation) {
+        serviceVersion = activation.record;
+        journalAt('activating');
+        await activation.apply();
+        if (dependencies.faultAfter === 'version-activated') throw new Error('upgrade-fixture-interrupted');
+      }
       if (serviceWasActive && dependencies.service) await dependencies.service.start();
       const config = inspectBrokerConfig(dependencies.home);
       if (serviceWasActive) {
@@ -1253,12 +1409,23 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
         toVersion,
         candidate.sha256,
         previousSha256,
+        // The version root and its environment file move with the binary, in the same write. A root left
+        // on disk without its receipt is the same defect a rollback used to leave behind, in a new place.
+        serviceVersion ? dependencies.service?.versions?.resources(serviceVersion.toVersionKey) ?? [] : [],
       ), dependencies.home);
       if (dependencies.faultAfter === 'receipt-committed') throw new Error('upgrade-fixture-interrupted');
       unlinkRegular(stagingPath);
       unlinkRegular(upgradeJournalPath(dependencies.home));
       // Only once the upgrade is committed, and only web roots no version in play still needs.
       if (javaScriptCandidate) pruneReleaseWebRoots(targetPath, [toVersion, fromVersion]);
+      // Strictly after the journal is gone: until that moment the superseded root is what a recovery
+      // would point the service back at. A superseded root is inert, so failing to remove one must never
+      // fail an upgrade that has already committed.
+      if (serviceVersion && dependencies.service?.versions) {
+        try {
+          await dependencies.service.versions.finalize(serviceVersion);
+        } catch { /* leave it for repair */ }
+      }
       return result('complete', 0, 'upgrade-complete', `Upgraded cosyncing from ${fromVersion} to ${toVersion}.`, fromVersion, recovered, toVersion);
     } catch (error) {
       if (!authorizationFenceWasActive
@@ -1282,14 +1449,43 @@ export async function runUpgrade(dependencies: UpgradeDependencies): Promise<Upg
       if (error instanceof Error && error.message === 'upgrade-fixture-interrupted') {
         return result('cleanup-required', 4, 'upgrade-interrupted', 'Upgrade was interrupted; the durable journal will restore the previous release on the next run.', fromVersion, recovered, toVersion);
       }
+      // Before anything is restored, because the candidate may still be alive: a health check fails when
+      // the candidate is slow as well as when it is broken, `start` on a running unit is a no-op on both
+      // systemd and launchd, and `versions.restore` below deletes the version root a live candidate is
+      // executing from. The failure is tolerated -- a service that will not stop must not by itself turn a
+      // rollback that can still put the binary and the pointer back into `cleanup-required`.
+      try {
+        if (serviceWasActive && dependencies.service) await dependencies.service.stop();
+      } catch { /* the restore below is still the best available outcome */ }
       let rollbackComplete = false;
       try {
         if (sha256(previousBytes) !== previousSha256) throw new Error('rollback-binary-mismatch');
         atomicWriteOwnerOnly(targetPath, previousBytes, { mode: 0o700 });
-        writeInstallState(installState, dependencies.home);
+        // Before the service is started, and for the same reason the activation had to precede it: a
+        // rollback that restored the binary and left the pointer would start the CANDIDATE and then
+        // report the previous release restored.
+        if (serviceVersion && dependencies.service?.versions) {
+          await dependencies.service.versions.restore(serviceVersion);
+        }
+        // The pre-upgrade state, minus the rollback copy this run overwrote and removes below. Restoring
+        // it unchanged would republish a receipt that measures bytes the copy no longer holds: after one
+        // successful upgrade `broker-binary-previous` names the build before THAT one, and this run wrote
+        // a different build over the same path.
+        writeInstallState(
+          previousWritten ? withoutPreviousBinaryReceipt(installState) : installState,
+          dependencies.home,
+        );
         if (serviceWasActive && dependencies.service) await dependencies.service.start();
         unlinkRegular(stagingPath);
+        // The journal goes before the rollback copy it names, for the same reason it does in recovery.
         unlinkRegular(upgradeJournalPath(dependencies.home));
+        // Nothing owns either of these once the previous release is back: the restored receipt is the one
+        // from before the upgrade, and it names neither. Leaving them is how `uninstall` came to report a
+        // clean removal while a stale binary copy and a whole web root survived under the state home.
+        if (previousWritten) unlinkRegular(previousPath);
+        try {
+          removeOwnedDirectory(abandonedCandidateWebRoot(targetPath, toVersion));
+        } catch { /* an unreferenced web root is inert; never fail a completed rollback for one */ }
         rollbackComplete = true;
       } catch {
         rollbackComplete = false;

@@ -113,12 +113,21 @@ Re-run the installer for the new release, then re-run `setup` so cosyncing copie
 into its managed service and reconciles the installation. An install placed this way is owned by
 cosyncing rather than by a package manager, so npm's update path does not apply to it.
 
-On Windows, that is the only update path today. `cosyncing upgrade` replaces the application the
-installer placed, but the Scheduled Task runs its own versioned copy under
-`%COSYNCING_HOME%\service\windows\versions\`, which only `setup` writes — so the post-switch health
-check still sees the old version and the upgrade rolls itself back. Nothing is left broken when it
-does: the previous application is restored and the running broker keeps serving. Installer plus
-`setup` is the supported sequence until that is closed.
+`cosyncing upgrade` is the other way, on Windows as everywhere else. It downloads the next signed
+release, verifies it, switches the application and health-checks the result, restoring the previous
+build if that check fails.
+
+Windows takes one extra step inside that sequence, because the Scheduled Task does not run
+`%COSYNCING_HOME%\bin\cosyncing` — it runs a versioned copy under
+`%COSYNCING_HOME%\service\windows\versions\`. `upgrade` writes the new version root and points the
+service at it before restarting, so the broker the health check talks to is the build the swap
+installed. A candidate that fails the check is rolled back pointer and all, so the restored service is
+the previous build; an interrupted upgrade is undone the same way on the next run.
+
+That step did not exist in 0.5.1, so every upgrade from it rolls itself back and this page used to name
+installer-plus-`setup` as the only Windows update path. Nothing is broken when it does — the previous
+build is restored and the broker keeps serving — but from a 0.5.1 install, update once with the
+installer and `upgrade` works from there.
 
 ## Verifying by hand
 

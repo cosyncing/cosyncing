@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import {
+  inspectWindowsActiveInstall,
   parseWindowsActiveInstallManifest,
   parseWindowsServiceEnvironment,
   windowsActiveInstallManifest,
+  windowsServiceActiveManifestPath,
   windowsServiceEnvironment,
   windowsServiceInstallPaths,
   windowsServiceVersionKey,
+  writeWindowsActiveInstall,
 } from '../../src/installation/windows-service-install.ts';
 import { windowsPowerShellChildEnvironment } from '../../../adapter-api/src/host-process.ts';
 import {
@@ -34,8 +37,10 @@ import {
 } from '../../src/installation/windows-task-scheduler-powershell.ts';
 import {
   WindowsTaskSchedulerServiceProvider,
+  removeWindowsServiceVersionRoot,
   windowsFilesystemReceiptMatches,
   windowsPriorVersionReceiptTarget,
+  windowsServiceVersionResources,
 } from '../../src/installation/windows-task-scheduler-provider.ts';
 import type { InstalledResourceRecord } from '../../src/installation/install-state.ts';
 import {
@@ -54,6 +59,7 @@ import {
   writeBrokerConfig,
 } from '../../src/runtime/configuration.ts';
 import { embeddedRuntimeAsset } from '../../src/runtime/runtime-assets.ts';
+import { ensureOwnerOnlyDirectory } from '../../src/security/secure-files.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
 
@@ -964,6 +970,177 @@ function check(name: string, ok: boolean, detail?: string): void {
   check('an inspection that throws after classifying leaves unknown, not the previous owned verdict',
     threw && afterFailure.definition === 'unknown' && afterFailure.environment === 'unknown',
     `threw=${threw} ${afterFailure.definition}/${afterFailure.environment}`);
+}
+
+// ---- Moving a live install from one version root to the next --------------------------------------
+//
+// `upgrade` replaces `<home>\bin\cosyncing` and restarts the service. The Scheduled Task does not exec
+// that file: it execs a bootstrap that reads `active-install.json` at every start and runs the version
+// root named there. These pin the three pieces an upgrade needs to move the service with the binary --
+// a pointer path that does not need a version key to be resolved, the receipts that move with a root,
+// and a removal that refuses anything not provably one of ours.
+{
+  const home = 'C:\\Users\\Fixture\\.cosyncing';
+  const versionsRoot = windowsServiceInstallPaths(home, 'version-1').versionsRoot;
+  check('the pointer file resolves without a version key, and to the same path the layout gives it',
+    windowsServiceActiveManifestPath(home) === windowsServiceInstallPaths(home, 'version-1').activeManifestPath
+      && windowsServiceActiveManifestPath(home)
+        === windowsServiceInstallPaths(home, 'a-completely-different-key').activeManifestPath,
+    windowsServiceActiveManifestPath(home));
+
+  // The bootstrap and the pointer are absent on purpose: neither target carries a version key, so an
+  // upgrade that activates a new root leaves both receipts exactly as setup wrote them.
+  const moved = windowsServiceVersionResources(home, 'version-2');
+  check('exactly the version root and its environment file move with a version key',
+    moved.map((resource) => `${resource.id}:${resource.ownership.marker}`).join(',')
+      === 'service-windows-version:version-2,service-environment:version-2'
+      && moved[0]?.target === `${versionsRoot}\\version-2`
+      && moved[1]?.target === `${versionsRoot}\\version-2\\environment.json`,
+    moved.map((resource) => resource.target).join(','));
+
+  check('a root outside the versions directory, below it, or currently active is never removed',
+    !removeWindowsServiceVersionRoot({
+      versionsRoot, target: `${home}\\service\\windows`, activeVersionRoot: `${versionsRoot}\\version-2`,
+    })
+      && !removeWindowsServiceVersionRoot({
+        versionsRoot, target: `${versionsRoot}\\version-1\\web`, activeVersionRoot: `${versionsRoot}\\version-2`,
+      })
+      && !removeWindowsServiceVersionRoot({
+        versionsRoot, target: `${versionsRoot}\\version-2`, activeVersionRoot: `${versionsRoot}\\version-2`,
+      }));
+}
+
+// The removal itself needs a real filesystem addressed by real Windows paths, which only exists here.
+if (process.platform === 'win32') {
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-windows-supersede-'));
+  const superseded = windowsServiceInstallPaths(home, 'version-1');
+  const active = windowsServiceInstallPaths(home, 'version-2');
+  ensureOwnerOnlyDirectory(superseded.webRoot);
+  ensureOwnerOnlyDirectory(active.webRoot);
+  const removed = removeWindowsServiceVersionRoot({
+    versionsRoot: superseded.versionsRoot,
+    target: superseded.versionRoot,
+    activeVersionRoot: active.versionRoot,
+  });
+  check('a superseded version root and everything under it go, and the active one stays',
+    removed && !existsSync(superseded.versionRoot) && existsSync(active.webRoot),
+    `${removed}/${existsSync(superseded.versionRoot)}/${existsSync(active.webRoot)}`);
+  rmSync(home, { recursive: true, force: true });
+}
+
+// The lifecycle seam `upgrade` drives, against a real pointer file. Windows-only for the same reason the
+// removal above is: the layout is addressed with `win32` paths, which name nothing on a POSIX filesystem.
+if (process.platform === 'win32') {
+  const { createLifecycleServiceVersions } = await import('../../src/installation/broker-lifecycle.ts');
+  const home = mkdtempSync(join(tmpdir(), 'cosyncing-windows-versions-'));
+  const candidate = {
+    version: '2.0.0', commit: 'cafe1234', buildDate: '2026-09-04T00:00:00.000Z',
+    target: 'universal', dirty: false, distribution: 'bootstrap-js' as const,
+  };
+  const options = {
+    home,
+    buildInfo: { version: '1.0.0' } as never,
+    executablePath: join(home, 'bin', 'cosyncing'),
+    context: { platform: 'win32' } as never,
+  };
+  const missing = createLifecycleServiceVersions(options)?.plan(candidate);
+  check('no pointer means no versioned install to move, and an upgrade there is the binary swap it was',
+    missing === undefined, String(missing));
+
+  writeWindowsActiveInstall(
+    windowsServiceActiveManifestPath(home),
+    windowsActiveInstallManifest('install-live', 'version-1'),
+  );
+  const versions = createLifecycleServiceVersions(options);
+  const activation = versions?.plan(candidate);
+  check('the plan reads the live pointer and keys the candidate by the candidate own build terms',
+    activation?.record.installationId === 'install-live'
+      && activation?.record.fromVersionKey === 'version-1'
+      && activation?.record.toVersionKey === windowsServiceVersionKey(candidate),
+    JSON.stringify(activation?.record));
+
+  const supersededRoot = windowsServiceInstallPaths(home, 'version-1').versionRoot;
+  const candidateRoot = windowsServiceInstallPaths(home, activation!.record.toVersionKey).versionRoot;
+  ensureOwnerOnlyDirectory(supersededRoot);
+  ensureOwnerOnlyDirectory(candidateRoot);
+  writeWindowsActiveInstall(
+    windowsServiceActiveManifestPath(home),
+    windowsActiveInstallManifest('install-live', activation!.record.toVersionKey),
+  );
+  await versions!.restore(activation!.record);
+  const restored = inspectWindowsActiveInstall(windowsServiceActiveManifestPath(home));
+  check('restore points the service back and drops the candidate root, leaving the one it returns to',
+    restored.status === 'ok' && restored.manifest.versionKey === 'version-1'
+      && !existsSync(candidateRoot) && existsSync(supersededRoot),
+    `${restored.status}/${existsSync(candidateRoot)}/${existsSync(supersededRoot)}`);
+
+  ensureOwnerOnlyDirectory(candidateRoot);
+  await versions!.finalize(activation!.record);
+  check('finalize drops the superseded root and never the one the record moved to',
+    !existsSync(supersededRoot) && existsSync(candidateRoot),
+    `${existsSync(supersededRoot)}/${existsSync(candidateRoot)}`);
+
+  check('the receipts the seam commits are the ones the provider itself writes for that key',
+    JSON.stringify(versions!.resources(activation!.record.toVersionKey))
+      === JSON.stringify(windowsServiceVersionResources(home, activation!.record.toVersionKey)));
+  rmSync(home, { recursive: true, force: true });
+}
+
+{
+  // `upgrade` moves the service to a new version root without rewriting a scheduled task whose definition
+  // has not changed. `installDefinition` still routes through the same writer, so there is one definition
+  // of what a version root is rather than a private copy in the upgrade path.
+  const sid = 'S-1-5-21-7-8-9-1001';
+  let staged = 0;
+  const operations: string[] = [];
+  let snapshot: Record<string, unknown> = { currentUserSid: sid };
+  const provider = new WindowsTaskSchedulerServiceProvider({
+    context: { platform: 'win32' } as never,
+    homeDir: 'C:\\Users\\Fixture',
+    stateHome: 'C:\\Users\\Fixture\\.cosyncing',
+    installationId: 'install-stage-version',
+    versionKey: 'version-2',
+    cacheRoot: 'C:\\Users\\Fixture\\AppData\\Local\\cosyncing-cache',
+    executablePath: 'C:\\Acquisition\\cosyncing',
+    acquisitionExecutablePath: 'C:\\Acquisition\\cosyncing',
+    distribution: 'bun-js',
+    runtimePath: 'C:\\Tools\\bun.exe',
+    webDir: 'C:\\Acquisition\\web',
+    environmentEntries: [['COSYNCING_HOME', 'C:\\Users\\Fixture\\.cosyncing']],
+    backend: new WindowsTaskSchedulerPowerShellBackend({
+      execute(operation, input) {
+        operations.push(operation);
+        if (operation === 'current-user') return { currentUserSid: sid };
+        if (operation === 'reconcile') {
+          snapshot = {
+            currentUserSid: sid,
+            shared: { path: input.sharedPath, sddl: input.expectedSddl, childFolders: [sid], tasks: [] },
+            sidFolder: {
+              path: input.sidFolderPath, sddl: input.expectedSddl, childFolders: [],
+              tasks: [{ name: 'Broker', ownershipMarker: input.ownershipMarker }],
+            },
+            task: {
+              path: input.taskPath, ownershipMarker: input.ownershipMarker,
+              definition: structuredClone(input.definition), taskSddl: input.expectedSddl,
+              enabled: 'enabled', active: 'inactive', lastResult: 0, xml: '<Task/>',
+            },
+          };
+        }
+        return structuredClone(snapshot);
+      },
+    }),
+    environmentState: () => 'current',
+    stageFiles: () => { staged += 1; },
+    filesystemState: () => 'current',
+  });
+  await provider.stageVersion();
+  const stagedAlone = staged;
+  const schedulerAfterStage = operations.filter((operation) => operation !== 'current-user');
+  await provider.installDefinition();
+  check('stageVersion writes a version root and touches no scheduler object; installDefinition uses it',
+    stagedAlone === 1 && schedulerAfterStage.length === 0
+      && staged === 2 && operations.includes('reconcile'),
+    `staged=${stagedAlone}->${staged} scheduler=${operations.join(',')}`);
 }
 
 const failed = results.filter((result) => !result.ok);

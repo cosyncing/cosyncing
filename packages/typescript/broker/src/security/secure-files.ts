@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -15,7 +16,7 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { dirname, isAbsolute, parse, resolve } from 'node:path';
+import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import {
   createWindowsOwnerOnlyDirectory,
   enforceWindowsOwnerOnlyDacl,
@@ -162,6 +163,31 @@ export function enforceOwnerOnlyFile(target: string, mode = 0o600): void {
   } else {
     assertOwned(stat, target);
     chmodSync(target, mode);
+  }
+}
+
+/**
+ * Tighten an entire application-owned directory tree, node by node.
+ *
+ * A tree that arrives from somewhere else -- an unpacked archive, a directory a tool created inside one of
+ * ours -- carries the modes the tool chose and, on Windows, the ACEs its parent handed down. Inherited
+ * access is exactly what {@link inspectOwnerOnlyDirectory} rejects, so a tree that merely SITS inside an
+ * owner-only directory does not read as owner-only itself and never will until each node is given its own
+ * protected descriptor.
+ *
+ * Every node is visited: a directory whose children were skipped is a directory whose contents are still
+ * whatever produced them. Symlinks and anything that is neither a regular file nor a directory are refused
+ * rather than tightened, because tightening a link tightens whatever it points at.
+ */
+export function enforceOwnerOnlyTree(root: string): void {
+  ensureOwnerOnlyDirectory(root);
+  for (const name of readdirSync(root)) {
+    const child = join(root, name);
+    const stat = lstatSync(child);
+    if (stat.isSymbolicLink()) throw new SecurePathError('symlink', child);
+    if (stat.isDirectory()) enforceOwnerOnlyTree(child);
+    else if (stat.isFile()) enforceOwnerOnlyFile(child);
+    else throw new SecurePathError('not-file', child);
   }
 }
 
