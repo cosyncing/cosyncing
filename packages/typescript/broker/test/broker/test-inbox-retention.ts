@@ -2,10 +2,11 @@
 /**
  * Inbox retention acceptance.
  *
- * A delivered prompt attachment used to leak forever. Completion unlinks the
- * staging METADATA and leaves the bytes in `<cwd>/.cosyncing/inbox`, and an
- * inline attachment never had metadata at all, so the expiry sweep — which
- * walks the metadata tree — never listed an inbox directory at all.
+ * A delivered prompt attachment used to leak forever. Completion renames the
+ * bytes into `<cwd>/.cosyncing/inbox` and rewrites the record to point there;
+ * the prompt turn that consumes it then deletes the record and leaves the
+ * bytes. An inline attachment never had a record at all. Either way the expiry
+ * sweep — which walks the metadata tree — never listed an inbox directory.
  *
  * Fixed in place here: the three bounds (age, bytes, count), the four
  * never-delete rules, and the boundedness of the sweep itself.
@@ -24,7 +25,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PROMPT_ATTACHMENT_LIMITS } from '../../../protocol/src/index.ts';
-import { scopedUploadIdentity, UploadStaging } from '../../src/artifacts/upload-staging.ts';
+import {
+  INBOX_PROTECTED_RECORD_CAP,
+  scopedUploadIdentity,
+  UploadStaging,
+} from '../../src/artifacts/upload-staging.ts';
 
 let passed = 0;
 
@@ -401,6 +406,40 @@ try {
     check(
       'a live workspace with no inbox is neither registered nor given one',
       roots.length === 1 && roots[0]!.endsWith('adopt-leaked') && !existsSync(bare.inbox),
+    );
+  }
+
+  // 12 — past the protected-record cap the sweep aborts, and says so.
+  //
+  // An aborted sweep collects nothing, which on its own looks exactly like an
+  // inbox with nothing to collect. The result has to distinguish them: a host
+  // whose record tree has grown past the cap is not collecting at all, and the
+  // runtime logs that rather than staying silent.
+  {
+    const capHome = join(root, 'cap-abort-state');
+    const staging = new UploadStaging({ home: capHome });
+    const ws = workspace('cap-abort');
+    const delivered = deliverInline(staging, 'cap-abort', ws.cwd, 'aged.txt', 'aged');
+    age(delivered, RETENTION_MS + DAY_MS);
+
+    const bulk = join(capHome, 'uploads', 'bulk-tool', 'bulk-session');
+    mkdirSync(bulk, { recursive: true });
+    // Content is irrelevant: the cap counts `.json` names before any read, and
+    // an unreadable record protects nothing anyway.
+    for (let i = 0; i <= INBOX_PROTECTED_RECORD_CAP; i += 1) {
+      writeFileSync(join(bulk, `bulk-${i}.json`), '{}');
+    }
+    const aborted = staging.sweepInboxes();
+    check(
+      'past the protected-record cap the sweep aborts and reports it',
+      aborted.aborted && aborted.removed === 0 && existsSync(delivered),
+    );
+
+    rmSync(bulk, { recursive: true, force: true });
+    const resumed = staging.sweepInboxes();
+    check(
+      'the same inbox is collected once the record tree is back under the cap',
+      !resumed.aborted && resumed.removed === 1 && !existsSync(delivered),
     );
   }
 

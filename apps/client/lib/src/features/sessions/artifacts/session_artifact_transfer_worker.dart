@@ -1054,6 +1054,40 @@ class SessionArtifactTransferWorker {
     return userFacingMessage(error, lead: "Couldn't upload this file.");
   }
 
+  /// The ledger's staging state for [transferId], or null for a fresh start.
+  ///
+  /// A download keeps its transfer id across attempts — `retryTransfer` reuses
+  /// the row — so the `.part` file and the validators it was fetched with
+  /// outlive a cancel, a failure and an app restart. Null when the row has no
+  /// partial file: the loop then truncates whatever it finds and starts at 0.
+  SessionFileDownloadCheckpoint? _downloadCheckpoint(String transferId) {
+    final transfer = transferController.transferById(transferId);
+    final partialFilePath = transfer?.partialFilePath;
+    if (transfer == null || partialFilePath == null) return null;
+    return SessionFileDownloadCheckpoint(
+      partialFilePath: partialFilePath,
+      bytesTransferred: transfer.bytesTransferred ?? 0,
+      totalBytes: transfer.totalBytes,
+      etag: transfer.downloadEtag,
+      lastModified: transfer.downloadLastModified,
+    );
+  }
+
+  /// Commits one staging checkpoint to the durable ledger.
+  Future<void> _commitDownloadCheckpoint(
+    String transferId,
+    SessionFileDownloadCheckpoint checkpoint,
+  ) {
+    return transferController.updateDownloadCheckpoint(
+      id: transferId,
+      partialFilePath: checkpoint.partialFilePath,
+      bytesTransferred: checkpoint.bytesTransferred,
+      totalBytes: checkpoint.totalBytes,
+      etag: checkpoint.etag,
+      lastModified: checkpoint.lastModified,
+    );
+  }
+
   Future<SessionArtifactTransferWorkerResult> _runSessionFileDownload({
     required String transferId,
     required SessionDetailKey sessionKey,
@@ -1093,7 +1127,6 @@ class SessionArtifactTransferWorker {
 
     try {
       cancellationToken.throwIfCanceled();
-      final transfer = transferController.transferById(transferId);
       final cached = fileService is ResumableSessionArtifactFileService
           ? await (fileService as ResumableSessionArtifactFileService)
                 .cacheSessionFileResumable(
@@ -1102,24 +1135,9 @@ class SessionArtifactTransferWorker {
                   path: path,
                   fileName: fileName,
                   mimeType: mimeType,
-                  checkpoint: transfer?.partialFilePath == null
-                      ? null
-                      : SessionFileDownloadCheckpoint(
-                          partialFilePath: transfer!.partialFilePath!,
-                          bytesTransferred: transfer.bytesTransferred ?? 0,
-                          totalBytes: transfer.totalBytes,
-                          etag: transfer.downloadEtag,
-                          lastModified: transfer.downloadLastModified,
-                        ),
+                  checkpoint: _downloadCheckpoint(transferId),
                   onCheckpoint: (checkpoint) =>
-                      transferController.updateDownloadCheckpoint(
-                        id: transferId,
-                        partialFilePath: checkpoint.partialFilePath,
-                        bytesTransferred: checkpoint.bytesTransferred,
-                        totalBytes: checkpoint.totalBytes,
-                        etag: checkpoint.etag,
-                        lastModified: checkpoint.lastModified,
-                      ),
+                      _commitDownloadCheckpoint(transferId, checkpoint),
                   cancellationToken: cancellationToken,
                   onProgress: ({required bytesTransferred, totalBytes}) {
                     cancellationToken.throwIfCanceled();
@@ -1250,6 +1268,9 @@ class SessionArtifactTransferWorker {
       cancellationToken.throwIfCanceled();
       final cached = await fileService.cacheArtifact(
         descriptor,
+        checkpoint: _downloadCheckpoint(transferId),
+        onCheckpoint: (checkpoint) =>
+            _commitDownloadCheckpoint(transferId, checkpoint),
         cancellationToken: cancellationToken,
         onProgress: ({required bytesTransferred, totalBytes}) {
           cancellationToken.throwIfCanceled();
@@ -1385,6 +1406,9 @@ class SessionArtifactTransferWorker {
       cancellationToken.throwIfCanceled();
       final cached = await fileService.cacheArtifact(
         descriptor,
+        checkpoint: _downloadCheckpoint(transferId),
+        onCheckpoint: (checkpoint) =>
+            _commitDownloadCheckpoint(transferId, checkpoint),
         cancellationToken: cancellationToken,
         onProgress: ({required bytesTransferred, totalBytes}) {
           cancellationToken.throwIfCanceled();

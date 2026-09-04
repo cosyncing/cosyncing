@@ -61,7 +61,7 @@ const INBOX_ROOT_REGISTRY_CAP = 256;
  * incomplete never-delete set is indistinguishable from an empty one at the
  * unlink, so reaching it aborts the sweep instead of shortening it.
  */
-const INBOX_PROTECTED_RECORD_CAP = 8192;
+export const INBOX_PROTECTED_RECORD_CAP = 8192;
 
 export class UploadError extends Error {
   constructor(
@@ -128,6 +128,15 @@ export interface InboxSweepResult {
   dropped: number;
   /** Roots refused because the inbox no longer resolves to itself. */
   refused: number;
+  /**
+   * The protected set could not be built past {@link INBOX_PROTECTED_RECORD_CAP},
+   * so the sweep collected nothing.
+   *
+   * A sweep that never ran and a sweep that found nothing to collect are the
+   * same all-zero result otherwise, and the caller has to be able to tell them
+   * apart: the first one means this host is not collecting at all.
+   */
+  aborted: boolean;
 }
 
 /** The durable set of session cwds whose inboxes are in scope for collection. */
@@ -1124,10 +1133,12 @@ export class UploadStaging {
   /**
    * Collect delivered prompt attachments out of the session inboxes.
    *
-   * A delivered attachment used to leak forever. Completion unlinks the staging
-   * METADATA and leaves the bytes in `<cwd>/.cosyncing/inbox`, and an inline
-   * attachment never had metadata at all, so {@link sweepExpired} — which walks
-   * the metadata tree — never listed an inbox directory at all.
+   * A delivered attachment used to leak forever. Completion renames the bytes
+   * into `<cwd>/.cosyncing/inbox` and rewrites the record to point there; the
+   * prompt turn that consumes it then deletes the record and leaves the bytes.
+   * An inline attachment never had a record at all. Either way {@link
+   * sweepExpired} — which walks the metadata tree — never listed an inbox
+   * directory.
    *
    * Nothing here is rewritten or truncated. The attachment was read, or its
    * path passed, in the prompt turn that delivered it; a later read of a
@@ -1148,7 +1159,7 @@ export class UploadStaging {
     options: { liveCwds?: () => Iterable<string> } = {},
   ): InboxSweepResult {
     const result: InboxSweepResult = {
-      roots: 0, scanned: 0, removed: 0, bytes: 0, dropped: 0, refused: 0,
+      roots: 0, scanned: 0, removed: 0, bytes: 0, dropped: 0, refused: 0, aborted: false,
     };
     if (this.inboxRetentionMs <= 0) return result;
 
@@ -1158,7 +1169,10 @@ export class UploadStaging {
     if (total === 0) return result;
 
     const protectedPaths = this.protectedInboxPaths(now);
-    if (!protectedPaths) return result;
+    if (!protectedPaths) {
+      result.aborted = true;
+      return result;
+    }
 
     const liveInboxes = new Set<string>();
     for (const cwd of options.liveCwds?.() ?? []) {

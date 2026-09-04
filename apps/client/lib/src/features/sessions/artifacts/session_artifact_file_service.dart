@@ -343,7 +343,7 @@ final class BrokerArtifactDownloadBackend
   }
 }
 
-/// Persisted state needed to continue one workspace-file download.
+/// Persisted state needed to continue one cached download.
 @immutable
 final class SessionFileDownloadCheckpoint {
   /// Creates a partial-file checkpoint.
@@ -486,8 +486,16 @@ typedef SessionArtifactProgressCallback =
 /// Contract for cache/export operations.
 abstract interface class SessionArtifactFileService {
   /// Caches artifact bytes in app writable storage.
+  ///
+  /// [checkpoint] continues a previous attempt's `.part` file; passing none
+  /// starts at byte 0 and truncates any partial the caller left behind, which
+  /// is what an implementation with no durable staging can do. [onCheckpoint]
+  /// is awaited after each flushed range, so the ledger commit lands before the
+  /// next one is requested.
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   });
@@ -614,6 +622,12 @@ final class BrowserSessionArtifactFileService
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    // Web has no `.part` file to continue: the bytes live in a bounded
+    // in-memory LRU that a reload discards, so there is never durable partial
+    // state for a checkpoint to describe. Accepted and ignored rather than
+    // unsupported, so the worker wires one call site for both platforms.
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) async {
@@ -1107,6 +1121,8 @@ final class DefaultSessionArtifactFileService
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) async {
@@ -1118,12 +1134,18 @@ final class DefaultSessionArtifactFileService
 
     // The chunked machinery already existed and was proven, so it is reused
     // here rather than reimplemented: bounded ranges, `If-Range` validation,
-    // and no whole-file buffering. It is NOT resumed across attempts — no
-    // checkpoint is threaded in, so each call starts at byte 0. Wiring the
-    // transfer ledger's checkpoint through, the way
-    // `cacheSessionFileResumable` does, is the separate piece of work.
+    // no whole-file buffering, and — with a [checkpoint] from the caller's
+    // ledger — the same continue-across-attempts behaviour the workspace path
+    // has. With no checkpoint each call still starts at byte 0.
+    //
+    // An inline `data:` artifact is not on the wire at all: its bytes are in
+    // the descriptor, there is nothing to range over, and the request would
+    // leave as an HTTP GET for a `data:` URL. It decodes locally, the way the
+    // browser service and the un-ranged path have always decoded it.
     final rangedBackend = switch (_downloadBackend) {
-      final ResumableSignedArtifactDownloadBackend value => value,
+      final ResumableSignedArtifactDownloadBackend value
+          when !descriptor.isInlineDataUrl =>
+        value,
       _ => null,
     };
     if (rangedBackend != null) {
@@ -1146,6 +1168,8 @@ final class DefaultSessionArtifactFileService
           contentType: resolvedMime ?? descriptor.mimeType,
         ),
         mimeType: descriptor.mimeType,
+        checkpoint: checkpoint,
+        onCheckpoint: onCheckpoint,
         cancellationToken: cancellationToken,
         onProgress: onProgress,
       );

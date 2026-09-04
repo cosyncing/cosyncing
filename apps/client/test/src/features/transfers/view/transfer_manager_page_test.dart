@@ -4005,6 +4005,8 @@ final class _NoopFileService implements SessionArtifactFileService {
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) {

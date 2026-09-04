@@ -540,6 +540,8 @@ class FakeControllerArtifactFileService implements SessionArtifactFileService {
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) async {

@@ -244,6 +244,110 @@ void main() {
       expect(transfer.error, isNull);
     });
 
+    test(
+      'downloadArtifact commits each artifact checkpoint to the ledger',
+      () async {
+        fileService
+          ..checkpointsToEmit = const [
+            SessionFileDownloadCheckpoint(
+              partialFilePath: '/cache/report.html.part',
+              bytesTransferred: 512,
+              totalBytes: 2048,
+              etag: '"artifact-v1"',
+            ),
+            SessionFileDownloadCheckpoint(
+              partialFilePath: '/cache/report.html.part',
+              bytesTransferred: 1536,
+              totalBytes: 2048,
+              etag: '"artifact-v1"',
+            ),
+          ]
+          ..mockCachedFile = const SessionArtifactCachedFile(
+            cachedFilePath: '/tmp/report.html',
+            fileName: 'report.html',
+            byteLength: 2048,
+          )
+          ..exportedPath = '/workspace/report.html';
+
+        await worker.downloadArtifact(
+          sessionKey: sessionKey,
+          descriptor: downloadDescriptor,
+          hasActiveBrokerClient: true,
+        );
+
+        // Nothing durable is left pointing at a `.part` that has already been
+        // renamed: the completed row clears the checkpoint it was committing.
+        final transfer = container
+            .read(sessionArtifactTransferControllerProvider)
+            .single;
+        expect(transfer.status, SessionArtifactTransferStatus.completed);
+        expect(transfer.partialFilePath, isNull);
+        expect(transfer.downloadEtag, isNull);
+        expect(fileService.receivedCheckpoints.single, isNull);
+      },
+    );
+
+    test(
+      'a retried artifact download resumes from the ledger checkpoint',
+      () async {
+        // The first attempt commits a checkpoint and then fails, exactly as a
+        // dropped connection part-way through a chunked download does.
+        fileService
+          ..checkpointsToEmit = const [
+            SessionFileDownloadCheckpoint(
+              partialFilePath: '/cache/report.html.part',
+              bytesTransferred: 1200,
+              totalBytes: 4096,
+              etag: '"artifact-v1"',
+              lastModified: 'Wed, 03 Sep 2026 10:00:00 GMT',
+            ),
+          ]
+          ..cacheFailure = Exception('connection lost');
+
+        final first = await worker.downloadArtifact(
+          sessionKey: sessionKey,
+          descriptor: downloadDescriptor,
+          hasActiveBrokerClient: true,
+        );
+        expect(first.outcome, SessionArtifactTransferWorkerOutcome.failed);
+
+        final failed = container
+            .read(sessionArtifactTransferControllerProvider)
+            .single;
+        expect(failed.partialFilePath, '/cache/report.html.part');
+        expect(failed.downloadEtag, '"artifact-v1"');
+
+        fileService
+          ..checkpointsToEmit = const []
+          ..cacheFailure = null
+          ..mockCachedFile = const SessionArtifactCachedFile(
+            cachedFilePath: '/tmp/report.html',
+            fileName: 'report.html',
+            byteLength: 4096,
+          )
+          ..exportedPath = '/workspace/report.html';
+
+        final retried = await worker.retryTransfer(
+          first.transferId,
+          hasActiveBrokerClient: true,
+        );
+
+        expect(retried.outcome, SessionArtifactTransferWorkerOutcome.completed);
+        // The second attempt is handed the first one's staging file and its
+        // validator, so the transport can ask for the byte it stopped at
+        // instead of starting over. The byte count itself is re-derived from
+        // the `.part` file — a requeue clears the row's progress so the UI does
+        // not report bytes the next attempt has not confirmed — which is what
+        // the workspace path has always done.
+        final resumed = fileService.receivedCheckpoints.last;
+        expect(resumed?.partialFilePath, '/cache/report.html.part');
+        expect(resumed?.etag, '"artifact-v1"');
+        expect(resumed?.lastModified, 'Wed, 03 Sep 2026 10:00:00 GMT');
+        expect(resumed?.bytesTransferred, 0);
+        expect(resumed?.totalBytes, isNull);
+      },
+    );
+
     test('downloadArtifact rejects a reference for another session', () async {
       const descriptor = SessionArtifactDescriptor(
         name: 'other.txt',
@@ -2385,6 +2489,17 @@ class _FakeSessionArtifactFileService implements SessionArtifactFileService {
   Completer<void>? cacheStarted;
   Completer<SessionArtifactCachedFile>? cacheCompleter;
   List<({int bytesTransferred, int? totalBytes})> progressSteps = const [];
+
+  /// Checkpoints the service should flush before returning, standing in for the
+  /// ranges a real chunked download commits as it goes.
+  List<SessionFileDownloadCheckpoint> checkpointsToEmit = const [];
+
+  /// Checkpoints the worker handed in, newest last — one per `cacheArtifact`.
+  final List<SessionFileDownloadCheckpoint?> receivedCheckpoints = [];
+
+  /// Raised after the checkpoints are flushed, for an attempt that dies
+  /// part-way with staging state already committed.
+  Exception? cacheFailure;
   int cacheCallCount = 0;
   int sessionFileCacheCallCount = 0;
   int exportCallCount = 0;
@@ -2394,10 +2509,18 @@ class _FakeSessionArtifactFileService implements SessionArtifactFileService {
   @override
   Future<SessionArtifactCachedFile> cacheArtifact(
     SessionArtifactDescriptor descriptor, {
+    SessionFileDownloadCheckpoint? checkpoint,
+    SessionFileDownloadCheckpointCallback? onCheckpoint,
     SessionArtifactCancellationToken? cancellationToken,
     SessionArtifactProgressCallback? onProgress,
   }) async {
     cacheCallCount++;
+    receivedCheckpoints.add(checkpoint);
+    for (final emitted in checkpointsToEmit) {
+      await onCheckpoint?.call(emitted);
+    }
+    final failure = cacheFailure;
+    if (failure != null) throw failure;
     for (final step in progressSteps) {
       onProgress?.call(
         bytesTransferred: step.bytesTransferred,
