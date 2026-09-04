@@ -1364,13 +1364,30 @@ const liveSessionCwds = (): string[] => hub
  */
 const sweepUploads = (): void => {
   uploadStaging.sweepExpired();
-  uploadStaging.sweepInboxes(Date.now(), { liveCwds: liveSessionCwds });
+  const inbox = uploadStaging.sweepInboxes(Date.now(), { liveCwds: liveSessionCwds });
+  // One line per sweep that did something, and a distinct one when the sweep
+  // aborted: an aborted sweep and an empty one are otherwise the same silence,
+  // and a host that is never collecting should not look like a tidy one.
+  if (inbox.aborted) {
+    console.warn(
+      `${LOG_PREFIX} inbox sweep skipped: too many staging records to build the protected set`,
+    );
+  } else if (inbox.removed > 0) {
+    console.log(
+      `${LOG_PREFIX} collected ${inbox.removed} delivered attachment(s), `
+      + `${inbox.bytes} byte(s), from ${inbox.roots} inbox(es)`,
+    );
+  }
 };
 const uploadGcTimer = setInterval(sweepUploads, 60 * 60 * 1000);
 uploadGcTimer.unref?.();
-// One sweep at start, deferred off the startup path — the constructor's own
-// `sweepExpired` already runs there and broker start does enough IO as it is.
-queueMicrotask(sweepUploads);
+// One sweep at start, off the startup path for real: a microtask would run at
+// the next await of module evaluation, still ahead of `Bun.serve` below, and
+// this sweep is synchronous fs work. The constructor's own `sweepExpired`
+// already runs at start and broker start does enough IO as it is. Unref'd, so
+// it never holds the process open on its own.
+const startupSweepTimer = setTimeout(sweepUploads, 5_000);
+startupSweepTimer.unref?.();
 // Claude live-sync via HOOKS (Tier-1; replaces the archived claude/channel). An in-session PreToolUse hook
 // relays permission/question prompts here and blocks for the phone's answer. Same adopt/evict lifecycle.
 const claudeHooks = new ClaudeHooksRegistry(
@@ -7112,6 +7129,7 @@ async function shutdownBroker(reason = 'requested'): Promise<void> {
     clearInterval(tokdashQuotaTimer);
     clearInterval(piBridgeSweepTimer);
     clearInterval(uploadGcTimer);
+    clearTimeout(startupSweepTimer);
     for (const timer of scheduledConnectionReleaseTimers) clearInterval(timer);
     scheduledConnectionReleaseTimers.clear();
     for (const unsubscribe of sessionInfoWatchers) {

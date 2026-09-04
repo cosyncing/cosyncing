@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PROMPT_ATTACHMENT_LIMITS } from '../../../protocol/src/index.ts';
@@ -59,6 +59,30 @@ async function expectAsyncUploadError(
   } catch (error) {
     check(name, error instanceof UploadError && error.code === code);
   }
+}
+
+/**
+ * Move a staging home's one record past its deadline.
+ *
+ * The record is FOUND rather than constructed: `<home>/uploads/<tool>/<session>`
+ * are hashed segments the staging owns, and a test that rebuilds that layout
+ * would be asserting the hash rather than the expiry.
+ */
+function expireStagingRecord(home: string): void {
+  const uploads = join(home, 'uploads');
+  for (const tool of readdirSync(uploads)) {
+    for (const session of readdirSync(join(uploads, tool))) {
+      const sessionRoot = join(uploads, tool, session);
+      for (const name of readdirSync(sessionRoot)) {
+        if (!name.endsWith('.json')) continue;
+        const path = join(sessionRoot, name);
+        const record = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+        writeFileSync(path, JSON.stringify({ ...record, expiresAt: Date.now() - 1 }));
+        return;
+      }
+    }
+  }
+  throw new Error('FAIL: no staging record to expire');
 }
 
 const root = mkdtempSync(join(tmpdir(), 'cosyncing-staged-prompt-'));
@@ -416,11 +440,8 @@ try {
     'UPLOAD_TOO_LARGE',
   );
 
-  const expiring = new UploadStaging({
-    home: join(root, 'expiring-state'),
-    maxBytes: 1024,
-    ttlMs: 1,
-  });
+  const expiringHome = join(root, 'expiring-state');
+  const expiring = new UploadStaging({ home: expiringHome, maxBytes: 1024 });
   const expiringInit = expiring.init(
     {
       tool: 'pi',
@@ -439,7 +460,12 @@ try {
     Buffer.from('x'),
     identityA,
   );
-  await Bun.sleep(5);
+  // Expiry is FORCED, not waited out. A `ttlMs: 1` staging used to stand in for
+  // an expired one, which made the SETUP race the clock: on Windows the
+  // filesystem work between `init` and `patch` outlasts a 1 ms TTL, so the patch
+  // this case rests on threw `UPLOAD_EXPIRED` before the case began. Rewriting
+  // the record's own deadline asserts the same refusal with no timing in it.
+  expireStagingRecord(expiringHome);
   await expectAsyncUploadError(
     'expired staging is rejected and cleaned',
     () =>

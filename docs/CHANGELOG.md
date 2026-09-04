@@ -34,15 +34,16 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   owner only. This raises the broker contract to revision 20, so clients 0.5.1
   and earlier need the next client release before they can use a broker that
   carries it.
-- Artifact downloads are served in byte ranges. The broker answers `Range` on
-  artifact downloads, so any client that speaks it — `curl -C -`, a download
-  manager — can resume one. The app now pulls an artifact in 512 KiB chunks
-  instead of buffering the whole file, retries a failed chunk from where it
-  stopped, and resumes at the same offset when its download ticket has to be
-  refreshed mid-transfer. Each chunk is validated against the representation the
-  download started on, so a file that changed underneath restarts cleanly rather
-  than splicing two versions. Resuming *across* attempts — after you cancel, or
-  after the app is killed — is not in this release; the next attempt starts over.
+- Artifact downloads resume. The broker answers `Range` on artifact downloads,
+  so any client that speaks it — `curl -C -`, a download manager — can resume
+  one. The app pulls an artifact in 512 KiB chunks instead of buffering the whole
+  file, retries a failed chunk from where it stopped, and resumes at the same
+  offset when its download ticket has to be refreshed mid-transfer. It also
+  continues across attempts: cancel a download and retry it, or kill the app
+  and reopen it, and the next attempt asks for the byte the last one reached
+  rather than starting over. Each chunk is validated against the representation
+  the download started on, so a file that changed underneath restarts cleanly
+  rather than splicing two versions.
 - A file the agent sent you now carries a "Sent to you" badge in the transcript.
   Files you attached, and files the broker surfaced because the agent wrote them
   into the workspace, are not badged — the badge means the agent chose to hand

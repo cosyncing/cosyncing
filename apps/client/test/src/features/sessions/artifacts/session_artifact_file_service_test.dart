@@ -731,6 +731,224 @@ void main() {
         expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
       },
     );
+
+    test(
+      'an inline data URL artifact never reaches the ranged backend',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-inline-ranged',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final backend = _FakeRangedArtifactBackend(utf8.encode('unused'));
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        // The bytes are in the descriptor. A range request for a `data:` URL
+        // would leave as an HTTP GET and fail, so the range capability must not
+        // capture this path just because the backend advertises one.
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'note.txt',
+            url: 'data:text/plain;base64,aW5saW5lIGJ5dGVz',
+            mimeType: 'text/plain',
+          ),
+        );
+
+        expect(backend.rangeStarts, isEmpty);
+        expect(backend.wholeFetches, 0);
+        expect(
+          await File(cached.cachedFilePath).readAsString(),
+          'inline bytes',
+        );
+      },
+    );
+
+    test(
+      'an artifact download continues a previous attempt from its checkpoint',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-resume-attempt',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(4096, (index) => index % 197);
+        // What the cancelled first attempt left behind.
+        final partial = File('${workDir.path}/report.bin.part');
+        await partial.writeAsBytes(bytes.take(1500).toList(), flush: true);
+        final backend = _FakeRangedArtifactBackend(bytes);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            fetchUrl: 'https://broker/sessions/unit/artifact/ranged',
+            mimeType: 'application/octet-stream',
+          ),
+          checkpoint: SessionFileDownloadCheckpoint(
+            partialFilePath: partial.path,
+            bytesTransferred: 1500,
+            totalBytes: bytes.length,
+            etag: '"v1"',
+          ),
+        );
+
+        // The second attempt asks for the byte the first one stopped at, under
+        // the first attempt's validator, and byte 0 is never re-fetched.
+        expect(backend.rangeStarts.first, 1500);
+        expect(backend.rangeStarts, isNot(contains(0)));
+        expect(backend.ifRanges.first, '"v1"');
+        expect(backend.wholeFetches, 0);
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+      },
+    );
+
+    test(
+      'an artifact replaced between attempts restarts clean rather than '
+      'splicing',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-resume-stale',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(4096, (index) => index % 193);
+        final partial = File('${workDir.path}/report.bin.part');
+        // 1500 bytes of a DIFFERENT representation than the one now served.
+        await partial.writeAsBytes(List<int>.filled(1500, 7), flush: true);
+        final backend = _FakeRangedArtifactBackend(bytes);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final checkpoints = <SessionFileDownloadCheckpoint>[];
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            fetchUrl: 'https://broker/sessions/unit/artifact/ranged',
+            mimeType: 'application/octet-stream',
+          ),
+          checkpoint: SessionFileDownloadCheckpoint(
+            partialFilePath: partial.path,
+            bytesTransferred: 1500,
+            totalBytes: 1500 + 10,
+            etag: '"v0"',
+          ),
+          onCheckpoint: (checkpoint) async => checkpoints.add(checkpoint),
+        );
+
+        // The stale validator is offered once, refused, and the partial is
+        // truncated: the bytes on disk are the new representation whole, never
+        // the old prefix with the new tail appended.
+        expect(backend.ifRanges.first, '"v0"');
+        expect(backend.rangeStarts, contains(0));
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+        expect(checkpoints.first.bytesTransferred, 0);
+        expect(checkpoints.last.bytesTransferred, bytes.length);
+        expect(
+          checkpoints.every(
+            (checkpoint) => checkpoint.partialFilePath == partial.path,
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'an artifact download with no checkpoint starts clean and leaves a '
+      'stray partial alone',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-resume-none',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(2048, (index) => index % 251);
+        // A partial nobody named in a checkpoint has no validator behind it and
+        // may belong to another attempt, so a checkpoint-less call neither
+        // continues it nor overwrites it. The browser service and the direct
+        // callers pass none, and they must keep getting a whole file.
+        final stray = File('${workDir.path}/report.bin.part');
+        final strayBytes = List<int>.filled(900, 3);
+        await stray.writeAsBytes(strayBytes, flush: true);
+        final backend = _FakeRangedArtifactBackend(bytes);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            fetchUrl: 'https://broker/sessions/unit/artifact/ranged',
+            mimeType: 'application/octet-stream',
+          ),
+        );
+
+        expect(backend.rangeStarts.first, 0);
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+        expect(await stray.readAsBytes(), strayBytes);
+      },
+    );
+
+    test(
+      'an artifact checkpoint with no validator truncates its partial',
+      () async {
+        final workDir = await Directory.systemTemp.createTemp(
+          'artifact-resume-unvalidated',
+        );
+        addTearDown(() {
+          if (workDir.existsSync()) workDir.deleteSync(recursive: true);
+        });
+
+        final bytes = List<int>.generate(2048, (index) => index % 241);
+        final partial = File('${workDir.path}/report.bin.part');
+        await partial.writeAsBytes(List<int>.filled(900, 3), flush: true);
+        final backend = _FakeRangedArtifactBackend(bytes);
+        final service = DefaultSessionArtifactFileService(
+          downloadBackend: backend,
+          cacheDirectoryProvider: _FakeArtifactCacheDirectoryProvider(workDir),
+          saveTargetProvider: _FakeArtifactSaveTargetProvider(),
+        );
+
+        // Bytes on disk with no ETag and no Last-Modified cannot be proven to
+        // belong to the representation now being served, so they are discarded
+        // rather than resumed onto.
+        final cached = await service.cacheArtifact(
+          const SessionArtifactDescriptor(
+            name: 'report.bin',
+            fetchUrl: 'https://broker/sessions/unit/artifact/ranged',
+            mimeType: 'application/octet-stream',
+          ),
+          checkpoint: SessionFileDownloadCheckpoint(
+            partialFilePath: partial.path,
+            bytesTransferred: 900,
+          ),
+        );
+
+        expect(backend.rangeStarts, [0]);
+        expect(backend.ifRanges, [null]);
+        expect(await File(cached.cachedFilePath).readAsBytes(), bytes);
+      },
+    );
   });
 }
 

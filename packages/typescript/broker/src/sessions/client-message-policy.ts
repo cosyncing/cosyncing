@@ -126,15 +126,10 @@ export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput:
         'prompt image data is raw base64, without a data: prefix',
       );
     }
-    if (
-      data.length % 4 !== 0
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
-    ) {
-      throw new ClientMessagePolicyError(
-        'ATTACHMENT_INVALID',
-        'prompt image data is not canonical base64',
-      );
-    }
+    // Size before shape. Both bounds are arithmetic on the string's length and
+    // cost nothing, so an oversized entry is refused before the canonical-base64
+    // regex scans it — a 30 MB string used to be walked end to end on its way to
+    // being rejected anyway.
     encoded += data.length;
     if (encoded > PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes) {
       throw new ClientMessagePolicyError(
@@ -150,6 +145,15 @@ export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput:
       throw new ClientMessagePolicyError(
         'ATTACHMENT_LIMIT_EXCEEDED',
         `a prompt image is larger than ${PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes} bytes`,
+      );
+    }
+    if (
+      data.length % 4 !== 0
+      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+    ) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_INVALID',
+        'prompt image data is not canonical base64',
       );
     }
   }

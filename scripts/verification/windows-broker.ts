@@ -57,6 +57,24 @@ interface LaneSuite {
  * Windows" question for a survey to answer. Its render-time claims are on the Linux gate in
  * `test-release-supply-chain.ts`; what is HERE is the part only a Windows host can prove.
  *
+ * Measured again 2026-09-04, for the five suites the file-transfer lane added: all five pass natively
+ * on both Bun lanes, and together they cost about a minute of the fifteen. `test:broker-chunked-upload`
+ * is the only one worth naming — 24-33s, and it is spawning real brokers, which is the part of the
+ * upload protocol only a host can answer. Two things are not what the plain verdict suggests.
+ * `test:broker-staged-prompt-attachments` failed on both lanes at first, and the product was not what
+ * was wrong: the suite built an expired upload from a `ttlMs: 1` staging, so its own setup raced the
+ * clock and lost on Windows, where the `init`-to-`patch` filesystem work outlasts a millisecond. The
+ * deadline is forced now rather than waited out, which is why it is here rather than excluded. And
+ * `test:claude-artifacts` is the first member outside `test:broker*`: the survey enumerates that
+ * prefix, so it cannot reach an adapter suite, and its verdict was taken the same way -- 12/12 on both
+ * Bun lanes on the same staged tree -- just outside the survey's own loop.
+ *
+ * One observation that outlived the measurement: under the SURVEY harness on Bun 1.3.8,
+ * `test:broker-staged-prompt-attachments` wedged for its full 180s ceiling in two runs and then passed
+ * in 467ms in a third at the identical commit. Run directly on the same host with the survey's own
+ * environment it is 0.45s. That shape belongs to the survey's piped `Bun.spawn` and its bounded read,
+ * not to the suite or to this lane, which inherits stdio and never reads a child's pipe.
+ *
  * Nothing was pruned to get there, and nothing should be. The cost was never in the suite list, and
  * the cheap members are not passengers: `test:broker-protocol-journal` is 60ms of pure logic that
  * caught a real Windows defect -- a temp root built at a literal `/tmp`, which on Windows is the
@@ -102,6 +120,11 @@ const LANE: readonly LaneSuite[] = [
   { suite: 'test:broker-attention-bulk', area: 'attention dismissal' },
   { suite: 'test:broker-real-host-evidence', area: 'release evidence' },
   { suite: 'test:broker-install-ps1', area: 'the PowerShell installer' },
+  { suite: 'test:broker-chunked-upload', area: 'chunked upload' },
+  { suite: 'test:broker-staged-prompt-attachments', area: 'prompt attachments' },
+  { suite: 'test:broker-artifact-store-health', area: 'artifact store health' },
+  { suite: 'test:broker-inbox-retention', area: 'inbox collection' },
+  { suite: 'test:claude-artifacts', area: 'agent-to-user artifacts' },
 ];
 
 /**
