@@ -1065,9 +1065,26 @@ class BrokerClient {
   /// or a root-relative URL resolved against this client's broker. Current
   /// same-origin references carry the active broker credential; legacy
   /// cross-origin URLs never receive it.
-  Future<ArtifactDownload> fetchArtifactUrl(String url) async {
+  ///
+  /// The range and validator fields mirror [downloadSessionFile] exactly, so a
+  /// resumed artifact transfer and a resumed workspace transfer are the same
+  /// conversation. A refreshed signature retries at the SAME offset rather than
+  /// restarting: the signature TTL is shorter than a large download on a slow
+  /// link, so a refresh that restarted at byte 0 could never finish.
+  Future<ArtifactDownload> fetchArtifactUrl(
+    String url, {
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
+  }) async {
+    _assertArtifactRange(rangeStart, rangeEnd);
     try {
-      final response = await _getArtifactBytesWithRefresh(url);
+      final response = await _getArtifactBytesWithRefresh(
+        url,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
+      );
       final headers = response.headers;
 
       return ArtifactDownload(
@@ -1093,6 +1110,11 @@ class BrokerClient {
           ],
         ),
         sourceUrl: response.requestOptions.uri.toString(),
+        statusCode: response.statusCode ?? 200,
+        etag: headers.value('etag'),
+        lastModified: headers.value('last-modified'),
+        acceptRanges: headers.value('accept-ranges'),
+        contentRange: headers.value('content-range'),
       );
     } on DioException catch (e) {
       throw BrokerException(
@@ -1116,11 +1138,18 @@ class BrokerClient {
   Future<ArtifactDownload> fetchArtifactUrlBounded(
     String url, {
     required int maxBytes,
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
   }) async {
+    _assertArtifactRange(rangeStart, rangeEnd);
     try {
       final response = await _getArtifactBytesBoundedWithRefresh(
         url,
         maxBytes: maxBytes,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
       );
       final headers = response.headers;
       final advertised = _parseContentLength(headers.value('content-length'));
@@ -1157,6 +1186,11 @@ class BrokerClient {
           ],
         ),
         sourceUrl: response.requestOptions.uri.toString(),
+        statusCode: response.statusCode ?? 200,
+        etag: headers.value('etag'),
+        lastModified: headers.value('last-modified'),
+        acceptRanges: headers.value('accept-ranges'),
+        contentRange: headers.value('content-range'),
       );
     } on DioException catch (e) {
       throw BrokerException(
@@ -1390,10 +1424,20 @@ class BrokerClient {
     }
   }
 
-  Future<Response<List<int>>> _getArtifactBytesWithRefresh(String value) async {
+  Future<Response<List<int>>> _getArtifactBytesWithRefresh(
+    String value, {
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
+  }) async {
     final resolved = _resolveArtifactUrl(value);
     try {
-      return await _getArtifactBytes(resolved);
+      return await _getArtifactBytes(
+        resolved,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
+      );
     } on DioException catch (error) {
       if (error.response?.statusCode != 403) rethrow;
       final identity = _canonicalArtifactIdentity(resolved);
@@ -1412,17 +1456,33 @@ class BrokerClient {
           message: 'Broker returned an invalid artifact ticket',
         );
       }
-      return _getArtifactBytes(refreshedResolved);
+      // Re-issued at the SAME offset. A refresh that restarted at byte 0 would
+      // make a download longer than the signature TTL unfinishable.
+      return _getArtifactBytes(
+        refreshedResolved,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
+      );
     }
   }
 
   Future<Response<List<int>>> _getArtifactBytesBoundedWithRefresh(
     String value, {
     required int maxBytes,
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
   }) async {
     final resolved = _resolveArtifactUrl(value);
     try {
-      return await _getArtifactBytesBounded(resolved, maxBytes: maxBytes);
+      return await _getArtifactBytesBounded(
+        resolved,
+        maxBytes: maxBytes,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
+      );
     } on DioException catch (error) {
       if (error.response?.statusCode != 403) rethrow;
       final identity = _canonicalArtifactIdentity(resolved);
@@ -1441,19 +1501,69 @@ class BrokerClient {
           message: 'Broker returned an invalid artifact ticket',
         );
       }
+      // Same offset on the re-issued ticket; see the unbounded twin.
       return _getArtifactBytesBounded(
         refreshedResolved,
         maxBytes: maxBytes,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+        ifRange: ifRange,
       );
     }
   }
 
-  Future<Response<List<int>>> _getArtifactBytes(String path) async {
+  /// Validates a caller-supplied artifact range on the same terms as
+  /// [downloadSessionFile], so neither surface accepts what the other refuses.
+  static void _assertArtifactRange(int? rangeStart, int? rangeEnd) {
+    if (rangeStart != null && rangeStart < 0) {
+      throw ArgumentError.value(rangeStart, 'rangeStart', 'Must be >= 0.');
+    }
+    if (rangeEnd != null && (rangeStart == null || rangeEnd < rangeStart)) {
+      throw ArgumentError.value(
+        rangeEnd,
+        'rangeEnd',
+        'Requires rangeStart and must be >= rangeStart.',
+      );
+    }
+  }
+
+  /// Auth plus, when a resume asked for one, the byte range and its validator.
+  Map<String, String> _artifactRequestHeaders(
+    String path, {
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
+  }) {
+    return {
+      ..._artifactAuthHeaders(path),
+      if (rangeStart != null) 'range': 'bytes=$rangeStart-${rangeEnd ?? ''}',
+      if (ifRange != null && ifRange.trim().isNotEmpty)
+        'if-range': ifRange.trim(),
+    };
+  }
+
+  /// 416 is a legitimate answer to a resume whose representation shrank, so it
+  /// is read rather than thrown, exactly as the workspace download reads it.
+  static bool _artifactStatusAccepted(int? status) =>
+      status == 200 || status == 206 || status == 416;
+
+  Future<Response<List<int>>> _getArtifactBytes(
+    String path, {
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
+  }) async {
     return _dio.get<List<int>>(
       path,
       options: Options(
         responseType: ResponseType.bytes,
-        headers: _artifactAuthHeaders(path),
+        headers: _artifactRequestHeaders(
+          path,
+          rangeStart: rangeStart,
+          rangeEnd: rangeEnd,
+          ifRange: ifRange,
+        ),
+        validateStatus: _artifactStatusAccepted,
       ),
     );
   }
@@ -1461,6 +1571,9 @@ class BrokerClient {
   Future<Response<List<int>>> _getArtifactBytesBounded(
     String path, {
     required int maxBytes,
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
   }) async {
     final cancelToken = CancelToken();
     var overLimit = false;
@@ -1469,7 +1582,13 @@ class BrokerClient {
         path,
         options: Options(
           responseType: ResponseType.bytes,
-          headers: _artifactAuthHeaders(path),
+          headers: _artifactRequestHeaders(
+            path,
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd,
+            ifRange: ifRange,
+          ),
+          validateStatus: _artifactStatusAccepted,
         ),
         cancelToken: cancelToken,
         onReceiveProgress: (received, total) {

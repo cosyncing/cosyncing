@@ -379,6 +379,17 @@ export const PROMPT_ATTACHMENT_LIMITS = {
   cleanupBatchRecords: 64,
   maxRetainedClientFiles: 8,
   maxRetainedClientBytes: 64 * 1024 * 1024,
+  /**
+   * How long a delivered attachment stays in `<cwd>/.cosyncing/inbox`.
+   *
+   * Fourteen times `stagingTtlMs`, so an in-flight or just-referenced
+   * attachment is never in scope, and short enough that a screenshot does not
+   * sit in a git working tree for a quarter.
+   */
+  inboxRetentionMs: 14 * 24 * 60 * 60 * 1000,
+  /** Per-inbox ceilings. Over either, the oldest files are collected first. */
+  maxInboxBytes: 256 * 1024 * 1024,
+  maxInboxFiles: 200,
 } as const;
 
 /**
@@ -843,7 +854,11 @@ export type AgentMessage =
       contentHash?: string;
       /** Future lazy-artifact endpoint. Optional until artifact references are negotiated. */
       fetchUrl?: string;
-      /** agent flagged this as important / push-worthy */
+      /** The agent SENT this file to the user: the broker channel `send_file`, or a Claude
+       *  `SendUserFile` attachment. Absent on a file the broker surfaced from a workspace write,
+       *  and absent on a user attachment. The flag used to be stamped on every broker-synthesised
+       *  artifact, which made it unreadable — a `.md` the agent merely wrote looked identical to
+       *  one it handed over. */
       proactive?: boolean;
       /** The `key` of the user-message this artifact was SENT WITH. Present only on a user
        *  attachment (an image or file the user put on a prompt), never on something the agent

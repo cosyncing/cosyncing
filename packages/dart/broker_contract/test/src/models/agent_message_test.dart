@@ -653,6 +653,40 @@ void main() {
       expect(blank.isUserAttachment, isFalse);
       expect(wrongType.fileArtifactUserMessageKey, isNull);
     });
+
+    test(
+      'reads whether the agent sent the file, and tolerates its absence',
+      () {
+        final sent = AgentMessage.fromJson({
+          'type': 'file-artifact',
+          'artifactKey': 'artifact-1',
+          'name': 'report.pdf',
+          'proactive': true,
+        });
+        // An older broker omits the field entirely; a current one omits it on a
+        // file it merely surfaced. Both must decode, and neither is "sent".
+        final surfaced = AgentMessage.fromJson({
+          'type': 'file-artifact',
+          'artifactKey': 'artifact-2',
+          'name': 'notes.md',
+        });
+        final explicitlyFalse = AgentMessage.fromJson({
+          'type': 'file-artifact',
+          'artifactKey': 'artifact-3',
+          'proactive': false,
+        });
+        final wrongType = AgentMessage.fromJson({
+          'type': 'model-output',
+          'proactive': true,
+          'text': 'not an artifact',
+        });
+
+        expect(sent.fileArtifactProactive, isTrue);
+        expect(surfaced.fileArtifactProactive, isFalse);
+        expect(explicitlyFalse.fileArtifactProactive, isFalse);
+        expect(wrongType.fileArtifactProactive, isFalse);
+      },
+    );
   });
 
   group('typed session state messages', () {

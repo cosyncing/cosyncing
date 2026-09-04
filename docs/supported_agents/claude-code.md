@@ -38,7 +38,12 @@ Direct agent-to-user file delivery is not currently available from a local
 Claude CLI/Drive session because that mode does not expose the native
 `SendUserFile` tool. cosyncing can render a `SendUserFile` record when one is
 already present in a Claude transcript, but the installed skill cannot create
-one. Leave generated files in the workspace; do not use a shared
-`.cosyncing/outbox` directory.
+one.
+
+Ask Claude to write the file into the workspace instead. A successful Write of a
+deliverable inside the session's own directory is surfaced as a downloadable
+file artifact on that session, bound to the write that produced it. Source
+churn, a write outside the session directory, and a write that failed all
+surface nothing. Do not use a shared `.cosyncing/outbox` directory.
 
 See Anthropic's [Claude Code setup guide](https://docs.anthropic.com/en/docs/claude-code/getting-started).

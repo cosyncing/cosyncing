@@ -29,15 +29,6 @@ full support claim:
 
 ## Next
 
-### Open workspace file references
-
-- Recognize safe workspace-relative references such as
-  `lib/example.dart:42:7` in session transcripts.
-- Open them in the current session's read-only Files surface.
-- Reject traversal, symlink escape, unsupported URLs, and host-local file URLs.
-- Support keyboard, pointer, touch, and screen-reader use on web and native
-  clients.
-
 ### Improve the everyday session experience
 
 - Make session health, control ownership, pending questions, and permissions
@@ -48,10 +39,10 @@ full support claim:
   factors.
 - Keep shared behavior agent-neutral; provider-specific code stays inside its
   adapter.
-- Show subagent sessions as nested roster rows for Claude Code, Kimi Code, and
-  OpenCode. Codex and DeepSeek Harness nest them under the parent session today;
-  the other three surface subagent work inside the transcript only, so the
-  roster's background-session toggle has nothing to collapse.
+- Show subagent sessions as nested roster rows for OpenCode. Claude Code, Kimi
+  Code, Codex, and DeepSeek Harness nest them under the parent session today;
+  OpenCode surfaces subagent work inside the transcript only, so the roster's
+  background-session toggle has nothing to collapse there.
 
 ## Later
 

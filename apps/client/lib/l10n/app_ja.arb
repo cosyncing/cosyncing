@@ -729,6 +729,7 @@
   "mimeTypeLabel": "MIME",
   "sessionArtifactsCount": "ファイル成果物（{count}）",
   "sessionArtifactUntitled": "（名称未設定の成果物）",
+  "sessionArtifactSentToYou": "あなたに送信",
   "artifactKeyLabel": "成果物",
   "hashLabel": "ハッシュ",
   "sizeLabel": "サイズ",

@@ -4779,7 +4779,10 @@ function mimeFromName(name: string): string {
 export function sendUserFileArtifacts(ln: any): AgentMessage[] {
   const tur = ln?.toolUseResult;
   if (!tur || typeof tur !== 'object' || !Array.isArray(tur.attachments)) return [];
-  const proactive = tur.status === 'proactive';
+  // Every SendUserFile attachment is a file the agent handed to the user, so
+  // every one is `proactive`. This used to read `tur.status === 'proactive'`,
+  // i.e. UNPROMPTED — but a file the user asked for and the agent then sent is
+  // still a file the agent sent, and that is what the flag now means.
   const out: AgentMessage[] = [];
   for (const att of tur.attachments) {
     if (!att || typeof att.path !== 'string' || !att.path) continue;
@@ -4790,7 +4793,7 @@ export function sendUserFileArtifacts(ln: any): AgentMessage[] {
       path: att.path,
       mimeType: mime,
       size: numOrUndef(att.size),
-      proactive,
+      proactive: true,
       url: inlineFileDataUrl(att.path, mime, numOrUndef(att.size)),
     });
   }

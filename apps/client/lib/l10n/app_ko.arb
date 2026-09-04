@@ -729,6 +729,7 @@
   "mimeTypeLabel": "MIME",
   "sessionArtifactsCount": "파일 산출물({count})",
   "sessionArtifactUntitled": "(제목 없는 산출물)",
+  "sessionArtifactSentToYou": "사용자에게 전송됨",
   "artifactKeyLabel": "산출물",
   "hashLabel": "해시",
   "sizeLabel": "크기",
