@@ -49,7 +49,7 @@ case "$OS/$ARCH" in
   Linux/aarch64|Linux/arm64) TARGET='linux-arm64' ;;
   Darwin/arm64) TARGET='darwin-arm64' ;;
   Darwin/x86_64) fail 'only Apple Silicon macOS is supported; Intel Macs are out of scope' ;;
-  MINGW*/*|MSYS*/*|CYGWIN*/*) fail 'this shell installer supports Linux and macOS only; on Windows, install into a WSL distribution' ;;
+  MINGW*/*|MSYS*/*|CYGWIN*/*) fail 'this shell installer supports Linux and macOS only; on Windows x64, run install.ps1 from PowerShell instead' ;;
   *) fail "unsupported host: $OS/$ARCH (Linux x64/arm64 or Apple Silicon macOS is required)" ;;
 esac
 

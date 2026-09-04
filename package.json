@@ -63,6 +63,7 @@
     "test:broker-npm-package": "bun run scripts/broker/tests/release/test-npm-package.ts",
     "test:broker-web-origin": "bun run packages/typescript/broker/test/broker/test-web-origin.ts",
     "test:broker-state": "bun run packages/typescript/broker/test/broker/test-state-security.ts",
+    "test:broker-install-ps1": "bun run scripts/broker/tests/release/test-install-ps1.ts",
     "test:broker-windows-dacl": "bun run packages/typescript/broker/test/broker/test-windows-dacl.ts",
     "test:broker-windows-process": "bun run packages/typescript/broker/test/broker/test-windows-process.ts",
     "test:broker-windows-service": "bun run packages/typescript/broker/test/broker/test-windows-service-install.ts",

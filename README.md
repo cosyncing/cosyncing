@@ -112,7 +112,8 @@ configure your chosen method while keeping the broker bound to loopback.
 tracking and warnings.
 
 See [installation prerequisites](docs/installation/prerequisites.md) for Linux and macOS commands,
-WSL notes, and Tokdash setup.
+WSL notes, and Tokdash setup. For the signed one-liner installers, see
+[installing with cosyncing's own installer](docs/installation/script-install.md).
 
 ## Install
 
@@ -145,6 +146,11 @@ cosy pair
 of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user service that runs that
 copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
 committed.
+
+cosyncing also publishes its own installer beside every signed release — `install.sh` for Linux and
+macOS, `install.ps1` for Windows x64 — for hosts where you would rather not add Node.js and npm. Both
+verify the release signature before placing anything. See
+[installing with cosyncing's own installer](docs/installation/script-install.md).
 
 To update, let npm replace the global package, then re-run setup so cosyncing copies the new
 application into its managed service and reconciles the installation:

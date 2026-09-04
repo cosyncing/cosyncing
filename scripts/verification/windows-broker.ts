@@ -51,6 +51,12 @@ interface LaneSuite {
  * Windows API costs 0.143ms, so those 4,470 operations went from twenty minutes at best to under a
  * second, and the lane fits in single-digit minutes.
  *
+ * `test:broker-install-ps1` joined on 2026-09-03 without a survey verdict, and that is less an exception
+ * to the measured rule than a case it does not cover: the suite runs the rendered PowerShell installer
+ * under Windows PowerShell 5.1, so it cannot pass anywhere else and there is no "does this suite work on
+ * Windows" question for a survey to answer. Its render-time claims are on the Linux gate in
+ * `test-release-supply-chain.ts`; what is HERE is the part only a Windows host can prove.
+ *
  * Nothing was pruned to get there, and nothing should be. The cost was never in the suite list, and
  * the cheap members are not passengers: `test:broker-protocol-journal` is 60ms of pure logic that
  * caught a real Windows defect -- a temp root built at a literal `/tmp`, which on Windows is the
@@ -95,6 +101,7 @@ const LANE: readonly LaneSuite[] = [
   { suite: 'test:broker-history-page-cache', area: 'history page cache' },
   { suite: 'test:broker-attention-bulk', area: 'attention dismissal' },
   { suite: 'test:broker-real-host-evidence', area: 'release evidence' },
+  { suite: 'test:broker-install-ps1', area: 'the PowerShell installer' },
 ];
 
 /**

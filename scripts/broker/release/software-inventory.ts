@@ -146,8 +146,21 @@ function packageLicenseText(name: string, version: string): string {
   throw new Error(`runtime dependency license text is missing: ${name}`);
 }
 
+/**
+ * Bun's licence, pinned by digest — over the licence TEXT, not over the bytes git happened to write.
+ *
+ * This file is tracked and the repository declares no `.gitattributes`, so a checkout with
+ * `core.autocrlf=true` — which is every GitHub-hosted Windows runner — delivers it CRLF. Hashing those
+ * bytes failed the pin on Windows while the licence itself was untouched, and it failed inside
+ * `assembleRelease`, so no release could be assembled on a Windows checkout at all. Normalising first
+ * also keeps the emitted notices byte-identical whichever host assembled them, which is what the
+ * reproducibility check wants and a CRLF copy would quietly break.
+ *
+ * The pin is not weakened in any way that matters: line endings do not change a licence, and the digest
+ * still fails on a change to any word of it.
+ */
 function pinnedBunLicenseText(): string {
-  const text = readFileSync(BUN_LICENSE_PATH, 'utf8');
+  const text = readFileSync(BUN_LICENSE_PATH, 'utf8').replace(/\r\n/g, '\n');
   const digest = createHash('sha256').update(text).digest('hex');
   if (digest !== BUN_LICENSE_SHA256) {
     throw new Error(`Bun 1.3.8 license hash mismatch: ${digest}`);

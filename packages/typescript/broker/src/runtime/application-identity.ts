@@ -153,6 +153,12 @@ export const MINIMUM_BUN_RUNTIME_VERSION = '1.3.8';
  * need different builds, and pre-AVX2 x64 needs the baseline one. The installer reorders on what it can
  * detect and then PROVES the choice by running `--revision` — a build that cannot run on this machine is
  * simply the wrong candidate, and the next one is tried. Detection is an optimization; the probe decides.
+ *
+ * Keyed by INSTALLER host, which is not the same set as the release's compiled targets: `windows-x64` has
+ * no compiled artifact and never will, and it is here because the PowerShell installer places the same
+ * universal bundle and needs the same pinned runtime to execute it. Windows publishes no musl build (there
+ * is no musl there) and no ARM64 row, because the broker refuses Windows ARM64 outright — a pinned archive
+ * for a host the product declines would be a runtime nothing is allowed to use.
  */
 export const PINNED_BUN_RUNTIME_ARCHIVES: Readonly<Record<string, readonly BunRuntimeArchive[]>> =
   Object.freeze({
@@ -168,6 +174,10 @@ export const PINNED_BUN_RUNTIME_ARCHIVES: Readonly<Record<string, readonly BunRu
     ]),
     'darwin-arm64': Object.freeze([
       { asset: 'bun-darwin-aarch64.zip', sha256: '672a0a9a7b744d085a1d2219ca907e3e26f5579fca9e783a9510a4f98a36212f' },
+    ]),
+    'windows-x64': Object.freeze([
+      { asset: 'bun-windows-x64.zip', sha256: '4c0a82866424e23d1bdaa9517307ec2f143ed513c15546dba0b859c6c55c47c7' },
+      { asset: 'bun-windows-x64-baseline.zip', sha256: '74f4dad7b4873ee70f63add9918400334e31acab9ba3fce9ef9906d96646e231' },
     ]),
   });
 

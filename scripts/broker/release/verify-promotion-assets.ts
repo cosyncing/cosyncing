@@ -10,6 +10,7 @@ import {
   verifyReleasePairing,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
+  BOOTSTRAP_TEMPLATES,
   P256_DER_SIGNATURE_SUFFIX,
   P256_PUBLIC_KEY_NAME,
   P256_SIGNATURE_SUFFIX,
@@ -43,7 +44,10 @@ export const EXPECTED_CANDIDATE_ASSETS = Object.freeze([
   'LICENSE',
   'NOTICE',
   'THIRD_PARTY_NOTICES.txt',
-  'install.sh',
+  // Both installers, from the names the assembler renders. Listed from BOOTSTRAP_TEMPLATES rather than
+  // typed out, so a third installer joins the exact-set check by existing — the point of an exact set is
+  // that a forgotten line fails promotion, and a hand-maintained copy of the list can forget one too.
+  ...Object.keys(BOOTSTRAP_TEMPLATES),
   'SHA256SUMS',
   'SHA256SUMS.sig',
   `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
