@@ -1187,6 +1187,20 @@ extension FileArtifactAgentMessage on AgentMessage {
   /// is outside the retained window still renders user-side instead of as an
   /// agent deliverable.
   bool get isUserAttachment => fileArtifactUserMessageKey != null;
+
+  /// Whether the agent SENT this file to the user.
+  ///
+  /// True for the broker `send_file` channel and for a Claude `SendUserFile`
+  /// attachment. Absent on a file the broker surfaced from a workspace write
+  /// the agent happened to make, and absent on a user attachment.
+  ///
+  /// Read out of [raw] like every other Part 3 field rather than added to the
+  /// constructor: an older broker's frame simply omits it, and a decoder that
+  /// required it would fail the whole message.
+  bool get fileArtifactProactive {
+    if (type != AgentMessageType.fileArtifact) return false;
+    return raw['proactive'] == true;
+  }
 }
 
 /// Broker-side truncation of a message body, for bounded history replay.

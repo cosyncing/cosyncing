@@ -24,6 +24,12 @@ import {
   readOwnerOnlyText,
 } from '../security/secure-files.ts';
 import { ClientMessagePolicyError } from '../sessions/client-message-policy.ts';
+import {
+  DownloadRangeError,
+  ifRangeMatches,
+  parseDownloadRange,
+  type DownloadByteRange,
+} from './fs-browse.ts';
 
 export interface ArtifactSession {
   tool: string;
@@ -75,6 +81,11 @@ interface ArtifactRecord {
    *  already proved the exact tool + native session. Legacy cwd-outbox records
    *  intentionally lack this marker and are never replayed after restart. */
   qualifiedSource?: 'managed-connection-v1';
+  /** The agent SENT this file, rather than the broker surfacing a write it saw.
+   *  Persisted so a replay after restart says the same thing the live frame
+   *  did; records written before this field existed are absent, which is the
+   *  correct answer for every one of them. */
+  proactive?: boolean;
 }
 
 /** Metadata for an R2 `export-attachment` ingestion (bytes come from a verified broker temp file). */
@@ -550,6 +561,7 @@ export class ArtifactStore {
       createdAt: now,
       lastAccessedAt: now,
       ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
+      ...(message.proactive === true ? { proactive: true as const } : {}),
     };
     this.commitRecord(rec, createdBlob);
     return this.asMessage(session, message, rec, brokerUrl, authorization);
@@ -633,6 +645,7 @@ export class ArtifactStore {
       createdAt: now,
       lastAccessedAt: now,
       ...(options.sessionQualified ? { qualifiedSource: 'managed-connection-v1' as const } : {}),
+      ...(message.proactive === true ? { proactive: true as const } : {}),
     };
     this.commitRecord(rec, createdBlob);
     return this.asMessage(session, message, rec, brokerUrl);
@@ -679,7 +692,9 @@ export class ArtifactStore {
           name: record.name,
           mimeType: record.mimeType,
           size: record.size,
-          proactive: true,
+          // The STORED value, not an assertion. Re-asserting `true` here made
+          // a restart claim the agent had sent every file it ever wrote.
+          ...(record.proactive === true ? { proactive: true } : {}),
           ...(record.deliveryClass ? { deliveryClass: record.deliveryClass } : {}),
           ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
           ...(record.format ? { format: record.format } : {}),
@@ -779,6 +794,13 @@ export class ArtifactStore {
     return n;
   }
 
+  /**
+   * Answer a signed artifact fetch, honouring one byte range.
+   *
+   * `requestHeaders` is optional so a caller that never resumes — the internal
+   * scope, and every direct-call test — keeps working unchanged and simply
+   * receives the whole representation.
+   */
   serve(
     tool: string,
     sessionId: string,
@@ -786,6 +808,7 @@ export class ArtifactStore {
     expiresRaw: string | null,
     sigRaw: string | null,
     authorization = INTERNAL_ARTIFACT_SCOPE,
+    requestHeaders?: Headers,
   ): Response {
     const expires = Number(expiresRaw ?? 0);
     if (!expires || !sigRaw || Date.now() > expires) return new Response('artifact URL expired', { status: 403 });
@@ -809,8 +832,7 @@ export class ArtifactStore {
       h.set('cross-origin-resource-policy', 'same-origin');
       h.set('x-cosyncing-artifact-key', rec.artifactKey);
       h.set('x-cosyncing-content-hash', rec.contentHash);
-      h.set('content-length', String(rec.size));
-      return new Response(Bun.file(rec.filePath), { headers: h });
+      return this.rangedArtifactResponse(rec, h, requestHeaders);
     }
     this.commitMutation('access', () => { rec.lastAccessedAt = this.nextRecency(); }, rec.key);
     const headers = new Headers();
@@ -827,8 +849,66 @@ export class ArtifactStore {
       headers.set('content-disposition', `attachment; filename="${safeName}"`);
       headers.set('content-security-policy', 'sandbox');
     }
-    headers.set('content-length', String(rec.size));
-    return new Response(Bun.file(rec.filePath), { headers });
+    return this.rangedArtifactResponse(rec, headers, requestHeaders);
+  }
+
+  /**
+   * Stream a record, whole or as one byte range.
+   *
+   * Parse, 416 and 206 mirror the workspace download route and reuse its
+   * helpers, so the broker's two ranged surfaces cannot drift apart. The
+   * validators come free of any new computation: the ETag is the record's
+   * existing content hash, which the response already carries as
+   * `x-cosyncing-content-hash`, and `last-modified` is its `createdAt` —
+   * deliberately not `lastAccessedAt`, which every fetch moves.
+   *
+   * `headers` arrives fully built by the caller and is carried onto the 206 and
+   * the 416 unchanged. A 206 that quietly dropped `sandbox` or
+   * `content-disposition` would turn a hardened attachment into an
+   * inline-renderable response; that is the one way range support becomes a
+   * security regression, so the header set is shared rather than rebuilt.
+   */
+  private rangedArtifactResponse(
+    rec: ArtifactRecord,
+    headers: Headers,
+    requestHeaders: Headers | undefined,
+  ): Response {
+    const etag = `"${rec.contentHash}"`;
+    headers.set('accept-ranges', 'bytes');
+    headers.set('etag', etag);
+    headers.set('last-modified', new Date(rec.createdAt).toUTCString());
+
+    let range: DownloadByteRange | undefined;
+    try {
+      range = ifRangeMatches(requestHeaders?.get('if-range') ?? null, etag, rec.createdAt)
+        ? parseDownloadRange(requestHeaders?.get('range') ?? null, rec.size)
+        : undefined;
+    } catch (error) {
+      if (!(error instanceof DownloadRangeError)) throw error;
+      const refused = new Headers(headers);
+      refused.set('content-range', `bytes */${rec.size}`);
+      refused.set('content-length', '0');
+      return new Response(null, { status: 416, headers: refused });
+    }
+
+    if (!range) {
+      headers.set('content-length', String(rec.size));
+      // `Bun.serve` re-ranges a `BunFile` body itself whenever the REQUEST
+      // carried a `Range`, rewriting a 200 into a 206 — which would silently
+      // undo the stale-`if-range` decision just made above. Streaming opts out
+      // of that path; the sendfile fast path is kept for the ordinary
+      // no-range fetch, which is every fetch the client makes today.
+      const body = requestHeaders?.get('range')
+        ? Bun.file(rec.filePath).stream()
+        : Bun.file(rec.filePath);
+      return new Response(body, { headers });
+    }
+    headers.set('content-length', String(range.end - range.start + 1));
+    headers.set('content-range', `bytes ${range.start}-${range.end}/${rec.size}`);
+    return new Response(Bun.file(rec.filePath).slice(range.start, range.end + 1), {
+      status: 206,
+      headers,
+    });
   }
 
   clearSession(tool: string, sessionId: string): number {

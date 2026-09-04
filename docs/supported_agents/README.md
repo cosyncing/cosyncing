@@ -14,13 +14,18 @@ cosyncing-owned integration files; it does not install the coding agent.
 | [Claude Code](claude-code.md) | 2.1.207 | Official npm or native installer | Observe and Take over |
 
 These are cosyncing compatibility floors, not the latest upstream releases.
-Direct agent-to-user file delivery currently works through OpenCode's native
-tool and Pi's cosyncing bridge. Claude Code can render existing native
-`SendUserFile` transcript records, but its local CLI/Drive mode does not expose
-that tool for cosyncing to invoke. Codex has no direct delivery tool. Filesystem
-delivery for Claude Code and Codex is deferred until it can be bound to the
-exact broker and native session; the shared `.cosyncing/outbox` path is not
-supported.
+Direct agent-to-user file delivery — the agent calling a tool that hands you a
+file — works through OpenCode's native tool and Pi's cosyncing bridge. Claude
+Code can render existing native `SendUserFile` transcript records, but its local
+CLI/Drive mode does not expose that tool for cosyncing to invoke. Codex has no
+direct delivery tool.
+
+Short of that, cosyncing surfaces a deliverable the agent writes into the
+session's own workspace as a downloadable file, for OpenCode, Claude Code, and
+Kimi Code. This is bound to the exact broker and native session that performed
+the write; a write outside the session directory surfaces nothing, and the
+shared `.cosyncing/outbox` path is still not supported. Codex writes through
+`apply_patch` rather than a write tool and is not covered.
 
 ## Experimental source integration
 

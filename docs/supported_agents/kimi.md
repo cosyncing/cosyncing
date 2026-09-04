@@ -20,6 +20,9 @@ cannot decode would cost them their whole agent list.
 - Model selection is offered at creation time and while driving.
 - File and image attachments are supported: images go inline as vision input,
   other files upload through the server's own file API.
+- A deliverable the agent writes inside the session's own directory is surfaced
+  as a downloadable file artifact. Source churn, a write outside that directory,
+  and a write that failed surface nothing.
 - The server's slash commands are offered, including `/goal` and its skills as
   prompt commands.
 - Subagent runs appear as observe-only child rows under the session that

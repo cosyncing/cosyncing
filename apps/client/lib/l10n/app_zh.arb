@@ -729,6 +729,7 @@
   "mimeTypeLabel": "MIME",
   "sessionArtifactsCount": "文件产物（{count}）",
   "sessionArtifactUntitled": "（未命名产物）",
+  "sessionArtifactSentToYou": "发送给你",
   "artifactKeyLabel": "产物",
   "hashLabel": "哈希",
   "sizeLabel": "大小",

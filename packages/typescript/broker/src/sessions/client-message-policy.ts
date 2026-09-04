@@ -1,3 +1,4 @@
+import { PROMPT_ATTACHMENT_LIMITS } from '@cosyncing/protocol';
 import type { AgentMessage, AgentOption, ModeOption, PlanAction, PlanSemantic, SessionConnection } from '@cosyncing/protocol';
 import { isNativeSessionUnresumableError, isOwnershipConflictError } from '@cosyncing/adapter-api';
 import { trustTierForAddress } from '../security/r2-policy.ts';
@@ -64,6 +65,94 @@ function isModeToken(value: unknown): value is string {
     && value.length > 0
     && value.length <= 120
     && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+/**
+ * Bound `msg.images` before it reaches an adapter.
+ *
+ * The field is the older of the two intake routes and was forwarded verbatim:
+ * only `WS_INBOUND_MAX_BYTES` (32 MiB) stood between a client and an adapter
+ * that declares `supportsNativeFileInput: false` and has a dead `images` branch
+ * waiting for it. Ceilings, codes and shape rules are the ones inline `files`
+ * already obeys — deliberately no new error code, which would move the surface
+ * hash for validation that adds no new failure mode.
+ */
+export function assertBoundedPromptImages(raw: unknown, supportsNativeFileInput: boolean): void {
+  if (raw === undefined || raw === null) return;
+  if (!Array.isArray(raw)) {
+    throw new ClientMessagePolicyError('ATTACHMENT_INVALID', 'prompt images must be an array');
+  }
+  if (raw.length === 0) return;
+  if (!supportsNativeFileInput) {
+    throw new ClientMessagePolicyError(
+      'ATTACHMENT_UNSUPPORTED',
+      'this adapter does not support prompt attachments',
+    );
+  }
+  if (raw.length > PROMPT_ATTACHMENT_LIMITS.maxFiles) {
+    throw new ClientMessagePolicyError(
+      'ATTACHMENT_LIMIT_EXCEEDED',
+      `a prompt carries at most ${PROMPT_ATTACHMENT_LIMITS.maxFiles} images`,
+    );
+  }
+  let encoded = 0;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ClientMessagePolicyError('ATTACHMENT_INVALID', 'each prompt image must be an object');
+    }
+    const image = entry as Record<string, unknown>;
+    // A client never names a broker path. `upload-staging` refuses the same
+    // field on `files`; an image entry carrying one is asserting a location on
+    // the host it has no standing to assert.
+    if (image.brokerPath !== undefined) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_INVALID',
+        'a prompt image may not carry a broker path',
+      );
+    }
+    if (typeof image.mimeType !== 'string' || image.mimeType.trim().length === 0) {
+      throw new ClientMessagePolicyError('ATTACHMENT_INVALID', 'a prompt image needs a mimeType');
+    }
+    if (image.name !== undefined && typeof image.name !== 'string') {
+      throw new ClientMessagePolicyError('ATTACHMENT_INVALID', "a prompt image's name must be a string");
+    }
+    const data = image.data;
+    if (typeof data !== 'string' || data.length === 0) {
+      throw new ClientMessagePolicyError('ATTACHMENT_INVALID', 'a prompt image needs base64 data');
+    }
+    if (data.startsWith('data:')) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_INVALID',
+        'prompt image data is raw base64, without a data: prefix',
+      );
+    }
+    if (
+      data.length % 4 !== 0
+      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
+    ) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_INVALID',
+        'prompt image data is not canonical base64',
+      );
+    }
+    encoded += data.length;
+    if (encoded > PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_LIMIT_EXCEEDED',
+        `prompt images exceed the ${PROMPT_ATTACHMENT_LIMITS.maxInlineEncodedBytes}-byte inline budget`,
+      );
+    }
+    // Derived, never decoded: measuring the base64 costs no allocation, so an
+    // oversized image is refused before its bytes exist in the broker at all.
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const decoded = (data.length / 4) * 3 - padding;
+    if (decoded > PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes) {
+      throw new ClientMessagePolicyError(
+        'ATTACHMENT_LIMIT_EXCEEDED',
+        `a prompt image is larger than ${PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes} bytes`,
+      );
+    }
+  }
 }
 
 export function isShortPolicyToken(value: unknown, max = 200): value is string {

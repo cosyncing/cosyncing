@@ -9,6 +9,10 @@ import {
   UploadError,
   UploadStaging,
 } from '../../src/artifacts/upload-staging.ts';
+import {
+  assertBoundedPromptImages,
+  ClientMessagePolicyError,
+} from '../../src/sessions/client-message-policy.ts';
 import { CodexAdapter } from '../../../adapters/codex/src/index.ts';
 import { ClaudeAdapter } from '../../../adapters/claude/src/index.ts';
 import { OpenCodeAdapter } from '../../../adapters/opencode/src/index.ts';
@@ -32,6 +36,15 @@ function expectUploadError(
     throw new Error(`FAIL: ${name} did not throw`);
   } catch (error) {
     check(name, error instanceof UploadError && error.code === code);
+  }
+}
+
+function expectPolicyError(name: string, fn: () => unknown, code: string): void {
+  try {
+    fn();
+    throw new Error(`FAIL: ${name} did not throw`);
+  } catch (error) {
+    check(name, error instanceof ClientMessagePolicyError && error.code === code);
   }
 }
 
@@ -439,6 +452,98 @@ try {
       ),
     'UPLOAD_EXPIRED',
   );
+
+  // `images` — the older of the two intake routes, bounded to the same ceilings
+  // as inline `files`. Nothing but the 32 MiB inbound frame cap used to stand
+  // behind it, and the adapters that declare no file input have a dead `images`
+  // branch waiting for whatever arrived.
+  {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+
+    expectPolicyError(
+      'a non-array images field is rejected',
+      () => assertBoundedPromptImages({}, true),
+      'ATTACHMENT_INVALID',
+    );
+    expectPolicyError(
+      'more images than the attachment count allows are rejected',
+      () => assertBoundedPromptImages(
+        Array.from({ length: PROMPT_ATTACHMENT_LIMITS.maxFiles + 1 }, () => ({
+          data: png,
+          mimeType: 'image/png',
+        })),
+        true,
+      ),
+      'ATTACHMENT_LIMIT_EXCEEDED',
+    );
+    expectPolicyError(
+      'an image larger than the inline decoded bound is rejected',
+      () => assertBoundedPromptImages(
+        [{
+          data: Buffer.alloc(
+            PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes + 3,
+            0x61,
+          ).toString('base64'),
+          mimeType: 'image/png',
+        }],
+        true,
+      ),
+      'ATTACHMENT_LIMIT_EXCEEDED',
+    );
+    expectPolicyError(
+      'images past the aggregate inline encoded budget are rejected',
+      () => assertBoundedPromptImages(
+        Array.from({ length: PROMPT_ATTACHMENT_LIMITS.maxFiles }, () => ({
+          data: Buffer.alloc(
+            PROMPT_ATTACHMENT_LIMITS.maxInlineDecodedBytes - 3,
+            0x62,
+          ).toString('base64'),
+          mimeType: 'image/png',
+        })),
+        true,
+      ),
+      'ATTACHMENT_LIMIT_EXCEEDED',
+    );
+    expectPolicyError(
+      'a brokerPath on an image entry is rejected',
+      () => assertBoundedPromptImages(
+        [{ data: png, mimeType: 'image/png', brokerPath: '/etc/passwd' }],
+        true,
+      ),
+      'ATTACHMENT_INVALID',
+    );
+    expectPolicyError(
+      'an image without a mimeType is rejected',
+      () => assertBoundedPromptImages([{ data: png }], true),
+      'ATTACHMENT_INVALID',
+    );
+    expectPolicyError(
+      'a data: URL in place of raw base64 is rejected',
+      () => assertBoundedPromptImages(
+        [{ data: `data:image/png;base64,${png}`, mimeType: 'image/png' }],
+        true,
+      ),
+      'ATTACHMENT_INVALID',
+    );
+    expectPolicyError(
+      'non-canonical base64 image data is rejected',
+      () => assertBoundedPromptImages([{ data: 'not!base64', mimeType: 'image/png' }], true),
+      'ATTACHMENT_INVALID',
+    );
+    expectPolicyError(
+      'images addressed to an adapter without native file input are refused',
+      () => assertBoundedPromptImages([{ data: png, mimeType: 'image/png' }], false),
+      'ATTACHMENT_UNSUPPORTED',
+    );
+    assertBoundedPromptImages(
+      [{ data: png, mimeType: 'image/png', name: 'shot.png' }],
+      true,
+    );
+    check('a well-formed image is accepted', true);
+    assertBoundedPromptImages(undefined, false);
+    assertBoundedPromptImages([], false);
+    check('an absent or empty images field is accepted by every adapter', true);
+  }
 
   console.log(`\n${passed} staged prompt attachment checks passed.`);
 } finally {

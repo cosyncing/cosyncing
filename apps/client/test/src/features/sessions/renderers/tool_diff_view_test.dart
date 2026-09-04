@@ -1556,6 +1556,9 @@ class _CountingBrokerClient extends BrokerClient {
   Future<ArtifactDownload> fetchArtifactUrlBounded(
     String url, {
     required int maxBytes,
+    int? rangeStart,
+    int? rangeEnd,
+    String? ifRange,
   }) async {
     calls++;
     return ArtifactDownload(bytes: utf8.encode(_bodies[url] ?? ''));

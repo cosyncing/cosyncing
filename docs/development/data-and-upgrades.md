@@ -12,6 +12,14 @@ downloads use platform cache or user-selected destinations. The broker stores
 runtime state under the current user's `.cosyncing` directory unless an
 operator selects another supported location.
 
+One kind of broker state lives outside that directory: a file you attach to a
+prompt is staged in `<workspace>/.cosyncing/inbox`, because the agent has to be
+able to read it from its own working directory. That is inside a git working
+tree, so the broker collects it — hourly, oldest first, on the retention and
+size limits in the [changelog](../CHANGELOG.md). It only sweeps inboxes it
+staged into, only when both `.cosyncing` and `inbox` resolve to themselves, and
+never a file a staged upload still points at.
+
 No runtime database, cache, transcript, credential, trace, screenshot, or
 generated output belongs in Git. The public-tree CI policy rejects these paths
 and file types.

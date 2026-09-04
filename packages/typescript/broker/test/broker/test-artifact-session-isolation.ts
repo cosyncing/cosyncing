@@ -16,6 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect, createServer, type Server as TcpServer } from 'node:net';
@@ -460,6 +461,118 @@ try {
     JSON.stringify(restartNames) === JSON.stringify(overflowNames.slice(-3)), restartNames.join(','));
   check('8e bounded restart replay does not cross to the peer', artifactFrames(boundedRestartPeer).length === 0);
 
+  // ── Range: an interrupted artifact download resumes rather than restarting ─
+  //
+  // Download is part of this claim and had none of the workspace route's range
+  // support: every retry started at byte 0. The security assertion is the point
+  // of the group — a 206 that dropped `sandbox` or `content-disposition` would
+  // turn a hardened attachment into an inline-renderable response, which is the
+  // one way this becomes a regression — so the whole header set is compared
+  // rather than sampled.
+  {
+    const rangedName = 'ranged.bin';
+    const rangedPath = join(cwd, rangedName);
+    const rangedBytes = Buffer.alloc(4096);
+    for (let i = 0; i < rangedBytes.length; i += 1) rangedBytes[i] = i % 251;
+    writeFileSync(rangedPath, rangedBytes);
+    const sentRanged = await sendFile(clientAOrigin, restartedIdA, rangedPath);
+    const rangedFrame = await boundedRestartOwner.waitFrame(artifactNamed(rangedName));
+    const ranged = rangedFrame?.message as Artifact | undefined;
+    check('8f a non-passive artifact is accepted through the owner route',
+      sentRanged.status === 200 && typeof ranged?.fetchUrl === 'string', `status=${sentRanged.status}`);
+    const rangedUrl = new URL(String(ranged?.fetchUrl), clientAOrigin);
+    const get = (headers: Record<string, string> = {}, method = 'GET') =>
+      fetch(rangedUrl, { method, headers });
+
+    const whole = await get();
+    const wholeBody = Buffer.from(await whole.arrayBuffer());
+    const contentHash = whole.headers.get('x-cosyncing-content-hash') ?? '';
+    check('8g the whole representation advertises range support',
+      whole.status === 200
+        && whole.headers.get('accept-ranges') === 'bytes'
+        && whole.headers.get('etag') === `"${contentHash}"`
+        && Boolean(whole.headers.get('last-modified'))
+        && wholeBody.equals(rangedBytes),
+      `status=${whole.status} accept-ranges=${whole.headers.get('accept-ranges')}`);
+
+    const closed = await get({ range: 'bytes=0-2047' });
+    const closedBody = Buffer.from(await closed.arrayBuffer());
+    check('8h a closed range answers 206 with the exact slice and content-range',
+      closed.status === 206
+        && closed.headers.get('content-length') === '2048'
+        && closed.headers.get('content-range') === `bytes 0-2047/${rangedBytes.length}`
+        && closedBody.equals(rangedBytes.subarray(0, 2048)),
+      `status=${closed.status} range=${closed.headers.get('content-range')}`);
+
+    const open = await get({ range: 'bytes=2048-' });
+    const openBody = Buffer.from(await open.arrayBuffer());
+    check('8i an open range runs to the end of the representation',
+      open.status === 206
+        && open.headers.get('content-range') === `bytes 2048-${rangedBytes.length - 1}/${rangedBytes.length}`
+        && openBody.equals(rangedBytes.subarray(2048)),
+      `range=${open.headers.get('content-range')}`);
+
+    const suffix = await get({ range: 'bytes=-50' });
+    const suffixBody = Buffer.from(await suffix.arrayBuffer());
+    check('8j a suffix range answers the last bytes',
+      suffix.status === 206
+        && suffix.headers.get('content-range')
+          === `bytes ${rangedBytes.length - 50}-${rangedBytes.length - 1}/${rangedBytes.length}`
+        && suffixBody.equals(rangedBytes.subarray(rangedBytes.length - 50)),
+      `range=${suffix.headers.get('content-range')}`);
+
+    check('8k two half ranges concatenate to the exact artifact, hash equal to its content hash',
+      Buffer.concat([closedBody, openBody]).equals(rangedBytes)
+        && createHash('sha256').update(rangedBytes).digest('hex') === contentHash,
+      contentHash);
+
+    const freshIfRange = await get({ range: 'bytes=0-9', 'if-range': `"${contentHash}"` });
+    check('8l a matching if-range still answers the partial response',
+      freshIfRange.status === 206 && freshIfRange.headers.get('content-length') === '10',
+      `status=${freshIfRange.status}`);
+
+    const staleIfRange = await get({ range: 'bytes=0-9', 'if-range': '"sha256:0000"' });
+    const staleBody = Buffer.from(await staleIfRange.arrayBuffer());
+    check('8m a stale if-range answers the whole representation instead',
+      staleIfRange.status === 200 && staleBody.equals(rangedBytes),
+      `status=${staleIfRange.status}`);
+
+    const outOfBounds = await get({ range: `bytes=${rangedBytes.length}-` });
+    check('8n a range outside the representation is refused 416 with its size',
+      outOfBounds.status === 416
+        && outOfBounds.headers.get('content-range') === `bytes */${rangedBytes.length}`,
+      `status=${outOfBounds.status} range=${outOfBounds.headers.get('content-range')}`);
+
+    const securityHeaders = (response: Response) => [
+      'x-content-type-options',
+      'content-disposition',
+      'content-security-policy',
+      'cache-control',
+      'referrer-policy',
+      'cross-origin-resource-policy',
+      'content-type',
+    ].map((name) => `${name}=${response.headers.get(name)}`).join(' ');
+    check('8o a 206 carries the identical security header set as the 200',
+      securityHeaders(closed) === securityHeaders(whole)
+        && whole.headers.get('x-content-type-options') === 'nosniff'
+        && whole.headers.get('content-security-policy') === 'sandbox'
+        && whole.headers.get('content-disposition')?.startsWith('attachment;') === true,
+      securityHeaders(closed));
+    check('8p the 416 keeps that same security header set rather than a bare refusal',
+      outOfBounds.headers.get('x-content-type-options') === 'nosniff'
+        && outOfBounds.headers.get('content-security-policy') === 'sandbox',
+      securityHeaders(outOfBounds));
+
+    const headRanged = await get({ range: 'bytes=0-99' }, 'HEAD');
+    const headBody = Buffer.from(await headRanged.arrayBuffer());
+    check('8q a HEAD with a range answers 206 headers and no body',
+      headRanged.status === 206
+        && headRanged.headers.get('content-range') === `bytes 0-99/${rangedBytes.length}`
+        && headBody.length === 0,
+      `status=${headRanged.status} bytes=${headBody.length}`);
+  }
+
+
   // Adapter-internal history reset: assert the same bounded cache is replayed
   // only by its owning ManagedConn. This signal is not exposed by Pi's bridge.
   const historyRoot = join(root, 'history-reset');
@@ -888,6 +1001,105 @@ try {
   } finally {
     if (priorMaxBytes == null) delete process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES;
     else process.env.COSYNCING_ARTIFACT_CACHE_MAX_BYTES = priorMaxBytes;
+  }
+
+  // ── `proactive` means the agent SENT the file, and survives a restart ─────
+  //
+  // Every broker-synthesised artifact used to be stamped `true`, and replay
+  // re-asserted it unconditionally, so the flag could not distinguish a file
+  // the agent handed over from a `.md` it happened to write. Both halves are
+  // asserted here because the replay bug is separate from the emission one: a
+  // fixed emitter with an unfixed replay looks correct until a restart.
+  {
+    const flagRoot = join(root, 'proactive-flag');
+    mkdirSync(flagRoot, { recursive: true });
+    const flagStore = new ArtifactStore('http://proactive.test', join(flagRoot, 'store'));
+    const flagConn = fakeConnection('opencode', 'flag-owner', flagRoot);
+    const flagOwner = new ManagedConn(flagConn, flagStore);
+    const flagFrames: any[] = [];
+    flagOwner.addClient((event) => {
+      if (event.kind === 'message' && event.message?.type === 'file-artifact') {
+        flagFrames.push(event.message);
+      }
+    });
+
+    const handedOver = join(flagRoot, 'delivered.txt');
+    writeFileSync(handedOver, 'the agent sent this');
+    check('15 an explicit send_file is accepted', flagOwner.surfaceExplicit('delivered.txt').ok);
+    await sleep(2);
+
+    const merelyWritten = join(flagRoot, 'notes.md');
+    writeFileSync(merelyWritten, '# notes the agent wrote');
+    flagConn.emit({
+      type: 'tool-result',
+      toolName: 'write',
+      path: merelyWritten,
+    } as AgentMessage);
+    await sleep(20);
+
+    const sent = flagFrames.find((message) => message.name === 'delivered.txt');
+    const written = flagFrames.find((message) => message.name === 'notes.md');
+    check('15a an explicit send_file carries proactive: true',
+      sent?.proactive === true, String(sent?.proactive));
+    check('15b an auto-surfaced write carries no proactive at all',
+      written !== undefined && written.proactive === undefined,
+      `present=${written !== undefined} proactive=${String(written?.proactive)}`);
+
+    const reattached = flagOwner.artifactSnapshot() as any[];
+    check('15c a reattach replays each artifact with the value it was emitted with',
+      reattached.find((message) => message.name === 'delivered.txt')?.proactive === true
+        && reattached.find((message) => message.name === 'notes.md')?.proactive === undefined,
+      reattached.map((message) => `${message.name}=${String(message.proactive)}`).join(','));
+
+    // ── The auto-surface gate is case-insensitive ─────────────────────────
+    //
+    // Each adapter picks the string it normalises its native write tool to.
+    // The gate compared exactly, so OpenCode's 'write' matched and Claude's
+    // and Kimi's 'Write' did not — auto-surface was OpenCode-only by accident.
+    // The bytes still have to earn it: DELIVERABLE, containment and the
+    // error flag are all unchanged, and ownership comes from the ManagedConn
+    // that received the tool-result rather than from the name on it.
+    const before = flagFrames.length;
+    const titleCased = join(flagRoot, 'report.html');
+    writeFileSync(titleCased, '<h1>report</h1>');
+    flagConn.emit({ type: 'tool-result', toolName: 'Write', path: titleCased } as AgentMessage);
+    await sleep(20);
+    check('16 a title-cased Write surfaces exactly one artifact, bound to this session',
+      flagFrames.length === before + 1
+        && flagFrames.at(-1)?.name === 'report.html'
+        && flagFrames.at(-1)?.proactive === undefined,
+      `added=${flagFrames.length - before}`);
+
+    const source = join(flagRoot, 'module.ts');
+    writeFileSync(source, 'export const x = 1;');
+    flagConn.emit({ type: 'tool-result', toolName: 'Write', path: source } as AgentMessage);
+    await sleep(20);
+    check('16a source churn is still excluded by DELIVERABLE',
+      flagFrames.length === before + 1, `count=${flagFrames.length}`);
+
+    const outsideCwd = join(root, 'outside-write.html');
+    writeFileSync(outsideCwd, '<h1>outside</h1>');
+    flagConn.emit({ type: 'tool-result', toolName: 'Write', path: outsideCwd } as AgentMessage);
+    await sleep(20);
+    check('16b a write outside cwd is still refused',
+      flagFrames.length === before + 1, `count=${flagFrames.length}`);
+
+    const failed = join(flagRoot, 'failed.html');
+    writeFileSync(failed, '<h1>failed</h1>');
+    flagConn.emit({
+      type: 'tool-result', toolName: 'Write', path: failed, isError: true,
+    } as AgentMessage);
+    await sleep(20);
+    check('16c a failed write surfaces nothing',
+      flagFrames.length === before + 1, `count=${flagFrames.length}`);
+
+    await flagOwner.dispose();
+    const restarted = new ArtifactStore('http://proactive.test', join(flagRoot, 'store'))
+      .sessionQualifiedArtifacts({ tool: 'opencode', id: 'flag-owner' }) as any[];
+    check('15d a broker restart replays the STORED value, not an assertion',
+      restarted.find((message) => message.name === 'delivered.txt')?.proactive === true
+        && restarted.find((message) => message.name === 'notes.md')?.proactive === undefined,
+      restarted.map((message) => `${message.name}=${String(message.proactive)}`).join(','));
   }
 } catch (error) {
   failures++;

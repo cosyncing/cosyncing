@@ -729,6 +729,7 @@
   "mimeTypeLabel": "MIME",
   "sessionArtifactsCount": "Archivos generados ({count})",
   "sessionArtifactUntitled": "(archivo sin título)",
+  "sessionArtifactSentToYou": "Enviado a ti",
   "artifactKeyLabel": "Archivo generado",
   "hashLabel": "Hash",
   "sizeLabel": "Tamaño",

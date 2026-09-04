@@ -1768,6 +1768,132 @@ void main() {
         expect(download.contentRange, 'bytes */0');
       });
 
+      test(
+        'fetchArtifactUrl sends Range and exposes resume metadata',
+        () async {
+          dioAdapter.onGet(
+            'http://127.0.0.1:7734/api/sessions/opencode/session-1/artifact/a1'
+            '?expires=1&sig=s',
+            headers: const {
+              'range': 'bytes=512-1023',
+              'if-range': '"art-v1"',
+            },
+            (server) => server.reply(
+              206,
+              Uint8List.fromList(List<int>.filled(512, 9)),
+              headers: {
+                'content-type': ['application/octet-stream'],
+                'content-length': ['512'],
+                'content-range': ['bytes 512-1023/2048'],
+                'accept-ranges': ['bytes'],
+                'etag': ['"art-v1"'],
+                'last-modified': ['Fri, 17 Jul 2026 12:00:00 GMT'],
+                'x-cosyncing-content-hash': ['art-v1'],
+              },
+            ),
+          );
+
+          final download = await client.fetchArtifactUrl(
+            '/api/sessions/opencode/session-1/artifact/a1?expires=1&sig=s',
+            rangeStart: 512,
+            rangeEnd: 1023,
+            ifRange: '"art-v1"',
+          );
+
+          expect(download.statusCode, 206);
+          expect(download.bytes, hasLength(512));
+          expect(download.contentRange, 'bytes 512-1023/2048');
+          expect(download.acceptRanges, 'bytes');
+          expect(download.etag, '"art-v1"');
+          expect(download.lastModified, 'Fri, 17 Jul 2026 12:00:00 GMT');
+          expect(download.contentHash, 'art-v1');
+        },
+      );
+
+      test('fetchArtifactUrl returns an empty typed 416 boundary', () async {
+        dioAdapter.onGet(
+          'http://127.0.0.1:7734/api/sessions/opencode/session-1/artifact/a2'
+          '?expires=1&sig=s',
+          headers: const {'range': 'bytes=2048-'},
+          (server) => server.reply(
+            416,
+            Uint8List(0),
+            headers: {
+              'content-range': ['bytes */2048'],
+              'accept-ranges': ['bytes'],
+              'etag': ['"art-v2"'],
+            },
+          ),
+        );
+
+        final download = await client.fetchArtifactUrl(
+          '/api/sessions/opencode/session-1/artifact/a2?expires=1&sig=s',
+          rangeStart: 2048,
+        );
+
+        expect(download.statusCode, 416);
+        expect(download.bytes, isEmpty);
+        expect(download.contentRange, 'bytes */2048');
+      });
+
+      test('a refreshed artifact ticket resumes at the same offset', () async {
+        dioAdapter
+          ..onGet(
+            'http://127.0.0.1:7734/api/sessions/opencode/session-1/artifact/a3'
+            '?expires=1&sig=stale',
+            headers: const {'range': 'bytes=1024-'},
+            (server) => server.reply(403, 'artifact URL expired'),
+          )
+          ..onPost(
+            'http://127.0.0.1:7734/api/sessions/opencode/session-1'
+            '/artifact/a3/ticket',
+            data: const <String, dynamic>{},
+            (server) => server.reply(201, {
+              'ok': true,
+              'fetchUrl':
+                  '/api/sessions/opencode/session-1/artifact/a3'
+                  '?expires=2&sig=fresh',
+            }),
+          )
+          ..onGet(
+            'http://127.0.0.1:7734/api/sessions/opencode/session-1/artifact/a3'
+            '?expires=2&sig=fresh',
+            headers: const {'range': 'bytes=1024-'},
+            (server) => server.reply(
+              206,
+              Uint8List.fromList(List<int>.filled(1024, 3)),
+              headers: {
+                'content-length': ['1024'],
+                'content-range': ['bytes 1024-2047/2048'],
+                'accept-ranges': ['bytes'],
+              },
+            ),
+          );
+
+        final download = await client.fetchArtifactUrl(
+          '/api/sessions/opencode/session-1/artifact/a3?expires=1&sig=stale',
+          rangeStart: 1024,
+        );
+
+        // The whole point: the retry carries the SAME offset. A refresh that
+        // restarted at byte 0 could never finish a download that outlives the
+        // signature's own lifetime, which is the case resume exists for.
+        expect(download.statusCode, 206);
+        expect(download.contentRange, 'bytes 1024-2047/2048');
+        expect(download.bytes, hasLength(1024));
+      });
+
+      test('fetchArtifactUrl refuses a malformed range before any request', () {
+        expect(
+          () => client.fetchArtifactUrl('/api/x', rangeStart: -1),
+          throwsA(isA<ArgumentError>()),
+        );
+        expect(
+          () => client.fetchArtifactUrl('/api/x', rangeEnd: 10),
+          throwsA(isA<ArgumentError>()),
+        );
+      });
+
       test('downloadSessionFile wraps FS_REMOTE_DISABLED', () async {
         dioAdapter.onGet(
           'http://127.0.0.1:7734/api/sessions/opencode/session-1/fs/download'
