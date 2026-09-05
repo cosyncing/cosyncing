@@ -2,9 +2,11 @@
 /** Deterministic lifecycle, repair, signed upgrade/rollback, and owned-uninstall acceptance. */
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -83,11 +85,14 @@ import {
 import {
   atomicWriteOwnerOnly,
   ensureOwnerOnlyDirectory,
+  inspectOwnerOnlyDirectory,
+  inspectOwnerOnlyFile,
 } from '../../src/security/secure-files.ts';
 import {
   SYSTEMD_SERVICE_NAME,
   type DurableServiceProvider,
   type DurableServiceStatus,
+  type DurableServiceVersions,
   type ServiceCommandResult,
   type ServiceCommandRunner,
 } from '../../src/installation/service-manager.ts';
@@ -145,6 +150,27 @@ function check(name: string, ok: boolean, detail?: string): void {
 
 function hash(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/** The first node of a tree that is not owner-only, or undefined when every node is. */
+function ownerOnlyTreeProblem(root: string): string | undefined {
+  const directory = inspectOwnerOnlyDirectory(root);
+  if (directory.status !== 'ok') return `${root}: ${directory.status}/${directory.problem ?? ''}`;
+  for (const name of readdirSync(root, { withFileTypes: true })) {
+    const child = join(root, name.name);
+    if (name.isDirectory()) {
+      const nested = ownerOnlyTreeProblem(child);
+      if (nested) return nested;
+      continue;
+    }
+    const file = inspectOwnerOnlyFile(child);
+    if (file.status !== 'ok') return `${child}: ${file.status}/${file.problem ?? ''}`;
+  }
+  return undefined;
+}
+
+function ownerOnlyTree(root: string): boolean {
+  return ownerOnlyTreeProblem(root) === undefined;
 }
 
 const BUILD = Object.freeze({
@@ -1953,6 +1979,19 @@ try {
   }
 
   // Signed-manifest upgrade matrix.
+  //
+  // The self-check payload is every field `version --json` actually prints, not just the four the switch
+  // fence compares. A versioned service root is keyed on the candidate's own build terms, and a fixture
+  // that omitted them would be testing a stdout no real cosyncing produces.
+  const CANDIDATE_SELF_CHECK = Object.freeze({
+    version: '2.0.0',
+    commit: '2222222',
+    buildDate: '2026-07-17T12:00:00.000Z',
+    target: 'linux-x64',
+    distribution: 'native',
+    packaged: true,
+    dirty: false,
+  });
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const keyId = 'fixture-ed25519';
   const publicPem = publicKey.export({ format: 'pem', type: 'spki' }).toString();
@@ -1996,7 +2035,7 @@ try {
     manifestUrl: 'https://releases.example/manifest.json',
     trustedKeys: { [keyId]: publicPem },
     fetch: fetcher(manifest),
-    runBinary: async () => ({ status: 'ok' as const, exitCode: 0, stdout: JSON.stringify({ version: '2.0.0', target: 'linux-x64', packaged: true, distribution: 'native' }), stderr: '' }),
+    runBinary: async () => ({ status: 'ok' as const, exitCode: 0, stdout: JSON.stringify(CANDIDATE_SELF_CHECK), stderr: '' }),
     service: fixture.service,
     verifyBrokerVersion: async () => true,
     healthAttempts: 1,
@@ -2049,8 +2088,17 @@ try {
   {
     const webFixture = mkdtempSync(join(tmpdir(), 'cosyncing-web-sidecar-'));
     cleanup.push(webFixture);
-    mkdirSync(join(webFixture, 'app'));
+    mkdirSync(join(webFixture, 'app', 'assets'), { recursive: true });
     writeFileSync(join(webFixture, 'app', 'index.html'), '<html><base href="/cosy/"></html>\n');
+    writeFileSync(join(webFixture, 'app', 'assets', 'FontManifest.json'), '[]\n');
+    // Nested, and deliberately group/world readable: a release archive is not written by this product, so
+    // the tree it unpacks to is owner-only only if the sidecar install makes every node of it so.
+    for (const [entry, mode] of [
+      ['app', 0o755], ['app/assets', 0o755],
+      ['app/index.html', 0o644], ['app/assets/FontManifest.json', 0o644],
+    ] as const) {
+      chmodSync(join(webFixture, ...entry.split('/')), mode);
+    }
     const packed = Bun.spawnSync(
       ['tar', '-czf', join(webFixture, 'app.tar.gz'), '-C', webFixture, 'app'],
       { stdout: 'ignore', stderr: 'pipe' },
@@ -2068,7 +2116,7 @@ try {
       cacheManifestSha256: '2'.repeat(64),
       mainDartSha256: '3'.repeat(64),
       directorySha256: '4'.repeat(64),
-      fileCount: 1,
+      fileCount: 2,
     };
     const jsApp: ReleaseJavaScriptApp = {
       name: 'cosyncing-app.js',
@@ -2120,7 +2168,9 @@ try {
         return {
           status: 'ok' as const,
           exitCode: 0,
-          stdout: JSON.stringify({ version: '2.0.0', target: 'universal', packaged: true, distribution: 'bootstrap-js' }),
+          stdout: JSON.stringify({
+            ...CANDIDATE_SELF_CHECK, target: 'universal', distribution: 'bootstrap-js',
+          }),
           stderr: '',
         };
       },
@@ -2135,7 +2185,17 @@ try {
       // Two superseded roots and the one the running service is still configured to serve.
       mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0'), { recursive: true });
       mkdirSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'), { recursive: true });
-      const upgraded = await runUpgrade(jsUpgradeOptions(fixture));
+      // `tar` extracts with the archive's modes masked by the process umask, so on a host that already
+      // runs at 0077 the unpacked tree would arrive owner-only for a reason that has nothing to do with
+      // the sidecar install. Unpack under the ordinary 0022, so the owner-only check below tests the
+      // product rather than the host it happens to run on.
+      const priorUmask = typeof process.umask === 'function' ? process.umask(0o022) : undefined;
+      let upgraded: Awaited<ReturnType<typeof runUpgrade>>;
+      try {
+        upgraded = await runUpgrade(jsUpgradeOptions(fixture));
+      } finally {
+        if (priorUmask !== undefined) process.umask(priorUmask);
+      }
       const state = inspectInstallState(fixture.m.home);
       check('a bootstrap-js build upgrades through the signed channel and takes the JavaScript artifact',
         upgraded.exitCode === 0
@@ -2153,6 +2213,13 @@ try {
       // leave the new version resolving a directory nothing ever created.
       check('the paired web client is installed at the new version\'s web root',
         existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0', 'index.html')));
+      // The staging directory was created with `mkdirSync(..., { mode })`, which Windows ignores, and the
+      // unpacked tree was renamed into place carrying whatever `tar` and the parent DACL had given it.
+      // Every node now carries its own owner-only descriptor -- the same property the installer's own
+      // directories are held to, asserted with the same inspection.
+      check('every node of the installed web root is owner-only',
+        ownerOnlyTree(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')),
+        ownerOnlyTreeProblem(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')));
       check('the previous version\'s web root survives and only superseded ones are pruned',
         existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-1.0.0'))
           && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-0.9.0')));
@@ -2216,6 +2283,27 @@ try {
         npm.detailCode === 'upgrade-package-manager-owned'
           && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
           && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0')));
+    }
+
+    {
+      // A rollback puts the machine back on the version it started from, so the candidate's web root and
+      // the rollback copy of the binary belong to nothing: the receipt in force afterwards is the one from
+      // before the upgrade and names neither. `uninstall` removes what the receipts own, so anything left
+      // here is what makes it report a clean removal over files that are still on disk.
+      const fixture = upgradeMachine();
+      const rolledBack = await runUpgrade({
+        ...jsUpgradeOptions(fixture),
+        verifyBrokerVersion: async () => false,
+      });
+      const state = inspectInstallState(fixture.m.home);
+      check('a rolled-back upgrade leaves neither the candidate web root nor an unowned rollback copy',
+        rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
+          && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing-web-2.0.0'))
+          && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.previous'))
+          && state.committed
+          && !state.state.resources.some((item) => item.id === 'broker-binary-previous'),
+        `${rolledBack.exitCode}/${rolledBack.detailCode}`);
     }
   }
 
@@ -2406,7 +2494,36 @@ try {
       interrupted.exitCode === 4 && recovered.exitCode === 3
         && recovered.detailCode === 'upgrade-interrupted-recovered' && recovered.recoveredInterruptedUpgrade
         && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1' && fixture.active()
-        && !existsSync(join(fixture.m.home, 'upgrade-journal.json')));
+        && !existsSync(join(fixture.m.home, 'upgrade-journal.json'))
+        && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.previous')));
+  }
+  {
+    // A journal that never reached `switching` never wrote the rollback copy, so the file at that path is
+    // still whatever an EARLIER upgrade left there -- measured by a receipt that is still true. The
+    // cleanup above must not reach it.
+    const fixture = upgradeMachine();
+    const previousPath = join(fixture.m.home, 'bin', `${PRODUCT_IDENTITY.primaryBinary}.previous`);
+    atomicWriteOwnerOnly(previousPath, 'older-binary-v0', { mode: 0o700 });
+    const seeded = inspectInstallState(fixture.m.home);
+    if (!seeded.committed) throw new Error('fixture install missing');
+    seeded.state.resources.push({
+      id: 'broker-binary-previous', kind: 'binary', target: previousPath,
+      ownership: { proof: 'package-hash', installedSha256: hash('older-binary-v0') },
+    });
+    writeInstallState(seeded.state, fixture.m.home);
+    const interrupted = await runUpgrade({ ...upgradeOptions(fixture), faultAfter: 'service-stopped' });
+    const recovered = await runUpgrade({
+      ...upgradeOptions(fixture),
+      fetch: (async () => new Response('missing', { status: 503 })) as unknown as typeof fetch,
+    });
+    const state = inspectInstallState(fixture.m.home);
+    check('recovery before the switch preserves an earlier upgrade\'s rollback copy and its receipt',
+      interrupted.exitCode === 4 && recovered.detailCode === 'upgrade-interrupted-recovered'
+        && existsSync(previousPath) && readFileSync(previousPath, 'utf8') === 'older-binary-v0'
+        && state.committed
+        && state.state.resources.some((item) => item.id === 'broker-binary-previous'
+          && item.ownership.installedSha256 === hash('older-binary-v0')),
+      `${interrupted.detailCode}/${recovered.detailCode}`);
   }
   {
     const fixture = upgradeMachine();
@@ -2432,6 +2549,236 @@ try {
     check('rollback failure preserves the journal and reports manual cleanup',
       incomplete.exitCode === 4 && incomplete.detailCode === 'upgrade-rollback-incomplete'
         && existsSync(join(fixture.m.home, 'upgrade-journal.json')));
+  }
+
+  // ---- A service that execs a version root, not the installed binary --------------------------------
+  //
+  // The Windows Scheduled Task runs a bootstrap that reads a pointer file at every start and execs the
+  // version root it names, so replacing `<home>/bin/cosyncing` changes nothing about what starts. These
+  // stand in for that layout with the same contract and a real pointer file: what matters here is the
+  // ORDER `runUpgrade` does things in and what it writes down, which is identical on every host that has
+  // versions. The Windows implementation of the same seam is proven in test:broker-windows-service and on
+  // the physical host.
+  const versionedMachine = () => {
+    const m = machine({ binaryHash: true }); cleanup.push(m.root);
+    const versionsRoot = join(m.home, 'service', 'versions');
+    const pointerPath = join(m.home, 'service', 'active-install.json');
+    const pointer = (): string =>
+      (JSON.parse(readFileSync(pointerPath, 'utf8')) as { versionKey: string }).versionKey;
+    const pointAt = (versionKey: string): void => atomicWriteOwnerOnly(
+      pointerPath,
+      `${JSON.stringify({ installationId: 'install-fixture', versionKey })}\n`,
+      { mode: 0o600 },
+    );
+    ensureOwnerOnlyDirectory(join(versionsRoot, 'key-1.0.0'));
+    pointAt('key-1.0.0');
+    const calls: string[] = [];
+    const versions: DurableServiceVersions = {
+      resources(versionKey) {
+        return [{
+          id: 'service-windows-version',
+          kind: 'other',
+          target: join(versionsRoot, versionKey),
+          ownership: { proof: 'receipt', marker: versionKey },
+        }];
+      },
+      plan(build) {
+        const record = {
+          installationId: 'install-fixture',
+          fromVersionKey: pointer(),
+          toVersionKey: `key-${build.version}`,
+        };
+        return {
+          record,
+          async apply() {
+            calls.push('apply');
+            ensureOwnerOnlyDirectory(join(versionsRoot, record.toVersionKey));
+            pointAt(record.toVersionKey);
+          },
+        };
+      },
+      async restore(record) {
+        calls.push('restore');
+        pointAt(record.fromVersionKey);
+        rmSync(join(versionsRoot, record.toVersionKey), { recursive: true, force: true });
+      },
+      async finalize(record) {
+        calls.push('finalize');
+        rmSync(join(versionsRoot, record.fromVersionKey), { recursive: true, force: true });
+      },
+    };
+    let active = true;
+    // The pointer as it read at the instant the service was told to start. Everything about this defect
+    // is a question of ordering, and this is the only place the answer can be observed.
+    const startedAt: string[] = [];
+    const service: UpgradeServiceController = {
+      async inspect() { return { active }; },
+      // Service control shares `calls` with the version seam because the defect these cases pin is the
+      // ORDER of the two against each other, and an ordering is only observable in one sequence.
+      async stop() { calls.push('stop'); active = false; },
+      async start() { calls.push('start'); startedAt.push(pointer()); active = true; },
+      versions,
+    };
+    return { m, service, versionsRoot, pointer, startedAt, calls, active: () => active, failStart() {} };
+  };
+  // The stop that has to precede a `restore` is the LAST one. The transaction stops the service before it
+  // switches the binary, so an early `stop` proves nothing; what matters is that the undo stopped the
+  // service AGAIN, after the candidate was started, before deleting the version root it runs from.
+  const lastStopPrecedesRestore = (calls: readonly string[]): boolean =>
+    calls.includes('stop') && calls.includes('restore')
+      && calls.lastIndexOf('stop') < calls.indexOf('restore');
+  const versionRootReceipt = (home: string): string | undefined => {
+    const state = inspectInstallState(home);
+    return state.committed
+      ? state.state.resources.find((item) => item.id === 'service-windows-version')?.ownership.marker
+      : undefined;
+  };
+
+  {
+    const fixture = versionedMachine();
+    const upgraded = await runUpgrade(upgradeOptions(fixture));
+    check('an upgrade points the service at the candidate BEFORE restarting it, then supersedes the old root',
+      upgraded.exitCode === 0 && upgraded.detailCode === 'upgrade-complete'
+        && fixture.startedAt.join(',') === 'key-2.0.0'
+        && fixture.pointer() === 'key-2.0.0'
+        && existsSync(join(fixture.versionsRoot, 'key-2.0.0'))
+        && !existsSync(join(fixture.versionsRoot, 'key-1.0.0'))
+        && versionRootReceipt(fixture.m.home) === 'key-2.0.0',
+      `${upgraded.detailCode}/started=${fixture.startedAt.join(',')}/pointer=${fixture.pointer()}`);
+  }
+
+  {
+    // Without the pointer flip the restarted service comes back on the version it already had, the health
+    // poll reads that old version every attempt, and a perfectly good candidate is rolled back. That was
+    // `upgrade` on every Windows host: exit 3, `upgrade-rolled-back`, thirty times over.
+    const fixture = versionedMachine();
+    let observed = '';
+    const upgraded = await runUpgrade({
+      ...upgradeOptions(fixture),
+      verifyBrokerVersion: async (_config, expected) => {
+        observed = fixture.pointer();
+        return observed === `key-${expected}`;
+      },
+    });
+    check('the health check sees the candidate because the version the service execs moved with the binary',
+      upgraded.exitCode === 0 && observed === 'key-2.0.0', `${upgraded.detailCode}/${observed}`);
+  }
+
+  {
+    const fixture = versionedMachine();
+    const rolledBack = await runUpgrade({
+      ...upgradeOptions(fixture),
+      verifyBrokerVersion: async () => false,
+    });
+    check('a rollback puts the pointer back before restarting, so the restored service is the old build',
+      rolledBack.exitCode === 3 && rolledBack.detailCode === 'upgrade-rolled-back'
+        && fixture.startedAt.join(',') === 'key-2.0.0,key-1.0.0'
+        && fixture.pointer() === 'key-1.0.0'
+        && existsSync(join(fixture.versionsRoot, 'key-1.0.0'))
+        && !existsSync(join(fixture.versionsRoot, 'key-2.0.0'))
+        && versionRootReceipt(fixture.m.home) === undefined,
+      `${rolledBack.detailCode}/started=${fixture.startedAt.join(',')}/pointer=${fixture.pointer()}`);
+    // A failed health check does not mean a dead candidate -- a cold start slower than the ~3 s window
+    // fails it too, and the candidate is then still serving. `start` on a live unit is a no-op, so
+    // without this stop the rollback reports the previous release restored while the candidate keeps
+    // answering; on Windows `restore` would additionally delete the version root it is executing from.
+    check('a rollback stops the candidate it started before deleting the version root it runs from',
+      lastStopPrecedesRestore(fixture.calls)
+        && fixture.calls.join(',') === 'stop,apply,start,stop,restore,start',
+      fixture.calls.join(','));
+  }
+
+  {
+    // The fault the journal phase exists for: the pointer has moved and the service has not been
+    // restarted, so nothing running knows about it and only what was written down can undo it.
+    const fixture = versionedMachine();
+    const interrupted = await runUpgrade({ ...upgradeOptions(fixture), faultAfter: 'version-activated' });
+    const journal = JSON.parse(readFileSync(join(fixture.m.home, 'upgrade-journal.json'), 'utf8')) as {
+      phase: string;
+      serviceVersion?: { fromVersionKey: string; toVersionKey: string };
+    };
+    const recovered = await runUpgrade({
+      ...upgradeOptions(fixture),
+      fetch: (async () => new Response('missing', { status: 503 })) as unknown as typeof fetch,
+    });
+    check('a crash between the pointer flip and the restart is undone from the journal alone',
+      interrupted.exitCode === 4 && journal.phase === 'activating'
+        && journal.serviceVersion?.fromVersionKey === 'key-1.0.0'
+        && journal.serviceVersion?.toVersionKey === 'key-2.0.0'
+        && recovered.detailCode === 'upgrade-interrupted-recovered'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+        && fixture.pointer() === 'key-1.0.0'
+        && !existsSync(join(fixture.versionsRoot, 'key-2.0.0'))
+        && versionRootReceipt(fixture.m.home) === 'key-1.0.0'
+        // Both runs, in one sequence. The interrupted run stopped the service and applied the pointer,
+        // then crashed; the recovery stops it AGAIN -- the crashed run may have got as far as starting
+        // the candidate, and `restore` deletes the version root it would be executing from -- and only
+        // then puts the pointer back and starts the old build. Was `apply,restore` before service
+        // control was recorded here.
+        && fixture.calls.join(',') === 'stop,apply,stop,restore,start'
+        && lastStopPrecedesRestore(fixture.calls),
+      `${journal.phase}/${recovered.detailCode}/pointer=${fixture.pointer()}/${fixture.calls.join(',')}`);
+  }
+
+  {
+    // The version key is derived from the candidate's own build terms, so a candidate that will not name
+    // them cannot be filed anywhere. Refused before the journal opens, rather than activated under a key
+    // invented from the version -- which would name a directory the candidate itself never resolves.
+    const fixture = versionedMachine();
+    const refused = await runUpgrade({
+      ...upgradeOptions(fixture),
+      runBinary: async () => ({
+        status: 'ok' as const,
+        exitCode: 0,
+        stdout: JSON.stringify({ version: '2.0.0', target: 'linux-x64', packaged: true, distribution: 'native' }),
+        stderr: '',
+      }),
+    });
+    check('a candidate that will not state its own build terms is refused where a version root is keyed on them',
+      refused.detailCode === 'release-offline-self-check-failed'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+        && fixture.pointer() === 'key-1.0.0' && fixture.calls.length === 0,
+      `${refused.detailCode}/${fixture.calls.join(',')}`);
+  }
+
+  {
+    // A pointer that exists and cannot be read is the one case that must not be papered over: writing a
+    // new root and pointing the service at it would leave nothing to point back to. Read before the
+    // journal opens, so the answer is a refusal with the machine untouched rather than a rollback.
+    const fixture = versionedMachine();
+    const refused = await runUpgrade({
+      ...upgradeOptions(fixture),
+      service: {
+        ...fixture.service,
+        versions: {
+          ...fixture.service.versions!,
+          plan() { throw new Error('windows-active-install-unreadable'); },
+        },
+      },
+    });
+    check('an unreadable service pointer refuses the upgrade before the web root or the binary move',
+      refused.exitCode === 1 && refused.detailCode === 'windows-active-install-unreadable'
+        && readFileSync(fixture.m.binary, 'utf8') === 'old-binary-v1'
+        && !existsSync(join(fixture.m.home, 'upgrade-journal.json'))
+        && !existsSync(join(fixture.m.home, 'bin', 'cosyncing.staging-2.0.0'))
+        && fixture.active(),
+      `${refused.exitCode}/${refused.detailCode}`);
+  }
+
+  {
+    // A crash BEFORE the activation must not write the pointer file at all. Recovery that rewrites a file
+    // the service reads at every start, on a machine where nothing moved it, is a mutation with no cause.
+    const fixture = versionedMachine();
+    const interrupted = await runUpgrade({ ...upgradeOptions(fixture), faultAfter: 'binary-switched' });
+    const recovered = await runUpgrade({
+      ...upgradeOptions(fixture),
+      fetch: (async () => new Response('missing', { status: 503 })) as unknown as typeof fetch,
+    });
+    check('recovery from a phase the pointer could not have moved in never writes the pointer',
+      interrupted.exitCode === 4 && recovered.detailCode === 'upgrade-interrupted-recovered'
+        && fixture.pointer() === 'key-1.0.0'
+        && !fixture.calls.includes('restore') && !fixture.calls.includes('apply'),
+      `${recovered.detailCode}/${fixture.calls.join(',')}`);
   }
 
   // CLI grammar keeps all lifecycle flags explicit and alias-aware.

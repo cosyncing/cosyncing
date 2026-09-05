@@ -166,6 +166,59 @@ export function windowsPriorVersionReceiptTarget(
   return target;
 }
 
+/**
+ * The receipts that move with a version root: the root itself, and the environment file inside it.
+ *
+ * The bootstrap and the pointer are deliberately NOT here. Neither target carries a version key, so an
+ * install that moves the service to a different root leaves both receipts exactly as they were written.
+ * One definition, used by the provider's own {@link WindowsTaskSchedulerServiceProvider.installedResources}
+ * and by an upgrade that activates a root without reinstalling the scheduled task.
+ */
+export function windowsServiceVersionResources(
+  stateHome: string,
+  versionKey: string,
+): InstalledResourceRecord[] {
+  const paths = windowsServiceInstallPaths(stateHome, versionKey);
+  return [
+    {
+      id: WINDOWS_VERSION_RESOURCE_ID,
+      kind: 'other',
+      target: paths.versionRoot,
+      ownership: { proof: 'receipt', marker: versionKey },
+    },
+    {
+      id: 'service-environment',
+      kind: 'environment-file',
+      target: paths.environmentPath,
+      ownership: { proof: 'receipt', marker: versionKey },
+    },
+  ];
+}
+
+/**
+ * Remove one superseded version root, or leave it exactly where it is.
+ *
+ * Every condition is a refusal to delete anything not provably one of ours: inside the versions root and
+ * directly beneath it, a plain owner-only directory, no symlink in any component, and never the root the
+ * service is pointed at now. Returns whether it removed anything, so a caller can tell "gone" from
+ * "declined" instead of inferring it.
+ */
+export function removeWindowsServiceVersionRoot(options: {
+  versionsRoot: string;
+  target: string;
+  activeVersionRoot: string;
+}): boolean {
+  const versionsRoot = win32.resolve(options.versionsRoot);
+  const target = win32.resolve(options.target);
+  if (!target.toLowerCase().startsWith(`${versionsRoot.toLowerCase()}\\`)
+      || win32.dirname(target).toLowerCase() !== versionsRoot.toLowerCase()
+      || target.toLowerCase() === win32.resolve(options.activeVersionRoot).toLowerCase()
+      || inspectOwnerOnlyDirectory(target).status !== 'ok') return false;
+  assertNoSymlinkComponents(target, false);
+  rmSync(target, { recursive: true, force: false });
+  return true;
+}
+
 /** Login-scoped, least-privilege per-user Task Scheduler provider. Files are staged by a separate action. */
 export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvider {
   readonly id = 'task-scheduler' as const;
@@ -329,18 +382,7 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
         target: this.paths.activeManifestPath,
         ownership: { proof: 'receipt', marker: this.identity.installationId },
       },
-      {
-        id: WINDOWS_VERSION_RESOURCE_ID,
-        kind: 'other',
-        target: this.paths.versionRoot,
-        ownership: { proof: 'receipt', marker: this.options.versionKey },
-      },
-      {
-        id: 'service-environment',
-        kind: 'environment-file',
-        target: this.paths.environmentPath,
-        ownership: { proof: 'receipt', marker: this.options.versionKey },
-      },
+      ...windowsServiceVersionResources(this.options.stateHome, this.options.versionKey),
     ];
   }
 
@@ -447,12 +489,23 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
     return status;
   }
 
+  /**
+   * Write this version's immutable root and point the service at it, leaving the scheduler alone.
+   *
+   * The pointer flip is the last thing {@link stageImmutableFiles} does, so on return the bootstrap's next
+   * start execs this version. Separated from {@link installDefinition} for `upgrade`, which must move the
+   * service to a new version without rewriting a scheduled task whose definition has not changed.
+   */
+  async stageVersion(): Promise<void> {
+    if (this.options.stageFiles) this.options.stageFiles();
+    else this.stageImmutableFiles();
+  }
+
   async installDefinition(): Promise<void> {
     const before = this.backend.inspect(this.identity);
     this.sharedCreatedDuringInstall ||= !before.shared;
     this.sidFolderCreatedDuringInstall ||= !before.sidFolder;
-    if (this.options.stageFiles) this.options.stageFiles();
-    else this.stageImmutableFiles();
+    await this.stageVersion();
     this.backend.reconcile({
       identity: this.identity,
       definition: this.definition,
@@ -543,12 +596,11 @@ export class WindowsTaskSchedulerServiceProvider implements DurableServiceProvid
       this.paths.versionRoot,
     );
     if (!target) return;
-    const versionsRoot = `${win32.resolve(this.paths.versionsRoot)}\\`;
-    if (!target.toLowerCase().startsWith(versionsRoot.toLowerCase())
-        || win32.dirname(target).toLowerCase() !== win32.resolve(this.paths.versionsRoot).toLowerCase()
-        || inspectOwnerOnlyDirectory(target).status !== 'ok') return;
-    assertNoSymlinkComponents(target, false);
-    rmSync(target, { recursive: true, force: false });
+    removeWindowsServiceVersionRoot({
+      versionsRoot: this.paths.versionsRoot,
+      target,
+      activeVersionRoot: this.paths.versionRoot,
+    });
   }
 
   private filesystemReceiptsCurrent(): boolean {

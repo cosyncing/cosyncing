@@ -82,6 +82,36 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   it found. Reversing a security repair would mean widening access again from a
   record written before the repair, which setup will not do.
 
+### Fixed
+
+- `cosyncing upgrade` works on Windows. The Scheduled Task does not run
+  `%COSYNCING_HOME%\bin\cosyncing`; it runs a versioned copy under
+  `%COSYNCING_HOME%\service\windows\versions\`, and only `setup` ever wrote
+  one. So the swap replaced a file the service does not run, the restarted broker
+  came back on the version it already had, and the post-switch health check
+  rolled every upgrade back. `upgrade` now writes the new version root — the same
+  writer `setup` uses, so it carries the new application, web client and service
+  environment together — and points the service at it before the restart. If the
+  candidate then fails its health check, the pointer goes back before the service
+  is restarted, so the rollback restores the previous build rather than starting
+  the new one. An interrupted upgrade is undone the same way from its durable
+  journal. Installer plus `setup` remains a valid way to update; it is no longer
+  the only one. The fix lives in the upgrader, so a host still on 0.5.1 rolls
+  back once more; update that host once with the installer and `upgrade` works
+  from there.
+- A rolled-back upgrade no longer leaves files nothing owns. The rollback copy of
+  the binary and the candidate's web client used to survive under
+  `<home>/bin` with no receipt naming either, so `uninstall` reported a clean
+  removal while both stayed on disk. Both are removed with the rollback, on the
+  journal recovery path as well. A rollback copy an *earlier* upgrade left is
+  untouched — that one is still measured by a receipt that is true.
+- The web client an upgrade installs is owner-only on Windows. Its staging
+  directory was created with a POSIX file mode, which Windows ignores, so the
+  unpacked tree inherited its parent's access instead of carrying the protected
+  descriptor every other directory cosyncing creates has. On Linux and macOS the
+  same tree is now 0700/0600 rather than whatever the archive and your umask
+  produced.
+
 ### Notes
 
 - Windows ARM64 is not qualified yet and is refused, including an x64 process

@@ -498,15 +498,16 @@ async function defaultRunUpgrade(options: {
   const setupState = (await import('../installation/setup-state.ts')).readSetupState(home);
   const service = (await import('../installation/setup-state.ts')).isDurableServiceChoice(setupState.serviceChoice)
     ? (() => {
-        const provider = lifecycle.createLifecycleDurableServiceProvider({
-          home,
-          buildInfo: options.buildInfo,
-          ...applicationLaunchInputs(options.buildInfo),
-        });
+        const inputs = { home, buildInfo: options.buildInfo, ...applicationLaunchInputs(options.buildInfo) };
+        const provider = lifecycle.createLifecycleDurableServiceProvider(inputs);
+        // Undefined wherever the unit execs the installed binary, which is every platform but Windows.
+        // There, replacing that file IS the version change; here the pointer has to move with it.
+        const versions = lifecycle.createLifecycleServiceVersions(inputs);
         return {
           inspect: async () => ({ active: (await provider.inspect()).active === 'active' }),
           stop: () => provider.stop(),
           start: () => provider.start(),
+          ...(versions ? { versions } : {}),
         };
       })()
     : undefined;

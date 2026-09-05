@@ -99,6 +99,64 @@ export interface ServiceLogsRequest {
   lines: number;
 }
 
+/**
+ * The immutable terms a versioned service root is keyed on.
+ *
+ * The semver cannot identify a build -- a whole release cycle shares one -- so the key hashes every term
+ * that distinguishes one artifact from another. An upgrade reads them from the CANDIDATE's own self-check:
+ * a key string-formatted from the version would name a directory the candidate itself would never resolve.
+ */
+export interface DurableServiceVersionBuild {
+  version: string;
+  commit: string;
+  buildDate: string | null;
+  target: string;
+  dirty: boolean | null;
+  distribution: DistributionKind;
+}
+
+/**
+ * Everything needed to undo an activation from a LATER process, and nothing that cannot be journaled.
+ *
+ * A crash between the pointer flip and the service restart is recovered by a different invocation of the
+ * CLI — possibly a different build of it — so the undo cannot depend on anything the crashed run held in
+ * memory, or on the version key whichever binary happens to be running now would compute.
+ */
+export interface DurableServiceVersionRecord {
+  installationId: string;
+  fromVersionKey: string;
+  toVersionKey: string;
+}
+
+export interface DurableServiceVersionActivation {
+  /** Journaled before {@link apply} runs, so the pointer can never move without a way back on disk. */
+  readonly record: DurableServiceVersionRecord;
+  apply(): Promise<void>;
+}
+
+/**
+ * Moving a durable service from one installed version to another, for the providers that have versions.
+ *
+ * The Windows Scheduled Task execs a bootstrap that reads `active-install.json` at every start and runs the
+ * version root it names, so replacing `<home>\bin\cosyncing` does not change what the service runs. This
+ * is the seam through which `upgrade` moves the pointer; `undefined` from the factory means the host keeps
+ * no versioned root and replacing the binary is the whole of the change.
+ */
+export interface DurableServiceVersions {
+  /**
+   * The record naming the root this upgrade would move to, or undefined when there is no versioned
+   * install to move. Computed before anything is written, so the journal can carry it into the phase in
+   * which the pointer may have moved.
+   */
+  plan(build: Readonly<DurableServiceVersionBuild>): DurableServiceVersionActivation | undefined;
+  /** Point the service back at `fromVersionKey` and drop the candidate's root. Idempotent. */
+  restore(record: Readonly<DurableServiceVersionRecord>): Promise<void>;
+  /** Drop the superseded root, only once the new receipt and the health gate have committed. */
+  finalize(record: Readonly<DurableServiceVersionRecord>): Promise<void>;
+  /** The receipts that name one version root, for the state an upgrade or a recovery commits. */
+  resources(versionKey: string): readonly InstalledResourceRecord[];
+}
+
 export interface DurableServiceProvider {
   readonly id: DurableServiceProviderId;
   readonly serviceName: string;
@@ -137,6 +195,15 @@ export interface DurableServiceProvider {
   ownership?(): DurableServiceOwnership;
   /** Remove superseded receipt-owned artifacts only after the new receipt and health gate have committed. */
   finalizeCommitted?(): Promise<void>;
+  /**
+   * Write this version's immutable root and point the service at it, without touching the service
+   * manager's own objects.
+   *
+   * Implemented only where the unit does NOT name the installed binary. systemd and launchd exec
+   * `<home>/bin/cosyncing` directly, so replacing that file is the whole of a version change there and
+   * there is no root to write.
+   */
+  stageVersion?(): Promise<void>;
   inspect(): Promise<DurableServiceStatus>;
   installDefinition(): Promise<void>;
   reloadDefinition(): Promise<void>;

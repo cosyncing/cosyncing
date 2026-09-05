@@ -119,6 +119,9 @@ import {
   serviceAgentExecutableOverrides,
   type DurableServiceProvider,
   type DurableServiceStatus,
+  type DurableServiceVersionBuild,
+  type DurableServiceVersionRecord,
+  type DurableServiceVersions,
   type ServiceCommandRunner,
   type DurableServiceProviderOptions,
 } from './service-manager.ts';
@@ -132,7 +135,18 @@ import {
   piBridgeOwnershipPrecondition,
 } from './pi-bridge-ownership.ts';
 import { readSetupTransactionJournal } from './setup-transaction.ts';
-import { windowsServiceVersionKey } from './windows-service-install.ts';
+import {
+  inspectWindowsActiveInstall,
+  windowsActiveInstallManifest,
+  windowsServiceActiveManifestPath,
+  windowsServiceInstallPaths,
+  windowsServiceVersionKey,
+  writeWindowsActiveInstall,
+} from './windows-service-install.ts';
+import {
+  removeWindowsServiceVersionRoot,
+  windowsServiceVersionResources,
+} from './windows-task-scheduler-provider.ts';
 import {
   isDurableServiceChoice,
   readCodexDaemonOwnership,
@@ -390,6 +404,89 @@ export function createLifecycleDurableServiceProvider(options: LifecycleBaseOpti
 
 /** Compatibility alias for integrations using the pre-Phase-4 name. */
 export const createLifecycleSystemdProvider = createLifecycleDurableServiceProvider;
+
+/**
+ * Moving the durable service from one installed version to another, on the platform that has versions.
+ *
+ * The Windows Scheduled Task does not exec `<home>\bin\cosyncing`. It execs a bootstrap that reads
+ * `active-install.json` at every start and runs the version root named there, so an upgrade that replaces
+ * the binary and restarts the service starts the version it already had -- which is why `upgrade` used to
+ * fail its own health check and roll back on every Windows host.
+ *
+ * `undefined` on systemd and launchd, whose units name the installed binary directly: there replacing that
+ * file IS the version change, and inventing a root for it would be a second layout to keep in step.
+ *
+ * The root is written by the SAME writer setup uses. A private copy in the upgrade path is precisely how
+ * the two definitions of "a version root" drift apart, and the drift is what this exists to repair.
+ */
+export function createLifecycleServiceVersions(
+  options: LifecycleBaseOptions,
+): DurableServiceVersions | undefined {
+  const context = options.context ?? createSetupDiagnosisContext();
+  if (context.platform !== 'win32') return undefined;
+  const home = options.home ?? setupStateHome();
+  const supersede = (remove: string, keep: string): void => {
+    if (remove === keep) return;
+    const superseded = windowsServiceInstallPaths(home, remove);
+    removeWindowsServiceVersionRoot({
+      versionsRoot: superseded.versionsRoot,
+      target: superseded.versionRoot,
+      activeVersionRoot: windowsServiceInstallPaths(home, keep).versionRoot,
+    });
+  };
+  return {
+    resources(versionKey) {
+      return windowsServiceVersionResources(home, versionKey);
+    },
+    plan(build: Readonly<DurableServiceVersionBuild>) {
+      const pointer = inspectWindowsActiveInstall(windowsServiceActiveManifestPath(home));
+      // No pointer, no versioned install to move: this host runs the broker in the foreground, or its
+      // service was never installed. An upgrade there is exactly the binary swap it already was.
+      if (pointer.status === 'missing') return undefined;
+      // A pointer that EXISTS and cannot be read is the one case that must not be papered over. Writing a
+      // new root and pointing the service at it would leave nothing to point back to.
+      if (pointer.status !== 'ok') throw new Error('windows-active-install-unreadable');
+      const record: DurableServiceVersionRecord = {
+        installationId: pointer.manifest.installationId,
+        fromVersionKey: pointer.manifest.versionKey,
+        toVersionKey: windowsServiceVersionKey(build),
+      };
+      return {
+        record,
+        async apply() {
+          // Built for the CANDIDATE, from the receipt-owned binary the swap has already replaced and the
+          // web root its signed sidecar was installed at. Everything else -- the environment the root
+          // carries, the paths inside it, the key it is filed under -- follows from that build, exactly as
+          // it will when the candidate itself next runs `status`.
+          const provider = createLifecycleDurableServiceProvider({
+            ...options,
+            home,
+            context,
+            buildInfo: { ...options.buildInfo, ...build, packaged: build.distribution !== 'source' },
+            executablePath: installedBinaryPath(home),
+          });
+          if (!provider.stageVersion) throw new Error('durable service provider stages no version root');
+          await provider.stageVersion();
+        },
+      };
+    },
+    async restore(record) {
+      const manifestPath = windowsServiceActiveManifestPath(home);
+      // The pointer first, and only then the root it no longer names: a crash between the two leaves the
+      // service pointed at a version that is still on disk, which is a machine that starts.
+      if (existsSync(manifestPath)) {
+        writeWindowsActiveInstall(
+          manifestPath,
+          windowsActiveInstallManifest(record.installationId, record.fromVersionKey),
+        );
+      }
+      supersede(record.toVersionKey, record.fromVersionKey);
+    },
+    async finalize(record) {
+      supersede(record.fromVersionKey, record.toVersionKey);
+    },
+  };
+}
 
 async function environment(options: LifecycleBaseOptions): Promise<LifecycleEnvironment> {
   const home = options.home ?? setupStateHome();
