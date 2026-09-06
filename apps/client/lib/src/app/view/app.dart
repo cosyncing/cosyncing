@@ -17,6 +17,7 @@ import 'package:cosyncing_client/src/features/broker_profiles/controller/broker_
 import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_profile_providers.dart';
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/connection/view/broker_auth_barrier.dart';
+import 'package:cosyncing_client/src/features/pairing/controller/installer_pairing_handoff_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/detail/session_notification_hooks.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
@@ -71,6 +72,10 @@ class _AppState extends ConsumerState<App> {
   Widget build(BuildContext context) {
     ref
       ..watch(activeBrokerProfileHydrationProvider)
+      // Redeems the all-in-one installer's one-shot pairing offer, if this is
+      // the first launch after one. Watched rather than awaited: no outcome of
+      // it may hold up the first frame.
+      ..watch(installerPairingHandoffProvider)
       ..watch(attentionFeedRuntimeProvider)
       ..watch(attentionRemoteWakeRuntimeProvider)
       ..watch(attentionMutationDrainRuntimeProvider)

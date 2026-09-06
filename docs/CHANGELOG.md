@@ -13,6 +13,23 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Added
 
+- One command installs the broker and the desktop client. `install.sh` and
+  `install.ps1` now place the GUI client beside the broker, run `setup`, hand the
+  client a pairing offer, and launch it. The client artifacts ship inside the
+  signed broker release, so `SHA256SUMS` and the digests baked into the installer
+  cover them exactly as they cover the broker's own files. A host with no client —
+  Linux arm64, or a Linux box with no display server — says so and finishes as a
+  server install. `setup` reads from the terminal rather than from the `curl | sh`
+  pipe, so its plan-and-confirm still asks; a run with no terminal prints the
+  command and stops instead of consenting for you.
+- The broker-only installers keep their behaviour under new names,
+  `install-server.sh` and `install-server.ps1`. All four are rendered from the two
+  templates in one step, so a server installer cannot drift from the all-in-one it
+  is a mode of.
+- On its first launch after an all-in-one install, the client reads the pairing
+  offer the installer left in `$COSYNCING_HOME/client-pairing.json`, imports it,
+  and deletes it. The offer is one-use and expires in five minutes, exactly as
+  `pair` issues it. An absent, malformed, or expired file is ignored.
 - Added `install.ps1`, a PowerShell installer for the Windows x64 broker, published
   beside `install.sh` by the same release step. It verifies the release with the
   ECDSA P-256 signature the manifest is already signed with, places the JavaScript
@@ -84,6 +101,20 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- The shell installers are `sh` scripts and say so. Their shebang read
+  `#!/usr/bin/env bash` while the documented one-liner pipes them into `sh`, which
+  on Debian and Ubuntu is dash. In the all-in-one, the probe for a terminal ran
+  `:` with a redirection that fails when there is none — and a redirection error
+  on a POSIX special built-in exits the shell, so dash killed the installer with
+  status 2 and no message, after the broker was installed and before the line
+  explaining that `setup` had been skipped. Every headless run on those
+  distributions hit it. macOS never did, because there `sh` is bash.
+- A client promotion no longer breaks every installed broker's update check.
+  GitHub keeps one `latest` release per repository, and every broker compiles
+  `releases/latest/download/release-manifest.json` in as its update channel, so
+  promoting a client release with `--latest` moved the pointer to a release with
+  no manifest. Client promotion no longer claims it; the broker release is the
+  only release that may hold it.
 - `cosyncing upgrade` works on Windows. The Scheduled Task does not run
   `%COSYNCING_HOME%\bin\cosyncing`; it runs a versioned copy under
   `%COSYNCING_HOME%\service\windows\versions\`, and only `setup` ever wrote

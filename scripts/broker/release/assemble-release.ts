@@ -6,6 +6,7 @@ import { assembleRelease, canonicalProductVersion } from './release-files.ts';
 interface Args {
   artifacts: string;
   evidence: string;
+  clients: string;
   output: string;
   baseUrl: string;
   commit: string;
@@ -20,7 +21,7 @@ interface Args {
 function usage(): never {
   console.error(
     'Usage: bun run scripts/broker/release/assemble-release.ts ' +
-    '--artifacts DIR --evidence DIR --output DIR --base-url HTTPS_URL --commit HEX ' +
+    '--artifacts DIR --evidence DIR --clients DIR --output DIR --base-url HTTPS_URL --commit HEX ' +
     '--published-at ISO --key-id ID --private-key PATH --public-key PATH ' +
     '--p256-private-key PATH --p256-public-key PATH',
   );
@@ -39,6 +40,9 @@ function parseArgs(argv: string[]): Args {
   return {
     artifacts: resolve(value('--artifacts')),
     evidence: resolve(value('--evidence')),
+    // Required, not optional. An assembly that quietly published no client would produce an all-in-one
+    // installer with an empty client table, which every host would read as "no client for you".
+    clients: resolve(value('--clients')),
     output: resolve(value('--output')),
     baseUrl: value('--base-url'),
     commit: value('--commit'),
@@ -55,6 +59,7 @@ const args = parseArgs(process.argv.slice(2));
 const result = assembleRelease({
   artifactDirectory: args.artifacts,
   evidenceDirectory: args.evidence,
+  clientDirectory: args.clients,
   outputDirectory: args.output,
   baseUrl: args.baseUrl,
   version: canonicalProductVersion(),

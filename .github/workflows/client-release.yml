@@ -184,8 +184,14 @@ jobs:
           mkdir -p output/client-release
           asset="output/client-release/cosyncing-client-$version-macos-arm64-unsigned.dmg"
           hdiutil create -volname "Cosyncing $version" -srcfolder "$stage" -ov -format UDZO "$asset"
+          # A ZIP of the same app beside the DMG. The DMG is the browser download; the ZIP is what the
+          # all-in-one installer places, because `ditto -x -k` unpacks it into ~/Applications with no
+          # mount, no prompt and no sudo, where a DMG needs hdiutil and a Finder gesture. `--keepParent`
+          # so the archive's one top-level entry is Cosyncing.app.
+          zip_asset="output/client-release/cosyncing-client-$version-macos-arm64-unsigned.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$stage/Cosyncing.app" "$zip_asset"
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          gh release upload "$GITHUB_REF_NAME" "$asset" "$zip_asset" --clobber
 
   windows:
     needs: prepare-draft
@@ -331,6 +337,7 @@ jobs:
           cosyncing-client-$version-android.apk
           cosyncing-client-$version-linux-x64.tar.gz
           cosyncing-client-$version-macos-arm64-unsigned.dmg
+          cosyncing-client-$version-macos-arm64-unsigned.zip
           cosyncing-client-$version-windows-x64-unsigned.zip
           EOF
           )"
@@ -345,6 +352,7 @@ jobs:
           cosyncing-client-$version-android.apk
           cosyncing-client-$version-linux-x64.tar.gz
           cosyncing-client-$version-macos-arm64-unsigned.dmg
+          cosyncing-client-$version-macos-arm64-unsigned.zip
           cosyncing-client-$version-windows-x64-unsigned.zip
           EOF
           )"

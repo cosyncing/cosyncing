@@ -310,6 +310,32 @@ jobs:
             --broker output/native/cosyncing-linux-x64 \
             --web-dir output/web-pair/app \
             --commit "$COMMIT" --version "$VERSION"
+      # The desktop clients the all-in-one installer places, taken from the matching client release rather
+      # than rebuilt here. That release is already published and physically accepted by the time a broker
+      # release runs — the client-first rollout order in docs/release/client-distribution.md requires it —
+      # so these are the exact bytes a user downloading the client by hand would get, carried into the
+      # broker release so one command can install both. Only the desktop hosts: Android installs from its
+      # own APK, and no installer places it.
+      - name: Collect the matching desktop clients
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          mkdir -p output/clients
+          gh release download "client-v$VERSION" --dir output/clients \
+            --pattern "cosyncing-client-$VERSION-linux-x64.tar.gz" \
+            --pattern "cosyncing-client-$VERSION-macos-arm64-unsigned.zip" \
+            --pattern "cosyncing-client-$VERSION-windows-x64-unsigned.zip" \
+            --pattern 'SHA256SUMS'
+          # The client release signs nothing, but it does publish a checksum list over its own assets.
+          # Checking the downloads against it here means a client that changed after acceptance cannot
+          # ride into a signed broker release.
+          (cd output/clients && grep -F -e "-linux-x64.tar.gz" -e "-macos-arm64-unsigned.zip" \
+            -e "-windows-x64-unsigned.zip" SHA256SUMS > expected.sha256 \
+            && sha256sum --check expected.sha256)
+          rm -f output/clients/SHA256SUMS output/clients/expected.sha256
       - name: Assemble and verify signed release
         env:
           RELEASE_PRIVATE_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PRIVATE_KEY_PEM_B64 }}
@@ -335,7 +361,8 @@ jobs:
           BASE_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/broker-v$VERSION"
           mkdir -p output/release
           bun run release:assemble -- \
-            --artifacts output/native --evidence output/native --output output/release \
+            --artifacts output/native --evidence output/native --clients output/clients \
+            --output output/release \
             --base-url "$BASE_URL" --commit "$COMMIT" --published-at "$BUILD_DATE" \
             --key-id "$RELEASE_KEY_ID" \
             --private-key "$RUNNER_TEMP/cosyncing-release.key.pem" \

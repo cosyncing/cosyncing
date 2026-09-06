@@ -1,17 +1,55 @@
 # Client distribution
 
 Client releases are separate from the npm broker package and compiled native
-broker releases. A `client-vX.Y.Z` tag stages four client artifacts from the
+broker releases. A `client-vX.Y.Z` tag stages five client artifacts from the
 reviewed tag:
 
 - a project-key-signed Android APK;
 - a Linux x64 tarball;
-- an unsigned Apple Silicon macOS DMG; and
+- an unsigned Apple Silicon macOS DMG;
+- an unsigned Apple Silicon macOS ZIP; and
 - an unsigned Windows x64 portable ZIP.
+
+The macOS DMG and ZIP hold the same app. The DMG is the browser download and
+hits Gatekeeper's Finder gate; the ZIP is what the all-in-one installer places,
+because `ditto -x -k` unpacks it into `~/Applications` with no mount, no prompt
+and no `sudo`.
 
 iOS distribution is deferred. TestFlight and App Store distribution require an
 active Apple Developer Program membership; simulator compilation remains part
 of public CI.
+
+## The desktop clients also ship inside the broker release
+
+The all-in-one installers (`install.sh`, `install.ps1`) place a desktop client
+beside the broker, so the broker release carries the three desktop artifacts —
+Linux x64, macOS arm64 ZIP, Windows x64 ZIP — copied from the matching
+`client-vX.Y.Z` release rather than rebuilt. They are the same bytes a user
+downloading by hand would get.
+
+They are covered by the broker release's signed `SHA256SUMS`, and each
+installer carries their digests baked in. They are deliberately **not** in the
+release manifest: that manifest describes what a running broker can upgrade
+*itself* to, and a GUI client is not a broker upgrade. Adding them there would
+tell every installed broker to treat a client as a candidate for its own swap.
+
+This makes a broker release depend on the matching client release already
+existing, which is the client-first order below stated as a build step rather
+than as a habit. Android is not carried: it installs from its own APK and no
+installer places it.
+
+## Who owns the `latest` pointer
+
+GitHub keeps exactly one `latest` release per repository, and every broker ever
+built compiles `releases/latest/download/release-manifest.json` in as its update
+channel. **Only the broker release may hold that pointer.** A client promotion
+that claims it moves `latest` to a release with no manifest, and every installed
+broker's update check then 404s.
+
+`client-release-promote.yml` therefore promotes with `--latest=false`, and
+`test-client-release-policy.ts` fails the build if that ever changes. The same
+pointer is what makes
+`releases/latest/download/install.sh` a stable installer URL.
 
 ## Release controls
 
@@ -21,14 +59,14 @@ tagged commit must already be on `main`, and the complete repository check runs
 before packaging.
 
 The workflow creates or resets only the matching draft, builds each platform on
-its native hosted runner, uploads the four final assets, generates
+its native hosted runner, uploads the five final assets, generates
 `SHA256SUMS`, downloads and verifies the remote set, and publishes a GitHub
 prerelease for physical acceptance. It never builds or ships the native broker.
 
 After physical acceptance, `.github/workflows/client-release-promote.yml`
 requires the exact tag plus typed `PROMOTE` confirmation. It verifies the same
-five remote assets and promotes them stable without rebuilding or replacing
-anything.
+six remote assets and promotes them stable — without the `latest` pointer, and
+without rebuilding or replacing anything.
 
 ## Client-first rollout order
 

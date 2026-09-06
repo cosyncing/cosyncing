@@ -42,18 +42,108 @@ import {
 const ROOT = resolve(import.meta.dir, '../../..');
 
 /**
+ * What an installer installs. Rendered into `@INSTALL_MODE@` and read by both templates.
+ *
+ * `all` places the broker AND the desktop GUI client, runs `setup`, and hands the client a pairing.
+ * `server` stops after placing the broker's files, which is what the installer did before the client
+ * joined the release. Both are rendered from the SAME template, so the server installer is the all-in-one
+ * with one branch not taken rather than a second script that can drift from it.
+ */
+export const INSTALL_MODES = Object.freeze(['all', 'server'] as const);
+export type InstallMode = (typeof INSTALL_MODES)[number];
+
+/**
  * The installers this release publishes, by published name.
  *
- * Two scripts, one substitution table, one set of digests. `install.ps1` is not a fork of `install.sh`:
- * both are rendered from the same pins in the same step, so a release cannot ship a Windows installer that
- * points at a different artifact from the Unix one — the way it could if either were assembled separately.
+ * Four outputs, two templates, one substitution table, one set of digests. `install.ps1` is not a fork of
+ * `install.sh` and `install-server.sh` is not a fork of `install.sh`: all four are rendered from the same
+ * pins in the same step, so a release cannot ship one installer that points at a different artifact from
+ * another — the way it could if any of them were assembled separately.
  */
 export const BOOTSTRAP_TEMPLATES = Object.freeze({
-  'install.sh': join(import.meta.dir, 'bootstrap-template.sh'),
-  'install.ps1': join(import.meta.dir, 'bootstrap-template.ps1'),
-} as const);
+  'install.sh': { template: join(import.meta.dir, 'bootstrap-template.sh'), mode: 'all' },
+  'install-server.sh': { template: join(import.meta.dir, 'bootstrap-template.sh'), mode: 'server' },
+  'install.ps1': { template: join(import.meta.dir, 'bootstrap-template.ps1'), mode: 'all' },
+  'install-server.ps1': { template: join(import.meta.dir, 'bootstrap-template.ps1'), mode: 'server' },
+} as const satisfies Record<string, { template: string; mode: InstallMode }>);
 
 export type BootstrapName = keyof typeof BOOTSTRAP_TEMPLATES;
+
+/**
+ * The desktop clients an `all` install can place, and the archive each host is published as.
+ *
+ * Keyed by CLIENT host rather than by release target: the client's macOS build is named `macos-arm64`
+ * where the broker's is `darwin-arm64`, and the client publishes a Windows build where the broker has no
+ * native one at all. Linux arm64 is absent because no Linux arm64 client is built — an installer that
+ * resolves no row there says so and finishes as a server install rather than failing.
+ *
+ * The extension is part of the identity, not a guess: the client release publishes an unsigned macOS DMG
+ * beside the ZIP, and only the ZIP is what `ditto -x -k` can unpack without mounting a disk image.
+ */
+export const CLIENT_HOSTS = Object.freeze({
+  'linux-x64': '.tar.gz',
+  'macos-arm64': '.zip',
+  'windows-x64': '.zip',
+} as const);
+export type ClientHost = keyof typeof CLIENT_HOSTS;
+
+/** One desktop client artifact, as the rendered `@CLIENT_TABLE@` states it. */
+export interface ClientArtifact {
+  host: ClientHost;
+  name: string;
+  sha256: string;
+  size: number;
+}
+
+/**
+ * Read the client table back out of a RENDERED installer.
+ *
+ * The installers are the only place a client artifact's expected digest is written down — the release
+ * manifest deliberately does not name them — so a reader that wants to check a published directory
+ * against what its installers promise has to read the promise from the installer. Both templates spell
+ * the assignment differently (`CLIENT_TABLE='…'` and `$CLIENT_TABLE = '…'`) and neither value can contain
+ * a quote, because {@link renderBootstraps} refuses to embed one.
+ */
+export function parseRenderedClientTable(script: string): ClientArtifact[] {
+  const table = /CLIENT_TABLE\s*=\s*'([^']*)'/.exec(script)?.[1];
+  if (table === undefined) throw new Error('rendered installer carries no client table');
+  return table.split('\n').filter((row) => row.trim() !== '').map((row) => {
+    const [host, name, digest, size] = row.trim().split(/\s+/);
+    if (!host || !(host in CLIENT_HOSTS)) throw new Error(`client table names an unknown host: ${host}`);
+    if (!name || !digest || !/^[a-f0-9]{64}$/.test(digest) || !size || !/^[0-9]+$/.test(size)) {
+      throw new Error(`client table row is malformed: ${row}`);
+    }
+    return { host: host as ClientHost, name, sha256: digest, size: Number(size) };
+  });
+}
+
+/**
+ * Resolve exactly one client artifact per desktop host from a directory of built clients.
+ *
+ * Required in the same sense {@link RELEASE_TARGETS} is: a release that could not hand every desktop host
+ * a client would publish an all-in-one installer that silently degrades to a server install on whichever
+ * host was forgotten. Matching is by the published prefix AND the host's archive extension, so the DMG the
+ * client release publishes beside the macOS ZIP is not a second candidate that makes the match ambiguous.
+ */
+export function resolveClientArtifacts(directory: string, releaseVersion: string): ClientArtifact[] {
+  return (Object.keys(CLIENT_HOSTS) as ClientHost[]).map((host) => {
+    const prefix = `${PRODUCT_IDENTITY.releaseAssetPrefix}-client-${releaseVersion}-${host}`;
+    const extension = CLIENT_HOSTS[host];
+    const matches = [...new Bun.Glob(`${prefix}*${extension}`)
+      .scanSync({ cwd: directory, onlyFiles: true })].sort();
+    if (matches.length !== 1) {
+      throw new Error(
+        `expected exactly one ${host} client artifact matching ${prefix}*${extension}, found ${matches.length}`,
+      );
+    }
+    const name = matches[0]!;
+    const path = join(directory, name);
+    const bytes = readFileSync(path);
+    const stats = statSync(path);
+    if (!stats.isFile() || stats.size === 0) throw new Error(`client artifact is not a file: ${name}`);
+    return { host, name, sha256: sha256(bytes), size: stats.size };
+  });
+}
 
 /**
  * Targets every assembled release MUST publish; assembly fails without all of them. macOS is a first-class
@@ -198,6 +288,8 @@ export interface WebPackageEvidence {
 export interface ReleaseAssemblyOptions {
   artifactDirectory: string;
   evidenceDirectory: string;
+  /** Built desktop clients, one per {@link CLIENT_HOSTS} entry. See {@link resolveClientArtifacts}. */
+  clientDirectory: string;
   outputDirectory: string;
   baseUrl: string;
   version: string;
@@ -417,6 +509,9 @@ function renderBootstraps(options: {
   // is the same archive everywhere too, so the host only decides whether the install is supported at all.
   application: { name: string; sha256: string; size: number };
   webApp: { name: string; sha256: string; size: number };
+  // The desktop clients an `all` install may place, one row per host. A `server` install carries the same
+  // rows and reads none of them: one substitution table renders all four installers.
+  clients: readonly ClientArtifact[];
 }): Record<BootstrapName, string> {
   const publicKeyB64 = Buffer.from(options.publicKeyPem.trim() + '\n', 'utf8').toString('base64');
   // Both trust anchors are baked in, for the same reason: the installer must verify against the key IT
@@ -433,6 +528,16 @@ function renderBootstraps(options: {
   // no target — could not be listed at all, which is why the installer never checked it.
   const rows = [options.application, options.webApp];
   const artifactTable = rows.map((row) => `${row.name} ${row.sha256} ${row.size}`).join('\n');
+  // The client table is keyed by HOST, unlike the artifact table above: an installer resolves its own host
+  // first and then asks which client belongs to it, where the broker artifacts are the same bytes
+  // everywhere. Client digests are pinned here for the same reason every other digest is — the signed
+  // checksum list is the other statement, and a client is installed only when the two agree.
+  const clientTable = options.clients
+    .map((client) => `${client.host} ${client.name} ${client.sha256} ${client.size}`)
+    .join('\n');
+  if (new Set(options.clients.map((client) => client.host)).size !== options.clients.length) {
+    throw new Error('client table repeats a host');
+  }
   // The Bun the installer may place is pinned by the same rule as everything else it places. Rendering it
   // from the runtime constant rather than restating it here is what keeps the installer's pin and the
   // floor the application enforces from drifting apart.
@@ -452,6 +557,7 @@ function renderBootstraps(options: {
   const bunTable = bunRows.join('\n');
   const embedded = [
     artifactTable,
+    clientTable,
     bunTable,
     BUN_RELEASE_DOWNLOAD_BASE,
     options.version,
@@ -483,22 +589,33 @@ function renderBootstraps(options: {
     ['@WEB_ASSET@', options.webApp.name],
     ['@MINIMUM_BUN@', options.minimumBunVersion],
     ['@ARTIFACT_TABLE@', artifactTable],
+    ['@CLIENT_TABLE@', clientTable],
     ['@BUN_TABLE@', bunTable],
     ['@BUN_RELEASE_BASE@', BUN_RELEASE_DOWNLOAD_BASE],
   ];
   const rendered = {} as Record<BootstrapName, string>;
-  for (const [name, templatePath] of Object.entries(BOOTSTRAP_TEMPLATES) as Array<[BootstrapName, string]>) {
-    let script = readFileSync(templatePath, 'utf8');
-    for (const [token, value] of substitutions) script = script.replaceAll(token, value);
+  for (const [name, spec] of Object.entries(BOOTSTRAP_TEMPLATES) as Array<
+    [BootstrapName, { template: string; mode: InstallMode }]
+  >) {
+    let script = readFileSync(spec.template, 'utf8');
+    // Mode LAST is not an ordering detail: it is the only substitution that differs between two outputs
+    // rendered from one template, so it is applied per output while everything above is shared.
+    for (const [token, value] of [...substitutions, ['@INSTALL_MODE@', spec.mode] as const]) {
+      script = script.replaceAll(token, value);
+    }
     // A template that grew a token nobody renders would publish an installer carrying the literal
     // `@SOMETHING@` where a digest or a URL belongs, and would fail at the operator rather than here.
     const unresolved = /@[A-Z0-9_]+@/.exec(script);
     if (unresolved) throw new Error(`${name} still carries the unrendered token ${unresolved[0]}`);
     rendered[name] = script;
   }
-  // Stated as an assertion, not as a comment: the Windows installer must not carry the Ed25519 key.
-  if (rendered['install.ps1'].includes(publicKeyB64)) {
-    throw new Error('install.ps1 embeds the Ed25519 release key, which it cannot verify');
+  // Stated as an assertion, not as a comment: no Windows installer may carry the Ed25519 key. Written
+  // over every `.ps1` output rather than over `install.ps1` by name, so a fifth PowerShell installer is
+  // covered by existing rather than by somebody remembering to add it here.
+  for (const name of Object.keys(rendered) as BootstrapName[]) {
+    if (name.endsWith('.ps1') && rendered[name].includes(publicKeyB64)) {
+      throw new Error(`${name} embeds the Ed25519 release key, which it cannot verify`);
+    }
   }
   return rendered;
 }
@@ -908,6 +1025,20 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     },
   );
 
+  // The desktop clients, copied in BEFORE the installers are rendered because their digests are baked
+  // into the rendered scripts. They are deliberately NOT in the release manifest: the manifest describes
+  // what a broker can upgrade ITSELF to, and a GUI client is not a broker upgrade. The signed SHA256SUMS
+  // row plus the digest baked into the installer is the whole guarantee, and both release signatures
+  // already cover SHA256SUMS.
+  const clients = resolveClientArtifacts(options.clientDirectory, releaseVersion);
+  for (const client of clients) {
+    writeFileSync(
+      join(options.outputDirectory, client.name),
+      readFileSync(join(options.clientDirectory, client.name)),
+      { mode: 0o644 },
+    );
+  }
+
   const bootstraps = renderBootstraps({
     version: releaseVersion,
     baseUrl: releaseBase,
@@ -917,6 +1048,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     minimumBunVersion: paired.jsApp.minimumBunVersion,
     application: paired.jsApp,
     webApp: paired.webApp,
+    clients,
   });
   const bootstrapNames = Object.keys(bootstraps).sort() as BootstrapName[];
   for (const name of bootstrapNames) {
@@ -947,6 +1079,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     `${manifestName}${P256_SIGNATURE_SUFFIX}`,
     `${manifestName}${P256_DER_SIGNATURE_SUFFIX}`,
     ...bootstrapNames,
+    ...clients.map((client) => client.name),
   ].sort();
   const checksums = `${checksumCandidates.map((name) =>
     `${sha256(readFileSync(join(options.outputDirectory, name)))}  ${name}`).join('\n')}\n`;
