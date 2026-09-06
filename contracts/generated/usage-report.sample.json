@@ -6,6 +6,11 @@
     "recognized": true,
     "periodResolved": "custom"
   },
+  "runtime": {
+    "version": "2.5.3",
+    "minimumVersion": "2.5.0",
+    "belowMinimum": false
+  },
   "timezone": "BST",
   "totals": {
     "tokens": 19893991786,

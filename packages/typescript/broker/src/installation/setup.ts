@@ -811,6 +811,11 @@ export async function inspectSetupEnvironment(options: {
     context: options.context,
     assetReport: inspectRuntimeAssets(),
     stateHome: options.home,
+    // Setup reads this report for its agent summaries alone, and its own Tokdash step promises that a
+    // run whose completion marker is written touches the endpoint not at all. Doctor's version probe
+    // is a `GET /health`, which is still a touch. Setup reports the version from the provisioning
+    // outcome instead, where an instance has just answered anyway.
+    probeTokdashVersion: false,
   });
   const agents = agentSummaries(doctor);
   let legacyCodexDaemon: LegacyCodexDaemonInspection | undefined;

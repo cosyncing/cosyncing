@@ -74,6 +74,11 @@ import {
   type SetupDiagnosisContext,
 } from '@cosyncing/adapter-api';
 import type { TokdashEndpoint } from './tokdash-quota.ts';
+import {
+  parseTokdashRuntimeVersion,
+  tokdashReportRuntime,
+  type TokdashReportRuntime,
+} from './tokdash-report.ts';
 
 /** The PyPI distribution and the console script it installs. Both are `tokdash`. */
 export const TOKDASH_PACKAGE = 'tokdash';
@@ -144,6 +149,16 @@ export interface TokdashCompletion {
  */
 interface TokdashProvisionEndpoint {
   baseUrl: string;
+  /**
+   * What the answering Tokdash reports about itself, when one answered.
+   *
+   * Present on `reused` and `provisioned` and on nothing else, because those are the two outcomes with an
+   * instance behind them. Setup adopts whatever is already at the endpoint — that is how a host ends up on a
+   * build years older than the report is written against — so the adoption is the moment to say which version
+   * was adopted. It is a warning and never a blocker: an old Tokdash still serves quota, and refusing a
+   * complete broker install over a dashboard version would be the wrong trade.
+   */
+  runtime?: TokdashReportRuntime;
 }
 
 export type TokdashProvisionOutcome = TokdashProvisionEndpoint & (
@@ -250,6 +265,21 @@ export async function probeTokdash(
 }
 
 /**
+ * What the Tokdash at `baseUrl` says it is, read through the diagnosis seam so a fixture answers it.
+ *
+ * Never throws and never blocks: an unreachable or silent `/api/version` is reported as no version at all,
+ * which {@link isTokdashVersionBelowMinimum} reads as below the floor. That is the fail-closed direction —
+ * one upgrade prompt against a silent adoption of a build the report cannot use.
+ */
+export async function readTokdashRuntime(
+  context: SetupDiagnosisContext,
+  baseUrl: string,
+): Promise<TokdashReportRuntime> {
+  const probe = await context.fetchJson(`${baseUrl}/api/version`, undefined, HEALTH_TIMEOUT_MS);
+  return tokdashReportRuntime(probe.status === 'ok' ? parseTokdashRuntimeVersion(probe.json) : null);
+}
+
+/**
  * The `tokdash setup` invocation that lands an instance on `endpoint`, or nothing when no invocation can.
  *
  * The default endpoint keeps the bare `setup --auto --yes` — Tokdash's own defaults are already that address,
@@ -318,7 +348,9 @@ export async function provisionTokdash(
   // question to ask because it is the record with fatal-and-compensating writes behind it: a mutation whose
   // ownership would not persist is reversed, so "no ownership" really does mean "cosyncing changed nothing".
   const ownsSomething = options.owned?.installedByBroker === true || options.owned?.serviceStartedByBroker === true;
-  if (!ownsSomething && await probeTokdash(options.context, baseUrl)) return { baseUrl, status: 'reused' };
+  if (!ownsSomething && await probeTokdash(options.context, baseUrl)) {
+    return { baseUrl, status: 'reused', runtime: await readTokdashRuntime(options.context, baseUrl) };
+  }
 
   // Checked before any mutation, and after the probe: something already answering there is still reusable,
   // whatever cosyncing could or could not have installed to make it so.
@@ -481,7 +513,14 @@ export async function provisionTokdash(
   try {
     options.recordCompletion?.({ baseUrl, completedAt: stamp() });
   } catch { /* absence means retry, and the retry is one more idempotent consent */ }
-  return { baseUrl, status: 'provisioned', ownership };
+  // Read after the instance answered, so the version reported is the one now serving. A cosyncing-installed
+  // Tokdash is whatever pipx resolved, which is not necessarily current on a host with a pinned index.
+  return {
+    baseUrl,
+    status: 'provisioned',
+    ownership,
+    runtime: await readTokdashRuntime(options.context, baseUrl),
+  };
 }
 
 /** One line, bounded, with the command named — a failure nobody can quote is a failure nobody can fix. */

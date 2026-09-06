@@ -584,15 +584,33 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     final hasRosterSessions = ref.watch(rosterSessionsProvider).isNotEmpty;
     final hasCompletedEmptyRoster =
         listState.status == SessionListStatus.loaded && !hasRosterSessions;
-    final emptyRosterMessage = switch (creationAvailability) {
-      SessionCreationAvailability.checking =>
-        l10n.sessionsWorkspaceEmptyCreationChecking,
-      SessionCreationAvailability.available => l10n.sessionsWorkspaceEmpty,
-      SessionCreationAvailability.unavailable =>
-        l10n.sessionsWorkspaceEmptyCreationUnavailable,
-      SessionCreationAvailability.failed =>
-        l10n.sessionsWorkspaceEmptyCreationCheckFailed,
-    };
+    // Null while the stored preference rehydrates — never the shipped default.
+    // Substituting it here named a window the reader had already changed.
+    final queryWindow = ref.watch(sessionRosterWindowProvider).valueOrNull;
+    // A narrowing window owns the sentence. "No sessions on this server yet"
+    // is a claim about the server, and the roster asked about seven days — so
+    // on a machine whose newest session is three weeks old that sentence was
+    // simply false, and it pointed at New Session instead of at the filter
+    // that was hiding everything.
+    final emptyWindowMessage = sessionsEmptyWindowBody(l10n, queryWindow);
+    final emptyRosterMessage =
+        emptyWindowMessage ??
+        switch (creationAvailability) {
+          SessionCreationAvailability.checking =>
+            l10n.sessionsWorkspaceEmptyCreationChecking,
+          SessionCreationAvailability.available => l10n.sessionsWorkspaceEmpty,
+          SessionCreationAvailability.unavailable =>
+            l10n.sessionsWorkspaceEmptyCreationUnavailable,
+          SessionCreationAvailability.failed =>
+            l10n.sessionsWorkspaceEmptyCreationCheckFailed,
+        };
+    final onShowAllSessions = emptyWindowMessage == null
+        ? null
+        : () => unawaited(
+            ref
+                .read(sessionRosterWindowProvider.notifier)
+                .setWindow(SessionRosterQueryWindow.any),
+          );
     final unreadCount = ref.watch(attentionUnreadCountProvider);
     final openAsync = ref.watch(openSessionsControllerProvider);
     // Never render a previous source's tab membership while the source-keyed
@@ -624,6 +642,11 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         hasCompletedEmptyRoster: hasCompletedEmptyRoster,
         canCreateSession: canCreateSession,
         emptyRosterMessage: emptyRosterMessage,
+        // The activity chip is a control and must show some position; the
+        // shipped default is the right one to draw. Only the SENTENCE has to
+        // wait for the real window, and it reads `emptyRosterMessage` above.
+        queryWindow: queryWindow ?? SessionRosterQueryWindow.last7Days,
+        onShowAllSessions: onShowAllSessions,
       ),
     );
   }
@@ -645,6 +668,8 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     required bool hasCompletedEmptyRoster,
     required bool canCreateSession,
     required String emptyRosterMessage,
+    required SessionRosterQueryWindow queryWindow,
+    required VoidCallback? onShowAllSessions,
   }) {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -733,6 +758,8 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                       hasActiveBrokerClient,
                       canCreateSession,
                       emptyRosterMessage,
+                      queryWindow,
+                      onShowAllSessions,
                     ),
                   ),
                   WorkspaceSplitSash(
@@ -782,6 +809,10 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
                                     ? _PaneMessage(
                                         icon: Icons.inbox_outlined,
                                         message: emptyRosterMessage,
+                                        actionLabel: onShowAllSessions == null
+                                            ? null
+                                            : l10n.sessionsEmptyWindowAction,
+                                        onAction: onShowAllSessions,
                                       )
                                     : _PaneMessage(
                                         icon: Icons.terminal_outlined,
@@ -865,6 +896,8 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
     bool hasActiveBrokerClient,
     bool canCreateSession,
     String emptyRosterMessage,
+    SessionRosterQueryWindow queryWindow,
+    VoidCallback? onShowAllSessions,
   ) {
     final l10n = AppLocalizations.of(context);
     final showSecondaryActions =
@@ -935,9 +968,7 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
         Expanded(
           child: SessionListPane(
             searchFocusNode: _searchFocusNode,
-            queryWindow:
-                ref.watch(sessionRosterWindowProvider).valueOrNull ??
-                SessionRosterQueryWindow.last7Days,
+            queryWindow: queryWindow,
             onQueryWindowChanged: (window) => unawaited(
               ref.read(sessionRosterWindowProvider.notifier).setWindow(window),
             ),
@@ -975,6 +1006,13 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
               message: !hasActiveBrokerClient
                   ? l10n.sessionsEmptyBody
                   : emptyRosterMessage,
+              // Offered only when a window is what emptied the roster, and only
+              // against a live server: with no client there is nothing to widen
+              // the query against.
+              actionLabel: hasActiveBrokerClient && onShowAllSessions != null
+                  ? l10n.sessionsEmptyWindowAction
+                  : null,
+              onAction: hasActiveBrokerClient ? onShowAllSessions : null,
             ),
           ),
         ),
@@ -1059,14 +1097,26 @@ class _SessionsWorkspaceState extends ConsumerState<SessionsWorkspace>
 
 /// A centered icon + message used for the workspace's empty panes.
 class _PaneMessage extends StatelessWidget {
-  const _PaneMessage({required this.icon, required this.message});
+  const _PaneMessage({
+    required this.icon,
+    required this.message,
+    this.actionLabel,
+    this.onAction,
+  });
 
   final IconData icon;
   final String message;
 
+  /// Optional way out of the state the message describes. Rendered only when
+  /// both this and [onAction] are present.
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final label = actionLabel;
+    final action = onAction;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -1082,6 +1132,15 @@ class _PaneMessage extends StatelessWidget {
                 context,
               ).textTheme.bodyMedium?.copyWith(color: tokens.textSecondary),
             ),
+            if (label != null && action != null) ...[
+              const SizedBox(height: 12),
+              FilledButton.tonalIcon(
+                key: const Key('workspace-empty-show-all'),
+                onPressed: action,
+                icon: const Icon(Icons.history),
+                label: Text(label),
+              ),
+            ],
           ],
         ),
       ),

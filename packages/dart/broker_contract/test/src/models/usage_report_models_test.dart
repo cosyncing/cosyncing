@@ -98,6 +98,60 @@ void main() {
       expect(report.topModelsByCost.first.name, 'claude-opus-5');
     });
 
+    test('the Tokdash behind the figures crosses the wire', () {
+      expect(report.runtime.version, '2.5.3');
+      expect(report.runtime.minimumVersion, '2.5.0');
+      expect(report.runtime.belowMinimum, isFalse);
+      expect(report.runtime.hasVersion, isTrue);
+      expect(report.needsTokdashUpgrade, isFalse);
+    });
+
+    test('a broker too old to serve the runtime block claims no upgrade', () {
+      // The one wrong answer here is inventing an upgrade prompt from silence:
+      // a revision-20 broker never checked, so the client must not say it did.
+      final older = Map<String, dynamic>.from(loadSample())..remove('runtime');
+      final decoded = UsageReport.fromJson(older);
+      expect(decoded.runtime.belowMinimum, isFalse);
+      expect(decoded.runtime.version, isNull);
+      expect(decoded.runtime.hasVersion, isFalse);
+      expect(decoded.needsTokdashUpgrade, isFalse);
+      expect(
+        decoded.totals.tokens,
+        19893991786,
+        reason: 'the rest still decodes',
+      );
+    });
+
+    test('an old Tokdash is reported as old, not as a refused period', () {
+      final sample = Map<String, dynamic>.from(loadSample())
+        ..['runtime'] = <String, dynamic>{
+          'version': '2.0.0',
+          'minimumVersion': '2.5.0',
+          'belowMinimum': true,
+        }
+        ..['range'] = <String, dynamic>{
+          'from': '2026-08-01',
+          'to': '2026-08-31',
+          'recognized': false,
+        };
+      final decoded = UsageReport.fromJson(sample);
+      expect(decoded.needsTokdashUpgrade, isTrue);
+      expect(decoded.runtime.version, '2.0.0');
+      expect(decoded.range.recognized, isFalse);
+    });
+
+    test('a Tokdash that will not name itself is still below the floor', () {
+      final sample = Map<String, dynamic>.from(loadSample())
+        ..['runtime'] = <String, dynamic>{
+          'version': null,
+          'minimumVersion': '2.5.0',
+          'belowMinimum': true,
+        };
+      final decoded = UsageReport.fromJson(sample);
+      expect(decoded.needsTokdashUpgrade, isTrue);
+      expect(decoded.runtime.hasVersion, isFalse);
+    });
+
     test('no prompt text is decodable from the sample', () {
       expect(
         jsonEncode(loadSample()).contains('display_name'),

@@ -55,9 +55,13 @@ class QuotaStatusPanel extends StatelessWidget {
         key: const Key('settings-quota-panel'),
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // A step up from the `labelLarge` the usage card above uses, so the
+          // eye reads a break here: everything above is a SUM recorded on this
+          // machine, everything below is REMAINING allowance in rolling
+          // windows. The two were set identically and ran together.
           Text(
             l10n.settingsQuotaPanelTitle,
-            style: theme.textTheme.labelLarge?.copyWith(
+            style: theme.textTheme.titleMedium?.copyWith(
               color: tokens.textSecondary,
             ),
           ),

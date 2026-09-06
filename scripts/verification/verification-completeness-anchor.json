@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "68745034148c175c720c2e9c7fd47d012ec22e19",
+  "acceptedBase": "3e5aa8933507d6614991e0a143cf1d5cb4076c25",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -97,6 +97,7 @@
     "broker.resync-serialization",
     "broker.roster-publication",
     "broker.roster-revision",
+    "broker.roster-window",
     "broker.service-lifecycle",
     "broker.session-truth-conformance",
     "broker.state-security",
@@ -146,7 +147,7 @@
   "requiredGateBindings": [
     {
       "id": "broker-deterministic",
-      "fingerprint": "sha256:c22fbd6cdf1cbdd4f0b71adbb658e9f0fac185d95b9980776cd4189ef099fc9d"
+      "fingerprint": "sha256:3f97d10a6d2922395986da936abd4e40b6cbbd0ca745c1cfdbda17097c7f2277"
     },
     {
       "id": "capabilities",
@@ -677,6 +678,10 @@
     {
       "id": "roster-watcher-publication-live",
       "fingerprint": "sha256:716c0e3e42face9ba820fa72c2e6dd8054589fd149ddaffc2e2d616080cb7e5b"
+    },
+    {
+      "id": "roster-window",
+      "fingerprint": "sha256:486e71ee0b75835e5a1948da5a3fba7e4fbff7cee53359d00bc4629ec302eb03"
     },
     {
       "id": "route-authorization",

@@ -211,11 +211,24 @@ class _UsageReportBody extends StatelessWidget {
         text: l10n.usageUnavailable,
       );
     }
+    // Ordered before the window verdict, and it has to be: a tokdash below the
+    // report's floor never published `recognized` at all, so the verdict reads
+    // false because the field is absent. Checking the window first told a
+    // reader on an old tokdash that their period had been refused — a claim
+    // nothing upstream made, and one that sends them to change the period
+    // instead of the thing that is actually wrong.
+    if (report.needsTokdashUpgrade) {
+      return InlineNotice(
+        icon: Icons.system_update_alt_outlined,
+        text: usageTokdashUpgradeText(l10n, report.runtime),
+      );
+    }
     // An unrecognized window silently resolved to all time upstream, so every
     // figure below it would be true of a period nobody asked about. Said in its
     // own words: the report arrived, and it is this period that could not be
     // resolved — which is a different thing from Tokdash being unreachable, and
-    // the reader's next move differs accordingly.
+    // the reader's next move differs accordingly. Reached only on a tokdash
+    // current enough to have refused the period on purpose.
     if (!report.range.recognized) {
       return InlineNotice(
         icon: Icons.help_outline,
@@ -522,6 +535,22 @@ String? usageTokenBreakdownText(
     formatCompactCount(cache, locale: locale),
   );
 }
+
+/// Why this report shows nothing, when the server's tokdash is too old for it.
+///
+/// Names both versions when both are known, because "too old" without either
+/// number tells the reader nothing they can act on. A tokdash that will not
+/// report its own version gets the second phrasing rather than a rendered
+/// `null`: the floor is still a fact, the installed version is not.
+///
+/// Shared by the report page and the Settings card so the two cannot drift
+/// into describing the same host differently.
+String usageTokdashUpgradeText(
+  AppLocalizations l10n,
+  UsageReportRuntime runtime,
+) => runtime.hasVersion
+    ? l10n.usageTokdashOutdated(runtime.version!, runtime.minimumVersion)
+    : l10n.usageTokdashVersionUnknown(runtime.minimumVersion);
 
 /// How the agent-time estimate is made, using the served idle-gap cap.
 String usageEstimatedTip(AppLocalizations l10n, UsageReportActiveTime active) =>

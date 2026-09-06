@@ -19,11 +19,18 @@ export function parseSessionWindowMs(v: string | null): number | undefined {
 }
 
 /** Filter a roster to sessions active within `windowMs` (by `updatedAt`, falling back to `createdAt`).
- *  Two classes are ALWAYS kept regardless of age, so a window never hides something the user can't get
- *  back another way: (1) non-idle sessions (working / needs-input — they need the user), and (2) idle
- *  sessions with NO timestamp at all — an un-datable session (e.g. an adapter regression that dropped
- *  `updatedAt`) must not silently vanish from every narrow window with no error. `windowMs === undefined`
- *  (the "all" window) returns the list unchanged. */
+ *
+ *  Non-idle sessions (working / needs-input) are ALWAYS kept regardless of age: they need the user, and a
+ *  window must never hide something the user cannot get back another way.
+ *
+ *  An idle session with NO timestamp at all is DROPPED from a bounded window, and kept only by the "all"
+ *  window. This reverses the earlier rule, which kept it so an adapter regression that lost `updatedAt`
+ *  could not make a session silently vanish. That protection was real and the cost was worse: an undatable
+ *  row is a row the client cannot place on its timeline, so a seven-day window on a macOS host answered with
+ *  exactly one session — a 24-day-old rollout whose only surviving record was a live connection's
+ *  timestamp-free `SessionInfo` — while the same roster at thirty days held thirty-nine. A row nobody can
+ *  date belongs to no window, and the honest place to see it is the unbounded one, which shows every session
+ *  and is one tap away. `windowMs === undefined` (the "all" window) returns the list unchanged. */
 export function filterSessionsByWindow<T extends { status: string; updatedAt?: number; createdAt?: number }>(
   sessions: T[],
   windowMs: number | undefined,
@@ -34,7 +41,7 @@ export function filterSessionsByWindow<T extends { status: string; updatedAt?: n
   return sessions.filter((s) => {
     if (s.status !== 'idle') return true; // working / needs-input — never age out
     const ts = s.updatedAt ?? s.createdAt;
-    return ts === undefined ? true : ts >= cutoff; // un-datable idle → keep; otherwise within the window
+    return ts === undefined ? false : ts >= cutoff; // un-datable idle → not in ANY bounded window
   });
 }
 

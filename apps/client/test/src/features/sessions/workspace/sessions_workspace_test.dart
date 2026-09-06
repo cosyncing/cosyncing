@@ -22,6 +22,7 @@ import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_tab_strip.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/session_list_state.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_pane_body.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/workspace/file_panes_store.dart';
@@ -60,6 +61,7 @@ void main() {
     NewSessionConnectionPreparer? connectionPreparer,
     Brightness brightness = Brightness.light,
     bool hasBrokerClient = true,
+    String rosterWindow = 'all',
   }) {
     final listController =
         controller ??
@@ -119,7 +121,8 @@ void main() {
                 (profile) async => client,
           ),
         sessionDisplayPreferencesStoreProvider.overrideWithValue(
-          InMemorySessionDisplayPreferencesStore()..sessionRosterWindow = 'all',
+          InMemorySessionDisplayPreferencesStore()
+            ..sessionRosterWindow = rosterWindow,
         ),
         // Same reason as the drive intent store above: the real file-pane
         // store opens a Drift database inside the widget test, and its timers
@@ -697,6 +700,86 @@ void main() {
         );
       },
     );
+
+    testWidgets(
+      'a narrowing window empties the window, never the server',
+      (tester) async {
+        // The measured macOS host: 39 sessions, newest 24 days old, and a
+        // roster that ships asking for seven days. Claiming the server has no
+        // sessions was simply false, and it pointed at New Session instead of
+        // at the filter that was hiding all 39.
+        await tester.pumpWidget(
+          buildSubject(
+            const [],
+            brokerClient: _CreateSessionFakeBrokerClient(),
+            rosterWindow: '7d',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'Nothing was active in the last 7 days. '
+            'This server may have older sessions.',
+          ),
+          findsNWidgets(2),
+        );
+        expect(
+          find.text(
+            'No sessions on this server yet. Create one to get started.',
+          ),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('the empty window offers its own way out', (tester) async {
+      // The filter bar that also widens the window is not rendered while the
+      // roster is empty, so without this the only route back to the reader's
+      // own sessions is guessing that a filter exists somewhere.
+      await tester.pumpWidget(
+        buildSubject(
+          const [],
+          brokerClient: _CreateSessionFakeBrokerClient(),
+          rosterWindow: '7d',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final widen = find.byKey(const Key('workspace-empty-show-all'));
+      expect(widen, findsNWidgets(2));
+      expect(find.text('Show all sessions'), findsNWidgets(2));
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsWorkspace)),
+      );
+      await tester.tap(widen.first);
+      await tester.pumpAndSettle();
+      expect(
+        container.read(sessionRosterWindowProvider).valueOrNull,
+        SessionRosterQueryWindow.any,
+      );
+    });
+
+    testWidgets('the one-day window says today, not seven days', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSubject(
+          const [],
+          brokerClient: _CreateSessionFakeBrokerClient(),
+          rosterWindow: '1d',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'Nothing was active today. This server may have older sessions.',
+        ),
+        findsNWidgets(2),
+      );
+    });
 
     testWidgets('keeps the connected empty workspace copy', (tester) async {
       await tester.pumpWidget(

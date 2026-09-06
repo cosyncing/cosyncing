@@ -102,6 +102,7 @@ import {
   tokdashRejectionReason,
   TOKDASH_DEFAULT_BASE_URL,
 } from '../../src/installation/tokdash-quota.ts';
+import { TOKDASH_MINIMUM_VERSION } from '../../src/installation/tokdash-report.ts';
 import {
   CONNECTIVITY_GUIDE_URL,
   normalizeSetupLanguage,
@@ -930,7 +931,13 @@ try {
     // A context that can see pipx and tokdash on PATH, with the health probe under the test's control.
     const provisionContext = (
       machine: string,
-      options: { healthy: boolean; tokdashOnPath?: boolean; env?: Record<string, string> },
+      options: {
+        healthy: boolean;
+        tokdashOnPath?: boolean;
+        env?: Record<string, string>;
+        /** What `/api/version` answers. Omitted means a build too old to serve the route at all. */
+        version?: string;
+      },
     ) => ({
       ...contextFor(machine, options.env ?? {}),
       resolveExecutable: (command: string): string | undefined => {
@@ -938,9 +945,18 @@ try {
         if (command === 'tokdash') return options.tokdashOnPath === false ? undefined : '/usr/bin/tokdash';
         return undefined;
       },
-      fetchJson: async (url: string) => url.endsWith('/health') && options.healthy
-        ? { status: 'ok' as const, json: { status: 'ok', service: 'tokdash', version: '1.5.7' } }
-        : { status: 'unreachable' as const },
+      fetchJson: async (url: string) => {
+        if (url.endsWith('/health') && options.healthy) {
+          return { status: 'ok' as const, json: { status: 'ok', service: 'tokdash', version: '1.5.7' } };
+        }
+        if (url.endsWith('/api/version') && options.healthy && options.version !== undefined) {
+          return {
+            status: 'ok' as const,
+            json: { service: 'tokdash', runtime_version: options.version, install_method: 'pipx' },
+          };
+        }
+        return { status: 'unreachable' as const };
+      },
     });
     const recordingRunner = (fail?: string) => {
       const calls: string[] = [];
@@ -1242,6 +1258,66 @@ try {
             && scripted.includes('[tokdash] url-rejected reason=credentials')
             && !surfaces.some((surface) => /leaked-user|leaked-secret/.test(surface)),
           surfaces.join(' ~ '));
+      }
+
+      // The adopted Tokdash's own version. Setup takes whatever already answers at the endpoint, which is
+      // exactly how the macOS host ended up serving a usage report from 2.0.0 with nothing anywhere saying
+      // so. A warning, never a refusal: the install is complete and quota tracking works either way.
+      {
+        const outdatedMachine = join(root, 'tokdash-outdated');
+        const outdatedRunner = recordingRunner();
+        const outdated = await runSetup(setupOptions(outdatedMachine, new ScriptedPresenter({ quota: true }), {
+          context: provisionContext(outdatedMachine, { healthy: true, version: '2.0.0' }),
+          tokdashRunner: outdatedRunner.run,
+        }));
+        const line = setupMessages('en').quotaVersionOutdated({
+          baseUrl: TOKDASH_DEFAULT_BASE_URL,
+          version: '2.0.0',
+          minimum: TOKDASH_MINIMUM_VERSION,
+        });
+        check('an adopted Tokdash below the report floor is reported, and setup still completes',
+          outdated.status === 'complete'
+            && outdated.tokdash?.status === 'reused'
+            && outdated.tokdash.runtime?.version === '2.0.0'
+            && outdated.tokdash.runtime.belowMinimum === true
+            && outdated.tokdash.runtime.minimumVersion === TOKDASH_MINIMUM_VERSION
+            && outdatedRunner.calls.length === 0
+            && line.includes('2.0.0') && line.includes(TOKDASH_MINIMUM_VERSION)
+            && line.includes('pipx upgrade tokdash')
+            && setupMessages('zh-Hans').quotaVersionOutdated({
+              baseUrl: TOKDASH_DEFAULT_BASE_URL, version: '2.0.0', minimum: TOKDASH_MINIMUM_VERSION,
+            }).includes('2.0.0'),
+          `${JSON.stringify(outdated.tokdash)} line=${line}`);
+
+        const currentMachine = join(root, 'tokdash-current');
+        const currentRunner = recordingRunner();
+        const fine = await runSetup(setupOptions(currentMachine, new ScriptedPresenter({ quota: true }), {
+          context: provisionContext(currentMachine, { healthy: true, version: TOKDASH_MINIMUM_VERSION }),
+          tokdashRunner: currentRunner.run,
+        }));
+        check('a Tokdash at the floor is adopted with nothing to warn about',
+          fine.tokdash?.status === 'reused'
+            && fine.tokdash.runtime?.version === TOKDASH_MINIMUM_VERSION
+            && fine.tokdash.runtime.belowMinimum === false,
+          JSON.stringify(fine.tokdash));
+
+        // The machine-readable half. A script consuming `--yes` branches on the status word, so the
+        // version fact gets its own tagged line rather than being folded into the existing one.
+        let outdatedScript = '';
+        createNonInteractiveSetupPresenter({ write: (value) => { outdatedScript += value; } })
+          .complete(outdated);
+        check('`setup --yes` prints the version, the floor and the fix on its own tagged line',
+          outdatedScript.includes('[tokdash] reused url=')
+            && outdatedScript.includes(`[tokdash] outdated version=2.0.0 minimum=${TOKDASH_MINIMUM_VERSION} `
+              + `url=${TOKDASH_DEFAULT_BASE_URL} remedy=pipx upgrade tokdash`),
+          outdatedScript);
+
+        let currentScript = '';
+        createNonInteractiveSetupPresenter({ write: (value) => { currentScript += value; } })
+          .complete(fine);
+        check('a current Tokdash prints no outdated line at all',
+          currentScript.includes('[tokdash] reused url=') && !currentScript.includes('[tokdash] outdated'),
+          currentScript);
       }
 
       // An endpoint Tokdash cannot serve at all is refused before anything is installed, and said so in both

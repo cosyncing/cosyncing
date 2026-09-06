@@ -16,8 +16,10 @@ import 'package:cosyncing_client/src/features/broker_profiles/provider/broker_pr
 import 'package:cosyncing_client/src/features/connection/provider/connection_providers.dart';
 import 'package:cosyncing_client/src/features/sessions/list/new_session_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/list/open_sessions_store.dart';
+import 'package:cosyncing_client/src/features/sessions/list/sessions_empty_state.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/roster_snapshot_store.dart';
 import 'package:cosyncing_client/src/features/sessions/roster/session_roster_identity.dart';
+import 'package:cosyncing_client/src/features/sessions/roster/session_roster_window_controller.dart';
 import 'package:cosyncing_client/src/features/sessions/sessions.dart';
 import 'package:cosyncing_client/src/features/settings/data/session_display_preferences_store.dart';
 import 'package:cosyncing_client/src/local/app_database.dart';
@@ -69,6 +71,7 @@ void main() {
     List<SessionInfo>? sessions,
     BrokerProfile? activeProfile,
     BrokerClient? brokerClient,
+    String rosterWindow = 'all',
   }) {
     fakeRepo.sessions = sessions ?? [];
     return ProviderScope(
@@ -76,7 +79,8 @@ void main() {
         ...localStorageOverrides(),
         sessionListRepositoryProvider.overrideWith((ref) async => fakeRepo),
         sessionDisplayPreferencesStoreProvider.overrideWithValue(
-          unboundedRosterPreferences(),
+          InMemorySessionDisplayPreferencesStore()
+            ..sessionRosterWindow = rosterWindow,
         ),
         sessionLiveStateViewStoreProvider.overrideWithValue(
           InMemorySessionLiveStateViewStore(),
@@ -241,6 +245,131 @@ void main() {
         expect(create.onPressed, isNotNull);
       },
     );
+
+    testWidgets(
+      'a narrowing window says the window is empty, not the server',
+      (tester) async {
+        await tester.pumpWidget(
+          buildSubject(
+            sessions: [],
+            activeProfile: BrokerProfile(
+              id: 'local',
+              displayName: 'local',
+              baseUri: Uri.parse('http://127.0.0.1:7734'),
+              createdAt: DateTime(2026),
+            ),
+            brokerClient: _AgentCapabilityBrokerClient(canCreate: true),
+            rosterWindow: '7d',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('No recent sessions'), findsOneWidget);
+        expect(
+          find.text(
+            'Nothing was active in the last 7 days. '
+            'This server may have older sessions.',
+          ),
+          findsOneWidget,
+        );
+        // The claim this replaces. The roster asked about seven days; it never
+        // asked the question that would justify saying the server is empty.
+        expect(find.text('No active sessions'), findsNothing);
+        expect(
+          find.byKey(const Key('sessions-empty-show-all')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets('widening the window from the empty state persists it', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        buildSubject(
+          sessions: [],
+          activeProfile: BrokerProfile(
+            id: 'local',
+            displayName: 'local',
+            baseUri: Uri.parse('http://127.0.0.1:7734'),
+            createdAt: DateTime(2026),
+          ),
+          brokerClient: _AgentCapabilityBrokerClient(canCreate: true),
+          rosterWindow: '7d',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SessionsPage)),
+      );
+      await tester.tap(find.byKey(const Key('sessions-empty-show-all')));
+      await tester.pumpAndSettle();
+
+      expect(
+        container.read(sessionRosterWindowProvider).valueOrNull,
+        SessionRosterQueryWindow.any,
+      );
+    });
+
+    testWidgets(
+      'an unresolved window names no window and offers no widen action',
+      (tester) async {
+        // The roster-window preference is asynchronous, and it resolves to no
+        // value at all whenever the provider is rebuilt rather than refreshed
+        // — a profile switch, a source change. A caller that substituted the
+        // shipped default across that gap put "nothing in the last 7 days" on
+        // a roster the reader had widened to all time: a specific, false
+        // sentence. Null is the state that must stay silent, so it is the
+        // state pinned here.
+        await tester.pumpWidget(
+          MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: buildAppTheme(
+              themeSpecById(kDefaultThemeId).light,
+              Brightness.light,
+            ),
+            home: const Scaffold(
+              body: SessionsEmptyState(
+                hasActiveBrokerClient: true,
+                creationAvailability: SessionCreationAvailability.available,
+                queryWindow: null,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('last 7 days'), findsNothing);
+        expect(find.textContaining('last 30 days'), findsNothing);
+        expect(find.textContaining('active today'), findsNothing);
+        // No window is known, so there is no window to widen out of.
+        expect(find.byKey(const Key('sessions-empty-show-all')), findsNothing);
+      },
+    );
+
+    testWidgets('an unbounded window keeps the server-is-empty copy', (
+      tester,
+    ) async {
+      // Only `all` asked the question that answers "this server has none".
+      await tester.pumpWidget(
+        buildSubject(
+          sessions: [],
+          activeProfile: BrokerProfile(
+            id: 'local',
+            displayName: 'local',
+            baseUri: Uri.parse('http://127.0.0.1:7734'),
+            createdAt: DateTime(2026),
+          ),
+          brokerClient: _AgentCapabilityBrokerClient(canCreate: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('No active sessions'), findsOneWidget);
+      expect(find.byKey(const Key('sessions-empty-show-all')), findsNothing);
+    });
 
     testWidgets(
       'connected empty page disables creation when no agent is ready',

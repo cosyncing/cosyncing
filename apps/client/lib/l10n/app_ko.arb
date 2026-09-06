@@ -1490,5 +1490,12 @@
   "sessionFilesLinksOffNoWorkspace": "이 세션에 작업 디렉터리가 없어, 기록의 파일 경로는 일반 텍스트로 표시됩니다.",
   "sessionFilePreviewLineWindow": "이 미리 보기의 {first}–{last}번째 줄을 표시합니다.",
   "sessionFilePreviewAnchorBeyond": "{line}번째 줄은 이 미리 보기가 다루는 {count}줄의 범위를 벗어납니다.",
-  "sessionFilePreviewAnchorLine": "{line}번째 줄"
+  "sessionFilePreviewAnchorLine": "{line}번째 줄",
+  "usageTokdashOutdated": "서버의 tokdash는 {installed}이고, 이 보고서에는 {required} 이상이 필요합니다. 서버에서 pipx upgrade tokdash를 실행한 뒤 이 페이지를 다시 여세요.",
+  "usageTokdashVersionUnknown": "서버의 tokdash가 버전을 알려주지 않아, 이 보고서에 필요한 {required}보다 오래된 것으로 봅니다. 서버에서 pipx upgrade tokdash를 실행한 뒤 이 페이지를 다시 여세요.",
+  "sessionsEmptyWindowTitle": "최근 세션 없음",
+  "sessionsEmptyWindowToday": "오늘 동작한 세션이 없습니다. 이 서버에 더 오래된 세션이 있을 수 있습니다.",
+  "sessionsEmptyWindowLast7Days": "최근 7일 동안 동작한 세션이 없습니다. 이 서버에 더 오래된 세션이 있을 수 있습니다.",
+  "sessionsEmptyWindowLast30Days": "최근 30일 동안 동작한 세션이 없습니다. 이 서버에 더 오래된 세션이 있을 수 있습니다.",
+  "sessionsEmptyWindowAction": "모든 세션 보기"
 }

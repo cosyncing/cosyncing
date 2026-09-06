@@ -1490,5 +1490,12 @@
   "sessionFilesLinksOffNoWorkspace": "このセッションには作業ディレクトリがないため、トランスクリプト内のファイルパスはただの文字列として表示されます。",
   "sessionFilePreviewLineWindow": "このプレビューの {first}〜{last} 行目を表示しています。",
   "sessionFilePreviewAnchorBeyond": "{line} 行目は、このプレビューが対象とする {count} 行の範囲外です。",
-  "sessionFilePreviewAnchorLine": "{line} 行目"
+  "sessionFilePreviewAnchorLine": "{line} 行目",
+  "usageTokdashOutdated": "サーバーの tokdash は {installed} ですが、このレポートには {required} 以降が必要です。サーバー側で pipx upgrade tokdash を実行してから、このページを開き直してください。",
+  "usageTokdashVersionUnknown": "サーバーの tokdash がバージョンを返さないため、このレポートに必要な {required} より古いと判断しました。サーバー側で pipx upgrade tokdash を実行してから、このページを開き直してください。",
+  "sessionsEmptyWindowTitle": "最近のセッションはありません",
+  "sessionsEmptyWindowToday": "今日は動いたセッションがありません。このサーバーにはもっと古いセッションが残っている可能性があります。",
+  "sessionsEmptyWindowLast7Days": "過去 7 日間に動いたセッションがありません。このサーバーにはもっと古いセッションが残っている可能性があります。",
+  "sessionsEmptyWindowLast30Days": "過去 30 日間に動いたセッションがありません。このサーバーにはもっと古いセッションが残っている可能性があります。",
+  "sessionsEmptyWindowAction": "すべてのセッションを表示"
 }

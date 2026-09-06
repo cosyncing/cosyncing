@@ -186,6 +186,8 @@ const ZH_HUMAN_TEXT: Readonly<Record<string, string>> = Object.freeze({
   'Reconcile managed runtime versions when sessions are safe to restart.': '请在会话可安全重启时修复托管运行时版本。',
   'Managed runtime update status is unavailable.': '托管运行时更新状态不可用。',
   'Retry managed runtime diagnosis.': '请重试托管运行时诊断。',
+  'No Tokdash is answering, so usage reporting is not configured.': '没有 Tokdash 在响应，用量报告尚未配置。',
+  'Upgrade Tokdash, then restart it.': '请升级 Tokdash，然后重启它。',
   'Stop that host yourself if you no longer want it running; cosyncing will not stop a process it cannot prove it started.': '如果不再需要该主机，请自行停止它；cosyncing 不会停止无法证明是由它自己启动的进程。',
   'Update cosyncing to a build with complete adapter diagnosis.': '请将 cosyncing 更新到包含完整适配器诊断的版本。',
   'Retry diagnosis after checking the agent installation.': '检查智能体安装后，请重试诊断。',
@@ -382,7 +384,22 @@ export function translateDoctorTextToChinese(source: string): string | undefined
     ?? replaceMatch(source, /^(.*) has a current durable service PATH, but its runtime or shared server is unavailable\.$/, (name) => `${name} 的持久服务 PATH 正确，但其运行时或共享服务器不可用。`)
     ?? replaceMatch(source, /^(.*) is installed in this shell and registered, but the running broker cannot create sessions\.$/, (name) => `${name} 已在当前 shell 安装并注册，但运行中的 broker 无法创建会话。`)
     ?? replaceMatch(source, /^(.*) is registered, but its executable is not installed or not visible to the running broker\.$/, (name) => `${name} 已注册，但其可执行文件未安装或对运行中的 broker 不可见。`)
-    ?? replaceMatch(source, /^Restart the broker-managed (.*) runtime or shared server; inspect `cosyncing logs` if it remains unavailable\.$/, (name) => `重启由 broker 管理的 ${name} 运行时或共享服务器；若仍不可用，请检查 \`cosyncing logs\`。`);
+    ?? replaceMatch(source, /^Restart the broker-managed (.*) runtime or shared server; inspect `cosyncing logs` if it remains unavailable\.$/, (name) => `重启由 broker 管理的 ${name} 运行时或共享服务器；若仍不可用，请检查 \`cosyncing logs\`。`)
+    ?? replaceMatch(
+      source,
+      /^Tokdash at (.*) does not report a version; the usage report needs ([^ ]+) or later\.$/,
+      (endpoint, minimum) => `${endpoint} 上的 Tokdash 没有报告版本号；用量报告需要 ${minimum} 或更高版本。`,
+    )
+    ?? replaceMatch(
+      source,
+      /^Tokdash ([^ ]+) is older than ([^ ]+), which the usage report needs\.$/,
+      (installed, minimum) => `Tokdash ${installed} 低于用量报告需要的 ${minimum}。`,
+    )
+    ?? replaceMatch(
+      source,
+      /^Tokdash ([^ ]+) meets the ([^ ]+) floor the usage report needs\.$/,
+      (installed, minimum) => `Tokdash ${installed} 满足用量报告要求的最低版本 ${minimum}。`,
+    );
   return dynamic;
 }
 

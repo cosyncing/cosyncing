@@ -104,6 +104,68 @@ void main() {
     expect(find.textContaining('19.9B'), findsNothing);
   });
 
+  testWidgets('an old tokdash is named, and the period is not blamed', (
+    tester,
+  ) async {
+    // The measured macOS host. 2.0.0 honours date_from/date_to and answers
+    // correct totals; it simply predates `range.recognized`, so the verdict is
+    // false for a reason that has nothing to do with the period asked for.
+    final data = sampleReport()
+      ..['runtime'] = <String, dynamic>{
+        'version': '2.0.0',
+        'minimumVersion': '2.5.0',
+        'belowMinimum': true,
+      };
+    (data['range']! as Map<String, dynamic>)['recognized'] = false;
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('tokdash 2.0.0'), findsOneWidget);
+    expect(find.textContaining('2.5.0 or later'), findsOneWidget);
+    expect(find.textContaining('pipx upgrade tokdash'), findsOneWidget);
+    // Neither of the two messages this replaces.
+    expect(
+      find.textContaining('tokdash did not recognize this period'),
+      findsNothing,
+    );
+    expect(find.text('Usage history is unavailable.'), findsNothing);
+  });
+
+  testWidgets('the upgrade notice can be selected and copied', (tester) async {
+    final data = sampleReport()
+      ..['runtime'] = <String, dynamic>{
+        'version': '2.0.0',
+        'minimumVersion': '2.5.0',
+        'belowMinimum': true,
+      };
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    // A notice naming a version and a command is exactly the text a reader
+    // wants to paste. On the web client a plain Text cannot be copied at all.
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is SelectableText &&
+            (widget.data?.contains('pipx upgrade tokdash') ?? false),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a report from a broker too old to check claims no upgrade', (
+    tester,
+  ) async {
+    // A revision-20 broker serves no runtime block. Inventing an upgrade prompt
+    // from that silence would send the reader to fix something already fine.
+    final data = sampleReport()..remove('runtime');
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('pipx upgrade tokdash'), findsNothing);
+    expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
+  });
+
   testWidgets('a served report prints its scope, window and totals', (
     tester,
   ) async {
