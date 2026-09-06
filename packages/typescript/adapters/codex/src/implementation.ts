@@ -921,6 +921,12 @@ export class CodexAdapter implements AgentBackend {
       currentMode: surface.currentMode,
       status: qualifiedRolloutStatus,
       attachMode: observe ? 'observe' : liveEligible ? 'live' : 'resume',
+      // The SAME timestamp discovery publishes for this rollout, from the stat already taken above.
+      // An attached session's SessionInfo is not only what the socket carries: the broker overlays it
+      // onto the roster, and where a bounded window has aged the disk row out it becomes the only
+      // record of the session. Without this the row reached a client undated, so a seven-day roster
+      // showed one 24-day-old session and nothing else.
+      ...(st ? { updatedAt: st.mtimeMs } : {}),
       terminalSyncHint,
       control: codexControlState({
         canResume: resolveBin('codex') !== null,

@@ -1633,9 +1633,17 @@ export type ClientMessageKind = (typeof BROKER_CLIENT_MESSAGE_KINDS)[number];
  * and 17 have ever raised that floor, and this route widens no credential
  * boundary. Note what the overlap window does mean here: 18 is the revision
  * shipped clients advertise, and 20 puts them outside it, so a revision-19-or-
- * later client has to ship before a revision-20 broker does.
+ * later client has to ship before a revision-20 broker does. Revision 21 adds
+ * one block to that report's DTO: the version of the Tokdash that produced it
+ * and whether that build clears the floor the report is written against. It
+ * moves no route, so the surface hash holds; it is numbered because a client
+ * reads it to tell "your Tokdash is too old to publish a window verdict" apart
+ * from "Tokdash refused this period", and those two states are indistinguishable
+ * without it. A revision-20 client simply does not receive the block and keeps
+ * its earlier reading, which is wrong in exactly the way this fixes and safe in
+ * every other way.
  */
-export const BROKER_CONTRACT_REVISION = 20 as const;
+export const BROKER_CONTRACT_REVISION = 21 as const;
 // Revision 17 removes public artifact bearer capabilities. The client-first
 // release sequence must complete before this broker ships; older clients do not
 // authenticate artifact downloads and therefore must fail closed as read-only.

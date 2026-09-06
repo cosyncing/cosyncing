@@ -78,7 +78,7 @@ void main() {
     );
   }
 
-  testWidgets('the card is a sum, and says so beside the quota window', (
+  testWidgets('the card is a sum, and its heading is what says so', (
     tester,
   ) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
@@ -86,11 +86,12 @@ void main() {
 
     expect(find.byKey(const Key('settings-usage-card')), findsOneWidget);
     expect(find.text('This machine'), findsOneWidget);
-    // The one line that keeps a sum from being read as a remaining-quota
-    // window, at exactly the point the two sit adjacent.
+    // A sentence used to sit here explaining that these totals are not the
+    // remaining-quota windows below. Two headings set at two weights carry
+    // that break on their own, and the prose only added a line to read.
     expect(
       find.textContaining('separate from the remaining-quota windows below'),
-      findsOneWidget,
+      findsNothing,
     );
   });
 
@@ -148,6 +149,91 @@ void main() {
 
     expect(find.text('Usage history is unavailable.'), findsOneWidget);
     expect(find.text('Tokens'), findsNothing);
+  });
+
+  testWidgets('an old tokdash is named as old, not as a refused period', (
+    tester,
+  ) async {
+    // The measured macOS host: tokdash 2.0.0 answers correct totals for the
+    // requested window and publishes no `recognized` field, so the card used to
+    // print "Usage history is unavailable" — which is false twice over.
+    final data = sampleReport()
+      ..['runtime'] = <String, dynamic>{
+        'version': '2.0.0',
+        'minimumVersion': '2.5.0',
+        'belowMinimum': true,
+      }
+      ..['range'] = <String, dynamic>{
+        'from': '2026-08-01',
+        'to': '2026-08-31',
+        'recognized': false,
+      };
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('tokdash 2.0.0'), findsOneWidget);
+    expect(find.textContaining('2.5.0 or later'), findsOneWidget);
+    expect(find.textContaining('pipx upgrade tokdash'), findsOneWidget);
+    expect(find.text('Usage history is unavailable.'), findsNothing);
+    expect(find.textContaining('did not recognize this period'), findsNothing);
+  });
+
+  testWidgets('a tokdash that will not name itself still says upgrade', (
+    tester,
+  ) async {
+    final data = sampleReport()
+      ..['runtime'] = <String, dynamic>{
+        'version': null,
+        'minimumVersion': '2.5.0',
+        'belowMinimum': true,
+      };
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('does not report its version'), findsOneWidget);
+    // Never a rendered null where a version would be.
+    for (final text in tester.widgetList<SelectableText>(
+      find.byType(SelectableText),
+    )) {
+      expect(text.data?.contains('null') ?? false, isFalse);
+    }
+  });
+
+  testWidgets('a current tokdash that refuses the period keeps that message', (
+    tester,
+  ) async {
+    final data = sampleReport()
+      ..['range'] = <String, dynamic>{
+        'from': '2026-08-01',
+        'to': '2026-08-31',
+        'recognized': false,
+      };
+    await tester.pumpWidget(buildSubject(response: served(data)));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('did not recognize this period'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('pipx upgrade tokdash'), findsNothing);
+  });
+
+  testWidgets('a notice can be selected and copied', (tester) async {
+    // Every notice in the app says something worth pasting into a bug report —
+    // a version, a command, a tool that could not be read — and a plain Text
+    // cannot be copied at all in the web client, which is where these are read.
+    await tester.pumpWidget(buildSubject());
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is SelectableText &&
+            widget.data == 'Usage history is unavailable.',
+      ),
+      findsOneWidget,
+      reason: 'InlineNotice renders its text as SelectableText',
+    );
   });
 
   testWidgets('cost carries its qualifier here too', (tester) async {

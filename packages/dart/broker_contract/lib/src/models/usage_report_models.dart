@@ -139,6 +139,56 @@ class UsageReportRange {
   final String? periodResolved;
 }
 
+/// Which Tokdash produced a report, and whether it clears the floor the report
+/// is built against.
+///
+/// The block exists because [UsageReportRange.recognized] is false for two
+/// unrelated reasons and the reader's next move differs. A current Tokdash
+/// answers `false` when it could not resolve the requested period. A Tokdash
+/// below [minimumVersion] never published the verdict at all, so `false` is the
+/// absence of a field rather than a refusal — the figures beside it may be
+/// perfectly good, and the fix is an upgrade, not a different period.
+///
+/// Absent on a report from a broker older than contract revision 21. The
+/// fallback is deliberately [belowMinimum] `false`: an older broker cannot have
+/// checked, and claiming an upgrade is needed on no evidence is the one wrong
+/// answer that sends the reader somewhere useless.
+class UsageReportRuntime {
+  /// Creates a runtime block.
+  const UsageReportRuntime({
+    required this.minimumVersion,
+    required this.belowMinimum,
+    this.version,
+  });
+
+  /// Decodes a runtime block.
+  factory UsageReportRuntime.fromJson(Map<String, dynamic> json) =>
+      UsageReportRuntime(
+        minimumVersion: _optionalString(json['minimumVersion']) ?? '',
+        belowMinimum: json['belowMinimum'] == true,
+        version: _optionalString(json['version']),
+      );
+
+  /// What a broker too old to serve this block implies: nothing was checked.
+  static const unknown = UsageReportRuntime(
+    minimumVersion: '',
+    belowMinimum: false,
+  );
+
+  /// The running Tokdash version, or `null` when it could not be read.
+  final String? version;
+
+  /// The floor the broker builds the report against. Served rather than
+  /// hardcoded so the client names the broker's number, not a stale copy.
+  final String minimumVersion;
+
+  /// Whether [version] is below [minimumVersion], or could not be read at all.
+  final bool belowMinimum;
+
+  /// Whether the surface can name both numbers, as opposed to only the floor.
+  bool get hasVersion => version != null && version!.isNotEmpty;
+}
+
 /// Period totals. The denominator every share on every surface reconciles
 /// against.
 class UsageReportTotals {
@@ -824,6 +874,7 @@ class UsageReport {
   /// Creates a report.
   const UsageReport({
     required this.range,
+    required this.runtime,
     required this.totals,
     required this.tools,
     required this.topModelsByTokens,
@@ -855,6 +906,9 @@ class UsageReport {
       range:
           section('range', UsageReportRange.fromJson) ??
           const UsageReportRange(from: '', to: '', recognized: false),
+      runtime:
+          section('runtime', UsageReportRuntime.fromJson) ??
+          UsageReportRuntime.unknown,
       totals:
           section('totals', UsageReportTotals.fromJson) ??
           const UsageReportTotals(tokens: 0, cost: 0, requests: 0),
@@ -895,6 +949,18 @@ class UsageReport {
 
   /// The resolved window.
   final UsageReportRange range;
+
+  /// The Tokdash behind the figures, and whether it is old enough to explain an
+  /// unpublished window verdict.
+  final UsageReportRuntime runtime;
+
+  /// Whether the server's Tokdash is too old for this report.
+  ///
+  /// Guard this BEFORE [UsageReportRange.recognized] on every surface: an old
+  /// Tokdash makes `recognized` false as a side effect of not having the field,
+  /// so a surface that checks the window first tells the reader their period
+  /// was refused when nothing refused it.
+  bool get needsTokdashUpgrade => runtime.belowMinimum;
 
   /// The broker host's zone label. The hourly and weekday buckets are cut in
   /// it.

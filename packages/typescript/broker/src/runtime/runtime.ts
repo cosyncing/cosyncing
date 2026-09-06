@@ -1836,7 +1836,29 @@ async function discoverLocalSessions(
       overlayAuthoritativeOwner(existing, owner);
     } else {
       // Live but not (yet) on disk — surface it so a brand-new bridged session isn't missing.
-      sessions.push({ ...info, machine: MACHINE, status });
+      //
+      // Dated from what the broker already discovered for the same identity, because an attach builds
+      // its SessionInfo from the transcript and several adapters carry no timestamps on it at all.
+      // Under a BOUNDED window that is not a cosmetic gap: windowed disk discovery has already dropped
+      // the aged-out row, so this push is the only source of it, and it published a 24-day-old macOS
+      // rollout as the single "last 7 days" session with no date on it whatsoever. Nothing is invented
+      // when there is no record — a row the client cannot place on a timeline is left undated here and
+      // excluded from every bounded view by `filterSessionsByWindow`, which is the honest answer and
+      // the one the unbounded window still shows.
+      const remembered = cachedSessionInfoForMutation(info).find(
+        (candidate) => candidate.updatedAt !== undefined || candidate.createdAt !== undefined,
+      );
+      sessions.push({
+        ...info,
+        machine: MACHINE,
+        status,
+        ...(info.createdAt === undefined && remembered?.createdAt !== undefined
+          ? { createdAt: remembered.createdAt }
+          : {}),
+        ...(info.updatedAt === undefined && remembered?.updatedAt !== undefined
+          ? { updatedAt: remembered.updatedAt }
+          : {}),
+      });
     }
   }
   const decorated = sessionMetadata

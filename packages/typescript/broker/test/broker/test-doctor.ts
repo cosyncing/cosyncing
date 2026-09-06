@@ -22,6 +22,7 @@ import type {
   SetupDiagnosisContext,
 } from '../../../adapter-api/src/index.ts';
 import { diagnoseManagedRuntimeFailure } from '../../src/runtime/managed-runtime-state.ts';
+import { TOKDASH_DEFAULT_BASE_URL } from '../../src/installation/tokdash-quota.ts';
 import {
   CODEX_MINIMUM_VERSION,
   CODEX_STANDALONE_INSTALL_COMMAND,
@@ -944,6 +945,94 @@ try {
     !reportJson.includes(credentials.brokerToken) && !reportJson.includes(credentials.piIntegration.credential) &&
       !reportJson.includes(credentials.ompIntegration.credential) &&
       !reportJson.includes('fixture.tailnet.ts.net'));
+
+  // ---- Tokdash version floor ------------------------------------------------------------------
+  //
+  // `setup` adopts whatever Tokdash already answers at the endpoint and never looks at what it
+  // adopted, which is how the macOS host sat on 2.0.0 while the usage report blamed the requested
+  // period. Doctor is where that becomes visible, and it is a warning: an old Tokdash still serves
+  // the quota the broker polls.
+  const tokdashContext = (answer: {
+    health?: unknown;
+    version?: unknown;
+  }): SetupDiagnosisContext => ({
+    ...aggregateContext,
+    async fetchJson(url, headers, timeoutMs, maxBytes) {
+      const path = new URL(url).pathname;
+      if (url.startsWith(TOKDASH_DEFAULT_BASE_URL)) {
+        const body = path === '/health' ? answer.health : path === '/api/version' ? answer.version : undefined;
+        return body === undefined
+          ? { status: 'unreachable' }
+          : { status: 'ok', statusCode: 200, json: body };
+      }
+      return aggregateContext.fetchJson(url, headers, timeoutMs, maxBytes);
+    },
+  });
+  const tokdashCheck = async (answer: { health?: unknown; version?: unknown }) => {
+    const built = await collectDoctorReport({
+      buildInfo: BUILD_INFO,
+      context: tokdashContext(answer),
+      assetReport: inspectRuntimeAssets(),
+      adapters: cleanAdapters,
+      stateHome,
+    });
+    return built.sections
+      .flatMap((section) => section.checks)
+      .find((item) => item.id === 'runtime.tokdash-version');
+  };
+  const healthy = { service: 'tokdash', status: 'ok' };
+  const belowFloor = await tokdashCheck({
+    health: healthy,
+    version: { service: 'tokdash', runtime_version: '2.0.0', install_method: 'pipx' },
+  });
+  check('doctor warns, and names both versions, when Tokdash is below the report floor',
+    belowFloor?.status === 'warn'
+      && belowFloor.detailCode === 'tokdash-version-below-minimum'
+      && belowFloor.summary.includes('2.0.0') && belowFloor.summary.includes('2.5.0')
+      && belowFloor.remediation?.command === 'pipx upgrade tokdash',
+    JSON.stringify(belowFloor));
+  const atFloor = await tokdashCheck({
+    health: healthy,
+    version: { service: 'tokdash', runtime_version: '2.5.0' },
+  });
+  const aboveFloor = await tokdashCheck({
+    health: healthy,
+    version: { service: 'tokdash', runtime_version: '2.5.3' },
+  });
+  check('the floor itself passes, and so does anything above it',
+    atFloor?.status === 'pass' && atFloor.detailCode === 'tokdash-version-current'
+      && aboveFloor?.status === 'pass' && aboveFloor.summary.includes('2.5.3'),
+    JSON.stringify([atFloor, aboveFloor]));
+  const unreadable = await tokdashCheck({ health: healthy, version: { service: 'tokdash' } });
+  check('a Tokdash that will not name itself fails closed to a warning, never to a version',
+    unreadable?.status === 'warn'
+      && unreadable.detailCode === 'tokdash-version-unreadable'
+      && !unreadable.summary.includes('undefined') && !unreadable.summary.includes('null'),
+    JSON.stringify(unreadable));
+  const absent = await tokdashCheck({});
+  check('no Tokdash at all is information, not a finding',
+    absent?.status === 'skip' && absent.detailCode === 'tokdash-absent'
+      && absent.remediation === undefined,
+    JSON.stringify(absent));
+  const foreign = await tokdashCheck({
+    health: { status: 'ok', service: 'something-else' },
+    version: { service: 'something-else', runtime_version: '9.9.9' },
+  });
+  check('a stranger holding the port is not evidence about Tokdash',
+    foreign?.status === 'skip' && foreign.detailCode === 'tokdash-absent',
+    JSON.stringify(foreign));
+  const skippedForSetup = await collectDoctorReport({
+    buildInfo: BUILD_INFO,
+    context: tokdashContext({ health: healthy, version: { service: 'tokdash', runtime_version: '2.0.0' } }),
+    assetReport: inspectRuntimeAssets(),
+    adapters: cleanAdapters,
+    stateHome,
+    probeTokdashVersion: false,
+  });
+  check("setup's embedded diagnosis omits the check rather than touching a marked endpoint",
+    !skippedForSetup.sections
+      .flatMap((section) => section.checks)
+      .some((item) => item.id === 'runtime.tokdash-version'));
 
   const serviceBlindContext: SetupDiagnosisContext = {
     ...aggregateContext,

@@ -5008,10 +5008,6 @@
   "@usageRankModels": {
     "description": "Heading of the per-model ranking list."
   },
-  "usageVsQuotaNote": "Totals recorded on this machine — separate from the remaining-quota windows below.",
-  "@usageVsQuotaNote": {
-    "description": "Disambiguation line between the usage card and the quota panel. Both say \"usage\"; one is a sum and the other is a window."
-  },
   "usageCoverageNote": "{named} in named projects · {unattributed} unattributed · {gap} from sources with no project records",
   "@usageCoverageNote": {
     "description": "Reconciles a project list against the period total. All three components are printed so the list visibly sums to 100%.",
@@ -5569,5 +5565,40 @@
   "usageWindowUnrecognized": "tokdash did not recognize this period, so it answered for a window nobody asked about. No figures are shown.",
   "@usageWindowUnrecognized": {
     "description": "Distinct from the unavailable notice: the report arrived, and it is this period that could not be resolved."
+  },
+  "usageTokdashOutdated": "The server runs tokdash {installed}, and this report needs {required} or later. Update it on the server — pipx upgrade tokdash — then reopen this page.",
+  "@usageTokdashOutdated": {
+    "description": "Shown instead of the figures when the broker's tokdash predates the report API. Names both versions and the command, because 'too old' without either is not actionable.",
+    "placeholders": {
+      "installed": {"type": "String", "example": "2.0.0"},
+      "required": {"type": "String", "example": "2.5.0"}
+    }
+  },
+  "usageTokdashVersionUnknown": "The server's tokdash does not report its version, so it is older than the {required} this report needs. Update it on the server — pipx upgrade tokdash — then reopen this page.",
+  "@usageTokdashVersionUnknown": {
+    "description": "The same fact when the installed version could not be read at all. Never prints a placeholder version.",
+    "placeholders": {
+      "required": {"type": "String", "example": "2.5.0"}
+    }
+  },
+  "sessionsEmptyWindowTitle": "No recent sessions",
+  "@sessionsEmptyWindowTitle": {
+    "description": "Empty-state title when the roster window, not the server, is what is empty."
+  },
+  "sessionsEmptyWindowToday": "Nothing was active today. This server may have older sessions.",
+  "@sessionsEmptyWindowToday": {
+    "description": "Roster empty state under the one-day window. Says the window is empty, never that the server is."
+  },
+  "sessionsEmptyWindowLast7Days": "Nothing was active in the last 7 days. This server may have older sessions.",
+  "@sessionsEmptyWindowLast7Days": {
+    "description": "Roster empty state under the default seven-day window."
+  },
+  "sessionsEmptyWindowLast30Days": "Nothing was active in the last 30 days. This server may have older sessions.",
+  "@sessionsEmptyWindowLast30Days": {
+    "description": "Roster empty state under the thirty-day window."
+  },
+  "sessionsEmptyWindowAction": "Show all sessions",
+  "@sessionsEmptyWindowAction": {
+    "description": "Widens the roster query window to all time from the empty state."
   }
 }

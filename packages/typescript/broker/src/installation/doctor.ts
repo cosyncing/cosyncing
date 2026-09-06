@@ -36,6 +36,8 @@ import {
 } from './install-state.ts';
 import { serviceFlutterWebRoot, type RuntimeAssetReport } from '../runtime/runtime-assets.ts';
 import { readSetupState, setupStateHome } from './setup-state.ts';
+import { resolveTokdashEndpoint } from './tokdash-quota.ts';
+import { probeTokdash, readTokdashRuntime } from './tokdash-provision.ts';
 import { brokerHostVerdict, supportedBrokerHostList } from './supported-hosts.ts';
 import { shippedAdapters } from './shipped-adapters.ts';
 import { brokerManagedHostIdentities } from './managed-host-posture.ts';
@@ -130,6 +132,15 @@ export interface DoctorDependencies {
    * moved or vanished — states a test host running a source checkout can never reach on its own.
    */
   applicationIdentity?: Readonly<ApplicationIdentity>;
+  /**
+   * Whether to ask the local Tokdash what version it is. Default true; `setup` passes false.
+   *
+   * Setup embeds this whole report purely to read its agent summaries, and its Tokdash step promises
+   * something this probe would break: a run whose completion marker is already written touches the
+   * endpoint not at all — no command, and not even a probe. A read-only `GET /health` is still a
+   * touch, and a promise with an exception in it is not the promise.
+   */
+  probeTokdashVersion?: boolean;
 }
 
 function remediation(command: string, message: string): SetupCheck['remediation'] {
@@ -1435,6 +1446,55 @@ async function endpointAndRuntimeChecks(options: {
   return { network, runtime, agents };
 }
 
+/**
+ * Which Tokdash the usage report would read, and whether it clears the floor.
+ *
+ * `setup` adopts any Tokdash already answering at the endpoint and never inspects what it adopted, so a
+ * host can sit for months on a build that predates the report's API with nothing anywhere saying so. The
+ * symptom without this check is a usage surface that blames the requested period — a message that sends
+ * the reader looking at the wrong thing entirely.
+ *
+ * Never a `fail`. An old Tokdash still answers `/api/quota`, which is what the broker polls; the report is
+ * the only thing short of it, and a diagnosis that reddens over an optional dashboard is one an operator
+ * learns to ignore.
+ */
+async function tokdashVersionCheck(context: SetupDiagnosisContext): Promise<SetupCheck> {
+  const endpoint = resolveTokdashEndpoint(context.env.COSYNCING_TOKDASH_URL);
+  const id = 'runtime.tokdash-version';
+  // Nothing answering is not a finding: Tokdash is optional, and quota consent may simply be off. The
+  // endpoint is named as evidence so an operator who expected one can see which address was probed.
+  if (!(await probeTokdash(context, endpoint.baseUrl))) {
+    return {
+      id,
+      status: 'skip',
+      detailCode: 'tokdash-absent',
+      summary: 'No Tokdash is answering, so usage reporting is not configured.',
+      evidence: { endpoint: endpoint.baseUrl },
+    };
+  }
+  const runtime = await readTokdashRuntime(context, endpoint.baseUrl);
+  return {
+    id,
+    status: runtime.belowMinimum ? 'warn' : 'pass',
+    detailCode: runtime.belowMinimum
+      ? runtime.version === null ? 'tokdash-version-unreadable' : 'tokdash-version-below-minimum'
+      : 'tokdash-version-current',
+    summary: runtime.belowMinimum
+      ? runtime.version === null
+        ? `Tokdash at ${endpoint.baseUrl} does not report a version; the usage report needs ${runtime.minimumVersion} or later.`
+        : `Tokdash ${runtime.version} is older than ${runtime.minimumVersion}, which the usage report needs.`
+      : `Tokdash ${runtime.version} meets the ${runtime.minimumVersion} floor the usage report needs.`,
+    evidence: {
+      endpoint: endpoint.baseUrl,
+      version: runtime.version ?? 'unknown',
+      minimumVersion: runtime.minimumVersion,
+    },
+    ...(runtime.belowMinimum
+      ? { remediation: remediation('pipx upgrade tokdash', 'Upgrade Tokdash, then restart it.') }
+      : {}),
+  };
+}
+
 export async function diagnoseAgents(
   context: SetupDiagnosisContext,
   adapters: readonly AgentBackend[],
@@ -1660,13 +1720,18 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     installedResources,
     adapterDiagnoses,
   );
-  const endpoints = await endpointAndRuntimeChecks({
-    context: dependencies.context,
-    config,
-    brokerToken,
-    home,
-    agentPathCheck: installedService.find((candidate) => candidate.id === 'service.agent-executable-path'),
-  });
+  const [endpoints, tokdashVersion] = await Promise.all([
+    endpointAndRuntimeChecks({
+      context: dependencies.context,
+      config,
+      brokerToken,
+      home,
+      agentPathCheck: installedService.find((candidate) => candidate.id === 'service.agent-executable-path'),
+    }),
+    dependencies.probeTokdashVersion === false
+      ? Promise.resolve(undefined)
+      : tokdashVersionCheck(dependencies.context),
+  ]);
   const codexReadiness = codexTuiReadinessCheck(
     dependencies.codexTuiReadiness ?? safeCodexTuiReadiness(dependencies.context),
   );
@@ -1711,7 +1776,11 @@ export async function collectDoctorReport(dependencies: DoctorDependencies): Pro
     { id: 'host', title: 'Host', checks: host.checks },
     { id: 'service', title: 'Service manager', checks: [...service, ...installedService] },
     { id: 'network', title: 'Local broker', checks: endpoints.network },
-    { id: 'runtime', title: 'Managed runtimes', checks: endpoints.runtime },
+    {
+      id: 'runtime',
+      title: 'Managed runtimes',
+      checks: [...endpoints.runtime, ...(tokdashVersion ? [tokdashVersion] : [])],
+    },
   ];
   const summary = summarize(sections);
   return {

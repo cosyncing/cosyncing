@@ -105,6 +105,27 @@ function quotaNotice(result: Readonly<SetupCommandResult>, text: SetupMessages):
 }
 
 /**
+ * The upgrade warning for a Tokdash below the report's floor, or nothing.
+ *
+ * Its own line rather than a clause on {@link quotaNotice}: "reused" and "too old" are two facts about
+ * the same endpoint, one of which is a warning and one of which is not, and a reader who scans for
+ * warnings must be able to find this one. Setup never fails over it — the instance works, and the
+ * feature it is short of is a report the operator may not even open.
+ */
+function quotaVersionWarning(
+  result: Readonly<SetupCommandResult>,
+  text: SetupMessages,
+): string | undefined {
+  const runtime = result.tokdash?.runtime;
+  if (!runtime?.belowMinimum) return undefined;
+  return text.quotaVersionOutdated({
+    baseUrl: result.tokdash!.baseUrl,
+    version: runtime.version,
+    minimum: runtime.minimumVersion,
+  });
+}
+
+/**
  * The footer sentence in the wizard's language. `result.summary` carries the English rendering of the same
  * code and stays on the result, because that is what `--yes` prints and what a bug report quotes.
  * `cancelled` never reaches here — the cancel path has its own copy, with the stage interpolated.
@@ -296,6 +317,8 @@ export function createClackSetupPresenter(): SetupPresenter {
       if (quota) {
         if (result.tokdash?.status === 'unavailable') log.warn(quota); else log.info(quota);
       }
+      const outdated = quotaVersionWarning(result, text());
+      if (outdated) log.warn(outdated);
       if (result.legacyConnectivityMigration) {
         log.warn(text().legacyConnectivityPreserved(result.legacyConnectivityMigration.preservedTargets));
       }
@@ -462,6 +485,14 @@ export function createNonInteractiveSetupPresenter(
         // The URL is on the line because a script reading this must be able to tell which endpoint the
         // status is about, and an override moves it.
         line(`[tokdash] ${result.tokdash.status} url=${result.tokdash.baseUrl}${result.tokdash.status === 'unavailable' ? ` reason=${result.tokdash.reason} detail=${result.tokdash.detail}` : ''}`);
+        // Its own tagged line, English like every other machine-readable one here. `version=unknown` is
+        // the honest token for a build that answers `/api/version` with nothing usable — it is not a
+        // missing measurement, it is the measurement.
+        const runtime = result.tokdash.runtime;
+        if (runtime?.belowMinimum) {
+          line(`[tokdash] outdated version=${runtime.version ?? 'unknown'} minimum=${runtime.minimumVersion} `
+            + `url=${result.tokdash.baseUrl} remedy=pipx upgrade tokdash`);
+        }
       }
       line(`[${result.status}] ${result.summary}`);
     },

@@ -1942,10 +1942,6 @@
   "@usageRankModels": {
     "description": "Heading of the per-model ranking list."
   },
-  "usageVsQuotaNote": "本机累计用量，与下方剩余额度窗口互不相干。",
-  "@usageVsQuotaNote": {
-    "description": "Disambiguation line between the usage card and the quota panel. Both say \"usage\"; one is a sum and the other is a window."
-  },
   "usageCoverageNote": "{named} 归属到项目 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
   "@usageCoverageNote": {
     "description": "Reconciles a project list against the period total. All three components are printed so the list visibly sums to 100%.",
@@ -2503,5 +2499,12 @@
   "usageWindowUnrecognized": "tokdash 未能识别该时间段，返回的是无人请求的区间数据，因此不显示任何数字。",
   "@usageWindowUnrecognized": {
     "description": "Distinct from the unavailable notice: the report arrived, and it is this period that could not be resolved."
-  }
+  },
+  "usageTokdashOutdated": "服务器上的 tokdash 是 {installed}，而这份报告需要 {required} 或更高版本。请在服务器上运行 pipx upgrade tokdash，然后重新打开本页。",
+  "usageTokdashVersionUnknown": "服务器上的 tokdash 没有报告版本号，因此低于本报告需要的 {required}。请在服务器上运行 pipx upgrade tokdash，然后重新打开本页。",
+  "sessionsEmptyWindowTitle": "最近没有会话",
+  "sessionsEmptyWindowToday": "今天没有活动的会话。这台服务器上可能还有更早的会话。",
+  "sessionsEmptyWindowLast7Days": "最近 7 天没有活动的会话。这台服务器上可能还有更早的会话。",
+  "sessionsEmptyWindowLast30Days": "最近 30 天没有活动的会话。这台服务器上可能还有更早的会话。",
+  "sessionsEmptyWindowAction": "显示全部会话"
 }

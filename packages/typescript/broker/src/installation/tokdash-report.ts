@@ -23,6 +23,17 @@
 
 import { normalizeTokdashQuotaBaseUrl } from './tokdash-quota.ts';
 
+/**
+ * The oldest Tokdash this report is built against.
+ *
+ * 2.5.0 is where `/api/insights` and its facets exist, and where `/api/usage` began publishing
+ * `range.recognized` — the verdict every window label is derived from. Below it neither fact is
+ * available, and the difference matters to the reader: an older Tokdash publishes no verdict at all,
+ * which is not the same claim as a current one answering `recognized: false` for a period it could
+ * not resolve. One constant, so the report, `setup` and `doctor` cannot disagree about the floor.
+ */
+export const TOKDASH_MINIMUM_VERSION = '2.5.0';
+
 /** Facets requested in the single composite insights scan (Tokdash 2.5.0+). */
 export const TOKDASH_REPORT_FACETS = [
   'hourly',
@@ -65,6 +76,25 @@ export interface TokdashReportRange {
   recognized: boolean;
   /** Tokdash's resolved period alias (`custom`, `year`, …). A label input, never a label. */
   periodResolved: string | null;
+}
+
+/**
+ * Which Tokdash answered, and whether it clears {@link TOKDASH_MINIMUM_VERSION}.
+ *
+ * Carried on every report because the two ways a window can go unlabelled are not the same fact and
+ * the reader's next move differs. A current Tokdash that answers `recognized: false` resolved a
+ * period it did not understand — a real upstream state with its own message. A Tokdash below the
+ * floor publishes no verdict at all, so {@link TokdashReportRange.recognized} is false because the
+ * field is absent, not because anything was refused; the fix there is an upgrade, and the report
+ * has to be able to say so instead of blaming the period.
+ */
+export interface TokdashReportRuntime {
+  /** `runtime_version` exactly as served, or `null` when absent or unparseable. */
+  version: string | null;
+  /** The floor this broker builds against. Served so the client names it without hardcoding it. */
+  minimumVersion: string;
+  /** True when {@link version} is below {@link minimumVersion}, and when it could not be read. */
+  belowMinimum: boolean;
 }
 
 /** Period totals. Carried beside every facet so shares reconcile against a real denominator. */
@@ -194,6 +224,8 @@ export interface TokdashReportCoverage {
 /** The aggregated report for one window. */
 export interface TokdashReport {
   range: TokdashReportRange;
+  /** Which Tokdash produced the figures, and whether it is old enough to explain a missing verdict. */
+  runtime: TokdashReportRuntime;
   /** Tokdash's local zone label. The hourly/weekday buckets are cut in it. */
   timezone: string | null;
   totals: TokdashReportTotals;
@@ -396,6 +428,92 @@ async function getJson(
 
 function windowQuery(window: TokdashReportWindow): string {
   return `date_from=${encodeURIComponent(window.from)}&date_to=${encodeURIComponent(window.to)}`;
+}
+
+/**
+ * Numeric release components of a version string, or `null` when it is not one.
+ *
+ * Leading `v`, a `-rc.1` suffix and a fourth component are all tolerated: only the release triple
+ * orders one Tokdash against another, and a build that decorates its version must not be read as
+ * having no version at all.
+ */
+function versionComponents(value: string): number[] | null {
+  const release = value.trim().replace(/^v/i, '').split(/[-+]/, 1)[0] ?? '';
+  const parts = release.split('.');
+  if (parts.length === 0 || parts.length > 4) return null;
+  const numbers: number[] = [];
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    numbers.push(Number(part));
+  }
+  return numbers;
+}
+
+/**
+ * Is `version` below `minimum`?
+ *
+ * Fails CLOSED: an absent, malformed or unreadable version is below the floor. A Tokdash that will
+ * not say what it is cannot be assumed to be new enough, and the cost of being wrong that way is one
+ * upgrade prompt — against silently rendering a window nobody can verify.
+ */
+export function isTokdashVersionBelowMinimum(
+  version: string | null,
+  minimum: string = TOKDASH_MINIMUM_VERSION,
+): boolean {
+  if (version === null) return true;
+  const found = versionComponents(version);
+  const floor = versionComponents(minimum);
+  if (found === null || floor === null) return true;
+  for (let index = 0; index < Math.max(found.length, floor.length); index += 1) {
+    const left = found[index] ?? 0;
+    const right = floor[index] ?? 0;
+    if (left !== right) return left < right;
+  }
+  return false;
+}
+
+/**
+ * The `runtime_version` in a `/api/version` body, or `null`.
+ *
+ * The `service` fingerprint is checked for the same reason {@link ./tokdash-provision.ts} checks it
+ * on `/health`: a loopback port can be held by anything, and a stranger's `runtime_version` is not
+ * evidence about Tokdash.
+ */
+export function parseTokdashRuntimeVersion(value: unknown): string | null {
+  if (!isRecord(value) || value.service !== 'tokdash') return null;
+  const version = optionalString(value.runtime_version);
+  return version !== null && versionComponents(version) !== null ? version : null;
+}
+
+/**
+ * Read the running Tokdash's version. Never throws: a build too old to serve `/api/version`, an
+ * unreachable one and a garbled body all answer `null`, which {@link isTokdashVersionBelowMinimum}
+ * reads as below the floor.
+ */
+export async function fetchTokdashVersion(
+  baseInput: unknown,
+  options: TokdashReportFetchOptions = {},
+): Promise<string | null> {
+  let baseUrl: string;
+  try {
+    baseUrl = normalizeTokdashQuotaBaseUrl(baseInput);
+  } catch {
+    return null;
+  }
+  try {
+    return parseTokdashRuntimeVersion(await getJson(`${baseUrl}/api/version`, options, 'version'));
+  } catch {
+    return null;
+  }
+}
+
+/** The runtime block for one read. */
+export function tokdashReportRuntime(version: string | null): TokdashReportRuntime {
+  return {
+    version,
+    minimumVersion: TOKDASH_MINIMUM_VERSION,
+    belowMinimum: isTokdashVersionBelowMinimum(version),
+  };
 }
 
 function parseRange(value: unknown, window: TokdashReportWindow): TokdashReportRange {
@@ -688,13 +806,16 @@ export async function fetchTokdashReport(
   const usageBody = await getJson(`${baseUrl}/api/usage?${query}`, options, 'usage');
   if (!isRecord(usageBody)) invalid('body', 'an object');
 
-  const [activeSettled, insightsSettled] = await Promise.allSettled([
+  // The version read rides the same round of requests as the two optional scans: it is one small
+  // GET, and paying for it serially would put a second latency on the slowest surface in the app.
+  const [activeSettled, insightsSettled, versionSettled] = await Promise.allSettled([
     getJson(`${baseUrl}/api/active-time?${query}`, options, 'active-time'),
     getJson(
       `${baseUrl}/api/insights?facets=${TOKDASH_REPORT_FACETS.join(',')}&${query}`,
       options,
       'insights',
     ),
+    fetchTokdashVersion(baseUrl, options),
   ]);
 
   const activeBody = activeSettled.status === 'fulfilled' && isRecord(activeSettled.value)
@@ -724,6 +845,11 @@ export async function fetchTokdashReport(
 
   return {
     range,
+    // `fetchTokdashVersion` swallows its own failures, so a rejection here can only be a programming
+    // error; either way an unread version is below the floor, which is the fail-closed direction.
+    runtime: tokdashReportRuntime(
+      versionSettled.status === 'fulfilled' ? versionSettled.value : null,
+    ),
     timezone: insights === null ? null : optionalString(insights.timezone),
     totals,
     comparison: parseComparison(usageBody.comparison),

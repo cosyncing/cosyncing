@@ -82,10 +82,6 @@ class _UsageTodayCardState extends ConsumerState<UsageTodayCard> {
           ),
         ),
         const SizedBox(height: 12),
-        // The cheapest possible guard against conflating a sum with a window,
-        // placed between the two sections that invite it.
-        UsageFootnote(text: l10n.usageVsQuotaNote),
-        const SizedBox(height: 4),
         Align(
           alignment: Alignment.centerRight,
           child: TextButton(
@@ -156,10 +152,26 @@ class _CardBody extends StatelessWidget {
     final report = response?.report;
 
     // The same notice the quota panel shows, and never a zero.
-    if (report == null || !report.range.recognized) {
+    if (report == null) {
       return InlineNotice(
         icon: Icons.cloud_off_outlined,
         text: l10n.usageUnavailable,
+      );
+    }
+    // Checked BEFORE the window verdict. A tokdash below the report's floor has
+    // no `recognized` field to publish, so the verdict is false as a side
+    // effect of its age — reading the window first told the reader their period
+    // was refused when nothing refused it, and sent them to change the period.
+    if (report.needsTokdashUpgrade) {
+      return InlineNotice(
+        icon: Icons.system_update_alt_outlined,
+        text: usageTokdashUpgradeText(l10n, report.runtime),
+      );
+    }
+    if (!report.range.recognized) {
+      return InlineNotice(
+        icon: Icons.help_outline,
+        text: l10n.usageWindowUnrecognized,
       );
     }
     if (report.isEmpty) {

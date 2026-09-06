@@ -85,6 +85,7 @@
     "test:broker-model-session-creation": "bun run packages/typescript/broker/test/broker/test-model-session-creation.ts",
     "test:broker-agent-create-readiness": "bun run packages/typescript/broker/test/broker/test-agent-create-readiness.ts && bun run packages/typescript/broker/test/broker/test-opencode-create-readiness-restart.ts",
     "test:broker-roster-revision": "bun run packages/typescript/broker/test/broker/test-roster-revision.ts",
+    "test:broker-roster-window": "bun run packages/typescript/broker/test/broker/test-roster-http.ts",
     "test:broker-adapter-discovery-bounds": "bun run packages/typescript/broker/test/broker/test-adapter-discovery-bounds.ts",
     "test:broker-managed-host-ownership": "bun run packages/typescript/broker/test/broker/test-managed-host-ownership.ts",
     "test:broker-sync-degraded-integration": "bun run packages/typescript/broker/test/broker/test-sync-degraded-integration.ts",

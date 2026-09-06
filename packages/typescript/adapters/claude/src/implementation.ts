@@ -1594,6 +1594,15 @@ export class ClaudeAdapter implements AgentBackend {
         : undefined,
       status: 'idle',
       attachMode: mode === 'resume' ? 'resume' : 'observe',
+      // The SAME timestamp discovery publishes for this transcript. The broker overlays an attached
+      // session's SessionInfo onto the roster, and under a bounded window — where windowed discovery
+      // has already aged the disk row out — it becomes the only record of the session. Undated, such a
+      // row is one no client can place on a timeline. A pending create has no transcript yet and
+      // honestly carries no date.
+      ...(() => {
+        const conversationTs = lastConversationTs(path) ?? statSafe(path)?.mtimeMs;
+        return conversationTs === undefined ? {} : { updatedAt: conversationTs };
+      })(),
       // Explicit control state (never inferred from attachMode by the UI). Resume = driving; a
       // remote-controlled/cwd-gone session is unavailable for Drive. Channel sync is archived.
       control: subagent

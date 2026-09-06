@@ -214,6 +214,14 @@ class _SessionsPageState extends ConsumerState<SessionsPage> {
                         ? SessionsEmptyState(
                             hasActiveBrokerClient: hasActiveBrokerClient,
                             creationAvailability: creationAvailability,
+                            queryWindow: ref
+                                .watch(sessionRosterWindowProvider)
+                                .valueOrNull,
+                            onShowAllSessions: () => unawaited(
+                              ref
+                                  .read(sessionRosterWindowProvider.notifier)
+                                  .setWindow(SessionRosterQueryWindow.any),
+                            ),
                           )
                         : _SessionList(
                             sessions: sessions,

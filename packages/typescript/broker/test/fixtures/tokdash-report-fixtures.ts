@@ -108,14 +108,31 @@ export function insightsFixture(overrides: Record<string, unknown> = {}): Record
   };
 }
 
+/**
+ * `GET /api/version`, as 2.5.x serves it.
+ *
+ * The report reads this to tell "this Tokdash is too old to publish a window verdict" apart from
+ * "this Tokdash answered a period it did not recognise". The default is a build above the floor, so
+ * a suite that says nothing about versions gets the current-Tokdash case.
+ */
+export function versionFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    service: 'tokdash',
+    runtime_version: '2.5.3',
+    install_method: 'pipx',
+    ...overrides,
+  };
+}
+
 /** How the stub should answer one upstream endpoint. */
 export type FixtureAnswer = Record<string, unknown> | 'fail' | number;
 
-/** What each of the three upstream endpoints answers. */
+/** What each of the four upstream endpoints answers. */
 export interface FixtureOptions {
   usage?: FixtureAnswer;
   activeTime?: FixtureAnswer;
   insights?: FixtureAnswer;
+  version?: FixtureAnswer;
 }
 
 /** A Tokdash stub that records every URL it is asked for. */
@@ -135,6 +152,7 @@ export function stubTokdash(options: FixtureOptions = {}): { fetch: typeof fetch
     if (url.includes('/api/usage')) return answer(options.usage, usageFixture());
     if (url.includes('/api/active-time')) return answer(options.activeTime, activeTimeFixture());
     if (url.includes('/api/insights')) return answer(options.insights, insightsFixture());
+    if (url.includes('/api/version')) return answer(options.version, versionFixture());
     throw new Error(`unexpected upstream request: ${url}`);
   }) as unknown as typeof fetch;
 

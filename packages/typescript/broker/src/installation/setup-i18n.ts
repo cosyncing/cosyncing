@@ -144,6 +144,14 @@ export interface SetupMessages {
   /** An endpoint Tokdash cannot be set up on at all, as opposed to one where setting it up went wrong. */
   quotaEndpointUnsupported: (baseUrl: string) => string;
   quotaProvisionFailed: (detail: string) => string;
+  /**
+   * The adopted Tokdash is older than the report needs.
+   *
+   * A warning, never a refusal: quota tracking works on an old build and the broker install is complete.
+   * Carries the found version and the floor because "too old" without both numbers is not actionable, and
+   * `null` is the honest rendering of a build that would not say what it is.
+   */
+  quotaVersionOutdated: (parts: { baseUrl: string; version: string | null; minimum: string }) => string;
   planTitle: string;
   planEmpty: string;
   planStep: (step: SetupMutationStep) => string;
@@ -281,6 +289,10 @@ const en: SetupMessages = {
   // Optional work: say what did not happen and that the install is fine, or this reads as a failed setup.
   quotaProvisionFailed: (detail) =>
     `Tokdash could not be set up, so quota warnings are off. Setup itself is complete. ${detail}`,
+  quotaVersionOutdated: ({ baseUrl, version, minimum }) =>
+    `${version ? `Tokdash ${version} at ${baseUrl}` : `The Tokdash at ${baseUrl} does not report a version, so it`} `
+    + `is older than ${minimum}, which the usage report needs. Quota warnings still work; the report will not `
+    + 'show figures until you upgrade it — `pipx upgrade tokdash`, then restart it.',
   planTitle: 'Exact mutation plan',
   planEmpty: 'No filesystem or service mutation is required.',
   // This rendering is the reference text: the plan's `mutationSummary`, the `--yes` `[plan]` lines, and the
@@ -484,6 +496,10 @@ const zhHans: SetupMessages = {
     `cosyncing 无法在 ${baseUrl} 上自动安装 Tokdash：Tokdash 只在本机端口的根路径上提供普通 HTTP 服务。`
     + '安装配置本身已经完成；请自行在该地址启动 Tokdash，或修改 COSYNCING_TOKDASH_URL。',
   quotaProvisionFailed: (detail) => `Tokdash 没能装好，配额提醒暂时不可用。安装配置本身已经完成。${detail}`,
+  quotaVersionOutdated: ({ baseUrl, version, minimum }) =>
+    `${version ? `${baseUrl} 上的 Tokdash 是 ${version}` : `${baseUrl} 上的 Tokdash 没有报告版本号`}，`
+    + `低于用量报告需要的 ${minimum}。配额提醒仍然可用；在升级之前报告里不会显示数据——`
+    + '运行 `pipx upgrade tokdash`，然后重启它。',
   planTitle: '将要执行的改动',
   planEmpty: '无需改动任何文件或服务。',
   // 路径、unit 名、URL、版本号、命令名一律保持原样：这些是操作者要输入和搜索的东西。

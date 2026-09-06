@@ -13,7 +13,9 @@ import {
   checkTokdashReportWindow,
   fetchTokdashReport,
   isTokdashReportDate,
+  isTokdashVersionBelowMinimum,
   TokdashReportCache,
+  TOKDASH_MINIMUM_VERSION,
   TOKDASH_REPORT_FACETS,
   TOKDASH_REPORT_WINDOW_FLOOR,
   withoutProjectNames,
@@ -24,6 +26,8 @@ import {
   SAMPLE_WINDOW,
   stubTokdash as stubFetch,
   usageFixture as usageBody,
+  versionFixture as versionBody,
+  type FixtureAnswer,
 } from '../fixtures/tokdash-report-fixtures.ts';
 
 let failures = 0;
@@ -61,18 +65,21 @@ await test('report window rejects malformed, impossible and inverted dates', asy
   assert.deepEqual(calls, [], 'a refused window never reaches Tokdash');
 });
 
-await test('one window costs exactly three GETs, and no /api/sessions fan-out', async () => {
+await test('one window costs exactly four GETs, and no /api/sessions fan-out', async () => {
   const { fetch: upstream, calls } = stubFetch();
   await fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
 
-  assert.equal(calls.length, 3, `expected 3 upstream reads, got ${calls.length}: ${calls.join(', ')}`);
+  assert.equal(calls.length, 4, `expected 4 upstream reads, got ${calls.length}: ${calls.join(', ')}`);
   assert.equal(calls.filter((url) => url.includes('/api/sessions')).length, 0);
   const insights = calls.find((url) => url.includes('/api/insights'));
   assert.ok(insights, 'the composite insights scan is requested');
   for (const name of TOKDASH_REPORT_FACETS) {
     assert.ok(insights.includes(name), `insights scan requests the ${name} facet`);
   }
-  for (const url of calls) {
+  assert.ok(calls.some((url) => url.endsWith('/api/version')), 'the running version is read');
+  // The version read is about the instance, not about a window, so it carries no date bounds — and
+  // it must not, or the per-window cache would be reading a different resource for every period.
+  for (const url of calls.filter((candidate) => !candidate.endsWith('/api/version'))) {
     assert.ok(url.includes('date_from=2026-08-01'), url);
     assert.ok(url.includes('date_to=2026-08-31'), url);
   }
@@ -225,6 +232,84 @@ await test('range.recognized is carried, and absent means unrecognized', async (
   assert.equal(silent.range.recognized, false, 'an unpublished verdict is never read as agreement');
 });
 
+await test('the running Tokdash version is carried, and the floor is judged against it', async () => {
+  const current = await fetchTokdashReport(undefined, WINDOW, { fetch: stubFetch().fetch });
+  assert.equal(current.runtime.version, '2.5.3');
+  assert.equal(current.runtime.minimumVersion, TOKDASH_MINIMUM_VERSION);
+  assert.equal(current.runtime.belowMinimum, false, 'a build above the floor clears it');
+
+  const exact = await fetchTokdashReport(undefined, WINDOW, {
+    fetch: stubFetch({ version: versionBody({ runtime_version: TOKDASH_MINIMUM_VERSION }) }).fetch,
+  });
+  assert.equal(exact.runtime.belowMinimum, false, 'the floor itself is not below the floor');
+
+  // The measured macOS host: 2.0.0 honours the window and answers correct totals, and publishes no
+  // verdict at all because the field postdates it.
+  const old = await fetchTokdashReport(undefined, WINDOW, {
+    fetch: stubFetch({
+      version: versionBody({ runtime_version: '2.0.0', install_method: 'pipx' }),
+      usage: usageBody({ range: { from: '2026-08-01', to: '2026-08-31' } }),
+      insights: 404,
+    }).fetch,
+  });
+  assert.equal(old.runtime.version, '2.0.0');
+  assert.equal(old.runtime.belowMinimum, true);
+  assert.equal(old.range.recognized, false);
+  assert.equal(old.insightsUnavailable, 'unsupported');
+  assert.equal(old.totals.tokens, 19_893_991_786, 'the totals are still read and still correct');
+});
+
+await test('an unreadable version fails closed to below the floor', async () => {
+  const cases: Array<[string, FixtureAnswer]> = [
+    ['no /api/version route at all', 404],
+    ['a body with no runtime_version', { service: 'tokdash' }],
+    ['a version that is not a version', versionBody({ runtime_version: 'nightly' })],
+    ['something else holding the port', { service: 'not-tokdash', runtime_version: '9.9.9' }],
+  ];
+  for (const [label, answer] of cases) {
+    const report = await fetchTokdashReport(undefined, WINDOW, {
+      fetch: stubFetch({ version: answer }).fetch,
+    });
+    assert.equal(report.runtime.version, null, label);
+    assert.equal(report.runtime.belowMinimum, true, label);
+  }
+});
+
+await test('the version read never costs the report', async () => {
+  // A `/api/version` that hangs past the budget or answers garbage must not turn a readable window
+  // into a failure: the figures come from `/api/usage`, and the version only labels them.
+  const report = await fetchTokdashReport(undefined, WINDOW, {
+    fetch: stubFetch({ version: 500 }).fetch,
+  });
+  assert.equal(report.totals.tokens, 19_893_991_786);
+  assert.equal(report.runtime.belowMinimum, true);
+  assert.ok(report.hourly, 'the facets are untouched by a failed version read');
+});
+
+await test('a current Tokdash that refuses a period is not reported as an old one', async () => {
+  // The two states the client must tell apart. Same `recognized: false`, different cause, different
+  // next move for the reader — and only the version says which.
+  const refused = await fetchTokdashReport(undefined, WINDOW, {
+    fetch: stubFetch({
+      usage: usageBody({ range: { from: '2026-08-01', to: '2026-08-31', recognized: false } }),
+      insights: insightsBody({ range: { from: '2026-08-01', to: '2026-08-31', recognized: false } }),
+    }).fetch,
+  });
+  assert.equal(refused.range.recognized, false);
+  assert.equal(refused.runtime.belowMinimum, false, 'a current Tokdash keeps the period explanation');
+});
+
+await test('version comparison orders releases numerically, not lexically', () => {
+  assert.equal(isTokdashVersionBelowMinimum('2.10.0'), false, '2.10 is above 2.5, not below it');
+  assert.equal(isTokdashVersionBelowMinimum('2.4.9'), true);
+  assert.equal(isTokdashVersionBelowMinimum('2.5'), false, 'a missing patch reads as zero');
+  assert.equal(isTokdashVersionBelowMinimum('3.0.0'), false);
+  assert.equal(isTokdashVersionBelowMinimum('v2.5.0'), false, 'a leading v is decoration');
+  assert.equal(isTokdashVersionBelowMinimum('2.5.0-rc.1'), false, 'a prerelease of the floor is the floor');
+  assert.equal(isTokdashVersionBelowMinimum(null), true);
+  assert.equal(isTokdashVersionBelowMinimum('2.5.0.1'), false, 'a fourth component is tolerated');
+});
+
 await test('the night window is served, never assumed', async () => {
   const served = await fetchTokdashReport(undefined, WINDOW, { fetch: stubFetch().fetch });
   assert.deepEqual(served.hourly?.nightHours, [22, 23, 0, 1]);
@@ -306,12 +391,12 @@ await test('a cached window is not re-read from Tokdash', async () => {
 
   const first = await fetchTokdashReport(undefined, WINDOW, { fetch: upstream });
   cache.set(WINDOW, first);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 
   const hit = cache.get(WINDOW);
   assert.ok(hit);
   assert.equal(hit.report.totals.tokens, first.totals.tokens);
-  assert.equal(calls.length, 3, 'a cache hit costs no upstream reads');
+  assert.equal(calls.length, 4, 'a cache hit costs no upstream reads');
 });
 
 await test('concurrent readers of one window share a single upstream scan', async () => {
@@ -332,7 +417,7 @@ await test('concurrent readers of one window share a single upstream scan', asyn
   ]);
 
   assert.equal(loads, 1, 'one upstream scan serves every concurrent caller');
-  assert.equal(calls.length, 3, 'three GETs total, not nine');
+  assert.equal(calls.length, 4, 'four GETs total, not twelve');
   assert.equal(first.servedFromCache, false, 'the caller that started the scan says so');
   assert.equal(second.servedFromCache, true);
   assert.equal(third.servedFromCache, true);

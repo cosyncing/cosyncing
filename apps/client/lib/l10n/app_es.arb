@@ -1490,5 +1490,12 @@
   "sessionFilesLinksOffNoWorkspace": "Las rutas de archivo de esta transcripción se quedan como texto plano porque esta sesión no tiene directorio de trabajo.",
   "sessionFilePreviewLineWindow": "Mostrando las líneas {first}–{last} de esta vista previa.",
   "sessionFilePreviewAnchorBeyond": "La línea {line} queda fuera de las {count} líneas que cubre esta vista previa.",
-  "sessionFilePreviewAnchorLine": "Línea {line}"
+  "sessionFilePreviewAnchorLine": "Línea {line}",
+  "usageTokdashOutdated": "El servidor ejecuta tokdash {installed}, y este informe necesita {required} o posterior. Actualízalo en el servidor — pipx upgrade tokdash — y vuelve a abrir esta página.",
+  "usageTokdashVersionUnknown": "El tokdash del servidor no informa de su versión, así que es anterior a la {required} que necesita este informe. Actualízalo en el servidor — pipx upgrade tokdash — y vuelve a abrir esta página.",
+  "sessionsEmptyWindowTitle": "Sin sesiones recientes",
+  "sessionsEmptyWindowToday": "Hoy no hubo actividad. Puede que este servidor tenga sesiones más antiguas.",
+  "sessionsEmptyWindowLast7Days": "No hubo actividad en los últimos 7 días. Puede que este servidor tenga sesiones más antiguas.",
+  "sessionsEmptyWindowLast30Days": "No hubo actividad en los últimos 30 días. Puede que este servidor tenga sesiones más antiguas.",
+  "sessionsEmptyWindowAction": "Mostrar todas las sesiones"
 }

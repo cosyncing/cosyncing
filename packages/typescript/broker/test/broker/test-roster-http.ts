@@ -83,10 +83,51 @@ check('7d keeps recent idle', w7.includes('recent-idle'));
 check('7d drops old idle', !w7.includes('old-idle'));
 check('7d ALWAYS keeps old working (non-idle)', w7.includes('old-working'));
 check('7d ALWAYS keeps old needs-input (non-idle)', w7.includes('old-needs-input'));
-check('7d KEEPS un-datable idle (no timestamp → never silently hidden)', w7.includes('no-timestamps-idle'));
+// The measured macOS defect: a live connection's timestamp-free SessionInfo was the only surviving
+// record of a 24-day-old rollout under 7d, and this filter admitted it. A row the client cannot place
+// on a timeline belongs to no bounded window.
+check('7d DROPS un-datable idle (a row no client can place on a timeline)', !w7.includes('no-timestamps-idle'));
 check('7d keeps recent idle dated via createdAt fallback', w7.includes('recent-by-createdAt'));
 check('7d drops old idle dated via createdAt fallback', !w7.includes('old-by-createdAt'));
 check('all (undefined) returns every row unchanged', filterSessionsByWindow(rows, undefined, NOW).length === rows.length);
+check(
+  'an un-datable session is still reachable — the all window is where it lives',
+  filterSessionsByWindow(rows, undefined, NOW).some((s) => s.id === 'no-timestamps-idle'),
+);
+check(
+  'an un-datable NON-idle session is never hidden by any window',
+  filterSessionsByWindow(
+    [{ id: 'undated-working', status: 'working' as const }],
+    7 * DAY,
+    NOW,
+  ).length === 1,
+);
+check(
+  'every bounded window drops it, not only the narrow ones',
+  [DAY, 7 * DAY, 30 * DAY, 180 * DAY].every(
+    (span) => !filterSessionsByWindow(rows, span, NOW).some((s) => s.id === 'no-timestamps-idle'),
+  ),
+);
+// The whole shape of the macOS report: 39 sessions, newest 24 days old, plus one undatable live
+// overlay. Before the fix `7d` answered with exactly that one row.
+const macShape = [
+  ...Array.from({ length: 39 }, (_, index) => ({
+    id: `aged-${index}`,
+    status: 'idle' as const,
+    updatedAt: NOW - (24 + index) * DAY,
+  })),
+  { id: 'live-overlay-undated', status: 'idle' as const },
+];
+check(
+  'a roster whose newest session predates the window answers empty, not with a ghost row',
+  filterSessionsByWindow(macShape, 7 * DAY, NOW).length === 0,
+);
+check(
+  'the same roster is complete at 30 days and at all time',
+  // Ages 24..30 inclusive — seven of the thirty-nine — plus the undatable row only at all time.
+  filterSessionsByWindow(macShape, 30 * DAY, NOW).length === 7
+    && filterSessionsByWindow(macShape, undefined, NOW).length === 40,
+);
 check(
   '7d representation expires when its oldest included idle row crosses cutoff',
   sessionWindowRepresentationExpiry(
@@ -131,6 +172,42 @@ check(
 check(
   '7d delta body retains a recent session payload',
   windowedDeltas[1]?.session?.id === 'recent-idle',
+);
+// Revision continuity over the same reversal: a row that leaves a bounded view for being undatable
+// leaves it as a removal at its own revision, so the client advances its cursor rather than being
+// handed a gap it has to resynchronise to notice.
+const undatableDeltas = filterRosterDeltasByWindow([
+  {
+    revision: 7,
+    machine: 'm',
+    tool: 'codex',
+    sessionId: 'no-timestamps-idle',
+    changedFields: ['session'],
+    session: rows[4]!,
+  },
+], 7 * DAY, NOW);
+const undatableDelta = undatableDeltas[0];
+check(
+  'an un-datable idle row leaves a bounded view as a transcript-free removal',
+  undatableDelta !== undefined
+    && undatableDelta.revision === 7
+    && 'removed' in undatableDelta
+    && undatableDelta.removed === true
+    && undatableDelta.session === undefined
+    && undatableDelta.sessionId === 'no-timestamps-idle',
+);
+check(
+  'the all window still carries the same row as a full payload',
+  filterRosterDeltasByWindow([
+    {
+      revision: 7,
+      machine: 'm',
+      tool: 'codex',
+      sessionId: 'no-timestamps-idle',
+      changedFields: ['session'],
+      session: rows[4]!,
+    },
+  ], undefined, NOW)[0]?.session?.id === 'no-timestamps-idle',
 );
 
 // ---- jsonMaybe: gzip + ETag + 304 --------------------------------------------------------------
