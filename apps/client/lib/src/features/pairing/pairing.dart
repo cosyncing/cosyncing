@@ -1,4 +1,7 @@
+export 'controller/installer_pairing_handoff_controller.dart';
 export 'controller/pairing_controller.dart';
+export 'data/installer_pairing_handoff.dart';
+export 'data/installer_pairing_inbox.dart';
 export 'data/transport_pairing_accept_service.dart';
 export 'data/transport_pairing_store.dart';
 export 'model/pairing_payload.dart';

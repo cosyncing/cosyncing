@@ -18,6 +18,7 @@ import {
   candidateAssetBlockers,
   promotionAssetBlockers,
 } from '../../release/verify-promotion-assets.ts';
+import { CLIENT_HOSTS, canonicalProductVersion } from '../../release/release-files.ts';
 import {
   EXPECTED_STAGING_ASSETS,
   stagingAssetBlockers,
@@ -173,9 +174,36 @@ try {
   rmSync(stagingDirectory, { recursive: true, force: true });
 }
 
+/**
+ * The fixed asset spine plus the three client artifacts a release now publishes.
+ *
+ * The client names carry the release version and are resolved from the directory rather than listed, so a
+ * fixture that wants an EXACT set has to write a manifest a reader can take the version from. `fixture` in
+ * every other file is still the point: this suite proves the set check and the fail-closed pairing check,
+ * not the signatures.
+ */
+function writeExactAssetSet(directory: string, files: readonly string[]): void {
+  const version = canonicalProductVersion();
+  for (const file of files) writeFileSync(join(directory, file), 'fixture\n');
+  // Enough manifest for the version and key id to be readable, and no more: what these checks prove is
+  // that an exact-but-unsigned set still fails the signature gate, so the manifest must reach that gate
+  // rather than fall out earlier on a shape complaint.
+  writeFileSync(
+    join(directory, 'release-manifest.json'),
+    `${JSON.stringify({
+      version,
+      signature: { algorithm: 'ed25519', keyId: 'fixture', value: '' },
+    })}\n`,
+  );
+  for (const host of Object.keys(CLIENT_HOSTS)) {
+    const extension = CLIENT_HOSTS[host as keyof typeof CLIENT_HOSTS];
+    writeFileSync(join(directory, `cosyncing-client-${version}-${host}${extension}`), 'fixture\n');
+  }
+}
+
 const candidateDirectory = mkdtempSync(join(tmpdir(), 'cosyncing-real-evidence-candidate-'));
 try {
-  for (const file of EXPECTED_CANDIDATE_ASSETS) writeFileSync(join(candidateDirectory, file), 'fixture\n');
+  writeExactAssetSet(candidateDirectory, EXPECTED_CANDIDATE_ASSETS);
   check('an exact but unsigned fixture still fails the signed pairing gate',
     candidateAssetBlockers(candidateDirectory).some((item) =>
       item.includes('signed broker/web pairing is invalid')));
@@ -188,7 +216,7 @@ try {
 
 const promotionDirectory = mkdtempSync(join(tmpdir(), 'cosyncing-real-evidence-promotion-'));
 try {
-  for (const file of EXPECTED_PROMOTION_ASSETS) writeFileSync(join(promotionDirectory, file), 'fixture\n');
+  writeExactAssetSet(promotionDirectory, EXPECTED_PROMOTION_ASSETS);
   check('an exact promotion fixture still requires a valid signed pairing',
     promotionAssetBlockers(promotionDirectory).some((item) =>
       item.includes('signed broker/web pairing is invalid')));

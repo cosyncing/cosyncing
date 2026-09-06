@@ -1,22 +1,62 @@
 # Installing with cosyncing's own installer
 
 npm is the documented default and remains so; see [Install](../../README.md#install). This page
-documents the alternative: cosyncing publishes its own installer beside every signed release, one for
-Linux and macOS and one for Windows. Use it when you want the broker without Node.js and npm on the
-host, or when you want the release's signature checked before anything is placed.
+documents the alternative: cosyncing publishes its own installers beside every signed release. Use them
+when you want cosyncing without Node.js and npm on the host, or when you want the release's signature
+checked before anything is placed.
 
-Both installers place the same two artifacts — the JavaScript application bundle and the web client
-sidecar — into `$COSYNCING_HOME/bin`, bootstrap a pinned Bun if the host has none new enough, write an
-ownership receipt, and stop. Neither one starts a service, changes `PATH`, or edits a shell startup
-file. Installing the files and installing the service are separate steps on purpose: `setup` inspects
-the machine, shows exactly what it will change, and applies the whole plan or none of it.
+Each release publishes four installers, rendered from two templates in one step:
 
-## The URL is per-release
+| Installer | What it does |
+| --- | --- |
+| `install.sh`, `install.ps1` | everything: broker, desktop client, `setup`, and a pairing |
+| `install-server.sh`, `install-server.ps1` | the broker's files only, then stop |
 
-`<base>` below is a release's own download base, which today means a per-release URL. There is no
-`…/latest/install.sh` alias yet — publishing one is a decision that covers both installers and both
-channels, and this page will name it when it exists. Until then, take `<base>` from the release you
-mean to install.
+An `install-server.*` run places the JavaScript application bundle and the web client sidecar into
+`$COSYNCING_HOME/bin`, bootstraps a pinned Bun if the host has none new enough, writes an ownership
+receipt, and stops. It starts no service, changes no `PATH`, and edits no shell startup file. That is
+the right installer for a headless box, for a configuration-managed host, and for anywhere you want the
+files and the service to be two decisions.
+
+## The one-liner
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/cosyncing/cosyncing/releases/latest/download/install.sh | sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/cosyncing/cosyncing/releases/latest/download/install.ps1 | iex"
+```
+
+`releases/latest/download/<name>` always resolves to the current stable broker release. It is the same
+pointer every installed broker's update channel resolves through, so it is a release cosyncing keeps
+correct rather than a convenience alias. Swap `install.sh` for `install-server.sh` (or `install.ps1` for
+`install-server.ps1`) for the broker-only install. Where this page writes `<base>`, a specific release's
+own download base works too, and is what to use when you mean a particular version.
+
+## What the all-in-one does
+
+After the broker's files are in place — the same work `install-server.*` does, verified the same way —
+it continues:
+
+1. **Places the desktop client.** Per-user, never elevated: `$COSYNCING_HOME/client` plus a
+   `~/.local/share/applications` entry on Linux, `~/Applications/Cosyncing.app` on macOS, and
+   `%LOCALAPPDATA%\cosyncing\client` on Windows. The client is verified against the signed checksum list
+   and a digest baked into the installer, exactly as the broker's own artifacts are.
+2. **Runs `setup`.** With input read from the terminal rather than from the `curl | sh` pipe, so the
+   plan-and-confirm prompt still asks and you still answer it. It never passes `--yes` or
+   `--accept-managed-runtime-ownership` for you. With no terminal attached — CI, a container, a remote
+   command — it prints the `setup` command and stops.
+3. **Hands the client a pairing.** It reads the listener URL from `status --json`, asks for an offer with
+   `pair --json`, and writes it to `$COSYNCING_HOME/client-pairing.json`, owner-only. The client reads
+   that file once on its next launch, imports it, and deletes it. The offer is one-use and expires in
+   five minutes, so a file left behind by a client that never started is a dead offer.
+4. **Launches the client.**
+
+Two hosts get no client and are told so, and the install still succeeds as a server install: Linux
+arm64, for which no client is built, and a Linux machine with neither `DISPLAY` nor `WAYLAND_DISPLAY`
+set, where a GUI is a package nothing can start.
 
 ## Linux and macOS
 
@@ -81,6 +121,8 @@ verified.
 | `%USERPROFILE%\.cosyncing\bin\cosy.cmd` | a shim for typing `cosy` by hand |
 | `%USERPROFILE%\.cosyncing\bootstrap-receipt` | what was installed, and which runtime runs it |
 | `%USERPROFILE%\.bun\bin\bun.exe` | only if the installer had to install Bun |
+| `%LOCALAPPDATA%\cosyncing\client` | the desktop client, `install.ps1` only |
+| `%USERPROFILE%\.cosyncing\client-pairing.json` | the one-use pairing the client reads once, `install.ps1` only |
 
 `COSYNCING_HOME` relocates all of it and must be an absolute path. `BUN_INSTALL` relocates the Bun
 prefix. `COSYNCING_BUN_BIN` names a Bun to use instead of searching. `COSYNCING_SKIP_BUN_INSTALL=1`
@@ -92,7 +134,9 @@ product enforces and inspects, so `cosyncing doctor` reads them as safe rather t
 
 ### Then run setup
 
-`PATH` is not changed, so the installer prints the absolute command to run next:
+`install.ps1` runs `setup` for you when it has a console to ask on. `install-server.ps1` never does, and
+neither does an `install.ps1` whose input is redirected; `PATH` is not changed, so it prints the
+absolute command to run next:
 
 ```powershell
 & "$env:USERPROFILE\.bun\bin\bun.exe" "$env:USERPROFILE\.cosyncing\bin\cosyncing" setup

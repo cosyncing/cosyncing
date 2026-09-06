@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -eu
 
 umask 077
@@ -18,6 +18,14 @@ ARTIFACT_TABLE='@ARTIFACT_TABLE@'
 # Official Bun builds for MINIMUM_BUN, most likely first: "<host> <asset> <sha256>".
 BUN_TABLE='@BUN_TABLE@'
 BUN_RELEASE_BASE='@BUN_RELEASE_BASE@'
+# What this installer installs. `all` places the desktop GUI client too, runs setup, and hands the client
+# a pairing; `server` stops after the broker's own files, which is what this installer did before the
+# client joined the release. Both are rendered from THIS file, so the server installer is the all-in-one
+# with one branch not taken rather than a second script that can drift from it.
+INSTALL_MODE='@INSTALL_MODE@'
+# One row per desktop client this release publishes: "<host> <asset> <sha256> <size>". Rows for hosts this
+# script cannot resolve are inert, exactly like the Bun table's.
+CLIENT_TABLE='@CLIENT_TABLE@'
 
 fail() {
   printf 'cosyncing install: %s\n' "$1" >&2
@@ -68,8 +76,13 @@ case "$STATE_HOME" in
   /*) ;;
   *) fail 'COSYNCING_HOME must be absolute when set' ;;
 esac
+# Built with printf rather than $'\n', which is a bashism: this script is run as `sh`, and on Debian and
+# Ubuntu that is dash.
+LINE_FEED='
+'
+CARRIAGE_RETURN="$(printf '\r')"
 case "$STATE_HOME" in
-  *$'\n'*|*$'\r'*) fail 'state path contains a line break' ;;
+  *"$LINE_FEED"*|*"$CARRIAGE_RETURN"*) fail 'state path contains a line break' ;;
 esac
 
 INSTALL_DIR="$STATE_HOME/bin"
@@ -84,11 +97,21 @@ STAGED_APPLICATION=''
 STAGED_RECEIPT=''
 STAGED_WEB=''
 RETIRED_WEB=''
+# Assigned by the all-in-one client section below, declared here because `cleanup` reads them and `set -u`
+# is on from the first line.
+CLIENT_ROOT=''
+STAGED_CLIENT=''
+RETIRED_CLIENT=''
+STAGED_DESKTOP=''
+STAGED_PAIRING=''
 cleanup() {
   rm -rf "$WORK"
   [ -z "$STAGED_APPLICATION" ] || rm -f "$STAGED_APPLICATION"
   [ -z "$STAGED_RECEIPT" ] || rm -f "$STAGED_RECEIPT"
   [ -z "$STAGED_WEB" ] || rm -rf "$STAGED_WEB"
+  [ -z "$STAGED_CLIENT" ] || rm -rf "$STAGED_CLIENT"
+  [ -z "$STAGED_DESKTOP" ] || rm -f "$STAGED_DESKTOP"
+  [ -z "$STAGED_PAIRING" ] || rm -f "$STAGED_PAIRING"
   # A retired web root is the operator's previous client, held only for the instant between two renames.
   # On any failure it is put BACK, never discarded — losing it would leave a host with no web client at all.
   if [ -n "$RETIRED_WEB" ] && [ -d "$RETIRED_WEB" ]; then
@@ -96,6 +119,15 @@ cleanup() {
       rm -rf "$RETIRED_WEB"
     else
       mv "$RETIRED_WEB" "$WEB_ROOT" 2>/dev/null || true
+    fi
+  fi
+  # The same rule for the desktop client the all-in-one places: a retired install goes back unless its
+  # replacement is already in position.
+  if [ -n "$RETIRED_CLIENT" ] && [ -n "$CLIENT_ROOT" ] && [ -d "$RETIRED_CLIENT" ]; then
+    if [ -e "$CLIENT_ROOT" ] || [ -L "$CLIENT_ROOT" ]; then
+      rm -rf "$RETIRED_CLIENT"
+    else
+      mv "$RETIRED_CLIENT" "$CLIENT_ROOT" 2>/dev/null || true
     fi
   fi
 }
@@ -155,21 +187,29 @@ manifest_digest_for() {
   ' "$WORK/release-manifest.json"
 }
 
-# Cross-check ONE artifact against all three statements of what it should be: the signed checksum list, the
-# signed manifest, and the digest baked into this script. Each of the three binds the NAME to the digest, so
-# agreement is about this artifact rather than about a digest appearing somewhere. Run in the current shell,
-# never a substitution, so a `fail` here stops the install instead of returning an empty string to a caller.
-assert_signed_artifact() {
+# The two statements about ONE artifact that hold for everything this installer places: the signed checksum
+# list, and the digest baked into this script. Both bind the NAME to the digest, so agreement is about this
+# artifact rather than about a digest appearing somewhere. Run in the current shell, never a substitution,
+# so a `fail` here stops the install instead of returning an empty string to a caller.
+assert_checksum_pin() {
   signed="$(awk -v asset="$1" '$2 == asset { if (seen++) exit 2; print $1 }' "$WORK/SHA256SUMS")" \
     || fail 'checksum list contains duplicate artifact rows'
   [ "${#signed}" -eq 64 ] || fail "artifact checksum is missing or malformed: $1"
+  [ "$signed" = "$2" ] \
+    || fail "signed checksum list disagrees with the digest embedded in this installer for $1"
+}
+
+# The broker's own artifacts add a THIRD statement: the signed manifest, which names them because a running
+# broker upgrades ITSELF to them. A desktop client is not a broker upgrade and the manifest deliberately
+# does not name one, so the client path calls `assert_checksum_pin` directly and this wrapper is what the
+# broker artifacts use.
+assert_signed_artifact() {
+  assert_checksum_pin "$1" "$2"
   stated="$(manifest_digest_for "$1")" \
     || fail "signed manifest names $1 more than once"
   [ -n "$stated" ] || fail "signed manifest does not name $1"
-  [ "$stated" = "$signed" ] \
+  [ "$stated" = "$2" ] \
     || fail "signed manifest and checksum list disagree about $1"
-  [ "$signed" = "$2" ] \
-    || fail "signed checksum list disagrees with the digest embedded in this installer for $1"
 }
 
 # Signature verification is REQUIRED wherever the local openssl can do it, and the release is signed twice
@@ -472,4 +512,253 @@ case "$SIGNATURE_STATE" in
     printf 'This installer was itself delivered over TLS and carries the expected digests; the broker\n'
     printf 'still verifies every future upgrade with its own built-in Ed25519 check.\n' ;;
 esac
-printf 'PATH was not changed. Run setup with the absolute command:\n  %s setup\n' "$APPLICATION"
+
+if [ "$INSTALL_MODE" != all ]; then
+  printf 'PATH was not changed. Run setup with the absolute command:\n  %s setup\n' "$APPLICATION"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------------
+# The all-in-one tail: the desktop client, setup, and the pairing handoff.
+#
+# Everything above is what `install-server.sh` also does, and it has already finished. Nothing below undoes
+# it. A host this release publishes no client for, and a headless one, are reported and skipped — those are
+# supported outcomes, not failures. Everything else here is fatal, including any disagreement about the
+# client's bytes: this run exits non-zero with a correctly installed broker and a printed next command,
+# which is the honest report of what happened.
+# ---------------------------------------------------------------------------------------------------
+
+# The client's macOS build is named for the platform Apple ships, not for the kernel `uname` reports, and
+# no Linux arm64 client is built at all.
+case "$TARGET" in
+  linux-x64) CLIENT_HOST='linux-x64' ;;
+  darwin-arm64) CLIENT_HOST='macos-arm64' ;;
+  *) CLIENT_HOST='' ;;
+esac
+
+CLIENT_ASSET=''
+CLIENT_SHA256=''
+CLIENT_SIZE=''
+lookup_client() {
+  row="$(printf '%s\n' "$CLIENT_TABLE" | awk -v h="$1" '$1 == h { if (seen++) exit 2; print }')" \
+    || fail 'embedded client table contains duplicate rows'
+  [ -n "$row" ] || return 1
+  CLIENT_ASSET="$(printf '%s\n' "$row" | awk '{print $2}')"
+  CLIENT_SHA256="$(printf '%s\n' "$row" | awk '{print $3}')"
+  CLIENT_SIZE="$(printf '%s\n' "$row" | awk '{print $4}')"
+  [ "${#CLIENT_SHA256}" -eq 64 ] || fail "embedded checksum for $CLIENT_ASSET is malformed"
+  case "$CLIENT_SHA256" in *[!0-9a-f]*) fail "embedded checksum for $CLIENT_ASSET is malformed" ;; esac
+  case "$CLIENT_SIZE" in ''|*[!0-9]*) fail "embedded size for $CLIENT_ASSET is malformed" ;; esac
+}
+
+CLIENT_SKIP=''
+if [ -z "$CLIENT_HOST" ] || ! lookup_client "$CLIENT_HOST"; then
+  CLIENT_SKIP="this release publishes no desktop client for $TARGET"
+elif [ "$OS" = Linux ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  # A desktop client on a machine with no display server is a package nothing can start. The broker is the
+  # part that belongs on a headless host, and it is already installed; say so rather than placing a GUI.
+  CLIENT_SKIP='this host has no display server (DISPLAY and WAYLAND_DISPLAY are both unset)'
+fi
+
+if [ -n "$CLIENT_SKIP" ]; then
+  printf 'Desktop client: skipped — %s.\n' "$CLIENT_SKIP"
+else
+  # Verified by exactly the rule the broker's own artifacts are verified by, minus the manifest — which
+  # names broker upgrades and deliberately does not name a client. See `assert_signed_artifact`.
+  if [ -n "$SIGNATURE_ALGORITHM" ]; then
+    assert_checksum_pin "$CLIENT_ASSET" "$CLIENT_SHA256"
+  fi
+  fetch_verified "$CLIENT_ASSET" "$CLIENT_SHA256" "$CLIENT_SIZE" "$WORK/$CLIENT_ASSET"
+
+  if [ "$OS" = Darwin ]; then
+    command -v ditto >/dev/null 2>&1 || fail 'required command is missing: ditto'
+    # ~/Applications, never /Applications: the whole install is per-user and unelevated, and Finder treats
+    # a per-user Applications folder as a first-class location. Created 755 because it is a place the
+    # user's own Finder and Launchpad read, not owner-only state.
+    CLIENT_PARENT="$HOME/Applications"
+    ( umask 022; mkdir -p "$CLIENT_PARENT" ) || fail "could not create $CLIENT_PARENT"
+    CLIENT_ROOT="$CLIENT_PARENT/Cosyncing.app"
+    # Staged beside the destination so the final move is a rename on one volume.
+    STAGED_CLIENT="$(mktemp -d "$CLIENT_PARENT/.cosyncing-client.staging.XXXXXXXX")"
+    ditto -x -k "$WORK/$CLIENT_ASSET" "$STAGED_CLIENT" \
+      || fail 'desktop client archive could not be extracted'
+    [ -d "$STAGED_CLIENT/Cosyncing.app" ] \
+      || fail 'desktop client archive does not contain Cosyncing.app'
+    EXTRACTED_CLIENT="$STAGED_CLIENT/Cosyncing.app"
+    CLIENT_LAUNCH="$CLIENT_ROOT"
+  else
+    CLIENT_PARENT="$STATE_HOME"
+    CLIENT_ROOT="$STATE_HOME/client"
+    STAGED_CLIENT="$(mktemp -d "$STATE_HOME/.cosyncing-client.staging.XXXXXXXX")"
+    tar -xzf "$WORK/$CLIENT_ASSET" -C "$STAGED_CLIENT" \
+      || fail 'desktop client archive could not be extracted'
+    # The archive holds one top-level directory whose name carries the release version, so the tree is
+    # found rather than named: a version-shaped path written down here would be a second place to keep in
+    # step with the client release.
+    set -- "$STAGED_CLIENT"/*
+    [ "$#" -eq 1 ] && [ -d "$1" ] \
+      || fail 'desktop client archive does not contain a single application directory'
+    EXTRACTED_CLIENT="$1"
+    [ -x "$EXTRACTED_CLIENT/cosyncing" ] \
+      || fail 'desktop client archive contains no cosyncing executable'
+    CLIENT_LAUNCH="$CLIENT_ROOT/cosyncing"
+  fi
+
+  if [ -e "$CLIENT_ROOT" ] || [ -L "$CLIENT_ROOT" ]; then
+    [ -d "$CLIENT_ROOT" ] && [ ! -L "$CLIENT_ROOT" ] \
+      || fail "unsafe desktop client path: $CLIENT_ROOT"
+    [ "$(stat_owner "$CLIENT_ROOT")" = "$(id -u)" ] \
+      || fail "desktop client directory is not owned by the current user: $CLIENT_ROOT"
+    RETIRED_CLIENT="$(mktemp -d "$CLIENT_PARENT/.cosyncing-client.retired.XXXXXXXX")"
+    rmdir "$RETIRED_CLIENT"
+    mv "$CLIENT_ROOT" "$RETIRED_CLIENT" || fail 'could not retire the previous desktop client'
+  fi
+  mv "$EXTRACTED_CLIENT" "$CLIENT_ROOT" || fail 'could not install the desktop client'
+  rmdir "$STAGED_CLIENT" 2>/dev/null || rm -rf "$STAGED_CLIENT"
+  STAGED_CLIENT=''
+  if [ -n "$RETIRED_CLIENT" ]; then
+    rm -rf "$RETIRED_CLIENT"
+    RETIRED_CLIENT=''
+  fi
+
+  if [ "$OS" = Linux ]; then
+    # A launcher entry, so the client is startable from the desktop rather than only by absolute path.
+    # 755/644 rather than the script's owner-only umask: the desktop environment reads these.
+    DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    ( umask 022; mkdir -p "$DESKTOP_DIR" ) || fail "could not create $DESKTOP_DIR"
+    DESKTOP_ENTRY="$DESKTOP_DIR/cosyncing.desktop"
+    STAGED_DESKTOP="$(mktemp "$DESKTOP_DIR/.cosyncing.desktop.XXXXXXXX")"
+    {
+      printf '[Desktop Entry]\n'
+      printf 'Type=Application\n'
+      printf 'Name=cosyncing\n'
+      printf 'Comment=Drive your coding agents from anywhere\n'
+      # The desktop menu starts the client with its own environment, not this script's, so a relocated
+      # home has to travel in the launcher or the client reads ~/.cosyncing and finds no handoff. The
+      # default home needs no such argument, and leaving it off keeps the common entry as it was.
+      if [ "$STATE_HOME" = "$HOME/.cosyncing" ]; then
+        printf 'Exec=%s\n' "$CLIENT_LAUNCH"
+      else
+        printf 'Exec=env COSYNCING_HOME=%s %s\n' "$STATE_HOME" "$CLIENT_LAUNCH"
+      fi
+      printf 'Terminal=false\n'
+      printf 'Categories=Development;Network;\n'
+    } > "$STAGED_DESKTOP"
+    chmod 644 "$STAGED_DESKTOP"
+    mv "$STAGED_DESKTOP" "$DESKTOP_ENTRY"
+    STAGED_DESKTOP=''
+    printf 'Desktop client: %s (launcher entry: %s)\n' "$CLIENT_ROOT" "$DESKTOP_ENTRY"
+  else
+    printf 'Desktop client: %s\n' "$CLIENT_ROOT"
+  fi
+fi
+
+# `setup` shows the whole plan and asks before it changes anything, and that consent is the point of the
+# command. Under `curl … | sh` this script's stdin IS the pipe, so setup would read the rest of the script
+# as answers — or see EOF and decline. Reading from the terminal restores the question. A run with no
+# terminal at all (CI, a container, a remote command) prints the command and stops rather than taking the
+# operator's consent as given: --yes and --accept-managed-runtime-ownership are never passed here.
+#
+# The open is probed inside a SUBSHELL. `:` is a POSIX special built-in, and a redirection error on a
+# special built-in makes the shell itself exit: dash does, with status 2 and no message, so `… || ! :
+# < /dev/tty` killed this script instead of taking the branch. In a subshell that exit is contained and
+# becomes an ordinary non-zero status. `2>/dev/null` wraps the subshell so the open failure is quiet on
+# the one path built to stop quietly.
+if [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; then
+  printf '\nNo terminal is attached, so setup was not run. Finish with:\n  %s setup\n' "$APPLICATION"
+  exit 0
+fi
+
+printf '\nRunning setup. It shows its plan and asks before changing anything.\n'
+if ! "$BUN_BIN" "$APPLICATION" setup < /dev/tty; then
+  printf 'cosyncing install: setup did not complete; the broker files are installed. Rerun:\n  %s setup\n' \
+    "$APPLICATION" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------------------------------
+# The pairing handoff.
+#
+# The client reads $COSYNCING_HOME/client-pairing.json once at startup, imports it, and deletes it — so
+# the first launch after an all-in-one install is already paired with the broker beside it instead of
+# asking a user to retype a QR payload from one window into another. The offer is one-use and expires in
+# five minutes, exactly as `pair` prints it, so a file left behind by a client that never started is a
+# dead offer rather than a standing credential.
+#
+# Parsed with the Bun this install just resolved rather than with awk: it is already a hard dependency of
+# the thing being installed, and a JSON reader assembled from line matching would be the least trustworthy
+# part of an installer whose whole posture is exact agreement.
+# ---------------------------------------------------------------------------------------------------
+
+PAIRING_FILE="$STATE_HOME/client-pairing.json"
+handoff_failed() {
+  printf 'Pairing handoff: skipped — %s. Pair by hand with:\n  %s pair\n' "$1" "$APPLICATION"
+}
+
+if [ -n "$CLIENT_SKIP" ]; then
+  # No client on this host, so no offer is created. Writing one would burn a one-use pairing that expires
+  # in five minutes and that nothing here can redeem, and leave it on disk looking like a credential.
+  printf 'Pairing handoff: not needed, no desktop client was installed. Pair another device with:\n  %s pair\n' \
+    "$APPLICATION"
+elif "$BUN_BIN" "$APPLICATION" status --json > "$WORK/status.json" 2>/dev/null \
+  && LISTENER_URL="$("$BUN_BIN" -e '
+    const status = JSON.parse(await Bun.file(process.argv[1]).text());
+    const url = status?.listener?.url;
+    if (typeof url !== "string" || !/^https?:\/\//.test(url)) process.exit(1);
+    console.log(url);
+  ' "$WORK/status.json" 2>/dev/null)" \
+  && [ -n "$LISTENER_URL" ]
+then
+  if "$BUN_BIN" "$APPLICATION" pair --json --broker-url "$LISTENER_URL" > "$WORK/pairing.json" 2>/dev/null
+  then
+    STAGED_PAIRING="$(mktemp "$STATE_HOME/.client-pairing.XXXXXXXX")"
+    if "$BUN_BIN" -e '
+      const offer = JSON.parse(await Bun.file(process.argv[1]).text());
+      const { qr, brokerUrl, expiresAt } = offer ?? {};
+      if (typeof qr !== "string" || typeof brokerUrl !== "string" || typeof expiresAt !== "string") {
+        process.exit(1);
+      }
+      await Bun.write(process.argv[2], `${JSON.stringify({ schemaVersion: 1, qr, brokerUrl, expiresAt }, null, 2)}\n`);
+    ' "$WORK/pairing.json" "$STAGED_PAIRING" 2>/dev/null
+    then
+      chmod 600 "$STAGED_PAIRING"
+      mv "$STAGED_PAIRING" "$PAIRING_FILE"
+      STAGED_PAIRING=''
+      printf 'Pairing handoff: %s (one-use, expires in five minutes)\n' "$PAIRING_FILE"
+    else
+      rm -f "$STAGED_PAIRING"
+      STAGED_PAIRING=''
+      handoff_failed 'the pairing offer could not be read'
+    fi
+  else
+    handoff_failed 'the broker did not issue a pairing offer'
+  fi
+else
+  handoff_failed 'the broker did not report a listener URL'
+fi
+
+if [ -z "$CLIENT_SKIP" ]; then
+  if [ "$OS" = Darwin ]; then
+    # LaunchServices starts the app with its own environment and drops the caller's, so a relocated home
+    # must be handed over explicitly or the client reads ~/.cosyncing and silently finds no handoff.
+    # `--env` is not on every macOS this installer supports, hence the plain retry.
+    if open --env "COSYNCING_HOME=$STATE_HOME" -a "$CLIENT_LAUNCH" >/dev/null 2>&1; then
+      printf 'Launched %s\n' "$CLIENT_LAUNCH"
+    elif open -a "$CLIENT_LAUNCH" >/dev/null 2>&1; then
+      printf 'Launched %s (without COSYNCING_HOME: this open(1) has no --env)\n' "$CLIENT_LAUNCH"
+    else
+      printf 'Could not launch %s; open it from Finder.\n' "$CLIENT_LAUNCH"
+    fi
+  else
+    # Detached from every pipe: this script is usually the tail of a `curl … | sh` pipeline, and a GUI
+    # holding one open would leave the operator's terminal blocked behind a window they just opened.
+    #
+    # This reports what it did, not that it worked. There is no success to test for: the placement step
+    # above already failed closed unless the executable is there, a GUI that dies after exec does so in
+    # its own process well after this script has gone, and the previous `( … & ) && printf 'Launched'`
+    # claimed success unconditionally, because a subshell that backgrounds a job exits 0 whatever the job
+    # does. macOS keeps a real three-way answer below because `open` asks LaunchServices and gets one.
+    "$CLIENT_LAUNCH" >/dev/null 2>&1 </dev/null &
+    printf 'Started %s\nIf no window appears, start it from your applications menu.\n' "$CLIENT_LAUNCH"
+  fi
+fi

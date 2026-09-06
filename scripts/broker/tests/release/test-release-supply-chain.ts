@@ -46,11 +46,16 @@ import {
 import {
   assembleRelease,
   canonicalProductVersion,
+  parseRenderedClientTable,
+  resolveClientArtifacts,
   releaseTargetArch,
   releaseTargetPlatform,
   sha256,
+  BOOTSTRAP_TEMPLATES,
+  CLIENT_HOSTS,
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
+  type ClientHost,
   type PackageEvidence,
   type ReleaseTarget,
   type JavaScriptPackageEvidence,
@@ -94,6 +99,8 @@ async function run(command: string[], options: {
   stage?: string;
   timeoutMs?: number;
   timeoutAttempts?: number;
+  /** Grace for a child the command has already asked to exit; see runSupervised. */
+  strayGraceMs?: number;
   beforeTimeoutRetry?: () => void;
 } = {}): Promise<{
   exitCode: number;
@@ -112,6 +119,7 @@ async function run(command: string[], options: {
       env: options.env ?? hermeticEnvironment(),
       timeoutMs,
       maxBufferBytes: 8 << 20,
+      strayGraceMs: options.strayGraceMs,
       isolateProcessGroup: !insideSupervisedProcessGroup(),
     });
     console.log(
@@ -185,6 +193,27 @@ ${JSON.stringify({
 JSON
   exit 0
 fi
+# What the all-in-one tail asks of the broker after it places the files. \`setup\` is a plan-and-confirm
+# conversation in the real product; here it only has to succeed, because what is under test is that the
+# installer runs it with a terminal attached and stops when it cannot.
+if [ "\${1:-}" = setup ]; then
+  echo 'fixture setup completed'
+  exit 0
+fi
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  cat <<'JSON'
+{
+  "schemaVersion": 2,
+  "listener": { "host": "127.0.0.1", "port": 7734, "url": "http://127.0.0.1:7734", "ready": true }
+}
+JSON
+  exit 0
+fi
+if [ "\${1:-}" = pair ] && [ "\${2:-}" = --json ] && [ "\${3:-}" = --broker-url ]; then
+  printf '{\\n  "schemaVersion": 1,\\n  "pairingId": "fixture-pairing",\\n  "qr": "%s",\\n  "expiresAt": "%s",\\n  "brokerUrl": "%s",\\n  "advertisedUrl": "%s",\\n  "tokenScope": "observe-drive-files-v1"\\n}\\n' \\
+    'https://pair.example/v3#fixture' '2026-07-17T00:05:00.000Z' "\${4}" "\${4}"
+  exit 0
+fi
 exit 2
 `;
 }
@@ -233,6 +262,12 @@ if [ "\${1:-}" = --revision ]; then
   echo '${version}+fixturebuild'
   exit 0
 fi
+# The all-in-one tail reads the broker's own JSON with \`bun -e\`, and that is real Bun code rather than a
+# fixture affordance — a shell stand-in for it would be testing a JSON reader this installer does not have.
+# So \`-e\` goes to the Bun running this suite; everything else stays the shell fixture.
+if [ "\${1:-}" = -e ]; then
+  exec '${process.execPath}' "$@"
+fi
 exec bash "$@"
 `, { mode: 0o755 });
 }
@@ -270,12 +305,58 @@ exec bash "$@"
   return { path, sha256: sha256(readFileSync(path)) };
 }
 
-/** Repoint a rendered installer's pinned Bun table at fixture archives, keeping every other pin real. */
-function repinBunTable(installer: string, rows: readonly string[]): void {
-  const source = readFileSync(installer, 'utf8');
-  const replaced = source.replace(/^BUN_TABLE='[^']*'$/m, `BUN_TABLE='${rows.join('\n')}'`);
-  if (replaced === source) throw new Error('installer does not carry a pinned Bun table');
-  writeFileSync(installer, replaced, { mode: 0o755 });
+/** Repoint every rendered shell installer's pinned Bun table, keeping every other pin real. */
+function repinBunTable(releaseDirectory: string, rows: readonly string[]): void {
+  for (const name of Object.keys(BOOTSTRAP_TEMPLATES).filter((item) => item.endsWith('.sh'))) {
+    const installer = join(releaseDirectory, name);
+    const source = readFileSync(installer, 'utf8');
+    const replaced = source.replace(/^BUN_TABLE='[^']*'$/m, `BUN_TABLE='${rows.join('\n')}'`);
+    if (replaced === source) throw new Error(`${name} does not carry a pinned Bun table`);
+    writeFileSync(installer, replaced, { mode: 0o755 });
+  }
+}
+
+/**
+ * The three desktop clients a release publishes, in the layouts the real ones have.
+ *
+ * Real archives rather than opaque blobs, for the reason the web sidecar became one: the all-in-one
+ * installer UNPACKS these and refuses a tree without the expected executable, so an opaque fixture would
+ * no longer exercise the code under test. The names carry the same `-unsigned` suffixes the client release
+ * publishes, which is what proves discovery matches on the prefix and extension rather than on an exact
+ * name nobody produces.
+ */
+function writeClientArtifacts(directory: string, version: string): void {
+  mkdirSync(directory, { recursive: true });
+  const staging = join(directory, 'staging');
+  const linuxTree = `cosyncing-client-${version}-linux-x64`;
+  mkdirSync(join(staging, linuxTree), { recursive: true });
+  writeFileSync(join(staging, linuxTree, 'cosyncing'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(staging, linuxTree, 'LICENSE.txt'), 'fixture licence\n');
+  const packed = Bun.spawnSync([
+    'tar', '--format=ustar', '--sort=name', '--mtime=@1750000000',
+    '--owner=0', '--group=0', '--numeric-owner',
+    '-czf', join(directory, `${linuxTree}.tar.gz`), '-C', staging, linuxTree,
+  ], { stdout: 'ignore', stderr: 'pipe' });
+  if (!packed.success) throw new Error(`linux client fixture: ${packed.stderr.toString()}`);
+
+  const macTree = 'Cosyncing.app';
+  mkdirSync(join(staging, macTree, 'Contents', 'MacOS'), { recursive: true });
+  writeFileSync(join(staging, macTree, 'Contents', 'MacOS', 'Cosyncing'), 'fixture\n', { mode: 0o755 });
+  const windowsTree = `cosyncing-client-${version}-windows-x64`;
+  mkdirSync(join(staging, windowsTree), { recursive: true });
+  writeFileSync(join(staging, windowsTree, 'cosyncing.exe'), 'fixture\n', { mode: 0o755 });
+  for (const [tree, asset] of [
+    [macTree, `cosyncing-client-${version}-macos-arm64-unsigned.zip`],
+    [windowsTree, `cosyncing-client-${version}-windows-x64-unsigned.zip`],
+  ] as const) {
+    const zipped = Bun.spawnSync(['zip', '-q', '-r', join(directory, asset), tree], {
+      cwd: staging,
+      stdout: 'ignore',
+      stderr: 'pipe',
+    });
+    if (!zipped.success) throw new Error(`${asset} fixture: ${zipped.stderr.toString()}`);
+  }
+  rmSync(staging, { recursive: true, force: true });
 }
 
 /** A PATH that reaches the host's real tools but no `bun`, for the case where the host has none. */
@@ -448,6 +529,9 @@ try {
     join(evidenceDirectory, `${WEB_SIDECAR_NAME}.evidence.json`),
     `${JSON.stringify(webEvidence, null, 2)}\n`,
   );
+  const clientDirectory = join(root, 'clients');
+  writeClientArtifacts(clientDirectory, version);
+
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
@@ -475,6 +559,7 @@ try {
     assembleRelease({
       artifactDirectory,
       evidenceDirectory,
+      clientDirectory,
       outputDirectory: join(root, 'rejected-native-contract'),
       baseUrl: `https://releases.example/cosyncing/v${version}`,
       version,
@@ -500,6 +585,7 @@ try {
   const assembled = assembleRelease({
     artifactDirectory,
     evidenceDirectory,
+    clientDirectory,
     outputDirectory: releaseDirectory,
     baseUrl: `https://releases.example/cosyncing/v${version}`,
     version,
@@ -518,6 +604,7 @@ try {
     assembleRelease({
       artifactDirectory,
       evidenceDirectory,
+      clientDirectory,
       outputDirectory: join(root, 'swapped-web-release'),
       baseUrl: `https://releases.example/cosyncing/v${version}`,
       version,
@@ -770,8 +857,11 @@ try {
   const providerReads = [
     ...new Set([...powerShellInstaller.matchAll(/\$env:([A-Za-z_]+)/g)].map((m) => m[1])),
   ].sort();
+  // `LOCALAPPDATA` joined when the all-in-one gained a desktop client: it is where Windows puts a
+  // per-user unpackaged application, and it is Windows' own variable rather than a cosyncing knob.
   check('install.ps1 reads exactly the documented environment, and no refusal override',
-    environmentReads.join(',') === 'BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,USERPROFILE'
+    environmentReads.join(',')
+        === 'BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,LOCALAPPDATA,USERPROFILE'
       && providerReads.join(',') === 'SystemRoot'
       && powerShellInstaller.includes('refusing an elevated install'),
     `${environmentReads.join(',')} | $env:${providerReads.join(',$env:')}`);
@@ -780,6 +870,95 @@ try {
   check('the shell installer points a Windows shell at install.ps1 rather than at WSL',
     shellInstaller.includes('on Windows x64, run install.ps1 from PowerShell instead')
       && !/install into a WSL distribution/.test(shellInstaller));
+
+  // ---- The four installers, and the clients they carry ----------------------------------------------
+  //
+  // Four published names, two templates, one substitution table. The all-in-one and the server installer
+  // for a platform are the SAME script with one token rendered differently, which is what makes the pair
+  // impossible to drift apart — so that is what is asserted, rather than the absence of a string that a
+  // shared template necessarily contains in both.
+  const installers = Object.fromEntries(
+    Object.keys(BOOTSTRAP_TEMPLATES).map((name) =>
+      [name, readFileSync(join(releaseDirectory, name), 'utf8')] as const),
+  );
+  const signedChecksums = readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8');
+  check('all four installers are published, checksummed, and fully rendered',
+    Object.keys(BOOTSTRAP_TEMPLATES).sort().join(',')
+        === 'install-server.ps1,install-server.sh,install.ps1,install.sh'
+      && Object.keys(installers).every((name) =>
+        assembled.publishedFiles.includes(name)
+          && signedChecksums.includes(`  ${name}\n`)
+          && !/@[A-Z0-9_]+@/.test(installers[name]!)),
+    Object.keys(installers).sort().join(','));
+  check('each installer carries the mode its published name promises',
+    singleQuoted(installers['install.sh']!, 'INSTALL_MODE=') === 'all'
+      && singleQuoted(installers['install-server.sh']!, 'INSTALL_MODE=') === 'server'
+      && singleQuoted(installers['install.ps1']!, '\\$INSTALL_MODE = ') === 'all'
+      && singleQuoted(installers['install-server.ps1']!, '\\$INSTALL_MODE = ') === 'server');
+  // A server installer is the all-in-one with one token changed. Anything else in it is a fork.
+  check('the server installer differs from the all-in-one by exactly its mode',
+    installers['install-server.sh']!.replace(/^INSTALL_MODE='server'$/m, "INSTALL_MODE='all'")
+        === installers['install.sh']
+      && installers['install-server.ps1']!
+        .replace(/^\$INSTALL_MODE = 'server'$/m, "$INSTALL_MODE = 'all'")
+        === installers['install.ps1']);
+
+  const expectedClients = resolveClientArtifacts(clientDirectory, version);
+  check('the release publishes one desktop client per host, discovered by prefix and extension',
+    expectedClients.map((client) => `${client.host}:${client.name}`).join(',')
+        === `linux-x64:cosyncing-client-${version}-linux-x64.tar.gz,`
+          + `macos-arm64:cosyncing-client-${version}-macos-arm64-unsigned.zip,`
+          + `windows-x64:cosyncing-client-${version}-windows-x64-unsigned.zip`
+      && Object.keys(CLIENT_HOSTS).join(',') === 'linux-x64,macos-arm64,windows-x64',
+    expectedClients.map((client) => client.name).join(', '));
+  const clientRowText = (rows: ReturnType<typeof parseRenderedClientTable>): string =>
+    rows.map((row) => `${row.host} ${row.name} ${row.sha256} ${row.size}`).sort().join('\n');
+  const expectedClientRows = clientRowText(expectedClients);
+  check('every installer carries the same client table, with the digests the clients actually have',
+    Object.values(installers)
+      .every((script) => clientRowText(parseRenderedClientTable(script)) === expectedClientRows)
+      && expectedClients.every((client) =>
+        sha256(readFileSync(join(releaseDirectory, client.name))) === client.sha256
+          && statSync(join(releaseDirectory, client.name)).size === client.size),
+    expectedClientRows.replaceAll('\n', ' | '));
+  check('the signed checksum list covers every client artifact',
+    expectedClients.every((client) =>
+      signedChecksums.includes(`${client.sha256}  ${client.name}\n`))
+      // Not in the manifest, and deliberately: the manifest describes what a broker can upgrade ITSELF
+      // to, and a GUI client is not a broker upgrade.
+      && !readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8')
+        .includes('cosyncing-client-'));
+  // A release assembled with a client missing for one host must fail rather than publish an all-in-one
+  // installer that silently degrades to a server install wherever the gap is.
+  const incompleteClients = join(root, 'clients-incomplete');
+  mkdirSync(incompleteClients, { recursive: true });
+  cpSync(
+    join(clientDirectory, `cosyncing-client-${version}-linux-x64.tar.gz`),
+    join(incompleteClients, `cosyncing-client-${version}-linux-x64.tar.gz`),
+  );
+  let incompleteRejected = '';
+  try {
+    assembleRelease({
+      artifactDirectory,
+      evidenceDirectory,
+      clientDirectory: incompleteClients,
+      outputDirectory: join(root, 'incomplete-client-release'),
+      baseUrl: `https://releases.example/cosyncing/v${version}`,
+      version,
+      sourceCommit: commit,
+      publishedAt: buildDate,
+      keyId: 'test-2026',
+      privateKeyPem: privatePem,
+      publicKeyPem: publicPem,
+      p256PrivateKeyPem: p256PrivatePem,
+      p256PublicKeyPem: p256PublicPem,
+    });
+  } catch (error) {
+    incompleteRejected = error instanceof Error ? error.message : String(error);
+  }
+  check('assembly refuses a client set missing a desktop host',
+    /expected exactly one macos-arm64 client artifact/.test(incompleteRejected),
+    incompleteRejected.slice(0, 160));
   const thirdPartyNotices = readFileSync(
     join(releaseDirectory, 'THIRD_PARTY_NOTICES.txt'),
     'utf8',
@@ -816,7 +995,7 @@ try {
   const home = join(root, 'install-home');
   mkdirSync(home);
   writeFileSync(join(home, '.bashrc'), '# preserve\n');
-  const install = await run(['bash', join(releaseDirectory, 'install.sh')], {
+  const install = await run(['bash', join(releaseDirectory, 'install-server.sh')], {
     cwd: root,
     env: {
       PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
@@ -857,6 +1036,279 @@ try {
     /Release signature: verified/.test(install.stdout)
       && /Artifact digests: matched/.test(install.stdout),
     install.stdout.trim().split('\n').slice(-4).join(' | '));
+  // The server installer is the broker half and nothing else: no client, no setup, no pairing offer.
+  check('the server installer places no client and hands setup back to the operator',
+    !existsSync(join(home, '.cosyncing', 'client'))
+      && !existsSync(join(home, '.cosyncing', 'client-pairing.json'))
+      && !existsSync(join(home, '.local', 'share', 'applications', 'cosyncing.desktop'))
+      && install.stdout.includes('PATH was not changed')
+      && !/Desktop client|Pairing handoff|Running setup/.test(install.stdout));
+
+  // ---- The all-in-one installer -----------------------------------------------------------------
+  //
+  // `runSupervised` execs through `setsid`, so this child is in a session of its own with no controlling
+  // terminal — which is exactly the `curl … | sh` case the tty branch exists for, arrived at honestly
+  // rather than by an environment override. So the default all-in-one run here places the client and then
+  // stops at setup, and the run that gets past setup is the one that stubs the terminal below.
+  const allInOneHome = join(root, 'all-in-one-home');
+  mkdirSync(allInOneHome);
+  const allInOne = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one install',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: allInOneHome,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const installedClient = join(allInOneHome, '.cosyncing', 'client');
+  const desktopEntry = join(
+    allInOneHome, '.local', 'share', 'applications', 'cosyncing.desktop',
+  );
+  check('the all-in-one installs the desktop client beside the broker, with a launcher entry',
+    allInOne.exitCode === 0
+      && existsSync(join(allInOneHome, '.cosyncing', 'bin', 'cosyncing'))
+      && lstatSync(installedClient).isDirectory() && !lstatSync(installedClient).isSymbolicLink()
+      && existsSync(join(installedClient, 'cosyncing'))
+      && existsSync(join(installedClient, 'LICENSE.txt'))
+      && readFileSync(desktopEntry, 'utf8').includes(`Exec=${join(installedClient, 'cosyncing')}\n`)
+      && allInOne.stdout.includes(`Desktop client: ${installedClient}`),
+    `${allInOne.exitCode}: ${allInOne.stdout.trim().split('\n').slice(-4).join(' | ')} ${allInOne.stderr.trim().slice(0, 200)}`);
+
+  // The desktop menu and LaunchServices both start the client with their own environment, not the one the
+  // installer ran in. A relocated home therefore has to travel in the launcher, or the client reads
+  // ~/.cosyncing, finds no handoff, and asks the operator to pair by hand for no visible reason.
+  const relocatedHome = join(root, 'relocated-home');
+  const relocatedState = join(relocatedHome, 'elsewhere');
+  mkdirSync(relocatedHome);
+  const relocated = await run(['sh', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one relocated home',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: relocatedHome,
+      COSYNCING_HOME: relocatedState,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const relocatedEntry = join(relocatedHome, '.local', 'share', 'applications', 'cosyncing.desktop');
+  check('a relocated home travels in the launcher entry, so the client can still find the handoff',
+    relocated.exitCode === 0
+      && readFileSync(relocatedEntry, 'utf8').includes(
+        `Exec=env COSYNCING_HOME=${relocatedState} ${join(relocatedState, 'client', 'cosyncing')}\n`),
+    `${relocated.exitCode}: ${readFileSync(relocatedEntry, 'utf8').split('\n').find((line) => line.startsWith('Exec=')) ?? 'no Exec line'}`);
+
+  // The macOS half of the same rule cannot run here, so pin the call instead: `open` starts the app with
+  // LaunchServices' environment and drops the caller's.
+  check('the macOS launch hands COSYNCING_HOME to open(1) rather than relying on inheritance',
+    /open --env "COSYNCING_HOME=\$STATE_HOME" -a/.test(installers['install.sh']!),
+    installers['install.sh']!.split('\n')
+      .filter((line) => /^\s*(?:if |elif )?open /.test(line)).join(' | ').slice(0, 200));
+
+  // Consent is the point of `setup`, and a pipeline has no terminal to give it. The installer must stop
+  // and say so rather than passing --yes on the operator's behalf.
+  check('with no terminal the all-in-one stops at setup instead of consenting for the operator',
+    allInOne.stdout.includes('No terminal is attached, so setup was not run')
+      && allInOne.stdout.includes(`${join(allInOneHome, '.cosyncing', 'bin', 'cosyncing')} setup`)
+      && !allInOne.stdout.includes('fixture setup completed')
+      && !existsSync(join(allInOneHome, '.cosyncing', 'client-pairing.json')),
+    allInOne.stdout.trim().split('\n').slice(-3).join(' | '));
+  // Stopping is a normal outcome here, so it must read like one. The probe that decides it opens
+  // /dev/tty, and on a host where that open fails the shell complains unless stderr is silenced first.
+  check('stopping at setup is quiet: the headless probe leaks no shell error',
+    allInOne.stderr.trim() === '',
+    allInOne.stderr.trim().slice(0, 300));
+  // Comments stripped, because both templates NAME these flags to explain why they are never passed.
+  const withoutComments = (script: string): string => script
+    .replace(/<#[\s\S]*?#>/g, '')
+    .split('\n')
+    .map((line) => line.replace(/(^|\s)#.*$/, ''))
+    .join('\n');
+  check('no installer ever passes setup a consent flag on the operator\'s behalf',
+    Object.values(installers).map(withoutComments).every((script) =>
+      !script.includes('--yes') && !script.includes('--accept-managed-runtime-ownership')));
+
+  // A machine with no display server is where the BROKER belongs and the client does not. Skipped and
+  // said out loud, not a failure: the install that matters on such a host has already succeeded.
+  const headlessHome = join(root, 'headless-home');
+  mkdirSync(headlessHome);
+  const headless = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one headless',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: headlessHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a headless Linux host gets the broker, is told why it gets no client, and still succeeds',
+    headless.exitCode === 0
+      && existsSync(join(headlessHome, '.cosyncing', 'bin', 'cosyncing'))
+      && !existsSync(join(headlessHome, '.cosyncing', 'client'))
+      && /Desktop client: skipped — this host has no display server/.test(headless.stdout),
+    `${headless.exitCode}: ${headless.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+
+  // The documented one-liner pipes into `sh`, and on Debian and Ubuntu `sh` is dash. Running every case
+  // under bash hid a fatal defect: `:` is a POSIX special built-in, so a redirection error on one exits
+  // the shell outright, and dash left the headless path dead at exit 2 with the broker installed and
+  // nothing said. macOS never showed it, because there `sh` is bash. Run the headless path under the
+  // shell the docs actually name.
+  const shHome = join(root, 'headless-home-sh');
+  mkdirSync(shHome);
+  const headlessSh = await run(['sh', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one headless under sh',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: shHome,
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('the headless path reaches its own stop message under sh, not only under bash',
+    headlessSh.exitCode === 0
+      && existsSync(join(shHome, '.cosyncing', 'bin', 'cosyncing'))
+      && headlessSh.stdout.includes('No terminal is attached, so setup was not run')
+      && headlessSh.stderr.trim() === '',
+    `${headlessSh.exitCode}: ${headlessSh.stdout.trim().split('\n').slice(-3).join(' | ')} ${headlessSh.stderr.trim().slice(0, 200)}`);
+
+  // A script the docs tell people to pipe into `sh` must say it is an sh script, or the two disagree and
+  // only one of them is tested.
+  check('the shell installers declare the shell the documentation pipes them into',
+    Object.entries(installers)
+      .filter(([name]) => name.endsWith('.sh'))
+      .every(([, script]) => script.startsWith('#!/bin/sh\n')),
+    Object.entries(installers)
+      .filter(([name]) => name.endsWith('.sh'))
+      .map(([name, script]) => `${name}: ${script.split('\n')[0]}`).join(' | '));
+
+  // Linux arm64 publishes no client. The all-in-one finishes as a server install and names the reason,
+  // which is the difference between an unsupported host and a broken release.
+  const armUname = join(root, 'uname-linux-arm64');
+  mkdirSync(armUname, { recursive: true });
+  writeFileSync(join(armUname, 'uname'),
+    '#!/usr/bin/env bash\ncase "${1:-}" in\n  -m) echo aarch64 ;;\n  *) echo Linux ;;\nesac\n',
+    { mode: 0o755 });
+  const armHome = join(root, 'linux-arm64-home');
+  mkdirSync(armHome);
+  const armInstall = await run(['bash', join(releaseDirectory, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one linux-arm64',
+    env: {
+      PATH: `${armUname}:${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: armHome,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: releaseDirectory,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a host this release publishes no client for finishes as a server install and says so',
+    armInstall.exitCode === 0
+      && existsSync(join(armHome, '.cosyncing', 'bin', 'cosyncing'))
+      && !existsSync(join(armHome, '.cosyncing', 'client'))
+      && /Desktop client: skipped — this release publishes no desktop client for linux-arm64/
+        .test(armInstall.stdout),
+    `${armInstall.exitCode}: ${armInstall.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+
+  // A client is held to the artifacts' own rule. Nothing about it being "just the GUI" relaxes the pin.
+  const tamperedClientRelease = join(root, 'tampered-client-release');
+  cpSync(releaseDirectory, tamperedClientRelease, { recursive: true });
+  writeFileSync(
+    join(tamperedClientRelease, `cosyncing-client-${version}-linux-x64.tar.gz`),
+    'swapped client\n',
+  );
+  const tamperedClientHome = join(root, 'tampered-client-home');
+  mkdirSync(tamperedClientHome);
+  const tamperedClient = await run(['bash', join(tamperedClientRelease, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one tampered client',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: tamperedClientHome,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: tamperedClientRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a substituted desktop client is refused against the digest embedded in the installer',
+    tamperedClient.exitCode !== 0
+      && /checksum verification failed|size does not match/.test(tamperedClient.stderr)
+      && !existsSync(join(tamperedClientHome, '.cosyncing', 'client')),
+    tamperedClient.stderr.trim().slice(0, 200));
+
+  // The whole tail, end to end. The terminal is the one host property this suite cannot give itself, so
+  // the RENDERED script is rewritten in a copy — the same technique the PowerShell suite uses for the
+  // machine architecture — and every other step is the real one: setup runs, the broker is asked for its
+  // listener URL and a pairing offer, and the offer is written where the client reads it.
+  const handoffRelease = join(root, 'handoff-release');
+  cpSync(releaseDirectory, handoffRelease, { recursive: true });
+  writeFileSync(
+    join(handoffRelease, 'install.sh'),
+    readFileSync(join(handoffRelease, 'install.sh'), 'utf8').replaceAll('/dev/tty', '/dev/null'),
+    { mode: 0o755 },
+  );
+  const handoffHome = join(root, 'handoff-home');
+  mkdirSync(handoffHome);
+  const handoff = await run(['bash', join(handoffRelease, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one handoff',
+    // The installer launches the client at the very end and detaches it. The fixture client exits at
+    // once, so this is the "already on its way out" case the grace window exists for, not a leak.
+    strayGraceMs: 5_000,
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: handoffHome,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: handoffRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  const handoffFile = join(handoffHome, '.cosyncing', 'client-pairing.json');
+  const handoffDocument = existsSync(handoffFile)
+    ? JSON.parse(readFileSync(handoffFile, 'utf8'))
+    : null;
+  check('with a terminal the all-in-one runs setup and launches the client it installed',
+    handoff.exitCode === 0
+      && handoff.stdout.includes('Running setup. It shows its plan and asks before changing anything.')
+      && handoff.stdout.includes('fixture setup completed')
+      && handoff.stdout.includes(`Started ${join(handoffHome, '.cosyncing', 'client', 'cosyncing')}`),
+    `${handoff.exitCode}: ${handoff.stdout.trim().split('\n').slice(-4).join(' | ')} ${handoff.stderr.trim().slice(0, 200)}`);
+  // A host with no client and a terminal to run setup on. The broker install and setup are the point
+  // there; an offer written for a client that does not exist would be a one-use credential on disk that
+  // nothing can redeem.
+  const headlessHandoffHome = join(root, 'headless-handoff-home');
+  mkdirSync(headlessHandoffHome);
+  const headlessHandoff = await run(['bash', join(handoffRelease, 'install.sh')], {
+    cwd: root,
+    stage: 'all-in-one headless handoff',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: headlessHandoffHome,
+      FAKE_RELEASE_ROOT: handoffRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('a host with no client runs setup and writes no pairing offer for a client that is not there',
+    headlessHandoff.exitCode === 0
+      && headlessHandoff.stdout.includes('fixture setup completed')
+      && headlessHandoff.stdout.includes('Pairing handoff: not needed, no desktop client was installed')
+      && !existsSync(join(headlessHandoffHome, '.cosyncing', 'client-pairing.json'))
+      && !existsSync(join(headlessHandoffHome, '.cosyncing', 'client')),
+    `${headlessHandoff.exitCode}: ${headlessHandoff.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+  check('the pairing offer is written where the client reads it, owner-only, with the fields it needs',
+    handoffDocument?.qr === 'https://pair.example/v3#fixture'
+      && handoffDocument?.brokerUrl === 'http://127.0.0.1:7734'
+      && handoffDocument?.expiresAt === '2026-07-17T00:05:00.000Z'
+      && (statSync(handoffFile).mode & 0o777) === 0o600
+      && handoff.stdout.includes(`Pairing handoff: ${handoffFile}`),
+    handoffDocument === null
+      ? 'no handoff document'
+      : `${JSON.stringify(handoffDocument)} mode=${(statSync(handoffFile).mode & 0o777).toString(8)}`);
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.
   // It has no trouble with ECDSA P-256, so the stub refuses Ed25519 SPECIFICALLY rather than refusing every
@@ -907,7 +1359,7 @@ exec /usr/bin/openssl "$@"
 `, { mode: 0o755 });
   const libreSslHome = join(root, 'libressl-home');
   mkdirSync(libreSslHome);
-  const libreSsl = await run(['bash', join(releaseDirectory, 'install.sh')], {
+  const libreSsl = await run(['bash', join(releaseDirectory, 'install-server.sh')], {
     cwd: root,
     env: {
       PATH: `${libreSslBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
@@ -931,7 +1383,7 @@ exec /usr/bin/openssl "$@"
   // and still gate the download on the embedded digest.
   const noSignatureHome = join(root, 'no-signature-home');
   mkdirSync(noSignatureHome);
-  const noSignature = await run(['bash', join(releaseDirectory, 'install.sh')], {
+  const noSignature = await run(['bash', join(releaseDirectory, 'install-server.sh')], {
     cwd: root,
     env: {
       PATH: `${noSignatureBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
@@ -1081,11 +1533,10 @@ exec /usr/bin/openssl "$@"
   const workingArchive = writeFakeBunArchive(bunInstallRelease, 'bun-linux-x64.zip', {
     version: MINIMUM_BUN_RUNTIME_VERSION,
   });
-  repinBunTable(join(bunInstallRelease, 'install.sh'),
-    [`linux-x64 bun-linux-x64.zip ${workingArchive.sha256}`]);
+  repinBunTable(bunInstallRelease, [`linux-x64 bun-linux-x64.zip ${workingArchive.sha256}`]);
   const bunInstallHome = join(root, 'bun-install-home');
   mkdirSync(bunInstallHome);
-  const bunInstall = await run(['bash', join(bunInstallRelease, 'install.sh')], {
+  const bunInstall = await run(['bash', join(bunInstallRelease, 'install-server.sh')], {
     env: {
       PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: bunInstallHome,
@@ -1111,13 +1562,13 @@ exec /usr/bin/openssl "$@"
   const fallback = writeFakeBunArchive(bunFallbackRelease, 'bun-linux-x64-musl.zip', {
     version: MINIMUM_BUN_RUNTIME_VERSION,
   });
-  repinBunTable(join(bunFallbackRelease, 'install.sh'), [
+  repinBunTable(bunFallbackRelease, [
     `linux-x64 bun-linux-x64.zip ${unrunnable.sha256}`,
     `linux-x64 bun-linux-x64-musl.zip ${fallback.sha256}`,
   ]);
   const bunFallbackHome = join(root, 'bun-fallback-home');
   mkdirSync(bunFallbackHome);
-  const bunFallback = await run(['bash', join(bunFallbackRelease, 'install.sh')], {
+  const bunFallback = await run(['bash', join(bunFallbackRelease, 'install-server.sh')], {
     env: {
       PATH: `${staleBunBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: bunFallbackHome,
@@ -1274,7 +1725,7 @@ exec /usr/bin/openssl "$@"
 
   const appleSiliconHome = join(root, 'darwin-arm64-home');
   mkdirSync(appleSiliconHome);
-  const appleSilicon = await run(['bash', join(releaseDirectory, 'install.sh')], {
+  const appleSilicon = await run(['bash', join(releaseDirectory, 'install-server.sh')], {
     env: {
       PATH: `${unameBin('arm64', 'arm64')}:${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       HOME: appleSiliconHome,

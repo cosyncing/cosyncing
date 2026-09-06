@@ -56,9 +56,11 @@ import {
 import {
   assembleRelease,
   canonicalProductVersion,
+  parseRenderedClientTable,
   releaseTargetArch,
   releaseTargetPlatform,
   sha256,
+  CLIENT_HOSTS,
   RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
   type JavaScriptPackageEvidence,
@@ -197,9 +199,22 @@ public static class FakeBun {
 
   const artifactDirectory = join(root, 'artifacts');
   const evidenceDirectory = join(root, 'evidence');
+  const clientDirectory = join(root, 'clients');
   const releaseDirectory = join(root, 'release');
   mkdirSync(artifactDirectory, { recursive: true });
   mkdirSync(evidenceDirectory, { recursive: true });
+  mkdirSync(clientDirectory, { recursive: true });
+
+  /**
+   * A release publishes two PowerShell installers from one template: the all-in-one, and the server
+   * installer that stops after the broker's files.
+   *
+   * Every check in this suite about PLACING those files runs the server installer, because that is the
+   * script those checks were written against and the all-in-one runs exactly the same code before its own
+   * tail. The tail has its own cases at the end, which are the only ones that need a client on disk.
+   */
+  const SERVER_INSTALLER = 'install-server.ps1';
+  const ALL_IN_ONE_INSTALLER = 'install.ps1';
 
   // The compiled per-host artifacts. This installer never touches them — it places one universal bundle —
   // but `assembleRelease` publishes the whole signed set, so the fixture provides the whole set.
@@ -339,9 +354,58 @@ public static class FakeBun {
     p256PrivateKeyPem: p256.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     p256PublicKeyPem: p256.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
   } as const;
+  /**
+   * The three desktop clients a release publishes.
+   *
+   * Only the Windows one is a real archive, because only the Windows one is unpacked here: this installer
+   * resolves its own host and never looks at the other rows. The other two exist because assembly requires
+   * one artifact per host, and their bytes are only ever hashed.
+   */
+  const windowsClientTree = `cosyncing-client-${VERSION}-windows-x64`;
+  {
+    const staging = join(root, 'client-staging', windowsClientTree);
+    mkdirSync(staging, { recursive: true });
+    // A real PE, because the installer requires `cosyncing.exe` to exist and the launch path runs it.
+    // csc is already a hard requirement of this suite for exactly this reason.
+    writeFileSync(join(root, 'client-staging', 'client.cs'),
+      'public class C { public static int Main() { return 0; } }\n');
+    const compiled = await runSupervised(
+      [CSC, '/nologo', `/out:${join(staging, 'cosyncing.exe')}`,
+        join(root, 'client-staging', 'client.cs')],
+      {
+        cwd: root,
+        env: process.env as NodeJS.ProcessEnv,
+        timeoutMs: 120_000,
+        isolateProcessGroup: !insideSupervisedProcessGroup(),
+      },
+    );
+    if (compiled.exitCode !== 0) {
+      throw new Error(`desktop client fixture could not be compiled: ${compiled.stderr}`);
+    }
+    const zipScript = join(root, 'zip-client.ps1');
+    writeFileSync(zipScript, `param([string] $Source, [string] $Destination)
+$ErrorActionPreference = 'Stop'
+Compress-Archive -Path $Source -DestinationPath $Destination -Force
+`);
+    const zipped = await runPowerShell({
+      script: zipScript,
+      arguments: [staging, join(clientDirectory, `${windowsClientTree}-unsigned.zip`)],
+      stage: 'zip desktop client',
+    });
+    if (zipped.exitCode !== 0) {
+      throw new Error(`desktop client fixture could not be zipped: ${zipped.stderr}`);
+    }
+    writeFileSync(join(clientDirectory, `cosyncing-client-${VERSION}-linux-x64.tar.gz`), 'fixture\n');
+    writeFileSync(
+      join(clientDirectory, `cosyncing-client-${VERSION}-macos-arm64-unsigned.zip`),
+      'fixture\n',
+    );
+  }
+
   assembleRelease({
     artifactDirectory,
     evidenceDirectory,
+    clientDirectory,
     outputDirectory: releaseDirectory,
     ...signing,
   });
@@ -388,8 +452,12 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
     stage: 'elevation probe',
   });
   const HOST_IS_ELEVATED = /^\s*True\s*$/i.test(elevationProbe.stdout);
-  const pristineInstaller = readFileSync(join(releaseDirectory, 'install.ps1'), 'utf8');
-  if (HOST_IS_ELEVATED) stubProbe(join(releaseDirectory, 'install.ps1'), ELEVATION_PROBE, '$false');
+  const pristineInstaller = readFileSync(join(releaseDirectory, SERVER_INSTALLER), 'utf8');
+  if (HOST_IS_ELEVATED) {
+    for (const name of [SERVER_INSTALLER, ALL_IN_ONE_INSTALLER]) {
+      stubProbe(join(releaseDirectory, name), ELEVATION_PROBE, '$false');
+    }
+  }
   console.log(`      (host is ${HOST_IS_ELEVATED ? 'ELEVATED, probe neutralised' : 'unelevated, script pristine'})`);
 
   /**
@@ -415,11 +483,16 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
     assembleRelease({
       artifactDirectory: artifacts,
       evidenceDirectory: evidence,
+      clientDirectory,
       outputDirectory: output,
       ...signing,
     });
     // Freshly rendered, so it needs the same neutralisation the shared release got.
-    if (HOST_IS_ELEVATED) stubProbe(join(output, 'install.ps1'), ELEVATION_PROBE, '$false');
+    if (HOST_IS_ELEVATED) {
+      for (const name of [SERVER_INSTALLER, ALL_IN_ONE_INSTALLER]) {
+        stubProbe(join(output, name), ELEVATION_PROBE, '$false');
+      }
+    }
     return output;
   }
 
@@ -505,12 +578,20 @@ exit $LASTEXITCODE
     bun?: string;
     bunInstall?: string;
     hideBun?: boolean;
+    /** Which published installer to run; the server one unless a case is about the all-in-one tail. */
+    installer?: string;
+    localAppData?: string;
     env?: Readonly<Record<string, string>>;
-  }): Promise<RunResult & { home: string }> {
+  }): Promise<RunResult & { home: string; localAppData: string }> {
     caseIndex += 1;
     const home = options.home ?? join(root, `home-${caseIndex}-${options.stage.replace(/\W+/g, '-')}`);
+    // Never the operator's own %LOCALAPPDATA%, for the reason BUN_INSTALL is redirected below: the
+    // all-in-one places a desktop client there, and a suite must not write into a directory it does not
+    // own.
+    const localAppData = options.localAppData ?? join(root, `localappdata-${caseIndex}`);
     const environment: Record<string, string> = {
       COSYNCING_HOME: home,
+      LOCALAPPDATA: localAppData,
       // Never the operator's own %USERPROFILE%\.bun: an install that placed a runtime there would
       // rewrite the ACLs on a directory this suite does not own.
       BUN_INSTALL: options.bunInstall ?? join(root, `bun-prefix-${caseIndex}`),
@@ -522,11 +603,11 @@ exit $LASTEXITCODE
     };
     const result = await runPowerShell({
       script: harness,
-      arguments: [join(options.release, 'install.ps1'), options.release],
+      arguments: [join(options.release, options.installer ?? SERVER_INSTALLER), options.release],
       env: environment,
       stage: options.stage,
     });
-    return { ...result, home };
+    return { ...result, home, localAppData };
   }
 
   function releaseCopy(name: string): string {
@@ -685,7 +766,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // between the two renames in a copy of the rendered script and what is asserted is the restore.
   {
     const release = releaseCopy('retired-web-restore');
-    const installer = join(release, 'install.ps1');
+    const installer = join(release, SERVER_INSTALLER);
     const anchor = '  Move-Item -LiteralPath $stagedApp -Destination $WEB_ROOT -Force';
     const source = readFileSync(installer, 'utf8');
     if (!source.includes(anchor)) throw new Error('rendered installer has no web root rename');
@@ -747,7 +828,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // though the signed chain is perfectly valid — the two disagreeing is the whole point of checking both.
   {
     const release = releaseCopy('wrong-embedded-digest');
-    const installer = join(release, 'install.ps1');
+    const installer = join(release, SERVER_INSTALLER);
     const source = readFileSync(installer, 'utf8');
     const table = /^\$ARTIFACT_TABLE = '([^']*)'$/m.exec(source)?.[1] ?? '';
     const rewritten = table.split('\n')
@@ -768,7 +849,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // single identity while verifying only half the signatures.
   {
     const release = releaseCopy('wrong-key-id');
-    rewriteAssignment(join(release, 'install.ps1'), 'KEY_ID', 'some-other-key');
+    rewriteAssignment(join(release, SERVER_INSTALLER), 'KEY_ID', 'some-other-key');
     const run = await install({ release, stage: 'wrong key id', bun: currentBun });
     check('a manifest key id that is not the pinned one is fatal',
       run.exitCode !== 0
@@ -871,7 +952,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // installer keyed on it would admit exactly the host the product refuses.
   {
     const release = releaseCopy('arm64-machine');
-    stubNativeMachine(join(release, 'install.ps1'), '0xaa64');
+    stubNativeMachine(join(release, SERVER_INSTALLER), '0xaa64');
     const run = await install({ release, stage: 'arm64 machine', bun: currentBun });
     check('an ARM64 native machine is refused with the product\'s own not-yet-qualified wording',
       run.exitCode !== 0
@@ -885,7 +966,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // claiming ARM64. `0x01c4` is IMAGE_FILE_MACHINE_ARMNT — a machine no cosyncing artifact targets.
   {
     const release = releaseCopy('other-machine');
-    stubNativeMachine(join(release, 'install.ps1'), '0x01c4');
+    stubNativeMachine(join(release, SERVER_INSTALLER), '0x01c4');
     const run = await install({ release, stage: 'other machine', bun: currentBun });
     check('a machine that is neither x64 nor ARM64 is refused by the name the kernel gave it',
       run.exitCode !== 0
@@ -901,7 +982,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   // of how the suite happened to be launched.
   {
     const release = releaseCopy('elevated');
-    const installer = join(release, 'install.ps1');
+    const installer = join(release, SERVER_INSTALLER);
     writeFileSync(installer, pristineInstaller);
     if (!HOST_IS_ELEVATED) stubProbe(installer, ELEVATION_PROBE, '$true');
     const run = await install({ release, stage: 'elevated install', bun: currentBun });
@@ -958,7 +1039,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
   {
     const release = releaseCopy('bun-install');
     const digest = await writeBunArchive(release, 'bun-windows-x64.zip', pinnedBun);
-    rewriteAssignment(join(release, 'install.ps1'), 'BUN_TABLE',
+    rewriteAssignment(join(release, SERVER_INSTALLER), 'BUN_TABLE',
       `windows-x64 bun-windows-x64.zip ${digest}`);
     const bunInstall = join(root, 'bun-prefix-install');
     const run = await install({
@@ -985,7 +1066,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
     const plainDigest = await writeBunArchive(release, 'bun-windows-x64.zip', unrunnableBun);
     const baselineDigest = await writeBunArchive(
       release, 'bun-windows-x64-baseline.zip', pinnedBun);
-    rewriteAssignment(join(release, 'install.ps1'), 'BUN_TABLE', [
+    rewriteAssignment(join(release, SERVER_INSTALLER), 'BUN_TABLE', [
       `windows-x64 bun-windows-x64.zip ${plainDigest}`,
       `windows-x64 bun-windows-x64-baseline.zip ${baselineDigest}`,
     ].join('\n'));
@@ -1033,6 +1114,76 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       rows.length === pinned.length
         && pinned.every((build, index) => rows[index] === `windows-x64 ${build.asset} ${build.sha256}`),
       rows.join(' | '));
+  }
+
+  // ---- The all-in-one tail ------------------------------------------------------------------------
+  //
+  // Everything above ran the server installer, which is this script with one token rendered differently.
+  // What only Windows can prove about the tail is that the client archive unpacks where Windows puts a
+  // per-user application, with the DACL the product inspects — and that a run with no console to ask on
+  // stops at setup instead of consenting for the operator.
+  {
+    const windowsClient = parseRenderedClientTable(
+      readFileSync(join(releaseDirectory, ALL_IN_ONE_INSTALLER), 'utf8'),
+    ).find((client) => client.host === 'windows-x64');
+    check('the all-in-one carries a windows-x64 client row for the asset the release published',
+      windowsClient?.name === `${windowsClientTree}-unsigned.zip`
+        && windowsClient?.sha256
+          === sha256(readFileSync(join(releaseDirectory, `${windowsClientTree}-unsigned.zip`)))
+        && Object.keys(CLIENT_HOSTS).includes('windows-x64'),
+      windowsClient ? `${windowsClient.name} ${windowsClient.sha256}` : 'no windows-x64 row');
+
+    const allInOne = await install({
+      release: releaseDirectory,
+      installer: ALL_IN_ONE_INSTALLER,
+      stage: 'all-in-one',
+      bun: currentBun,
+    });
+    const clientRoot = join(allInOne.localAppData, 'cosyncing', 'client');
+    check('the all-in-one unpacks the desktop client into the per-user application location',
+      allInOne.exitCode === 0
+        && existsSync(join(clientRoot, 'cosyncing.exe'))
+        && allInOne.stdout.includes(`Desktop client: ${clientRoot}`)
+        // Placed by a rename out of a staging directory, so nothing is left behind beside it.
+        && readdirSync(join(allInOne.localAppData, 'cosyncing')).join(',') === 'client',
+      `${allInOne.exitCode}: ${allInOne.stdout.trim().split('\n').slice(-4).join(' | ')} ${allInOne.stderr.trim().slice(0, 200)}`);
+    check('the desktop client directory passes the product\'s own owner-only inspection',
+      inspectOwnerOnlyDirectory(clientRoot).status === 'ok',
+      `${inspectOwnerOnlyDirectory(clientRoot).status}/${inspectOwnerOnlyDirectory(clientRoot).problem ?? ''}`);
+    // `runSupervised` gives the child a redirected stdin, which is the case this branch exists for.
+    check('with no console to ask on, the all-in-one stops at setup rather than consenting',
+      allInOne.stdout.includes('No console input is attached, so setup was not run')
+        && allInOne.stdout.includes(`'${join(allInOne.home, 'bin', 'cosyncing')}' setup`)
+        && !existsSync(join(allInOne.home, 'client-pairing.json')),
+      allInOne.stdout.trim().split('\n').slice(-3).join(' | '));
+
+    // A second run over an existing client must retire and replace it, leaving no staging directory.
+    const again = await install({
+      release: releaseDirectory,
+      installer: ALL_IN_ONE_INSTALLER,
+      stage: 'all-in-one rerun',
+      home: allInOne.home,
+      localAppData: allInOne.localAppData,
+      bun: currentBun,
+    });
+    check('a second all-in-one run replaces the desktop client and leaves no staging directory',
+      again.exitCode === 0
+        && existsSync(join(clientRoot, 'cosyncing.exe'))
+        && readdirSync(join(again.localAppData, 'cosyncing')).join(',') === 'client',
+      `${again.exitCode}: ${readdirSync(join(again.localAppData, 'cosyncing')).join(',')} ${again.stderr.trim().slice(0, 200)}`);
+
+    // The server installer is the broker half and nothing else.
+    const serverOnly = await install({
+      release: releaseDirectory,
+      stage: 'server installer places no client',
+      bun: currentBun,
+    });
+    check('the server installer places no desktop client and hands setup back to the operator',
+      serverOnly.exitCode === 0
+        && !existsSync(join(serverOnly.localAppData, 'cosyncing'))
+        && serverOnly.stdout.includes('PATH was not changed')
+        && !/Desktop client|Pairing handoff|Running setup/.test(serverOnly.stdout),
+      `${serverOnly.exitCode}: ${serverOnly.stdout.trim().split('\n').slice(-3).join(' | ')}`);
   }
 } finally {
   rmSync(root, { recursive: true, force: true });

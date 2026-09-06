@@ -62,6 +62,8 @@ const assetSuffixes = [
   '-android.apk',
   '-linux-x64.tar.gz',
   '-macos-arm64-unsigned.dmg',
+  // The same macOS app as the DMG, in the archive the all-in-one installer can unpack unattended.
+  '-macos-arm64-unsigned.zip',
   '-windows-x64-unsigned.zip',
 ];
 for (const suffix of assetSuffixes) {
@@ -168,8 +170,20 @@ check(
   'stable promotion requires typed owner confirmation',
 );
 check(
-  promotion.includes('--prerelease=false --latest'),
-  'accepted assets promote to the stable latest release',
+  promotion.includes('--prerelease=false --latest=false'),
+  'accepted assets promote to stable without taking the latest pointer',
+);
+// Spelled as its own check because the one above would pass on `--latest` too: `--latest=false` contains
+// it as a substring, so a rule stated only as "includes --prerelease=false --latest" is satisfied by both
+// answers. GitHub keeps ONE latest release per repository and every installed broker compiles
+// `releases/latest/download/release-manifest.json` in as its update channel, so a client release holding
+// that pointer 404s every broker's update check. The broker release is the only one that may hold it.
+check(
+  // Comments stripped, because the workflow NAMES the flag to explain why it does not pass it.
+  !/--latest(?!=false)/.test(
+    promotion.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '')).join('\n'),
+  ),
+  'client promotion never claims the latest pointer the broker update channel resolves through',
 );
 check(
   !/(flutter build|client:build|gh release upload)/.test(promotion),

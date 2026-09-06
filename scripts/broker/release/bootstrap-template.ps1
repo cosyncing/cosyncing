@@ -43,6 +43,14 @@ $ARTIFACT_TABLE = '@ARTIFACT_TABLE@'
 # installers, so rows for hosts this script cannot run on are present and inert.
 $BUN_TABLE = '@BUN_TABLE@'
 $BUN_RELEASE_BASE = '@BUN_RELEASE_BASE@'
+# What this installer installs. `all` places the desktop GUI client too, runs setup, and hands the client
+# a pairing; `server` stops after the broker's own files, which is what this installer did before the
+# client joined the release. Both are rendered from THIS file, so the server installer is the all-in-one
+# with one branch not taken rather than a second script that can drift from it.
+$INSTALL_MODE = '@INSTALL_MODE@'
+# One row per desktop client this release publishes: "<host> <asset> <sha256> <size>". One table serves all
+# four installers, so rows for hosts this script cannot run on are present and inert.
+$CLIENT_TABLE = '@CLIENT_TABLE@'
 
 # The one host this installer supports. Windows ARM64 and an x64 process emulated on ARM64 are refused
 # below, so there is nothing to select between.
@@ -62,6 +70,11 @@ $StagedApplication = ''
 $StagedReceipt = ''
 $StagedWeb = ''
 $RetiredWeb = ''
+# Assigned by the all-in-one client section, declared here because `Invoke-InstallCleanup` reads them and
+# StrictMode turns an unassigned variable into a terminating error.
+$CLIENT_ROOT = ''
+$StagedClient = ''
+$RetiredClient = ''
 
 function Fail {
   param([Parameter(Mandatory = $true)][string] $Message)
@@ -305,6 +318,26 @@ function Get-EmbeddedArtifact {
   return [pscustomobject] @{ Name = $Name; Sha256 = $fields[1]; Size = [long] $fields[2] }
 }
 
+<#
+The desktop client row for one host, or $null when this release publishes none for it.
+
+$null rather than a refusal: a host with no client is a supported outcome of an all-in-one install — it
+finishes as a server install and says so — where a missing BROKER artifact is a broken release.
+#>
+function Get-EmbeddedClient {
+  param([Parameter(Mandatory = $true)][string] $Host_)
+  $rows = @($CLIENT_TABLE -split '\r?\n' |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and (($_ -split '\s+')[0] -eq $Host_) })
+  if ($rows.Count -gt 1) { Fail 'embedded client table contains duplicate rows' }
+  if ($rows.Count -eq 0) { return $null }
+  $fields = $rows[0] -split '\s+'
+  if ($fields.Count -ne 4) { Fail "embedded client row for $Host_ is malformed" }
+  if ($fields[2] -notmatch '^[0-9a-f]{64}$') { Fail "embedded checksum for $($fields[1]) is malformed" }
+  if ($fields[3] -notmatch '^[0-9]+$') { Fail "embedded size for $($fields[1]) is malformed" }
+  return [pscustomobject] @{ Name = $fields[1]; Sha256 = $fields[2]; Size = [long] $fields[3] }
+}
+
 # ---------------------------------------------------------------------------------------------------
 # P-256 verification.
 # ---------------------------------------------------------------------------------------------------
@@ -414,14 +447,13 @@ function Get-ManifestDigestsFor {
 }
 
 <#
-Cross-check ONE artifact against all three statements of what it should be: the signed checksum list, the
-signed manifest, and the digest baked into this script. Each of the three binds the NAME to the digest, so
-agreement is about this artifact rather than about a digest appearing somewhere.
+The two statements about ONE artifact that hold for everything this installer places: the signed checksum
+list, and the digest baked into this script. Both bind the NAME to the digest, so agreement is about this
+artifact rather than about a digest appearing somewhere.
 #>
-function Assert-SignedArtifact {
+function Assert-ChecksumPin {
   param(
     [Parameter(Mandatory = $true)] $Pin,
-    [Parameter(Mandatory = $true)] $Manifest,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ChecksumRows
   )
   $named = @($ChecksumRows | Where-Object { ($_ -split '\s+')[1] -eq $Pin.Name })
@@ -431,14 +463,31 @@ function Assert-SignedArtifact {
   if ($signed -notmatch '^[0-9a-f]{64}$') {
     Fail "artifact checksum is missing or malformed: $($Pin.Name)"
   }
+  # The signed chain and the baked-in table must name the same bytes, or one of the two was tampered with.
+  if ($signed -ne $Pin.Sha256) {
+    Fail "signed checksum list disagrees with the digest embedded in this installer for $($Pin.Name)"
+  }
+}
+
+<#
+The broker's own artifacts add a THIRD statement: the signed manifest, which names them because a running
+broker upgrades ITSELF to them. A desktop client is not a broker upgrade and the manifest deliberately does
+not name one, so the client path calls `Assert-ChecksumPin` directly and this wrapper is what the broker
+artifacts use.
+#>
+function Assert-SignedArtifact {
+  param(
+    [Parameter(Mandatory = $true)] $Pin,
+    [Parameter(Mandatory = $true)] $Manifest,
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $ChecksumRows
+  )
+  Assert-ChecksumPin -Pin $Pin -ChecksumRows $ChecksumRows
   $stated = New-Object System.Collections.ArrayList
   Get-ManifestDigestsFor -Node $Manifest -Name $Pin.Name -Found $stated
   if ($stated.Count -gt 1) { Fail "signed manifest names $($Pin.Name) more than once" }
   if ($stated.Count -eq 0) { Fail "signed manifest does not name $($Pin.Name)" }
-  if ($stated[0] -ne $signed) { Fail "signed manifest and checksum list disagree about $($Pin.Name)" }
-  # The signed chain and the baked-in table must name the same bytes, or one of the two was tampered with.
-  if ($signed -ne $Pin.Sha256) {
-    Fail "signed checksum list disagrees with the digest embedded in this installer for $($Pin.Name)"
+  if ($stated[0] -ne $Pin.Sha256) {
+    Fail "signed manifest and checksum list disagree about $($Pin.Name)"
   }
 }
 
@@ -690,7 +739,7 @@ function Invoke-InstallCleanup {
   if ($WORK -and (Test-Path -LiteralPath $WORK)) {
     Remove-Item -LiteralPath $WORK -Recurse -Force -ErrorAction SilentlyContinue
   }
-  foreach ($path in @($StagedApplication, $StagedReceipt, $StagedWeb)) {
+  foreach ($path in @($StagedApplication, $StagedReceipt, $StagedWeb, $StagedClient)) {
     if ($path -and (Test-Path -LiteralPath $path)) {
       Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -702,6 +751,15 @@ function Invoke-InstallCleanup {
       Remove-Item -LiteralPath $RetiredWeb -Recurse -Force -ErrorAction SilentlyContinue
     } else {
       Move-Item -LiteralPath $RetiredWeb -Destination $WEB_ROOT -Force -ErrorAction SilentlyContinue
+    }
+  }
+  # The same rule for the desktop client the all-in-one places.
+  if ($RetiredClient -and $CLIENT_ROOT -and
+      (Test-Path -LiteralPath $RetiredClient -PathType Container)) {
+    if (Test-Path -LiteralPath $CLIENT_ROOT) {
+      Remove-Item -LiteralPath $RetiredClient -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+      Move-Item -LiteralPath $RetiredClient -Destination $CLIENT_ROOT -Force -ErrorAction SilentlyContinue
     }
   }
 }
@@ -1048,8 +1106,198 @@ try {
   Write-Output ('Release signature: verified (ECDSA P-256 over the signed release manifest and ' +
     'checksum list)')
   Write-Output "Command shim: $aliasPath"
-  Write-Output 'PATH was not changed. Run setup with the absolute command:'
-  Write-Output "  & '$bunBin' '$application' setup"
+
+  if ($INSTALL_MODE -cne 'all') {
+    Write-Output 'PATH was not changed. Run setup with the absolute command:'
+    Write-Output "  & '$bunBin' '$application' setup"
+    exit 0
+  }
+
+  # -------------------------------------------------------------------------------------------------
+  # The all-in-one tail: the desktop client, setup, and the pairing handoff.
+  #
+  # Everything above is what `install-server.ps1` also does, and it has already finished. Nothing below
+  # undoes it. A host this release publishes no client for is reported and skipped - a supported outcome,
+  # not a failure. Everything else here is fatal, including any disagreement about the client's bytes: this
+  # run exits non-zero with a correctly installed broker and a printed next command, which is the honest
+  # report of what happened.
+  # -------------------------------------------------------------------------------------------------
+
+  $clientPin = Get-EmbeddedClient -Host_ $HOST_KEY
+  $clientLaunch = ''
+  if ($null -eq $clientPin) {
+    Write-Output "Desktop client: skipped - this release publishes no desktop client for $HOST_KEY."
+  } else {
+    # Verified by exactly the rule the broker's own artifacts are verified by, minus the manifest - which
+    # names broker upgrades and deliberately does not name a client. See `Assert-SignedArtifact`.
+    Assert-ChecksumPin -Pin $clientPin -ChecksumRows $checksumRows
+    $clientSource = Get-VerifiedArtifact -Pin $clientPin
+
+    # %LOCALAPPDATA%, not %USERPROFILE%\.cosyncing: this is an application, not broker state, and Windows
+    # puts a per-user unpackaged application there. Owner-only all the same, because the whole install is
+    # one user's and an application another principal can rewrite is an application that runs as this one.
+    $localAppData = Get-EnvironmentValue 'LOCALAPPDATA'
+    if (-not $localAppData) { $localAppData = Join-Path $userProfile 'AppData\Local' }
+    if (-not [IO.Path]::IsPathRooted($localAppData)) { Fail 'LOCALAPPDATA must be absolute' }
+    $clientParent = Join-Path ([IO.Path]::GetFullPath($localAppData)) 'cosyncing'
+    Initialize-OwnerOnlyDirectory -Path $clientParent
+    $CLIENT_ROOT = Join-Path $clientParent 'client'
+
+    # `tar.exe` (bsdtar), not `Expand-Archive`: the cmdlet lives in Microsoft.PowerShell.Archive, and a 5.1
+    # session that inherited a PowerShell 7 PSModulePath cannot auto-load it. bsdtar reads zip, it is
+    # already a hard requirement refused for once above, and it is what unpacks Bun's archives here too.
+    $StagedClient = New-StagingPath -Parent $clientParent -Prefix '.cosyncing-client.staging.'
+    New-OwnerOnlyDirectory -Path $StagedClient
+    $extract = Invoke-Native -FilePath $TAR_EXE -ArgumentList @('-xf', $clientSource, '-C', $StagedClient)
+    if ($extract.ExitCode -ne 0) {
+      Fail ("desktop client archive could not be extracted (tar exit $($extract.ExitCode)" +
+        "$(if ($extract.StdErr) { ": $($extract.StdErr.Trim())" }))")
+    }
+    # The archive holds one top-level directory whose name carries the release version, so the tree is
+    # found rather than named: a version-shaped path written down here would be a second place to keep in
+    # step with the client release.
+    $extracted = @([IO.Directory]::GetDirectories($StagedClient))
+    if ($extracted.Count -ne 1) {
+      Fail 'desktop client archive does not contain a single application directory'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $extracted[0] 'cosyncing.exe') -PathType Leaf)) {
+      Fail 'desktop client archive contains no cosyncing.exe'
+    }
+    # tar created that directory inside the staging one, so it carries INHERITED access; it gets its own
+    # protected descriptor before the rename carries it to its destination.
+    Set-OwnerOnlySecurity -Path $extracted[0] -Kind 'directory'
+
+    if (Test-Path -LiteralPath $CLIENT_ROOT) {
+      $clientItem = Get-Item -LiteralPath $CLIENT_ROOT -Force
+      if (-not $clientItem.PSIsContainer -or (Test-ReparsePoint -Item $clientItem)) {
+        Fail "unsafe desktop client path: $CLIENT_ROOT"
+      }
+      if ((Get-PathOwnerSid -Path $CLIENT_ROOT) -ne $CURRENT_USER_SID) {
+        Fail "desktop client directory is not owned by the current user: $CLIENT_ROOT"
+      }
+      $RetiredClient = New-StagingPath -Parent $clientParent -Prefix '.cosyncing-client.retired.'
+      Move-Item -LiteralPath $CLIENT_ROOT -Destination $RetiredClient -Force
+    }
+    Move-Item -LiteralPath $extracted[0] -Destination $CLIENT_ROOT -Force
+    Remove-Item -LiteralPath $StagedClient -Recurse -Force -ErrorAction SilentlyContinue
+    $StagedClient = ''
+    if ($RetiredClient) {
+      Remove-Item -LiteralPath $RetiredClient -Recurse -Force -ErrorAction SilentlyContinue
+      $RetiredClient = ''
+    }
+    $clientLaunch = Join-Path $CLIENT_ROOT 'cosyncing.exe'
+    Write-Output "Desktop client: $CLIENT_ROOT"
+  }
+
+  # `setup` shows the whole plan and asks before it changes anything, and that consent is the point of the
+  # command. A run whose input is redirected - a scheduled task, a CI step, a remote command - cannot ask,
+  # so it prints the command and stops rather than taking the operator's consent as given: --yes and
+  # --accept-managed-runtime-ownership are never passed here.
+  if ([Console]::IsInputRedirected) {
+    Write-Output ''
+    Write-Output 'No console input is attached, so setup was not run. Finish with:'
+    Write-Output "  & '$bunBin' '$application' setup"
+    exit 0
+  }
+
+  Write-Output ''
+  Write-Output 'Running setup. It shows its plan and asks before changing anything.'
+  # Run with the console attached rather than through `Invoke-Native`, which captures both streams to
+  # files: setup is a conversation, and a captured conversation is a hang. The preference is lowered for
+  # the duration so a native child's stderr is not turned into a terminating error, exactly as
+  # `Invoke-Native` does it.
+  $setupExit = -1
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $global:LASTEXITCODE = 0
+    & $bunBin $application setup
+    $setupExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($setupExit -ne 0) {
+    Fail ("setup did not complete; the broker files are installed. Rerun: " +
+      "& '$bunBin' '$application' setup")
+  }
+
+  # -------------------------------------------------------------------------------------------------
+  # The pairing handoff.
+  #
+  # The client reads %COSYNCING_HOME%\client-pairing.json once at startup, imports it, and deletes it - so
+  # the first launch after an all-in-one install is already paired with the broker beside it instead of
+  # asking a user to retype a QR payload from one window into another. The offer is one-use and expires in
+  # five minutes, exactly as `pair` prints it, so a file left behind by a client that never started is a
+  # dead offer rather than a standing credential.
+  # -------------------------------------------------------------------------------------------------
+
+  $pairingPath = Join-Path $stateHome 'client-pairing.json'
+  $handoffSkip = ''
+  $listenerUrl = ''
+  # No client on this host, so no offer is created. Writing one would burn a one-use pairing that expires
+  # in five minutes and that nothing here can redeem, and leave it on disk looking like a credential.
+  if (-not $clientLaunch) {
+    Write-Output 'Pairing handoff: not needed, no desktop client was installed. Pair another device with:'
+    Write-Output "  & '$bunBin' '$application' pair"
+    exit 0
+  }
+  $status = Invoke-Native -FilePath $bunBin -ArgumentList @($application, 'status', '--json')
+  if ($status.ExitCode -ne 0) {
+    $handoffSkip = 'the broker did not report a listener URL'
+  } else {
+    try {
+      $listenerUrl = [string] (Get-JsonProperty -Name 'url' `
+        -Object (Get-JsonProperty -Object ($status.StdOut | ConvertFrom-Json) -Name 'listener'))
+    } catch {
+      $listenerUrl = ''
+    }
+    if ($listenerUrl -notmatch '^https?://') {
+      $handoffSkip = 'the broker did not report a listener URL'
+      $listenerUrl = ''
+    }
+  }
+  if (-not $handoffSkip) {
+    $offer = Invoke-Native -FilePath $bunBin `
+      -ArgumentList @($application, 'pair', '--json', '--broker-url', $listenerUrl)
+    if ($offer.ExitCode -ne 0) {
+      $handoffSkip = 'the broker did not issue a pairing offer'
+    } else {
+      $parsed = $null
+      try { $parsed = $offer.StdOut | ConvertFrom-Json } catch { $parsed = $null }
+      $qr = [string] (Get-JsonProperty -Object $parsed -Name 'qr')
+      $brokerUrl = [string] (Get-JsonProperty -Object $parsed -Name 'brokerUrl')
+      $expiresAt = [string] (Get-JsonProperty -Object $parsed -Name 'expiresAt')
+      if (-not $qr -or -not $brokerUrl -or -not $expiresAt) {
+        $handoffSkip = 'the pairing offer could not be read'
+      } else {
+        # ConvertTo-Json rather than hand-built text: the QR payload is opaque and must reach the client
+        # byte for byte, and a serializer is the thing that gets its escaping right. Newlines normalised
+        # to LF and no byte-order mark, so a handoff file is the same bytes on every host.
+        $document = ([pscustomobject] @{
+          schemaVersion = 1
+          qr = $qr
+          brokerUrl = $brokerUrl
+          expiresAt = $expiresAt
+        } | ConvertTo-Json) -replace "`r`n", "`n"
+        $stagedPairing = New-StagingPath -Parent $stateHome -Prefix '.client-pairing.'
+        [IO.File]::WriteAllText($stagedPairing, "$document`n", (New-Object Text.UTF8Encoding $false))
+        Set-OwnerOnlySecurity -Path $stagedPairing -Kind 'file'
+        Move-Item -LiteralPath $stagedPairing -Destination $pairingPath -Force
+        Write-Output "Pairing handoff: $pairingPath (one-use, expires in five minutes)"
+      }
+    }
+  }
+  if ($handoffSkip) {
+    Write-Output "Pairing handoff: skipped - $handoffSkip. Pair by hand with:"
+    Write-Output "  & '$bunBin' '$application' pair"
+  }
+
+  try {
+    Start-Process -FilePath $clientLaunch -WorkingDirectory $CLIENT_ROOT | Out-Null
+    Write-Output "Launched $clientLaunch"
+  } catch {
+    Write-Output "Could not launch $clientLaunch; start it from $CLIENT_ROOT."
+  }
 } catch {
   [Console]::Error.WriteLine("cosyncing install: $($_.Exception.Message)")
   # `exit` still runs the `finally` below, so the scratch directory and any half-placed staging path are
