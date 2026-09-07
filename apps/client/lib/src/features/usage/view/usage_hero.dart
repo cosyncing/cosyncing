@@ -1,24 +1,23 @@
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
-import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
-/// Three numbers and one sentence.
+/// The period's figures as a wrapping grid of stat tiles.
 ///
-/// The numbers stay plain and the sentence carries the voice — and the sentence
-/// is one parameterized string, not a story assembled from clauses. Every part
-/// of it is a served figure; if the broker served no comparison the sentence
-/// loses its final clause rather than gaining a zero.
+/// Mirrors the tokdash stats tiles: an uppercase quiet label over an extrabold
+/// figure, with an optional meta line beneath. The tile set is fixed except for
+/// the last one, which answers a different "peak" per period — day for a week,
+/// week for a month, month for a year or all time. The grid reflows from four
+/// columns to two at the compact breakpoint rather than clipping.
 class UsageHero extends StatelessWidget {
   /// Creates the hero.
   const UsageHero({
     required this.period,
     required this.report,
-    required this.periodLabel,
     required this.locale,
     this.activeTimeTooltip,
     super.key,
@@ -30,9 +29,6 @@ class UsageHero extends StatelessWidget {
   /// The served report.
   final UsageReport report;
 
-  /// The window's own name, e.g. `August 2026`.
-  final String periodLabel;
-
   /// How the agent-time estimate is made. Computed by the page from the served
   /// idle-gap cap, so this widget does not carry a second copy of that rule.
   final String? activeTimeTooltip;
@@ -43,85 +39,122 @@ class UsageHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final totals = report.totals;
     final activeMs = report.activeTime?.activeMsSum;
-    final activeDays = report.streaks?.activeDays;
+    final streaks = report.streaks;
 
-    final cells = <Widget>[
-      _HeroCell(
-        value: formatCompactCount(report.totals.tokens, locale: locale),
-        unit: l10n.usageHeroTokens,
+    final tiles = <_StatTile>[
+      _StatTile(
+        label: l10n.usageStatTokens,
+        value: formatCompactCount(totals.tokens, locale: locale),
+      ),
+      _StatTile(
+        label: l10n.usageStatCost,
+        value: formatUsageCost(totals.cost, locale: locale, compact: true),
+        valueColor: context.tokens.costInk,
+        // Cost is never a bare figure: the qualifier rides on the tile itself.
+        tooltip: l10n.usageCostFooterNote,
+      ),
+      _StatTile(
+        label: l10n.usageStatMessages,
+        value: formatCompactCount(totals.requests, locale: locale),
+      ),
+      _StatTile(
+        label: l10n.usageStatSessions,
+        value: usageSessionCount(report) == null
+            ? _emDash
+            : formatUsageCount(usageSessionCount(report)!, locale: locale),
       ),
       if (activeMs != null)
-        _HeroCell(
+        _StatTile(
+          label: l10n.usageStatAgentTime,
           value: l10n.usageHoursValue(
             formatUsageHours(activeMs, locale: locale),
           ),
-          unit: l10n.usageHeroActiveTime,
-          pill: l10n.usageEstimatedShort,
           tooltip: activeTimeTooltip,
         ),
-      if (activeDays != null)
-        _HeroCell(
-          value: formatCompactCount(activeDays, locale: locale),
-          unit: l10n.usageHeroActiveDays,
+      if (totals.cacheHitRate != null)
+        _StatTile(
+          label: l10n.usageStatCacheHit,
+          value: formatUsageShare(totals.cacheHitRate!, locale: locale),
         ),
+      if (streaks?.currentStreak != null)
+        _StatTile(
+          label: l10n.usageStatStreak,
+          value: formatCompactCount(streaks!.currentStreak!, locale: locale),
+          meta: streaks.longestStreak == null
+              ? null
+              : l10n.usageStatStreakMeta(
+                  formatCompactCount(streaks.longestStreak!, locale: locale),
+                ),
+        ),
+      if (_peakTile(l10n) case final tile?) tile,
     ];
 
-    final sentence = usageHeroSentence(
-      l10n,
-      period: period,
-      report: report,
-      periodLabel: periodLabel,
-      locale: locale,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const spacing = 8.0;
+        final columns = constraints.maxWidth >= 600 ? 4 : 2;
+        final width =
+            (constraints.maxWidth - spacing * (columns - 1)) / columns;
+        return Wrap(
+          key: const Key('usage-report-hero'),
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final tile in tiles) SizedBox(width: width, child: tile),
+          ],
+        );
+      },
     );
+  }
 
-    return Column(
-      key: const Key('usage-report-hero'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // The three cells share a height whatever their content, and the page
-        // scrolls, so the row has no height to stretch into on its own.
-        IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (var index = 0; index < cells.length; index++) ...[
-                if (index > 0) const SizedBox(width: 8),
-                Expanded(child: cells[index]),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        Text(
-          sentence,
-          key: const Key('usage-report-hero-sentence'),
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-      ],
+  /// The period-dependent peak tile, or `null` when nothing served a peak.
+  _StatTile? _peakTile(AppLocalizations l10n) {
+    final peak = switch (period) {
+      UsagePeriod.today ||
+      UsagePeriod.week => usagePeakDay(report, locale: locale),
+      UsagePeriod.month => usagePeakWeek(report, locale: locale),
+      UsagePeriod.year ||
+      UsagePeriod.allTime => usagePeakMonth(report, locale: locale),
+    };
+    if (peak == null) return null;
+    return _StatTile(
+      label: switch (period) {
+        UsagePeriod.today || UsagePeriod.week => l10n.usageStatPeakDay,
+        UsagePeriod.month => l10n.usageStatPeakWeek,
+        UsagePeriod.year || UsagePeriod.allTime => l10n.usageStatPeakMonth,
+      },
+      value: formatCompactCount(peak.tokens, locale: locale),
+      meta: peak.label,
     );
   }
 }
 
-class _HeroCell extends StatelessWidget {
-  const _HeroCell({
+const String _emDash = '—';
+
+/// One tile in the hero grid: quiet label, loud figure, optional meta line.
+class _StatTile extends StatelessWidget {
+  const _StatTile({
+    required this.label,
     required this.value,
-    required this.unit,
-    this.pill,
+    this.meta,
+    this.valueColor,
     this.tooltip,
   });
 
+  final String label;
   final String value;
-  final String unit;
-  final String? pill;
+  final String? meta;
+  final Color? valueColor;
   final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = context.tokens;
-    final cell = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+    final tile = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       decoration: BoxDecoration(
         color: tokens.surface,
         border: Border.all(color: tokens.separator),
@@ -130,113 +163,98 @@ class _HeroCell extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Text(
+            label.toUpperCase(),
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: tokens.textTertiary,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(height: 4),
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
             child: Text(
               value,
               style: theme.textTheme.headlineSmall?.copyWith(
+                color: valueColor,
                 fontWeight: FontWeight.w600,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
           ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              Flexible(
-                child: Text(
-                  unit,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: tokens.textTertiary,
-                  ),
-                ),
+          if (meta != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              meta!,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: tokens.textTertiary,
               ),
-              if (pill != null) ...[
-                const SizedBox(width: 6),
-                StatusPill(label: pill!, color: tokens.statusIdle),
-              ],
-            ],
-          ),
+            ),
+          ],
         ],
       ),
     );
-    return tooltip == null ? cell : Tooltip(message: tooltip, child: cell);
+    return tooltip == null ? tile : Tooltip(message: tooltip, child: tile);
   }
 }
 
-/// The report's one sentence.
+/// A peak window: its tokens and the name of the window it peaked in.
+typedef UsagePeak = ({double tokens, String label});
+
+/// The served busiest day, labelled by its date.
+UsagePeak? usagePeakDay(UsageReport report, {String? locale}) {
+  final day = report.firsts?.busiestDay;
+  final tokens = report.firsts?.busiestDayTokens;
+  final date = day == null ? null : DateTime.tryParse(day);
+  if (date == null || tokens == null) return null;
+  return (
+    tokens: tokens,
+    label: DateFormat.MMMd(locale).format(date),
+  );
+}
+
+/// The busiest Monday-first week in the window, folded from `daily[]`.
 ///
-/// Falls back to the comparison-free form whenever the broker served no
-/// `tokens_pct` or the period has no nameable predecessor — a report cannot
-/// say "more than last month" when it does not know what last month was.
-String usageHeroSentence(
-  AppLocalizations l10n, {
-  required UsagePeriod period,
-  required UsageReport report,
-  required String periodLabel,
-  required String locale,
+/// The DTO does not serve a weekly peak, and does not need to: `daily` already
+/// carries one row per day, so the client sums the seven-day runs itself.
+UsagePeak? usagePeakWeek(UsageReport report, {String? locale}) {
+  return _peakBucket(
+    report,
+    bucketStart: (day) => day.subtract(Duration(days: day.weekday - 1)),
+    label: (start) => DateFormat.MMMd(locale).format(start),
+  );
+}
+
+/// The busiest calendar month in the window, folded from `daily[]`.
+UsagePeak? usagePeakMonth(UsageReport report, {String? locale}) {
+  return _peakBucket(
+    report,
+    bucketStart: (day) => DateTime.utc(day.year, day.month),
+    label: (start) => DateFormat.MMMM(locale).format(start),
+  );
+}
+
+UsagePeak? _peakBucket(
+  UsageReport report, {
+  required DateTime Function(DateTime day) bucketStart,
+  required String Function(DateTime start) label,
 }) {
-  final sessions = usageSessionCount(report);
-  final sessionsText = sessions == null
-      ? _emDash
-      : formatUsageCount(sessions, locale: locale);
-  final tokensText = formatCompactCount(report.totals.tokens, locale: locale);
-  final costText = l10n.usageCostQualified(
-    formatUsageCost(report.totals.cost, locale: locale, compact: true),
-  );
-
-  final percent = report.comparison?.tokensPct;
-  final previous = usagePreviousPeriodLabel(period, report.range, locale);
-  if (percent == null ||
-      previous == null ||
-      !usageComparisonIsMeaningful(report)) {
-    return l10n.usageHeroSentencePlain(
-      periodLabel,
-      sessionsText,
-      tokensText,
-      costText,
-    );
+  final daily = report.daily;
+  if (daily == null || daily.isEmpty) return null;
+  final sums = <DateTime, double>{};
+  for (final row in daily) {
+    final day = DateTime.tryParse(row.date);
+    if (day == null || row.tokens <= 0) continue;
+    final start = bucketStart(DateTime.utc(day.year, day.month, day.day));
+    sums[start] = (sums[start] ?? 0) + row.tokens;
   }
-  final magnitude = formatUsagePercent(percent, locale: locale);
-  final delta = percent < 0
-      ? l10n.usageDeltaLess(magnitude)
-      : l10n.usageDeltaMore(magnitude);
-  return l10n.usageHeroSentence(
-    periodLabel,
-    sessionsText,
-    tokensText,
-    costText,
-    delta,
-    previous,
-  );
-}
-
-const String _emDash = '—';
-
-/// Above this ratio the prior window is not a quieter period, it is a period
-/// before the record began, and a percentage stops carrying meaning.
-///
-/// A hundredfold is a stated judgement, not a measurement — but the
-/// alternative is quoting the served figure, and on this machine's real 2026
-/// year window that figure is 1,231,088%: arithmetically true and about
-/// nothing. Tokdash's `firsts` facet cannot settle it either way, because it
-/// is scoped to the queried window and so reports the first active day
-/// *inside* it, never the first the record holds.
-const double _comparisonMeaningfulRatio = 100;
-
-/// Whether the served comparison says something a percentage can carry.
-///
-/// The broker serves a comparison for every window, including the first one a
-/// machine ever recorded. When the prior stretch holds nothing, or nearly
-/// nothing, the sentence drops its final clause rather than quoting a figure
-/// in the hundreds of thousands of percent.
-bool usageComparisonIsMeaningful(UsageReport report) {
-  final previous = report.comparison?.tokensPrev;
-  if (previous == null) return true;
-  if (previous <= 0) return false;
-  return report.totals.tokens <= previous * _comparisonMeaningfulRatio;
+  if (sums.isEmpty) return null;
+  final best = sums.entries.reduce((a, b) => a.value >= b.value ? a : b);
+  return (tokens: best.value, label: label(best.key));
 }
 
 /// Sessions in the period, from the active-time API or the per-tool rows.
@@ -255,27 +273,4 @@ int? usageSessionCount(UsageReport report) {
     }
   }
   return known ? total : null;
-}
-
-/// The name of the window this period is being compared against.
-///
-/// Only the periods whose predecessor has a name get one. A week has no common
-/// name, and all time has no predecessor at all, so both drop the clause rather
-/// than inventing a phrase for it.
-String? usagePreviousPeriodLabel(
-  UsagePeriod period,
-  UsageReportRange range,
-  String locale,
-) {
-  final from = DateTime.tryParse(range.from);
-  if (from == null) return null;
-  return switch (period) {
-    UsagePeriod.month => DateFormat.MMMM(
-      locale,
-    ).format(DateTime.utc(from.year, from.month - 1)),
-    UsagePeriod.year => DateFormat.y(
-      locale,
-    ).format(DateTime.utc(from.year - 1)),
-    _ => null,
-  };
 }

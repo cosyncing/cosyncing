@@ -166,9 +166,7 @@ void main() {
     expect(find.byKey(const Key('usage-report-hero')), findsOneWidget);
   });
 
-  testWidgets('a served report prints its scope, window and totals', (
-    tester,
-  ) async {
+  testWidgets('a served report prints its window and totals', (tester) async {
     await tester.pumpWidget(buildSubject(response: served(sampleReport())));
     await tester.pumpAndSettle();
 
@@ -179,16 +177,17 @@ void main() {
       findsOneWidget,
     );
 
-    // The scope is the machine, never "your cosyncing sessions": tokdash sees
-    // every agent on this host and cosyncing adapts a subset.
-    final scope = tester.widget<Text>(
-      find.byKey(const Key('usage-report-scope')),
-    );
-    expect(scope.data, contains('this machine'));
-    expect(scope.data, isNot(contains('cosyncing sessions')));
+    // The scope and broker-time lines are gone from the header; the zone the
+    // day boundaries are cut in is still stated by the When-you-work section.
+    expect(find.byKey(const Key('usage-report-scope')), findsNothing);
+    expect(find.textContaining('broker time'), findsNothing);
 
-    // The explicit range, so a period name cannot imply more than it covers.
-    expect(find.text('2026-08-01 – 2026-08-31'), findsOneWidget);
+    // Progress note and explicit range ride one line, so a period name cannot
+    // imply more than the window covers.
+    final range = tester.widget<Text>(
+      find.byKey(const Key('usage-report-range')),
+    );
+    expect(range.data, contains('2026-08-01 – 2026-08-31'));
   });
 
   testWidgets('cost never renders without its qualifier', (tester) async {
@@ -196,11 +195,21 @@ void main() {
     await tester.pumpAndSettle();
 
     // tokdash reports an API-equivalent figure, not money spent on a plan.
+    // The hero tile carries the qualifier on its tooltip, and the footer
+    // restates it as visible text outside any single figure.
     expect(
-      find.textContaining('at API list prices — not your bill'),
+      find.textContaining('API list-price equivalents, not billed spend'),
       findsWidgets,
     );
-    expect(find.text(r'$12,977'), findsNothing, reason: 'never bare');
+    final figure = find.descendant(
+      of: find.byKey(const Key('usage-report-hero')),
+      matching: find.text(r'$12,977'),
+    );
+    expect(figure, findsOneWidget);
+    final tooltip = tester.widget<Tooltip>(
+      find.ancestor(of: figure, matching: find.byType(Tooltip)),
+    );
+    expect(tooltip.message, contains('not billed spend'));
   });
 
   testWidgets('an empty period is empty, not unavailable', (tester) async {
@@ -278,14 +287,11 @@ void main() {
       ),
       findsOneWidget,
     );
-    // The qualifier appears wherever a cost does — the sentence, the podium
-    // tile, the footer — and never once without one.
+    // The qualifier appears wherever a cost does — the podium tile, the
+    // footer — and never once without one.
     expect(find.textContaining('非实际账单'), findsWidgets);
-    // The export cards carry their own scope line, so this asserts the page's.
-    final scope = tester.widget<Text>(
-      find.byKey(const Key('usage-report-scope')),
-    );
-    expect(scope.data, contains('本机全部 agent 活动'));
+    // The machine-scope line is gone from the page, in every locale.
+    expect(find.textContaining('本机全部 agent 活动'), findsNothing);
   });
 
   testWidgets('the page opens on the period a link names', (tester) async {

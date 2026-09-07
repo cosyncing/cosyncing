@@ -2,6 +2,7 @@ import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:flutter/material.dart';
@@ -40,7 +41,6 @@ class UsageExportCard extends StatelessWidget {
   const UsageExportCard({
     required this.kind,
     required this.report,
-    required this.machineLabel,
     required this.locale,
     required this.includeCost,
     super.key,
@@ -51,9 +51,6 @@ class UsageExportCard extends StatelessWidget {
 
   /// The served report for the card's window.
   final UsageReport report;
-
-  /// A nickname for the machine. Never the hostname.
-  final String machineLabel;
 
   /// BCP-47 tag for figure formatting.
   final String locale;
@@ -93,33 +90,31 @@ class UsageExportCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     _TierLabel(kind: kind),
-                    const SizedBox(height: 3),
-                    _Header(
-                      report: report,
-                      machineLabel: machineLabel,
-                      locale: locale,
-                    ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 2),
+                    _Header(report: report, locale: locale),
+                    const SizedBox(height: 6),
                     _Hero(
                       report: report,
                       locale: locale,
                       includeCost: includeCost,
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
                     _Section(
                       title: l10n.usageActiveDaysTitle,
                       child: _MiniHeatmap(report: report),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     _Stats(kind: kind, report: report, locale: locale),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     _Rankings(report: report, locale: locale),
                     if (kind.carriesProjectNames) ...[
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 4),
                       _Projects(report: report, locale: locale),
                     ],
-                    const SizedBox(height: 6),
-                    _Manifest(kind: kind),
+                    if (kind.carriesProjectNames) ...[
+                      const SizedBox(height: 4),
+                      _Manifest(kind: kind),
+                    ],
                   ],
                 ),
               ),
@@ -169,14 +164,9 @@ class _TierLabel extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({
-    required this.report,
-    required this.machineLabel,
-    required this.locale,
-  });
+  const _Header({required this.report, required this.locale});
 
   final UsageReport report;
-  final String machineLabel;
   final String locale;
 
   @override
@@ -199,11 +189,7 @@ class _Header extends StatelessWidget {
         ),
         const SizedBox(height: 1),
         Text(
-          l10n.usageCardRange(
-            report.range.from,
-            report.range.to,
-            machineLabel,
-          ),
+          l10n.usageCardRange(report.range.from, report.range.to),
           style: theme.textTheme.labelSmall?.copyWith(
             color: tokens.textTertiary,
           ),
@@ -230,16 +216,35 @@ class _Hero extends StatelessWidget {
     final theme = Theme.of(context);
     final tokens = context.tokens;
     final sessions = usageExportSessionCount(report);
+    final heroStyle = theme.textTheme.headlineSmall?.copyWith(
+      fontWeight: FontWeight.w700,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          formatCompactCount(report.totals.tokens, locale: locale),
-          style: theme.textTheme.headlineSmall?.copyWith(
-            // The one place the accent is allowed to go big.
-            color: tokens.accent,
-            fontWeight: FontWeight.w700,
-            fontFeatures: const [FontFeature.tabularFigures()],
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: formatCompactCount(report.totals.tokens, locale: locale),
+                // The one place the accent is allowed to go big.
+                style: heroStyle?.copyWith(color: tokens.accent),
+              ),
+              if (includeCost) ...[
+                TextSpan(text: ' · ', style: heroStyle),
+                TextSpan(
+                  text: formatUsageCost(
+                    report.totals.cost,
+                    locale: locale,
+                    compact: true,
+                  ),
+                  // Cost gets its own ink rather than a second spend of the
+                  // accent, so the two figures cannot blur into one claim.
+                  style: heroStyle?.copyWith(color: tokens.costInk),
+                ),
+              ],
+            ],
           ),
         ),
         const SizedBox(height: 1),
@@ -255,17 +260,11 @@ class _Hero extends StatelessWidget {
           ),
         ),
         if (includeCost) ...[
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Text(
             // Never bare, even here: an image outlives the screen it was
             // captured from, and its reader has no tooltip to consult.
-            l10n.usageCostQualified(
-              formatUsageCost(
-                report.totals.cost,
-                locale: locale,
-                compact: true,
-              ),
-            ),
+            l10n.usageCostFooterNote,
             style: theme.textTheme.labelSmall?.copyWith(
               color: tokens.textTertiary,
             ),
@@ -300,7 +299,7 @@ class _Section extends StatelessWidget {
             color: amber ? tokens.statusNeedsInput : tokens.textSecondary,
           ),
         ),
-        const SizedBox(height: 3),
+        const SizedBox(height: 2),
         child,
       ],
     );
@@ -331,7 +330,8 @@ class _MiniHeatmap extends StatelessWidget {
       return const SizedBox.shrink();
     }
     // The same widget the report page uses, at a smaller cell: one component,
-    // two densities, one bucketing rule.
+    // two densities, one bucketing rule. It solves its cell edge against the
+    // card's width, so a year fills the card rather than drawing as a strip.
     return UsageHeatmap(
       from: from,
       to: to,
@@ -339,7 +339,7 @@ class _MiniHeatmap extends StatelessWidget {
         for (final day in daily)
           if (day.intensity != null) day.date: day.intensity!,
       },
-      cellSize: 5,
+      maxCellSize: 4,
       gap: 1,
       showWeekdayLabels: false,
     );
@@ -422,7 +422,7 @@ class _StatRow extends StatelessWidget {
     final theme = Theme.of(context);
     final tokens = context.tokens;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
+      padding: const EdgeInsets.only(bottom: 1),
       child: Row(
         children: [
           Expanded(
@@ -449,7 +449,10 @@ class _StatRow extends StatelessWidget {
 }
 
 class _Rankings extends StatelessWidget {
-  const _Rankings({required this.report, required this.locale});
+  const _Rankings({
+    required this.report,
+    required this.locale,
+  });
 
   final UsageReport report;
   final String locale;
@@ -459,47 +462,56 @@ class _Rankings extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     final total = report.totals.tokens;
     if (total <= 0) return const SizedBox.shrink();
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    // Three rows per list on both tiers. On the project tier the extra rows
+    // cost a few percent of scale on an ordinary period — a deliberate trade
+    // for content on the card people actually share.
+    const take = 3;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: _MiniList(
-            title: l10n.usageRankHarnesses,
-            rows: [
-              for (final tool in report.tools.take(3))
-                (
-                  name: tool.label ?? tool.tool,
-                  tokens: tool.tokens,
-                  share: tool.tokens / total,
-                ),
-            ],
-            locale: locale,
-          ),
+        _RankList(
+          title: l10n.usageRankHarnesses,
+          rows: [
+            for (final tool in report.tools.take(take))
+              (
+                name: tool.label ?? tool.tool,
+                tokens: tool.tokens,
+                share: tool.tokens / total,
+                tool: tool.tool,
+              ),
+          ],
+          locale: locale,
         ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _MiniList(
-            title: l10n.usageRankModels,
-            rows: [
-              for (final model in report.topModelsByTokens.take(3))
-                (
-                  name: model.name,
-                  tokens: model.tokens,
-                  share: model.tokens / total,
-                ),
-            ],
-            locale: locale,
-          ),
+        const SizedBox(height: 3),
+        _RankList(
+          title: l10n.usageRankModels,
+          rows: [
+            for (final model in report.topModelsByTokens.take(take))
+              (
+                name: model.name,
+                tokens: model.tokens,
+                share: model.tokens / total,
+                tool: null,
+              ),
+          ],
+          locale: locale,
         ),
       ],
     );
   }
 }
 
-typedef _MiniRow = ({String name, double tokens, double share});
+typedef _MiniRow = ({
+  String name,
+  double tokens,
+  double share,
+  String? tool,
+});
 
-class _MiniList extends StatelessWidget {
-  const _MiniList({
+/// A ranked list in tokdash's row format: mark, bold name, the figure right,
+/// and a full-width bar read against the leader rather than the period total.
+class _RankList extends StatelessWidget {
+  const _RankList({
     required this.title,
     required this.rows,
     required this.locale,
@@ -514,6 +526,7 @@ class _MiniList extends StatelessWidget {
     if (rows.isEmpty) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final tokens = context.tokens;
+    final leader = rows.first.tokens;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -523,39 +536,49 @@ class _MiniList extends StatelessWidget {
             color: tokens.textSecondary,
           ),
         ),
-        const SizedBox(height: 3),
-        for (var index = 0; index < rows.length; index++)
+        const SizedBox(height: 2),
+        for (final row in rows)
           Padding(
-            padding: const EdgeInsets.only(bottom: 2),
-            child: Row(
+            padding: const EdgeInsets.only(bottom: 1),
+            child: Column(
               children: [
-                SizedBox(
-                  width: 12,
-                  child: Text(
-                    formatUsageRank(index, locale: locale),
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: tokens.textTertiary,
+                Row(
+                  children: [
+                    if (row.tool != null) ...[
+                      UsageAgentLogo(tool: row.tool!, size: 13),
+                      const SizedBox(width: 5),
+                    ],
+                    Expanded(
+                      child: Text(
+                        row.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 4),
+                    Text(
+                      formatUsageCountWithShare(
+                        row.tokens,
+                        row.share,
+                        locale: locale,
+                      ),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: tokens.textSecondary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
                 ),
-                Expanded(
-                  child: Text(
-                    rows[index].name,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelSmall,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  formatUsageCountWithShare(
-                    rows[index].tokens,
-                    rows[index].share,
-                    locale: locale,
-                  ),
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: tokens.textTertiary,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
+                const SizedBox(height: 1),
+                UsageShareBar(
+                  // Against the leader, so the top row is a full bar and the
+                  // rest are read against it rather than against a period
+                  // total the facet cannot see all of.
+                  fraction: leader <= 0 ? 0 : row.tokens / leader,
+                  height: 3,
                 ),
               ],
             ),
@@ -597,7 +620,7 @@ class _Projects extends StatelessWidget {
         children: [
           for (var index = 0; index < projects.rows.take(5).length; index++)
             Padding(
-              padding: const EdgeInsets.only(bottom: 2),
+              padding: const EdgeInsets.only(bottom: 1),
               child: Row(
                 children: [
                   SizedBox(
@@ -672,6 +695,11 @@ class _Manifest extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Only the project tier carries a manifest: it is a warning on a card
+    // that DOES carry project names. The overview tier's manifest and the
+    // attribution line were noise on an image meant to be posted, so they are
+    // gone rather than reworded.
+    if (!kind.carriesProjectNames) return const SizedBox.shrink();
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;
@@ -679,21 +707,13 @@ class _Manifest extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(height: 1, color: tokens.separator),
-        const SizedBox(height: 3),
+        const SizedBox(height: 2),
         // The card audits itself. A recipient reads what it contains; the
         // sender never has to reason about a toggle they set weeks ago.
         Text(
-          kind.carriesProjectNames
-              ? l10n.usageCardManifestProjects
-              : l10n.usageCardManifestOverview,
+          l10n.usageCardManifestProjects,
           style: theme.textTheme.labelSmall?.copyWith(
             color: tokens.textSecondary,
-          ),
-        ),
-        Text(
-          l10n.usageCardAttribution,
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: tokens.textTertiary,
           ),
         ),
       ],

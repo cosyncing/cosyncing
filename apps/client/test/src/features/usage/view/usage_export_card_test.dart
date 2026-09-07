@@ -84,7 +84,6 @@ void main() {
           child: UsageExportCard(
             kind: kind,
             report: report(),
-            machineLabel: 'This machine',
             locale: locale.toLanguageTag(),
             includeCost: includeCost,
           ),
@@ -100,10 +99,9 @@ void main() {
 
       // The fixture's projects are named atlas and atlas_private.
       expect(find.textContaining('atlas'), findsNothing);
-      expect(
-        find.text('Counts only · no project names · no prompt text'),
-        findsOneWidget,
-      );
+      // The overview tier prints no manifest: nothing on it needs the warning.
+      expect(find.textContaining('prompt text'), findsNothing);
+      expect(find.textContaining('cosyncing · tokdash'), findsNothing);
     });
 
     testWidgets('the project card names them, and says that it does', (
@@ -132,7 +130,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('at API list prices — not your bill'),
+        find.textContaining('API list-price equivalents, not billed spend'),
         findsOneWidget,
       );
       expect(find.textContaining('atlas'), findsNothing);
@@ -142,7 +140,8 @@ void main() {
       await tester.pumpWidget(card(kind: UsageExportCardKind.overview));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('API list prices'), findsNothing);
+      expect(find.textContaining('list-price'), findsNothing);
+      expect(find.textContaining('list prices'), findsNothing);
     });
 
     testWidgets('prompt text appears on neither card', (tester) async {
@@ -192,15 +191,21 @@ void main() {
   testWidgets('an ordinary period renders unscaled', (tester) async {
     // Scaling exists so a dense period cannot clip, not so every card is a
     // little smaller than designed. A local size that matches the painted one
-    // means the fallback stayed a fallback.
+    // means the fallback stayed a fallback. The project tier is the stated
+    // exception: it carries three rank rows per list by deliberate choice,
+    // trading a few percent of scale for content on the card people share.
     for (final kind in UsageExportCardKind.values) {
       await tester.pumpWidget(card(kind: kind, includeCost: true));
       await tester.pumpAndSettle();
 
-      final manifest = find.text('cosyncing · tokdash');
-      final scale =
-          tester.getRect(manifest).width / tester.getSize(manifest).width;
-      expect(scale, closeTo(1, 0.001), reason: kind.name);
+      final anchor = find.text('2026-08-01 – 2026-08-31');
+      final scale = tester.getRect(anchor).width / tester.getSize(anchor).width;
+      if (kind.carriesProjectNames) {
+        expect(scale, lessThan(1), reason: kind.name);
+        expect(scale, greaterThan(0.95), reason: kind.name);
+      } else {
+        expect(scale, closeTo(1, 0.001), reason: kind.name);
+      }
     }
   });
 
@@ -234,7 +239,6 @@ void main() {
           child: UsageExportCard(
             kind: UsageExportCardKind.projectDetail,
             report: dense,
-            machineLabel: 'This machine',
             locale: 'en',
             includeCost: true,
           ),
@@ -252,9 +256,10 @@ void main() {
     for (var index = 0; index < 5; index++) {
       expect(find.text('a_rather_long_repository_name_$index'), findsOneWidget);
     }
-    final manifest = find.text('cosyncing · tokdash');
-    final scale =
-        tester.getRect(manifest).width / tester.getSize(manifest).width;
+    final anchor = find.text(
+      'Counts + project names · no prompt text · share deliberately',
+    );
+    final scale = tester.getRect(anchor).width / tester.getSize(anchor).width;
     expect(scale, lessThan(1));
     expect(scale, greaterThan(0.7), reason: 'still legible at 3x');
   });

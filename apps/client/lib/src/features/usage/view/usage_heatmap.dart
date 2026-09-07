@@ -1,6 +1,15 @@
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:flutter/material.dart';
 
+/// The smallest cell the grid will draw without falling back to scrolling.
+const double usageHeatmapMinCell = 3;
+
+/// The line box a 9px weekday label occupies. The gutter rows are sized to at
+/// least this, because a label overflowing its box is clipped top and bottom —
+/// and 9px is already the floor, so the box grows rather than the font
+/// shrinking.
+const double _weekdayLabelLineHeight = 12;
+
 /// A Monday-first calendar grid of activity, one column per week.
 ///
 /// Shaded by the **served** quartile `intensity` (1–4 over active days) from
@@ -10,16 +19,28 @@ import 'package:flutter/material.dart';
 /// threshold. A day with no served row is inactive, which is a different cell
 /// from a day outside the window.
 ///
-/// No package and no `GridView`: a fixed `Row` of week columns, each a `Column`
-/// of seven cells. The month and year densities are the same widget at two cell
-/// sizes.
+/// Days outside `[from, to]` are holes (transparent), not inactive cells: an
+/// empty cell would claim the user did nothing on a date the report never
+/// covered. One caller deliberately plays against that rule: the month period
+/// extends `to` to the calendar month end, so the days after today sit INSIDE
+/// the grid window and draw as inactive cells, GitHub-style — a full month
+/// grid rather than a grid that stops at today. That is a caller decision
+/// about a known-future tail, not this widget restating coverage.
+///
+/// No package and no `GridView`: a fixed `Row` of week columns, each a
+/// `Column` of seven cells. The cell edge is solved against the available
+/// width — `(maxWidth - gutter) / weekCount - gap`, clamped to
+/// `[minCellSize, maxCellSize]` — so a year fills a wide pane instead of
+/// drawing as a 300px strip in it, and the horizontal scroll view remains
+/// only as the fallback below the legible minimum.
 class UsageHeatmap extends StatelessWidget {
   /// Creates a heatmap over `[from, to]`.
   const UsageHeatmap({
     required this.from,
     required this.to,
     required this.intensityByDate,
-    this.cellSize = 12,
+    this.maxCellSize = 12,
+    this.minCellSize = usageHeatmapMinCell,
     this.gap = 3,
     this.showWeekdayLabels = true,
     this.weekdayLabels = const <int, String>{},
@@ -36,8 +57,12 @@ class UsageHeatmap extends StatelessWidget {
   /// activity, and `0` means the same.
   final Map<String, int> intensityByDate;
 
-  /// Edge length of one day cell.
-  final double cellSize;
+  /// Largest edge a cell grows to when the width allows more. Short windows
+  /// keep their previous density instead of ballooning into tiles.
+  final double maxCellSize;
+
+  /// Smallest legible edge. Below this the grid stops shrinking and scrolls.
+  final double minCellSize;
 
   /// Space between cells.
   final double gap;
@@ -55,6 +80,33 @@ class UsageHeatmap extends StatelessWidget {
   /// verified against its ink in both brightnesses, so every theme reskins this
   /// for free.
   static const List<double> intensityAlpha = [0.40, 0.60, 0.80, 1.0];
+
+  /// Room reserved for the weekday gutter when it is shown.
+  static double gutterWidth(double gap) => 28 + gap * 2;
+
+  /// The week columns `[from, to]` spans once aligned to Monday.
+  static int weekCount(DateTime from, DateTime to) {
+    final start = DateTime.utc(from.year, from.month, from.day);
+    final end = DateTime.utc(to.year, to.month, to.day);
+    if (end.isBefore(start)) return 0;
+    final lead = start.weekday - 1;
+    final days = end.difference(start).inDays + 1;
+    return ((lead + days) / 7).ceil();
+  }
+
+  /// The cell edge the width alone would give, before clamping.
+  double _derivedCellSize(double maxWidth) {
+    final weeks = weekCount(from, to);
+    if (weeks <= 0 || !maxWidth.isFinite) return maxCellSize;
+    final gutter = showWeekdayLabels && weekdayLabels.isNotEmpty
+        ? gutterWidth(gap)
+        : 0.0;
+    return (maxWidth - gutter) / weeks - gap;
+  }
+
+  /// The cell edge that fills [maxWidth], clamped to the legible range.
+  double cellSizeFor(double maxWidth) =>
+      _derivedCellSize(maxWidth).clamp(minCellSize, maxCellSize);
 
   static String _key(DateTime day) =>
       '${day.year.toString().padLeft(4, '0')}-'
@@ -77,49 +129,80 @@ class UsageHeatmap extends StatelessWidget {
       final column = <DateTime?>[];
       for (var i = 0; i < 7; i++) {
         final day = cursor.add(Duration(days: i));
-        // Days outside the window are holes, not inactive days: an empty cell
-        // would claim the user did nothing on a date the report never covered.
         column.add(day.isBefore(start) || day.isAfter(end) ? null : day);
       }
       weeks.add(column);
       cursor = cursor.add(const Duration(days: 7));
     }
 
-    final gutter = showWeekdayLabels && weekdayLabels.isNotEmpty
-        ? _WeekdayGutter(
-            labels: weekdayLabels,
-            cellSize: cellSize,
-            gap: gap,
-          )
-        : null;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final raw = _derivedCellSize(constraints.maxWidth);
+        final cellSize = raw.clamp(minCellSize, maxCellSize);
+        // The gutter row carries the label's line box, never less: a 9px label
+        // in a 7px box is clipped top and bottom, which is the defect this
+        // height exists to prevent. Grid rows carry the same height so cells
+        // and labels stay aligned.
+        final rowHeight =
+            cellSize < _weekdayLabelLineHeight &&
+                showWeekdayLabels &&
+                weekdayLabels.isNotEmpty
+            ? _weekdayLabelLineHeight
+            : cellSize;
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (gutter != null) ...[gutter, SizedBox(width: gap * 2)],
-          for (final week in weeks)
-            Padding(
-              padding: EdgeInsets.only(right: gap),
-              child: Column(
-                children: [
-                  for (final day in week)
-                    Padding(
-                      padding: EdgeInsets.only(bottom: gap),
-                      child: _Cell(
-                        size: cellSize,
-                        radius: tokens.radiusXs,
-                        color: day == null
-                            ? Colors.transparent
-                            : _fill(tokens, intensityByDate[_key(day)] ?? 0),
+        final gutter = showWeekdayLabels && weekdayLabels.isNotEmpty
+            ? _WeekdayGutter(
+                labels: weekdayLabels,
+                rowHeight: rowHeight,
+                gap: gap,
+              )
+            : null;
+
+        final grid = Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (gutter != null) ...[gutter, SizedBox(width: gap * 2)],
+            for (final week in weeks)
+              Padding(
+                padding: EdgeInsets.only(right: gap),
+                child: Column(
+                  children: [
+                    for (final day in week)
+                      Padding(
+                        padding: EdgeInsets.only(bottom: gap),
+                        child: SizedBox(
+                          height: rowHeight,
+                          child: Center(
+                            child: _Cell(
+                              size: cellSize,
+                              radius: tokens.radiusXs,
+                              color: day == null
+                                  ? Colors.transparent
+                                  : _fill(
+                                      tokens,
+                                      intensityByDate[_key(day)] ?? 0,
+                                    ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
-            ),
-        ],
-      ),
+          ],
+        );
+
+        // The scroll view is the fallback below the legible minimum: a window
+        // whose solved cell edge came out under it wanted more room than the
+        // pane has.
+        if (raw < minCellSize && constraints.maxWidth.isFinite) {
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: grid,
+          );
+        }
+        return grid;
+      },
     );
   }
 
@@ -156,12 +239,12 @@ class _Cell extends StatelessWidget {
 class _WeekdayGutter extends StatelessWidget {
   const _WeekdayGutter({
     required this.labels,
-    required this.cellSize,
+    required this.rowHeight,
     required this.gap,
   });
 
   final Map<int, String> labels;
-  final double cellSize;
+  final double rowHeight;
   final double gap;
 
   @override
@@ -172,7 +255,7 @@ class _WeekdayGutter extends StatelessWidget {
       children: [
         for (var weekday = 1; weekday <= 7; weekday++)
           Container(
-            height: cellSize,
+            height: rowHeight,
             margin: EdgeInsets.only(bottom: gap),
             alignment: Alignment.centerRight,
             child: Text(
@@ -184,6 +267,89 @@ class _WeekdayGutter extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// One bar per day over `[from, to]`, height ranked against the window's
+/// busiest day.
+///
+/// The report's month and year views carry this under the heatmap: the grid
+/// says WHICH days were active, the bars say how much. The week view does not
+/// get one — seven cells already read as magnitudes, and the `When you work`
+/// buckets own the within-week shape. Built from the served `daily` rows'
+/// token counts; a day with no row is a zero-height bar, not a gap in the
+/// strip.
+class UsageDailyHistogram extends StatelessWidget {
+  /// Creates a daily histogram over `[from, to]`.
+  const UsageDailyHistogram({
+    required this.from,
+    required this.to,
+    required this.tokensByDate,
+    this.height = 48,
+    super.key,
+  });
+
+  /// First day of the window, inclusive.
+  final DateTime from;
+
+  /// Last day of the window, inclusive.
+  final DateTime to;
+
+  /// `YYYY-MM-DD` to served token count; absent means the day had no row.
+  final Map<String, double> tokensByDate;
+
+  /// Height of the strip, bars included.
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final start = DateTime.utc(from.year, from.month, from.day);
+    final end = DateTime.utc(to.year, to.month, to.day);
+    if (end.isBefore(start)) return const SizedBox.shrink();
+    final days = end.difference(start).inDays + 1;
+
+    var peak = 0.0;
+    final counts = <double>[];
+    for (var i = 0; i < days; i++) {
+      final count =
+          tokensByDate[UsageHeatmap._key(start.add(Duration(days: i)))] ?? 0;
+      counts.add(count);
+      if (count > peak) peak = count;
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const spacing = 1.0;
+        final barWidth = (constraints.maxWidth - spacing * (days - 1)) / days;
+        return SizedBox(
+          height: height,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (var i = 0; i < days; i++) ...[
+                if (i > 0) const SizedBox(width: spacing),
+                Container(
+                  width: barWidth,
+                  // An active day never rounds to nothing: it gets a visible
+                  // floor so the bar answers "was there work" even when the
+                  // peak dwarfs it.
+                  height: counts[i] <= 0
+                      ? 0
+                      : (counts[i] / peak * (height - 2)).clamp(2.0, height),
+                  decoration: BoxDecoration(
+                    color: counts[i] <= 0
+                        ? Colors.transparent
+                        : tokens.accent.withValues(alpha: 0.85),
+                    borderRadius: BorderRadius.circular(tokens.radiusXs),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 }

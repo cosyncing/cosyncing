@@ -108,9 +108,6 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final machineLabel = _machine.text.trim().isEmpty
-        ? l10n.usageTodayTitle
-        : _machine.text.trim();
     // A card whose whole purpose is project names has nothing to carry when the
     // broker withheld them, and offering it would promise a tier this caller
     // cannot export.
@@ -155,17 +152,6 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 12),
-        TextField(
-          key: const Key('usage-export-machine'),
-          controller: _machine,
-          onChanged: (_) => setState(() {}),
-          decoration: InputDecoration(
-            labelText: l10n.usageMachineLabelField,
-            border: const OutlineInputBorder(),
-            isDense: true,
-          ),
-        ),
-        const SizedBox(height: 8),
         SwitchListTile(
           key: const Key('usage-export-cost'),
           contentPadding: EdgeInsets.zero,
@@ -185,7 +171,6 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
                   boundaries: _boundaries,
                   spec: spec,
                   report: widget.report,
-                  machineLabel: machineLabel,
                   locale: widget.locale,
                   includeCost: _includeCost,
                   busy: _busy,
@@ -277,7 +262,6 @@ class _CardColumn extends StatelessWidget {
     required this.boundaries,
     required this.spec,
     required this.report,
-    required this.machineLabel,
     required this.locale,
     required this.includeCost,
     required this.busy,
@@ -288,7 +272,6 @@ class _CardColumn extends StatelessWidget {
   final Map<(UsageExportCardKind, Brightness), GlobalKey> boundaries;
   final ThemeSpec spec;
   final UsageReport report;
-  final String machineLabel;
   final String locale;
   final bool includeCost;
   final bool busy;
@@ -313,7 +296,6 @@ class _CardColumn extends StatelessWidget {
                   spec: spec,
                   kind: kind,
                   report: report,
-                  machineLabel: machineLabel,
                   locale: locale,
                   includeCost: includeCost,
                 ),
@@ -351,7 +333,6 @@ class _Preview extends StatelessWidget {
     required this.spec,
     required this.kind,
     required this.report,
-    required this.machineLabel,
     required this.locale,
     required this.includeCost,
   });
@@ -361,7 +342,6 @@ class _Preview extends StatelessWidget {
   final ThemeSpec spec;
   final UsageExportCardKind kind;
   final UsageReport report;
-  final String machineLabel;
   final String locale;
   final bool includeCost;
 
@@ -377,7 +357,6 @@ class _Preview extends StatelessWidget {
         child: UsageExportCard(
           kind: kind,
           report: report,
-          machineLabel: machineLabel,
           locale: locale,
           includeCost: includeCost,
         ),
