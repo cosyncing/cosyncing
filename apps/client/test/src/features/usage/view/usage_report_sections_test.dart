@@ -77,47 +77,59 @@ void main() {
   }
 
   group('hero', () {
-    testWidgets('three numbers and one sentence carrying every claim', (
-      tester,
-    ) async {
+    testWidgets('a wrapping stat grid carrying every figure', (tester) async {
       await tester.pumpWidget(buildSubject(data: sampleReport()));
       await tester.pumpAndSettle();
 
       final hero = find.byKey(const Key('usage-report-hero'));
       expect(hero, findsOneWidget);
-      for (final figure in ['19.9B', '786.2h', '31']) {
+      // The tokdash tile order: tokens, cost, messages, sessions, agent time,
+      // cache hit rate, streak, and the period's peak (week for a month).
+      for (final label in [
+        'TOKENS',
+        'COST',
+        'MESSAGES',
+        'SESSIONS',
+        'EST. AGENT TIME',
+        'CACHE HIT RATE',
+        'DAY STREAK',
+        'PEAK WEEK',
+      ]) {
+        expect(
+          find.descendant(of: hero, matching: find.text(label)),
+          findsOneWidget,
+          reason: label,
+        );
+      }
+      for (final figure in ['19.9B', r'$12,977', '129K', '294', '786.2h']) {
         expect(
           find.descendant(of: hero, matching: find.text(figure)),
           findsOneWidget,
+          reason: figure,
         );
       }
-
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
-      );
-      // Sessions, tokens, the qualified cost, the served delta, and the window
-      // it is measured against — all of them served, none of them rounded into
-      // a different claim.
-      expect(sentence.data, contains('294 sessions'));
-      expect(sentence.data, contains('19.9B tokens'));
-      expect(sentence.data, contains('at API list prices — not your bill'));
-      expect(sentence.data, contains('15.5% more'));
-      expect(sentence.data, contains('than July'));
+      // The sentence is gone: the tiles are the figures, not a second
+      // rendering of them.
+      expect(find.byKey(const Key('usage-report-hero-sentence')), findsNothing);
     });
 
-    testWidgets('no served comparison drops the clause, never zeroes it', (
+    testWidgets('the peak tile answers a different window per period', (
       tester,
     ) async {
-      final data = sampleReport()..remove('comparison');
-      await tester.pumpWidget(buildSubject(data: data));
-      await tester.pumpAndSettle();
-
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
+      await tester.pumpWidget(
+        buildSubject(data: sampleReport(), initialPeriod: UsagePeriod.year),
       );
-      expect(sentence.data, isNot(contains('more')));
-      expect(sentence.data, isNot(contains('0%')));
-      expect(sentence.data, contains('19.9B tokens'));
+      await tester.pumpAndSettle();
+      expect(find.text('PEAK MONTH'), findsOneWidget);
+
+      // `initialPeriod` seeds the page's state, so the second page needs its
+      // own element — pump a blank tree in between to drop the first state.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        buildSubject(data: sampleReport(), initialPeriod: UsagePeriod.week),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('PEAK DAY'), findsOneWidget);
     });
   });
 
@@ -145,6 +157,45 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    testWidgets('a month in progress draws the full calendar month', (
+      tester,
+    ) async {
+      // The broker closes the window at today; the grid extends it to the
+      // month end, with the tail drawn as empty cells rather than holes.
+      final data = sampleReport();
+      (data['range']! as Map<String, dynamic>)
+        ..['from'] = '2026-08-01'
+        ..['to'] = '2026-08-15'
+        ..['days'] = 31;
+      await tester.pumpWidget(buildSubject(data: data));
+      await tester.pumpAndSettle();
+
+      final heatmap = tester.widget<UsageHeatmap>(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-active-days')),
+          matching: find.byType(UsageHeatmap),
+        ),
+      );
+      expect(heatmap.to, DateTime(2026, 8, 31));
+    });
+
+    testWidgets('the week view gets no per-day histogram', (tester) async {
+      await tester.pumpWidget(
+        buildSubject(data: sampleReport(), initialPeriod: UsagePeriod.week),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(UsageDailyHistogram), findsNothing);
+    });
+
+    testWidgets('the month view draws the per-day histogram', (tester) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(UsageDailyHistogram), findsOneWidget);
+      expect(find.text('Tokens per day'), findsOneWidget);
     });
 
     testWidgets('no daily facet means no heatmap, not an empty grid', (
@@ -402,7 +453,12 @@ void main() {
       // The period owns its heading and its explicit window; a year must not
       // borrow the month's.
       expect(find.text('Top of the year'), findsOneWidget);
-      expect(find.text('2026-01-01 – 2026-09-01'), findsOneWidget);
+      // The export-card previews print the identical range, so read the
+      // header line by key rather than by text.
+      expect(
+        tester.widget<Text>(find.byKey(const Key('usage-report-range'))).data,
+        contains('2026-01-01 – 2026-09-01'),
+      );
       expect(
         find.descendant(
           of: find.byKey(const Key('usage-report-active-days')),
@@ -412,7 +468,7 @@ void main() {
       );
     });
 
-    testWidgets('the year sentence compares against the year before', (
+    testWidgets('the year grid fills the width and shows the daily bars', (
       tester,
     ) async {
       await tester.pumpWidget(buildSubject(data: yearReport()));
@@ -420,73 +476,13 @@ void main() {
       await tester.tap(find.text('Year'));
       await tester.pumpAndSettle();
 
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
-      );
-      expect(sentence.data, contains('In 2026'));
-      expect(sentence.data, contains('than 2025'));
-      // Sessions were counted, not estimated: 2.5K would read as a rounding
-      // of something exact.
-      expect(sentence.data, contains('294 sessions'));
-    });
-
-    testWidgets('a first year has nothing to compare against, and says so', (
-      tester,
-    ) async {
-      // This machine's real 2026 window serves tokensPct = 1231088.3, because
-      // the 244 days before it are mostly before the record begins. The figure
-      // is served and arithmetically true; as a sentence it is about nothing.
-      final data = yearReport();
-      data['comparison'] = {
-        'tokensPrev': 4676830,
-        'tokensPct': 1231088.3,
-      };
-      await tester.pumpWidget(buildSubject(data: data));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Year'));
-      await tester.pumpAndSettle();
-
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
-      );
-      expect(sentence.data, isNot(contains('%')));
-      expect(sentence.data, isNot(contains('than 2025')));
-      // Everything it can say, it still says.
-      expect(sentence.data, contains('In 2026'));
-      expect(sentence.data, contains('19.9B tokens'));
-    });
-
-    testWidgets('an empty prior window drops the clause too', (tester) async {
-      final data = yearReport();
-      data['comparison'] = {'tokensPrev': 0, 'tokensPct': 0};
-      await tester.pumpWidget(buildSubject(data: data));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Year'));
-      await tester.pumpAndSettle();
-
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
-      );
-      // A served pct of 0 against an empty window is not "no change".
-      expect(sentence.data, isNot(contains('0% more')));
-      expect(sentence.data, isNot(contains('than 2025')));
-    });
-
-    testWidgets('a week has no nameable predecessor, so it drops the clause', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildSubject(data: sampleReport()));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Week'));
-      await tester.pumpAndSettle();
-
-      final sentence = tester.widget<Text>(
-        find.byKey(const Key('usage-report-hero-sentence')),
-      );
-      // Rather than inventing "than the previous week", which is a phrase and
-      // not a window the reader could check.
-      expect(sentence.data, isNot(contains('than')));
-      expect(sentence.data, contains('19.9B tokens'));
+      // The per-day histogram rides under the year grid, never over the week.
+      expect(find.byType(UsageDailyHistogram), findsOneWidget);
+      expect(find.text('Tokens per day'), findsOneWidget);
+      // The peak tile names a month on the year period.
+      expect(find.text('PEAK MONTH'), findsOneWidget);
+      // The sentence is gone on every period.
+      expect(find.byKey(const Key('usage-report-hero-sentence')), findsNothing);
     });
   });
 

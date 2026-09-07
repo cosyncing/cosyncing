@@ -3,6 +3,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/design/window_size_class.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 
@@ -243,14 +244,26 @@ class _ToolRow extends StatelessWidget {
                 padding: EdgeInsets.only(
                   left: column == _Column.agent && indented ? 14 : 0,
                 ),
-                child: Text(
-                  _cell(column, l10n),
-                  textAlign: column == _Column.agent
-                      ? TextAlign.start
-                      : TextAlign.end,
-                  overflow: TextOverflow.ellipsis,
-                  style: style,
-                ),
+                child: column == _Column.agent
+                    ? Row(
+                        children: [
+                          UsageAgentLogo(tool: tool.tool, size: 14),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              _cell(column, l10n),
+                              overflow: TextOverflow.ellipsis,
+                              style: style,
+                            ),
+                          ),
+                        ],
+                      )
+                    : Text(
+                        _cell(column, l10n),
+                        textAlign: TextAlign.end,
+                        overflow: TextOverflow.ellipsis,
+                        style: style,
+                      ),
               ),
             ),
         ],

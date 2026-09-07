@@ -247,7 +247,6 @@ void main() {
           child: UsageExportCard(
             kind: kind,
             report: report,
-            machineLabel: locale.languageCode == 'zh' ? '本机' : 'This machine',
             locale: locale.toLanguageTag(),
             includeCost: true,
           ),

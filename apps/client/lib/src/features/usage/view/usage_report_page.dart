@@ -20,8 +20,7 @@ import 'package:intl/intl.dart';
 /// Settings → Usage overview: what this machine actually did.
 ///
 /// Scope is the machine, never "your cosyncing sessions": the broker host's
-/// tokdash sees every agent on it, and cosyncing adapts a subset. The page says
-/// so in a subtitle that is not optional.
+/// tokdash sees every agent on it, and cosyncing adapts a subset.
 class UsageReportPage extends ConsumerStatefulWidget {
   /// Creates the usage report page.
   const UsageReportPage({this.initialPeriod, super.key});
@@ -261,7 +260,6 @@ class _UsageReportBody extends StatelessWidget {
           UsageHero(
             period: period,
             report: report,
-            periodLabel: usageWindowTitle(l10n, period, report.range, locale),
             locale: locale,
             activeTimeTooltip: active == null
                 ? null
@@ -309,8 +307,10 @@ class _ActiveDays extends StatelessWidget {
     if (daily == null || daily.isEmpty) return const SizedBox.shrink();
 
     final requestedFrom = DateTime.tryParse(report.range.from);
-    final to = DateTime.tryParse(report.range.to);
-    if (requestedFrom == null || to == null) return const SizedBox.shrink();
+    final servedTo = DateTime.tryParse(report.range.to);
+    if (requestedFrom == null || servedTo == null) {
+      return const SizedBox.shrink();
+    }
 
     // All-time, and only all-time, starts where the data does.
     //
@@ -330,16 +330,25 @@ class _ActiveDays extends StatelessWidget {
         ? usageHeatmapStart(requestedFrom, report)
         : requestedFrom;
 
+    // The month period draws the whole calendar month: the broker closes the
+    // window at today, which left September rendering as one column. The tail
+    // after today is drawn as EMPTY CELLS (inactive), GitHub-style — a
+    // deliberate choice against the widget's hole semantics, because these
+    // days are known-future, not uncovered.
+    final to = period == UsagePeriod.month
+        ? DateTime(servedTo.year, servedTo.month + 1, 0)
+        : servedTo;
+
     final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
     // A year of week columns will not fit any phone, so the cells shrink with
-    // the window rather than the grid dropping weeks it cannot show.
+    // the window rather than the grid dropping weeks it cannot show. Within a
+    // density the grid solves its own cell edge against the pane width.
     final wide = to.difference(from).inDays > 120;
-    final cellSize = wide ? (compact ? 5.0 : 7.0) : (compact ? 10.0 : 12.0);
 
     // "Still running" is decided against the served window's own end, not the
     // client clock's idea of the period.
     final today = DateTime.now();
-    final windowIsOpen = !to.isBefore(
+    final windowIsOpen = !servedTo.isBefore(
       DateTime(today.year, today.month, today.day),
     );
     final streak = _streakLine(
@@ -360,7 +369,8 @@ class _ActiveDays extends StatelessWidget {
             for (final day in daily)
               if (day.intensity != null) day.date: day.intensity!,
           },
-          cellSize: cellSize,
+          maxCellSize: wide ? 14 : 12,
+          minCellSize: wide ? 4 : usageHeatmapMinCell,
           gap: wide ? 2 : 3,
           weekdayLabels: _weekdayLabels(locale, sparse: compact || wide),
         ),
@@ -369,6 +379,25 @@ class _ActiveDays extends StatelessWidget {
           lessLabel: l10n.usageLegendLess,
           moreLabel: l10n.usageLegendMore,
         ),
+        // The week view does not get bars: seven cells already read as
+        // magnitudes, and the `When you work` buckets own the within-week
+        // shape. Month and year do, where the grid answers "which days" and
+        // the bars answer "how much".
+        if (period == UsagePeriod.month || period == UsagePeriod.year) ...[
+          const SizedBox(height: 12),
+          Text(
+            l10n.usageDailyHistogramTitle,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: context.tokens.textTertiary,
+            ),
+          ),
+          const SizedBox(height: 4),
+          UsageDailyHistogram(
+            from: from,
+            to: to,
+            tokensByDate: {for (final day in daily) day.date: day.tokens},
+          ),
+        ],
         if (streak != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -456,25 +485,33 @@ class _Header extends StatelessWidget {
     final tokens = context.tokens;
     final window = report.range;
 
-    final suffixes = <String>[];
-    final days = window.days;
-    final firsts = report.firsts;
     // In progress is derived from the served window against its own last active
     // day, so a closed period never claims to still be running.
+    String? progress;
+    final days = window.days;
+    final firsts = report.firsts;
     if (days != null && firsts?.lastActiveDay != null) {
       final last = DateTime.tryParse(firsts!.lastActiveDay!);
       final to = DateTime.tryParse(window.to);
       if (last != null && to != null && !last.isBefore(to)) {
         final elapsed = resolveUsageWindow(period, DateTime.now());
         if (elapsed.inProgress) {
-          suffixes.add(
-            l10n.usageInProgress(elapsed.elapsedDays, elapsed.totalDays!),
+          progress = l10n.usageInProgress(
+            elapsed.elapsedDays,
+            elapsed.totalDays!,
           );
         }
       }
     }
-    final timezone = report.timezone;
-    if (timezone != null) suffixes.add(l10n.usageBrokerTime(timezone));
+
+    // One line: the progress note, then the explicit range. A period name
+    // alone lets "Year" imply twelve months over a window that opened in
+    // March, so the range is always printed — and the zone the buckets are
+    // bucketed by is stated by `When you work`, which owns it.
+    final line = [
+      if (progress != null) progress,
+      l10n.usageWindowRange(window.from, window.to),
+    ].join(' · ');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -486,32 +523,13 @@ class _Header extends StatelessWidget {
           key: const Key('usage-report-title'),
           style: theme.textTheme.titleMedium,
         ),
-        if (suffixes.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Text(
-              suffixes.join(' '),
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: tokens.textTertiary,
-              ),
-            ),
-          ),
         const SizedBox(height: 4),
-        // The explicit range, always. A period name alone lets "Year" imply
-        // twelve months over a window that opened in March.
         Text(
-          l10n.usageWindowRange(window.from, window.to),
+          line,
+          key: const Key('usage-report-range'),
           style: theme.textTheme.bodySmall?.copyWith(
             color: tokens.textTertiary,
             fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          l10n.usageReportScope,
-          key: const Key('usage-report-scope'),
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: tokens.textTertiary,
           ),
         ),
       ],

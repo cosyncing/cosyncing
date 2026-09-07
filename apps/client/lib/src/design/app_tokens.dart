@@ -23,6 +23,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     required this.accent,
     required this.accentInk,
     required this.accentSurface,
+    required this.costInk,
     required this.statusWorking,
     required this.statusNeedsInput,
     required this.statusIdle,
@@ -86,6 +87,16 @@ class AppTokens extends ThemeExtension<AppTokens> {
   /// themes sit under 4.8:1 against [surface2] already and have no headroom
   /// left for a wash. Use it behind plain text, not behind highlighted code.
   final Color accentSurface;
+
+  /// Money figures (usage cost), contrast-verified against [surface] per
+  /// theme.
+  ///
+  /// Cost sits next to the accent-spending token figure, so it needs its own
+  /// ink rather than a second spend of [accent]. Each theme answers for its
+  /// own ground: a warm complement against the cool-accent themes, a cool ink
+  /// against cyber_amber's warm field, and a plain value step on the
+  /// monochrome themes, whose premise is not having a hue.
+  final Color costInk;
 
   /// Agent running/active.
   final Color statusWorking;
@@ -186,6 +197,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
     Color? accent,
     Color? accentInk,
     Color? accentSurface,
+    Color? costInk,
     Color? statusWorking,
     Color? statusNeedsInput,
     Color? statusIdle,
@@ -220,6 +232,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       accent: accent ?? this.accent,
       accentInk: accentInk ?? this.accentInk,
       accentSurface: accentSurface ?? this.accentSurface,
+      costInk: costInk ?? this.costInk,
       statusWorking: statusWorking ?? this.statusWorking,
       statusNeedsInput: statusNeedsInput ?? this.statusNeedsInput,
       statusIdle: statusIdle ?? this.statusIdle,
@@ -261,6 +274,7 @@ class AppTokens extends ThemeExtension<AppTokens> {
       accent: Color.lerp(accent, other.accent, t)!,
       accentInk: Color.lerp(accentInk, other.accentInk, t)!,
       accentSurface: Color.lerp(accentSurface, other.accentSurface, t)!,
+      costInk: Color.lerp(costInk, other.costInk, t)!,
       statusWorking: Color.lerp(statusWorking, other.statusWorking, t)!,
       statusNeedsInput: Color.lerp(
         statusNeedsInput,

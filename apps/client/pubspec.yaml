@@ -66,3 +66,8 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   generate: true
+  assets:
+    # Per-harness brand marks for the usage surfaces, from tokdash's icon set.
+    # Provenance is documented in assets/agents/README.md; all marks remain the
+    # property of their respective owners.
+    - assets/agents/

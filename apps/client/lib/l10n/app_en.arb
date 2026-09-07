@@ -1170,9 +1170,6 @@
   "sessionsMachineConnectTitle": "Connect to {machine}?",
   "@sessionsMachineConnectTitle": {
     "placeholders": {
-      "machine": {
-        "type": "String"
-      }
     }
   },
   "sessionsMachineConnectBody": "This session belongs to another server. cosyncing will switch to the independently paired “{profileName}” profile.",
@@ -1187,9 +1184,6 @@
   "sessionsMachinePairBody": "{machine} owns this session at {brokerUrl}. Save and pair that server as its own profile before connecting. Credentials from the current server are never forwarded.",
   "@sessionsMachinePairBody": {
     "placeholders": {
-      "machine": {
-        "type": "String"
-      },
       "brokerUrl": {
         "type": "String"
       }
@@ -4342,9 +4336,6 @@
   "connectionConnectedMachine": "Connected to {machine}.",
   "@connectionConnectedMachine": {
     "placeholders": {
-      "machine": {
-        "type": "String"
-      }
     }
   },
   "connectionConnectedAt": "The server at {brokerUrl} is reachable.",
@@ -4764,10 +4755,6 @@
       }
     }
   },
-  "usageReportScope": "All agent activity on this machine, including sessions not started from cosyncing.",
-  "@usageReportScope": {
-    "description": "Mandatory scope line under the report title. The scope is the machine, never cosyncing."
-  },
   "usagePeriodWeek": "Week",
   "@usagePeriodWeek": {
     "description": "Report period switcher segment: the current week."
@@ -4798,9 +4785,9 @@
       }
     }
   },
-  "usageInProgress": "· in progress, {day} of {total} days",
+  "usageInProgress": "in progress, {day} of {total} days",
   "@usageInProgress": {
-    "description": "Report header suffix while the period is still running.",
+    "description": "Report header progress note while the period is still running, joined with the explicit range on one line.",
     "placeholders": {
       "day": {
         "type": "int",
@@ -4809,16 +4796,6 @@
       "total": {
         "type": "int",
         "example": "7"
-      }
-    }
-  },
-  "usageBrokerTime": "(broker time, {zone})",
-  "@usageBrokerTime": {
-    "description": "Report header suffix naming the zone the day boundaries are cut in.",
-    "placeholders": {
-      "zone": {
-        "type": "String",
-        "example": "Europe/London"
       }
     }
   },
@@ -4938,9 +4915,9 @@
       }
     }
   },
-  "usageActiveEstimatedTip": "Estimated — idle gaps over {minutes} minutes are excluded.",
+  "usageActiveEstimatedTip": "Estimated agent time summed across agents running at the same time — idle gaps over {minutes} minutes are excluded.",
   "@usageActiveEstimatedTip": {
-    "description": "Tooltip explaining how agent time is estimated. The gap is served by the broker, never assumed.",
+    "description": "Tooltip explaining how agent time is estimated: a sum across concurrent agents, never wall-clock time. The gap is served by the broker, never assumed.",
     "placeholders": {
       "minutes": {
         "type": "int",
@@ -5044,93 +5021,59 @@
   "@usageDayBoundaryNote": {
     "description": "Footer note fixing what a day means on these surfaces."
   },
-  "usageHeroTokens": "tokens",
-  "@usageHeroTokens": {
-    "description": "Unit under the hero token figure."
+  "usageStatTokens": "Tokens",
+  "@usageStatTokens": {
+    "description": "Hero stat tile label: total tokens."
   },
-  "usageHeroActiveTime": "active time",
-  "@usageHeroActiveTime": {
-    "description": "Unit under the hero active-time figure."
+  "usageStatCost": "Cost",
+  "@usageStatCost": {
+    "description": "Hero stat tile label: API list-price equivalent. Rendered in the costInk token, with the qualifier on its tooltip."
   },
-  "usageHeroActiveDays": "active days",
-  "@usageHeroActiveDays": {
-    "description": "Unit under the hero active-days figure."
+  "usageStatMessages": "Messages",
+  "@usageStatMessages": {
+    "description": "Hero stat tile label: total requests/messages."
   },
-  "usageEstimatedShort": "est.",
-  "@usageEstimatedShort": {
-    "description": "Pill on the hero active-time cell; the estimation rule is on its tooltip."
+  "usageStatSessions": "Sessions",
+  "@usageStatSessions": {
+    "description": "Hero stat tile label: total sessions."
   },
-  "usageHeroSentence": "In {period} you drove {sessions} sessions and used {tokens} tokens ({cost}), {delta} than {previous}.",
-  "@usageHeroSentence": {
-    "description": "The one sentence carrying the report voice. Every part is a served figure; the sentence adds no claim of its own.",
+  "usageStatAgentTime": "Est. agent time",
+  "@usageStatAgentTime": {
+    "description": "Hero stat tile label: estimated agent time, summed across concurrent agents. Not wall-clock time; the estimation rule is on its tooltip."
+  },
+  "usageStatCacheHit": "Cache hit rate",
+  "@usageStatCacheHit": {
+    "description": "Hero stat tile label: share of tokens served from cache."
+  },
+  "usageStatStreak": "Day streak",
+  "@usageStatStreak": {
+    "description": "Hero stat tile label: current run of consecutive active days."
+  },
+  "usageStatStreakMeta": "longest {days}",
+  "@usageStatStreakMeta": {
+    "description": "Meta line under the streak tile: the longest run in the window.",
     "placeholders": {
-      "period": {
+      "days": {
         "type": "String",
-        "example": "August"
-      },
-      "sessions": {
-        "type": "String",
-        "example": "422"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "19.9B"
-      },
-      "cost": {
-        "type": "String",
-        "example": "≈12,977 at API list prices — not your bill"
-      },
-      "delta": {
-        "type": "String",
-        "example": "15.5% more"
-      },
-      "previous": {
-        "type": "String",
-        "example": "July"
+        "example": "31"
       }
     }
   },
-  "usageHeroSentencePlain": "In {period} you drove {sessions} sessions and used {tokens} tokens ({cost}).",
-  "@usageHeroSentencePlain": {
-    "description": "The hero sentence for a period with nothing to compare against. A missing comparison is dropped, never rendered as a zero delta.",
-    "placeholders": {
-      "period": {
-        "type": "String",
-        "example": "August"
-      },
-      "sessions": {
-        "type": "String",
-        "example": "422"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "19.9B"
-      },
-      "cost": {
-        "type": "String",
-        "example": "$12,977"
-      }
-    }
+  "usageStatPeakDay": "Peak day",
+  "@usageStatPeakDay": {
+    "description": "Hero stat tile label: busiest day of the window (week period)."
   },
-  "usageDeltaMore": "{percent} more",
-  "@usageDeltaMore": {
-    "description": "Rising half of the hero delta phrase.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "15.5%"
-      }
-    }
+  "usageStatPeakWeek": "Peak week",
+  "@usageStatPeakWeek": {
+    "description": "Hero stat tile label: busiest Monday-first week of the window, folded from the daily rows (month period)."
   },
-  "usageDeltaLess": "{percent} less",
-  "@usageDeltaLess": {
-    "description": "Falling half of the hero delta phrase.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "15.5%"
-      }
-    }
+  "usageStatPeakMonth": "Peak month",
+  "@usageStatPeakMonth": {
+    "description": "Hero stat tile label: busiest calendar month of the window, folded from the daily rows (year and all-time periods)."
+  },
+  "usageDailyHistogramTitle": "Tokens per day",
+  "@usageDailyHistogramTitle": {
+    "description": "Caption over the per-day token histogram under the active-days heatmap (month and year periods)."
   },
   "usageActiveDaysTitle": "Active days",
   "@usageActiveDaysTitle": {
@@ -5376,7 +5319,7 @@
       }
     }
   },
-  "usageCardTierOverview": "COSYNCING · THIS MACHINE",
+  "usageCardTierOverview": "COSYNCING",
   "@usageCardTierOverview": {
     "description": "Green-tier card header. Counts only."
   },
@@ -5394,9 +5337,9 @@
       }
     }
   },
-  "usageCardRange": "{from} – {to} · all agent activity on {machine}",
+  "usageCardRange": "{from} – {to}",
   "@usageCardRange": {
-    "description": "Scope line on the export card. The machine is a nickname the sender chose; the hostname is never used.",
+    "description": "Window bounds on the export card.",
     "placeholders": {
       "from": {
         "type": "String",
@@ -5405,14 +5348,10 @@
       "to": {
         "type": "String",
         "example": "2026-09-01"
-      },
-      "machine": {
-        "type": "String",
-        "example": "this machine"
       }
     }
   },
-  "usageCardHeroSub": "tokens · {sessions} sessions · {requests} requests",
+  "usageCardHeroSub": "{sessions} sessions · {requests} requests",
   "@usageCardHeroSub": {
     "description": "Unit and counts under the card hero figure.",
     "placeholders": {
@@ -5492,17 +5431,9 @@
       }
     }
   },
-  "usageCardManifestOverview": "Counts only · no project names · no prompt text",
-  "@usageCardManifestOverview": {
-    "description": "The card prints its own content policy: a recipient audits it by reading it."
-  },
   "usageCardManifestProjects": "Counts + project names · no prompt text · share deliberately",
   "@usageCardManifestProjects": {
     "description": "As above, amber tier."
-  },
-  "usageCardAttribution": "cosyncing · tokdash",
-  "@usageCardAttribution": {
-    "description": "Attribution line in the card footer."
   },
   "usageShareTitle": "Share",
   "@usageShareTitle": {
@@ -5527,10 +5458,6 @@
   "usageCostToggle": "Include cost (API list price, not your bill)",
   "@usageCostToggle": {
     "description": "The only toggle on the cards, and it stays inside the green tier."
-  },
-  "usageMachineLabelField": "Name for this machine",
-  "@usageMachineLabelField": {
-    "description": "Nickname field for the export cards."
   },
   "usageExportSaved": "Saved {light} and {dark}",
   "@usageExportSaved": {

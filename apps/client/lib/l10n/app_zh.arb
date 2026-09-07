@@ -1698,10 +1698,6 @@
       }
     }
   },
-  "usageReportScope": "本机全部 agent 活动，含未通过 cosyncing 启动的会话。",
-  "@usageReportScope": {
-    "description": "Mandatory scope line under the report title. The scope is the machine, never cosyncing."
-  },
   "usagePeriodWeek": "周",
   "@usagePeriodWeek": {
     "description": "Report period switcher segment: the current week."
@@ -1732,9 +1728,9 @@
       }
     }
   },
-  "usageInProgress": "· 进行中，{total} 天中的第 {day} 天",
+  "usageInProgress": "进行中，{total} 天中的第 {day} 天",
   "@usageInProgress": {
-    "description": "Report header suffix while the period is still running.",
+    "description": "Report header progress note while the period is still running, joined with the explicit range on one line.",
     "placeholders": {
       "day": {
         "type": "int",
@@ -1743,16 +1739,6 @@
       "total": {
         "type": "int",
         "example": "7"
-      }
-    }
-  },
-  "usageBrokerTime": "（服务器时间，{zone}）",
-  "@usageBrokerTime": {
-    "description": "Report header suffix naming the zone the day boundaries are cut in.",
-    "placeholders": {
-      "zone": {
-        "type": "String",
-        "example": "Europe/London"
       }
     }
   },
@@ -1872,9 +1858,9 @@
       }
     }
   },
-  "usageActiveEstimatedTip": "为估算值，超过 {minutes} 分钟的空闲不计入。",
+  "usageActiveEstimatedTip": "估算的智能体时间，为同时运行的各智能体之和 — 超过 {minutes} 分钟的空闲间隔不计入。",
   "@usageActiveEstimatedTip": {
-    "description": "Tooltip explaining how agent time is estimated. The gap is served by the broker, never assumed.",
+    "description": "Tooltip explaining how agent time is estimated: a sum across concurrent agents, never wall-clock time. The gap is served by the broker, never assumed.",
     "placeholders": {
       "minutes": {
         "type": "int",
@@ -1978,93 +1964,59 @@
   "@usageDayBoundaryNote": {
     "description": "Footer note fixing what a day means on these surfaces."
   },
-  "usageHeroTokens": "token",
-  "@usageHeroTokens": {
-    "description": "Unit under the hero token figure."
+  "usageStatTokens": "Token 数",
+  "@usageStatTokens": {
+    "description": "Hero stat tile label: total tokens."
   },
-  "usageHeroActiveTime": "活跃时间",
-  "@usageHeroActiveTime": {
-    "description": "Unit under the hero active-time figure."
+  "usageStatCost": "费用",
+  "@usageStatCost": {
+    "description": "Hero stat tile label: API list-price equivalent. Rendered in the costInk token, with the qualifier on its tooltip."
   },
-  "usageHeroActiveDays": "活跃天数",
-  "@usageHeroActiveDays": {
-    "description": "Unit under the hero active-days figure."
+  "usageStatMessages": "消息数",
+  "@usageStatMessages": {
+    "description": "Hero stat tile label: total requests/messages."
   },
-  "usageEstimatedShort": "估算",
-  "@usageEstimatedShort": {
-    "description": "Pill on the hero active-time cell; the estimation rule is on its tooltip."
+  "usageStatSessions": "会话数",
+  "@usageStatSessions": {
+    "description": "Hero stat tile label: total sessions."
   },
-  "usageHeroSentence": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}），比{previous}{delta}。",
-  "@usageHeroSentence": {
-    "description": "The one sentence carrying the report voice. Every part is a served figure; the sentence adds no claim of its own.",
+  "usageStatAgentTime": "估算智能体时间",
+  "@usageStatAgentTime": {
+    "description": "Hero stat tile label: estimated agent time, summed across concurrent agents. Not wall-clock time; the estimation rule is on its tooltip."
+  },
+  "usageStatCacheHit": "缓存命中率",
+  "@usageStatCacheHit": {
+    "description": "Hero stat tile label: share of tokens served from cache."
+  },
+  "usageStatStreak": "连续天数",
+  "@usageStatStreak": {
+    "description": "Hero stat tile label: current run of consecutive active days."
+  },
+  "usageStatStreakMeta": "最长 {days}",
+  "@usageStatStreakMeta": {
+    "description": "Meta line under the streak tile: the longest run in the window.",
     "placeholders": {
-      "period": {
+      "days": {
         "type": "String",
-        "example": "August"
-      },
-      "sessions": {
-        "type": "String",
-        "example": "422"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "19.9B"
-      },
-      "cost": {
-        "type": "String",
-        "example": "≈12,977 at API list prices — not your bill"
-      },
-      "delta": {
-        "type": "String",
-        "example": "15.5% more"
-      },
-      "previous": {
-        "type": "String",
-        "example": "July"
+        "example": "31"
       }
     }
   },
-  "usageHeroSentencePlain": "{period}你驱动了 {sessions} 个会话，消耗 {tokens} token（{cost}）。",
-  "@usageHeroSentencePlain": {
-    "description": "The hero sentence for a period with nothing to compare against. A missing comparison is dropped, never rendered as a zero delta.",
-    "placeholders": {
-      "period": {
-        "type": "String",
-        "example": "August"
-      },
-      "sessions": {
-        "type": "String",
-        "example": "422"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "19.9B"
-      },
-      "cost": {
-        "type": "String",
-        "example": "$12,977"
-      }
-    }
+  "usageStatPeakDay": "峰值日",
+  "@usageStatPeakDay": {
+    "description": "Hero stat tile label: busiest day of the window (week period)."
   },
-  "usageDeltaMore": "多 {percent}",
-  "@usageDeltaMore": {
-    "description": "Rising half of the hero delta phrase.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "15.5%"
-      }
-    }
+  "usageStatPeakWeek": "峰值周",
+  "@usageStatPeakWeek": {
+    "description": "Hero stat tile label: busiest Monday-first week of the window, folded from the daily rows (month period)."
   },
-  "usageDeltaLess": "少 {percent}",
-  "@usageDeltaLess": {
-    "description": "Falling half of the hero delta phrase.",
-    "placeholders": {
-      "percent": {
-        "type": "String",
-        "example": "15.5%"
-      }
-    }
+  "usageStatPeakMonth": "峰值月",
+  "@usageStatPeakMonth": {
+    "description": "Hero stat tile label: busiest calendar month of the window, folded from the daily rows (year and all-time periods)."
+  },
+  "usageDailyHistogramTitle": "每日 Token 数",
+  "@usageDailyHistogramTitle": {
+    "description": "Caption over the per-day token histogram under the active-days heatmap (month and year periods)."
   },
   "usageActiveDaysTitle": "活跃天数",
   "@usageActiveDaysTitle": {
@@ -2310,7 +2262,7 @@
       }
     }
   },
-  "usageCardTierOverview": "COSYNCING · 本机概况",
+  "usageCardTierOverview": "COSYNCING",
   "@usageCardTierOverview": {
     "description": "Green-tier card header. Counts only."
   },
@@ -2328,9 +2280,9 @@
       }
     }
   },
-  "usageCardRange": "{from} – {to} · {machine}全部 agent 活动",
+  "usageCardRange": "{from} – {to}",
   "@usageCardRange": {
-    "description": "Scope line on the export card. The machine is a nickname the sender chose; the hostname is never used.",
+    "description": "Window bounds on the export card.",
     "placeholders": {
       "from": {
         "type": "String",
@@ -2339,14 +2291,10 @@
       "to": {
         "type": "String",
         "example": "2026-09-01"
-      },
-      "machine": {
-        "type": "String",
-        "example": "this machine"
       }
     }
   },
-  "usageCardHeroSub": "token · {sessions} 个会话 · {requests} 次请求",
+  "usageCardHeroSub": "{sessions} 个会话 · {requests} 次请求",
   "@usageCardHeroSub": {
     "description": "Unit and counts under the card hero figure.",
     "placeholders": {
@@ -2426,17 +2374,9 @@
       }
     }
   },
-  "usageCardManifestOverview": "仅统计数字 · 不含项目名称 · 不含提示词原文",
-  "@usageCardManifestOverview": {
-    "description": "The card prints its own content policy: a recipient audits it by reading it."
-  },
   "usageCardManifestProjects": "含项目名称 · 不含提示词原文 · 请谨慎分享",
   "@usageCardManifestProjects": {
     "description": "As above, amber tier."
-  },
-  "usageCardAttribution": "cosyncing · tokdash",
-  "@usageCardAttribution": {
-    "description": "Attribution line in the card footer."
   },
   "usageShareTitle": "分享",
   "@usageShareTitle": {
@@ -2461,10 +2401,6 @@
   "usageCostToggle": "包含费用（按 API 目录价，非实际账单）",
   "@usageCostToggle": {
     "description": "The only toggle on the cards, and it stays inside the green tier."
-  },
-  "usageMachineLabelField": "本机名称",
-  "@usageMachineLabelField": {
-    "description": "Nickname field for the export cards."
   },
   "usageExportSaved": "已保存 {light} 与 {dark}",
   "@usageExportSaved": {

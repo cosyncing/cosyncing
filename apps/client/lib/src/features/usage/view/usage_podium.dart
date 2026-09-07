@@ -3,6 +3,7 @@ import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 
@@ -59,6 +60,7 @@ class UsagePodium extends StatelessWidget {
         _PodiumTile(
           label: l10n.usagePodiumHarness,
           name: harness.label ?? harness.tool,
+          tool: harness.tool,
           share: harness.tokens / total,
           tokens: harness.tokens,
           detail: _harnessDetail(l10n, harness, locale),
@@ -184,6 +186,7 @@ class _PodiumTile extends StatelessWidget {
     required this.tokens,
     required this.detail,
     required this.locale,
+    this.tool,
   });
 
   final String label;
@@ -193,10 +196,22 @@ class _PodiumTile extends StatelessWidget {
   final String? detail;
   final String locale;
 
+  /// The served tool id when this tile names a harness, for its brand mark.
+  final String? tool;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokensTheme = context.tokens;
+    final nameText = Text(
+      name,
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+      // Content, not chrome: the toolbar type ceiling does not apply.
+      style: theme.textTheme.titleSmall?.copyWith(
+        fontWeight: FontWeight.w600,
+      ),
+    );
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -214,15 +229,16 @@ class _PodiumTile extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          Text(
-            name,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            // Content, not chrome: the toolbar type ceiling does not apply.
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w600,
+          if (tool == null)
+            nameText
+          else
+            Row(
+              children: [
+                UsageAgentLogo(tool: tool!, size: 18),
+                const SizedBox(width: 8),
+                Expanded(child: nameText),
+              ],
             ),
-          ),
           const SizedBox(height: 6),
           Text(
             formatUsageCountWithShare(tokens, share, locale: locale),
