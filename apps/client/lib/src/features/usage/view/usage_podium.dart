@@ -7,14 +7,19 @@ import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
 
-/// The three leaders of the period: harness, model, project.
+/// The period's leaders: harness, model, project — three rows each.
 ///
 /// The project tile is the one that needs care. Its share is a share of the
 /// *project facet*, and the facet cannot see every source — so the tile always
 /// carries the reconciliation against the period total: named projects, the
-/// facet's own unattributed bucket, and the remainder from sources that keep no
-/// project records. Without that line a 39% leader reads as "39% of my work",
-/// which is not what the number means.
+/// facet's own unattributed bucket, and the remainder from sources that keep
+/// no project records. Without that line a 39% leader reads as "39% of my
+/// work", which is not what the number means.
+///
+/// Each tile lists its top three in the export card's row idiom — mark, name
+/// left, figure right, a bar read against the leader — because the podium is
+/// where the reader decides whether the period looks like what they remember,
+/// and one name per facet answers only the easy half of that.
 class UsagePodium extends StatelessWidget {
   /// Creates the podium.
   const UsagePodium({
@@ -39,53 +44,68 @@ class UsagePodium extends StatelessWidget {
     final total = report.totals.tokens;
     if (total <= 0) return const SizedBox.shrink();
 
-    final harness = report.tools.isEmpty ? null : report.tools.first;
-    final model = report.topModelsByTokens.isEmpty
-        ? null
-        : report.topModelsByTokens.first;
+    final harnesses = report.tools.take(3).toList();
+    final models = report.topModelsByTokens.take(3).toList();
     final projects = report.projects;
-    final project = (projects == null || projects.rows.isEmpty)
-        ? null
-        : projects.rows.first;
-    if (harness == null &&
-        model == null &&
-        project == null &&
+    final projectRows = projects == null
+        ? const <UsageReportProjectRow>[]
+        : projects.rows.take(3).toList();
+    if (harnesses.isEmpty &&
+        models.isEmpty &&
+        projectRows.isEmpty &&
         !report.projectsWithheld) {
       return const SizedBox.shrink();
     }
 
     final reconciliation = UsageProjectReconciliation.of(projects, total);
     final tiles = <Widget>[
-      if (harness != null)
+      if (harnesses.isNotEmpty)
         _PodiumTile(
           label: l10n.usagePodiumHarness,
-          name: harness.label ?? harness.tool,
-          tool: harness.tool,
-          share: harness.tokens / total,
-          tokens: harness.tokens,
-          detail: _harnessDetail(l10n, harness, locale),
+          rows: [
+            for (final tool in harnesses)
+              (
+                name: tool.label ?? tool.tool,
+                tool: tool.tool,
+                tokens: tool.tokens,
+                share: tool.tokens / total,
+              ),
+          ],
+          detail: _harnessDetail(l10n, harnesses.first, locale),
           locale: locale,
         ),
-      if (model != null)
+      if (models.isNotEmpty)
         _PodiumTile(
           label: l10n.usageTopModelLabel,
-          name: model.name,
-          share: model.tokens / total,
-          tokens: model.tokens,
+          rows: [
+            for (final model in models)
+              (
+                name: model.name,
+                tool: null,
+                tokens: model.tokens,
+                share: model.tokens / total,
+              ),
+          ],
           detail: l10n.usageCostQualified(
-            formatUsageCost(model.cost, locale: locale, compact: true),
+            formatUsageCost(models.first.cost, locale: locale, compact: true),
           ),
           locale: locale,
         ),
-      if (project != null)
+      if (projectRows.isNotEmpty)
         _PodiumTile(
           label: l10n.usagePodiumProject,
-          name: project.project,
-          // Against the period total, not against the facet's own sum: the
-          // facet is a subset, and a share of a subset would overstate it.
-          share: project.tokens / total,
-          tokens: project.tokens,
-          detail: null,
+          rows: [
+            for (final project in projectRows)
+              (
+                name: project.project,
+                tool: null,
+                tokens: project.tokens,
+                // Against the period total, not against the facet's own sum:
+                // the facet is a subset, and a share of a subset would
+                // overstate it.
+                share: project.tokens / total,
+              ),
+          ],
           locale: locale,
         ),
     ];
@@ -122,7 +142,9 @@ class UsagePodium extends StatelessWidget {
             );
           },
         ),
-        if (projects != null && project != null && reconciliation != null) ...[
+        if (projects != null &&
+            projectRows.isNotEmpty &&
+            reconciliation != null) ...[
           const SizedBox(height: 8),
           UsageFootnote(
             text: l10n.usagePodiumProjectNote(
@@ -173,45 +195,40 @@ class UsagePodium extends StatelessWidget {
     if (sessions == null || activeMs == null) return null;
     return l10n.usagePodiumHarnessDetail(
       formatCompactCount(sessions, locale: locale),
-      l10n.usageHoursValue(formatUsageHours(activeMs, locale: locale)),
+      formatUsageAgentTime(activeMs, locale: locale),
     );
   }
 }
 
+/// One ranked entry on a podium tile.
+typedef _PodiumEntry = ({
+  String name,
+  String? tool,
+  double tokens,
+  double share,
+});
+
 class _PodiumTile extends StatelessWidget {
   const _PodiumTile({
     required this.label,
-    required this.name,
-    required this.share,
-    required this.tokens,
-    required this.detail,
+    required this.rows,
     required this.locale,
-    this.tool,
+    this.detail,
   });
 
   final String label;
-  final String name;
-  final double share;
-  final double tokens;
-  final String? detail;
+  final List<_PodiumEntry> rows;
   final String locale;
 
-  /// The served tool id when this tile names a harness, for its brand mark.
-  final String? tool;
+  /// The leader's subline (sessions · agent time, cost qualifier); rows two
+  /// and three stand without one.
+  final String? detail;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokensTheme = context.tokens;
-    final nameText = Text(
-      name,
-      maxLines: 2,
-      overflow: TextOverflow.ellipsis,
-      // Content, not chrome: the toolbar type ceiling does not apply.
-      style: theme.textTheme.titleSmall?.copyWith(
-        fontWeight: FontWeight.w600,
-      ),
-    );
+    final leader = rows.first.tokens;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -229,26 +246,15 @@ class _PodiumTile extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          if (tool == null)
-            nameText
-          else
-            Row(
-              children: [
-                UsageAgentLogo(tool: tool!, size: 18),
-                const SizedBox(width: 8),
-                Expanded(child: nameText),
-              ],
+          for (var index = 0; index < rows.length; index++) ...[
+            if (index > 0) const SizedBox(height: 6),
+            _PodiumRow(
+              entry: rows[index],
+              leader: leader <= 0 ? 1 : leader,
+              first: index == 0,
+              locale: locale,
             ),
-          const SizedBox(height: 6),
-          Text(
-            formatUsageCountWithShare(tokens, share, locale: locale),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: tokensTheme.textSecondary,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          const SizedBox(height: 6),
-          UsageShareBar(fraction: share),
+          ],
           if (detail != null) ...[
             const SizedBox(height: 6),
             Text(
@@ -260,6 +266,77 @@ class _PodiumTile extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// One podium row in the export card's idiom: optional mark, the name left,
+/// the figure right, and a bar read against the leader beneath.
+class _PodiumRow extends StatelessWidget {
+  const _PodiumRow({
+    required this.entry,
+    required this.leader,
+    required this.first,
+    required this.locale,
+  });
+
+  final _PodiumEntry entry;
+  final double leader;
+  final bool first;
+  final String locale;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = context.tokens;
+    final nameStyle = first
+        // The leader keeps the tile's emphasis; the rest are plainer.
+        ? theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)
+        : theme.textTheme.bodySmall?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: tokens.textSecondary,
+          );
+    final valueStyle = theme.textTheme.bodySmall?.copyWith(
+      color: first ? tokens.textSecondary : tokens.textTertiary,
+      fontWeight: first ? FontWeight.w600 : FontWeight.w400,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            if (entry.tool != null) ...[
+              UsageAgentNameMark(
+                tool: entry.tool!,
+                style: nameStyle ?? DefaultTextStyle.of(context).style,
+              ),
+              const SizedBox(
+                width: usageAgentNameMarkOffset - usageAgentNameMarkSize,
+              ),
+            ],
+            Expanded(
+              child: Text(
+                entry.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: nameStyle,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              formatUsageCountWithShare(
+                entry.tokens,
+                entry.share,
+                locale: locale,
+              ),
+              style: valueStyle,
+            ),
+          ],
+        ),
+        const SizedBox(height: 3),
+        UsageShareBar(fraction: entry.tokens / leader, height: 3),
+      ],
     );
   }
 }

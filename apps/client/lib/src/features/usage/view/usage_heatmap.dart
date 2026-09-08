@@ -44,6 +44,7 @@ class UsageHeatmap extends StatelessWidget {
     this.gap = 3,
     this.showWeekdayLabels = true,
     this.weekdayLabels = const <int, String>{},
+    this.centerWhenCapped = false,
     super.key,
   });
 
@@ -73,6 +74,14 @@ class UsageHeatmap extends StatelessWidget {
   /// Weekday index (1 = Monday) to its short label. Rows with no entry stay
   /// blank, which is how the compact breakpoint prints Mon/Wed/Fri only.
   final Map<int, String> weekdayLabels;
+
+  /// Whether a width-capped grid centers instead of hugging the leading edge.
+  ///
+  /// A short window in a wide pane solves to a cell edge far above
+  /// [maxCellSize]; clamped back down, its columns strand against one side.
+  /// Centering makes the strip read as deliberate. Long windows never cap, so
+  /// they are untouched.
+  final bool centerWhenCapped;
 
   /// The alpha steps for ranks 1–4, over [AppTokens.surface2].
   ///
@@ -160,6 +169,10 @@ class UsageHeatmap extends StatelessWidget {
 
         final grid = Row(
           crossAxisAlignment: CrossAxisAlignment.start,
+          // Shrink-wrap when the caller centers a capped grid: a max-width row
+          // fills the pane and its columns hug the start no matter what wraps
+          // it.
+          mainAxisSize: centerWhenCapped ? MainAxisSize.min : MainAxisSize.max,
           children: [
             if (gutter != null) ...[gutter, SizedBox(width: gap * 2)],
             for (final week in weeks)
@@ -201,6 +214,9 @@ class UsageHeatmap extends StatelessWidget {
             child: grid,
           );
         }
+        if (centerWhenCapped && raw > maxCellSize) {
+          return Center(child: grid);
+        }
         return grid;
       },
     );
@@ -214,6 +230,11 @@ class UsageHeatmap extends StatelessWidget {
       tokens.surface2,
     );
   }
+
+  /// The fill for one served quartile rank, public so the export card's
+  /// canvas cells shade by the same rule as this widget's.
+  static Color intensityFill(AppTokens tokens, int intensity) =>
+      _fill(tokens, intensity);
 }
 
 class _Cell extends StatelessWidget {

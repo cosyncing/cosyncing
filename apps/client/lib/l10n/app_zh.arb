@@ -1714,6 +1714,26 @@
   "@usagePeriodAllTime": {
     "description": "Report period switcher segment: everything recorded."
   },
+  "usagePeriodPrevious": "上一{period}",
+  "@usagePeriodPrevious": {
+    "description": "Tooltip on the button that steps the report one complete period back.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "周"
+      }
+    }
+  },
+  "usagePeriodNext": "下一{period}",
+  "@usagePeriodNext": {
+    "description": "Tooltip on the button that steps the report one period forward, toward the period in progress.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "周"
+      }
+    }
+  },
   "usageWindowRange": "{from} – {to}",
   "@usageWindowRange": {
     "description": "Explicit window bounds, printed so a period label never implies more than it covers.",
@@ -1848,13 +1868,43 @@
   "@usageAgentTimeLabel": {
     "description": "Row label for estimated agent activity time."
   },
-  "usageHoursValue": "{hours} 小时",
-  "@usageHoursValue": {
-    "description": "A total in decimal hours. The unit is localized; the number is not.",
+  "usageAgentTimeHours": "{hours} 小时",
+  "@usageAgentTimeHours": {
+    "description": "A total in decimal hours below one day, or the whole-hour remainder next to days. The unit is localized; the number is not.",
     "placeholders": {
       "hours": {
         "type": "String",
-        "example": "403.7"
+        "example": "5.5"
+      }
+    }
+  },
+  "usageAgentTimeDays": "{count, plural, other{{count} 天}}",
+  "@usageAgentTimeDays": {
+    "description": "Whole days of agent time, alone or as the remainder next to weeks or months.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "4"
+      }
+    }
+  },
+  "usageAgentTimeWeeks": "{count, plural, other{{count} 周}}",
+  "@usageAgentTimeWeeks": {
+    "description": "Whole weeks of agent time.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "usageAgentTimeMonths": "{count, plural, other{{count} 个月}}",
+  "@usageAgentTimeMonths": {
+    "description": "Whole 30-day months of agent time.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
       }
     }
   },
@@ -2126,7 +2176,7 @@
       },
       "hours": {
         "type": "String",
-        "example": "220.5h"
+        "example": "9 天 4 小时"
       }
     }
   },
@@ -2262,21 +2312,31 @@
       }
     }
   },
-  "usageCardTierOverview": "COSYNCING",
+  "usageCardTierOverview": "COSYNCING · 概况",
   "@usageCardTierOverview": {
-    "description": "Green-tier card header. Counts only."
+    "description": "Overview-tier card eyebrow. Counts only; the privacy positioning lives here."
   },
   "usageCardTierProjects": "COSYNCING · 项目明细",
   "@usageCardTierProjects": {
-    "description": "Amber-tier card header. Carries project names."
+    "description": "Project-detail-tier card eyebrow. Carries project names."
   },
   "usageCardPeriodYtd": "{year} 年 · 年初至今",
   "@usageCardPeriodYtd": {
-    "description": "Period line on the export card.",
+    "description": "Card title for the year still running.",
     "placeholders": {
       "year": {
         "type": "String",
         "example": "2026"
+      }
+    }
+  },
+  "usageCardWeekTitle": "{date} 当周",
+  "@usageCardWeekTitle": {
+    "description": "Card title for a week window.",
+    "placeholders": {
+      "date": {
+        "type": "String",
+        "example": "2026年9月7日"
       }
     }
   },
@@ -2294,89 +2354,83 @@
       }
     }
   },
-  "usageCardHeroSub": "{sessions} 个会话 · {requests} 次请求",
+  "usageCardHeroSub": "{total} 天中 {days} 天有记录 · {sessions} 个会话 · {requests} 次请求 · Agent 时间 {agent}",
   "@usageCardHeroSub": {
-    "description": "Unit and counts under the card hero figure.",
+    "description": "One activity-summary line under the card hero figure. A missing facet is an em dash in its own slot.",
     "placeholders": {
-      "sessions": {
+      "days": {
         "type": "String",
-        "example": "2,545"
-      },
-      "requests": {
-        "type": "String",
-        "example": "435K"
-      }
-    }
-  },
-  "usageCardDaysActive": "{total} 天中 {active} 天有记录",
-  "@usageCardDaysActive": {
-    "description": "Card stat: coverage of the window.",
-    "placeholders": {
-      "active": {
-        "type": "String",
-        "example": "230"
+        "example": "22"
       },
       "total": {
         "type": "String",
-        "example": "242"
+        "example": "31"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "294"
+      },
+      "requests": {
+        "type": "String",
+        "example": "129,030"
+      },
+      "agent": {
+        "type": "String",
+        "example": "1个月2天"
       }
     }
   },
-  "usageCardStreak": "连续编程 {count} 天",
-  "@usageCardStreak": {
-    "description": "Card stat: the current streak.",
+  "usageCardBusiestLabel": "最忙的一天",
+  "@usageCardBusiestLabel": {
+    "description": "Card stat row label for the peak day."
+  },
+  "usageCardRankProjects": "项目排名",
+  "@usageCardRankProjects": {
+    "description": "Ranked-section label on the project-detail card."
+  },
+  "usageCardMissingProjects": "该服务器无项目归属记录",
+  "@usageCardMissingProjects": {
+    "description": "The project-detail card's whole content when the facet is absent; said rather than silently empty."
+  },
+  "usageCardDurationHours": "{count, plural, other{{count}小时}}",
+  "@usageCardDurationHours": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
       "count": {
-        "type": "String",
-        "example": "171"
+        "type": "int",
+        "example": "3"
       }
     }
   },
-  "usageCardBusiest": "最忙的一天 {date} · {tokens}",
-  "@usageCardBusiest": {
-    "description": "Card stat: the peak day. Overview card only.",
-    "placeholders": {
-      "date": {
-        "type": "String",
-        "example": "Sep 1"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "1.6B"
-      }
-    }
-  },
-  "usageCardActiveTime": "活跃时间",
-  "@usageCardActiveTime": {
-    "description": "Card stat label for estimated active time."
-  },
-  "usageCardProjectsNote": "项目明细 · 共 {count} 个 · 按 token 排序",
-  "@usageCardProjectsNote": {
-    "description": "Amber section header on the project-detail card.",
+  "usageCardDurationDays": "{count, plural, other{{count}天}}",
+  "@usageCardDurationDays": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
       "count": {
-        "type": "String",
-        "example": "257"
+        "type": "int",
+        "example": "4"
       }
     }
   },
-  "usageCardGroupNote": "按仓库分组 · {unattributed} 未归属 · {gap} 来自无项目记录的来源",
-  "@usageCardGroupNote": {
-    "description": "Closes the project list by reconciling it against the period total, so a shared image cannot be read as the whole picture.",
+  "usageCardDurationWeeks": "{count, plural, other{{count}周}}",
+  "@usageCardDurationWeeks": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
-      "unattributed": {
-        "type": "String",
-        "example": "1%"
-      },
-      "gap": {
-        "type": "String",
-        "example": "10%"
+      "count": {
+        "type": "int",
+        "example": "2"
       }
     }
   },
-  "usageCardManifestProjects": "含项目名称 · 不含提示词原文 · 请谨慎分享",
-  "@usageCardManifestProjects": {
-    "description": "As above, amber tier."
+  "usageCardDurationMonths": "{count, plural, other{{count}个月}}",
+  "@usageCardDurationMonths": {
+    "description": "Card agent-time unit word (30-day months).",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
   },
   "usageShareTitle": "分享",
   "@usageShareTitle": {
@@ -2386,6 +2440,30 @@
   "@usageSharePreamble": {
     "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
   },
+  "usageShareOverviewTitle": "概况卡片 · 仅计数",
+  "@usageShareOverviewTitle": {
+    "description": "Tier heading above the counts-only card's previews."
+  },
+  "usageShareOverviewBody": "token、会话、活跃天数、连续天数、最忙的一天、估算活跃时长，以及最常用的 harness 与模型。可放心发布。",
+  "@usageShareOverviewBody": {
+    "description": "One-line audit of everything the counts-only card carries, so the preview does not have to be opened to be trusted."
+  },
+  "usageShareProjectsTitle": "项目明细卡片",
+  "@usageShareProjectsTitle": {
+    "description": "Tier heading above the project-detail card's previews."
+  },
+  "usageShareProjectsBody": "包含概况卡片的全部内容，外加按 token 排名的常用项目。请谨慎分享。",
+  "@usageShareProjectsBody": {
+    "description": "One-line audit of the higher tier: it names the difference rather than repeating the shared content."
+  },
+  "usageShareTierOverviewChip": "概况",
+  "@usageShareTierOverviewChip": {
+    "description": "Pill caption under each counts-only preview; rendered uppercase."
+  },
+  "usageShareTierProjectsChip": "项目明细",
+  "@usageShareTierProjectsChip": {
+    "description": "Pill caption under each project-detail preview; rendered uppercase."
+  },
   "usageExportOverview": "导出概况卡片",
   "@usageExportOverview": {
     "description": "Action for the green-tier card."
@@ -2393,6 +2471,10 @@
   "usageExportProject": "导出项目明细",
   "@usageExportProject": {
     "description": "Action for the amber-tier card."
+  },
+  "usageExportAll": "导出全部四张",
+  "@usageExportAll": {
+    "description": "Writes both tiers in both themes in one press."
   },
   "usageExportBothThemes": "每次导出生成浅色与深色两张 PNG，与 app 当前主题无关。",
   "@usageExportBothThemes": {
@@ -2428,9 +2510,9 @@
   "@usageExportDesktopOnly": {
     "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
   },
-  "usageExportBrowserPrompt": "一次点击会生成两个文件，浏览器可能会询问是否允许多个下载。",
+  "usageExportBrowserPrompt": "一次点击会生成两个文件（「导出全部四张」为四个），浏览器可能会询问是否允许多个下载。",
   "@usageExportBrowserPrompt": {
-    "description": "Web only. The page cannot tell whether the browser dropped the second download, so it says the prompt is expected."
+    "description": "Web only. The page cannot tell whether the browser dropped a later download, so it says the prompt is expected."
   },
   "usageWindowUnrecognized": "tokdash 未能识别该时间段，返回的是无人请求的区间数据，因此不显示任何数字。",
   "@usageWindowUnrecognized": {

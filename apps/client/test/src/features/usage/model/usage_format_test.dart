@@ -57,15 +57,68 @@ void main() {
     });
   });
 
-  group('formatUsageHours', () {
-    test('a period total reads as decimal hours, not as uptime', () {
-      // formatCompactDuration would render August as "16d 19h", which reads as
-      // how long something has been up rather than how long it ran.
-      expect(formatUsageHours(1453366891, locale: 'en'), '403.7');
+  group('formatUsageAgentTime', () {
+    const hour = Duration.millisecondsPerHour;
+    const day = Duration.millisecondsPerDay;
+
+    test('below a day it is decimal hours with one decimal', () {
+      expect(formatUsageAgentTime(0, locale: 'en'), '0.0 hr');
+      expect(formatUsageAgentTime(0.5 * hour, locale: 'en'), '0.5 hr');
+      expect(formatUsageAgentTime(5.5 * hour, locale: 'en'), '5.5 hr');
+      expect(formatUsageAgentTime(23.9 * hour, locale: 'en'), '23.9 hr');
+    });
+
+    test('below a week it is days and whole hours', () {
+      expect(formatUsageAgentTime(24 * hour, locale: 'en'), '1 day');
+      expect(formatUsageAgentTime(25 * hour, locale: 'en'), '1 day 1 hr');
+      expect(formatUsageAgentTime(3 * day, locale: 'en'), '3 days');
       expect(
-        formatUsageHours(Duration.millisecondsPerHour, locale: 'en'),
-        '1.0',
+        formatUsageAgentTime(6 * day + 23 * hour, locale: 'en'),
+        '6 days 23 hr',
       );
+    });
+
+    test('below thirty days it is weeks and days', () {
+      expect(formatUsageAgentTime(7 * day, locale: 'en'), '1 week');
+      expect(formatUsageAgentTime(14 * day, locale: 'en'), '2 weeks');
+      expect(formatUsageAgentTime(20 * day, locale: 'en'), '2 weeks 6 days');
+      expect(formatUsageAgentTime(29 * day, locale: 'en'), '4 weeks 1 day');
+    });
+
+    test('from thirty days it is 30-day months and days', () {
+      expect(formatUsageAgentTime(30 * day, locale: 'en'), '1 month');
+      expect(formatUsageAgentTime(34 * day, locale: 'en'), '1 month 4 days');
+      expect(formatUsageAgentTime(60 * day, locale: 'en'), '2 months');
+      expect(
+        formatUsageAgentTime(400 * day, locale: 'en'),
+        '13 months 10 days',
+      );
+    });
+
+    test('plural and singular agree in English', () {
+      expect(formatUsageAgentTime(day, locale: 'en'), '1 day');
+      expect(formatUsageAgentTime(2 * day, locale: 'en'), '2 days');
+      expect(formatUsageAgentTime(7 * day, locale: 'en'), '1 week');
+      expect(formatUsageAgentTime(30 * day, locale: 'en'), '1 month');
+      expect(formatUsageAgentTime(61 * day, locale: 'en'), '2 months 1 day');
+    });
+
+    test('a concurrent-agent week can hold more than 168 hours', () {
+      // activeMsSum adds across agents running at the same time: this is the
+      // 267.9-hour week the decimal form misstated as a wall-clock span.
+      expect(formatUsageAgentTime(267.9 * hour, locale: 'en'), '1 week 4 days');
+    });
+
+    test('units localize', () {
+      expect(formatUsageAgentTime(25 * hour, locale: 'zh'), '1 天 1 小时');
+      expect(formatUsageAgentTime(5.5 * hour, locale: 'zh'), '5.5 小时');
+      expect(formatUsageAgentTime(20 * day, locale: 'zh'), '2 周 6 天');
+      expect(formatUsageAgentTime(34 * day, locale: 'zh'), '1 个月 4 天');
+    });
+
+    test('non-finite values produce nothing', () {
+      expect(formatUsageAgentTime(double.nan), '');
+      expect(formatUsageAgentTime(double.infinity), '');
     });
   });
 
@@ -145,6 +198,85 @@ void main() {
       expect(percents.format(percents.named, locale: 'en'), '89.3%');
       expect(percents.format(percents.unattributed, locale: 'en'), '0.6%');
       expect(percents.format(percents.gap, locale: 'en'), '10.1%');
+    });
+  });
+
+  group('formatUsageCardTokens', () {
+    test('keeps the tenth at any mantissa, unlike the column rule', () {
+      // tokdash's card rule: at most one decimal, dropped when it rounds to
+      // none. The page's formatCompactCount would print 106M here.
+      expect(formatUsageCardTokens(105500000, locale: 'en'), '105.5M');
+      expect(formatUsageCardTokens(106040000, locale: 'en'), '106M');
+      expect(formatUsageCardTokens(19893991786, locale: 'en'), '19.9B');
+      expect(formatUsageCardTokens(1525, locale: 'en'), '1.5K');
+    });
+
+    test('a rounding carry promotes the tier instead of printing 1000', () {
+      expect(formatUsageCardTokens(999999, locale: 'en'), '1M');
+      expect(formatUsageCardTokens(999999999, locale: 'en'), '1B');
+    });
+
+    test('below a thousand it is a grouped integer', () {
+      expect(formatUsageCardTokens(545, locale: 'en'), '545');
+    });
+  });
+
+  group('formatUsageCardShare', () {
+    test('two decimals under one percent, one under ten, none above', () {
+      expect(formatUsageCardShare(0.0057, locale: 'en'), '0.57%');
+      expect(formatUsageCardShare(0.096, locale: 'en'), '9.6%');
+      expect(formatUsageCardShare(0.57, locale: 'en'), '57%');
+    });
+
+    test('a missing facet total is an em dash, never an invented zero', () {
+      expect(formatUsageCardShare(null), '\u2014');
+    });
+  });
+
+  group('formatUsageCardCost', () {
+    test("two decimals, never compacted, tokdash's exact figure", () {
+      expect(formatUsageCardCost(12976.51), r'$12976.51');
+      expect(formatUsageCardCost(0.1), r'$0.10');
+    });
+  });
+
+  group('formatUsageCardDuration', () {
+    test('below a day it is the compact clock form', () {
+      expect(formatUsageCardDuration(0), '\u2014');
+      expect(formatUsageCardDuration(30000, locale: 'en'), '30s');
+      expect(formatUsageCardDuration(45 * 60000, locale: 'en'), '45m');
+      expect(
+        formatUsageCardDuration((5 * 3600 + 5 * 60) * 1000, locale: 'en'),
+        '5h 05m',
+      );
+    });
+
+    test('at a day and above it is long unit words, two at most', () {
+      const day = Duration.millisecondsPerDay;
+      expect(
+        formatUsageCardDuration(25 * 3600000, locale: 'en'),
+        '1 day 1 hour',
+      );
+      expect(formatUsageCardDuration(3 * day, locale: 'en'), '3 days');
+      expect(formatUsageCardDuration(20 * day, locale: 'en'), '2 weeks 6 days');
+      expect(formatUsageCardDuration(34 * day, locale: 'en'), '1 month 4 days');
+      // A 23.6h remainder rounds to a carried day, never "1 day 24 hours".
+      expect(
+        formatUsageCardDuration((day + 23.6 * 3600000).round(), locale: 'en'),
+        '2 days',
+      );
+    });
+
+    test('the joiner drops the space where the words carry none', () {
+      const day = Duration.millisecondsPerDay;
+      expect(
+        formatUsageCardDuration(25 * 3600000, locale: 'zh'),
+        '1\u59291\u5c0f\u65f6',
+      );
+      expect(
+        formatUsageCardDuration(34 * day, locale: 'zh'),
+        '1\u4e2a\u67084\u5929',
+      );
     });
   });
 }

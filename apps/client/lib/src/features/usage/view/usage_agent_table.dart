@@ -247,8 +247,17 @@ class _ToolRow extends StatelessWidget {
                 child: column == _Column.agent
                     ? Row(
                         children: [
-                          UsageAgentLogo(tool: tool.tool, size: 14),
-                          const SizedBox(width: 6),
+                          UsageAgentNameMark(
+                            tool: tool.tool,
+                            style: style ?? DefaultTextStyle.of(context).style,
+                          ),
+                          // 15 + 4: the name starts 19px in, tokdash's card
+                          // metric.
+                          const SizedBox(
+                            width:
+                                usageAgentNameMarkOffset -
+                                usageAgentNameMarkSize,
+                          ),
                           Flexible(
                             child: Text(
                               _cell(column, l10n),
@@ -294,7 +303,7 @@ class _ToolRow extends StatelessWidget {
         final active = tool.activeMs;
         return active == null
             ? _emDash
-            : l10n.usageHoursValue(formatUsageHours(active, locale: locale));
+            : formatUsageAgentTime(active, locale: locale);
     }
   }
 

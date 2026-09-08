@@ -4771,6 +4771,26 @@
   "@usagePeriodAllTime": {
     "description": "Report period switcher segment: everything recorded."
   },
+  "usagePeriodPrevious": "Previous {period}",
+  "@usagePeriodPrevious": {
+    "description": "Tooltip on the button that steps the report one complete period back.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "week"
+      }
+    }
+  },
+  "usagePeriodNext": "Next {period}",
+  "@usagePeriodNext": {
+    "description": "Tooltip on the button that steps the report one period forward, toward the period in progress.",
+    "placeholders": {
+      "period": {
+        "type": "String",
+        "example": "week"
+      }
+    }
+  },
   "usageWindowRange": "{from} – {to}",
   "@usageWindowRange": {
     "description": "Explicit window bounds, printed so a period label never implies more than it covers.",
@@ -4905,13 +4925,43 @@
   "@usageAgentTimeLabel": {
     "description": "Row label for estimated agent activity time."
   },
-  "usageHoursValue": "{hours}h",
-  "@usageHoursValue": {
-    "description": "A total in decimal hours. The unit is localized; the number is not.",
+  "usageAgentTimeHours": "{hours} hr",
+  "@usageAgentTimeHours": {
+    "description": "A total in decimal hours below one day, or the whole-hour remainder next to days. The unit is localized; the number is not.",
     "placeholders": {
       "hours": {
         "type": "String",
-        "example": "403.7"
+        "example": "5.5"
+      }
+    }
+  },
+  "usageAgentTimeDays": "{count, plural, =1{{count} day} other{{count} days}}",
+  "@usageAgentTimeDays": {
+    "description": "Whole days of agent time, alone or as the remainder next to weeks or months.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "4"
+      }
+    }
+  },
+  "usageAgentTimeWeeks": "{count, plural, =1{{count} week} other{{count} weeks}}",
+  "@usageAgentTimeWeeks": {
+    "description": "Whole weeks of agent time.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "2"
+      }
+    }
+  },
+  "usageAgentTimeMonths": "{count, plural, =1{{count} month} other{{count} months}}",
+  "@usageAgentTimeMonths": {
+    "description": "Whole 30-day months of agent time.",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
       }
     }
   },
@@ -5183,7 +5233,7 @@
       },
       "hours": {
         "type": "String",
-        "example": "220.5h"
+        "example": "9 days 4 hr"
       }
     }
   },
@@ -5319,21 +5369,31 @@
       }
     }
   },
-  "usageCardTierOverview": "COSYNCING",
+  "usageCardTierOverview": "COSYNCING · OVERVIEW",
   "@usageCardTierOverview": {
-    "description": "Green-tier card header. Counts only."
+    "description": "Overview-tier card eyebrow. Counts only; the privacy positioning lives here."
   },
   "usageCardTierProjects": "COSYNCING · PROJECT DETAIL",
   "@usageCardTierProjects": {
-    "description": "Amber-tier card header. Carries project names."
+    "description": "Project-detail-tier card eyebrow. Carries project names."
   },
   "usageCardPeriodYtd": "{year} · year to date",
   "@usageCardPeriodYtd": {
-    "description": "Period line on the export card.",
+    "description": "Card title for the year still running.",
     "placeholders": {
       "year": {
         "type": "String",
         "example": "2026"
+      }
+    }
+  },
+  "usageCardWeekTitle": "Week of {date}",
+  "@usageCardWeekTitle": {
+    "description": "Card title for a week window.",
+    "placeholders": {
+      "date": {
+        "type": "String",
+        "example": "Sep 7, 2026"
       }
     }
   },
@@ -5351,89 +5411,83 @@
       }
     }
   },
-  "usageCardHeroSub": "{sessions} sessions · {requests} requests",
+  "usageCardHeroSub": "{days} of {total} days active · {sessions} sessions · {requests} requests · {agent} agent time",
   "@usageCardHeroSub": {
-    "description": "Unit and counts under the card hero figure.",
+    "description": "One activity-summary line under the card hero figure. A missing facet is an em dash in its own slot.",
     "placeholders": {
-      "sessions": {
+      "days": {
         "type": "String",
-        "example": "2,545"
-      },
-      "requests": {
-        "type": "String",
-        "example": "435K"
-      }
-    }
-  },
-  "usageCardDaysActive": "{active} of {total} days active",
-  "@usageCardDaysActive": {
-    "description": "Card stat: coverage of the window.",
-    "placeholders": {
-      "active": {
-        "type": "String",
-        "example": "230"
+        "example": "22"
       },
       "total": {
         "type": "String",
-        "example": "242"
+        "example": "31"
+      },
+      "sessions": {
+        "type": "String",
+        "example": "294"
+      },
+      "requests": {
+        "type": "String",
+        "example": "129,030"
+      },
+      "agent": {
+        "type": "String",
+        "example": "1 month 2 days"
       }
     }
   },
-  "usageCardStreak": "{count}-day streak",
-  "@usageCardStreak": {
-    "description": "Card stat: the current streak.",
+  "usageCardBusiestLabel": "Busiest day",
+  "@usageCardBusiestLabel": {
+    "description": "Card stat row label for the peak day."
+  },
+  "usageCardRankProjects": "Top projects",
+  "@usageCardRankProjects": {
+    "description": "Ranked-section label on the project-detail card."
+  },
+  "usageCardMissingProjects": "project records unavailable on this server",
+  "@usageCardMissingProjects": {
+    "description": "The project-detail card's whole content when the facet is absent; said rather than silently empty."
+  },
+  "usageCardDurationHours": "{count, plural, =1{{count} hour} other{{count} hours}}",
+  "@usageCardDurationHours": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
       "count": {
-        "type": "String",
-        "example": "171"
+        "type": "int",
+        "example": "3"
       }
     }
   },
-  "usageCardBusiest": "Busiest {date} · {tokens}",
-  "@usageCardBusiest": {
-    "description": "Card stat: the peak day. Overview card only.",
-    "placeholders": {
-      "date": {
-        "type": "String",
-        "example": "Sep 1"
-      },
-      "tokens": {
-        "type": "String",
-        "example": "1.6B"
-      }
-    }
-  },
-  "usageCardActiveTime": "Active time",
-  "@usageCardActiveTime": {
-    "description": "Card stat label for estimated active time."
-  },
-  "usageCardProjectsNote": "Projects · {count} · ranked by tokens",
-  "@usageCardProjectsNote": {
-    "description": "Amber section header on the project-detail card.",
+  "usageCardDurationDays": "{count, plural, =1{{count} day} other{{count} days}}",
+  "@usageCardDurationDays": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
       "count": {
-        "type": "String",
-        "example": "257"
+        "type": "int",
+        "example": "4"
       }
     }
   },
-  "usageCardGroupNote": "Grouped by repository · {unattributed} unattributed · {gap} from sources with no project records",
-  "@usageCardGroupNote": {
-    "description": "Closes the project list by reconciling it against the period total, so a shared image cannot be read as the whole picture.",
+  "usageCardDurationWeeks": "{count, plural, =1{{count} week} other{{count} weeks}}",
+  "@usageCardDurationWeeks": {
+    "description": "Card agent-time unit word.",
     "placeholders": {
-      "unattributed": {
-        "type": "String",
-        "example": "1%"
-      },
-      "gap": {
-        "type": "String",
-        "example": "10%"
+      "count": {
+        "type": "int",
+        "example": "2"
       }
     }
   },
-  "usageCardManifestProjects": "Counts + project names · no prompt text · share deliberately",
-  "@usageCardManifestProjects": {
-    "description": "As above, amber tier."
+  "usageCardDurationMonths": "{count, plural, =1{{count} month} other{{count} months}}",
+  "@usageCardDurationMonths": {
+    "description": "Card agent-time unit word (30-day months).",
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "1"
+      }
+    }
   },
   "usageShareTitle": "Share",
   "@usageShareTitle": {
@@ -5443,6 +5497,30 @@
   "@usageSharePreamble": {
     "description": "States the privacy boundary before either button is pressed. The boundary is which button, not a toggle."
   },
+  "usageShareOverviewTitle": "Overview card · counts only",
+  "@usageShareOverviewTitle": {
+    "description": "Tier heading above the counts-only card's previews."
+  },
+  "usageShareOverviewBody": "Tokens, sessions, days, streak, busiest day, estimated active time, top harnesses and models. Safe to post.",
+  "@usageShareOverviewBody": {
+    "description": "One-line audit of everything the counts-only card carries, so the preview does not have to be opened to be trusted."
+  },
+  "usageShareProjectsTitle": "Project detail card",
+  "@usageShareProjectsTitle": {
+    "description": "Tier heading above the project-detail card's previews."
+  },
+  "usageShareProjectsBody": "Everything on the overview card, plus the top projects by tokens. Share deliberately.",
+  "@usageShareProjectsBody": {
+    "description": "One-line audit of the higher tier: it names the difference rather than repeating the shared content."
+  },
+  "usageShareTierOverviewChip": "Overview",
+  "@usageShareTierOverviewChip": {
+    "description": "Pill caption under each counts-only preview; rendered uppercase."
+  },
+  "usageShareTierProjectsChip": "Project detail",
+  "@usageShareTierProjectsChip": {
+    "description": "Pill caption under each project-detail preview; rendered uppercase."
+  },
   "usageExportOverview": "Export overview card",
   "@usageExportOverview": {
     "description": "Action for the green-tier card."
@@ -5450,6 +5528,10 @@
   "usageExportProject": "Export project detail",
   "@usageExportProject": {
     "description": "Action for the amber-tier card."
+  },
+  "usageExportAll": "Export all four",
+  "@usageExportAll": {
+    "description": "Writes both tiers in both themes in one press."
   },
   "usageExportBothThemes": "Each export writes two PNGs — light and dark — whatever theme the app is in.",
   "@usageExportBothThemes": {
@@ -5485,9 +5567,9 @@
   "@usageExportDesktopOnly": {
     "description": "Replaces the export controls on iOS and Android, where no directory sink exists."
   },
-  "usageExportBrowserPrompt": "One press writes two files, so your browser may ask to allow multiple downloads.",
+  "usageExportBrowserPrompt": "One press writes two files — four for “Export all four” — so your browser may ask to allow multiple downloads.",
   "@usageExportBrowserPrompt": {
-    "description": "Web only. The page cannot tell whether the browser dropped the second download, so it says the prompt is expected."
+    "description": "Web only. The page cannot tell whether the browser dropped a later download, so it says the prompt is expected."
   },
   "usageWindowUnrecognized": "tokdash did not recognize this period, so it answered for a window nobody asked about. No figures are shown.",
   "@usageWindowUnrecognized": {

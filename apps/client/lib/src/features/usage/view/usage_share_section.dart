@@ -6,6 +6,7 @@ import 'package:cosyncing_client/src/design/components.dart';
 import 'package:cosyncing_client/src/design/theme_spec.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_export_card.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_figures.dart';
 import 'package:flutter/material.dart';
@@ -23,10 +24,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 class UsageShareSection extends ConsumerStatefulWidget {
   /// Creates the share section.
   const UsageShareSection({
+    required this.period,
     required this.report,
     required this.locale,
     super.key,
   });
+
+  /// Period being reported; the cards title and lay out by it.
+  final UsagePeriod period;
 
   /// The served report the cards summarize.
   final UsageReport report;
@@ -44,24 +49,15 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
       for (final brightness in usageExportBrightnesses)
         (kind, brightness): GlobalKey(),
   };
-  late final TextEditingController _machine;
+  // The palette the previews render in, resolved once per build from the
+  // ambient tokens and reused by the export path, so the file name always
+  // names the theme the captured card is actually wearing.
+  late ThemeSpec _spec;
   bool _includeCost = false;
   bool _busy = false;
   String? _status;
 
-  @override
-  void initState() {
-    super.initState();
-    _machine = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _machine.dispose();
-    super.dispose();
-  }
-
-  Future<void> _export(UsageExportCardKind kind) async {
+  Future<void> _write(Set<UsageExportCardKind> kinds) async {
     final l10n = AppLocalizations.of(context);
     setState(() {
       _busy = true;
@@ -70,23 +66,26 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
     final capture = ref.read(usageExportCaptureProvider);
     try {
       final files = <UsageExportFile>[];
-      for (final brightness in usageExportBrightnesses) {
-        final key = _boundaries[(kind, brightness)];
-        if (key == null) continue;
-        final bytes = await capture(key);
-        if (bytes == null) continue;
-        files.add(
-          UsageExportFile(
-            name: usageExportFileName(
-              kind: kind,
-              brightness: brightness,
-              range: widget.report.range,
+      for (final kind in kinds) {
+        for (final brightness in usageExportBrightnesses) {
+          final key = _boundaries[(kind, brightness)];
+          if (key == null) continue;
+          final bytes = await capture(key);
+          if (bytes == null) continue;
+          files.add(
+            UsageExportFile(
+              name: usageExportFileName(
+                kind: kind,
+                brightness: brightness,
+                range: widget.report.range,
+                spec: _spec,
+              ),
+              bytes: bytes,
             ),
-            bytes: bytes,
-          ),
-        );
+          );
+        }
       }
-      if (files.length < usageExportBrightnesses.length) {
+      if (files.length < kinds.length * usageExportBrightnesses.length) {
         setState(() => _status = l10n.usageExportFailed);
         return;
       }
@@ -122,6 +121,7 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
     // preferences store, and a report page should not open a database to
     // decide what colour to draw a preview.
     final spec = usageThemeSpecFor(context.tokens);
+    _spec = spec;
 
     // The section still explains the two tiers where it cannot produce them:
     // the reader learns the export exists and where to run it, rather than
@@ -162,44 +162,28 @@ class _UsageShareSectionState extends ConsumerState<UsageShareSection> {
           onChanged: (value) => setState(() => _includeCost = value),
         ),
         const SizedBox(height: 8),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = <Widget>[
-              for (final kind in offered)
-                _CardColumn(
-                  kind: kind,
-                  boundaries: _boundaries,
-                  spec: spec,
-                  report: widget.report,
-                  locale: widget.locale,
-                  includeCost: _includeCost,
-                  busy: _busy,
-                  onExport: () => _export(kind),
-                ),
-            ];
-            if (constraints.maxWidth < 780) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final column in columns)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: column,
-                    ),
-                ],
-              );
-            }
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (var index = 0; index < columns.length; index++) ...[
-                  if (index > 0) const SizedBox(width: 16),
-                  Expanded(child: columns[index]),
-                ],
-              ],
-            );
-          },
-        ),
+        for (var index = 0; index < offered.length; index++) ...[
+          if (index > 0) const SizedBox(height: 18),
+          _TierGroup(
+            kind: offered[index],
+            boundaries: _boundaries,
+            spec: spec,
+            period: widget.period,
+            report: widget.report,
+            locale: widget.locale,
+            includeCost: _includeCost,
+            busy: _busy,
+            onExport: () => _write({offered[index]}),
+            // "All four" only exists while both tiers do, and it lives on the
+            // higher tier's row: pressing it crosses every boundary the page
+            // offers, so it sits where the most content is at stake.
+            onExportAll:
+                offered.length == UsageExportCardKind.values.length &&
+                    offered[index].carriesProjectNames
+                ? () => _write(offered.toSet())
+                : null,
+          ),
+        ],
         const SizedBox(height: 8),
         UsageFootnote(text: l10n.usageExportBothThemes),
         // Two downloads from one press is exactly what a browser asks about,
@@ -246,75 +230,229 @@ const List<Brightness> usageExportBrightnesses = [
 ];
 
 /// A file name that says what the image is without opening it.
+///
+/// The theme id rides in the name because the card wears the selected theme's
+/// palette: two exports of the same window and tier under different themes are
+/// different-looking images, and identical names would claim otherwise.
+/// [ThemeSpec.id] is a lowercase slug (`teal-obsidian`), already filesystem
+/// safe.
 String usageExportFileName({
   required UsageExportCardKind kind,
   required Brightness brightness,
   required UsageReportRange range,
+  required ThemeSpec spec,
 }) {
   final tier = kind.carriesProjectNames ? 'projects' : 'overview';
   final theme = brightness == Brightness.dark ? 'dark' : 'light';
-  return 'cosyncing-usage-${range.from}-${range.to}-$tier-$theme.png';
+  return 'cosyncing-usage-${range.from}-${range.to}'
+      '-$tier-${spec.id}-$theme.png';
 }
 
-class _CardColumn extends StatelessWidget {
-  const _CardColumn({
+/// One privacy tier: a colour-coded rail, a one-line brief, the two
+/// thumbnails, and the buttons that write exactly this tier (plus "all four"
+/// on the higher one).
+///
+/// The rail and chip wear the same colour the exported card prints its tier
+/// label in, so the preview group reads as the card's provenance rather than
+/// as decoration.
+class _TierGroup extends StatelessWidget {
+  const _TierGroup({
     required this.kind,
     required this.boundaries,
     required this.spec,
+    required this.period,
     required this.report,
     required this.locale,
     required this.includeCost,
     required this.busy,
     required this.onExport,
+    required this.onExportAll,
   });
 
   final UsageExportCardKind kind;
   final Map<(UsageExportCardKind, Brightness), GlobalKey> boundaries;
   final ThemeSpec spec;
+  final UsagePeriod period;
   final UsageReport report;
   final String locale;
   final bool includeCost;
   final bool busy;
   final VoidCallback onExport;
+  final VoidCallback? onExportAll;
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final brightness in usageExportBrightnesses) ...[
-              if (brightness != usageExportBrightnesses.first)
-                const SizedBox(width: 8),
-              Expanded(
-                child: _Preview(
+    final tokens = context.tokens;
+    final carriesNames = kind.carriesProjectNames;
+    final tierColor = carriesNames ? tokens.statusNeedsInput : tokens.accent;
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: tierColor, width: 3)),
+      ),
+      padding: const EdgeInsets.only(left: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            carriesNames
+                ? l10n.usageShareProjectsTitle
+                : l10n.usageShareOverviewTitle,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 2),
+          ConstrainedBox(
+            // ~62 characters of the muted body copy, as on the source panel.
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Text(
+              carriesNames
+                  ? l10n.usageShareProjectsBody
+                  : l10n.usageShareOverviewBody,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: tokens.textTertiary,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 14,
+            runSpacing: 14,
+            children: [
+              for (final brightness in usageExportBrightnesses)
+                _Thumbnail(
                   boundaryKey: boundaries[(kind, brightness)]!,
                   brightness: brightness,
                   spec: spec,
                   kind: kind,
+                  period: period,
                   report: report,
                   locale: locale,
                   includeCost: includeCost,
+                  tierColor: tierColor,
+                  chip: carriesNames
+                      ? l10n.usageShareTierProjectsChip
+                      : l10n.usageShareTierOverviewChip,
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton(
+                key: Key('usage-export-${kind.name}'),
+                onPressed: busy ? null : onExport,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: context.tokens.accent,
+                ),
+                child: Text(
+                  carriesNames
+                      ? l10n.usageExportProject
+                      : l10n.usageExportOverview,
                 ),
               ),
+              if (onExportAll case final onExportAll?)
+                TextButton(
+                  key: const Key('usage-export-all'),
+                  onPressed: busy ? null : onExportAll,
+                  child: Text(l10n.usageExportAll),
+                ),
             ],
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One thumbnail with its caption: the tier chip and the mode it renders in.
+class _Thumbnail extends StatelessWidget {
+  const _Thumbnail({
+    required this.boundaryKey,
+    required this.brightness,
+    required this.spec,
+    required this.kind,
+    required this.period,
+    required this.report,
+    required this.locale,
+    required this.includeCost,
+    required this.tierColor,
+    required this.chip,
+  });
+
+  final GlobalKey boundaryKey;
+  final Brightness brightness;
+  final ThemeSpec spec;
+  final UsageExportCardKind kind;
+  final UsagePeriod period;
+  final UsageReport report;
+  final String locale;
+  final bool includeCost;
+  final Color tierColor;
+  final String chip;
+
+  /// The edge a thumbnail is scaled to — small enough to read as a preview,
+  /// large enough to audit the tier it belongs to.
+  static const double width = 169;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: width,
+          decoration: BoxDecoration(
+            border: Border.all(color: tokens.separator),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: _Preview(
+            boundaryKey: boundaryKey,
+            brightness: brightness,
+            spec: spec,
+            kind: kind,
+            period: period,
+            report: report,
+            locale: locale,
+            includeCost: includeCost,
+          ),
         ),
         const SizedBox(height: 8),
-        OutlinedButton(
-          key: Key('usage-export-${kind.name}'),
-          onPressed: busy ? null : onExport,
-          style: OutlinedButton.styleFrom(
-            foregroundColor: context.tokens.accent,
-          ),
-          child: Text(
-            kind.carriesProjectNames
-                ? l10n.usageExportProject
-                : l10n.usageExportOverview,
-          ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: tierColor.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                chip.toUpperCase(),
+                style: TextStyle(
+                  color: tierColor,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.6,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              brightness == Brightness.dark ? 'dark' : 'light',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: tokens.textTertiary,
+                fontFamily: 'monospace',
+                fontSize: 11,
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -325,13 +463,14 @@ class _CardColumn extends StatelessWidget {
 ///
 /// The card is built at its true 360×640 inside the boundary and scaled for
 /// display outside it, so the capture is full resolution while the preview
-/// fits the column.
+/// fits the thumbnail.
 class _Preview extends StatelessWidget {
   const _Preview({
     required this.boundaryKey,
     required this.brightness,
     required this.spec,
     required this.kind,
+    required this.period,
     required this.report,
     required this.locale,
     required this.includeCost,
@@ -341,6 +480,7 @@ class _Preview extends StatelessWidget {
   final Brightness brightness;
   final ThemeSpec spec;
   final UsageExportCardKind kind;
+  final UsagePeriod period;
   final UsageReport report;
   final String locale;
   final bool includeCost;
@@ -356,6 +496,7 @@ class _Preview extends StatelessWidget {
         key: boundaryKey,
         child: UsageExportCard(
           kind: kind,
+          period: period,
           report: report,
           locale: locale,
           includeCost: includeCost,

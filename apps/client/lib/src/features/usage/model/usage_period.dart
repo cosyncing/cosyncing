@@ -140,10 +140,29 @@ int _daysInYear(int year) =>
 /// idea of "today". That is why the report labels its window from the served
 /// `range` block and prints the broker's zone rather than trusting this
 /// resolution to be the last word.
-UsageWindow resolveUsageWindow(UsagePeriod period, DateTime now) {
+///
+/// [offset] steps back through COMPLETE periods: 0 is the period in progress,
+/// 1 the one that ended just before it started. An offset window is whole by
+/// construction — `elapsedDays == totalDays`, so `inProgress` is false. Only
+/// the bounded report periods step: `today` is a Today-card period the report
+/// never offers, and `allTime` has no boundary to step across, so an offset on
+/// either is a caller bug and throws.
+UsageWindow resolveUsageWindow(
+  UsagePeriod period,
+  DateTime now, {
+  int offset = 0,
+}) {
+  RangeError.checkNotNegative(offset, 'offset');
   final today = DateTime.utc(now.year, now.month, now.day);
   switch (period) {
     case UsagePeriod.today:
+      if (offset != 0) {
+        throw ArgumentError.value(
+          offset,
+          'offset',
+          'today has no previous window',
+        );
+      }
       return UsageWindow(
         period: period,
         from: _iso(today),
@@ -153,32 +172,72 @@ UsageWindow resolveUsageWindow(UsagePeriod period, DateTime now) {
       );
     case UsagePeriod.week:
       // DateTime.weekday is 1..7 Monday-first, matching Tokdash's own buckets.
-      final start = today.subtract(Duration(days: today.weekday - 1));
+      final currentStart = today.subtract(Duration(days: today.weekday - 1));
+      if (offset == 0) {
+        return UsageWindow(
+          period: period,
+          from: _iso(currentStart),
+          to: _iso(today),
+          elapsedDays: today.weekday,
+          totalDays: 7,
+        );
+      }
+      final start = currentStart.subtract(Duration(days: 7 * offset));
       return UsageWindow(
         period: period,
         from: _iso(start),
-        to: _iso(today),
-        elapsedDays: today.weekday,
+        to: _iso(start.add(const Duration(days: 6))),
+        elapsedDays: 7,
         totalDays: 7,
       );
     case UsagePeriod.month:
+      if (offset == 0) {
+        return UsageWindow(
+          period: period,
+          from: _iso(DateTime.utc(today.year, today.month)),
+          to: _iso(today),
+          elapsedDays: today.day,
+          totalDays: _daysInMonth(today.year, today.month),
+        );
+      }
+      // Month arithmetic normalizes across the year boundary: month 0 is the
+      // previous December, and every month is measured by its own length.
+      final first = DateTime.utc(today.year, today.month - offset);
+      final totalDays = _daysInMonth(first.year, first.month);
       return UsageWindow(
         period: period,
-        from: _iso(DateTime.utc(today.year, today.month)),
-        to: _iso(today),
-        elapsedDays: today.day,
-        totalDays: _daysInMonth(today.year, today.month),
+        from: _iso(first),
+        to: _iso(DateTime.utc(first.year, first.month, totalDays)),
+        elapsedDays: totalDays,
+        totalDays: totalDays,
       );
     case UsagePeriod.year:
-      final start = DateTime.utc(today.year);
+      if (offset == 0) {
+        final start = DateTime.utc(today.year);
+        return UsageWindow(
+          period: period,
+          from: _iso(start),
+          to: _iso(today),
+          elapsedDays: today.difference(start).inDays + 1,
+          totalDays: _daysInYear(today.year),
+        );
+      }
+      final year = today.year - offset;
       return UsageWindow(
         period: period,
-        from: _iso(start),
-        to: _iso(today),
-        elapsedDays: today.difference(start).inDays + 1,
-        totalDays: _daysInYear(today.year),
+        from: _iso(DateTime.utc(year)),
+        to: _iso(DateTime.utc(year, 12, 31)),
+        elapsedDays: _daysInYear(year),
+        totalDays: _daysInYear(year),
       );
     case UsagePeriod.allTime:
+      if (offset != 0) {
+        throw ArgumentError.value(
+          offset,
+          'offset',
+          'all time has no previous window',
+        );
+      }
       return UsageWindow(
         period: period,
         from: usageAllTimeFloor,
