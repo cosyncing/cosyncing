@@ -60,7 +60,9 @@ void main() {
   test('no connected broker means unavailable, not an empty report', () async {
     final container = containerWith(null);
     expect(
-      await container.read(usageReportProvider(UsagePeriod.month).future),
+      await container.read(
+        usageReportProvider((period: UsagePeriod.month, offset: 0)).future,
+      ),
       isNull,
     );
   });
@@ -76,7 +78,9 @@ void main() {
     );
     final container = containerWith(api);
     expect(
-      await container.read(usageReportProvider(UsagePeriod.year).future),
+      await container.read(
+        usageReportProvider((period: UsagePeriod.year, offset: 0)).future,
+      ),
       isNull,
     );
   });
@@ -85,7 +89,9 @@ void main() {
     final api = _FakeUsageReportApi(failure: StateError('decode bug'));
     final container = containerWith(api);
     await expectLater(
-      container.read(usageReportProvider(UsagePeriod.month).future),
+      container.read(
+        usageReportProvider((period: UsagePeriod.month, offset: 0)).future,
+      ),
       throwsStateError,
     );
   });
@@ -94,7 +100,9 @@ void main() {
     final api = _FakeUsageReportApi();
     final container = containerWith(api);
 
-    await container.read(usageReportProvider(UsagePeriod.month).future);
+    await container.read(
+      usageReportProvider((period: UsagePeriod.month, offset: 0)).future,
+    );
     expect(api.windows.single.from, '2026-09-01');
     expect(api.windows.single.to, '2026-09-02');
   });
@@ -107,10 +115,15 @@ void main() {
     // is what a user flipping the segmented control produces.
     final subscriptions = [
       for (final period in UsagePeriod.report)
-        container.listen(usageReportProvider(period), (previous, next) {}),
+        container.listen(
+          usageReportProvider((period: period, offset: 0)),
+          (previous, next) {},
+        ),
     ];
     for (final period in UsagePeriod.report) {
-      await container.read(usageReportProvider(period).future);
+      await container.read(
+        usageReportProvider((period: period, offset: 0)).future,
+      );
     }
 
     expect(api.windows, hasLength(4));
@@ -122,19 +135,42 @@ void main() {
     expect(api.windows.every((window) => window.to == '2026-09-02'), isTrue);
 
     // Re-reading a period already resolved costs no second broker call.
-    await container.read(usageReportProvider(UsagePeriod.year).future);
+    await container.read(
+      usageReportProvider((period: UsagePeriod.year, offset: 0)).future,
+    );
     expect(api.windows, hasLength(4));
     for (final subscription in subscriptions) {
       subscription.close();
     }
   });
 
+  test(
+    'a stepped-back window is its own request and its own cache entry',
+    () async {
+      final api = _FakeUsageReportApi();
+      final container = containerWith(api);
+
+      // The Wednesday fixture resolves September in progress; one step back is
+      // the whole of August.
+      await container.read(
+        usageReportProvider((period: UsagePeriod.month, offset: 1)).future,
+      );
+      expect(api.windows.single, (from: '2026-08-01', to: '2026-08-31'));
+
+      // The current window and the previous one coexist instead of evicting.
+      await container.read(
+        usageReportProvider((period: UsagePeriod.month, offset: 0)).future,
+      );
+      expect(api.windows, hasLength(2));
+    },
+  );
+
   test('a served report decodes through to its figures', () async {
     final api = _FakeUsageReportApi();
     final container = containerWith(api);
 
     final response = await container.read(
-      usageReportProvider(UsagePeriod.month).future,
+      usageReportProvider((period: UsagePeriod.month, offset: 0)).future,
     );
     final report = response!.report!;
     expect(report.totals.tokens, 19893991786);

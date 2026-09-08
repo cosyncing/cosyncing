@@ -8,6 +8,7 @@ import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
+import 'package:cosyncing_client/src/features/usage/view/usage_agent_logo.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_heatmap.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_when_you_work.dart';
@@ -101,7 +102,13 @@ void main() {
           reason: label,
         );
       }
-      for (final figure in ['19.9B', r'$12,977', '129K', '294', '786.2h']) {
+      for (final figure in [
+        '19.9B',
+        r'$12,977',
+        '129K',
+        '294',
+        '1 month 2 days',
+      ]) {
         expect(
           find.descendant(of: hero, matching: find.text(figure)),
           findsOneWidget,
@@ -111,6 +118,34 @@ void main() {
       // The sentence is gone: the tiles are the figures, not a second
       // rendering of them.
       expect(find.byKey(const Key('usage-report-hero-sentence')), findsNothing);
+    });
+
+    testWidgets('every tile is the same height, meta line or not', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+
+      final hero = find.byKey(const Key('usage-report-hero'));
+      // DAY STREAK and PEAK WEEK carry sublines; the other six reserve the
+      // same slot, so no tile stands taller than its row.
+      final labels = [
+        'TOKENS',
+        'COST',
+        'DAY STREAK',
+        'PEAK WEEK',
+      ];
+      final heights = <double>{};
+      for (final label in labels) {
+        final text = find.descendant(of: hero, matching: find.text(label));
+        // The tile is the labelled Container the text sits in.
+        final tile = find.ancestor(
+          of: text,
+          matching: find.byType(Container),
+        );
+        heights.add(tester.getSize(tile.first).height);
+      }
+      expect(heights.length, 1, reason: 'tile heights: $heights');
     });
 
     testWidgets('the peak tile answers a different window per period', (
@@ -213,18 +248,48 @@ void main() {
   });
 
   group('podium', () {
-    testWidgets('three leaders, each with its share of the period', (
+    testWidgets('three leaders, each with its top three rows', (
       tester,
     ) async {
-      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      // The sample serves three harnesses but two models and two projects;
+      // add thirds so each tile has a full podium to show.
+      final data = sampleReport();
+      (data['topModelsByTokens']! as List<dynamic>).add({
+        'name': 'kimi-k2.5',
+        'tokens': 3000000000,
+        'cost': 900.0,
+        'requests': 24000,
+      });
+      (data['projects']! as Map<String, dynamic>)['rows'] = [
+        ...(data['projects']! as Map<String, dynamic>)['rows']!
+            as List<dynamic>,
+        {
+          'project': 'tokdash',
+          'tokens': 2500000000,
+          'cost': 800.0,
+          'requests': 20000,
+        },
+      ];
+      await tester.pumpWidget(buildSubject(data: data));
       await tester.pumpAndSettle();
 
       final podium = find.byKey(const Key('usage-report-podium'));
       expect(podium, findsOneWidget);
-      for (final name in ['Claude Code', 'claude-opus-5', 'atlas']) {
+      for (final name in [
+        'Claude Code',
+        'Codex',
+        'openclaw',
+        'claude-opus-5',
+        'gpt-5.6-sol',
+        'kimi-k2.5',
+        'atlas',
+        'atlas_private',
+        'tokdash',
+      ]) {
         expect(
           find.descendant(of: podium, matching: find.text(name)),
           findsOneWidget,
+          reason: name,
         );
       }
       expect(
@@ -233,6 +298,100 @@ void main() {
           matching: find.textContaining('10.1B · 51%'),
         ),
         findsOneWidget,
+      );
+      // Every harness row carries its mark.
+      expect(
+        find.descendant(of: podium, matching: find.byType(UsageAgentLogo)),
+        findsNWidgets(3),
+      );
+    });
+
+    testWidgets('a facet with two entries shows two, and none drops the tile', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+      final podium = find.byKey(const Key('usage-report-podium'));
+      // The sample serves exactly two models and two projects.
+      expect(
+        find.descendant(of: podium, matching: find.text('gpt-5.6-sol')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: podium, matching: find.text('atlas_private')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: podium, matching: find.text('kimi-k2.5')),
+        findsNothing,
+      );
+
+      // One entry: a single row, no crash.
+      final one = sampleReport();
+      one['topModelsByTokens'] = [
+        (one['topModelsByTokens']! as List<dynamic>).first,
+      ];
+      one['projects'] = {
+        'rows': <dynamic>[],
+        'attributedCount': 0,
+        'namesIncluded': true,
+      };
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(buildSubject(data: one));
+      await tester.pumpAndSettle();
+      expect(find.text('claude-opus-5'), findsWidgets);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-podium')),
+          matching: find.text('gpt-5.6-sol'),
+        ),
+        findsNothing,
+      );
+      // The project tile is gone; the others stand.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('usage-report-podium')),
+          matching: find.text('atlas'),
+        ),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the harness mark centers on the name’s x-height', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+
+      final podium = find.byKey(const Key('usage-report-podium'));
+      final name = find
+          .descendant(of: podium, matching: find.text('Claude Code'))
+          .first;
+      final mark = find
+          .descendant(of: podium, matching: find.byType(UsageAgentLogo))
+          .first;
+      expect(mark, findsOneWidget);
+
+      // tokdash's card metrics on the page: a 15px mark, the name 19px in.
+      final nameRect = tester.getRect(name);
+      final markRect = tester.getRect(mark);
+      expect(markRect.size, const Size.square(usageAgentNameMarkSize));
+      expect(
+        nameRect.left - markRect.left,
+        closeTo(usageAgentNameMarkOffset, 0.01),
+      );
+      // Painted center on the x band, not the line-box middle a plain
+      // centered Row would give. (Under the test font the two nearly
+      // coincide; with Roboto the shift is ~0.08em down.)
+      final nameWidget = tester.widget<Text>(name);
+      final dy = UsageAgentNameMark.xHeightOffset(
+        nameWidget.style!,
+        MediaQuery.textScalerOf(tester.element(name)),
+      );
+      expect(
+        markRect.center.dy,
+        closeTo(nameRect.top + nameRect.height / 2 + dy, 0.5),
       );
     });
 
@@ -318,6 +477,37 @@ void main() {
   });
 
   group('by agent', () {
+    testWidgets('row marks center on the agent name’s x-height', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildSubject(data: sampleReport()));
+      await tester.pumpAndSettle();
+
+      final agents = find.byKey(const Key('usage-report-agents'));
+      final name = find
+          .descendant(of: agents, matching: find.text('Claude Code'))
+          .first;
+      final mark = find
+          .descendant(of: agents, matching: find.byType(UsageAgentLogo))
+          .first;
+      final nameRect = tester.getRect(name);
+      final markRect = tester.getRect(mark);
+      expect(markRect.size, const Size.square(usageAgentNameMarkSize));
+      expect(
+        nameRect.left - markRect.left,
+        closeTo(usageAgentNameMarkOffset, 0.01),
+      );
+      final nameWidget = tester.widget<Text>(name);
+      final dy = UsageAgentNameMark.xHeightOffset(
+        nameWidget.style!,
+        MediaQuery.textScalerOf(tester.element(name)),
+      );
+      expect(
+        markRect.center.dy,
+        closeTo(nameRect.top + nameRect.height / 2 + dy, 0.5),
+      );
+    });
+
     testWidgets('coding apps are rows; everything else folds into one', (
       tester,
     ) async {

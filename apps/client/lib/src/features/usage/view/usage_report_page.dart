@@ -39,10 +39,16 @@ class UsageReportPage extends ConsumerStatefulWidget {
 class _UsageReportPageState extends ConsumerState<UsageReportPage> {
   late UsagePeriod _period = widget.initialPeriod ?? UsagePeriod.month;
 
+  /// How many complete periods back the page is looking. Switching the period
+  /// segment always lands back on the period in progress.
+  int _offset = 0;
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final report = ref.watch(usageReportProvider(_period));
+    final report = ref.watch(
+      usageReportProvider((period: _period, offset: _offset)),
+    );
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.usageHubTileTitle)),
@@ -58,7 +64,12 @@ class _UsageReportPageState extends ConsumerState<UsageReportPage> {
               children: [
                 _PeriodSwitcher(
                   period: _period,
-                  onChanged: (value) => setState(() => _period = value),
+                  offset: _offset,
+                  onChanged: (value) => setState(() {
+                    _period = value;
+                    _offset = 0;
+                  }),
+                  onOffsetChanged: (value) => setState(() => _offset = value),
                 ),
                 const SizedBox(height: 16),
                 report.when(
@@ -70,8 +81,12 @@ class _UsageReportPageState extends ConsumerState<UsageReportPage> {
                     icon: Icons.cloud_off_outlined,
                     text: l10n.usageUnavailable,
                   ),
-                  data: (response) =>
-                      _UsageReportBody(period: _period, response: response),
+                  data: (response) => _UsageReportBody(
+                    period: _period,
+                    offset: _offset,
+                    response: response,
+                    now: ref.watch(usageNowProvider)(),
+                  ),
                 ),
               ],
             ),
@@ -83,32 +98,88 @@ class _UsageReportPageState extends ConsumerState<UsageReportPage> {
 }
 
 class _PeriodSwitcher extends StatelessWidget {
-  const _PeriodSwitcher({required this.period, required this.onChanged});
+  const _PeriodSwitcher({
+    required this.period,
+    required this.offset,
+    required this.onChanged,
+    required this.onOffsetChanged,
+  });
 
   final UsagePeriod period;
+  final int offset;
   final ValueChanged<UsagePeriod> onChanged;
+  final ValueChanged<int> onOffsetChanged;
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SegmentedButton<UsagePeriod>(
-          key: const Key('usage-period-switcher'),
-          showSelectedIcon: false,
-          segments: [
-            for (final value in UsagePeriod.report)
-              ButtonSegment(
-                value: value,
-                label: Text(usagePeriodLabel(l10n, value)),
-              ),
-          ],
-          selected: {period},
-          onSelectionChanged: (selection) => onChanged(selection.first),
+    final label = usagePeriodLabel(l10n, period).toLowerCase();
+    // All time has no previous window to step into. The buttons hide rather
+    // than disable, but keep their space, so picking the segment does not
+    // shift the switcher under the reader's finger.
+    final navigable = period != UsagePeriod.allTime;
+    return Row(
+      children: [
+        Visibility(
+          visible: navigable,
+          maintainState: true,
+          maintainAnimation: true,
+          maintainSize: true,
+          // Zero padding with the glyph pinned left, then shifted back by the
+          // glyph's own side bearing (8px of the 24px icon box is empty): the
+          // row's visual left edge is the ‹ ink itself, flush with the
+          // content below, while the tap target stays 40px.
+          child: Transform.translate(
+            offset: const Offset(-8, 0),
+            child: IconButton(
+              key: const Key('usage-period-previous'),
+              padding: EdgeInsets.zero,
+              alignment: Alignment.centerLeft,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              icon: const Icon(Icons.chevron_left),
+              tooltip: l10n.usagePeriodPrevious(label),
+              onPressed: () => onOffsetChanged(offset + 1),
+            ),
+          ),
         ),
-      ),
+        // Loose so the group stays [‹ switcher ›] on the left rather than
+        // stranding › at the far edge; the scroll view still shrinks when the
+        // row runs out of width.
+        Flexible(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SegmentedButton<UsagePeriod>(
+              key: const Key('usage-period-switcher'),
+              showSelectedIcon: false,
+              segments: [
+                for (final value in UsagePeriod.report)
+                  ButtonSegment(
+                    value: value,
+                    label: Text(usagePeriodLabel(l10n, value)),
+                  ),
+              ],
+              selected: {period},
+              onSelectionChanged: (selection) => onChanged(selection.first),
+            ),
+          ),
+        ),
+        Visibility(
+          visible: navigable,
+          maintainState: true,
+          maintainAnimation: true,
+          maintainSize: true,
+          child: IconButton(
+            key: const Key('usage-period-next'),
+            padding: EdgeInsets.zero,
+            alignment: Alignment.centerRight,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            icon: const Icon(Icons.chevron_right),
+            tooltip: l10n.usagePeriodNext(label),
+            // Offset 0 is the period in progress; there is no newer window.
+            onPressed: offset == 0 ? null : () => onOffsetChanged(offset - 1),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -192,10 +263,21 @@ DateTime usageHeatmapStart(DateTime requestedFrom, UsageReport report) {
 }
 
 class _UsageReportBody extends StatelessWidget {
-  const _UsageReportBody({required this.period, required this.response});
+  const _UsageReportBody({
+    required this.period,
+    required this.offset,
+    required this.response,
+    required this.now,
+  });
 
   final UsagePeriod period;
+
+  /// How many complete periods back this window is. 0 is the one in progress.
+  final int offset;
   final UsageReportResponse? response;
+
+  /// The clock everything on the page resolves against.
+  final DateTime now;
 
   @override
   Widget build(BuildContext context) {
@@ -240,7 +322,13 @@ class _UsageReportBody extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Header(period: period, report: report, locale: locale),
+        _Header(
+          period: period,
+          offset: offset,
+          report: report,
+          locale: locale,
+          now: now,
+        ),
         const SizedBox(height: 16),
         if (report.isPartial) ...[
           InlineNotice(
@@ -279,7 +367,7 @@ class _UsageReportBody extends StatelessWidget {
           const SizedBox(height: 24),
           UsageAgentTable(tools: report.tools, locale: locale),
           const SizedBox(height: 24),
-          UsageShareSection(report: report, locale: locale),
+          UsageShareSection(period: period, report: report, locale: locale),
         ],
         const SizedBox(height: 24),
         _Footer(report: report, locale: locale),
@@ -470,13 +558,20 @@ class _ActiveDays extends StatelessWidget {
 class _Header extends StatelessWidget {
   const _Header({
     required this.period,
+    required this.offset,
     required this.report,
     required this.locale,
+    required this.now,
   });
 
   final UsagePeriod period;
+  final int offset;
   final UsageReport report;
   final String locale;
+
+  /// The injected clock; the progress note must agree with the window the
+  /// request was built from, which the raw wall clock need not do.
+  final DateTime now;
 
   @override
   Widget build(BuildContext context) {
@@ -486,15 +581,16 @@ class _Header extends StatelessWidget {
     final window = report.range;
 
     // In progress is derived from the served window against its own last active
-    // day, so a closed period never claims to still be running.
+    // day, so a closed period never claims to still be running. A stepped-back
+    // window is complete by construction and never prints the note at all.
     String? progress;
     final days = window.days;
     final firsts = report.firsts;
-    if (days != null && firsts?.lastActiveDay != null) {
+    if (offset == 0 && days != null && firsts?.lastActiveDay != null) {
       final last = DateTime.tryParse(firsts!.lastActiveDay!);
       final to = DateTime.tryParse(window.to);
       if (last != null && to != null && !last.isBefore(to)) {
-        final elapsed = resolveUsageWindow(period, DateTime.now());
+        final elapsed = resolveUsageWindow(period, now);
         if (elapsed.inProgress) {
           progress = l10n.usageInProgress(
             elapsed.elapsedDays,

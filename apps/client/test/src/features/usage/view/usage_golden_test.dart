@@ -7,6 +7,7 @@ import 'package:cosyncing_client/src/design/app_theme.dart';
 import 'package:cosyncing_client/src/design/themes/theme_registry.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_export_service.dart';
 import 'package:cosyncing_client/src/features/usage/data/usage_report_api.dart';
+import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_export_card.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_report_page.dart';
 import 'package:cosyncing_client/src/features/usage/view/usage_today_card.dart';
@@ -246,6 +247,7 @@ void main() {
         body: Center(
           child: UsageExportCard(
             kind: kind,
+            period: UsagePeriod.month,
             report: report,
             locale: locale.toLanguageTag(),
             includeCost: true,

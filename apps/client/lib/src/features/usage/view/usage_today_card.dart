@@ -37,7 +37,9 @@ class _UsageTodayCardState extends ConsumerState<UsageTodayCard> {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final tokens = context.tokens;
-    final report = ref.watch(usageReportProvider(_period));
+    final report = ref.watch(
+      usageReportProvider((period: _period, offset: 0)),
+    );
     final window = resolveUsageWindow(_period, ref.watch(usageNowProvider)());
     final compact = WindowSizeClass.of(context) == WindowSizeClass.compact;
 
@@ -212,8 +214,9 @@ class _CardBody extends StatelessWidget {
         if (report.activeTime?.activeMsSum != null)
           UsageFigureRow(
             label: l10n.usageAgentTimeLabel,
-            value: l10n.usageHoursValue(
-              formatUsageHours(report.activeTime!.activeMsSum!, locale: locale),
+            value: formatUsageAgentTime(
+              report.activeTime!.activeMsSum!,
+              locale: locale,
             ),
             tooltip: usageEstimatedTip(l10n, report.activeTime!),
           ),

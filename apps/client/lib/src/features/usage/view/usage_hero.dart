@@ -1,10 +1,12 @@
+import 'dart:ui' as ui show TextDirection;
+
 import 'package:broker_contract/broker_contract.dart';
 import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:cosyncing_client/src/design/app_tokens.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_format.dart';
 import 'package:cosyncing_client/src/features/usage/model/usage_period.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' hide TextDirection;
 
 /// The period's figures as a wrapping grid of stat tiles.
 ///
@@ -68,9 +70,7 @@ class UsageHero extends StatelessWidget {
       if (activeMs != null)
         _StatTile(
           label: l10n.usageStatAgentTime,
-          value: l10n.usageHoursValue(
-            formatUsageHours(activeMs, locale: locale),
-          ),
+          value: formatUsageAgentTime(activeMs, locale: locale),
           tooltip: activeTimeTooltip,
         ),
       if (totals.cacheHitRate != null)
@@ -153,6 +153,18 @@ class _StatTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = context.tokens;
+    final valueStyle = theme.textTheme.headlineSmall?.copyWith(
+      color: valueColor,
+      fontWeight: FontWeight.w600,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    // The value slot is pinned to one unscaled line: a value long enough to
+    // scale down must not shrink its tile against the row.
+    final valueHeight = (TextPainter(
+      text: TextSpan(text: '0', style: valueStyle),
+      textDirection: ui.TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout()).height;
     final tile = Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       decoration: BoxDecoration(
@@ -166,6 +178,7 @@ class _StatTile extends StatelessWidget {
           Text(
             label.toUpperCase(),
             overflow: TextOverflow.ellipsis,
+            maxLines: 1,
             style: theme.textTheme.labelSmall?.copyWith(
               color: tokens.textTertiary,
               fontWeight: FontWeight.w600,
@@ -173,28 +186,26 @@ class _StatTile extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(
-              value,
-              style: theme.textTheme.headlineSmall?.copyWith(
-                color: valueColor,
-                fontWeight: FontWeight.w600,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
+          SizedBox(
+            height: valueHeight,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(value, style: valueStyle),
             ),
           ),
-          if (meta != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              meta!,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: tokens.textTertiary,
-              ),
+          // The subline slot is reserved even when empty: streak and peak
+          // tiles carry meta and the rest do not, and an unconditional slot is
+          // what keeps every tile in the grid the same height.
+          const SizedBox(height: 2),
+          Text(
+            meta ?? '',
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: tokens.textTertiary,
             ),
-          ],
+          ),
         ],
       ),
     );

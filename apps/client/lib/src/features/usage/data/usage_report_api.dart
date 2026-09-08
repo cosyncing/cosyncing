@@ -68,7 +68,13 @@ final class UsageReportApiContext {
 /// Reference clock for window resolution, overridable so tests pin a date.
 final usageNowProvider = Provider<DateTime Function()>((_) => DateTime.now);
 
-/// The report for one period, or `null` when it is unavailable.
+/// The window a report request is for: a period and how many complete periods
+/// back. Offset 0 is the period in progress; offset 1 is the one that ended
+/// just before it started. Part of the family key, so every visited window
+/// keeps its own result.
+typedef UsageReportQuery = ({UsagePeriod period, int offset});
+
+/// The report for one window, or `null` when it is unavailable.
 ///
 /// `null` means unavailable — no broker connected, or the read failed with a
 /// [BrokerException] (Tokdash down, broker 502). The whole surface hides on it
@@ -76,16 +82,20 @@ final usageNowProvider = Provider<DateTime Function()>((_) => DateTime.now);
 /// different claims and only one of them is ever true here. Programming and
 /// decoding errors are deliberately not swallowed.
 ///
-/// Auto-disposed and keyed by period: leaving the report drops the
-/// subscription, and switching periods keeps each window's result rather than
-/// discarding it, which is what makes the broker's own window cache worth
-/// having.
-final AutoDisposeFutureProviderFamily<UsageReportResponse?, UsagePeriod>
+/// Auto-disposed and keyed by window: leaving the report drops the
+/// subscription, and switching periods or stepping back keeps each window's
+/// result rather than discarding it, which is what makes the broker's own
+/// window cache worth having.
+final AutoDisposeFutureProviderFamily<UsageReportResponse?, UsageReportQuery>
 usageReportProvider = FutureProvider.autoDispose
-    .family<UsageReportResponse?, UsagePeriod>((ref, period) async {
+    .family<UsageReportResponse?, UsageReportQuery>((ref, query) async {
       final context = await ref.watch(usageReportApiContextProvider.future);
       if (context == null) return null;
-      final window = resolveUsageWindow(period, ref.watch(usageNowProvider)());
+      final window = resolveUsageWindow(
+        query.period,
+        ref.watch(usageNowProvider)(),
+        offset: query.offset,
+      );
       try {
         return await context.api.getReport(from: window.from, to: window.to);
       } on BrokerException {

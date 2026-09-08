@@ -6,7 +6,10 @@
 /// claims about one number.
 library;
 
+import 'dart:ui' as ui;
+
 import 'package:broker_contract/broker_contract.dart';
+import 'package:cosyncing_client/l10n/app_localizations.dart';
 import 'package:intl/intl.dart';
 
 /// Compact count with ASCII K/M/B/T suffixes.
@@ -78,12 +81,50 @@ String formatUsageCost(num cost, {String? locale, bool compact = false}) {
   ).format(cost);
 }
 
-/// Total agent time as decimal hours with one decimal.
+/// Total agent time, normalized to at most two units.
 ///
-/// A period total, not a duration: `formatCompactDuration` would render August
-/// as `16d 19h`, which reads as uptime rather than as time spent.
-String formatUsageHours(num milliseconds, {String? locale}) =>
-    _fixed(milliseconds / Duration.millisecondsPerHour, 1, locale);
+/// A period total, not a duration, but decimal hours (`267.9h`) read as one
+/// continuous span once they pass a day, so the total is stated in the largest
+/// unit that fits: decimal hours below a day (`5.5 hr`), days and whole hours
+/// below a week (`1 day 1 hr`), weeks and days below thirty days (`2 weeks 6
+/// days`), then 30-day months and days (`1 month 4 days`). A zero remainder is
+/// dropped (`3 days`). The figure is a sum across agents running at the same
+/// time — a week can hold more than 168 — so the units name an amount of work,
+/// never a span of wall-clock time.
+String formatUsageAgentTime(num milliseconds, {String? locale}) {
+  if (!milliseconds.isFinite) return '';
+  final l10n = lookupAppLocalizations(_appLocale(locale));
+  const msPerHour = Duration.millisecondsPerHour;
+  const msPerDay = Duration.millisecondsPerDay;
+  final totalHours = milliseconds / msPerHour;
+  if (totalHours < 24) {
+    return l10n.usageAgentTimeHours(_fixed(totalHours, 1, locale));
+  }
+  final totalDays = milliseconds.floor() ~/ msPerDay;
+  if (totalDays < 7) {
+    final hours = ((milliseconds - totalDays * msPerDay) / msPerHour).floor();
+    final days = l10n.usageAgentTimeDays(totalDays);
+    return hours == 0 ? days : '$days ${l10n.usageAgentTimeHours('$hours')}';
+  }
+  if (totalDays < 30) {
+    final weeks = l10n.usageAgentTimeWeeks(totalDays ~/ 7);
+    final days = totalDays % 7;
+    return days == 0 ? weeks : '$weeks ${l10n.usageAgentTimeDays(days)}';
+  }
+  final months = l10n.usageAgentTimeMonths(totalDays ~/ 30);
+  final days = totalDays % 30;
+  return days == 0 ? months : '$months ${l10n.usageAgentTimeDays(days)}';
+}
+
+/// Resolves a BCP-47 tag to the locale the generated messages are keyed by.
+///
+/// The app ships language-only locales, so the language code is the whole
+/// match; a tag this app does not ship falls back to English, the same answer
+/// the delegates give.
+ui.Locale _appLocale(String? locale) {
+  if (locale == null || locale.isEmpty) return const ui.Locale('en');
+  return ui.Locale(locale.split('-').first.split('_').first);
+}
 
 /// A share of a total, as a percentage.
 ///
@@ -118,6 +159,122 @@ String formatUsageCountWithShare(
 String formatUsageCount(num value, {String? locale}) {
   if (value is double && !value.isFinite) return '';
   return _fixed(value, 0, locale);
+}
+
+/// Compact count under tokdash's card rule: at most one decimal at any
+/// magnitude, with the decimal dropped when it rounds to none.
+///
+/// [formatCompactCount] goes to zero decimals at a 100+ mantissa to hold a
+/// column to four significant characters; the export card is a poster, not a
+/// column, so `105.5M` keeps its tenth. Rounding that carries promotes the
+/// tier, as it does there.
+String formatUsageCardTokens(num value, {String? locale}) {
+  if (!value.isFinite) return '';
+  final magnitude = value.abs();
+  if (magnitude < 1000) {
+    return NumberFormat.decimalPattern(locale).format(value.round());
+  }
+  const tiers = <(num, String)>[
+    (1000000000000, 'T'),
+    (1000000000, 'B'),
+    (1000000, 'M'),
+    (1000, 'K'),
+  ];
+  var index = tiers.indexWhere((tier) => magnitude >= tier.$1);
+  if (index < 0) index = tiers.length - 1;
+  var (divisor, suffix) = tiers[index];
+  var mantissa = (value / divisor * 10).round() / 10;
+  if (mantissa.abs() >= 1000 && index > 0) {
+    (divisor, suffix) = tiers[index - 1];
+    mantissa = (value / divisor * 10).round() / 10;
+  }
+  final decimals = mantissa == mantissa.roundToDouble() ? 0 : 1;
+  return '${_fixed(mantissa, decimals, locale)}$suffix';
+}
+
+/// A ranked row's share under tokdash's card rule.
+///
+/// Two decimals while under 1% (`0.57%` is the whole point on a shared
+/// image), one below 10%, none above. A missing facet total is an em dash,
+/// never an invented zero.
+String formatUsageCardShare(double? fraction, {String? locale}) {
+  if (fraction == null || !fraction.isFinite) return '\u2014';
+  final percent = fraction * 100;
+  final decimals = percent > 0 && percent < 1
+      ? 2
+      : percent < 10
+      ? 1
+      : 0;
+  return '${_fixed(percent, decimals, locale)}%';
+}
+
+/// API list-price equivalent on the card: two decimals, never compacted.
+///
+/// tokdash's card prints `'$' + n.toFixed(2)` — no locale grouping and no
+/// cents-dropping at four digits — so the card and the reference render the
+/// same figure byte for byte. The qualifier rides on the page's toggle, not
+/// beside the number.
+String formatUsageCardCost(num cost) {
+  if (!cost.isFinite) return '';
+  return '\$${cost.toStringAsFixed(2)}';
+}
+
+/// Total agent time on the card, under tokdash's duration rule.
+///
+/// Below a day this is the compact clock form (`5h 05m`, `45m`, `30s`); at a
+/// day and above it switches to long unit words, two units at most: day+hour
+/// below a week, week+day below thirty days, then 30-day months and days. The
+/// joiner drops the space where the locale's words carry none (`1天1小时`).
+/// Distinct from [formatUsageAgentTime], the page's decimal-hours style,
+/// because the card is a tokdash port and the page is not.
+String formatUsageCardDuration(num milliseconds, {String? locale}) {
+  if (!milliseconds.isFinite) return '';
+  final seconds = milliseconds < 0 ? 0 : (milliseconds / 1000).round();
+  if (seconds == 0) return '\u2014';
+  if (seconds < Duration.secondsPerDay) {
+    final hours = seconds ~/ Duration.secondsPerHour;
+    final minutes = (seconds % Duration.secondsPerHour) ~/ 60;
+    if (hours > 0) {
+      return '${hours}h ${minutes.toString().padLeft(2, '0')}m';
+    }
+    if (minutes > 0) return '${minutes}m';
+    return '${seconds}s';
+  }
+  final resolved = _appLocale(locale);
+  final l10n = lookupAppLocalizations(resolved);
+  final joiner = switch (resolved.languageCode) {
+    'zh' || 'ja' => '',
+    _ => ' ',
+  };
+  String pair(String head, int tailCount, String Function(int) tail) =>
+      tailCount == 0 ? head : '$head$joiner${tail(tailCount)}';
+  var days = seconds ~/ Duration.secondsPerDay;
+  if (days < 7) {
+    var restHours =
+        ((seconds - days * Duration.secondsPerDay) / Duration.secondsPerHour)
+            .round();
+    if (restHours == 24) {
+      days += 1;
+      restHours = 0;
+    }
+    return pair(
+      l10n.usageCardDurationDays(days),
+      restHours,
+      l10n.usageCardDurationHours,
+    );
+  }
+  if (days < 30) {
+    return pair(
+      l10n.usageCardDurationWeeks(days ~/ 7),
+      days % 7,
+      l10n.usageCardDurationDays,
+    );
+  }
+  return pair(
+    l10n.usageCardDurationMonths(days ~/ 30),
+    days % 30,
+    l10n.usageCardDurationDays,
+  );
 }
 
 /// A one-based rank from a zero-based index, e.g. `1`.

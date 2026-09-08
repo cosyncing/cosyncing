@@ -136,6 +136,123 @@ void main() {
     });
   });
 
+  group('resolveUsageWindow with an offset', () {
+    test('offset zero is the current behavior, unchanged', () {
+      for (final period in UsagePeriod.values) {
+        final plain = resolveUsageWindow(period, wednesday);
+        // The explicit zero is the subject: it must equal the defaulted call.
+        // ignore: avoid_redundant_argument_values
+        final explicit = resolveUsageWindow(period, wednesday, offset: 0);
+        expect(explicit.from, plain.from);
+        expect(explicit.to, plain.to);
+        expect(explicit.elapsedDays, plain.elapsedDays);
+        expect(explicit.totalDays, plain.totalDays);
+      }
+    });
+
+    test('the previous week is the complete Monday-first week before', () {
+      // The Wednesday fixture sits in the week that opened August 31, so one
+      // step back lands across the month boundary.
+      final window = resolveUsageWindow(UsagePeriod.week, wednesday, offset: 1);
+      expect(window.from, '2026-08-24');
+      expect(window.to, '2026-08-30');
+      expect(window.elapsedDays, 7);
+      expect(window.totalDays, 7);
+      expect(window.inProgress, isFalse);
+    });
+
+    test('two steps back lands two complete weeks back', () {
+      final window = resolveUsageWindow(UsagePeriod.week, wednesday, offset: 2);
+      expect(window.from, '2026-08-17');
+      expect(window.to, '2026-08-23');
+    });
+
+    test('a week stepped from Monday closes the week just ended', () {
+      final monday = DateTime(2026, 9, 7);
+      final window = resolveUsageWindow(UsagePeriod.week, monday, offset: 1);
+      expect(window.from, '2026-08-31');
+      expect(window.to, '2026-09-06');
+      expect(window.inProgress, isFalse);
+    });
+
+    test(
+      'the previous month is the whole calendar month, by its own length',
+      () {
+        final window = resolveUsageWindow(
+          UsagePeriod.month,
+          wednesday,
+          offset: 1,
+        );
+        expect(window.from, '2026-08-01');
+        expect(window.to, '2026-08-31');
+        expect(window.elapsedDays, 31);
+        expect(window.totalDays, 31);
+        expect(window.inProgress, isFalse);
+      },
+    );
+
+    test('March steps back to February, leap year or not', () {
+      final leap = resolveUsageWindow(
+        UsagePeriod.month,
+        DateTime(2028, 3, 15),
+        offset: 1,
+      );
+      expect((leap.from, leap.to), ('2028-02-01', '2028-02-29'));
+      expect(leap.inProgress, isFalse);
+      final plain = resolveUsageWindow(
+        UsagePeriod.month,
+        DateTime(2026, 3, 15),
+        offset: 1,
+      );
+      expect((plain.from, plain.to), ('2026-02-01', '2026-02-28'));
+    });
+
+    test('January steps back across the year boundary', () {
+      final window = resolveUsageWindow(
+        UsagePeriod.month,
+        DateTime(2027, 1, 10),
+        offset: 1,
+      );
+      expect((window.from, window.to), ('2026-12-01', '2026-12-31'));
+      final thirteen = resolveUsageWindow(
+        UsagePeriod.month,
+        DateTime(2027, 1, 10),
+        offset: 13,
+      );
+      expect((thirteen.from, thirteen.to), ('2025-12-01', '2025-12-31'));
+    });
+
+    test('the previous year is complete, leap years included', () {
+      final window = resolveUsageWindow(UsagePeriod.year, wednesday, offset: 1);
+      expect((window.from, window.to), ('2025-01-01', '2025-12-31'));
+      expect(window.elapsedDays, 365);
+      expect(window.totalDays, 365);
+      expect(window.inProgress, isFalse);
+      final leap = resolveUsageWindow(
+        UsagePeriod.year,
+        DateTime(2029, 6),
+        offset: 1,
+      );
+      expect((leap.from, leap.to), ('2028-01-01', '2028-12-31'));
+      expect(leap.totalDays, 366);
+    });
+
+    test('today and all time have no previous window to step into', () {
+      expect(
+        () => resolveUsageWindow(UsagePeriod.today, wednesday, offset: 1),
+        throwsArgumentError,
+      );
+      expect(
+        () => resolveUsageWindow(UsagePeriod.allTime, wednesday, offset: 1),
+        throwsArgumentError,
+      );
+      expect(
+        () => resolveUsageWindow(UsagePeriod.week, wednesday, offset: -1),
+        throwsRangeError,
+      );
+    });
+  });
+
   group('link names', () {
     test('every report period round-trips through its link name', () {
       for (final period in UsagePeriod.report) {

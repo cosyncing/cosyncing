@@ -109,6 +109,65 @@ class UsageAgentLogo extends StatelessWidget {
   }
 }
 
+/// The mark size used next to a harness name, and the name's offset from the
+/// row's left edge — tokdash's metrics: a 15px mark, the name at +19.
+const double usageAgentNameMarkSize = 15;
+
+/// Left edge of the name when a [UsageAgentNameMark] leads the row.
+const double usageAgentNameMarkOffset = 19;
+
+/// A [UsageAgentLogo] at [usageAgentNameMarkSize], centered on the x-height
+/// of [style] rather than on the line box.
+///
+/// A plain centered `Row` centers the mark on the name's line box, whose
+/// middle sits ~(ascent − descent − xHeight)/2 above the x band — a visible
+/// wobble next to text. tokdash's card puts the mark's center at
+/// baseline − xHeight/2; this reaches the same place with the font's real
+/// metrics, measured off a throwaway one-glyph painter.
+class UsageAgentNameMark extends StatelessWidget {
+  /// Creates a name-row mark.
+  const UsageAgentNameMark({
+    required this.tool,
+    required this.style,
+    super.key,
+  });
+
+  /// The served tool id, e.g. `codex`.
+  final String tool;
+
+  /// The name's style; the mark follows its x-height.
+  final TextStyle style;
+
+  /// The shift from line-box center to x-height center for [style], in
+  /// logical px. Positive moves the mark down.
+  static double xHeightOffset(TextStyle style, TextScaler scaler) {
+    final painter = TextPainter(
+      text: TextSpan(text: 'x', style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: scaler,
+    )..layout();
+    try {
+      final line = painter.computeLineMetrics().first;
+      final boxes = painter.getBoxesForSelection(
+        const TextSelection(baseOffset: 0, extentOffset: 1),
+      );
+      if (boxes.isEmpty) return 0;
+      final xBox = boxes.first;
+      return (xBox.top + xBox.bottom) / 2 - line.height / 2;
+    } finally {
+      painter.dispose();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Transform.translate(
+      offset: Offset(0, xHeightOffset(style, MediaQuery.textScalerOf(context))),
+      child: UsageAgentLogo(tool: tool, size: usageAgentNameMarkSize),
+    );
+  }
+}
+
 class _FallbackChip extends StatelessWidget {
   const _FallbackChip({required this.tool, required this.size});
 

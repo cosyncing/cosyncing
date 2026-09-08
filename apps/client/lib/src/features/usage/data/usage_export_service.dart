@@ -24,7 +24,7 @@ class UsageExportFile {
 /// Where captured cards are written.
 ///
 /// A seam, so the capture and the destination can be tested apart: a widget
-/// test can prove the PNG is 1080×1920 without a file dialog, and the platform
+/// test can prove the PNG is 1800×3200 without a file dialog, and the platform
 /// implementations stay thin enough to read.
 // ignore: one_member_abstracts
 abstract class UsageExportSink {
@@ -164,8 +164,8 @@ typedef UsageExportCapture = Future<Uint8List?> Function(GlobalKey boundaryKey);
 final Provider<UsageExportCapture> usageExportCaptureProvider =
     Provider<UsageExportCapture>((ref) => captureUsageExportCard);
 
-/// Pixel ratio for a captured card: 360×640 logical becomes 1080×1920.
-const double usageExportPixelRatio = 3;
+/// Pixel ratio for a captured card: 360×640 logical becomes 1800×3200.
+const double usageExportPixelRatio = 5;
 
 /// Captures one `RepaintBoundary` as PNG bytes.
 ///

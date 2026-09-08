@@ -38,6 +38,19 @@ class _StubApi implements UsageReportApi {
   }
 }
 
+class _RecordingApi implements UsageReportApi {
+  final List<({String from, String to})> windows = [];
+
+  @override
+  Future<UsageReportResponse> getReport({
+    required String from,
+    required String to,
+  }) async {
+    windows.add((from: from, to: to));
+    return UsageReportResponse.fromJson({'ok': true, 'data': sampleReport()});
+  }
+}
+
 void main() {
   final now = DateTime(2026, 9, 2, 9);
 
@@ -188,6 +201,159 @@ void main() {
       find.byKey(const Key('usage-report-range')),
     );
     expect(range.data, contains('2026-08-01 – 2026-08-31'));
+  });
+
+  group('stepping back through complete periods', () {
+    Widget recordingSubject(_RecordingApi api) {
+      final spec = themeSpecById(kDefaultThemeId);
+      return ProviderScope(
+        overrides: [
+          usageNowProvider.overrideWithValue(() => now),
+          usageReportApiProvider.overrideWithValue(api),
+        ],
+        child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          theme: buildAppTheme(spec.light, Brightness.light),
+          home: const MediaQuery(
+            data: MediaQueryData(size: Size(1000, 2400)),
+            child: UsageReportPage(),
+          ),
+        ),
+      );
+    }
+
+    bool chevronVisible(WidgetTester tester, Key key) => tester
+        .widget<Visibility>(
+          find.ancestor(
+            of: find.byKey(key),
+            matching: find.byType(Visibility),
+          ),
+        )
+        .visible;
+
+    testWidgets('next is disabled on the period in progress, previous is not', (
+      tester,
+    ) async {
+      await tester.pumpWidget(recordingSubject(_RecordingApi()));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('usage-period-next')))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const Key('usage-period-previous')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('stepping back asks for the complete previous month', (
+      tester,
+    ) async {
+      final api = _RecordingApi();
+      await tester.pumpWidget(recordingSubject(api));
+      await tester.pumpAndSettle();
+      expect(api.windows.single, (from: '2026-09-01', to: '2026-09-02'));
+
+      await tester.tap(find.byKey(const Key('usage-period-previous')));
+      await tester.pumpAndSettle();
+
+      expect(api.windows.last, (from: '2026-08-01', to: '2026-08-31'));
+      // The title reads from the served range, and a closed window never
+      // claims to still be running.
+      final title = tester.widget<Text>(
+        find.byKey(const Key('usage-report-title')),
+      );
+      expect(title.data, contains('August 2026'));
+      expect(
+        tester.widget<Text>(find.byKey(const Key('usage-report-range'))).data,
+        isNot(contains('in progress')),
+      );
+      // One step back, the way forward reopens.
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('usage-period-next')))
+            .onPressed,
+        isNotNull,
+      );
+
+      await tester.tap(find.byKey(const Key('usage-period-next')));
+      await tester.pumpAndSettle();
+      expect(api.windows.last, (from: '2026-09-01', to: '2026-09-02'));
+    });
+
+    testWidgets('switching segments lands back on the period in progress', (
+      tester,
+    ) async {
+      final api = _RecordingApi();
+      await tester.pumpWidget(recordingSubject(api));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('usage-period-previous')));
+      await tester.pumpAndSettle();
+      expect(api.windows.last, (from: '2026-08-01', to: '2026-08-31'));
+
+      await tester.tap(find.text('Year'));
+      await tester.pumpAndSettle();
+      // The year in progress, not a previous year: the offset reset with the
+      // segment.
+      expect(api.windows.last, (from: '2026-01-01', to: '2026-09-02'));
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('usage-period-next')))
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('all time hides both chevrons', (tester) async {
+      await tester.pumpWidget(recordingSubject(_RecordingApi()));
+      await tester.pumpAndSettle();
+      expect(
+        chevronVisible(tester, const Key('usage-period-previous')),
+        isTrue,
+      );
+
+      await tester.tap(find.text('All time'));
+      await tester.pumpAndSettle();
+
+      // No previous window exists to step into, so there is no button to
+      // press — and no dead greyed one either.
+      expect(
+        chevronVisible(tester, const Key('usage-period-previous')),
+        isFalse,
+      );
+      expect(chevronVisible(tester, const Key('usage-period-next')), isFalse);
+    });
+
+    testWidgets('the chevrons name where they go for assistive readers', (
+      tester,
+    ) async {
+      await tester.pumpWidget(recordingSubject(_RecordingApi()));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const Key('usage-period-previous')),
+            )
+            .tooltip,
+        'Previous month',
+      );
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('usage-period-next')))
+            .tooltip,
+        'Next month',
+      );
+    });
   });
 
   testWidgets('cost never renders without its qualifier', (tester) async {
