@@ -23,7 +23,9 @@ import {
   isAddressInUse,
   isTicketedSessionWebSocket,
   runCandidateBrokerAttempts,
+  TICKET_POST_DATA_INLINE_CAP,
   ticketRequestContractMatches,
+  ticketRequestPostData,
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
 } from '../../release/verify-candidate-pair.ts';
@@ -129,6 +131,69 @@ for (const [field, value] of [
   );
 }
 console.log('PASS  publication verifier checks compiled ticket contract identity');
+
+// The ticket body is read long after the request was sent, so it must arrive
+// on the event. Chromium evicts request bodies, and answers a late
+// `Network.getRequestPostData` with `-32000 No resource with given id was
+// found` — which failed a public release gate and passed on the rerun.
+const inlineTicketRequest = {
+  params: { requestId: 'request-1', request: { postData: ticketPostData } },
+};
+let lookups = 0;
+assert.equal(
+  await ticketRequestPostData(inlineTicketRequest, async (requestId) => {
+    lookups += 1;
+    return { postData: `late lookup for ${requestId}` };
+  }),
+  ticketPostData,
+);
+assert.equal(lookups, 0, 'an inline body must not be looked up again');
+
+assert.equal(
+  await ticketRequestPostData(
+    { params: { requestId: 'request-2', request: {} } },
+    async () => ({ postData: ticketPostData }),
+  ),
+  ticketPostData,
+  'a body over the inline cap still falls back to the lookup',
+);
+
+assert.equal(
+  await ticketRequestPostData({ params: { request: {} } }, async () => {
+    throw new Error('must not be called without a request id');
+  }),
+  undefined,
+);
+
+await assert.rejects(
+  ticketRequestPostData(
+    { params: { requestId: 'request-3', request: {} } },
+    async () => {
+      throw new Error('{"code":-32000,"message":"No resource with given id was found"}');
+    },
+  ),
+  // A body that could not be read must not be reported as a contract
+  // mismatch: that is a different failure and sends the reader elsewhere.
+  /ticket request body was not delivered inline and Chromium no longer holds it/,
+);
+console.log('PASS  publication verifier reads the ticket body from its own event');
+
+// The helper cannot fix the race on its own: without the cap Chromium never
+// puts a body on the event, and every run takes the racy path again.
+const verifierSource = readFileSync(
+  new URL('../../release/verify-candidate-pair.ts', import.meta.url),
+  'utf8',
+);
+assert.match(
+  verifierSource,
+  /Network\.enable',\s*\{\s*maxPostDataSize: TICKET_POST_DATA_INLINE_CAP,/,
+  'Network.enable must ask for request bodies inline',
+);
+assert.ok(
+  TICKET_POST_DATA_INLINE_CAP > ticketPostData.length,
+  'the inline cap must comfortably exceed a real ticket body',
+);
+console.log('PASS  publication verifier asks Chromium for request bodies inline');
 
 const webIdentity = {
   version: '1.2.3',

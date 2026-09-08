@@ -376,6 +376,51 @@ export function ticketRequestContractMatches(
   }
 }
 
+/**
+ * Bytes of request body Chromium is asked to deliver on `requestWillBeSent`.
+ *
+ * The ticket request carries a small JSON object, so this only has to be
+ * comfortably larger than that; it is not a budget for page traffic, because
+ * Chromium applies it per request and only to bodies it would otherwise have
+ * withheld.
+ */
+export const TICKET_POST_DATA_INLINE_CAP = 65_536;
+
+/**
+ * The ticket request's body, taken from the recorded event where possible.
+ *
+ * Reading it from the event is not an optimisation, it is the fix for a race.
+ * The body is wanted long after the request was sent: the verifier first waits
+ * for the session WebSocket to appear, then searches *backwards* through the
+ * recorded events for the earlier ticket request. By that point Chromium is
+ * free to have evicted the body, and answers `Network.getRequestPostData` with
+ * `-32000 No resource with given id was found` — which failed a public release
+ * gate on a PR that had changed nothing near it, and passed on the rerun.
+ *
+ * The retroactive lookup survives only for a body larger than the inline cap,
+ * which Chromium reports as `hasPostData` with no copy attached. When even
+ * that fails, the error says the body could not be read rather than letting a
+ * missing body be reported as a contract mismatch, which is a different bug
+ * and would send the next reader to the wrong place.
+ */
+export async function ticketRequestPostData(
+  ticketRequest: any,
+  fetchPostData: (requestId: string) => Promise<{ postData?: string } | undefined>,
+): Promise<string | undefined> {
+  const inline = ticketRequest?.params?.request?.postData;
+  if (typeof inline === 'string' && inline.length > 0) return inline;
+  const requestId = ticketRequest?.params?.requestId;
+  if (typeof requestId !== 'string' || requestId.length === 0) return undefined;
+  try {
+    return (await fetchPostData(requestId))?.postData;
+  } catch (error) {
+    throw new Error(
+      'ticket request body was not delivered inline and Chromium no longer '
+      + `holds it: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export function candidateBrokerEnvironment(options: {
   home: string;
   hostHome: string;
@@ -513,7 +558,12 @@ async function probeBuiltClient(options: {
 
     await send('Page.enable');
     await send('Runtime.enable');
-    await send('Network.enable');
+    // Bodies inline, so the ticket POST arrives complete on its own
+    // `requestWillBeSent`. See `ticketRequestPostData` for why reading it
+    // there rather than asking for it later is the correctness point.
+    await send('Network.enable', {
+      maxPostDataSize: TICKET_POST_DATA_INLINE_CAP,
+    });
     const sessionPath = `/cosy/sessions/pi/${encodeURIComponent(options.sessionId)}`;
     await send('Page.navigate', {
       url: `${options.base}/cosy/#${sessionPath.substring('/cosy'.length)}`,
@@ -724,11 +774,12 @@ async function probeBuiltClient(options: {
         'built app did not exchange its header credential for the WebSocket ticket',
       );
     }
-    const ticketPostData = await send('Network.getRequestPostData', {
-      requestId: ticketRequest.params.requestId,
-    });
+    const ticketPostData = await ticketRequestPostData(
+      ticketRequest,
+      (requestId) => send('Network.getRequestPostData', { requestId }),
+    );
     if (!ticketRequestContractMatches(
-      ticketPostData?.postData,
+      ticketPostData,
       options.clientContract,
       'pi',
       options.sessionId,
