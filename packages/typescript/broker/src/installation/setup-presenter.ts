@@ -248,6 +248,11 @@ export function createClackSetupPresenter(): SetupPresenter {
       }));
     },
     async confirmOpencodeShim(inspection): Promise<SetupPromptResult<boolean>> {
+      // Never ask for something this host cannot do. Routing works by sourcing a block from an
+      // interactive POSIX rc file, which no Windows shell reads, so on Windows the answer is fixed.
+      // Asking anyway defaulted to Yes and then refused the whole plan at commit time, which made the
+      // wizard's own default the reason setup could not complete on Windows.
+      if (!inspection.opencodeShim.routingSupported) return false;
       return cancelled(await confirm({
         message: text().opencodeShimConfirm,
         initialValue: inspection.setupState.opencodeShimRequested !== false,

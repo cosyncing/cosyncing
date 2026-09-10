@@ -1218,10 +1218,19 @@ function durableServiceOwnership(inspection: SetupInspection): {
   // installation's immutable marker, which is stronger than a hash recorded once at install time.
   const verdict = inspection.durableServiceOwnershipVerdict;
   if (verdict) {
+    // An environment file this build has not written yet is not somebody else's. The Windows environment
+    // path and the receipt that names it BOTH carry the version key, and a version key is
+    // `version-commit-clean-target-buildDate` -- it changes on every build. So after any upgrade the new
+    // path holds no file and no receipt names it, and demanding `owned` there refused the upgrade with
+    // `<provider>-definition-unowned`: the same failure the note above describes for the definition half,
+    // arriving by the other half. Only a file that EXISTS unaccounted for may refuse a plan; absent is
+    // absent, and the mutation that follows is the one that writes it.
+    const environmentAbsent = inspection.durableServiceStatus?.environment === 'missing';
     // `unknown` is never a soft `owned`: a provider that could not establish the answer is treated exactly
     // as one that answered no.
     return {
-      serviceFiles: verdict.definition === 'owned' && verdict.environment === 'owned',
+      serviceFiles: verdict.definition === 'owned'
+        && (verdict.environment === 'owned' || environmentAbsent),
       lingering: lingeringOwned,
     };
   }
@@ -1500,7 +1509,11 @@ export function buildSetupPlan(options: {
         summary: `A usable ${provider} user service manager is required for persistent service mode.`,
         remediation: provider === 'launchd'
           ? 'Sign in to a macOS GUI session so launchd can own the agent, or choose foreground mode.'
-          : 'Enable the systemd user manager or choose foreground mode. WSL without systemd supports foreground mode only.',
+          : provider === 'task-scheduler'
+            // Windows was being told to enable a systemd user manager, and about WSL. The Scheduled Task
+            // is registered with an interactive token, so an interactive sign-in is the actual condition.
+            ? 'Sign in to Windows interactively so the Scheduled Task can run as you, or choose foreground mode.'
+            : 'Enable the systemd user manager or choose foreground mode. WSL without systemd supports foreground mode only.',
       });
     } else {
       if (serviceStatus.definition === 'unsafe' || serviceStatus.environment === 'unsafe'

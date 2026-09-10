@@ -361,6 +361,37 @@ try {
       checkById(pathVersionCodex, 'codex.version').status === 'pass' &&
       checkById(packageVersionPi, 'pi.version').status === 'pass');
 
+  // Codex's Windows installer places `…\Programs\OpenAI\Codex\bin\codex.exe`: no npm package, no
+  // version anywhere in the path, and no version resource on the binary. With no fallback, a current
+  // Codex reported its version as unreadable and setup DISABLED it -- seen on the 3090, where 0.154.0
+  // was refused against a 0.144.5 floor. The probe is a last resort and stays one: the two cases above
+  // still answer from metadata alone, which is what keeps `mutationProneVersionRuns === 0` true.
+  let windowsProbeRuns = 0;
+  const windowsCodex = await diagnoseCodexSetup(fakeContext({
+    executables: { codex: 'C:\\Users\\Fixture\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe' },
+    runReadOnly: async () => {
+      windowsProbeRuns += 1;
+      return { status: 'ok', stdout: 'codex-cli 0.154.0', stderr: '' };
+    },
+  }));
+  check('a Codex whose layout carries no version is probed rather than declared unreadable',
+    windowsProbeRuns === 1 && checkById(windowsCodex, 'codex.version').status === 'pass',
+    `probes=${windowsProbeRuns} status=${checkById(windowsCodex, 'codex.version').status}`);
+
+  // The standalone layout on Windows names the binary `codex.exe`; the path still answers, so the
+  // fallback above is never reached there either.
+  let winStandaloneProbes = 0;
+  const winStandaloneCodex = await diagnoseCodexSetup(fakeContext({
+    executables: { codex: 'C:\\fixture\\releases\\0.150.0-x86_64-pc-windows-msvc\\bin\\codex.exe' },
+    runReadOnly: async () => {
+      winStandaloneProbes += 1;
+      return { status: 'ok', stdout: 'codex-cli 0.150.0', stderr: '' };
+    },
+  }));
+  check('the standalone Windows layout answers from its path, without a probe',
+    winStandaloneProbes === 0 && checkById(winStandaloneCodex, 'codex.version').status === 'pass',
+    `probes=${winStandaloneProbes}`);
+
   const npmOnlyCodex = await diagnoseCodexSetup(fakeContext({
     executables: { codex: '/fixture/node_modules/@openai/codex/bin/codex.js' },
     readPackageVersion: () => '0.146.1',

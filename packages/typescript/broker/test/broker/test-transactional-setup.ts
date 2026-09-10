@@ -807,11 +807,16 @@ try {
       { id: 'service-environment', kind: 'environment-file', target: verdictEnvironmentPath,
         ownership: { proof: 'receipt', marker: 'version-plan' } },
     ];
-    const realVerdict = (marker: string, resources = verdictReceipts) => windowsTaskSchedulerOwnership({
+    const realVerdict = (
+      marker: string,
+      resources = verdictReceipts,
+      versionKey = 'version-plan',
+      environmentPath = verdictEnvironmentPath,
+    ) => windowsTaskSchedulerOwnership({
       resources,
       identity: verdictIdentity,
-      environmentPath: verdictEnvironmentPath,
-      versionKey: 'version-plan',
+      environmentPath,
+      versionKey,
       task: classifyWindowsScheduledTask({
         actual: {
           path: verdictIdentity.taskPath, ownershipMarker: marker,
@@ -883,6 +888,42 @@ try {
     check('the ownership verdict is part of the precondition fingerprint',
       fingerprintWith(ownVerdict)
         !== fingerprintWith(realVerdict('cosyncing:task-scheduler:v1:someone-else')));
+
+    // ---- The other half of the same bug: an upgrade ------------------------------------------------
+    //
+    // The Windows environment file lives at `...\service\windows\versions\<versionKey>\environment.json`
+    // and its receipt records BOTH that path and that key. A version key is
+    // `version-commit-clean-target-buildDate`, so it changes on every build, not merely every release.
+    // On any upgrade the new path holds no file and no receipt names it — which is not evidence that
+    // somebody else owns the service, only that this build has not written it yet. Demanding `owned`
+    // there blocked every upgrade with `task-scheduler-definition-unowned`: the same failure the note
+    // above describes for the definition half, arriving by the other half. Reproduced on the 3090
+    // upgrading 0.6.0-physical.6 to .7, where the receipt on disk still named the .6 path and key.
+    const oldVersionKey = '0.6.0-physical.6-7f33cb7f-clean-universal-2026-09-09T21-18-33.000Z';
+    const newVersionKey = '0.6.0-physical.7-4935b258-clean-universal-2026-09-10T09-00-00.000Z';
+    const versionedEnvironment = (key: string) =>
+      `C:\\Users\\Fixture\\.cosyncing\\service\\windows\\versions\\${key}\\environment.json`;
+    const upgradeReceipts: InstalledResourceRecord[] = [
+      { id: WINDOWS_TASK_RESOURCE_ID, kind: 'service', target: verdictIdentity.taskPath,
+        ownership: { proof: 'receipt', marker: verdictIdentity.ownershipMarker } },
+      { id: WINDOWS_SID_FOLDER_RESOURCE_ID, kind: 'other', target: verdictIdentity.sidFolderPath,
+        ownership: { proof: 'receipt' } },
+      // Written by the PREVIOUS build, naming the previous version's path and key.
+      { id: 'service-environment', kind: 'environment-file', target: versionedEnvironment(oldVersionKey),
+        ownership: { proof: 'receipt', marker: oldVersionKey } },
+    ];
+    const upgradeVerdict = realVerdict(
+      verdictIdentity.ownershipMarker, upgradeReceipts, newVersionKey,
+      versionedEnvironment(newVersionKey));
+    check('an upgrade still owns the task it created, and the absent new environment file says nothing',
+      upgradeVerdict.definition === 'owned' && upgradeVerdict.environment === 'unowned',
+      `${upgradeVerdict.definition}/${upgradeVerdict.environment}`);
+    check('an upgrade is not refused because this build has not written its environment file yet',
+      !blockedBy(providerVerified(upgradeVerdict, { environment: 'missing' })));
+    // The relaxation is exactly `missing`, never a file that is present and unaccounted for.
+    check('an environment file that exists without a receipt still blocks the upgrade',
+      blockedBy(providerVerified(upgradeVerdict, { environment: 'current' }))
+        && blockedBy(providerVerified(upgradeVerdict, { environment: 'drifted' })));
 
     const legacyPlan = buildSetupPlan({
       inspection: {

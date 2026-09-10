@@ -26,7 +26,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/cosyncing/cosyncing/releases/latest/download/install.ps1 | iex"
+powershell -NoProfile -c "irm https://github.com/cosyncing/cosyncing/releases/latest/download/install.ps1 | iex"
 ```
 
 `releases/latest/download/<name>` always resolves to the current stable broker release. It is the same
@@ -75,7 +75,7 @@ cannot load an Ed25519 key at all. A signature that *fails* is always fatal. Onl
 ## Windows x64
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm <base>/install.ps1 | iex"
+powershell -NoProfile -c "irm <base>/install.ps1 | iex"
 ```
 
 Run it in an ordinary PowerShell window, as the user who will own the broker. An elevated install is
@@ -97,16 +97,23 @@ every Windows box) and `tar.exe`, which has shipped in `System32` since Windows 
 installed for you if the host has none new enough; see
 [prerequisites](prerequisites.md#required-on-the-broker-host-bun) to install it yourself first.
 
-### About `-ExecutionPolicy Bypass`
+### Why not `-ExecutionPolicy Bypass`
 
-The flag is in the command because that invocation is what makes the one-liner work on a host whose
-execution policy would otherwise refuse it. Be clear about what it means: it disables Authenticode
-enforcement for this invocation, so **script signing is not the integrity guarantee here and could not
-be**. The guarantee is the release signature. `install.ps1` carries the release's ECDSA P-256 public
-key, verifies the signed manifest and the signed checksum list against it through Windows CNG, and
-then requires the manifest, the checksum list, and a digest baked into the script itself to agree
-about each artifact by name. Any disagreement, and any signature failure, is fatal — there is no
-degraded path on Windows.
+Execution policy governs script *files*; it does not gate a command passed to `-Command`, nor a string
+run through `Invoke-Expression`, so the one-liner never needs `-ExecutionPolicy Bypass`. The flag only
+invites trouble: `powershell -ExecutionPolicy Bypass -c "irm … | iex"` is the exact shape Microsoft
+Defender's machine-learning model scores as a fileless download-and-run loader, and on a host that has
+not yet built reputation for the download URL it is killed outright (`Trojan:Win32/Commando.A!ml`).
+The command line is what gets flagged, never the file, so signing the script cannot help. Dropping the
+flag and adding `-NoProfile` clears it, and matches what the Claude Code, bun, and Antigravity CLIs
+publish. The strictest environments can skip the one-liner and install from npm instead.
+
+Script signing is not the integrity guarantee here and could not be: the script arrives and runs as
+text, not as a signed file. The guarantee is the release signature. `install.ps1` carries the
+release's ECDSA P-256 public key, verifies the signed manifest and the signed checksum list against it
+through Windows CNG, and then requires the manifest, the checksum list, and a digest baked into the
+script itself to agree about each artifact by name. Any disagreement, and any signature failure, is
+fatal — there is no degraded path on Windows.
 
 The same reasoning applies to `curl | sh`. In both cases the script arrives over TLS, and what it does
 after that is verified against a key it carried rather than one fetched alongside the thing being
@@ -123,6 +130,7 @@ verified.
 | `%USERPROFILE%\.bun\bin\bun.exe` | only if the installer had to install Bun |
 | `%LOCALAPPDATA%\cosyncing\client` | the desktop client, `install.ps1` only |
 | `%USERPROFILE%\.cosyncing\client-pairing.json` | the one-use pairing the client reads once, `install.ps1` only |
+| `%APPDATA%\Microsoft\Windows\Start Menu\Programs\cosyncing.lnk` | the Start Menu entry that opens the client, `install.ps1` only |
 
 `COSYNCING_HOME` relocates all of it and must be an absolute path. `BUN_INSTALL` relocates the Bun
 prefix. `COSYNCING_BUN_BIN` names a Bun to use instead of searching. `COSYNCING_SKIP_BUN_INSTALL=1`

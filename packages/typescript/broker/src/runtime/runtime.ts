@@ -7033,6 +7033,8 @@ const managedHostStartup = Promise.allSettled(registry.list().map(async (backend
  * restart — see `recoverManagedHost`. Ticks never overlap: a slow probe delays
  * the next tick instead of stacking a second one on top of it.
  */
+/** Agents already told about, so the give-up notice is said once rather than once per tick. */
+const announcedRestartGiveUp = new Set<string>();
 const managedHostSupervisor = new ManagedHostSupervisor({
   backends: () => registry.list(),
   effects: managedHostEffects,
@@ -7046,6 +7048,8 @@ const managedHostSupervisor = new ManagedHostSupervisor({
       // came back must not leave doctor reporting a failure that is over.
       console.log(`${LOG_PREFIX} restarted the managed ${agent} host after it stopped serving`);
       clearManagedRuntimeFailure(agent);
+      // Recovered, so a future give-up is news again rather than a repeat.
+      announcedRestartGiveUp.delete(agent);
     } else if (outcome.action === 'recovery-failed') {
       // The case that used to print the success line above. It is a warning AND
       // a durable record: nobody is reading the journal at 3am, so the only
@@ -7078,7 +7082,19 @@ const managedHostSupervisor = new ManagedHostSupervisor({
           : {}),
       });
     } else if (outcome.action === 'declined' && outcome.reason === 'budget-exhausted') {
-      console.warn(`${LOG_PREFIX} the managed ${agent} host keeps failing to stay up; not restarting it again — run \`cosyncing doctor\``);
+      // Once per agent, not once per tick. The supervisor keeps declining for as long as the broker runs,
+      // and repeating this every interval buried every other line in the log with a fact that had not
+      // changed since the first time it was true. The durable record written when the recovery actually
+      // failed is what an operator reads later; this line only has to say it stopped trying.
+      if (!announcedRestartGiveUp.has(agent)) {
+        announcedRestartGiveUp.add(agent);
+        console.warn(`${LOG_PREFIX} the managed ${agent} host keeps failing to stay up; not restarting it again — run \`cosyncing doctor\``);
+      }
+    } else if (outcome.action === 'declined' && outcome.reason === 'not-launchable') {
+      // An agent that is not installed has no host to manage, which is a configuration fact rather than
+      // a runtime failure. Say nothing each tick, and clear any record an earlier build wrote, so doctor
+      // stops reporting a failure for software that was never here.
+      clearManagedRuntimeFailure(agent);
     }
   },
   onError: (agent, error) => {

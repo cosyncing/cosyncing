@@ -95,11 +95,16 @@ RECEIPT="$STATE_HOME/bootstrap-receipt"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cosyncing-install.XXXXXXXX")"
 STAGED_APPLICATION=''
 STAGED_RECEIPT=''
+# Set when this run took over an npm install, so the tail can offer to remove the package it came from.
+ADOPTED_NPM_INSTALL=''
 STAGED_WEB=''
 RETIRED_WEB=''
 # Assigned by the all-in-one client section below, declared here because `cleanup` reads them and `set -u`
 # is on from the first line.
 CLIENT_ROOT=''
+CLIENT_RUNNING=''
+# Set on macOS when the placed client declares the App Sandbox, which moves the home it reads.
+CLIENT_CONTAINER=''
 STAGED_CLIENT=''
 RETIRED_CLIENT=''
 STAGED_DESKTOP=''
@@ -416,6 +421,49 @@ printf '%s\n' "$VERSION_JSON" | grep -Fq '"packaged": true' \
 printf '%s\n' "$VERSION_JSON" | grep -Fq '"distribution": "bootstrap-js"' \
   || fail 'verified application is not the installer-owned distribution'
 
+# Takes over the copy `cosyncing setup` made from the npm package, after asking.
+#
+# Consent comes from the terminal and nowhere else. Every environment variable these installers read makes
+# them MORE restrictive, never less, and an unattended run must not take over another package manager's
+# install on an operator's behalf — so there is deliberately no variable that answers this question.
+#
+# On agreement this returns and the ordinary placement below runs: one file is replaced and one receipt is
+# written. Nothing reads or writes anything else under the state home, so settings, credentials, paired
+# devices, drafts and sessions survive untouched, and the service keeps running the same path it already
+# names. That is why this can be offered at all.
+adopt_npm_application() {
+  EXISTING_JSON="$("$BUN_BIN" "$APPLICATION" version --json 2>/dev/null)" || EXISTING_JSON=''
+  printf '%s\n' "$EXISTING_JSON" | grep -Fq '"product": "cosyncing"' \
+    && printf '%s\n' "$EXISTING_JSON" | grep -Fq '"packaged": true' \
+    && printf '%s\n' "$EXISTING_JSON" | grep -Fq '"distribution": "bun-js"' \
+    || fail 'existing application has no safe bootstrap ownership receipt'
+  EXISTING_VERSION="$(printf '%s\n' "$EXISTING_JSON" | sed -n 's/^ *"version": "\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$EXISTING_VERSION" ] || EXISTING_VERSION='an unknown version'
+
+  printf '\ncosyncing %s is installed at\n  %s\n' "$EXISTING_VERSION" "$APPLICATION"
+  printf 'from the npm package, by `cosyncing setup`. This installer did not place it.\n\n'
+  printf 'Taking it over replaces that one file and records ownership of it. Everything else in\n'
+  printf '  %s\n' "$STATE_HOME"
+  printf 'is left exactly as it is — settings, credentials, paired devices, drafts and sessions —\n'
+  printf 'and the service keeps running the same path.\n\n'
+
+  if [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; then
+    printf 'cosyncing install: replacing an npm install needs your answer and no terminal is attached.\n' >&2
+    printf 'Rerun this installer from a terminal, or stay on npm with:\n  npm update -g cosyncing\n  %s setup\n' \
+      "$APPLICATION" >&2
+    exit 1
+  fi
+
+  printf 'Replace it with cosyncing %s? [y/N] ' "$VERSION"
+  REPLY=''
+  read -r REPLY < /dev/tty || REPLY=''
+  case "$REPLY" in
+    y|Y|yes|YES|Yes) ;;
+    *) fail 'left the npm install in place; nothing was changed' ;;
+  esac
+  ADOPTED_NPM_INSTALL=1
+}
+
 ensure_owned_directory() {
   path="$1"
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -435,19 +483,31 @@ ensure_owned_directory "$INSTALL_DIR"
 if [ -e "$APPLICATION" ] || [ -L "$APPLICATION" ]; then
   [ -f "$APPLICATION" ] && [ ! -L "$APPLICATION" ] || fail 'existing cosyncing application is not a safe regular file'
   [ "$(stat_owner "$APPLICATION")" = "$(id -u)" ] || fail 'existing cosyncing application is not owned by this user'
-  [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail 'existing application has no safe bootstrap ownership receipt'
-  [ "$(stat_owner "$RECEIPT")" = "$(id -u)" ] || fail 'existing bootstrap receipt is not owned by this user'
-  # Receipt 1 recorded a compiled per-host executable. This installer places a JavaScript bundle a Bun
-  # runtime executes, so overwriting one with the other would leave a service unit that can never start.
-  grep -Fxq 'schemaVersion=1' "$RECEIPT" \
-    && fail 'this path holds a compiled cosyncing install; remove it and its service before installing the JavaScript build'
-  grep -Fxq 'schemaVersion=2' "$RECEIPT" || fail 'existing bootstrap receipt is invalid'
-  grep -Fxq 'product=cosyncing' "$RECEIPT" || fail 'existing bootstrap receipt is for another product'
-  grep -Fxq "application=$APPLICATION" "$RECEIPT" || fail 'existing bootstrap receipt names another application'
-  PRIOR="$(sed -n 's/^sha256=//p' "$RECEIPT")"
-  [ "${#PRIOR}" -eq 64 ] || fail 'existing bootstrap receipt checksum is invalid'
-  [ "$(sha256_of "$APPLICATION")" = "$PRIOR" ] \
-    || fail 'existing application differs from its bootstrap ownership receipt'
+  # A missing receipt is the ORDINARY state of an npm install, not evidence of tampering: the npm package
+  # is an acquisition artifact, and `cosyncing setup` copies its bundle to exactly this path and writes no
+  # receipt. Refusing every unreceipted application therefore refused the entire installed base — npm is
+  # the only other channel this product ships through — and did it before the desktop-client step, so
+  # neither half was updated. Ask the file what it is instead, and take it over only if it answers as a
+  # packaged npm-distribution cosyncing. Running it is not a new exposure: it is a user-owned file in the
+  # user's own home that this installer is about to overwrite, executed as that same user.
+  if [ ! -f "$RECEIPT" ] || [ -L "$RECEIPT" ]; then
+    # No receipt to check against, by design on the npm path: this either wins consent to take the install
+    # over, or exits. There is deliberately no third outcome where an unreceipted application is replaced.
+    adopt_npm_application
+  else
+    [ "$(stat_owner "$RECEIPT")" = "$(id -u)" ] || fail 'existing bootstrap receipt is not owned by this user'
+    # Receipt 1 recorded a compiled per-host executable. This installer places a JavaScript bundle a Bun
+    # runtime executes, so overwriting one with the other would leave a service unit that can never start.
+    grep -Fxq 'schemaVersion=1' "$RECEIPT" \
+      && fail 'this path holds a compiled cosyncing install; remove it and its service before installing the JavaScript build'
+    grep -Fxq 'schemaVersion=2' "$RECEIPT" || fail 'existing bootstrap receipt is invalid'
+    grep -Fxq 'product=cosyncing' "$RECEIPT" || fail 'existing bootstrap receipt is for another product'
+    grep -Fxq "application=$APPLICATION" "$RECEIPT" || fail 'existing bootstrap receipt names another application'
+    PRIOR="$(sed -n 's/^sha256=//p' "$RECEIPT")"
+    [ "${#PRIOR}" -eq 64 ] || fail 'existing bootstrap receipt checksum is invalid'
+    [ "$(sha256_of "$APPLICATION")" = "$PRIOR" ] \
+      || fail 'existing application differs from its bootstrap ownership receipt'
+  fi
 fi
 
 if [ -e "$ALIAS" ] || [ -L "$ALIAS" ]; then
@@ -507,13 +567,44 @@ printf 'Web client: %s\n' "$WEB_ROOT"
 printf 'Bun runtime: %s\n' "$BUN_STATE"
 printf 'Artifact digests: matched the sha256 values embedded in this installer.\n'
 printf 'Release signature: %s\n' "$SIGNATURE_STATE"
+
 case "$SIGNATURE_STATE" in
   skipped*)
     printf 'This installer was itself delivered over TLS and carries the expected digests; the broker\n'
     printf 'still verifies every future upgrade with its own built-in Ed25519 check.\n' ;;
 esac
 
+# The npm package is preserved by design — `uninstall` says the same thing — but after a takeover it is a
+# loaded gun: its own `setup` copies itself back over the application just placed, and the next run of this
+# installer would then refuse again. Offer to remove it, and never fail the install over the answer.
+if [ -n "$ADOPTED_NPM_INSTALL" ]; then
+  NPM_ROOT=''
+  command -v npm >/dev/null 2>&1 && NPM_ROOT="$(npm root -g 2>/dev/null)" || NPM_ROOT=''
+  if [ -n "$NPM_ROOT" ] && [ -d "$NPM_ROOT/cosyncing" ]; then
+    printf '\nThe npm package it came from is still installed at %s/cosyncing.\n' "$NPM_ROOT"
+    printf 'Its own `setup` would copy itself back over the install just made.\n'
+    printf 'Remove it now? [y/N] '
+    REPLY=''
+    read -r REPLY < /dev/tty || REPLY=''
+    case "$REPLY" in
+      y|Y|yes|YES|Yes)
+        if npm uninstall -g cosyncing >/dev/null 2>&1; then
+          printf 'Removed the npm package.\n'
+        else
+          printf 'Could not remove the npm package; remove it by hand:\n  npm uninstall -g cosyncing\n' >&2
+        fi ;;
+      *) printf 'Left it in place. Remove it later with:\n  npm uninstall -g cosyncing\n' ;;
+    esac
+  fi
+fi
+
 if [ "$INSTALL_MODE" != all ]; then
+  # Named, not removed. This installer does not run setup, so the service is still the previous broker
+  # and still serving out of one of these; setup is what moves it to the new root.
+  for SUPERSEDED in "$INSTALL_DIR"/cosyncing-web-*; do
+    [ -d "$SUPERSEDED" ] && [ ! -L "$SUPERSEDED" ] && [ "$SUPERSEDED" != "$WEB_ROOT" ] || continue
+    printf 'A previous web client is still at %s. setup moves the service to the new one,\nafter which that directory can be removed.\n' "$SUPERSEDED"
+  done
   printf 'PATH was not changed. Run setup with the absolute command:\n  %s setup\n' "$APPLICATION"
   exit 0
 fi
@@ -604,6 +695,14 @@ else
     CLIENT_LAUNCH="$CLIENT_ROOT/cosyncing"
   fi
 
+  # An app that is already open keeps running the bytes it started with. macOS `open -a` ACTIVATES a
+  # running application rather than restarting it, and a second copy of the Linux binary is a second
+  # window, not an upgrade. Replacing the tree below is still right — the next start gets the new version —
+  # but the handoff and the launch line must not pretend the update took effect in the window on screen.
+  if command -v pgrep >/dev/null 2>&1 && pgrep -f "$CLIENT_LAUNCH" >/dev/null 2>&1; then
+    CLIENT_RUNNING=1
+  fi
+
   if [ -e "$CLIENT_ROOT" ] || [ -L "$CLIENT_ROOT" ]; then
     [ -d "$CLIENT_ROOT" ] && [ ! -L "$CLIENT_ROOT" ] \
       || fail "unsafe desktop client path: $CLIENT_ROOT"
@@ -650,6 +749,23 @@ else
     printf 'Desktop client: %s (launcher entry: %s)\n' "$CLIENT_ROOT" "$DESKTOP_ENTRY"
   else
     printf 'Desktop client: %s\n' "$CLIENT_ROOT"
+    # A sandboxed macOS application does not have the home this script has. The kernel rewrites $HOME to
+    # its container, so the offer written below into the broker's state home is a file the client is
+    # denied — it is not that the client looks in the wrong place, it is that `~` means something else
+    # inside the cage. Verified on a real Mac: two identical copies, one in the state home and one in the
+    # container, and only the container copy was ever read.
+    #
+    # So the offer goes where the client's OWN home resolves to. The bundle identifier is read from the
+    # application just placed rather than written down here, and the entitlement is read from its
+    # signature, so an unsandboxed build of the same client keeps the ordinary path with no second rule to
+    # maintain. Both commands ship with macOS.
+    if BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+        "$CLIENT_ROOT/Contents/Info.plist" 2>/dev/null)" && [ -n "$BUNDLE_ID" ] \
+      && codesign -d --entitlements - --xml "$CLIENT_ROOT" 2>/dev/null \
+        | grep -A1 'com\.apple\.security\.app-sandbox' | grep -q '<true/>'
+    then
+      CLIENT_CONTAINER="$HOME/Library/Containers/$BUNDLE_ID/Data"
+    fi
   fi
 fi
 
@@ -664,17 +780,60 @@ fi
 # < /dev/tty` killed this script instead of taking the branch. In a subshell that exit is contained and
 # becomes an ordinary non-zero status. `2>/dev/null` wraps the subshell so the open failure is quiet on
 # the one path built to stop quietly.
-if [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; then
+#
+# WHICH terminal descriptor matters, and only on macOS. A reopened `/dev/tty` there delivers nothing to a
+# reader that has put the terminal in raw mode — `isTTY` is true, the mode change succeeds, and no keypress
+# ever arrives. setup is exactly that reader, so `setup < /dev/tty` drew its first question and could never
+# be answered: a macOS operator got a wizard frozen at the language prompt, and had to interrupt it and run
+# setup by hand. Reproduced from three independent pseudo-terminals (an sshd pty, `expect`, a bare
+# `pty.fork`), and only on macOS; Linux takes input either way.
+#
+# The descriptors this script INHERITED are unaffected, and `curl … | sh` only ever replaces stdin: stdout
+# and stderr still carry the operator's terminal. So setup takes its stdin from whichever of those is one,
+# and `/dev/tty` stays as the last resort for the case where both were redirected — which is where it still
+# works, because a shell reading a here-string is not in raw mode.
+setup_with_terminal() { "$BUN_BIN" "$APPLICATION" setup; }
+
+if [ ! -t 1 ] && [ ! -t 2 ] && { [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; }; then
   printf '\nNo terminal is attached, so setup was not run. Finish with:\n  %s setup\n' "$APPLICATION"
   exit 0
 fi
 
 printf '\nRunning setup. It shows its plan and asks before changing anything.\n'
-if ! "$BUN_BIN" "$APPLICATION" setup < /dev/tty; then
+SETUP_STATUS=0
+if [ -t 1 ]; then
+  setup_with_terminal 0<&1 || SETUP_STATUS=$?
+elif [ -t 2 ]; then
+  setup_with_terminal 0<&2 || SETUP_STATUS=$?
+else
+  setup_with_terminal < /dev/tty || SETUP_STATUS=$?
+fi
+if [ "$SETUP_STATUS" -ne 0 ]; then
   printf 'cosyncing install: setup did not complete; the broker files are installed. Rerun:\n  %s setup\n' \
     "$APPLICATION" >&2
   exit 1
 fi
+
+# The web client is version-stamped, so an upgrade does not replace the previous root — it lands beside
+# it and, until this existed, abandoned it: two 38 MB trees on a real Mac after one upgrade, referenced
+# by nothing. Every sibling but the current one goes, so a host that has already leaked several is healed
+# rather than merely stopped from leaking more. The install directory is one this installer owns
+# outright — it refuses an unowned application, alias or web root above — so a `cosyncing-web-*` in it is
+# either this release's or a superseded one.
+#
+# AFTER setup, never before. Until setup returns, one of these can still be the tree the running broker is
+# serving; setup is what rewrites the service definition and restarts it against the new root. A failed
+# setup exits above and leaves them all alone. A symlink is skipped rather than followed, and so is
+# anything this user does not own.
+for SUPERSEDED in "$INSTALL_DIR"/cosyncing-web-*; do
+  [ -d "$SUPERSEDED" ] && [ ! -L "$SUPERSEDED" ] && [ "$SUPERSEDED" != "$WEB_ROOT" ] || continue
+  [ "$(stat_owner "$SUPERSEDED")" = "$(id -u)" ] || continue
+  if rm -rf "$SUPERSEDED"; then
+    printf 'Removed the superseded web client: %s\n' "$SUPERSEDED"
+  else
+    printf 'Could not remove the superseded web client; remove it by hand:\n  %s\n' "$SUPERSEDED" >&2
+  fi
+done
 
 # ---------------------------------------------------------------------------------------------------
 # The pairing handoff.
@@ -690,9 +849,33 @@ fi
 # part of an installer whose whole posture is exact agreement.
 # ---------------------------------------------------------------------------------------------------
 
-PAIRING_FILE="$STATE_HOME/client-pairing.json"
+# Where the client will look, which is not always where the broker keeps its state. On a sandboxed macOS
+# client that is the container; everywhere else it is the state home the installer and broker share.
+HANDOFF_HOME="$STATE_HOME"
+if [ -n "$CLIENT_CONTAINER" ]; then
+  HANDOFF_HOME="$CLIENT_CONTAINER/.cosyncing"
+fi
+PAIRING_FILE="$HANDOFF_HOME/client-pairing.json"
 handoff_failed() {
   printf 'Pairing handoff: skipped — %s. Pair by hand with:\n  %s pair\n' "$1" "$APPLICATION"
+}
+
+# The state home always exists by here. A container may not: macOS creates one at the application's first
+# launch, and on a first install that has not happened yet. Creating it ourselves is enough — verified on a
+# real Mac, where containermanagerd ADOPTED the hand-made directory, wrote its own metadata into it, and
+# the application launched and read the offer out of it. Owner-only, because that is what macOS makes it,
+# and because `mkdir -p` would otherwise leave it at whatever umask this script inherited.
+#
+# Returns non-zero rather than failing the install: if a future macOS refuses to adopt a directory it did
+# not create, this ends as every other handoff failure does — no offer written, pair by hand.
+ensure_handoff_home() {
+  [ -d "$HANDOFF_HOME" ] && return 0
+  mkdir -p "$HANDOFF_HOME" 2>/dev/null || return 1
+  [ -z "$CLIENT_CONTAINER" ] \
+    || chmod 700 "$(dirname "$CLIENT_CONTAINER")" "$CLIENT_CONTAINER" 2>/dev/null \
+    || true
+  chmod 700 "$HANDOFF_HOME" 2>/dev/null || true
+  return 0
 }
 
 if [ -n "$CLIENT_SKIP" ]; then
@@ -700,6 +883,13 @@ if [ -n "$CLIENT_SKIP" ]; then
   # in five minutes and that nothing here can redeem, and leave it on disk looking like a credential.
   printf 'Pairing handoff: not needed, no desktop client was installed. Pair another device with:\n  %s pair\n' \
     "$APPLICATION"
+elif [ -n "$CLIENT_RUNNING" ]; then
+  # The same rule as the no-client case: an offer only a startup reads, written for a client that is not
+  # going to start, is a one-use credential on disk that nothing can redeem and that expires unattended.
+  printf 'Pairing handoff: not written — the desktop client is already running and reads an offer only at\nstartup. Quit and reopen it, then pair with:\n  %s pair\n' \
+    "$APPLICATION"
+elif ! ensure_handoff_home; then
+  handoff_failed "the client's own home could not be created at $HANDOFF_HOME"
 elif "$BUN_BIN" "$APPLICATION" status --json > "$WORK/status.json" 2>/dev/null \
   && LISTENER_URL="$("$BUN_BIN" -e '
     const status = JSON.parse(await Bun.file(process.argv[1]).text());
@@ -711,7 +901,7 @@ elif "$BUN_BIN" "$APPLICATION" status --json > "$WORK/status.json" 2>/dev/null \
 then
   if "$BUN_BIN" "$APPLICATION" pair --json --broker-url "$LISTENER_URL" > "$WORK/pairing.json" 2>/dev/null
   then
-    STAGED_PAIRING="$(mktemp "$STATE_HOME/.client-pairing.XXXXXXXX")"
+    STAGED_PAIRING="$(mktemp "$HANDOFF_HOME/.client-pairing.XXXXXXXX")"
     if "$BUN_BIN" -e '
       const offer = JSON.parse(await Bun.file(process.argv[1]).text());
       const { qr, brokerUrl, expiresAt } = offer ?? {};
@@ -738,7 +928,20 @@ else
 fi
 
 if [ -z "$CLIENT_SKIP" ]; then
-  if [ "$OS" = Darwin ]; then
+  if [ -n "$CLIENT_RUNNING" ]; then
+    printf 'Desktop client: it was already running, so the window on screen is still the previous version.\nQuit and reopen %s to use %s.\n' \
+      "$CLIENT_LAUNCH" "$VERSION"
+  elif [ -n "$CLIENT_CONTAINER" ]; then
+    # Deliberately WITHOUT --env. COSYNCING_HOME is the only thing this client reads that variable for,
+    # and pointing a sandboxed process at an absolute path outside its container just makes the read fail:
+    # it would look at the state home, be denied, and report no handoff. Left alone it resolves $HOME to
+    # its container, which is exactly where the offer above was written.
+    if open -a "$CLIENT_LAUNCH" >/dev/null 2>&1; then
+      printf 'Launched %s\n' "$CLIENT_LAUNCH"
+    else
+      printf 'Could not launch %s; open it from Finder.\n' "$CLIENT_LAUNCH"
+    fi
+  elif [ "$OS" = Darwin ]; then
     # LaunchServices starts the app with its own environment and drops the caller's, so a relocated home
     # must be handed over explicitly or the client reads ~/.cosyncing and silently finds no handoff.
     # `--env` is not on every macOS this installer supports, hence the plain retry.

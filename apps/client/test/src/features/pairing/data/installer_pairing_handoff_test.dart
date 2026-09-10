@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -229,6 +230,40 @@ void main() {
       expect(inbox.discarded, isTrue);
     });
 
+    // Redeeming calls the broker and then writes to the platform credential
+    // store, which on macOS can sit on a login-keychain prompt. A discard that
+    // waits for that leaves a live one-use offer on disk for as long as it
+    // takes — observed on a real Mac, where the broker had already registered
+    // the peer while the file was still there. The file must be gone before the
+    // import is even reached.
+    test(
+      'the offer is gone before redemption is attempted, not after',
+      () async {
+        final inbox = _FakeInbox(
+          jsonEncode({
+            'qr': 'https://broker.example:9443',
+            'expiresAt': '2026-09-05T12:05:00.000Z',
+          }),
+        );
+        final container = containerFor(
+          inbox,
+          now: DateTime.utc(2026, 9, 5, 12),
+          overrides: [
+            pairingControllerProvider.overrideWith(_StalledController.new),
+          ],
+        );
+
+        // Never awaited: this import never completes, which is the whole point.
+        unawaited(container.read(installerPairingHandoffProvider.future));
+        final controller =
+            container.read(pairingControllerProvider.notifier)
+                as _StalledController;
+        await controller.started.future;
+
+        expect(inbox.discarded, isTrue);
+      },
+    );
+
     test('an unreadable inbox never blocks startup', () async {
       final inbox = _FakeInbox(null, throwOnRead: true);
       final container = containerFor(inbox);
@@ -266,6 +301,18 @@ class _RecordingController extends PairingController {
   @override
   Future<void> importPayload(String rawPayload, {String? brokerUrl}) async {
     imported.add(rawPayload);
+  }
+}
+
+/// A controller whose import never returns, so a discard that waits for it
+/// never happens.
+class _StalledController extends PairingController {
+  final Completer<void> started = Completer<void>();
+
+  @override
+  Future<void> importPayload(String rawPayload, {String? brokerUrl}) {
+    if (!started.isCompleted) started.complete();
+    return Completer<void>().future;
   }
 }
 

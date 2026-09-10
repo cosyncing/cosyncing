@@ -130,9 +130,19 @@ export async function diagnoseCodexSetup(context: SetupDiagnosisContext): Promis
     displayName: 'Codex',
     command: 'codex',
     packageNames: ['@openai/codex'],
-    // The official standalone layout carries the exact version in its canonical path. Do not invoke
-    // `codex --version`: current Codex attempts PATH-alias writes even for that flag, violating doctor.
-    versionFromExecutable: (path) => path.match(/[/\\]releases[/\\](\d+\.\d+\.\d+)(?:-[^/\\]+)?[/\\]bin[/\\]codex$/)?.[1],
+    // The official standalone layout carries the exact version in its canonical path, so on a host that
+    // uses it the CLI is never invoked. `.exe` is admitted because the same layout on Windows names the
+    // binary that way.
+    versionFromExecutable: (path) =>
+      path.match(/[/\\]releases[/\\](\d+\.\d+\.\d+)(?:-[^/\\]+)?[/\\]bin[/\\]codex(?:\.exe)?$/i)?.[1],
+    // Last resort, reached only when neither the npm package nor the path answers. Codex's Windows
+    // installer places `…\\Programs\\OpenAI\\Codex\\bin\\codex.exe`, a layout with no version in it and
+    // no version resource on the binary, so without this a perfectly current Codex reports its version as
+    // unreadable and setup disables it -- observed on the 3090 with 0.154.0 against a 0.144.5 floor. The
+    // older refusal here was specific to a Codex that wrote PATH aliases even for this flag; 0.154.0 does
+    // not (verified against the install tree, CODEX_HOME and the user PATH), and every other adapter
+    // probes exactly this way.
+    versionArgs: ['--version'],
     minimum: CODEX_MINIMUM_VERSION,
     installMessage: 'Install the official Codex CLI, then rerun doctor.',
     upgradeCommand: 'codex update',

@@ -13,6 +13,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -171,7 +172,13 @@ exit 2
  * bundle does. The installer runs it through a Bun, never directly, so a fake `bun` on PATH can stand in
  * for the runtime while every other property under test — digests, signatures, evidence — stays real.
  */
-function javaScriptAppScript(version: string, commit: string, buildDate: string): string {
+function javaScriptAppScript(
+  version: string,
+  commit: string,
+  buildDate: string,
+  /** `bun-js` is what npm ships and what `cosyncing setup` copies into the state home. */
+  distribution: 'bootstrap-js' | 'bun-js' = 'bootstrap-js',
+): string {
   return `#!/usr/bin/env bash
 if [ "\${1:-}" = version ] && [ "\${2:-}" = --json ]; then
   cat <<'JSON'
@@ -184,7 +191,7 @@ ${JSON.stringify({
   commit,
   buildDate,
   target: RELEASE_JAVASCRIPT_APP_TARGET,
-  distribution: 'bootstrap-js',
+  distribution,
   packaged: true,
   dirty: false,
   schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
@@ -852,7 +859,7 @@ try {
   // hold that is to pin the whole set of variables the script reads, so a future override cannot be added
   // quietly to make some test easier. `USERPROFILE` and `SystemRoot` are Windows' own.
   const environmentReads = [
-    ...new Set([...powerShellInstaller.matchAll(/Get-EnvironmentValue '([A-Z_]+)'/g)].map((m) => m[1])),
+    ...new Set([...powerShellInstaller.matchAll(/Get-EnvironmentValue '([A-Za-z_]+)'/g)].map((m) => m[1])),
   ].sort();
   const providerReads = [
     ...new Set([...powerShellInstaller.matchAll(/\$env:([A-Za-z_]+)/g)].map((m) => m[1])),
@@ -861,10 +868,107 @@ try {
   // per-user unpackaged application, and it is Windows' own variable rather than a cosyncing knob.
   check('install.ps1 reads exactly the documented environment, and no refusal override',
     environmentReads.join(',')
-        === 'BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,LOCALAPPDATA,USERPROFILE'
+        === 'APPDATA,BUN_INSTALL,COSYNCING_BUN_BIN,COSYNCING_HOME,COSYNCING_SKIP_BUN_INSTALL,LOCALAPPDATA,USERPROFILE'
       && providerReads.join(',') === 'SystemRoot'
       && powerShellInstaller.includes('refusing an elevated install'),
     `${environmentReads.join(',')} | $env:${providerReads.join(',$env:')}`);
+  // On macOS a REOPENED /dev/tty delivers nothing to a reader that has put the terminal in raw mode, so
+  // `setup < /dev/tty` drew its first question and could never be answered — a wizard frozen at the
+  // language prompt. The descriptors the script inherited are fine, and `curl … | sh` only replaces stdin,
+  // so setup takes its terminal from stdout or stderr and keeps /dev/tty only for the case where both were
+  // redirected. This suite cannot give itself a terminal, so what is pinned here is the shape; the
+  // behaviour is verified on a real host in the physical pass.
+  check('setup is handed an inherited terminal, not a reopened /dev/tty, wherever one exists',
+    /setup_with_terminal 0<&1 \|\| SETUP_STATUS=\$\?/.test(shellInstaller)
+      && /setup_with_terminal 0<&2 \|\| SETUP_STATUS=\$\?/.test(shellInstaller)
+      && /setup_with_terminal < \/dev\/tty \|\| SETUP_STATUS=\$\?/.test(shellInstaller)
+      && /if \[ ! -t 1 \] && \[ ! -t 2 \] &&/.test(shellInstaller)
+      // the old unconditional invocation must be gone, or the macOS path silently returns
+      && !/"\$APPLICATION" setup < \/dev\/tty/.test(shellInstaller));
+
+  // The npm takeover exists in both installers or Windows npm users keep hitting the wall the shell
+  // installer just learned to get past. That the env list above is UNCHANGED is the other half of this:
+  // consent is read from the console, and no variable answers it.
+  check('install.ps1 offers the same npm takeover, answered on the console and by nothing else',
+    /function Approve-NpmApplicationTakeover/.test(powerShellInstaller)
+      && /-cne 'bun-js'/.test(powerShellInstaller)
+      && /Read-Host "Replace it with cosyncing \$Version\? \[y\/N\]"/.test(powerShellInstaller)
+      && /\[Console\]::IsInputRedirected/.test(powerShellInstaller)
+      && /npm uninstall -g cosyncing/.test(powerShellInstaller)
+      && /adopt_npm_application/.test(shellInstaller)
+      && /npm uninstall -g cosyncing/.test(shellInstaller));
+
+  // The web client is version-stamped, so an upgrade adds a root beside the previous one and used to
+  // abandon it: two 38 MB trees on a Mac after one upgrade, referenced by nothing. Removing it is only
+  // safe AFTER setup has pointed the service at the new root, so the ordering is pinned here, in both
+  // installers, rather than only the fact that a removal exists somewhere.
+  const shellPruneAt = shellInstaller.indexOf('Removed the superseded web client');
+  const shellSetupAt = shellInstaller.indexOf('setup did not complete');
+  const powerShellPruneAt = powerShellInstaller.indexOf('Removed the superseded web client');
+  const powerShellSetupAt = powerShellInstaller.indexOf('setup did not complete');
+  check('both installers retire superseded web roots, after setup rather than before it',
+    /for SUPERSEDED in "\$INSTALL_DIR"\/cosyncing-web-\*/.test(shellInstaller)
+      && shellPruneAt > shellSetupAt && shellSetupAt > 0
+      && /function Get-SupersededWebRoot/.test(powerShellInstaller)
+      && powerShellPruneAt > powerShellSetupAt && powerShellSetupAt > 0,
+    `sh ${shellSetupAt}->${shellPruneAt} | ps1 ${powerShellSetupAt}->${powerShellPruneAt}`);
+
+  // An application that is already open keeps running the bytes it started with: macOS `open -a`
+  // activates it rather than restarting it, and on Windows its own open executable makes the directory
+  // rename fail outright. Neither installer may report a launch that did not happen.
+  check('an already-open desktop client is named, not silently left on the previous version',
+    /pgrep -f "\$CLIENT_LAUNCH"/.test(shellInstaller)
+      && /the desktop client is already running/.test(shellInstaller)
+      && /it was already running, so the window on screen is still the previous version/
+        .test(shellInstaller)
+      && /Get-Process -Name 'cosyncing'/.test(powerShellInstaller)
+      && /Windows cannot replace it while it /.test(powerShellInstaller));
+
+  // Linux gets a .desktop entry and macOS an .app that LaunchServices indexes; Windows got neither, so
+  // the client was reachable only from the run that launched it — after that first install there was
+  // nowhere to open it from. Both halves are pinned: the entry itself, and the relocated-home launcher,
+  // because the Start Menu starts the client with its own environment exactly as the desktop menu does.
+  check('install.ps1 writes a Start Menu entry, carrying a relocated COSYNCING_HOME like the Linux launcher',
+    /Join-Path \$appData 'Microsoft\\Windows\\Start Menu\\Programs'/.test(powerShellInstaller)
+      && /'cosyncing\.lnk'/.test(powerShellInstaller)
+      && /\$shortcut\.Save\(\)/.test(powerShellInstaller)
+      && /Start Menu: \$shortcutPath/.test(powerShellInstaller)
+      && /cosyncing-launch\.cmd/.test(powerShellInstaller)
+      && /COSYNCING_HOME=\$stateHome/.test(powerShellInstaller)
+      && /Exec=env COSYNCING_HOME=/.test(shellInstaller));
+
+  // Windows has no rc file to append a line to, so an operator whose PATH lacks the install directory
+  // has no convenient way to fix it -- `cosy` and `cosyncing` were simply not commands, in cmd or in
+  // PowerShell. The installer that placed the binary now places the PATH entry too. Three properties are
+  // pinned because each one, wrong, breaks something: the registry write preserves the existing value
+  // KIND (rewriting user PATH as REG_SZ stops every other %VARIABLE% entry expanding), the presence test
+  // is entry-wise rather than a substring match, and the change is broadcast (a terminal started from
+  // Explorer inherits a cached environment, so without WM_SETTINGCHANGE the operator must sign out).
+  check('install.ps1 puts the install directory on the user PATH, preserving the value kind',
+    /Microsoft\.Win32\.Registry\]::CurrentUser\.OpenSubKey\('Environment', \$true\)/.test(powerShellInstaller)
+      && /GetValueKind\('Path'\)/.test(powerShellInstaller)
+      && /\$key\.SetValue\('Path', \$next, \$kind\)/.test(powerShellInstaller)
+      && /DoNotExpandEnvironmentNames/.test(powerShellInstaller)
+      && /-split ';'/.test(powerShellInstaller)
+      && /0x001A/.test(powerShellInstaller)
+      && /Add-UserPathEntry -Directory \$installDir/.test(powerShellInstaller));
+
+  // A client left open cannot be replaced, and that used to be discovered at the very end: the operator
+  // sat through the download, the signature check and the whole broker install to be told to close an app
+  // and start again — and because the Start Menu entry is written by the step that was refused, the run
+  // also left no way to open the client afterwards. The refusal now happens in preflight. Pinned by
+  // position, since a check that runs late is exactly the bug: it must precede the install it guards.
+  {
+    const rule = powerShellInstaller.indexOf('function Assert-ClientNotRunning');
+    const preflight = powerShellInstaller.indexOf('Assert-ClientNotRunning -ClientRoot $preflightRoot');
+    const placement = powerShellInstaller.indexOf('Assert-ClientNotRunning -ClientRoot $CLIENT_ROOT');
+    const installed = powerShellInstaller.indexOf('Write-Output "Installed cosyncing');
+    check('install.ps1 refuses a running desktop client in preflight, before it installs anything',
+      rule >= 0 && preflight >= 0 && placement >= 0 && installed >= 0
+        && preflight < installed && installed < placement,
+      `rule=${rule} preflight=${preflight} installed=${installed} placement=${placement}`);
+  }
+
   // The shell installer's Windows refusal used to send an operator to WSL. It now names the installer
   // that actually works there, and this is the assertion that keeps the two from drifting apart again.
   check('the shell installer points a Windows shell at install.ps1 rather than at WSL',
@@ -1044,6 +1148,117 @@ try {
       && install.stdout.includes('PATH was not changed')
       && !/Desktop client|Pairing handoff|Running setup/.test(install.stdout));
 
+  // ---- Taking over an npm install ------------------------------------------------------------------
+  //
+  // The npm package is an acquisition artifact and `cosyncing setup` copies its bundle to exactly the path
+  // this installer owns, writing no receipt. So a missing receipt is the ordinary state of every npm
+  // install, and refusing all of them refused the whole installed base — before the desktop-client step,
+  // so neither half was updated. These pin the three outcomes: refuse when it cannot ask, refuse when told
+  // no, and replace exactly one file when told yes.
+  const npmApplication = javaScriptAppScript(version, commit, buildDate, 'bun-js');
+  function npmOwnedHome(name: string, application: string): string {
+    const home = join(root, name);
+    const state = join(home, '.cosyncing');
+    mkdirSync(join(state, 'bin'), { recursive: true });
+    // The installer refuses a state home another user can read, and mkdir honours the suite's umask.
+    chmodSync(state, 0o700);
+    chmodSync(join(state, 'bin'), 0o700);
+    writeFileSync(join(state, 'bin', 'cosyncing'), application, { mode: 0o755 });
+    // The state a takeover must not touch. Compared byte for byte afterwards.
+    writeFileSync(join(state, 'config.json'), '{"fixture":"config"}\n');
+    writeFileSync(join(state, 'transport-peers.json'), '{"fixture":"peers"}\n');
+    return home;
+  }
+  // The terminal is the one host property this suite cannot give itself, so the rendered script's
+  // `/dev/tty` is repointed at a file holding the answer — the same technique the handoff case below uses
+  // to reach the other side of the same branch.
+  function releaseAnswering(name: string, answer: string): string {
+    const directory = join(root, name);
+    cpSync(releaseDirectory, directory, { recursive: true });
+    const answerPath = join(directory, 'tty-answer');
+    writeFileSync(answerPath, answer);
+    writeFileSync(
+      join(directory, 'install-server.sh'),
+      readFileSync(join(directory, 'install-server.sh'), 'utf8').replaceAll('/dev/tty', answerPath),
+      { mode: 0o755 },
+    );
+    return directory;
+  }
+  async function installOver(home: string, from: string): Promise<{
+    exitCode: number; stdout: string; stderr: string;
+  }> {
+    return run(['bash', join(from, 'install-server.sh')], {
+      cwd: root,
+      stage: 'npm takeover',
+      env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        HOME: home,
+        FAKE_RELEASE_ROOT: from,
+        LANG: 'C.UTF-8',
+      },
+    });
+  }
+  function stateSurvived(home: string): boolean {
+    return readFileSync(join(home, '.cosyncing', 'config.json'), 'utf8') === '{"fixture":"config"}\n'
+      && readFileSync(join(home, '.cosyncing', 'transport-peers.json'), 'utf8') === '{"fixture":"peers"}\n';
+  }
+
+  const npmUnattendedHome = npmOwnedHome('npm-unattended-home', npmApplication);
+  const npmUnattended = await installOver(npmUnattendedHome, releaseDirectory);
+  check('a run that cannot ask refuses the npm install and names the way to stay on npm',
+    npmUnattended.exitCode !== 0
+      && npmUnattended.stderr.includes('npm update -g cosyncing')
+      && !existsSync(join(npmUnattendedHome, '.cosyncing', 'bootstrap-receipt'))
+      && readFileSync(join(npmUnattendedHome, '.cosyncing', 'bin', 'cosyncing'), 'utf8') === npmApplication
+      && stateSurvived(npmUnattendedHome),
+    npmUnattended.stderr.trim().slice(0, 220));
+
+  const declinedHome = npmOwnedHome('npm-declined-home', npmApplication);
+  const declined = await installOver(declinedHome, releaseAnswering('npm-declined-release', 'n\n'));
+  check('answering no leaves the npm install exactly where it was',
+    declined.exitCode !== 0
+      && declined.stderr.includes('left the npm install in place')
+      && !existsSync(join(declinedHome, '.cosyncing', 'bootstrap-receipt'))
+      && readFileSync(join(declinedHome, '.cosyncing', 'bin', 'cosyncing'), 'utf8') === npmApplication
+      && stateSurvived(declinedHome),
+    declined.stderr.trim().slice(0, 220));
+
+  const adoptedHome = npmOwnedHome('npm-adopted-home', npmApplication);
+  const adopted = await installOver(adoptedHome, releaseAnswering('npm-adopted-release', 'y\n'));
+  const adoptedBinary = join(adoptedHome, '.cosyncing', 'bin', 'cosyncing');
+  const adoptedReceipt = existsSync(join(adoptedHome, '.cosyncing', 'bootstrap-receipt'))
+    ? readFileSync(join(adoptedHome, '.cosyncing', 'bootstrap-receipt'), 'utf8')
+    : '';
+  check('answering yes replaces the application, records ownership, and touches nothing else',
+    adopted.exitCode === 0
+      && readFileSync(adoptedBinary, 'utf8') !== npmApplication
+      && adoptedReceipt.includes('distribution=bootstrap-js\n')
+      && adoptedReceipt.includes(`sha256=${sha256(readFileSync(adoptedBinary))}`)
+      && adopted.stdout.includes(`Installed cosyncing ${version} at ${adoptedBinary}`)
+      && stateSurvived(adoptedHome),
+    `${adopted.exitCode} | ${adopted.stderr.trim().slice(0, 160)}`);
+
+  // The prompt is not a general overwrite. A file that will not identify itself as a packaged npm
+  // cosyncing is refused with the original message, whatever the operator would have answered.
+  const foreignHome = npmOwnedHome('foreign-home', '#!/usr/bin/env bash\nexit 3\n');
+  const foreign = await installOver(foreignHome, releaseAnswering('foreign-release', 'y\n'));
+  check('an application that does not identify as an npm cosyncing is still refused outright',
+    foreign.exitCode !== 0
+      && foreign.stderr.includes('no safe bootstrap ownership receipt')
+      && !existsSync(join(foreignHome, '.cosyncing', 'bootstrap-receipt'))
+      && readFileSync(join(foreignHome, '.cosyncing', 'bin', 'cosyncing'), 'utf8')
+        === '#!/usr/bin/env bash\nexit 3\n',
+    foreign.stderr.trim().slice(0, 220));
+
+  // An install this installer already owns keeps upgrading with no question asked: the receipt is there,
+  // so the takeover branch is never reached.
+  const reinstalled = await installOver(adoptedHome, releaseDirectory);
+  check('an install the receipt already covers upgrades without asking anything',
+    reinstalled.exitCode === 0
+      && !/Replace it with cosyncing|installed from the npm package|npm update -g/.test(reinstalled.stdout)
+      && stateSurvived(adoptedHome),
+    `${reinstalled.exitCode} | ${reinstalled.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+
   // ---- The all-in-one installer -----------------------------------------------------------------
   //
   // `runSupervised` execs through `setsid`, so this child is in a session of its own with no controlling
@@ -1108,6 +1323,25 @@ try {
     /open --env "COSYNCING_HOME=\$STATE_HOME" -a/.test(installers['install.sh']!),
     installers['install.sh']!.split('\n')
       .filter((line) => /^\s*(?:if |elif )?open /.test(line)).join(' | ').slice(0, 200));
+
+  // A sandboxed macOS client does not have this script's $HOME: the kernel rewrites it to the app's
+  // container, so an offer written into the broker's state home is one the client is denied. Proven on a
+  // real Mac with two identical copies, only the container one ever read. The offer therefore goes where
+  // the client's own home resolves to — and the launch must then NOT pass COSYNCING_HOME, because
+  // pointing a sandboxed process at an absolute path outside its container only makes the read fail.
+  // The identifier comes from the placed bundle and the entitlement from its signature, so an unsandboxed
+  // build of the same client keeps the ordinary path with no second rule to maintain.
+  check('a sandboxed macOS client is handed the offer in its container, and no home to look outside it',
+    /CLIENT_CONTAINER="\$HOME\/Library\/Containers\/\$BUNDLE_ID\/Data"/.test(shellInstaller)
+      && /PlistBuddy -c 'Print :CFBundleIdentifier'/.test(shellInstaller)
+      && /codesign -d --entitlements - --xml "\$CLIENT_ROOT"/.test(shellInstaller)
+      && /HANDOFF_HOME="\$CLIENT_CONTAINER\/\.cosyncing"/.test(shellInstaller)
+      && /PAIRING_FILE="\$HANDOFF_HOME\/client-pairing\.json"/.test(shellInstaller)
+      // the container launch is its own branch, and it carries no --env
+      && /elif \[ -n "\$CLIENT_CONTAINER" \]; then\n(?:.*\n)*?\s+if open -a "\$CLIENT_LAUNCH"/
+        .test(shellInstaller)
+      // and the offer is never staged anywhere but the home the client actually reads
+      && !/mktemp "\$STATE_HOME\/\.client-pairing/.test(shellInstaller));
 
   // Consent is the point of `setup`, and a pipeline has no terminal to give it. The installer must stop
   // and say so rather than passing --yes on the operator's behalf.
@@ -1309,6 +1543,103 @@ try {
     handoffDocument === null
       ? 'no handoff document'
       : `${JSON.stringify(handoffDocument)} mode=${(statSync(handoffFile).mode & 0o777).toString(8)}`);
+
+  // The upgrade case, end to end. A version change lands the new web client BESIDE the previous root
+  // rather than over it, so the fixture puts two of them in the install directory — one shaped like a
+  // release this installer placed, one a symlink that must be skipped rather than followed — and the
+  // next run has to clear the first and leave the second. Headless, so no client is placed and no launch
+  // is attempted: the property under test is the web root, and setup still runs.
+  const supersededHome = join(root, 'superseded-web-home');
+  mkdirSync(supersededHome);
+  async function installIntoSuperseded(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return run(['bash', join(handoffRelease, 'install.sh')], {
+      cwd: root,
+      stage: 'superseded web root',
+      env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+        HOME: supersededHome,
+        FAKE_RELEASE_ROOT: handoffRelease,
+        LANG: 'C.UTF-8',
+      },
+    });
+  }
+  const supersededBin = join(supersededHome, '.cosyncing', 'bin');
+  await installIntoSuperseded();
+  const abandonedWeb = join(supersededBin, 'cosyncing-web-0.0.0-previous');
+  mkdirSync(abandonedWeb);
+  writeFileSync(join(abandonedWeb, 'index.html'), 'the previous release\n');
+  // A directory outside the install tree, reached only through a link that carries the matching name.
+  // Removing what a symlink points at is how a prune becomes a delete of someone else's data.
+  const linkTarget = join(supersededHome, 'somewhere-else');
+  mkdirSync(linkTarget);
+  writeFileSync(join(linkTarget, 'index.html'), 'not ours\n');
+  symlinkSync(linkTarget, join(supersededBin, 'cosyncing-web-0.0.0-linked'));
+  const supersededUpgrade = await installIntoSuperseded();
+  check('an upgrade clears the superseded web roots beside the new one, and follows no symlink out',
+    supersededUpgrade.exitCode === 0
+      && !existsSync(abandonedWeb)
+      && existsSync(join(linkTarget, 'index.html'))
+      && existsSync(join(supersededBin, 'cosyncing-web-0.0.0-linked'))
+      && existsSync(join(supersededBin, `cosyncing-web-${version}`))
+      && existsSync(join(supersededBin, 'cosyncing'))
+      && supersededUpgrade.stdout.includes(`Removed the superseded web client: ${abandonedWeb}`)
+      && !supersededUpgrade.stdout.includes('cosyncing-web-0.0.0-linked'),
+    `${supersededUpgrade.exitCode}: ${supersededUpgrade.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+
+  // The server installer does not run setup, so the service is still the previous broker and still
+  // serving out of one of these. It names them and removes nothing.
+  const namedOnlyWeb = join(supersededBin, 'cosyncing-web-0.0.0-named-only');
+  mkdirSync(namedOnlyWeb);
+  const serverUpgrade = await run(['bash', join(handoffRelease, 'install-server.sh')], {
+    cwd: root,
+    stage: 'superseded web root, server install',
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: supersededHome,
+      FAKE_RELEASE_ROOT: handoffRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('the server installer names a superseded web root and removes nothing, having run no setup',
+    serverUpgrade.exitCode === 0
+      && existsSync(namedOnlyWeb)
+      && serverUpgrade.stdout.includes(`A previous web client is still at ${namedOnlyWeb}`)
+      && !serverUpgrade.stdout.includes('Removed the superseded web client'),
+    `${serverUpgrade.exitCode}: ${serverUpgrade.stdout.trim().split('\n').slice(-3).join(' | ')}`);
+
+  // A client that is already open. `pgrep` is the one host fact this suite cannot arrange without
+  // leaving a real process behind, so it is stubbed to answer for the installed client path and for
+  // nothing else — the same technique the terminal and the machine architecture use above.
+  const runningClientBin = join(root, 'running-client-bin');
+  mkdirSync(runningClientBin);
+  writeFileSync(join(runningClientBin, 'pgrep'), `#!/usr/bin/env bash
+# A pgrep that reports the desktop client as running, and nothing else.
+for argument in "$@"; do
+  case "$argument" in */.cosyncing/client/cosyncing) exit 0 ;; esac
+done
+exit 1
+`, { mode: 0o755 });
+  const runningClientHome = join(root, 'running-client-home');
+  mkdirSync(runningClientHome);
+  const runningClient = await run(['bash', join(handoffRelease, 'install.sh')], {
+    cwd: root,
+    stage: 'already-running client',
+    env: {
+      PATH: `${runningClientBin}:${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: runningClientHome,
+      DISPLAY: ':0',
+      FAKE_RELEASE_ROOT: handoffRelease,
+      LANG: 'C.UTF-8',
+    },
+  });
+  check('an open client is updated on disk, told about, and handed no offer it cannot read',
+    runningClient.exitCode === 0
+      && existsSync(join(runningClientHome, '.cosyncing', 'client', 'cosyncing'))
+      && runningClient.stdout.includes('the desktop client is already running')
+      && runningClient.stdout.includes('it was already running, so the window on screen is still the')
+      && !existsSync(join(runningClientHome, '.cosyncing', 'client-pairing.json'))
+      && !/^Started |^Launched /m.test(runningClient.stdout),
+    `${runningClient.exitCode}: ${runningClient.stdout.trim().split('\n').slice(-4).join(' | ')}`);
 
   // Stock macOS ships LibreSSL, which cannot load an Ed25519 SPKI key at all — the real physical failure.
   // It has no trouble with ECDSA P-256, so the stub refuses Ed25519 SPECIFICALLY rather than refusing every

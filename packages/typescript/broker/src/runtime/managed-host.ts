@@ -1377,7 +1377,7 @@ export type ManagedHostRecoveryOutcome =
    */
   | { action: 'recovery-failed'; outcome: ManagedHostStartOutcome }
   /** Something is wrong but nothing here is provably ours to act on. */
-  | { action: 'declined'; reason: 'unproven' | 'foreign' | 'budget-exhausted' }
+  | { action: 'declined'; reason: 'unproven' | 'foreign' | 'budget-exhausted' | 'not-launchable' }
   | ManagedHostSkip;
 
 /**
@@ -1467,6 +1467,16 @@ async function restart(
   if (!ledger.allow(backend.id, now, budget)) return { action: 'declined', reason: 'budget-exhausted' };
   ledger.record(backend.id, now);
   const outcome = await ensureManagedHost(backend, effects, store, env) as ManagedHostStartOutcome;
+  // Nothing to launch is an ABSENCE, not a failed restart. An agent that is not installed reaches here
+  // on every tick, and counting it spent the restart budget on a host that never existed -- after which
+  // the supervisor warned that the host "keeps failing to stay up" once a minute, about software the
+  // operator had never installed and that setup's own preflight had already listed as missing. Hand the
+  // attempt back so the budget belongs to hosts that CAN be restarted, and report an absence as declined
+  // rather than failed, so nothing is journalled for doctor to report in the morning.
+  if (outcome.action === 'not-launchable') {
+    ledger.forget(backend.id);
+    return { action: 'declined', reason: 'not-launchable' };
+  }
   // A restart is a RECOVERY only if OUR host is serving at the end of it. Most
   // members of the outcome union are ways the attempt produced none — a spawn
   // that failed, a predecessor that would not stop, an address that could not
