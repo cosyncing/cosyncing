@@ -25,6 +25,7 @@ import {
 } from '../../../adapter-api/src/index.ts';
 import {
   CodexAdapter,
+  codexLiveSyncEnabled,
   type CodexAttachDiagnostic,
 } from '../../../adapters/codex/src/index.ts';
 import {
@@ -180,11 +181,36 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 });
 
+await test('Codex sync defaults respect Windows, persisted preferences, and explicit env precedence', async () => {
+  const failures: string[] = [];
+  for (const platform of ['linux', 'darwin', 'win32'] as const) {
+    for (const persisted of [undefined, true, false]) {
+      const expected = platform !== 'win32' && persisted !== false;
+      if (codexLiveSyncEnabled(persisted, platform, {}) !== expected) {
+        failures.push(`${platform}/${persisted}: default`);
+      }
+      for (const value of ['1', 'true', 'YES', ' on ', '0', 'false', 'off', '']) {
+        const enabled = ['1', 'true', 'YES', ' on '].includes(value);
+        for (const key of ['COSYNCING_CODEX_SYNC_SERVER', 'COSYNCING_CODEX_LIVE']) {
+          if (codexLiveSyncEnabled(persisted, platform, { [key]: value }) !== enabled) {
+            failures.push(`${platform}/${persisted}/${key}=${value}`);
+          }
+        }
+      }
+      if (codexLiveSyncEnabled(persisted, platform, {
+        COSYNCING_CODEX_SYNC_SERVER: '0', COSYNCING_CODEX_LIVE: '1',
+      })) failures.push(`${platform}/${persisted}: legacy env overrode canonical env`);
+    }
+  }
+  return [failures.length === 0, failures.join(', ')];
+});
+
 await test('createSession starts a durable no-prompt Codex thread', async () => {
   return await withFakeCodex(`#!/usr/bin/env bun
 const enc = new TextDecoder();
 let buf = '';
 let startCount = 0;
+let historyMode;
 const append = (value) =>
   require('node:fs').appendFileSync('__MARKER__', JSON.stringify(value) + '\\n');
 const send = (o) => console.log(JSON.stringify(o));
@@ -209,6 +235,11 @@ for await (const chunk of Bun.stdin.stream()) {
         send({ id: msg.id, result: {} });
       }
     } else if (msg.method === 'thread/name/set') {
+      if (startCount && historyMode === 'legacy') {
+        require('node:fs').writeFileSync('__ROLLOUT__', JSON.stringify({
+          type: 'session_meta', payload: { id: 'created-thread', cwd: '__DIR__' }
+        }) + '\\n');
+      }
       send({ id: msg.id, result: {} });
     }
     else if (msg.method === 'thread/start') {
@@ -217,6 +248,7 @@ for await (const chunk of Bun.stdin.stream()) {
           ![
             'cwd',
             'serviceName',
+            'historyMode',
             'model',
             'modelProvider',
             'allowProviderModelFallback',
@@ -227,6 +259,7 @@ for await (const chunk of Bun.stdin.stream()) {
         continue;
       }
       startCount++;
+      historyMode = msg.params.historyMode ?? 'paginated';
       append({ kind: 'thread/start', params: msg.params });
       send({ id: msg.id, result: {
         thread: {
@@ -250,6 +283,8 @@ for await (const chunk of Bun.stdin.stream()) {
   }
 }
 `, async (rollout, dir, marker) => {
+    // Recent Codex allocates a path but writes nothing in paginated mode.
+    rmSync(rollout);
     const adapter = new CodexAdapter();
     const info = await adapter.createSession({
       directory: dir,
@@ -276,6 +311,7 @@ for await (const chunk of Bun.stdin.stream()) {
         info.currentModel?.modelID === 'gpt-selected' &&
         info.currentModel?.reasoningEffort === 'high' &&
         threadStart?.params?.model === 'gpt-selected' &&
+        threadStart?.params?.historyMode === 'legacy' &&
         threadStart?.params?.modelProvider === 'azure-openai' &&
         !Object.prototype.hasOwnProperty.call(
           threadStart?.params ?? {},

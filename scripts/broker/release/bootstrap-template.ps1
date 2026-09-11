@@ -1583,7 +1583,22 @@ try {
     Write-Output "Could not launch $clientLaunch; start it from $CLIENT_ROOT."
   }
 } catch {
-  [Console]::Error.WriteLine("cosyncing install: $($_.Exception.Message)")
+  # A refusal should LOOK like one. The running-client message in particular reads as ordinary progress
+  # otherwise, and it is the one an operator is most likely to meet. The marker is coloured, not the
+  # message: a whole red paragraph is harder to read than a red word in front of a plain sentence.
+  # Colour only a real console -- when stderr is redirected there is nothing to colour and the escape
+  # would land in the file -- and never let a console that refuses the colour cost us the message.
+  $recolour = $false
+  try {
+    if (-not [Console]::IsErrorRedirected) {
+      [Console]::ForegroundColor = [ConsoleColor]::Red
+      $recolour = $true
+    }
+  } catch { $recolour = $false }
+  try { [Console]::Error.Write('FAILED') } finally {
+    if ($recolour) { try { [Console]::ResetColor() } catch { } }
+  }
+  [Console]::Error.WriteLine("  cosyncing install: $($_.Exception.Message)")
   # `exit` still runs the `finally` below, so the scratch directory and any half-placed staging path are
   # removed on the failure path exactly as they are on the success path.
   exit 1

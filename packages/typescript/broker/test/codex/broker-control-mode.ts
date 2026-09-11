@@ -116,6 +116,7 @@ try {
 
 // ── Phase 1: the per-agent enabler endpoint, against a broker started WITHOUT Codex sync ──────────────
 {
+  writeFileSync(setupStatePath, JSON.stringify({ agents: { codex: false } }, null, 2) + '\n');
   const { broker, base, health } = await startBroker(home, { COSYNCING_CODEX_SYNC_SERVER: '0' });
   try {
     if (health.codexSyncServer !== false) fail('phase1: expected Codex sync-server disabled at boot');
@@ -126,16 +127,24 @@ try {
     const badType = await jsonPost(base, '/api/agents/codex/sync', { enabled: 'yes' });
     if (badType.status !== 400) fail(`phase1: non-boolean enabled should 400, got ${badType.status}`);
 
+    const savedBeforeEnable = readFileSync(setupStatePath, 'utf8');
     const enable = await jsonPost(base, '/api/agents/codex/sync', { enabled: true });
-    if (enable.status !== 202) fail(`phase1: enabling against a running observe-broker should require restart (202), got ${enable.status}`);
-    if (enable.body.enabled !== true) fail('phase1: enable response lost enabled:true');
-    if (enable.body.agent !== 'codex') fail('phase1: enable response should name the codex agent');
-    if (enable.body.restartRequired !== true) fail('phase1: enabling against a running broker should require a restart');
-    if (enable.body.restartScheduled !== false || enable.body.dryRun !== true) fail('phase1: dry-run must NOT spawn a replacement broker');
+    if (process.platform === 'win32') {
+      if (enable.status !== 409) fail(`phase1: enabling unsupported Windows sync should 409, got ${enable.status}`);
+      if (typeof enable.body.error !== 'string') fail('phase1: Windows rejection should explain the unsupported operation');
+      if (enable.body.restartRequired || enable.body.restartScheduled) fail('phase1: Windows rejection must not request a restart');
+      if (readFileSync(setupStatePath, 'utf8') !== savedBeforeEnable) fail('phase1: Windows rejection must not change the saved preference');
+    } else {
+      if (enable.status !== 202) fail(`phase1: enabling against a running observe-broker should require restart (202), got ${enable.status}`);
+      if (enable.body.enabled !== true) fail('phase1: enable response lost enabled:true');
+      if (enable.body.agent !== 'codex') fail('phase1: enable response should name the codex agent');
+      if (enable.body.restartRequired !== true) fail('phase1: enabling against a running broker should require a restart');
+      if (enable.body.restartScheduled !== false || enable.body.dryRun !== true) fail('phase1: dry-run must NOT spawn a replacement broker');
 
-    // Intent persisted durably to setup-state.json (D18) — survives restart/cache wipe.
-    const persisted = JSON.parse(readFileSync(setupStatePath, 'utf8'));
-    if (persisted?.agents?.codex !== true) fail(`phase1: setup-state should persist agents.codex=true, got ${JSON.stringify(persisted)}`);
+      // Intent persisted durably to setup-state.json (D18) — survives restart/cache wipe.
+      const persisted = JSON.parse(readFileSync(setupStatePath, 'utf8'));
+      if (persisted?.agents?.codex !== true) fail(`phase1: setup-state should persist agents.codex=true, got ${JSON.stringify(persisted)}`);
+    }
 
     // Disabling: dry-run never applied the enable, so the running env is still off → no restart needed.
     const disable = await jsonPost(base, '/api/agents/codex/sync', { enabled: false });
@@ -167,13 +176,14 @@ try {
   delete (process.env as any).COSYNCING_CODEX_SYNC_SERVER;
   const { broker, base, health } = await startBroker(home, env);
   try {
-    if (health.codexSyncServer !== true) fail('phase2 (FU-3): a broker launched with persisted codex=true must come up with Codex sync ON, no restart');
+    const expectedEnabled = process.platform !== 'win32';
+    if (health.codexSyncServer !== expectedEnabled) fail('phase2 (FU-3): persisted Codex sync must respect the platform default at boot');
 
     const agents = await getJson(base, '/api/agents');
     const codex = Array.isArray(agents.body) ? agents.body.find((a: any) => a.id === 'codex') : undefined;
     if (!codex) fail('phase2: /api/agents missing codex');
-    if (codex.capabilities?.supportsLiveAttach !== true) fail('phase2 (FU-3): codex should advertise supportsLiveAttach:true after pre-start enablement');
-    if (codex.syncEnabled !== true) fail('phase2: codex.syncEnabled should be true after pre-start enablement');
+    if (codex.capabilities?.supportsLiveAttach !== expectedEnabled) fail('phase2 (FU-3): Codex live-attach capability must match effective startup enablement');
+    if (codex.syncEnabled !== expectedEnabled) fail('phase2: Codex syncEnabled must match effective startup enablement');
 
     console.log('PASS phase2 — FU-3 pre-start: persisted Codex sync enablement applied at construction, no restart');
   } finally {

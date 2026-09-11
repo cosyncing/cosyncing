@@ -28,7 +28,13 @@ INSTALL_MODE='@INSTALL_MODE@'
 CLIENT_TABLE='@CLIENT_TABLE@'
 
 fail() {
-  printf 'cosyncing install: %s\n' "$1" >&2
+  # Mirrors install.ps1: a red marker in front of a plain sentence, and only when stderr is a terminal,
+  # so a redirected log never collects escape sequences.
+  if [ -t 2 ]; then
+    printf '\033[31mFAILED\033[0m  cosyncing install: %s\n' "$1" >&2
+  else
+    printf 'FAILED  cosyncing install: %s\n' "$1" >&2
+  fi
   exit 1
 }
 
