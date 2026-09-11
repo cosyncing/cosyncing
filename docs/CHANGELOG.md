@@ -101,6 +101,23 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Scheduled messages work on a paired device. Reading the queue needs `observe`
+  and changing it needs `drive`, instead of the owner credential no paired client
+  holds. A scheduled send is a prompt with a clock on it, and `drive` already
+  delivers that prompt immediately, so deferring it grants no new authority.
+  Every paired device previously showed a permanent "server refused this device"
+  error in each session, and re-pairing could not clear it.
+- Surfacing a workspace file into a session needs the `files` role rather than the
+  owner credential. The path is resolved against the session's own directory and
+  checked for containment, so the route was held to a stricter bar than the
+  boundary it enforces, and stricter than the uploads route beside it.
+- Codex New Session requests JSONL history explicitly, so current Codex CLI
+  versions persist empty sessions for discovery and resume before the first
+  prompt.
+- Broker startup respects the Windows default of disabled Codex terminal sync,
+  including when setup persisted an enabled preference. The sync endpoint also
+  rejects attempts to enable it on Windows. Explicit startup environment overrides
+  still take precedence.
 - The shell installers are `sh` scripts and say so. Their shebang read
   `#!/usr/bin/env bash` while the documented one-liner pipes them into `sh`, which
   on Debian and Ubuntu is dash. In the all-in-one, the probe for a terminal ran

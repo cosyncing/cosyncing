@@ -294,9 +294,6 @@ try {
     ['restart an updated runtime', 'POST', '/api/agent-runtime-updates/codex/restart'],
     ['synchronize Codex runtime state', 'POST', '/api/agents/codex/sync'],
     ['change the global quota preference', 'POST', '/api/tokdash/quota-preference'],
-    ['create a durable schedule', 'POST', '/api/schedules'],
-    ['list durable schedules', 'GET', '/api/schedules'],
-    ['invoke the agent-only send-file route', 'POST', '/api/tool/send_file'],
     ['trigger a wake for another device', 'POST', '/api/push/wake'],
   ];
   for (const [label, method, path] of peerOwnerOnlyRequests) {
@@ -306,6 +303,22 @@ try {
         headers: { ...peerHeaders, 'content-type': 'application/json' },
         ...(method === 'POST' ? { body: '{}' } : {}),
       })) === 403);
+  }
+  // Scheduled sends and send_file carry peer authority, so the roles a real pairing is issued reach
+  // them. A rejection here must come from the request body, never from the credential: 400 proves the
+  // call was authorized and then validated, which 403 would hide.
+  check('paired device can list durable schedules',
+    (await status(tokened.base, '/api/schedules', { headers: peerHeaders })) === 200);
+  for (const [label, path] of [
+    ['create a durable schedule', '/api/schedules'],
+    ['surface a workspace file into a session', '/api/tool/send_file'],
+  ] as const) {
+    check(`paired device can ${label}`,
+      (await status(tokened.base, path, {
+        method: 'POST',
+        headers: { ...peerHeaders, 'content-type': 'application/json' },
+        body: '{}',
+      })) === 400);
   }
   const tokdashOverride = await fetch(
     `${tokened.base}/api/tokdash/usage?base=${encodeURIComponent('http://127.0.0.1:1/private')}`,
