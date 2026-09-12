@@ -13,7 +13,7 @@ workflows. They were reviewed before any workflow was admitted to this lineage.
 | Actions artifacts | Client smokes uploaded screenshots/build outputs; broker release correctly used GitHub Releases | Test uploads removed from required CI; Releases remain the only permanent distribution surface |
 | Untrusted code | Some self-managed jobs could be manually/label-triggered from pull requests | Not imported; fork code runs only on ephemeral GitHub-hosted runners |
 | Mutable Actions | Predecessor actions used version tags | Every admitted third-party Action is pinned to a full commit SHA |
-| Duplicate gates | Client and broker repeated setup and overlapping analysis/build checks | Consolidated into `ci.yml`; release gate is limited to native package/hash coverage |
+| Duplicate gates | Client and broker repeated setup and overlapping analysis/build checks | Consolidated into `ci.yml`; release gate covers ephemeral native packaging and the actual JavaScript broker/web pair |
 
 Neither predecessor used `pull_request_target` to execute contributor code. The
 complete hash-addressed audit, including retired labels and paths, remains in

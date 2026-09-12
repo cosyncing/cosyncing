@@ -23,19 +23,20 @@ Compiled native broker distribution is a separate transition and is not
 complete. Before any compiled broker prerelease, resolve the binary-license
 gate, provision protected signing environments, and run the published-candidate
 upgrade/unhealthy-rollback acceptance described in the release documentation.
-The non-embedded npm JavaScript package does not distribute the Bun runtime or
-a compiled broker and is governed by its own readiness record.
+The non-embedded npm package and signed GitHub JavaScript release do not
+distribute the Bun runtime or a compiled broker. Their release controls remain
+separate from the compiled-broker legal gate.
 
 ## D. Post-public validation — complete for source, npm, and client releases
 
 The contributor fork path and maintainer hosted checks are proven. The npm
 JavaScript package and advertised Android, Linux, macOS, and Windows clients use
 protected release workflows and physically accepted candidates. iOS remains a
-CI-built source target rather than a distributed client. Remaining transition
-work applies only to a future compiled native broker: legal approval, protected
-signing, prerelease/stable promotion, and packaged acceptance. Release
-validation must complete without relying on a maintainer workstation as CI
-infrastructure.
+CI-built source target rather than a distributed client. The native-free signed
+GitHub broker path is prepared in source and still requires publication and
+candidate acceptance. Any future compiled broker additionally requires legal
+approval and a reviewed native asset policy. Release validation must complete
+without relying on a maintainer workstation as CI infrastructure.
 
 ## Traceability
 
@@ -50,4 +51,5 @@ infrastructure.
 | Source publication | C | public repository, website, branch rules, and fork PR proof |
 | npm JavaScript release | C → D | protected trusted publishing, staged approval, and package-manager-owned updates |
 | Flutter client release | C → D | protected candidate staging, physical acceptance, and exact-asset stable promotion |
+| Signed JavaScript broker release | C → D | source prepared; protected signing and candidate acceptance remain before publication |
 | Compiled release acceptance | C → D | legal approval, protected signing, candidate upgrade/rollback, stable promotion |

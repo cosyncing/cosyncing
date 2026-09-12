@@ -25,7 +25,7 @@
 - [Local data and predecessor upgrades](development/data-and-upgrades.md)
 - [Public CI architecture](ci/public-ci.md)
 - [Predecessor workflow audit](ci/predecessor-workflow-audit.md)
-- [Future compiled-native broker release and signing](release/broker-release-signing.md)
+- [Signed JavaScript broker release and signing](release/broker-release-signing.md)
 - [Client distribution](release/client-distribution.md)
 - [Dormant compiled-broker distribution gate](legal/binary-distribution-readiness.md)
 - [npm JavaScript distribution readiness](legal/npm-javascript-distribution-readiness.md)

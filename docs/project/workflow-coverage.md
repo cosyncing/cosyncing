@@ -17,9 +17,10 @@ archive. The table below describes the active coverage.
 | Client Windows gate | `ci.yml` / Windows build | yes | Hosted Windows build passes |
 | Client sibling contract sync | `ci.yml` / broker and contracts | yes | Same-checkout diff gate passes |
 | Broker deterministic CI | `ci.yml` / broker and contracts | yes | Every registered deterministic sub-suite passes |
-| Broker native package lanes | `broker-release-gate.yml` | yes | Hosted x64/arm64 outputs hash successfully |
-| Broker candidate staging | `broker-release.yml` | tag only | Protected draft-release flow succeeds |
-| Broker stable promotion | `broker-release-promote.yml` | manual | Protected exact-asset verification succeeds |
+| Broker native package lanes | `broker-release-gate.yml` | yes | Ephemeral hosted x64/arm64 builds; no native broker publication |
+| Broker JavaScript/web parity | `broker-release-gate.yml` | yes | Actual bundled candidate executes through explicit Bun against its web sidecar |
+| Broker candidate staging | `broker-release.yml` | tag only | Protected JavaScript/web and matching-client flow; requires a new candidate acceptance pass |
+| Broker stable promotion | `broker-release-promote.yml` | manual | Protected signed exact-asset verification; rejects native brokers and bundled runtimes |
 | npm JavaScript package | `npm-publish.yml` | release only | Exact candidate passes offline package verification, trusted staging, protected review, and interactive approval |
 | Flutter client candidate | `client-release.yml` | tag only | Exact tagged source passes the full gate and stages Android, Linux, macOS, and Windows assets |
 | Flutter client stable promotion | `client-release-promote.yml` | manual | Protected promotion verifies the physically accepted prerelease asset set without rebuilding |
