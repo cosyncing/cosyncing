@@ -82,7 +82,7 @@ if (!existsSync(join(ROOT, 'apps', 'client', 'build', 'web', 'index.html'))) {
 mkdirSync(dirname(OUTPUT), { recursive: true });
 const WORK_OUTPUT = mkdtempSync(join(dirname(OUTPUT), '.release-checkpoint-'));
 const LOGS = join(WORK_OUTPUT, 'logs');
-const BROKER = join(WORK_OUTPUT, 'cosyncing-linux-x64');
+const BROKER = join(WORK_OUTPUT, 'cosyncing-app.js');
 let workPublished = false;
 process.on('exit', () => {
   if (!workPublished) rmSync(WORK_OUTPUT, { recursive: true, force: true });
@@ -160,7 +160,7 @@ function writeReport(
   sourceAfter = sourceFingerprint(ROOT),
 ): void {
   const reportSourceStable = sourceBefore.sha256 === sourceAfter.sha256;
-  const artifacts = status === 'pass' ? ['cosyncing-linux-x64'] : [];
+  const artifacts = status === 'pass' ? ['cosyncing-app.js'] : [];
   const report = {
     schemaVersion: 1,
     kind: 'release-checkpoint',
@@ -222,9 +222,9 @@ function writeReport(
 run('build-broker', [
   'bun',
   'run',
-  'scripts/broker/build-broker.ts',
-  '--target',
-  'bun-linux-x64',
+  'scripts/broker/build-broker-bundle.ts',
+  '--distribution',
+  'bootstrap-js',
   '--outfile',
   BROKER,
   '--commit',
@@ -232,7 +232,6 @@ run('build-broker', [
   '--build-date',
   buildDate,
   '--minify',
-  '--no-alias',
 ]);
 run('verify-candidate-pair', [
   'bun',
@@ -241,6 +240,8 @@ run('verify-candidate-pair', [
   '--',
   '--broker',
   BROKER,
+  '--bun',
+  process.execPath,
   '--web-dir',
   'apps/client/build/web',
   '--commit',

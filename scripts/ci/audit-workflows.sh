@@ -104,10 +104,26 @@ for fragment in \
   }
 done
 
+# Signed GitHub publication is JavaScript-only. Native tests remain ephemeral in the PR gate.
 for workflow in broker-release.yml broker-release-promote.yml; do
-  rg -q 'COSYNCING_BINARY_RELEASE_LEGAL_APPROVED' "$workflow_dir/$workflow"
-  rg -q 'test "\$BINARY_RELEASE_LEGAL_APPROVED" = true' "$workflow_dir/$workflow"
+  if rg -n 'build-broker\.ts|--compile|native-package|COSYNCING_BINARY_RELEASE_LEGAL_APPROVED|output/native|cosyncing-linux-(x64|arm64)|cosyncing-darwin-arm64' "$workflow_dir/$workflow"; then
+    echo "ERROR: $workflow must not build, stage, publish, or enable embedded-runtime brokers." >&2
+    exit 1
+  fi
+  rg -q 'verify-promotion-assets\.ts' "$workflow_dir/$workflow"
+  rg -q 'git merge-base --is-ancestor' "$workflow_dir/$workflow"
+  rg -q 'test "\$GITHUB_REPOSITORY" = cosyncing/cosyncing' "$workflow_dir/$workflow"
 done
+rg -q 'needs: \[javascript-package, web-package\]' "$workflow_dir/broker-release.yml"
+rg -q 'verify-staging-assets\.ts output/staging' "$workflow_dir/broker-release.yml"
+rg -Fq -- '--broker output/staging/cosyncing-app.js --bun "$(command -v bun)"' "$workflow_dir/broker-release.yml"
+rg -Fq 'test "$(git rev-parse "client-v$VERSION^{commit}")" = "$(git rev-parse HEAD)"' "$workflow_dir/broker-release.yml"
+rg -q 'environment: broker-release-candidate' "$workflow_dir/broker-release.yml"
+rg -q 'environment: broker-production' "$workflow_dir/broker-release-promote.yml"
+if rg -n 'build-broker|client:build|gh release upload' "$workflow_dir/broker-release-promote.yml"; then
+  echo 'ERROR: broker promotion must not rebuild or replace accepted assets.' >&2
+  exit 1
+fi
 
 # npm publication policy.
 #

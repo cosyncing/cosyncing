@@ -18,6 +18,18 @@ receipt, and stops. It starts no service, changes no `PATH`, and edits no shell 
 the right installer for a headless box, for a configuration-managed host, and for anywhere you want the
 files and the service to be two decisions.
 
+## Publication status
+
+The native-free signed release path is prepared in source. The live download
+URLs below acquire it only after a new candidate is published and promoted;
+merging this change does not change an existing 0.5.2 release or the live installer.
+
+The release carries JavaScript and the web sidecar, plus matching Flutter desktop
+clients. It carries no compiled native broker and no Bun runtime archive. You do
+not need to preinstall Bun: both installers reuse a suitable runtime or download
+the pinned runtime directly from upstream. The broker still runs under that
+separate Bun installation.
+
 ## The one-liner
 
 ```bash
@@ -29,9 +41,10 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 powershell -NoProfile -c "irm https://github.com/cosyncing/cosyncing/releases/latest/download/install.ps1 | iex"
 ```
 
-`releases/latest/download/<name>` always resolves to the current stable broker release. It is the same
-pointer every installed broker's update channel resolves through, so it is a release cosyncing keeps
-correct rather than a convenience alias. Swap `install.sh` for `install-server.sh` (or `install.ps1` for
+`releases/latest/download/<name>` uses GitHub's latest-release pointer. Broker
+promotion sets that pointer to the accepted signed broker release; client
+promotion preserves it with `--latest=false`. Installer-owned
+brokers use the signed channel; npm installations use their package manager. Swap `install.sh` for `install-server.sh` (or `install.ps1` for
 `install-server.ps1`) for the broker-only install. Where this page writes `<base>`, a specific release's
 own download base works too, and is what to use when you mean a particular version.
 
@@ -198,3 +211,27 @@ verifies, and ECDSA P-256 beside it for installers whose crypto library cannot l
 The P-256 signature is published in two encodings of the same signature — raw `r||s` for .NET, and a
 DER `SEQUENCE` for `openssl dgst -verify`. See
 [broker release and signing](../release/broker-release-signing.md).
+
+## Migrating older installer-owned brokers
+
+Published 0.5.2's updater rejects a manifest with an empty native artifact list,
+even when `jsApp` and the web metadata are valid. A native-free release therefore
+cannot be installed by that build's self-updater. Earlier native installer builds
+also require reinstallation to change distribution kind.
+
+After the new release is published and accepted, rerun its version-specific
+`install.sh` or `install.ps1`. For a broker-only host, use `install-server.sh` or
+`install-server.ps1`, then run the printed `setup` command to reconcile the
+installed service. Use a maintenance window for a running installation; keep the
+existing state home and credentials, and let the installer/setup manage receipts.
+Do not delete state or manually copy a bundle over the installed service.
+
+This acquires the new parser. Subsequent `bootstrap-js` updates can consume the
+native-free signed channel with the existing runtime and health-checked rollback.
+The manifest still says schema 1, but older parsers do not accept its new empty-
+native-list shape. This has no effect on the broker/client wire contract.
+
+For npm-owned (`bun-js`) installations, keep using `npm update --global cosyncing`
+followed by `cosyncing setup`; do not use self-update as a migration mechanism.
+Rerunning the standalone installer is a change of ownership, for which its
+existing interactive takeover confirmation remains required.

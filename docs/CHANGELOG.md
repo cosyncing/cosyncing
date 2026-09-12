@@ -11,6 +11,12 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+- Prepare signed GitHub releases containing the JavaScript broker, web sidecar,
+  installers and matching desktop clients, with no embedded Bun broker executable
+  or bundled runtime archive. Installers acquire Bun separately when needed.
+  Older installer-owned builds, including 0.5.2, require rerunning the new installer
+  after publication; npm updates retain package-manager ownership.
+
 ## 0.5.2 — 2026-09-12
 
 ### Added

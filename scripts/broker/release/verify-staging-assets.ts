@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
-/** Refuse candidate assembly unless the draft release contains exactly the native staging inputs. */
+/** Refuse candidate assembly unless the draft release contains exactly the JavaScript staging inputs. */
 import { resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
+import { readFileSync } from 'node:fs';
+import { assertJavaScriptBroker, exactReleaseFiles } from './javascript-release-policy.ts';
 import { RELEASE_JAVASCRIPT_APP_NAME } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
-  RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
 } from './release-files.ts';
 
@@ -15,10 +15,6 @@ function usage(): never {
 
 export const EXPECTED_STAGING_ASSETS = Object.freeze(
   [
-    ...RELEASE_TARGETS.flatMap((target) => {
-    const artifact = `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`;
-    return [artifact, `${artifact}.evidence.json`];
-    }),
     RELEASE_JAVASCRIPT_APP_NAME,
     `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`,
     WEB_SIDECAR_NAME,
@@ -27,11 +23,13 @@ export const EXPECTED_STAGING_ASSETS = Object.freeze(
 );
 
 export function stagingAssetBlockers(directory: string): string[] {
-  const actual = [...new Bun.Glob('*').scanSync({ cwd: directory, onlyFiles: true })].sort();
-  if (JSON.stringify(actual) === JSON.stringify(EXPECTED_STAGING_ASSETS)) return [];
-  return [
-    `staging asset set mismatch; expected: ${EXPECTED_STAGING_ASSETS.join(', ')}; actual: ${actual.join(', ')}`,
-  ];
+  try {
+    exactReleaseFiles(directory, EXPECTED_STAGING_ASSETS);
+    assertJavaScriptBroker(readFileSync(resolve(directory, RELEASE_JAVASCRIPT_APP_NAME)));
+    return [];
+  } catch (error) {
+    return [error instanceof Error ? error.message : String(error)];
+  }
 }
 
 if (import.meta.main) {

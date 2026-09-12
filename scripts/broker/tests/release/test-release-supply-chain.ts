@@ -31,7 +31,8 @@ import {
   RELEASE_JAVASCRIPT_APP_TARGET,
   RELEASE_MANIFEST_SCHEMA_VERSION,
   UPGRADE_JOURNAL_SCHEMA_VERSION,
-  verifyReleaseManifest,
+  verifySignedManifest,
+  verifyUpgradeCandidate,
   verifyReleasePairing,
 } from '../../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../../packages/typescript/broker/src/runtime/application-identity.ts';
@@ -49,16 +50,11 @@ import {
   canonicalProductVersion,
   parseRenderedClientTable,
   resolveClientArtifacts,
-  releaseTargetArch,
-  releaseTargetPlatform,
   sha256,
   BOOTSTRAP_TEMPLATES,
   CLIENT_HOSTS,
-  RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
   type ClientHost,
-  type PackageEvidence,
-  type ReleaseTarget,
   type JavaScriptPackageEvidence,
   type WebPackageEvidence,
 } from '../../release/release-files.ts';
@@ -68,6 +64,8 @@ import {
 } from '../../release/verify-promotion-assets.ts';
 import { PRODUCT_IDENTITY } from '../../../../packages/typescript/protocol/src/product.ts';
 import { forbiddenArtifactContent } from '../../release/package-evidence.ts';
+
+import { javaScriptReleaseRegressions } from './javascript-release-regressions.ts';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -142,36 +140,7 @@ async function run(command: string[], options: {
   throw new Error(`${stage} exhausted its timeout attempts`);
 }
 
-function artifactScript(version: string, target: ReleaseTarget, commit: string, buildDate: string): string {
-  return `#!/usr/bin/env bash
-if [ "\${1:-}" = version ] && [ "\${2:-}" = --json ]; then
-  cat <<'JSON'
-${JSON.stringify({
-  schemaVersion: 1,
-  product: 'cosyncing',
-  binary: 'cosyncing',
-  alias: 'cosy',
-  version,
-  commit,
-  buildDate,
-  target,
-  packaged: true,
-  dirty: false,
-  schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
-  contract: PUBLISHED_BROKER_CONTRACT,
-}, null, 2)}
-JSON
-  exit 0
-fi
-exit 2
-`;
-}
-
-/**
- * The JavaScript application fixture: a shell script that answers `version --json` exactly as the real
- * bundle does. The installer runs it through a Bun, never directly, so a fake `bun` on PATH can stand in
- * for the runtime while every other property under test — digests, signatures, evidence — stays real.
- */
+/** Executable JavaScript fixture; only the runtime version probe is simulated. */
 function javaScriptAppScript(
   version: string,
   commit: string,
@@ -179,84 +148,24 @@ function javaScriptAppScript(
   /** `bun-js` is what npm ships and what `cosyncing setup` copies into the state home. */
   distribution: 'bootstrap-js' | 'bun-js' = 'bootstrap-js',
 ): string {
-  return `#!/usr/bin/env bash
-if [ "\${1:-}" = version ] && [ "\${2:-}" = --json ]; then
-  cat <<'JSON'
-${JSON.stringify({
-  schemaVersion: 2,
-  product: 'cosyncing',
-  binary: 'cosyncing',
-  alias: 'cosy',
-  version,
-  commit,
-  buildDate,
-  target: RELEASE_JAVASCRIPT_APP_TARGET,
-  distribution,
-  packaged: true,
-  dirty: false,
-  schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
+  return `#!/usr/bin/env bun
+const [command, ...args] = process.argv.slice(2);
+const identity = ${JSON.stringify({
+  schemaVersion: 2, product: 'cosyncing', binary: 'cosyncing', alias: 'cosy',
+  version, commit, buildDate, target: RELEASE_JAVASCRIPT_APP_TARGET, distribution,
+  packaged: true, dirty: false, schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
   contract: PUBLISHED_BROKER_CONTRACT,
-}, null, 2)}
-JSON
-  exit 0
-fi
-# What the all-in-one tail asks of the broker after it places the files. \`setup\` is a plan-and-confirm
-# conversation in the real product; here it only has to succeed, because what is under test is that the
-# installer runs it with a terminal attached and stops when it cannot.
-if [ "\${1:-}" = setup ]; then
-  echo 'fixture setup completed'
-  exit 0
-fi
-if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
-  cat <<'JSON'
-{
-  "schemaVersion": 2,
-  "listener": { "host": "127.0.0.1", "port": 7734, "url": "http://127.0.0.1:7734", "ready": true }
-}
-JSON
-  exit 0
-fi
-if [ "\${1:-}" = pair ] && [ "\${2:-}" = --json ] && [ "\${3:-}" = --broker-url ]; then
-  printf '{\\n  "schemaVersion": 1,\\n  "pairingId": "fixture-pairing",\\n  "qr": "%s",\\n  "expiresAt": "%s",\\n  "brokerUrl": "%s",\\n  "advertisedUrl": "%s",\\n  "tokenScope": "observe-drive-files-v1"\\n}\\n' \\
-    'https://pair.example/v3#fixture' '2026-07-17T00:05:00.000Z' "\${4}" "\${4}"
-  exit 0
-fi
-exit 2
+})};
+if (command === 'version' && args[0] === '--json') console.log(JSON.stringify(identity, null, 2));
+else if (command === 'setup') console.log('fixture setup completed');
+else if (command === 'status') console.log(JSON.stringify({schemaVersion: 2,
+  listener: {host: '127.0.0.1', port: 7734, url: 'http://127.0.0.1:7734', ready: true}}));
+else if (command === 'pair' && args[0] === '--json' && args[1] === '--broker-url') {
+  console.log(JSON.stringify({schemaVersion: 1, pairingId: 'fixture-pairing',
+    qr: 'https://pair.example/v3#fixture', expiresAt: '2026-07-17T00:05:00.000Z',
+    brokerUrl: args[2], advertisedUrl: args[2], tokenScope: 'observe-drive-files-v1'}));
+} else process.exit(2);
 `;
-}
-
-function evidence(options: {
-  artifactPath: string;
-  target: ReleaseTarget;
-  version: string;
-  commit: string;
-  buildDate: string;
-}): PackageEvidence {
-  const bytes = readFileSync(options.artifactPath);
-  return {
-    schemaVersion: 1,
-    product: 'cosyncing',
-    artifact: `cosyncing-${options.target}`,
-    version: options.version,
-    target: options.target,
-    sourceCommit: options.commit,
-    buildDate: options.buildDate,
-    size: bytes.byteLength,
-    sha256: sha256(bytes),
-    packaged: true,
-    dirty: false,
-    schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
-    contract: PUBLISHED_BROKER_CONTRACT,
-    cleanCheckout: true,
-    offlineVersionCheck: true,
-    forbiddenContentCheck: true,
-    runner: {
-      os: releaseTargetPlatform(options.target),
-      arch: releaseTargetArch(options.target),
-      image: `fixture-${options.target}`,
-      invocationId: `100${RELEASE_TARGETS.indexOf(options.target) + 1}`,
-    },
-  };
 }
 
 /**
@@ -275,7 +184,7 @@ fi
 if [ "\${1:-}" = -e ]; then
   exec '${process.execPath}' "$@"
 fi
-exec bash "$@"
+exec '${process.execPath}' "$@"
 `, { mode: 0o755 });
 }
 
@@ -299,7 +208,7 @@ if [ "\${1:-}" = --revision ]; then
   echo '${options.version}+fixturebuild'
   exit 0
 fi
-exec bash "$@"
+exec '${process.execPath}' "$@"
 `, { mode: 0o755 });
   const path = join(directory, asset);
   const zipped = Bun.spawnSync(['zip', '-q', '-r', path, name], {
@@ -351,7 +260,7 @@ function writeClientArtifacts(directory: string, version: string): void {
   writeFileSync(join(staging, macTree, 'Contents', 'MacOS', 'Cosyncing'), 'fixture\n', { mode: 0o755 });
   const windowsTree = `cosyncing-client-${version}-windows-x64`;
   mkdirSync(join(staging, windowsTree), { recursive: true });
-  writeFileSync(join(staging, windowsTree, 'cosyncing.exe'), 'fixture\n', { mode: 0o755 });
+  writeFileSync(join(staging, windowsTree, 'cosyncing.exe'), 'MZ desktop fixture\n', { mode: 0o755 });
   for (const [tree, asset] of [
     [macTree, `cosyncing-client-${version}-macos-arm64-unsigned.zip`],
     [windowsTree, `cosyncing-client-${version}-windows-x64-unsigned.zip`],
@@ -453,15 +362,6 @@ try {
   const version = canonicalProductVersion();
   const commit = '1'.repeat(40);
   const buildDate = '2026-07-17T00:00:00.000Z';
-  for (const target of RELEASE_TARGETS) {
-    const name = `cosyncing-${target}`;
-    const artifactPath = join(artifactDirectory, name);
-    writeFileSync(artifactPath, artifactScript(version, target, commit, buildDate), { mode: 0o755 });
-    writeFileSync(
-      join(evidenceDirectory, `${name}.evidence.json`),
-      `${JSON.stringify(evidence({ artifactPath, target, version, commit, buildDate }), null, 2)}\n`,
-    );
-  }
   const jsArtifactPath = join(artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
   writeFileSync(jsArtifactPath, javaScriptAppScript(version, commit, buildDate), { mode: 0o755 });
   const jsBytes = readFileSync(jsArtifactPath);
@@ -547,27 +447,27 @@ try {
   const p256 = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const p256PrivatePem = p256.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   const p256PublicPem = p256.publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  const armEvidencePath = join(
+  const webEvidencePath = join(
     evidenceDirectory,
-    'cosyncing-linux-arm64.evidence.json',
+    `${WEB_SIDECAR_NAME}.evidence.json`,
   );
-  const originalArmEvidence = readFileSync(armEvidencePath);
-  const mismatchedArmEvidence = JSON.parse(originalArmEvidence.toString());
-  mismatchedArmEvidence.contract = {
-    ...PUBLISHED_BROKER_CONTRACT,
+  const originalWebEvidence = readFileSync(webEvidencePath);
+  const mismatchedWebEvidence = JSON.parse(originalWebEvidence.toString());
+  mismatchedWebEvidence.contract = {
+    ...webEvidence.contract,
     surfaceHash: 'fnv1a32:00000000',
   };
   writeFileSync(
-    armEvidencePath,
-    `${JSON.stringify(mismatchedArmEvidence, null, 2)}\n`,
+    webEvidencePath,
+    `${JSON.stringify(mismatchedWebEvidence, null, 2)}\n`,
   );
-  let mismatchedNativeContractRejected = false;
+  let mismatchedWebContractRejected = false;
   try {
     assembleRelease({
       artifactDirectory,
       evidenceDirectory,
       clientDirectory,
-      outputDirectory: join(root, 'rejected-native-contract'),
+      outputDirectory: join(root, 'rejected-web-contract'),
       baseUrl: `https://releases.example/cosyncing/v${version}`,
       version,
       sourceCommit: commit,
@@ -579,15 +479,15 @@ try {
       p256PublicKeyPem: p256PublicPem,
     });
   } catch (error) {
-    mismatchedNativeContractRejected = /disagrees on broker contract/.test(
+    mismatchedWebContractRejected = /disagree on broker contract/.test(
       error instanceof Error ? error.message : String(error),
     );
   } finally {
-    writeFileSync(armEvidencePath, originalArmEvidence);
+    writeFileSync(webEvidencePath, originalWebEvidence);
   }
   check(
-    'native x64 and arm64 evidence must bind the same broker surface',
-    mismatchedNativeContractRejected,
+    'JavaScript and web evidence must bind the same broker surface',
+    mismatchedWebContractRejected,
   );
   const assembled = assembleRelease({
     artifactDirectory,
@@ -603,6 +503,12 @@ try {
     publicKeyPem: publicPem,
     p256PrivateKeyPem: p256PrivatePem,
     p256PublicKeyPem: p256PublicPem,
+  });
+  javaScriptReleaseRegressions({
+    artifactDirectory, evidenceDirectory, clientDirectory, outputDirectory: releaseDirectory,
+    baseUrl: `https://releases.example/cosyncing/v${version}`, version, sourceCommit: commit,
+    publishedAt: buildDate, keyId: 'test-2026', privateKeyPem: privatePem, publicKeyPem: publicPem,
+    p256PrivateKeyPem: p256PrivatePem, p256PublicKeyPem: p256PublicPem,
   });
   const originalWebArtifact = readFileSync(webArtifactPath);
   writeFileSync(webArtifactPath, 'swapped candidate web sidecar\n');
@@ -640,25 +546,17 @@ try {
       && promotionAssetBlockers(releaseDirectory).length === 0,
   );
 
-  check('release manifest publishes every required target, macOS included',
-    assembled.manifest.artifacts.map((item) => item.target).join(',') === RELEASE_TARGETS.join(',')
-      && assembled.manifest.artifacts.some((item) =>
-        item.target === 'darwin-arm64' && item.platform === 'darwin' && item.arch === 'arm64')
-      && assembled.publishedFiles.includes('cosyncing-darwin-arm64'),
-    assembled.manifest.artifacts.map((item) => `${item.target}/${item.platform}`).join(','));
-  check('manifest carries exact version, commit, size, checksum, provenance, and embedded signature',
+  check('release publishes a complete JavaScript pair with no native descriptors or payloads',
+    assembled.manifest.artifacts.length === 0
+      && assembled.manifest.jsApp?.name === RELEASE_JAVASCRIPT_APP_NAME
+      && !assembled.publishedFiles.some((name) => /^cosyncing-(linux|darwin)-/.test(name)));
+  check('manifest carries exact version, commit and embedded signature',
     assembled.manifest.version === version && assembled.manifest.sourceCommit === commit
-      && assembled.manifest.artifacts.every((item) =>
-        item.size > 0 && /^[a-f0-9]{64}$/.test(item.sha256)
-          && item.provenanceUrl.endsWith(`${item.name}.intoto.jsonl`))
       && assembled.manifest.signature.keyId === 'test-2026');
-  check('every published target verifies against the pinned Ed25519 release key',
-    RELEASE_TARGETS.every((target) =>
-      verifyReleaseManifest({
-        value: assembled.manifest,
-        target,
-        trustedKeys: { 'test-2026': publicPem },
-      }).artifact.target === target));
+  check('JavaScript release verifies against the pinned Ed25519 key',
+    verifyUpgradeCandidate({value: assembled.manifest,
+      buildInfo: {distribution: 'bootstrap-js', target: 'universal'},
+      trustedKeys: {'test-2026': publicPem}}).name === RELEASE_JAVASCRIPT_APP_NAME);
 
   // The sibling P-256 signature, published in two encodings because the two consumers can each read only
   // one: PowerShell 5.1 has no DER overload, and openssl has no P1363 input. The installer's macOS path
@@ -720,21 +618,13 @@ try {
       { key: p256PublicKeyObject, dsaEncoding: 'ieee-p1363' },
       readFileSync(join(releaseDirectory, 'release-manifest.json.p256.sig')),
     ));
-  // The whole reason Ed25519 stays. A broker built before the sibling signature existed reads only the
-  // manifest, knows only `ed25519`, and trusts only the Ed25519 key id: prove that release is still readable
-  // by exactly that reader rather than assuming a sibling FILE cannot disturb it.
   const publishedManifest = JSON.parse(readFileSync(join(releaseDirectory, 'release-manifest.json'), 'utf8'));
-  check('a broker built before this change still verifies the manifest with Ed25519 alone',
+  check('manifest signature encoding stays Ed25519; old nonempty-native parsers require reinstall',
     publishedManifest.signature.algorithm === 'ed25519'
-      && Object.keys(publishedManifest.signature).sort().join(',') === 'algorithm,keyId,value'
-      && !('signatures' in publishedManifest) && !('p256Signature' in publishedManifest)
-      && verifyReleaseManifest({
-        value: publishedManifest,
-        target: 'linux-x64',
-        trustedKeys: { 'test-2026': publicPem },
-      }).manifest.version === version);
+      && publishedManifest.artifacts.length === 0
+      && verifySignedManifest(publishedManifest, {'test-2026': publicPem}).version === version);
 
-  check('the signed manifest carries the JavaScript application beside the compiled set',
+  check('the signed manifest carries the JavaScript application without a compiled set',
     assembled.manifest.jsApp?.name === RELEASE_JAVASCRIPT_APP_NAME
       && assembled.manifest.jsApp?.target === RELEASE_JAVASCRIPT_APP_TARGET
       && assembled.manifest.jsApp?.sha256 === jsEvidence.sha256
@@ -758,7 +648,7 @@ try {
   );
 
   const inventory = JSON.parse(readFileSync(join(releaseDirectory, 'software-inventory.json'), 'utf8'));
-  check('@clack/prompts 1.7.0 and its reviewed MIT closure are in the compiled inventory',
+  check('@clack/prompts 1.7.0 and its reviewed MIT closure are in the JavaScript inventory',
     inventory.reviewedSupplyChain?.clackPrompts?.root === '@clack/prompts@1.7.0'
       && inventory.reviewedSupplyChain.clackPrompts.licenses?.join(',') === 'MIT'
       && inventory.reviewedSupplyChain.clackPrompts.packages?.length === 6);
@@ -776,7 +666,7 @@ try {
       && assembled.publishedFiles.includes('LICENSE')
       && assembled.publishedFiles.includes('NOTICE')
       && assembled.publishedFiles.includes('THIRD_PARTY_NOTICES.txt')
-      && assembled.publishedFiles.includes('cosyncing-linux-arm64.intoto.jsonl.sig')
+      && assembled.publishedFiles.includes(`${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl.sig`)
       && assembled.publishedFiles.includes(WEB_SIDECAR_NAME)
       && assembled.publishedFiles.includes(`${WEB_SIDECAR_NAME}.intoto.jsonl.sig`)
       && readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8').includes('  install.sh\n'));
@@ -1067,30 +957,15 @@ try {
     join(releaseDirectory, 'THIRD_PARTY_NOTICES.txt'),
     'utf8',
   );
-  check('release notices cover Bun and every compiled external package',
-    thirdPartyNotices.includes('Bun 1.3.8 runtime')
-      && thirdPartyNotices.includes('JavaScriptCore')
-      && thirdPartyNotices.includes('provide your application in an object')
-      && inventory.packages
-        .filter((item: any) => !item.internal)
+  check('release inventory and notices distinguish external Bun from distributed dependencies',
+    inventory.format === 'cosyncing-javascript-software-inventory'
+      && inventory.externalRuntime.bundled === false
+      && inventory.releaseArtifacts.length === 5
+      && thirdPartyNotices.includes('Bun is installed separately')
+      && !thirdPartyNotices.includes('Bun 1.3.8 runtime')
+      && thirdPartyNotices.includes('app/assets/NOTICES')
+      && inventory.packages.filter((item: any) => !item.internal)
         .every((item: any) => thirdPartyNotices.includes(`${item.name}@${item.version}`)));
-  // The Bun section embeds a TRACKED licence file, and a checkout with `core.autocrlf=true` — every
-  // hosted Windows runner — delivers that file CRLF. It used to be hashed as-checked-out, which failed
-  // the digest pin inside `assembleRelease` and meant no release could be assembled on a Windows
-  // checkout at all. The pin is over the licence text now, and this asserts the consequence: that
-  // section is the same bytes whichever host assembled the release.
-  //
-  // Scoped to that section on purpose. The dependency closure below it carries each package's licence
-  // exactly as npm published it, CRLF included, and rewriting a third party's licence bytes to satisfy
-  // a test would be the wrong fix — those come from the tarball, not from this checkout, so they do not
-  // vary by host anyway.
-  const bunNoticeSection = thirdPartyNotices.slice(
-    thirdPartyNotices.indexOf('Bun 1.3.8 runtime'),
-    thirdPartyNotices.indexOf('Compiled npm dependency closure'),
-  );
-  check('the tracked Bun licence is emitted host-independently, with no carriage return',
-    bunNoticeSection.length > 1000 && !bunNoticeSection.includes('\r'),
-    `${bunNoticeSection.length} bytes, ${bunNoticeSection.split('\r').length - 1} carriage returns`);
 
   const fakeBin = join(root, 'fake-bin');
   mkdirSync(fakeBin);
@@ -1110,6 +985,7 @@ try {
   });
   const binary = join(home, '.cosyncing', 'bin', 'cosyncing');
   const alias = join(home, '.cosyncing', 'bin', 'cosy');
+  if (install.exitCode !== 0) throw new Error(`fixture installation failed: ${install.stderr} ${install.stdout}`);
   const installedReceipt = readFileSync(join(home, '.cosyncing', 'bootstrap-receipt'), 'utf8');
   check('bootstrap verifies, installs user-owned bundle+relative alias, and records ownership',
     install.exitCode === 0 && existsSync(binary) && lstatSync(binary).isFile()
@@ -1968,9 +1844,9 @@ exec /usr/bin/openssl "$@"
   );
   const trueApplicationDigest = misboundManifest.jsApp.sha256;
   misboundManifest.jsApp.sha256 = 'f'.repeat(64);
-  // Moved onto a compiled artifact's `sha256`, so the document still contains a literal
+  // Moved onto the web sidecar's `sha256`, so the document still contains a literal
   // `"sha256": "<the application's digest>"` — the exact shape a scan of the whole file would accept.
-  misboundManifest.artifacts[0].sha256 = trueApplicationDigest;
+  misboundManifest.webApp.sha256 = trueApplicationDigest;
   const misboundBytes = Buffer.from(`${JSON.stringify(misboundManifest, null, 2)}\n`, 'utf8');
   writeFileSync(join(misboundRelease, 'release-manifest.json'), misboundBytes);
   writeFileSync(
@@ -2165,14 +2041,8 @@ exec /usr/bin/openssl "$@"
   check('release directory has no generated cache or unexpected publication payload',
     readdirSync(releaseDirectory).sort().join(',') === assembled.publishedFiles.join(','));
 
-  // The npm distribution's own assertions live in scripts/broker/tests/release/test-npm-package.ts.
-  //
-  // They used to be here because npm packaging WAS release packaging: the published package carried
-  // per-platform `bun build --compile` executables, so every claim about it was a claim about compiled
-  // artifacts, provenance evidence, and the resolver that selected between them. The npm package now
-  // ships one universal JavaScript bundle and no compiled artifact at all, which shares nothing with the
-  // signed native release this suite governs. Keeping both here would tie a JavaScript packaging change
-  // to the native release gate and vice versa; the native lane's assertions above are unchanged.
+  // npm acquisition and ownership have their own acceptance suite in test-npm-package.ts.
+  // Native builds above are ephemeral reproducibility evidence, never assembled release assets.
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

@@ -64,7 +64,7 @@ Public source publication does not authorize compiled distribution. GitHub
 binary releases of the compiled native broker remain blocked by
 [compiled broker distribution readiness](../legal/binary-distribution-readiness.md):
 the embedded Bun runtime's distribution obligations need a recorded resolution,
-and protected signing environments and keys have not been provisioned.
+independently of the JavaScript distribution path.
 
 The npm package is a different artifact and is no longer inside that gate. It
 ships one self-contained JavaScript application bundle executed by a Bun runtime
@@ -72,12 +72,17 @@ the operator installs separately, with no embedded runtime and no compiled
 executable — see
 [npm JavaScript distribution readiness](../legal/npm-javascript-distribution-readiness.md).
 `.github/workflows/npm-publish.yml` builds, verifies, and submits releases
-through npm's protected staging and 2FA approval flow. The current JavaScript
-package is `cosyncing@0.5.1`. Flutter-only Android, Linux, Apple Silicon macOS,
-and Windows client downloads are published separately in the GitHub client
+through npm's protected staging and 2FA approval flow. Flutter-only Android,
+Linux, Apple Silicon macOS, and Windows client downloads are published in the client
 release; iOS/TestFlight remains deferred.
 
-The release workflows fail closed unless the protected
-`COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` variable is exactly `true`. Keep it
-unset until the documented review is complete. Local builds and ephemeral CI
-packaging remain valid engineering evidence, but they are not public releases.
+The signed GitHub workflow now assembles a JavaScript broker, web sidecar,
+installers and same-commit desktop clients with signed metadata. Its asset policy
+rejects embedded-runtime brokers and bundled Bun archives; protected candidate
+and promotion environments still apply. This source change does not publish the
+new installer. Older installer-owned builds need to rerun that installer after
+publication because their manifest parser requires a native artifact.
+
+Keep `COSYNCING_BINARY_RELEASE_LEGAL_APPROVED` unset. Any future compiled broker
+distribution still requires the documented dated approval. Local native builds
+and ephemeral CI packaging remain engineering evidence, not public releases.

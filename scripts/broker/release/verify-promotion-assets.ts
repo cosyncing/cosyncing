@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /** Refuse stable promotion unless the prerelease has exactly the signed release asset set. */
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
+import { assertJavaScriptBroker, exactReleaseFiles } from './javascript-release-policy.ts';
 import {
   RELEASE_JAVASCRIPT_APP_NAME,
-  verifyReleaseManifest,
+  verifySignedManifest,
   verifyReleasePairing,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
@@ -15,21 +15,18 @@ import {
   P256_DER_SIGNATURE_SUFFIX,
   P256_PUBLIC_KEY_NAME,
   P256_SIGNATURE_SUFFIX,
-  RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
   parseRenderedClientTable,
+  clientAssetName,
   type ClientHost,
 } from './release-files.ts';
 
 function usage(): never {
-  console.error('Usage: bun run scripts/broker/release/verify-promotion-assets.ts [--candidate] RELEASE_DIRECTORY');
+  console.error('Usage: bun run scripts/broker/release/verify-promotion-assets.ts [--candidate] RELEASE_DIRECTORY --version X.Y.Z --commit HEX');
   process.exit(2);
 }
 
-const artifacts = RELEASE_TARGETS.map((target) => `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`);
 export const EXPECTED_CANDIDATE_ASSETS = Object.freeze([
-  ...artifacts,
-  ...artifacts.flatMap((name) => [`${name}.intoto.jsonl`, `${name}.intoto.jsonl.sig`]),
   RELEASE_JAVASCRIPT_APP_NAME,
   `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl`,
   `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl.sig`,
@@ -61,9 +58,12 @@ export const EXPECTED_PROMOTION_ASSETS = Object.freeze([
 ].sort());
 
 function exactAssetSetBlocker(directory: string, expected: readonly string[], label: string): string[] {
-  const actual = [...new Bun.Glob('*').scanSync({ cwd: directory, onlyFiles: true })].sort();
-  if (JSON.stringify(actual) === JSON.stringify(expected)) return [];
-  return [`${label} asset set mismatch; expected: ${expected.join(', ')}; actual: ${actual.join(', ')}`];
+  try {
+    exactReleaseFiles(directory, expected);
+    return [];
+  } catch (error) {
+    return [`${label}: ${error instanceof Error ? error.message : String(error)}`];
+  }
 }
 
 /**
@@ -90,6 +90,10 @@ function resolveExpectedClientAssets(
       blockers.push(
         `expected exactly one ${host} client asset matching ${prefix}*${extension}, found ${matches.length}`,
       );
+      continue;
+    }
+    if (matches[0] !== clientAssetName(host, version)) {
+      blockers.push(`unexpected desktop client asset: ${matches[0]}`);
       continue;
     }
     names.push(matches[0]!);
@@ -162,12 +166,9 @@ function signedPairingBlockers(directory: string): string[] {
     );
     const keyId = manifest?.signature?.keyId;
     if (typeof keyId !== 'string') return ['release signing key id is missing'];
-    const verified = verifyReleaseManifest({
-      value: manifest,
-      target: RELEASE_TARGETS[0],
-      trustedKeys: { [keyId]: publicKey },
-    });
-    const pairing = verifyReleasePairing(verified.manifest);
+    const verified = verifySignedManifest(manifest, { [keyId]: publicKey });
+    if (verified.artifacts.length !== 0) return ['JavaScript release must not describe native broker artifacts'];
+    const pairing = verifyReleasePairing(verified);
     const webPath = resolve(directory, pairing.webApp.name);
     const webBytes = readFileSync(webPath);
     const digest = createHash('sha256').update(webBytes).digest('hex');
@@ -177,9 +178,32 @@ function signedPairingBlockers(directory: string): string[] {
     }
     const jsPath = resolve(directory, pairing.jsApp.name);
     const jsBytes = readFileSync(jsPath);
+    assertJavaScriptBroker(jsBytes);
     if (statSync(jsPath).size !== pairing.jsApp.size
         || createHash('sha256').update(jsBytes).digest('hex') !== pairing.jsApp.sha256) {
       return ['signed JavaScript application size or digest does not match the candidate'];
+    }
+    for (const [name, digest, contract, buildType] of [
+      [pairing.jsApp.name, pairing.jsApp.sha256, pairing.contract, 'bun-bundle'],
+      [pairing.webApp.name, pairing.webApp.sha256, pairing.contract, 'flutter-web-sidecar'],
+    ] as const) {
+      const statement = JSON.parse(readFileSync(resolve(directory, `${name}.intoto.jsonl`), 'utf8'));
+      const definition = statement?.predicate?.buildDefinition;
+      const parameters = definition?.externalParameters;
+      const evidenceContract = parameters?.contract;
+      if (statement?.subject?.length !== 1 || statement.subject[0].name !== name
+          || statement.subject[0].digest?.sha256 !== digest
+          || definition?.buildType !== `https://cosyncing.dev/build/${buildType}/v1`
+          || parameters?.version !== verified.version
+          || definition?.resolvedDependencies?.[0]?.digest?.gitCommit !== verified.sourceCommit
+          || evidenceContract?.revision !== contract.revision
+          || evidenceContract?.minimumClientRevision !== contract.minimumClientRevision
+          || evidenceContract?.surfaceHash !== contract.surfaceHash
+          || (name === pairing.jsApp.name && (parameters?.distribution !== 'bootstrap-js'
+            || parameters?.target !== 'universal'
+            || parameters?.minimumBunVersion !== pairing.jsApp.minimumBunVersion))) {
+        return [`signed provenance disagrees with the broker/web manifest: ${name}`];
+      }
     }
     return [];
   } catch (error) {
@@ -188,6 +212,42 @@ function signedPairingBlockers(directory: string): string[] {
         error instanceof Error ? error.message : String(error)
       }`,
     ];
+  }
+}
+
+function signatureAndChecksumBlockers(directory: string, expected: readonly string[]): string[] {
+  try {
+    const read = (name: string) => readFileSync(resolve(directory, name));
+    const key = createPublicKey(read('release-key.pem'));
+    const p256 = createPublicKey(read(P256_PUBLIC_KEY_NAME));
+    if (key.asymmetricKeyType !== 'ed25519' || p256.asymmetricKeyType !== 'ec'
+        || p256.asymmetricKeyDetails?.namedCurve !== 'prime256v1') throw new Error('release key algorithms are invalid');
+    for (const name of ['release-manifest.json', 'SHA256SUMS',
+      `${RELEASE_JAVASCRIPT_APP_NAME}.intoto.jsonl`, `${WEB_SIDECAR_NAME}.intoto.jsonl`]) {
+      if (!verify(null, read(name), key, read(`${name}.sig`))) throw new Error(`invalid signature: ${name}`);
+    }
+    for (const name of ['release-manifest.json', 'SHA256SUMS']) {
+      for (const [suffix, dsaEncoding] of [[P256_SIGNATURE_SUFFIX, 'ieee-p1363'], [P256_DER_SIGNATURE_SUFFIX, 'der']] as const) {
+        if (!verify('sha256', read(name), { key: p256, dsaEncoding }, read(`${name}${suffix}`))) {
+          throw new Error(`invalid signature: ${name}${suffix}`);
+        }
+      }
+    }
+    const rows = read('SHA256SUMS').toString('utf8').trimEnd().split('\n');
+    const names: string[] = [];
+    for (const row of rows) {
+      const match = /^([a-f0-9]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(row);
+      if (!match || !expected.includes(match[2]!)) throw new Error('invalid checksum row');
+      names.push(match[2]!);
+      if (createHash('sha256').update(read(match[2]!)).digest('hex') !== match[1]) {
+        throw new Error(`checksum mismatch: ${match[2]}`);
+      }
+    }
+    const covered = expected.filter((name) => !name.startsWith('SHA256SUMS')).sort();
+    if (JSON.stringify(names.sort()) !== JSON.stringify(covered)) throw new Error('checksum inventory is not exact');
+    return [];
+  } catch (error) {
+    return [`signed release integrity is invalid: ${error instanceof Error ? error.message : String(error)}`];
   }
 }
 
@@ -214,6 +274,8 @@ function assetBlockers(directory: string, label: 'candidate' | 'promotion'): str
   if (blockers.length > 0) return blockers;
   const pairing = signedPairingBlockers(directory);
   if (pairing.length > 0) return pairing;
+  const integrity = signatureAndChecksumBlockers(directory, expected);
+  if (integrity.length > 0) return integrity;
   return clientPinBlockers(directory, clients.names);
 }
 
@@ -230,6 +292,16 @@ if (import.meta.main) {
   const directoryArg = candidateOnly ? process.argv[3] : process.argv[2];
   const directory = directoryArg ? resolve(directoryArg) : usage();
   const blockers = candidateOnly ? candidateAssetBlockers(directory) : promotionAssetBlockers(directory);
+  // The workflow supplies the checked-out tag's identity; a valid signature on another release is insufficient.
+  const versionIndex = process.argv.indexOf('--version');
+  const commitIndex = process.argv.indexOf('--commit');
+  if (versionIndex < 0 || commitIndex < 0) usage();
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(directory, 'release-manifest.json'), 'utf8'));
+    if (!process.argv[versionIndex + 1] || !process.argv[commitIndex + 1]
+        || manifest.version !== process.argv[versionIndex + 1]
+        || manifest.sourceCommit !== process.argv[commitIndex + 1]) blockers.push('release does not match the expected tag identity');
+  } catch { blockers.push('release identity is unreadable'); }
   if (blockers.length > 0) {
     for (const blocker of blockers) console.error(blocker);
     process.exit(1);

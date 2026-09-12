@@ -7,28 +7,15 @@ on:
 permissions:
   contents: read
 
+env:
+  GH_REPO: ${{ github.repository }}
+
 concurrency:
   group: broker-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  legal-authorization:
-    name: binary distribution legal authorization
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Require explicit reviewed binary-distribution approval
-        env:
-          BINARY_RELEASE_LEGAL_APPROVED: ${{ vars.COSYNCING_BINARY_RELEASE_LEGAL_APPROVED }}
-        shell: bash
-        run: |
-          test "$BINARY_RELEASE_LEGAL_APPROVED" = true || {
-            echo "Compiled broker distribution remains blocked; see docs/legal/binary-distribution-readiness.md" >&2
-            exit 1
-          }
-
   gate:
-    needs: legal-authorization
     name: release contract gate
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -57,6 +44,8 @@ jobs:
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           test "$GITHUB_REF_NAME" = "broker-v$VERSION"
           test -z "$(git status --porcelain --untracked-files=normal)"
+          test "$GITHUB_REPOSITORY" = cosyncing/cosyncing
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - run: bun run check
 
   prepare-draft:
@@ -81,96 +70,6 @@ jobs:
               --title "cosyncing $GITHUB_REF_NAME release candidate (staging)" \
               --notes "Unpublished staging release. Only the verified candidate is published."
           fi
-
-  native-package:
-    needs: prepare-draft
-    name: signed-config native package ${{ matrix.target }}
-    environment: broker-release-candidate
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: linux-x64
-            compile-target: bun-linux-x64
-          - runner: ubuntu-24.04-arm
-            target: linux-arm64
-            compile-target: bun-linux-arm64
-          # macOS builds on an Apple Silicon runner rather than cross-compiling from Linux. The evidence
-          # step self-attests by EXECUTING the artifact, which only a Mach-O host can do; building where the
-          # attestation runs keeps that proof real instead of recording an unverified claim.
-          - runner: macos-15
-            target: darwin-arm64
-            compile-target: bun-darwin-arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.8
-      - run: bun install --frozen-lockfile
-      - name: Load public release trust material
-        env:
-          RELEASE_PUBLIC_KEY_B64: ${{ secrets.COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64 }}
-          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
-        shell: bash
-        run: |
-          test -n "$RELEASE_PUBLIC_KEY_B64"
-          test -n "$RELEASE_KEY_ID"
-          printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/cosyncing-release.pub.pem"
-      - name: Build, prove, and stage native input
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_KEY_ID: ${{ vars.COSYNCING_RELEASE_KEY_ID }}
-        shell: bash
-        run: |
-          COMMIT="$(git rev-parse HEAD)"
-          # GNU date takes -d, BSD/macOS date takes -r. Both must render the SAME instant: the assembler
-          # requires every target's evidence buildDate to equal the release publishedAt exactly.
-          EPOCH="$(git show -s --format=%ct HEAD)"
-          BUILD_DATE="$(date -u -d "@$EPOCH" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null \
-            || date -u -r "$EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)"
-          VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
-          BASE_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/broker-v$VERSION"
-          CHANNEL_URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/release-manifest.json"
-          mkdir -p output/native
-          bun run scripts/broker/build-broker.ts \
-            --target "${{ matrix.compile-target }}" \
-            --outfile "output/native/cosyncing-${{ matrix.target }}" \
-            --commit "$COMMIT" --build-date "$BUILD_DATE" \
-            --release-manifest-url "$BASE_URL/release-manifest.json" \
-            --release-channel-manifest-url "$CHANNEL_URL" \
-            --release-key-id "$RELEASE_KEY_ID" \
-            --release-public-key "$RUNNER_TEMP/cosyncing-release.pub.pem" \
-            --require-clean --minify --no-alias
-          bun run scripts/broker/release/package-evidence.ts \
-            --artifact "output/native/cosyncing-${{ matrix.target }}" \
-            --output "output/native/cosyncing-${{ matrix.target }}.evidence.json" \
-            --target "${{ matrix.target }}" --version "$VERSION" \
-            --commit "$COMMIT" --build-date "$BUILD_DATE"
-          chmod +x "output/native/cosyncing-${{ matrix.target }}"
-          "output/native/cosyncing-${{ matrix.target }}" version --json > "$RUNNER_TEMP/packaged-version.json"
-          # Asserted with bun rather than jq: bun is guaranteed by setup-bun on every runner in this matrix,
-          # and jq is not something the macOS runner is required to carry.
-          VERSION="$VERSION" bun -e '
-            const info = await Bun.file(`${process.env.RUNNER_TEMP}/packaged-version.json`).json();
-            const revisions = (await Bun.file("contracts/contract-revisions.json").json()).revisions;
-            const surface = revisions[revisions.length - 1].surfaceHash;
-            const ok = info.version === process.env.VERSION && info.packaged === true
-              && info.contract.revision === info.schemaVersions.brokerContract
-              && info.contract.surfaceHash === surface;
-            if (!ok) { console.error(JSON.stringify(info)); process.exit(1); }
-          '
-          gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" \
-            "output/native/cosyncing-${{ matrix.target }}" \
-            "output/native/cosyncing-${{ matrix.target }}.evidence.json" --clobber
 
   javascript-package:
     needs: prepare-draft
@@ -228,11 +127,11 @@ jobs:
             --target universal --version "$VERSION" \
             --commit "$COMMIT" --build-date "$BUILD_DATE"
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" output/js/* --clobber
+          gh release upload "$GITHUB_REF_NAME" output/js/cosyncing-app.js output/js/cosyncing-app.js.evidence.json --clobber
 
   web-package:
     needs: prepare-draft
-    name: canonical /app/ web sidecar
+    name: canonical /cosy/ web sidecar
     environment: broker-release-candidate
     permissions:
       contents: write
@@ -270,10 +169,10 @@ jobs:
             --evidence output/web/cosyncing-web-app.tar.gz.evidence.json \
             --version "$VERSION" --commit "$COMMIT" --build-date "$BUILD_DATE"
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          gh release upload "$GITHUB_REF_NAME" output/web/* --clobber
+          gh release upload "$GITHUB_REF_NAME" output/web/cosyncing-web-app.tar.gz output/web/cosyncing-web-app.tar.gz.evidence.json --clobber
 
   candidate:
-    needs: [native-package, javascript-package, web-package]
+    needs: [javascript-package, web-package]
     name: assemble, verify, and publish prerelease
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -295,19 +194,20 @@ jobs:
         shell: bash
         run: |
           gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' | grep -qx true
-          mkdir -p output/native
-          gh release download "$GITHUB_REF_NAME" --dir output/native
-          bun run scripts/broker/release/verify-staging-assets.ts output/native
+          mkdir -p output/staging
+          gh release download "$GITHUB_REF_NAME" --dir output/staging
+          bun run scripts/broker/release/verify-staging-assets.ts output/staging
+      - name: Install canonical parity browser
+        run: npx --yes playwright@1.61.1 install --with-deps chromium-headless-shell
       - name: Prove the downloaded broker/web candidate pair
         shell: bash
         run: |
           COMMIT="$(git rev-parse HEAD)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           mkdir -p output/web-pair
-          tar -xzf output/native/cosyncing-web-app.tar.gz -C output/web-pair
-          chmod +x output/native/cosyncing-linux-x64
+          tar -xzf output/staging/cosyncing-web-app.tar.gz -C output/web-pair
           bun run release:verify-pair -- \
-            --broker output/native/cosyncing-linux-x64 \
+            --broker output/staging/cosyncing-app.js --bun "$(command -v bun)" \
             --web-dir output/web-pair/app \
             --commit "$COMMIT" --version "$VERSION"
       # The desktop clients the all-in-one installer places, taken from the matching client release rather
@@ -323,6 +223,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          test "$(git rev-parse "client-v$VERSION^{commit}")" = "$(git rev-parse HEAD)"
+          gh release view "client-v$VERSION" --json isDraft,isPrerelease,tagName > "$RUNNER_TEMP/client-release.json"
+          jq -e --arg tag "client-v$VERSION" '.isDraft == false and .isPrerelease == false and .tagName == $tag' "$RUNNER_TEMP/client-release.json"
           mkdir -p output/clients
           gh release download "client-v$VERSION" --dir output/clients \
             --pattern "cosyncing-client-$VERSION-linux-x64.tar.gz" \
@@ -361,7 +264,7 @@ jobs:
           BASE_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/broker-v$VERSION"
           mkdir -p output/release
           bun run release:assemble -- \
-            --artifacts output/native --evidence output/native --clients output/clients \
+            --artifacts output/staging --evidence output/staging --clients output/clients \
             --output output/release \
             --base-url "$BASE_URL" --commit "$COMMIT" --published-at "$BUILD_DATE" \
             --key-id "$RELEASE_KEY_ID" \
@@ -404,7 +307,8 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" output/release/*
           mkdir -p output/published
           gh release download "$GITHUB_REF_NAME" --dir output/published
-          bun run scripts/broker/release/verify-promotion-assets.ts --candidate output/published
+          bun run scripts/broker/release/verify-promotion-assets.ts --candidate output/published \
+            --version "$(bun -e 'console.log((await Bun.file("package.json").json()).version)')" --commit "$(git rev-parse HEAD)"
           (cd output/release && sha256sum * | sort) > "$RUNNER_TEMP/local.sha256"
           (cd output/published && sha256sum * | sort) > "$RUNNER_TEMP/remote.sha256"
           cmp "$RUNNER_TEMP/local.sha256" "$RUNNER_TEMP/remote.sha256"

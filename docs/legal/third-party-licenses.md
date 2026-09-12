@@ -2,12 +2,19 @@
 
 First-party source is Apache-2.0. Runtime and development dependencies retain
 their own licenses as declared in `bun.lock`, `pubspec.lock`, and upstream
-packages. Broker releases generate `software-inventory.json`; the release gate
-checks the embedded Bun runtime and the `@clack/prompts` dependency closure.
-Candidate assembly also emits `THIRD_PARTY_NOTICES.txt` from the exact,
-hash-pinned Bun 1.3.8 `LICENSE.md` and the licence file of every external package
-in the compiled inventory; those generated assets are covered by signed
-checksums.
+packages. Signed JavaScript broker releases generate `software-inventory.json`
+and an SPDX SBOM for the broker dependency closure, including the reviewed
+`@clack/prompts` dependency closure. They identify web and desktop archives
+separately, with their Flutter/plugin notices retained inside each archive.
+Candidate assembly emits `THIRD_PARTY_NOTICES.txt` from the exact licence file
+of every external JavaScript package. These assets are covered by signed
+checksums. Bun is an external requirement installed directly from upstream or
+reused on the host; no runtime archive or embedded-runtime broker is distributed
+in that release. Its notices therefore omit Bun's licence section.
+
+The optional compiled-notice generator retains the exact pinned Bun 1.3.8
+licence for ephemeral native tests and any future approved native distribution.
+It does not make that blocked distribution eligible for publication.
 
 The npm package is a separate artifact with a separate notice file. It ships one
 JavaScript application bundle and no runtime, so its `THIRD_PARTY_NOTICES.txt`

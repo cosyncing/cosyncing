@@ -1,6 +1,6 @@
 # Client distribution
 
-Client releases are separate from the npm broker package and compiled native
+Client releases are separate from the npm broker package and signed JavaScript
 broker releases. A `client-vX.Y.Z` tag stages five client artifacts from the
 reviewed tag:
 
@@ -40,9 +40,9 @@ installer places it.
 
 ## Who owns the `latest` pointer
 
-GitHub keeps exactly one `latest` release per repository, and every broker ever
-built compiles `releases/latest/download/release-manifest.json` in as its update
-channel. **Only the broker release may hold that pointer.** A client promotion
+GitHub keeps exactly one `latest` release per repository. Installer-owned brokers
+use `releases/latest/download/release-manifest.json` as their update channel;
+npm-owned brokers use their package manager. **Only the broker release may hold that pointer.** A client promotion
 that claims it moves `latest` to a release with no manifest, and every installed
 broker's update check then 404s.
 
@@ -70,8 +70,9 @@ without rebuilding or replacing anything.
 
 ## Client-first rollout order
 
-Broker and client releases use separate publication channels, and no workflow
-gates one on the other. A release is client-first whenever a client that is
+The npm broker and client releases use separate publication channels, and no
+workflow gates npm publication on client acceptance. The signed GitHub broker
+workflow additionally requires matching stable same-commit desktop clients. A release is client-first whenever a client that is
 already published cannot fully drive the new broker. Before publishing the npm
 broker for such a release:
 
@@ -133,3 +134,10 @@ that those builds are unsigned. macOS Gatekeeper and Windows SmartScreen may
 warn or block first launch. Checksums provide file integrity, not publisher
 authentication. A later signing/notarization lane must publish a new version;
 it must not silently replace existing assets.
+
+The signed GitHub broker release copies the three desktop installer archives from
+the already stable matching client release. Its candidate job requires the same
+product version and source commit; it does not rebuild clients or reuse an older
+release's identity. The broker candidate must then pass physical acceptance and
+be promoted after client acceptance. Only broker promotion sets GitHub's latest
+pointer; client promotion preserves it with `--latest=false`.

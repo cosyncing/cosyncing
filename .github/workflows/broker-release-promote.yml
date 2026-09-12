@@ -24,15 +24,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Require explicit reviewed binary-distribution approval
-        env:
-          BINARY_RELEASE_LEGAL_APPROVED: ${{ vars.COSYNCING_BINARY_RELEASE_LEGAL_APPROVED }}
-        shell: bash
-        run: |
-          test "$BINARY_RELEASE_LEGAL_APPROVED" = true || {
-            echo "Compiled broker distribution remains blocked; see docs/legal/binary-distribution-readiness.md" >&2
-            exit 1
-          }
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.tag }}
@@ -50,6 +41,8 @@ jobs:
         run: |
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           test "$TAG" = "broker-v$VERSION"
+          test "$GITHUB_REPOSITORY" = cosyncing/cosyncing
+          git merge-base --is-ancestor HEAD origin/main
           test "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)"
           gh release view "$TAG" --json isDraft,isPrerelease,tagName > "$RUNNER_TEMP/release.json"
           jq -e --arg tag "$TAG" '.isDraft == false and .isPrerelease == true and .tagName == $tag' "$RUNNER_TEMP/release.json"
@@ -93,7 +86,8 @@ jobs:
             }
           '
           (cd output/promotion && sha256sum --check SHA256SUMS)
-          bun run scripts/broker/release/verify-promotion-assets.ts output/promotion
+          bun run scripts/broker/release/verify-promotion-assets.ts output/promotion \
+            --version "$(bun -e 'console.log((await Bun.file("package.json").json()).version)')" --commit "$(git rev-parse HEAD)"
       - name: Promote without changing assets
         env:
           GH_TOKEN: ${{ github.token }}

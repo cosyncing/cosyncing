@@ -24,9 +24,13 @@ import {
 import {
   withCandidateParityBrowser,
 } from './candidate-browser-startup.ts';
+import { resolveBunRuntime } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
+import { assertJavaScriptBroker } from './javascript-release-policy.ts';
+import { isolatedBrokerFixtureEnvironment } from '../../../packages/typescript/broker/test/helpers/isolated-broker-fixture.ts';
 
 export interface CandidatePairArgs {
   broker: string;
+  bun?: string;
   webDirectory: string;
   commit: string;
   version: string;
@@ -39,7 +43,7 @@ function usage(): never {
   console.error(
     'Usage: bun run scripts/broker/release/verify-candidate-pair.ts '
     + '--broker PATH --web-dir DIR --commit HEX --version X.Y.Z '
-    + '[--allow-dirty-web-review true]',
+    + '[--bun ABSOLUTE_RUNTIME_PATH] [--allow-dirty-web-review true]',
   );
   process.exit(2);
 }
@@ -61,11 +65,23 @@ function parseArgs(argv: string[]): CandidatePairArgs {
   if (!broker || !webDirectory || !commit || !version) usage();
   return {
     broker: resolve(broker),
+    ...(values.has('--bun') ? { bun: values.get('--bun')! } : {}),
     webDirectory: resolve(webDirectory),
     commit,
     version,
     allowDirtyWebReview,
   };
+}
+
+/** Both the version probe and live fixture must execute these same candidate bytes through this runtime. */
+export function candidateBrokerCommand(args: Pick<CandidatePairArgs, 'broker' | 'bun'>): string[] {
+  if (args.bun) {
+    assertJavaScriptBroker(readFileSync(args.broker));
+    const runtime = resolveBunRuntime({ execPath: process.execPath, override: args.bun });
+    return [runtime.path, resolve(args.broker)];
+  }
+  if (args.broker.endsWith('.js')) throw new Error('JavaScript candidate verification requires --bun');
+  return [resolve(args.broker)];
 }
 
 async function processJson(command: string[], cwd: string): Promise<any> {
@@ -426,8 +442,7 @@ export function candidateBrokerEnvironment(options: {
   hostHome: string;
   webDirectory: string;
 }): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
+  return isolatedBrokerFixtureEnvironment(options.home, { overrides: {
     HOME: options.hostHome,
     COSYNCING_HOME: options.home,
     COSYNCING_TOKEN_FILE: '',
@@ -440,7 +455,7 @@ export function candidateBrokerEnvironment(options: {
     COSYNCING_CLAUDE_HOOKS: '0',
     COSYNCING_CODEX_SYNC_SERVER: '0',
     COSYNCING_TOKDASH_URL: 'http://127.0.0.1:1',
-  };
+  } });
 }
 
 async function probeBuiltClient(options: {
@@ -852,13 +867,14 @@ export function brokerIdentityMatchesCandidate(
   identity: any,
   args: Pick<
     CandidatePairArgs,
-    'commit' | 'version' | 'allowDirtyWebReview'
+    'commit' | 'version' | 'allowDirtyWebReview' | 'bun'
   >,
   webBrokerContract: unknown,
 ): boolean {
   return identity.version === args.version
     && identity.commit === args.commit
     && identity.packaged === true
+    && (!args.bun || (identity.distribution === 'bootstrap-js' && identity.target === 'universal'))
     && identity.dirty === (args.allowDirtyWebReview ? true : false)
     && identity.schemaVersions?.brokerContract
       === (webBrokerContract as any)?.revision
@@ -903,8 +919,9 @@ export async function verifyCandidatePair(
     throw new Error('built web client is root-scoped or has an unstamped worker');
   }
 
+  const brokerCommand = candidateBrokerCommand(args);
   const binaryInfo = await processJson(
-    [args.broker, 'version', '--json'],
+    [...brokerCommand, 'version', '--json'],
     process.cwd(),
   );
   if (!brokerIdentityMatchesCandidate(binaryInfo, args, webBrokerContract)) {
@@ -948,7 +965,7 @@ export async function verifyCandidatePair(
         };
       },
       spawn: () => Bun.spawn(
-        [args.broker, 'broker'],
+        [...brokerCommand, 'broker'],
         {
           cwd: process.cwd(),
           env: candidateBrokerEnvironment({

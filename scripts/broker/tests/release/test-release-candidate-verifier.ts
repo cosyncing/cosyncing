@@ -18,6 +18,7 @@ import {
 import {
   CANDIDATE_CREDENTIAL_FIELD_LABEL,
   candidateBrokerEnvironment,
+  candidateBrokerCommand,
   brokerIdentityMatchesCandidate,
   isHeaderAuthenticatedTicketRequest,
   isAddressInUse,
@@ -29,6 +30,33 @@ import {
   webIdentityMatchesCandidate,
   type CandidateBrokerProcess,
 } from '../../release/verify-candidate-pair.ts';
+
+const bundleFixture = mkdtempSync(join(tmpdir(), 'cosyncing-js-candidate-verifier-'));
+try {
+  const application = join(bundleFixture, 'cosyncing-app.js');
+  const built = Bun.spawnSync([process.execPath, 'run', 'scripts/broker/build-broker-bundle.ts',
+    '--outfile', application, '--distribution', 'bootstrap-js', '--minify'],
+    { stdout: 'pipe', stderr: 'pipe' });
+  assert.equal(built.exitCode, 0, built.stderr.toString());
+  const command = candidateBrokerCommand({ broker: application, bun: process.execPath });
+  assert.deepEqual(command, [process.execPath, application]);
+  const probe = Bun.spawnSync([...command, 'version', '--json'], {
+    cwd: bundleFixture,
+    env: candidateBrokerEnvironment({ home: bundleFixture, hostHome: bundleFixture, webDirectory: bundleFixture }),
+    stdout: 'pipe', stderr: 'pipe',
+  });
+  assert.equal(probe.exitCode, 0, probe.stderr.toString());
+  const identity = JSON.parse(probe.stdout.toString());
+  assert.equal(identity.distribution, 'bootstrap-js');
+  assert.equal(identity.target, 'universal');
+  assert.equal(identity.packaged, true);
+  assert.throws(() => candidateBrokerCommand({ broker: application }), /requires --bun/);
+  assert.throws(() => candidateBrokerCommand({ broker: application, bun: 'bun' }));
+  assert.equal(brokerIdentityMatchesCandidate({ ...identity, distribution: 'bun-js' }, {
+    commit: identity.commit, version: identity.version, allowDirtyWebReview: identity.dirty, bun: process.execPath,
+  }, identity.contract), false);
+  console.log('PASS  candidate verifier executes the actual bundled JS candidate through explicit Bun and refuses npm identity');
+} finally { rmSync(bundleFixture, { recursive: true, force: true }); }
 
 assert.equal(CANDIDATE_CREDENTIAL_FIELD_LABEL, 'Server token');
 console.log('PASS  publication verifier targets the current server token field');
@@ -455,27 +483,36 @@ const isolatedEnvironmentKeys = [
   'COSYNCING_PI_INTEGRATION_FILE',
   'COSYNCING_TOKEN',
   'COSYNCING_PI_INTEGRATION_TOKEN',
+  'OPENCODE_URL', 'COSYNCING_KIMI_MANAGED_HOST', 'COSYNCING_DSH_MANAGED_HOST',
 ] as const;
+const environmentFixture = mkdtempSync(join(tmpdir(), 'cosyncing-candidate-environment-'));
 const originalEnvironment = new Map(
   isolatedEnvironmentKeys.map((key) => [key, process.env[key]]),
 );
 try {
+  process.env.COSYNCING_KIMI_MANAGED_HOST = '1';
+  process.env.COSYNCING_DSH_MANAGED_HOST = '1';
+  process.env.OPENCODE_URL = 'http://127.0.0.1:4096';
   process.env.COSYNCING_WEB_DIR = '/ambient/wrong-build';
   process.env.COSYNCING_TOKEN_FILE = '/ambient/broker-token';
   process.env.COSYNCING_PI_INTEGRATION_FILE = '/ambient/pi-integration';
   process.env.COSYNCING_TOKEN = 'ambient-token';
   process.env.COSYNCING_PI_INTEGRATION_TOKEN = 'ambient-pi-token';
   const env = candidateBrokerEnvironment({
-    home: '/candidate/home',
-    hostHome: '/candidate/host-home',
+    home: environmentFixture,
+    hostHome: join(environmentFixture, 'host-home'),
     webDirectory: '/release/sidecar/app',
   });
   assert.equal(env.COSYNCING_WEB_DIR, '/release/sidecar/app');
-  for (const key of isolatedEnvironmentKeys.slice(1)) {
+  for (const key of isolatedEnvironmentKeys.slice(1, 5)) {
     assert.equal(env[key], '', `${key} escaped into the candidate fixture`);
   }
-  console.log('PASS  release candidate isolates sidecar and credential environment');
+  assert.equal(env.OPENCODE_URL, 'http://127.0.0.1:1');
+  assert.equal(env.COSYNCING_KIMI_MANAGED_HOST, '0');
+  assert.equal(env.COSYNCING_DSH_MANAGED_HOST, '0');
+  console.log('PASS  release candidate isolates sidecar, credentials and managed runtimes');
 } finally {
+  rmSync(environmentFixture, { recursive: true, force: true });
   for (const [key, value] of originalEnvironment) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

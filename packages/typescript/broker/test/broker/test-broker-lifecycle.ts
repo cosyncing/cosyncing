@@ -2130,7 +2130,7 @@ try {
     const jsManifest = (override: Partial<ReleaseJavaScriptApp> | null = {}): ReleaseManifest =>
       releaseManifestForTests({
         version: '2.0.0', sourceCommit: '2222222', publishedAt: '2026-07-17T12:00:00.000Z',
-        artifact, keyId,
+        ...(override === null ? { artifact } : {}), keyId,
         contract: { revision: 1, minimumClientRevision: 1, surfaceHash: 'fnv1a32:00000000' },
         webApp,
         ...(override === null ? {} : { jsApp: { ...jsApp, ...override } }),
@@ -2197,7 +2197,7 @@ try {
         if (priorUmask !== undefined) process.umask(priorUmask);
       }
       const state = inspectInstallState(fixture.m.home);
-      check('a bootstrap-js build upgrades through the signed channel and takes the JavaScript artifact',
+      check('a bootstrap-js build upgrades from a native-free signed manifest and preserves its receipt',
         upgraded.exitCode === 0
           && readFileSync(fixture.m.binary, 'utf8') === jsBundle.toString()
           && state.committed && (state.state.installer as any)?.version === '2.0.0',

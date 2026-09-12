@@ -199,6 +199,28 @@ const checkDependencies = (value: ReleaseManifest, fetcher = manifestFetcher(val
   fetch: fetcher,
   now: () => new Date('2026-07-18T13:00:00.000Z'),
 });
+const jsOnlyManifest = releaseManifestForTests({
+  version: '1.1.0', sourceCommit: '2222222', publishedAt: '2026-07-18T12:00:00.000Z',
+  keyId, sign: (payload) => sign(null, payload, privateKey), contract: BROKER_CONTRACT,
+  jsApp: { name: 'cosyncing-app.js', target: 'universal', size: artifact.size,
+    sha256: artifact.sha256, url: 'https://releases.example/cosyncing-app.js',
+    provenanceUrl: 'https://releases.example/cosyncing-app.js.intoto.jsonl', minimumBunVersion: '1.3.8' },
+  webApp: { name: 'cosyncing-web-app.tar.gz', mount: '/cosy/', size: 100,
+    sha256: '1'.repeat(64), url: 'https://releases.example/cosyncing-web-app.tar.gz',
+    buildId: '1'.repeat(16), cacheManifestSha256: '2'.repeat(64), mainDartSha256: '3'.repeat(64),
+    directorySha256: '4'.repeat(64), fileCount: 10 },
+});
+const jsAvailable = await checkReleaseUpdate({ ...checkDependencies(jsOnlyManifest),
+  buildInfo: { ...buildInfo, distribution: 'bootstrap-js', target: 'universal' } });
+check('installer-owned brokers discover a signed native-free release',
+  jsAvailable.status === 'update-available' && jsAvailable.latestVersion === '1.1.0');
+let npmProbes = 0;
+const npmOwned = await checkReleaseUpdate({ ...checkDependencies(jsOnlyManifest),
+  buildInfo: { ...buildInfo, distribution: 'bun-js', target: 'universal' },
+  fetch: (async () => { npmProbes += 1; throw new Error('npm must not probe the signed channel'); }) as unknown as typeof fetch });
+check('npm ownership suppresses the native-free signed channel too',
+  npmProbes === 0 && npmOwned.status === 'unknown' && npmOwned.detailCode === 'upgrade-package-manager-owned',
+  npmOwned.detailCode);
 const available = await checkReleaseUpdate(checkDependencies(manifest('1.1.0')));
 const current = await checkReleaseUpdate(checkDependencies(manifest('1.0.0')));
 const unreachable = await checkReleaseUpdate(checkDependencies(

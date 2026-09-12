@@ -44,7 +44,8 @@ tag-release contract job invoke this same command. Its durable evidence is:
 `bun run release:checkpoint` consumes a successful `bun run check` report for
 the exact current source fingerprint. It does not rerun contract, broker,
 Flutter, Dart, browser, cache, workflow, or sidecar-packaging suites. It builds
-one Linux broker and verifies its exact candidate identity against the
+one installer-owned JavaScript broker and executes it through an explicitly
+resolved Bun to verify its exact candidate identity against the
 canonical web output left by `check`. Clean sidecar packaging remains owned by
 the supply-chain gate and protected release workflow. Checkpoint evidence is
 under `output/release-checkpoint/`.

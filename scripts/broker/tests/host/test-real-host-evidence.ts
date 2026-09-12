@@ -165,11 +165,12 @@ check('stable promotion binds tag, signature, checksums, and exact assets before
 const stagingDirectory = mkdtempSync(join(tmpdir(), 'cosyncing-real-evidence-staging-'));
 try {
   for (const file of EXPECTED_STAGING_ASSETS) writeFileSync(join(stagingDirectory, file), 'fixture\n');
-  check('candidate assembly accepts only native plus web artifacts and evidence',
+  writeFileSync(join(stagingDirectory, 'cosyncing-app.js'), '#!/usr/bin/env bun\nconsole.log("fixture");\n');
+  check('candidate assembly accepts only JavaScript plus web artifacts and evidence',
     stagingAssetBlockers(stagingDirectory).length === 0);
   writeFileSync(join(stagingDirectory, 'unreviewed-extra.txt'), 'unexpected\n');
   check('an extra draft asset blocks candidate assembly',
-    stagingAssetBlockers(stagingDirectory).some((item) => item.includes('staging asset set mismatch')));
+    stagingAssetBlockers(stagingDirectory).some((item) => item.includes('asset set mismatch')));
 } finally {
   rmSync(stagingDirectory, { recursive: true, force: true });
 }
@@ -197,7 +198,7 @@ function writeExactAssetSet(directory: string, files: readonly string[]): void {
   );
   for (const host of Object.keys(CLIENT_HOSTS)) {
     const extension = CLIENT_HOSTS[host as keyof typeof CLIENT_HOSTS];
-    writeFileSync(join(directory, `cosyncing-client-${version}-${host}${extension}`), 'fixture\n');
+    writeFileSync(join(directory, `cosyncing-client-${version}-${host}${host === "linux-x64" ? "" : "-unsigned"}${extension}`), 'fixture\n');
   }
 }
 
@@ -209,7 +210,7 @@ try {
       item.includes('signed broker/web pairing is invalid')));
   writeFileSync(join(candidateDirectory, 'stale-native.evidence.json'), 'unexpected\n');
   check('a stale staging asset blocks prerelease publication',
-    candidateAssetBlockers(candidateDirectory).some((item) => item.includes('candidate asset set mismatch')));
+    candidateAssetBlockers(candidateDirectory).some((item) => item.includes('asset set mismatch')));
 } finally {
   rmSync(candidateDirectory, { recursive: true, force: true });
 }

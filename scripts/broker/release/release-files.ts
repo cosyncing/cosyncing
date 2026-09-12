@@ -17,9 +17,8 @@ import {
   RELEASE_JAVASCRIPT_APP_NAME,
   RELEASE_JAVASCRIPT_APP_TARGET,
   releaseManifestSigningPayload,
-  verifyReleaseManifest,
+  verifySignedManifest,
   verifyReleasePairing,
-  type ReleaseArtifact,
   type ReleaseManifest,
 } from '../../../packages/typescript/broker/src/updates/release-upgrade.ts';
 import {
@@ -34,10 +33,12 @@ import {
 } from '../../../packages/typescript/broker/src/runtime/build-info.ts';
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
 import {
-  createCompiledSoftwareInventory,
+  createJavaScriptSoftwareInventory,
   createSpdxSoftwareBom,
-  createThirdPartyNotices,
+  createJavaScriptThirdPartyNotices,
 } from './software-inventory.ts';
+
+import { assertJavaScriptBroker, exactReleaseFiles } from './javascript-release-policy.ts';
 
 const ROOT = resolve(import.meta.dir, '../../..');
 
@@ -87,6 +88,10 @@ export const CLIENT_HOSTS = Object.freeze({
 } as const);
 export type ClientHost = keyof typeof CLIENT_HOSTS;
 
+export function clientAssetName(host: ClientHost, version: string): string {
+  return `${PRODUCT_IDENTITY.releaseAssetPrefix}-client-${version}-${host}${host === 'linux-x64' ? '' : '-unsigned'}${CLIENT_HOSTS[host]}`;
+}
+
 /** One desktop client artifact, as the rendered `@CLIENT_TABLE@` states it. */
 export interface ClientArtifact {
   host: ClientHost;
@@ -120,7 +125,7 @@ export function parseRenderedClientTable(script: string): ClientArtifact[] {
 /**
  * Resolve exactly one client artifact per desktop host from a directory of built clients.
  *
- * Required in the same sense {@link RELEASE_TARGETS} is: a release that could not hand every desktop host
+ * Required for every assembled release: a release that could not hand every desktop host
  * a client would publish an all-in-one installer that silently degrades to a server install on whichever
  * host was forgotten. Matching is by the published prefix AND the host's archive extension, so the DMG the
  * client release publishes beside the macOS ZIP is not a second candidate that makes the match ambiguous.
@@ -137,6 +142,7 @@ export function resolveClientArtifacts(directory: string, releaseVersion: string
       );
     }
     const name = matches[0]!;
+    if (name !== clientAssetName(host, releaseVersion)) throw new Error(`unexpected desktop client asset: ${name}`);
     const path = join(directory, name);
     const bytes = readFileSync(path);
     const stats = statSync(path);
@@ -145,15 +151,9 @@ export function resolveClientArtifacts(directory: string, releaseVersion: string
   });
 }
 
-/**
- * Targets every assembled release MUST publish; assembly fails without all of them. macOS is a first-class
- * broker host, so darwin-arm64 is part of the required set rather than an optional extra — a release that
- * cannot be installed or upgraded on a Mac is not a release that supports macOS. Intel is out of scope.
- */
-export const RELEASE_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
-/** Kept as the schema-level alias of the required set; every known target is now published. */
-export const KNOWN_RELEASE_TARGETS = RELEASE_TARGETS;
-export type ReleaseTarget = (typeof RELEASE_TARGETS)[number];
+/** Legacy native evidence targets. These are host types, never the JavaScript publication inventory. */
+export const KNOWN_RELEASE_TARGETS = Object.freeze(['linux-x64', 'linux-arm64', 'darwin-arm64'] as const);
+export type ReleaseTarget = (typeof KNOWN_RELEASE_TARGETS)[number];
 
 export function releaseTargetPlatform(target: ReleaseTarget): 'linux' | 'darwin' {
   return target.startsWith('darwin-') ? 'darwin' : 'linux';
@@ -344,30 +344,6 @@ function exactObject(value: unknown, expected: unknown): boolean {
   return JSON.stringify(value) === JSON.stringify(expected);
 }
 
-function readEvidence(path: string, target: ReleaseTarget, options: ReleaseAssemblyOptions): PackageEvidence {
-  const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<PackageEvidence>;
-  const artifact = `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`;
-  if (value.schemaVersion !== 1 || value.product !== PRODUCT_IDENTITY.productName
-      || value.artifact !== artifact || value.version !== options.version || value.target !== target
-      || value.sourceCommit !== options.sourceCommit || value.buildDate !== options.publishedAt
-      || value.packaged !== true || value.dirty !== false || value.cleanCheckout !== true
-      || value.offlineVersionCheck !== true || value.forbiddenContentCheck !== true
-      || !exactObject(value.schemaVersions, PUBLISHED_SCHEMA_VERSIONS)
-      || !value.contract || !Number.isSafeInteger(value.contract.revision)
-      || !Number.isSafeInteger(value.contract.minimumClientRevision)
-      || typeof value.contract.surfaceHash !== 'string'
-      || !/^fnv1a32:[a-f0-9]{8}$/.test(value.contract.surfaceHash)
-      || !value.runner || value.runner.os !== releaseTargetPlatform(target)
-      || value.runner.arch !== releaseTargetArch(target)
-      || typeof value.runner.image !== 'string' || !value.runner.image
-      || typeof value.runner.invocationId !== 'string' || !value.runner.invocationId
-      || !Number.isSafeInteger(value.size) || Number(value.size) <= 0
-      || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) {
-    throw new Error(`package evidence is invalid for ${target}`);
-  }
-  return value as PackageEvidence;
-}
-
 function readWebEvidence(path: string, options: ReleaseAssemblyOptions): WebPackageEvidence {
   const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<WebPackageEvidence>;
   if (value.schemaVersion !== 1 || value.product !== PRODUCT_IDENTITY.productName
@@ -377,6 +353,8 @@ function readWebEvidence(path: string, options: ReleaseAssemblyOptions): WebPack
       || !value.contract || !Number.isSafeInteger(value.contract.revision)
       || !Number.isSafeInteger(value.contract.minimumClientRevision)
       || !Number.isSafeInteger(value.contract.clientMinimumBrokerRevision)
+      || value.contract.clientMinimumBrokerRevision < 0
+      || value.contract.clientMinimumBrokerRevision > value.contract.revision
       || typeof value.contract.surfaceHash !== 'string'
       || !/^fnv1a32:[a-f0-9]{8}$/.test(value.contract.surfaceHash)
       || typeof value.buildId !== 'string' || !/^[a-f0-9]{16}$/.test(value.buildId)
@@ -410,6 +388,7 @@ function readJavaScriptEvidence(
       || !/^\d+\.\d+\.\d+$/.test(value.minimumBunVersion)
       || !exactObject(value.schemaVersions, PUBLISHED_SCHEMA_VERSIONS)
       || !value.contract || !Number.isSafeInteger(value.contract.revision)
+      || value.contract.revision !== PUBLISHED_SCHEMA_VERSIONS.brokerContract
       || !Number.isSafeInteger(value.contract.minimumClientRevision)
       || typeof value.contract.surfaceHash !== 'string'
       || !/^fnv1a32:[a-f0-9]{8}$/.test(value.contract.surfaceHash)
@@ -620,57 +599,6 @@ function renderBootstraps(options: {
   return rendered;
 }
 
-function provenance(options: {
-  evidence: PackageEvidence;
-  artifact: ReleaseArtifact;
-  inventorySha256: string;
-  sbomSha256: string;
-}): Record<string, unknown> {
-  return {
-    _type: 'https://in-toto.io/Statement/v1',
-    subject: [{ name: options.artifact.name, digest: { sha256: options.artifact.sha256 } }],
-    predicateType: 'https://slsa.dev/provenance/v1',
-    predicate: {
-      buildDefinition: {
-        buildType: 'https://cosyncing.dev/build/bun-compile/v1',
-        externalParameters: {
-          version: options.evidence.version,
-          target: options.evidence.target,
-          schemaVersions: options.evidence.schemaVersions,
-          contract: options.evidence.contract,
-        },
-        internalParameters: {
-          buildDate: options.evidence.buildDate,
-          cleanCheckout: options.evidence.cleanCheckout,
-          softwareInventorySha256: options.inventorySha256,
-          spdxSbomSha256: options.sbomSha256,
-        },
-        resolvedDependencies: [{
-          uri: 'git+https://github.com/cosyncing/cosyncing',
-          digest: { gitCommit: options.evidence.sourceCommit },
-        }],
-      },
-      runDetails: {
-        builder: { id: `https://github.com/cosyncing/cosyncing/actions/runs/${options.evidence.runner.invocationId}` },
-        metadata: {
-          invocationId: options.evidence.runner.invocationId,
-          startedOn: options.evidence.buildDate,
-          finishedOn: options.evidence.buildDate,
-        },
-        byproducts: [{
-          name: 'native-package-evidence',
-          content: {
-            runnerImage: options.evidence.runner.image,
-            runnerArchitecture: options.evidence.runner.arch,
-            offlineVersionCheck: true,
-            forbiddenContentCheck: true,
-          },
-        }],
-      },
-    },
-  };
-}
-
 function javaScriptProvenance(options: {
   evidence: JavaScriptPackageEvidence;
   inventorySha256: string;
@@ -769,7 +697,7 @@ function webProvenance(options: {
   };
 }
 
-/** Assemble, sign, and self-verify the publication directory from two native-runner artifacts. */
+/** Assemble, sign, and self-verify the JavaScript release; native broker publication is not supported. */
 export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssemblyResult {
   const releaseVersion = version(options.version);
   if (!/^[a-f0-9]{40,64}$/.test(options.sourceCommit)) throw new Error('release source commit must be full hexadecimal');
@@ -804,7 +732,18 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     throw new Error('release sibling signing key pair does not match');
   }
 
+  const payloads = [RELEASE_JAVASCRIPT_APP_NAME, WEB_SIDECAR_NAME];
+  const evidenceFiles = payloads.map((name) => `${name}.evidence.json`);
+  if (resolve(options.artifactDirectory) === resolve(options.evidenceDirectory)) {
+    exactReleaseFiles(options.artifactDirectory, [...payloads, ...evidenceFiles]);
+  } else {
+    exactReleaseFiles(options.artifactDirectory, payloads);
+    exactReleaseFiles(options.evidenceDirectory, evidenceFiles);
+  }
+  const clients = resolveClientArtifacts(options.clientDirectory, releaseVersion);
+  exactReleaseFiles(options.clientDirectory, clients.map((client) => client.name));
   mkdirSync(options.outputDirectory, { recursive: true });
+  exactReleaseFiles(options.outputDirectory, []);
   const publicKeyName = 'release-key.pem';
   writeFileSync(
     join(options.outputDirectory, publicKeyName),
@@ -816,10 +755,15 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     `${options.p256PublicKeyPem.trim()}\n`,
     { mode: 0o644 },
   );
-  const inventory = createCompiledSoftwareInventory({
+  const inventory = createJavaScriptSoftwareInventory({
     version: releaseVersion,
     sourceCommit: options.sourceCommit,
     generatedAt: publishedAt,
+    releaseArtifacts: [
+      { name: RELEASE_JAVASCRIPT_APP_NAME, kind: 'javascript-broker' },
+      { name: WEB_SIDECAR_NAME, kind: 'flutter-web' },
+      ...clients.map((client) => ({ name: client.name, kind: 'flutter-desktop' as const })),
+    ],
   });
   const inventoryName = 'software-inventory.json';
   const inventoryBytes = writeJson(join(options.outputDirectory, inventoryName), inventory);
@@ -845,63 +789,17 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   );
   writeFileSync(
     join(options.outputDirectory, thirdPartyNoticesName),
-    createThirdPartyNotices(inventory),
+    createJavaScriptThirdPartyNotices(inventory),
     { mode: 0o644 },
   );
 
-  const artifacts: ReleaseArtifact[] = [];
-  const evidenceByTarget = new Map<ReleaseTarget, PackageEvidence>();
-  for (const target of RELEASE_TARGETS) {
-    const name = `${PRODUCT_IDENTITY.releaseAssetPrefix}-${target}`;
-    const artifactPath = join(options.artifactDirectory, name);
-    const evidencePath = join(options.evidenceDirectory, `${name}.evidence.json`);
-    const evidence = readEvidence(evidencePath, target, options);
-    const bytes = readFileSync(artifactPath);
-    const stats = statSync(artifactPath);
-    if (!stats.isFile() || stats.size !== evidence.size || sha256(bytes) !== evidence.sha256) {
-      throw new Error(`artifact no longer matches native package evidence: ${name}`);
-    }
-    writeFileSync(join(options.outputDirectory, name), bytes, { mode: 0o755 });
-    artifacts.push({
-      name,
-      target,
-      platform: releaseTargetPlatform(target),
-      arch: releaseTargetArch(target),
-      size: stats.size,
-      sha256: evidence.sha256,
-      url: `${releaseBase}/${name}`,
-      provenanceUrl: `${releaseBase}/${name}.intoto.jsonl`,
-    });
-    evidenceByTarget.set(target, evidence);
-  }
-  const nativeContract = evidenceByTarget.get('linux-x64')!.contract;
-  if (RELEASE_TARGETS.some((target) => !exactObject(evidenceByTarget.get(target)!.contract, nativeContract))) {
-    throw new Error('native package evidence disagrees on broker contract identity');
-  }
-
-  for (const artifact of artifacts) {
-    const name = `${artifact.name}.intoto.jsonl`;
-    const statement = provenance({
-      evidence: evidenceByTarget.get(artifact.target as ReleaseTarget)!,
-      artifact,
-      inventorySha256: inventoryHash,
-      sbomSha256: sbomHash,
-    });
-    const bytes = Buffer.from(`${JSON.stringify(statement)}\n`, 'utf8');
-    writeFileSync(join(options.outputDirectory, name), bytes, { mode: 0o644 });
-    writeSignature(join(options.outputDirectory, `${name}.sig`), bytes, options.privateKeyPem);
-  }
-
-  // The JavaScript application, assembled beside the compiled set and bound to the same broker contract.
   const jsEvidence = readJavaScriptEvidence(
     join(options.evidenceDirectory, `${RELEASE_JAVASCRIPT_APP_NAME}.evidence.json`),
     options,
   );
-  if (!exactObject(jsEvidence.contract, nativeContract)) {
-    throw new Error('native and JavaScript package evidence disagree on broker contract identity');
-  }
   const jsArtifactPath = join(options.artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
   const jsBytes = readFileSync(jsArtifactPath);
+  assertJavaScriptBroker(jsBytes);
   const jsStats = statSync(jsArtifactPath);
   if (!jsStats.isFile() || jsStats.size !== jsEvidence.size || sha256(jsBytes) !== jsEvidence.sha256) {
     throw new Error('JavaScript application no longer matches package evidence');
@@ -931,8 +829,8 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     clientMinimumBrokerRevision: _clientMinimumBrokerRevision,
     ...webBrokerContract
   } = webEvidence.contract;
-  if (!exactObject(webBrokerContract, nativeContract)) {
-    throw new Error('native and web package evidence disagree on broker contract identity');
+  if (!exactObject(webBrokerContract, jsEvidence.contract)) {
+    throw new Error('JavaScript and web package evidence disagree on broker contract identity');
   }
   const webArtifactPath = join(options.artifactDirectory, WEB_SIDECAR_NAME);
   const webBytes = readFileSync(webArtifactPath);
@@ -973,8 +871,8 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     channel: 'stable',
     sourceCommit: options.sourceCommit,
     publishedAt,
-    artifacts,
-    contract: { ...nativeContract },
+    artifacts: [],
+    contract: { ...jsEvidence.contract },
     jsApp: {
       name: RELEASE_JAVASCRIPT_APP_NAME,
       target: RELEASE_JAVASCRIPT_APP_TARGET,
@@ -1008,9 +906,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
       )).toString('base64'),
     },
   };
-  for (const target of RELEASE_TARGETS) {
-    verifyReleaseManifest({ value: manifest, target, trustedKeys: { [options.keyId]: options.publicKeyPem } });
-  }
+  verifySignedManifest(manifest, { [options.keyId]: options.publicKeyPem });
   const paired = verifyReleasePairing(manifest);
   const manifestName = 'release-manifest.json';
   const manifestBytes = writeJson(join(options.outputDirectory, manifestName), manifest);
@@ -1030,7 +926,6 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   // what a broker can upgrade ITSELF to, and a GUI client is not a broker upgrade. The signed SHA256SUMS
   // row plus the digest baked into the installer is the whole guarantee, and both release signatures
   // already cover SHA256SUMS.
-  const clients = resolveClientArtifacts(options.clientDirectory, releaseVersion);
   for (const client of clients) {
     writeFileSync(
       join(options.outputDirectory, client.name),
@@ -1059,8 +954,6 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
   }
 
   const checksumCandidates = [
-    ...artifacts.map((artifact) => artifact.name),
-    ...artifacts.flatMap((artifact) => [`${artifact.name}.intoto.jsonl`, `${artifact.name}.intoto.jsonl.sig`]),
     RELEASE_JAVASCRIPT_APP_NAME,
     jsProvenanceName,
     `${jsProvenanceName}.sig`,
@@ -1103,10 +996,7 @@ export function assembleRelease(options: ReleaseAssemblyOptions): ReleaseAssembl
     `SHA256SUMS${P256_SIGNATURE_SUFFIX}`,
     `SHA256SUMS${P256_DER_SIGNATURE_SUFFIX}`,
   ].sort();
-  const actualFiles = [...new Bun.Glob('*').scanSync({ cwd: options.outputDirectory, onlyFiles: true })].sort();
-  if (JSON.stringify(actualFiles) !== JSON.stringify(publishedFiles)) {
-    throw new Error(`release directory contains unexpected files: ${actualFiles.join(', ')}`);
-  }
+  exactReleaseFiles(options.outputDirectory, publishedFiles);
   return { manifest, outputDirectory: options.outputDirectory, publishedFiles };
 }
 

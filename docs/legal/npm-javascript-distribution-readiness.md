@@ -93,8 +93,10 @@ by `cosyncing setup`. The same fence blocks the app-triggered update path and
 suppresses the signed-release probe, so no surface reports that a native update
 is available or was applied.
 
-A signed self-update channel for the JavaScript distribution is explicitly not
-implemented and is out of scope for this record.
+The separate installer-owned `bootstrap-js` distribution uses a signed GitHub
+self-update channel. It does not change this npm ownership fence. See
+[Broker release and signing](../release/broker-release-signing.md) for that
+channel and its older-installer migration requirements.
 
 ## Enforcement
 

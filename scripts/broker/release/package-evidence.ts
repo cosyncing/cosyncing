@@ -31,6 +31,8 @@ import {
   type ReleaseTarget,
 } from './release-files.ts';
 
+import { assertJavaScriptBroker } from './javascript-release-policy.ts';
+
 const ROOT = resolve(import.meta.dir, '../../..');
 
 interface EvidenceOptions {
@@ -244,12 +246,7 @@ export async function createJavaScriptPackageEvidence(
   if (!stats.isFile() || stats.isSymbolicLink() || stats.size <= 0) {
     throw new Error('release artifact is not a regular file');
   }
-  // Text with an interpreter line, never a machine-code header. This is the same property the npm lane
-  // asserts about the same builder's output, and it is what keeps the compiled-binary distribution control
-  // from reaching this channel: an ELF or Mach-O artifact starts with a magic byte, not `#!`.
-  if (!bytes.subarray(0, 2).equals(Buffer.from('#!'))) {
-    throw new Error('JavaScript application does not begin with an interpreter line');
-  }
+  assertJavaScriptBroker(bytes);
   const forbidden = forbiddenArtifactContent(bytes, RELEASE_JAVASCRIPT_APP_TARGET);
   if (forbidden) throw new Error(`release artifact contains forbidden ${forbidden}`);
   if (options.artifactPath.split('/').pop() !== RELEASE_JAVASCRIPT_APP_NAME) {
