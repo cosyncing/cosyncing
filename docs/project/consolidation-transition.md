@@ -33,8 +33,7 @@ The contributor fork path and maintainer hosted checks are proven. The npm
 JavaScript package and advertised Android, Linux, macOS, and Windows clients use
 protected release workflows and physically accepted candidates. iOS remains a
 CI-built source target rather than a distributed client. The native-free signed
-GitHub broker path is prepared in source and still requires publication and
-candidate acceptance. Any future compiled broker additionally requires legal
+GitHub broker path is published from 0.5.3, on a physically accepted candidate. Any future compiled broker additionally requires legal
 approval and a reviewed native asset policy. Release validation must complete
 without relying on a maintainer workstation as CI infrastructure.
 

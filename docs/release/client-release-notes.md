@@ -5,8 +5,13 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.2 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
-0.5.1 client still drives a 0.5.2 broker. Those clients simply do not offer the
+**0.5.3 changes nothing in the client.** It carries no client fix and no client
+feature; it exists so the first signed broker release has a client of the same
+version to install alongside it. If you already run 0.5.2, you gain nothing by
+updating and lose nothing by staying.
+
+0.5.3 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.3 broker. Those clients simply do not offer the
 features that need a newer contract, the Usage report among them. A 0.4.1 or
 older client remains read-only against current brokers.
 
@@ -14,7 +19,7 @@ Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.2
+## What's new since 0.5.1
 
 - One command installs the broker and this client together. `install.sh` and
   `install.ps1` place the client beside the broker, run `setup`, hand the client
@@ -38,7 +43,8 @@ matches it.
 - Focused text fields receive digits, brackets, punctuation and AltGr input when
   a matching application shortcut is intentionally suppressed.
 
-For the complete behavior above, use a 0.5.2 client with a 0.5.2 broker.
+For the complete behavior above, use a 0.5.2 or 0.5.3 client with a broker of
+the same version.
 
 ## Downloads
 

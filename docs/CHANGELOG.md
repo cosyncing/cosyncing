@@ -11,16 +11,33 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
-- Keep signed broker promotion policy bound to the trusted workflow revision when
-  verifying older candidates. Print shell setup commands with the resolved Bun
-  runtime, including when Bun was downloaded outside `PATH`.
+## 0.5.3 — 2026-09-12
 
-- Prepare signed GitHub releases containing the JavaScript broker, web sidecar,
-  installers and matching desktop clients, with no embedded Bun broker executable
-  or bundled runtime archive. Installers acquire Bun separately when needed.
-  Older bootstrap-js builds, including 0.5.2, require rerunning the new installer
-  after publication; native migration remains unsupported pending acceptance.
-  npm updates retain package-manager ownership.
+### Added
+
+- The first signed broker release, and with it the installer one-liner the
+  installation docs have always named. `install.sh`, `install.ps1` and their
+  `install-server` variants are published beside the release and reachable at
+  `releases/latest/download/<name>`; until now that URL resolved to nothing,
+  because no broker release had ever been published.
+
+### Changed
+
+- A release carries the broker as JavaScript. The signed asset set is
+  `cosyncing-app.js`, the web sidecar, the four installers and the matching
+  desktop clients — no compiled broker executable and no bundled runtime
+  archive. You do not need Bun beforehand: an installer reuses a suitable
+  runtime if the host has one and otherwise downloads the pinned upstream
+  release, and the broker then runs under that separate Bun installation.
+- An npm installation keeps package-manager ownership and updates through npm,
+  unchanged. Only an installer-placed broker follows the signed release channel.
+- Signed broker promotion stays bound to the trusted workflow revision when it
+  verifies an older candidate.
+
+### Fixed
+
+- Shell setup commands print the Bun runtime that will actually run them,
+  including when the installer downloaded Bun outside `PATH`.
 
 ## 0.5.2 — 2026-09-12
 
