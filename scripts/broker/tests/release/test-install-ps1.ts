@@ -701,8 +701,12 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
       && !/skipped/i.test(happy.stdout)
       && !/delivered over TLS/.test(happy.stdout),
     happy.stdout.trim().split('\n').slice(-6).join(' | '));
-  check('PATH is not changed and the printed setup command names the runtime and the bundle absolutely',
-    happy.stdout.includes('PATH was not changed')
+  // Unlike install.sh, which leaves PATH alone and prints an absolute command, this installer puts the
+  // shim's directory on the user PATH -- Windows has no symlink to hang `cosy` off, so without the entry
+  // neither `cosy` nor `cosyncing` is a command in cmd or PowerShell. The absolute command stays printed
+  // for the terminal that is already open, which cannot see an entry added after it started.
+  check('the shim directory is added to the user PATH and the absolute setup command is still printed',
+    /^PATH: (added .+ to your user PATH|.+ is already on your user PATH)/m.test(happy.stdout)
       && happy.stdout.includes(`& '${currentBun}' '${application}' setup`),
     happy.stdout.trim().split('\n').slice(-2).join(' | '));
 
@@ -1181,7 +1185,7 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
     check('the server installer places no desktop client and hands setup back to the operator',
       serverOnly.exitCode === 0
         && !existsSync(join(serverOnly.localAppData, 'cosyncing'))
-        && serverOnly.stdout.includes('PATH was not changed')
+        && /^PATH: (added .+ to your user PATH|.+ is already on your user PATH)/m.test(serverOnly.stdout)
         && !/Desktop client|Pairing handoff|Running setup/.test(serverOnly.stdout),
       `${serverOnly.exitCode}: ${serverOnly.stdout.trim().split('\n').slice(-3).join(' | ')}`);
   }
