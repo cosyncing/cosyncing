@@ -154,7 +154,9 @@ check('a release tag uses a draft for staging and publishes only after remote ve
     && releaseWorkflow.includes('--draft=false')
     && releaseWorkflow.includes('--prerelease=true'));
 check('stable promotion binds tag, signature, checksums, and exact assets before changing channel',
-  promotionWorkflow.includes('git rev-parse "$TAG^{commit}"')
+  promotionWorkflow.includes('ref: ${{ github.workflow_sha }}')
+    && promotionWorkflow.includes('git rev-parse "refs/tags/$TAG^{commit}"')
+    && promotionWorkflow.includes('--version "$CANDIDATE_VERSION" --commit "$CANDIDATE_COMMIT"')
     && promotionWorkflow.includes('COSYNCING_RELEASE_PUBLIC_KEY_PEM_B64')
     && promotionWorkflow.includes('cmp "$RUNNER_TEMP/cosyncing-release.pub.pem" output/promotion/release-key.pem')
     && promotionWorkflow.includes('openssl pkeyutl -verify')

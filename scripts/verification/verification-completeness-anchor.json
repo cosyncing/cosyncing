@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "acceptedBase": "3e5aa8933507d6614991e0a143cf1d5cb4076c25",
+  "acceptedBase": "fad8a6c4b37e553f0d2aa287828f9618df964fe9",
   "requiredClaimIds": [
     "broker.adapter-discovery-bounds",
     "broker.adapter-path-stamps",
@@ -227,7 +227,7 @@
     },
     {
       "id": "release-candidate-pair",
-      "fingerprint": "sha256:17a762e3a9415c139ffdecca61b547096e5c8aa7547fcfbc913eb8becdf13fb3"
+      "fingerprint": "sha256:c16d6f31171c4a6d8f1db9e835f10d56fee9b806698d19db0f38e9ba296618bd"
     },
     {
       "id": "source-boundaries",
@@ -653,7 +653,7 @@
     },
     {
       "id": "release-supply-chain",
-      "fingerprint": "sha256:9d2cdc193474dd89284747a4c3b7a2ee3246eda05e0f428dc067913783190e3e"
+      "fingerprint": "sha256:fd68f1d273adebb59b81ae32e7c46f80c3104751944de3a246e7aef90108dc54"
     },
     {
       "id": "request-resolution-hygiene",
