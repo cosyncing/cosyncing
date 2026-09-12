@@ -34,10 +34,10 @@ final installerPairingClockProvider = Provider<DateTime Function()>(
 ///
 /// The all-in-one installer pairs the broker it just set up with the client it
 /// just placed, and leaves the offer in a file for this launch to redeem. Read
-/// once, redeemed once, deleted whatever happened: a second launch must never
-/// find it again, and no outcome here may keep the app from starting. Every
-/// failure ends the same way — the file is gone and the user pairs by hand,
-/// which is what they would have done anyway.
+/// once, deleted, then redeemed: a second launch must never find it again,
+/// even if this one never finishes redeeming, and no outcome here may keep the
+/// app from starting. Every failure ends the same way — the file is gone and
+/// the user pairs by hand, which is what they would have done anyway.
 final installerPairingHandoffProvider =
     FutureProvider<InstallerPairingHandoffOutcome>((ref) async {
       final inbox = ref.read(installerPairingInboxProvider);
@@ -48,6 +48,17 @@ final installerPairingHandoffProvider =
         return InstallerPairingHandoffOutcome.absent;
       }
       if (raw == null) return InstallerPairingHandoffOutcome.absent;
+      // Deleted BEFORE it is redeemed, not after. The bytes are in
+      // hand, so the file has no further purpose, while redeeming
+      // can take a long time: it calls the broker and then writes
+      // the platform credential store, and on macOS a keychain
+      // write can sit on a user prompt. Observed on a real Mac —
+      // the broker had registered the peer while the offer was
+      // still on disk, because `importPayload` had not returned
+      // and the discard was waiting behind it. Removing it first
+      // makes the one-use rule hold when the app is closed
+      // mid-import, not only when the import returns.
+      await inbox.discard();
       try {
         final handoff = parseInstallerPairingHandoff(raw);
         if (handoff == null) return InstallerPairingHandoffOutcome.unreadable;
@@ -61,7 +72,5 @@ final installerPairingHandoffProvider =
         return InstallerPairingHandoffOutcome.imported;
       } on Object {
         return InstallerPairingHandoffOutcome.unreadable;
-      } finally {
-        await inbox.discard();
       }
     });

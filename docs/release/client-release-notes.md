@@ -5,27 +5,40 @@ then use `cosy pair` to authorize the client.
 
 ## Update your client with this release
 
-0.5.1 is a compatible patch for the 0.5 series. It keeps the minimum accepted
-client contract at revision 17, so a 0.5.0 client can still drive a 0.5.1
-broker. A 0.4.1 or older client remains read-only against current brokers.
+0.5.2 keeps the minimum accepted client contract at revision 17, so a 0.5.0 or
+0.5.1 client still drives a 0.5.2 broker. Those clients simply do not offer the
+features that need a newer contract, the Usage report among them. A 0.4.1 or
+older client remains read-only against current brokers.
 
 Update the client on every device you use before, or together with, the broker.
 The web client needs nothing: it ships inside the broker package and always
 matches it.
 
-## What's new in 0.5.1
+## What's new in 0.5.2
 
-- Transcript resync now preserves newer live output and telemetry, avoids
-  duplicate raced rows, keeps earlier-history paging available, and no longer
-  labels a locally evicted transcript head as the start of the session.
-- Claude background-agent notifications keep Drive and working state truthful,
-  open distinct continuation turns, and close interrupted or failed live runs.
-  The composer context meter follows the current 200K or 1M model window across
-  history refreshes and model changes.
-- Focused text fields now receive digits, brackets, punctuation, and AltGr input
-  when a matching application shortcut is intentionally suppressed.
+- One command installs the broker and this client together. `install.sh` and
+  `install.ps1` place the client beside the broker, run `setup`, hand the client
+  a one-use pairing offer, and launch it — so a new device is paired without
+  copying a token by hand. On Windows the client also gets a Start Menu entry.
+- A Usage report under Settings: totals for today, this week, this month, this
+  year and all time, with an activity heatmap, top projects, a working-hours
+  profile and export cards.
+- Artifact downloads resume. A download continues across a cancelled attempt, an
+  app restart, and a ticket refresh mid-transfer, rather than starting over, and
+  validates each chunk against the file the download began on.
+- A file the agent chose to send you carries a "Sent to you" badge, and it
+  survives a restart. Files you attached are not badged.
+- Scheduled messages work on a paired device. Every paired device previously
+  showed a permanent "the server refused this device's access" error in each
+  session, which re-pairing could not clear.
+- Codex New Session works again on current Codex CLI versions. codex-cli 0.151.0
+  stopped persisting an empty session, so creating one failed.
+- oh-my-pi (omp) joins the roster as its own agent, with Drive, live sync, model
+  and command controls, and New Session. OMP 17.4.2 or newer is required.
+- Focused text fields receive digits, brackets, punctuation and AltGr input when
+  a matching application shortcut is intentionally suppressed.
 
-For the complete behavior above, use a 0.5.1 client with a 0.5.1 broker.
+For the complete behavior above, use a 0.5.2 client with a 0.5.2 broker.
 
 ## Downloads
 

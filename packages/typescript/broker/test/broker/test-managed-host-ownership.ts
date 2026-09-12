@@ -1023,6 +1023,38 @@ try {
       attempts.join(','));
   }
   {
+    // An agent that is not INSTALLED describes a host with nothing to launch, and that reaches the
+    // supervisor on every tick. Counting those as restart attempts spent the budget on a host that never
+    // existed and then warned, once a minute, that a `kimi web` host "keeps failing to stay up" on a
+    // machine where setup's own preflight had already reported Kimi as missing. Absence is not failure:
+    // it declines, spawns nothing, journals nothing, and -- the property that matters -- never runs out
+    // of budget, because a budget spent here is a budget denied to a host that could really be restarted.
+    const ledger = managedHostRestartLedger();
+    const { effects, spawns } = fakeEffects({
+      identities: new Map(), missingProcess: PROCESS_ABSENT,
+      listeners: new Map([[59999, HOST_ABSENT]]),
+    });
+    const { store } = memoryStore();
+    const seen: string[] = [];
+    for (let round = 0; round < 8; round += 1) {
+      const outcome = await recoverManagedHost(
+        backend({
+          isAvailable: async () => false,
+          describeManagedHost: async () => ({
+            identityKey: KEY,
+            locator: { kind: 'tcp-port' as const, port: 59999 },
+            readyTimeoutMs: 300,
+            stopGraceMs: 100,
+          }),
+        }) as never,
+        effects, store, ledger, AUTHORIZED);
+      seen.push(outcome.action === 'declined' ? (outcome as { reason: string }).reason : outcome.action);
+    }
+    check('an agent with nothing to launch is declined as an absence, and never exhausts its budget',
+      seen.every((entry) => entry === 'not-launchable') && spawns.length === 0,
+      seen.join(','));
+  }
+  {
     // The supervisor is behind the same gate as the start: an unauthorized agent
     // is not supervised into existence.
     const { effects, spawns } = fakeEffects({});

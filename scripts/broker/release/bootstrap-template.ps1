@@ -13,7 +13,7 @@
 # is already qualified; nothing here touches Task Scheduler.
 #
 # No `param()` block, deliberately: the documented invocation is
-# `powershell -ExecutionPolicy Bypass -c "irm <base>/install.ps1 | iex"`, which has no way to bind
+# `powershell -NoProfile -c "irm <base>/install.ps1 | iex"`, which has no way to bind
 # parameters, so every knob is an environment variable and the same knobs work either way.
 
 Set-StrictMode -Version Latest
@@ -70,6 +70,8 @@ $StagedApplication = ''
 $StagedReceipt = ''
 $StagedWeb = ''
 $RetiredWeb = ''
+# Set when this run took over an npm install, so the tail can offer to remove the package it came from.
+$AdoptedNpmInstall = $false
 # Assigned by the all-in-one client section, declared here because `Invoke-InstallCleanup` reads them and
 # StrictMode turns an unassigned variable into a terminating error.
 $CLIENT_ROOT = ''
@@ -562,10 +564,82 @@ compiler — degrades instead of failing. See each caller for what degraded mean
 # `Get-NativeMachineValue` is: a host property a test cannot change about itself has to be replaceable in
 # a copy of the rendered script, since the alternative is an environment override — and a refusal that an
 # environment variable can switch off is not a refusal.
+# Put the install directory on the user's PATH.
+#
+# Windows has no equivalent of adding a line to a shell rc file: an operator who cannot run `cosyncing`
+# has no convenient way to fix it, so the installer that placed the binary is the thing that must. Bun's
+# own installer, which this one already depends on, does the same to the same PATH.
+#
+# Written through the registry rather than [Environment]::SetEnvironmentVariable, which rewrites the
+# value as REG_SZ. User PATH is normally REG_EXPAND_SZ, and flattening it stops every OTHER entry that
+# contains a %VARIABLE% from resolving -- a well-known way for an installer to break unrelated software.
+# The existing kind is read and preserved.
+function Add-UserPathEntry {
+  param([Parameter(Mandatory = $true)][string] $Directory)
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+  if (-not $key) { return 'unavailable' }
+  try {
+    $kind = 'ExpandString'
+    try {
+      if ($key.GetValueNames() -contains 'Path') { $kind = $key.GetValueKind('Path') }
+    } catch { $kind = 'ExpandString' }
+    # Unexpanded, so a PATH written with %USERPROFILE% is compared and rewritten as it was stored.
+    $current = [string] $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    # Entry-wise, never a substring test: `...\.cosyncing\bin` is a substring of nothing here, but a
+    # directory whose name merely STARTS with another's would otherwise read as already present.
+    $entries = @($current -split ';' | Where-Object { $_ -ne '' })
+    foreach ($entry in $entries) {
+      $candidate = $entry.Trim().TrimEnd('\')
+      if (-not $candidate) { continue }
+      $expanded = [Environment]::ExpandEnvironmentVariables($candidate)
+      if ($expanded -eq $Directory.TrimEnd('\')) { return 'already-present' }
+    }
+    $next = if ($entries.Count -gt 0) { ($entries -join ';') + ';' + $Directory } else { $Directory }
+    $key.SetValue('Path', $next, $kind)
+    # A registry write alone reaches nobody: a terminal started from Explorer inherits Explorer's cached
+    # environment, so without this broadcast "open a new terminal" would not actually work and the
+    # operator would have to sign out. Best-effort -- the entry is written either way, and the timeout
+    # keeps a wedged top-level window from holding the installer.
+    try {
+      if (-not ('CosyncingInstall.Broadcast' -as [type])) {
+        Add-Type -Namespace 'CosyncingInstall' -Name 'Broadcast' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint msg, System.UIntPtr wParam,
+  string lParam, uint flags, uint timeout, out System.UIntPtr result);
+'@ -ErrorAction Stop
+      }
+      $unused = [UIntPtr]::Zero
+      # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5s.
+      [void] [CosyncingInstall.Broadcast]::SendMessageTimeout(
+        [IntPtr] 0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref] $unused)
+    } catch { }
+    return 'added'
+  } catch {
+    return 'unavailable'
+  } finally {
+    $key.Dispose()
+  }
+}
+
 function Test-ElevatedProcess {
   param([Parameter(Mandatory = $true)] $Identity)
   return (New-Object Security.Principal.WindowsPrincipal $Identity).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# A running desktop client holds its own executable open, and Windows will not rename the directory that
+# contains it. Both the preflight and the placement itself ask this, so the rule and its wording live once.
+function Assert-ClientNotRunning {
+  param([Parameter(Mandatory = $true)][string] $ClientRoot)
+  foreach ($candidate in @(Get-Process -Name 'cosyncing' -ErrorAction SilentlyContinue)) {
+    $candidatePath = ''
+    try { $candidatePath = $candidate.Path } catch { $candidatePath = '' }
+    if ($candidatePath -and $candidatePath.StartsWith($ClientRoot,
+        [StringComparison]::OrdinalIgnoreCase)) {
+      Fail ("the desktop client is running from $ClientRoot and Windows cannot replace it while it " +
+        'is open; close it and run this installer again')
+    }
+  }
 }
 
 function Initialize-NativeProbe {
@@ -768,6 +842,86 @@ function Invoke-InstallCleanup {
 # Refusals, before any network.
 # ---------------------------------------------------------------------------------------------------
 
+# Takes over the copy `cosyncing setup` made from the npm package, after asking.
+#
+# A missing receipt is the ORDINARY state of an npm install, not evidence of tampering: the npm package is
+# an acquisition artifact, and `cosyncing setup` copies its bundle to exactly this path and writes no
+# receipt. Refusing every unreceipted application therefore refused the entire installed base - npm is the
+# only other channel this product ships through - and did it before the desktop-client step, so neither
+# half was updated.
+#
+# Consent comes from the console and nowhere else. Every environment variable this installer reads makes it
+# MORE restrictive, never less, and an unattended run must not take over another package manager's install
+# on an operator's behalf, so there is deliberately no variable that answers this question.
+#
+# On agreement this returns and the ordinary placement below runs: one file is replaced and one receipt is
+# written. Nothing reads or writes anything else under the state home, so settings, credentials, paired
+# devices, drafts and sessions survive untouched, and the scheduled task keeps naming the same path.
+function Get-SupersededWebRoot {
+  # The web client is version-stamped, so an upgrade does not replace the previous root - it lands beside
+  # it and, until this existed, abandoned it. Every sibling but the current one is superseded, so a host
+  # that has already leaked several is healed rather than merely stopped from leaking more. The install
+  # directory is one this installer owns outright - it refuses an unowned application, shim or web root -
+  # so a `cosyncing-web-*` in it is either this release's or a superseded one. A reparse point is skipped
+  # rather than followed, and so is anything this user does not own.
+  param([string]$InstallDir, [string]$Current, [string]$OwnerSid)
+  $found = @()
+  foreach ($item in @(Get-ChildItem -LiteralPath $InstallDir -Filter 'cosyncing-web-*' -Force `
+      -ErrorAction SilentlyContinue)) {
+    if (-not $item.PSIsContainer) { continue }
+    if (Test-ReparsePoint -Item $item) { continue }
+    if ($item.FullName -eq $Current) { continue }
+    if ((Get-PathOwnerSid -Path $item.FullName) -ne $OwnerSid) { continue }
+    $found += $item.FullName
+  }
+  return $found
+}
+
+function Approve-NpmApplicationTakeover {
+  param(
+    [Parameter(Mandatory = $true)][string] $BunBin,
+    [Parameter(Mandatory = $true)][string] $Application,
+    [Parameter(Mandatory = $true)][string] $StateHome,
+    [Parameter(Mandatory = $true)][string] $Version
+  )
+  # Running it is not a new exposure: a user-owned file in the user's own profile that this installer is
+  # about to overwrite, executed as that same user.
+  $probe = Invoke-Native -FilePath $BunBin -ArgumentList @($Application, 'version', '--json')
+  $reported = $null
+  if ($probe.ExitCode -eq 0) {
+    try { $reported = $probe.StdOut | ConvertFrom-Json } catch { $reported = $null }
+  }
+  if ((-not $reported) -or
+      ((Get-JsonProperty -Object $reported -Name 'product') -cne 'cosyncing') -or
+      ((Get-JsonProperty -Object $reported -Name 'packaged') -ne $true) -or
+      ((Get-JsonProperty -Object $reported -Name 'distribution') -cne 'bun-js')) {
+    Fail 'existing application has no safe bootstrap ownership receipt'
+  }
+  $existingVersion = [string] (Get-JsonProperty -Object $reported -Name 'version')
+  if (-not $existingVersion) { $existingVersion = 'an unknown version' }
+
+  Write-Output ''
+  Write-Output "cosyncing $existingVersion is installed at"
+  Write-Output "  $Application"
+  Write-Output 'from the npm package, by `cosyncing setup`. This installer did not place it.'
+  Write-Output ''
+  Write-Output 'Taking it over replaces that one file and records ownership of it. Everything else in'
+  Write-Output "  $StateHome"
+  Write-Output 'is left exactly as it is - settings, credentials, paired devices, drafts and sessions -'
+  Write-Output 'and the scheduled task keeps naming the same path.'
+  Write-Output ''
+
+  if ([Console]::IsInputRedirected) {
+    Fail ('replacing an npm install needs your answer and no console input is attached. Rerun this ' +
+      'installer from a PowerShell window, or stay on npm with: npm update -g cosyncing; then ' +
+      "& '$BunBin' '$Application' setup")
+  }
+
+  if ((Read-Host "Replace it with cosyncing $Version? [y/N]") -notmatch '^(y|yes)$') {
+    Fail 'left the npm install in place; nothing was changed'
+  }
+}
+
 try {
   if ($PSVersionTable.PSVersion -lt [Version] '5.1') {
     Fail ("Windows PowerShell 5.1 or newer is required; this host reports " +
@@ -799,6 +953,19 @@ try {
   if ($machine.Kind -ceq 'other') {
     Fail ("this installer supports Windows x64; this machine reports $($machine.Reported). Run the " +
       'broker on Windows x64, or on a supported Linux or macOS host.')
+  }
+
+  # The desktop client is placed at the very end of this script, so a client left open used to be
+  # discovered only after the download, the signature check, the Bun probe and the whole broker install
+  # had already run - the operator waited through all of it to be told to close an app and start over.
+  # Ask here, while nothing has been written. The placement asks again, which is what catches a client
+  # started while this was running.
+  if ($null -ne (Get-EmbeddedClient -Host_ $HOST_KEY)) {
+    $preflightLocalAppData = Get-EnvironmentValue 'LOCALAPPDATA'
+    if ($preflightLocalAppData -and [IO.Path]::IsPathRooted($preflightLocalAppData)) {
+      $preflightRoot = Join-Path ([IO.Path]::GetFullPath($preflightLocalAppData)) 'cosyncing\client'
+      Assert-ClientNotRunning -ClientRoot $preflightRoot
+    }
   }
 
   # The sidecar is a gzipped tar and Windows PowerShell 5.1 can unpack neither layer. `tar.exe` (bsdtar)
@@ -976,37 +1143,41 @@ try {
     if ((Get-PathOwnerSid -Path $application) -ne $CURRENT_USER_SID) {
       Fail 'existing cosyncing application is not owned by this user'
     }
-    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
-      Fail 'existing application has no safe bootstrap ownership receipt'
-    }
-    if (Test-ReparsePoint -Item (Get-Item -LiteralPath $receiptPath -Force)) {
-      Fail 'existing application has no safe bootstrap ownership receipt'
-    }
-    if ((Get-PathOwnerSid -Path $receiptPath) -ne $CURRENT_USER_SID) {
-      Fail 'existing bootstrap receipt is not owned by this user'
-    }
-    $receiptLines = @([IO.File]::ReadAllText($receiptPath) -split '\r?\n' |
-      ForEach-Object { $_.Trim() })
-    # Receipt 1 recorded a compiled per-host executable. This installer places a JavaScript bundle a Bun
-    # runtime executes, so overwriting one with the other would leave a service that can never start.
-    if ($receiptLines -contains 'schemaVersion=1') {
-      Fail ('this path holds a compiled cosyncing install; remove it and its service before installing ' +
-        'the JavaScript build')
-    }
-    if ($receiptLines -notcontains 'schemaVersion=2') { Fail 'existing bootstrap receipt is invalid' }
-    if ($receiptLines -notcontains 'product=cosyncing') {
-      Fail 'existing bootstrap receipt is for another product'
-    }
-    if ($receiptLines -notcontains "application=$application") {
-      Fail 'existing bootstrap receipt names another application'
-    }
-    $prior = @($receiptLines | Where-Object { $_ -clike 'sha256=*' } |
-      ForEach-Object { $_.Substring(7) })
-    if ($prior.Count -ne 1 -or $prior[0] -notmatch '^[0-9a-f]{64}$') {
-      Fail 'existing bootstrap receipt checksum is invalid'
-    }
-    if ((Get-Sha256 -Path $application) -ne $prior[0]) {
-      Fail 'existing application differs from its bootstrap ownership receipt'
+    # No receipt to check against, by design on the npm path: this either wins consent to take the
+    # install over, or exits. There is deliberately no third outcome where an unreceipted application is
+    # replaced. See Approve-NpmApplicationTakeover.
+    if ((-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) -or
+        (Test-ReparsePoint -Item (Get-Item -LiteralPath $receiptPath -Force))) {
+      Approve-NpmApplicationTakeover -BunBin $bunBin -Application $application `
+        -StateHome $stateHome -Version $VERSION
+      $AdoptedNpmInstall = $true
+    } else {
+      if ((Get-PathOwnerSid -Path $receiptPath) -ne $CURRENT_USER_SID) {
+        Fail 'existing bootstrap receipt is not owned by this user'
+      }
+      $receiptLines = @([IO.File]::ReadAllText($receiptPath) -split '\r?\n' |
+        ForEach-Object { $_.Trim() })
+      # Receipt 1 recorded a compiled per-host executable. This installer places a JavaScript bundle a Bun
+      # runtime executes, so overwriting one with the other would leave a service that can never start.
+      if ($receiptLines -contains 'schemaVersion=1') {
+        Fail ('this path holds a compiled cosyncing install; remove it and its service before installing ' +
+          'the JavaScript build')
+      }
+      if ($receiptLines -notcontains 'schemaVersion=2') { Fail 'existing bootstrap receipt is invalid' }
+      if ($receiptLines -notcontains 'product=cosyncing') {
+        Fail 'existing bootstrap receipt is for another product'
+      }
+      if ($receiptLines -notcontains "application=$application") {
+        Fail 'existing bootstrap receipt names another application'
+      }
+      $prior = @($receiptLines | Where-Object { $_ -clike 'sha256=*' } |
+        ForEach-Object { $_.Substring(7) })
+      if ($prior.Count -ne 1 -or $prior[0] -notmatch '^[0-9a-f]{64}$') {
+        Fail 'existing bootstrap receipt checksum is invalid'
+      }
+      if ((Get-Sha256 -Path $application) -ne $prior[0]) {
+        Fail 'existing application differs from its bootstrap ownership receipt'
+      }
     }
   }
 
@@ -1106,9 +1277,54 @@ try {
   Write-Output ('Release signature: verified (ECDSA P-256 over the signed release manifest and ' +
     'checksum list)')
   Write-Output "Command shim: $aliasPath"
+  $pathState = Add-UserPathEntry -Directory $installDir
+  if ($pathState -eq 'added') {
+    Write-Output "PATH: added $installDir to your user PATH. Open a NEW terminal, then run: cosy setup"
+  } elseif ($pathState -eq 'already-present') {
+    Write-Output "PATH: $installDir is already on your user PATH."
+  } else {
+    Write-Output "PATH: could not be updated. Run cosyncing with its full path, or add $installDir by hand."
+  }
+
+  # The npm package is preserved by design - `uninstall` says the same thing - but after a takeover it is
+  # a loaded gun: its own `setup` copies itself back over the application just placed, and the next run of
+  # this installer would then refuse again. Offer to remove it, and never fail the install over the answer.
+  if ($AdoptedNpmInstall) {
+    $npmRoot = ''
+    if (Get-Command npm -CommandType Application -ErrorAction SilentlyContinue) {
+      $npmProbe = Invoke-Native -FilePath 'npm' -ArgumentList @('root', '-g')
+      if ($npmProbe.ExitCode -eq 0) { $npmRoot = $npmProbe.StdOut.Trim() }
+    }
+    if ($npmRoot -and (Test-Path -LiteralPath (Join-Path $npmRoot 'cosyncing') -PathType Container)) {
+      Write-Output ''
+      Write-Output "The npm package it came from is still installed at $npmRoot\cosyncing."
+      Write-Output 'Its own setup would copy itself back over the install just made.'
+      if ((Read-Host 'Remove it now? [y/N]') -match '^(y|yes)$') {
+        $removal = Invoke-Native -FilePath 'npm' -ArgumentList @('uninstall', '-g', 'cosyncing')
+        if ($removal.ExitCode -eq 0) {
+          Write-Output 'Removed the npm package.'
+        } else {
+          Write-Output 'Could not remove the npm package; remove it by hand: npm uninstall -g cosyncing'
+        }
+      } else {
+        Write-Output 'Left it in place. Remove it later with: npm uninstall -g cosyncing'
+      }
+    }
+  }
 
   if ($INSTALL_MODE -cne 'all') {
-    Write-Output 'PATH was not changed. Run setup with the absolute command:'
+    # Named, not removed. This installer does not run setup, so the service is still the previous broker
+    # and still serving out of one of these; setup is what moves it to the new root.
+    foreach ($superseded in (Get-SupersededWebRoot -InstallDir $installDir -Current $WEB_ROOT -OwnerSid $CURRENT_USER_SID)) {
+      Write-Output "A previous web client is still at $superseded. setup moves the service to the new"
+      Write-Output 'one, after which that directory can be removed.'
+    }
+    if ($pathState -eq 'added') {
+      Write-Output 'Open a NEW terminal so the PATH entry applies, then run: cosy setup'
+      Write-Output 'Or run setup now with the absolute command:'
+    } else {
+      Write-Output 'Run setup with the absolute command:'
+    }
     Write-Output "  & '$bunBin' '$application' setup"
     exit 0
   }
@@ -1167,6 +1383,12 @@ try {
     # protected descriptor before the rename carries it to its destination.
     Set-OwnerOnlySecurity -Path $extracted[0] -Kind 'directory'
 
+    # A running client holds its own executable open, and Windows will not rename the directory that
+    # contains it: the retire step below would fail mid-install and roll back with a message about a move,
+    # not about the app the operator has open. Say it before anything is touched. The broker above is
+    # already installed and correct, which is the same posture as every other fatal step in this tail.
+    Assert-ClientNotRunning -ClientRoot $CLIENT_ROOT
+
     if (Test-Path -LiteralPath $CLIENT_ROOT) {
       $clientItem = Get-Item -LiteralPath $CLIENT_ROOT -Force
       if (-not $clientItem.PSIsContainer -or (Test-ReparsePoint -Item $clientItem)) {
@@ -1186,7 +1408,56 @@ try {
       $RetiredClient = ''
     }
     $clientLaunch = Join-Path $CLIENT_ROOT 'cosyncing.exe'
-    Write-Output "Desktop client: $CLIENT_ROOT"
+    # A Start Menu entry, so the client is startable after this run rather than only by absolute path.
+    # Linux gets a .desktop entry and macOS an .app the launcher already indexes; Windows had neither,
+    # which left the client reachable only from the install that launched it and nowhere afterwards.
+    $shortcutPath = ''
+    try {
+      $appData = Get-EnvironmentValue 'APPDATA'
+      if ($appData) {
+        $programs = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs'
+        if (-not (Test-Path -LiteralPath $programs)) {
+          New-Item -ItemType Directory -Path $programs -Force | Out-Null
+        }
+        $candidate = Join-Path $programs 'cosyncing.lnk'
+        # The Start Menu starts the client with its OWN environment, not this script's, so a relocated
+        # home has to travel with the shortcut or the client reads %USERPROFILE%\.cosyncing and finds no
+        # handoff. A .lnk cannot carry an environment variable, so that case goes through a launcher
+        # script; the default home needs none and points straight at the executable.
+        $target = $clientLaunch
+        if ($stateHome -ne (Join-Path $userProfile '.cosyncing')) {
+          $launcher = Join-Path $CLIENT_ROOT 'cosyncing-launch.cmd'
+          [IO.File]::WriteAllText(
+            $launcher,
+            "@echo off`r`nset `"COSYNCING_HOME=$stateHome`"`r`nstart `"`" `"$clientLaunch`"`r`n",
+            (New-Object Text.UTF8Encoding $false))
+          # The shortcut targets the launcher itself: Windows runs a .cmd through the shell, so no
+          # interpreter has to be named and no further environment is read to locate one.
+          $target = $launcher
+        }
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($candidate)
+        $shortcut.TargetPath = $target
+        if ($target -ne $clientLaunch) {
+          # Minimized, so the launcher's console does not sit on screen behind the client.
+          $shortcut.WindowStyle = 7
+        }
+        $shortcut.WorkingDirectory = $CLIENT_ROOT
+        $shortcut.IconLocation = $clientLaunch
+        $shortcut.Description = 'Drive your coding agents from anywhere'
+        $shortcut.Save()
+        $shortcutPath = $candidate
+      }
+    } catch {
+      # An unwritable Start Menu is not a failed install: the client is placed and launchable either way,
+      # and saying so beats failing a run whose broker and client are both correct.
+      $shortcutPath = ''
+    }
+    if ($shortcutPath) {
+      Write-Output "Desktop client: $CLIENT_ROOT (Start Menu: $shortcutPath)"
+    } else {
+      Write-Output "Desktop client: $CLIENT_ROOT (no Start Menu entry could be written)"
+    }
   }
 
   # `setup` shows the whole plan and asks before it changes anything, and that consent is the point of the
@@ -1219,6 +1490,19 @@ try {
   if ($setupExit -ne 0) {
     Fail ("setup did not complete; the broker files are installed. Rerun: " +
       "& '$bunBin' '$application' setup")
+  }
+
+  # Setup has rewritten the service definition and restarted it against the new web root, so every other
+  # version-stamped root beside it is now referenced by nothing. Before setup one of them could still be
+  # the tree the running broker was serving, which is why this is here and not beside the install: a
+  # failed setup stops above and leaves them alone.
+  foreach ($superseded in (Get-SupersededWebRoot -InstallDir $installDir -Current $WEB_ROOT -OwnerSid $CURRENT_USER_SID)) {
+    Remove-Item -LiteralPath $superseded -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $superseded) {
+      Write-Output "Could not remove the superseded web client; remove it by hand: $superseded"
+    } else {
+      Write-Output "Removed the superseded web client: $superseded"
+    }
   }
 
   # -------------------------------------------------------------------------------------------------
@@ -1299,7 +1583,22 @@ try {
     Write-Output "Could not launch $clientLaunch; start it from $CLIENT_ROOT."
   }
 } catch {
-  [Console]::Error.WriteLine("cosyncing install: $($_.Exception.Message)")
+  # A refusal should LOOK like one. The running-client message in particular reads as ordinary progress
+  # otherwise, and it is the one an operator is most likely to meet. The marker is coloured, not the
+  # message: a whole red paragraph is harder to read than a red word in front of a plain sentence.
+  # Colour only a real console -- when stderr is redirected there is nothing to colour and the escape
+  # would land in the file -- and never let a console that refuses the colour cost us the message.
+  $recolour = $false
+  try {
+    if (-not [Console]::IsErrorRedirected) {
+      [Console]::ForegroundColor = [ConsoleColor]::Red
+      $recolour = $true
+    }
+  } catch { $recolour = $false }
+  try { [Console]::Error.Write('FAILED') } finally {
+    if ($recolour) { try { [Console]::ResetColor() } catch { } }
+  }
+  [Console]::Error.WriteLine("  cosyncing install: $($_.Exception.Message)")
   # `exit` still runs the `finally` below, so the scratch directory and any half-placed staging path are
   # removed on the failure path exactly as they are on the success path.
   exit 1

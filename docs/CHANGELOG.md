@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.2 — 2026-09-12
+
 ### Added
 
 - One command installs the broker and the desktop client. `install.sh` and
@@ -48,9 +50,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   this year, and all time, read from the host's Tokdash, with an activity
   heatmap, top projects, a working-hours profile, and export cards. The broker
   serves it read-only at `/api/tokdash/report`; project names are shown to the
-  owner only. This raises the broker contract to revision 20, so clients 0.5.1
-  and earlier need the next client release before they can use a broker that
-  carries it.
+  owner only. This raises the broker contract to revision 20, which a client
+  needs before it can show the report. It does not move the minimum accepted
+  client revision, which stays at 17, so a 0.5.0 or 0.5.1 client keeps working
+  against this broker and simply does not offer the report until you update it.
 - Artifact downloads resume. The broker answers `Range` on artifact downloads,
   so any client that speaks it — `curl -C -`, a download manager — can resume
   one. The app pulls an artifact in 512 KiB chunks instead of buffering the whole
@@ -101,6 +104,23 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ### Fixed
 
+- Scheduled messages work on a paired device. Reading the queue needs `observe`
+  and changing it needs `drive`, instead of the owner credential no paired client
+  holds. A scheduled send is a prompt with a clock on it, and `drive` already
+  delivers that prompt immediately, so deferring it grants no new authority.
+  Every paired device previously showed a permanent "server refused this device"
+  error in each session, and re-pairing could not clear it.
+- Surfacing a workspace file into a session needs the `files` role rather than the
+  owner credential. The path is resolved against the session's own directory and
+  checked for containment, so the route was held to a stricter bar than the
+  boundary it enforces, and stricter than the uploads route beside it.
+- Codex New Session requests JSONL history explicitly, so current Codex CLI
+  versions persist empty sessions for discovery and resume before the first
+  prompt.
+- Broker startup respects the Windows default of disabled Codex terminal sync,
+  including when setup persisted an enabled preference. The sync endpoint also
+  rejects attempts to enable it on Windows. Explicit startup environment overrides
+  still take precedence.
 - The shell installers are `sh` scripts and say so. Their shebang read
   `#!/usr/bin/env bash` while the documented one-liner pipes them into `sh`, which
   on Debian and Ubuntu is dash. In the all-in-one, the probe for a terminal ran

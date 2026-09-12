@@ -1213,20 +1213,16 @@ export function codexAttachMode(canResume: boolean, status: SessionInfo['status'
   return 'observe';
 }
 
-function codexLiveSyncEnabled(): boolean {
-  // ON by default (issues-part2): the daemon is managed via `codex app-server daemon start`
-  // (idempotent, see ensureCodexDaemon). Set COSYNCING_CODEX_SYNC_SERVER=0 to opt out.
-  const v = (process.env.COSYNCING_CODEX_SYNC_SERVER ?? process.env.COSYNCING_CODEX_LIVE ?? '').trim();
-  if (v) return truthyEnv(v);
-  // ...but NOT on Windows, where there is nothing to join. `~/.codex/app-server-control/` stays
-  // empty, the shared daemon a terminal joins with `codex resume --remote` is a Unix-domain-socket
-  // flow, and the desktop app runs its own private app-server instead of joining one. Defaulting on
-  // there advertised `syncAvailable: true` with a "Sync with Codex terminal" command that cannot
-  // work — inferred from the ability flag rather than, as this field's own contract requires, from
-  // real reachability. An explicit env value still wins, so a future Windows control plane needs no
-  // change here.
-  if (process.platform === 'win32') return false;
-  return true;
+export function codexLiveSyncEnabled(
+  persisted?: boolean,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const value = env.COSYNCING_CODEX_SYNC_SERVER ?? env.COSYNCING_CODEX_LIVE;
+  if (value != null) return truthyEnv(value);
+  // The terminal daemon has no supported Windows join path. Setup's persisted
+  // default must not turn it on before the adapter gets to apply this gate.
+  return platform !== 'win32' && persisted !== false;
 }
 
 function brokerClientInfo(): { name: string; title: string; version: string } {
@@ -2589,6 +2585,9 @@ async function createCodexThread(
     const started = await rpc('thread/start', {
       cwd,
       serviceName: brokerClientInfo().name,
+      // Discovery and Observe consume JSONL rollouts. Codex 0.151+ can default
+      // to paginated history, where naming an empty thread writes no rollout.
+      historyMode: 'legacy',
       ...(model
         ? {
             model: model.modelID,
@@ -2608,11 +2607,8 @@ async function createCodexThread(
         `Codex started ${String(started?.modelProvider ?? 'unknown')}/${String(started?.model ?? 'unknown')} instead of the selected ${model.providerID}/${model.modelID}.`,
       );
     }
-    // `thread/start` only ALLOCATES the rollout path — codex writes the file lazily, normally on the
-    // first turn. A create→attach flow therefore raced a file that would never exist ("failed to
-    // resolve rollout path", issues-part1 codex create). `thread/name/set` is the cheapest RPC that
-    // forces the rollout to disk (verified against codex app-server 2026-07-04), and we want the
-    // thread named after the session title anyway.
+    // Legacy history allocates the path at start and persists on name/set,
+    // without a prompt. Keep the file check before handing the session out.
     const threadId = started?.thread?.id;
     const path = typeof started?.thread?.path === 'string' ? started.thread.path : undefined;
     if (threadId != null) {
@@ -2640,7 +2636,7 @@ async function createCodexThread(
     }
     if (path) {
       for (let i = 0; i < 20 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 200));
-      if (!existsSync(path)) throw new Error('Codex did not persist the new session rollout; send the first message from a terminal `codex resume` instead.');
+      if (!existsSync(path)) throw new Error('Codex did not persist the new session rollout after requesting legacy history.');
     }
     return started;
   });

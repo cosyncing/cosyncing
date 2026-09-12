@@ -242,16 +242,24 @@ const en: SetupMessages = {
   serviceQuestion: 'How should the broker run after setup?',
   serviceForegroundLabel: 'Foreground',
   serviceForegroundHint: (binary) => `Run \`${binary} broker\` explicitly after setup.`,
-  serviceDurableLabel: (provider) => provider === 'launchd' ? 'launchd user agent' : 'systemd user service',
+  serviceDurableLabel: (provider) => provider === 'launchd'
+    ? 'launchd user agent'
+    : provider === 'task-scheduler'
+      ? 'Windows Scheduled Task'
+      : 'systemd user service',
   // Never describe the other platform's manager as "unavailable" — on macOS systemd is not a thing that
   // could be enabled, and saying so reads as a broken install rather than a host difference.
   serviceDurableHint: ({ provider, available }) => available
     ? provider === 'launchd'
       ? 'Persistent macOS LaunchAgent; runs from GUI login to logout.'
-      : 'Persistent Linux service (installed by the service package).'
+      : provider === 'task-scheduler'
+        ? 'Persistent per-user Scheduled Task; runs from sign-in to sign-out.'
+        : 'Persistent Linux service (installed by the service package).'
     : provider === 'launchd'
       ? 'Needs a packaged install and a macOS GUI session; foreground remains supported.'
-      : 'Unavailable on this host; foreground remains supported.',
+      : provider === 'task-scheduler'
+        ? 'Needs an interactive Windows sign-in; foreground remains supported.'
+        : 'Unavailable on this host; foreground remains supported.',
   launchdSessionNote: 'The launchd agent runs from GUI login to logout. cosyncing does not install a system-wide '
     + 'LaunchDaemon, so the broker does not run before you sign in or after you sign out.',
   // Every case, truthfully. A Tokdash that is already running is reused and never touched; below that, the
@@ -265,8 +273,8 @@ const en: SetupMessages = {
       install: 'If none is running, cosyncing installs and starts one for you: `pipx install tokdash`, then '
         + '`tokdash setup`, then quota tracking is turned on. Uninstall reverses only what cosyncing installed.',
       unavailable: 'If none is running, cosyncing cannot set one up here: neither tokdash nor pipx is installed. '
-        + 'Install pipx (it needs Python 3.9+) — `sudo apt install pipx` on Ubuntu, `brew install pipx` on macOS '
-        + '— then run setup again and it will finish this step.',
+        + 'Install pipx (it needs Python 3.9+) — `sudo apt install pipx` on Ubuntu, `brew install pipx` on macOS, '
+        + '`py -m pip install --user pipx` on Windows — then run setup again and it will finish this step.',
     }[capability],
   // The value is withheld on purpose and the copy says so, or an operator retypes the variable looking for
   // the typo that was quoted back at them. An override can carry a credential; the reason cannot.
@@ -458,14 +466,22 @@ const zhHans: SetupMessages = {
   serviceQuestion: '安装完成后，broker 以哪种方式运行？',
   serviceForegroundLabel: '前台运行',
   serviceForegroundHint: (binary) => `每次自己执行 \`${binary} broker\` 启动。`,
-  serviceDurableLabel: (provider) => provider === 'launchd' ? 'launchd 用户代理' : 'systemd 用户服务',
+  serviceDurableLabel: (provider) => provider === 'launchd'
+    ? 'launchd 用户代理'
+    : provider === 'task-scheduler'
+      ? 'Windows 计划任务'
+      : 'systemd 用户服务',
   serviceDurableHint: ({ provider, available }) => available
     ? provider === 'launchd'
       ? '常驻的 macOS LaunchAgent，从图形界面登录起运行到注销为止。'
-      : '常驻的 Linux 服务（由服务包安装）。'
+      : provider === 'task-scheduler'
+        ? '常驻的每用户计划任务，从登录起运行到注销为止。'
+        : '常驻的 Linux 服务（由服务包安装）。'
     : provider === 'launchd'
       ? '需要打包安装并处于 macOS 图形会话中；前台运行始终可用。'
-      : '此主机不支持；前台运行始终可用。',
+      : provider === 'task-scheduler'
+        ? '需要以交互方式登录 Windows；前台运行始终可用。'
+        : '此主机不支持；前台运行始终可用。',
   launchdSessionNote: 'launchd 代理从图形界面登录起运行到注销为止。cosyncing 不会安装系统级 LaunchDaemon，'
     + '所以登录前和注销后 broker 都不会运行。',
   quotaNote: (baseUrl, capability) => `配额数据来自 ${baseUrl} 上的 Tokdash（可用 COSYNCING_TOKDASH_URL 覆盖）。`
@@ -477,7 +493,8 @@ const zhHans: SetupMessages = {
         + '然后打开配额跟踪。卸载时只会撤销 cosyncing 自己装的东西。',
       unavailable: '如果没有，cosyncing 在这台机器上没法自动安装：系统里既没有 tokdash 也没有 pipx。'
         + '请先装好 pipx（它需要 Python 3.9+）——Ubuntu 上用 `sudo apt install pipx`，'
-        + 'macOS 上用 `brew install pipx`——然后重新运行 setup，这一步就会自动补上。',
+        + 'macOS 上用 `brew install pipx`，Windows 上用 `py -m pip install --user pipx`——'
+        + '然后重新运行 setup，这一步就会自动补上。',
     }[capability],
   quotaUrlRejected: (rejection, baseUrl) =>
     `COSYNCING_TOKDASH_URL 被拒绝了，原因是${({

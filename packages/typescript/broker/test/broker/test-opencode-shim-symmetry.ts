@@ -51,6 +51,7 @@ import {
 } from '../../src/installation/pi-bridge-ownership.ts';
 import { atomicWriteOwnerOnly } from '../../src/security/secure-files.ts';
 import { readSetupState, writeSetupState } from '../../src/installation/setup-state.ts';
+import { createClackSetupPresenter } from '../../src/installation/setup-presenter.ts';
 import type { SetupTransactionContext } from '../../src/installation/setup-transaction.ts';
 
 const results: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -582,6 +583,20 @@ try {
         && posix.some((target) => target.id === 'zsh')
         && windows.length === 0,
       `posix=${posix.length} windows=${windows.length}`);
+  }
+
+  {
+    // Having no rc candidates is what makes routing impossible on Windows; the wizard must therefore not
+    // ASK for it there. It used to, defaulting to Yes, and then refused the whole plan at commit time —
+    // so the wizard's own default was the reason setup could not complete on Windows at all. The gate
+    // returns before any prompt is drawn, which is also why this needs no terminal.
+    const presenter = createClackSetupPresenter();
+    const answered = await presenter.confirmOpencodeShim({
+      opencodeShim: { routingSupported: false },
+      setupState: { opencodeShimRequested: true },
+    } as unknown as Parameters<typeof presenter.confirmOpencodeShim>[0]);
+    check('the wizard never asks for opencode terminal routing on a host that cannot route',
+      answered === false, `answered=${String(answered)}`);
   }
 } finally {
   for (const root of cleanup) rmSync(root, { recursive: true, force: true });

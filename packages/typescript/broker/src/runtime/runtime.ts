@@ -54,6 +54,7 @@ import { PiAdapter } from '@cosyncing/adapter-pi';
 import { inspectOmpPathCollision, OmpAdapter, OMP_DIALECT } from '@cosyncing/adapter-omp';
 import {
   CodexAdapter,
+  codexLiveSyncEnabled,
   createCodexConfigFreshnessProbe,
   queryCodexLoadedThreadActivitiesStrict,
   readCodexDaemonVersion,
@@ -700,18 +701,9 @@ process.env.COSYNCING_BROKER_BUILD_VERSION = BUILD_INFO.version;
 // relaunch, or by the operator) always wins over the persisted default.
 {
   const persisted = readSetupState().agents;
-  // Resolve the EFFECTIVE Codex sync enablement exactly as the Codex adapter does — explicit env
-  // COSYNCING_CODEX_SYNC_SERVER, else the legacy COSYNCING_CODEX_LIVE, accepting 1/true/yes/on — and fall
-  // back to the persisted per-agent flag when neither env is set. Then write it back as the canonical
-  // '1'/'0'. This guarantees the broker's `=== '1'` reads (brokerControlModeState, the
-  // /api/agents/codex/sync GET, /api/agents syncEnabled) and the adapter's truthyEnv() can NEVER disagree
-  // about whether Codex sync is on — the truthiness skew (env spelled "true", or only COSYNCING_CODEX_LIVE
-  // set) that the review caught, where a "disable" request silently no-ops because the two paths differ.
-  const envRaw = process.env.COSYNCING_CODEX_SYNC_SERVER ?? process.env.COSYNCING_CODEX_LIVE;
-  // issues-part2: Codex true-sync is ON BY DEFAULT. Explicit env wins; an explicit Settings-toggle
-  // "off" (persisted false) is honored; only an ABSENT preference defaults to enabled — the managed
-  // `codex app-server daemon start` (adapter-side) makes it work with no manual setup step.
-  const enabled = envRaw != null ? /^(1|true|yes|on)$/i.test(envRaw.trim()) : persisted?.codex !== false;
+  // Share the adapter's platform and env precedence, then canonicalize for the
+  // broker's `=== '1'` reads. A persisted setup default cannot enable Windows sync.
+  const enabled = codexLiveSyncEnabled(persisted?.codex);
   process.env.COSYNCING_CODEX_SYNC_SERVER = enabled ? '1' : '0';
 }
 
@@ -5859,6 +5851,9 @@ server = Bun.serve<WsData>({
     if (path === '/api/agents/codex/sync' && req.method === 'POST') {
       const body: any = await req.json().catch(() => ({}));
       if (typeof body?.enabled !== 'boolean') return json({ error: 'enabled:boolean is required' }, 400);
+      if (body.enabled && process.platform === 'win32') {
+        return json({ error: 'Codex terminal sync is not supported on Windows.' }, 409);
+      }
       setAgentSyncEnabled('codex', body.enabled);
       const result = scheduleBrokerControlModeRestart(body.enabled);
       return json(
@@ -7033,6 +7028,8 @@ const managedHostStartup = Promise.allSettled(registry.list().map(async (backend
  * restart — see `recoverManagedHost`. Ticks never overlap: a slow probe delays
  * the next tick instead of stacking a second one on top of it.
  */
+/** Agents already told about, so the give-up notice is said once rather than once per tick. */
+const announcedRestartGiveUp = new Set<string>();
 const managedHostSupervisor = new ManagedHostSupervisor({
   backends: () => registry.list(),
   effects: managedHostEffects,
@@ -7046,6 +7043,8 @@ const managedHostSupervisor = new ManagedHostSupervisor({
       // came back must not leave doctor reporting a failure that is over.
       console.log(`${LOG_PREFIX} restarted the managed ${agent} host after it stopped serving`);
       clearManagedRuntimeFailure(agent);
+      // Recovered, so a future give-up is news again rather than a repeat.
+      announcedRestartGiveUp.delete(agent);
     } else if (outcome.action === 'recovery-failed') {
       // The case that used to print the success line above. It is a warning AND
       // a durable record: nobody is reading the journal at 3am, so the only
@@ -7078,7 +7077,19 @@ const managedHostSupervisor = new ManagedHostSupervisor({
           : {}),
       });
     } else if (outcome.action === 'declined' && outcome.reason === 'budget-exhausted') {
-      console.warn(`${LOG_PREFIX} the managed ${agent} host keeps failing to stay up; not restarting it again — run \`cosyncing doctor\``);
+      // Once per agent, not once per tick. The supervisor keeps declining for as long as the broker runs,
+      // and repeating this every interval buried every other line in the log with a fact that had not
+      // changed since the first time it was true. The durable record written when the recovery actually
+      // failed is what an operator reads later; this line only has to say it stopped trying.
+      if (!announcedRestartGiveUp.has(agent)) {
+        announcedRestartGiveUp.add(agent);
+        console.warn(`${LOG_PREFIX} the managed ${agent} host keeps failing to stay up; not restarting it again — run \`cosyncing doctor\``);
+      }
+    } else if (outcome.action === 'declined' && outcome.reason === 'not-launchable') {
+      // An agent that is not installed has no host to manage, which is a configuration fact rather than
+      // a runtime failure. Say nothing each tick, and clear any record an earlier build wrote, so doctor
+      // stops reporting a failure for software that was never here.
+      clearManagedRuntimeFailure(agent);
     }
   },
   onError: (agent, error) => {

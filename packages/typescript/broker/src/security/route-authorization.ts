@@ -70,9 +70,16 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/push/wake', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/push/wake-tokens', methods: ['GET', 'POST'], policy: OBSERVE },
   { route: '/api/push/wake-tokens/{id}', methods: ['DELETE'], policy: OBSERVE },
-  { route: '/api/schedules', methods: ['GET', 'POST'], policy: OWNER_ONLY },
-  { route: '/api/schedules/{id}', methods: ['DELETE', 'PATCH'], policy: OWNER_ONLY },
-  { route: '/api/schedules/{id}/actions', methods: ['POST'], policy: OWNER_ONLY },
+  // A scheduled send is a prompt with a clock on it, so it carries the authority of the prompt and
+  // not more: `drive` already lets a peer create a session and send it anything right now, and
+  // deferring the same text grants nothing further. Reading the queue is narrower still — an
+  // `observe` peer can already read every session these prompts would land in. Owner-only here made
+  // the inline scheduled-message poll a permanent 403 on every paired device, and re-pairing (what
+  // the client's unauthorized advice suggests) reissues the same three roles and fails identically.
+  { route: '/api/schedules', methods: ['GET'], policy: OBSERVE },
+  { route: '/api/schedules', methods: ['POST'], policy: DRIVE },
+  { route: '/api/schedules/{id}', methods: ['DELETE', 'PATCH'], policy: DRIVE },
+  { route: '/api/schedules/{id}/actions', methods: ['POST'], policy: DRIVE },
   { route: '/api/claude/hooks', methods: ['GET', 'POST'], policy: OWNER_ONLY },
   { route: '/api/session-roster-deltas', methods: ['GET'], policy: OBSERVE },
   { route: '/api/sessions', methods: ['GET'], policy: OBSERVE },
@@ -97,7 +104,12 @@ export const BROKER_ROUTE_POLICIES: readonly RoutePolicyEntry<BrokerRoute>[] = [
   { route: '/api/tokdash/quota-preference', methods: ['GET'], policy: OBSERVE },
   { route: '/api/tokdash/quota-preference', methods: ['POST'], policy: OWNER_ONLY },
   { route: '/api/tokdash/report', methods: ['GET'], policy: OBSERVE },
-  { route: '/api/tool/send_file', methods: ['POST'], policy: OWNER_ONLY },
+  // Named the agent-only route because host-side agent tooling is what calls it, but the authority it
+  // needs is `files`, not ownership. `Hub.surfaceExplicit` resolves the path against the session's cwd
+  // and enforces containment, a real-file check and no symlinks — the same scoping the fs routes rely
+  // on — and a `files` peer can already put a file into a session through `uploads`. Owner-only here
+  // was stricter than the boundary it was protecting.
+  { route: '/api/tool/send_file', methods: ['POST'], policy: FILES },
   { route: '/api/transport/envelopes', methods: ['GET', 'POST'], policy: OBSERVE },
   { route: '/api/transport/peers', methods: ['GET'], policy: OWNER_ONLY },
   { route: '/api/transport/peers/{id}', methods: ['DELETE'], policy: OWNER_ONLY },
