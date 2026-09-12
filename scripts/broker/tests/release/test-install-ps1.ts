@@ -29,7 +29,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   PUBLISHED_BROKER_CONTRACT,
@@ -57,15 +57,10 @@ import {
   assembleRelease,
   canonicalProductVersion,
   parseRenderedClientTable,
-  releaseTargetArch,
-  releaseTargetPlatform,
   sha256,
   CLIENT_HOSTS,
-  RELEASE_TARGETS,
   WEB_SIDECAR_NAME,
   type JavaScriptPackageEvidence,
-  type PackageEvidence,
-  type ReleaseTarget,
   type WebPackageEvidence,
 } from '../../release/release-files.ts';
 import {
@@ -148,15 +143,49 @@ async function runPowerShell(options: {
 // is only a spelling. Canonicalise once, here, and every path built from it is the form the installer
 // will echo back.
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'cosyncing-install-ps1-')));
+const fixtureRegistryKey = `Software\\${basename(root)}`;
+
+/** Exercise real PATH registry logic against a test-owned key, never HKCU\Environment. */
+function isolateRenderedRegistry(directory: string): void {
+  for (const installer of ['install.ps1', 'install-server.ps1']) {
+    const path = join(directory, installer);
+    const source = readFileSync(path, 'utf8');
+    const original = "[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)";
+    if (!source.includes(original)) throw new Error('installer PATH registry seam is missing');
+    writeFileSync(path, source.replace(original,
+      `[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('${fixtureRegistryKey}')`));
+  }
+}
 try {
   // ---- Fixtures -----------------------------------------------------------------------------------
   const fixtures = join(root, 'fixtures');
   mkdirSync(fixtures, { recursive: true });
+  const userPathReader = join(fixtures, 'read-user-path.ps1');
+  writeFileSync(userPathReader, [
+    "$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')",
+    'try {',
+    "  if ($null -eq $key) { 'absent' } else {",
+    "    $value = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)",
+    "    if ($null -eq $value) { 'absent' } else {",
+    "      [ordered]@{ value = $value; kind = $key.GetValueKind('Path').ToString() } | ConvertTo-Json -Compress",
+    '    }',
+    '  }',
+    '} finally { if ($null -ne $key) { $key.Dispose() } }',
+  ].join('\n'));
+  const originalUserPath = await runPowerShell({
+    script: userPathReader, arguments: [], stage: 'capture operator PATH before fixtures',
+  });
+  if (originalUserPath.exitCode !== 0) throw new Error('cannot capture operator PATH for isolation check');
+  const operatorShortcut = process.env.APPDATA
+    ? join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'cosyncing.lnk')
+    : undefined;
+  const originalShortcut = operatorShortcut && existsSync(operatorShortcut)
+    ? readFileSync(operatorShortcut) : undefined;
 
   /**
    * A real `bun.exe` that stands in for the two things the installer asks a runtime to do: answer
-   * `--revision`, and run the verified bundle's `version --json`. It prints the bundle file back, so the
-   * fixture "bundle" is the identity JSON itself and every other property under test — digests,
+   * `--revision`, and run the verified bundle's `version --json`. It extracts the identity object from the
+   * JavaScript fixture and every other property under test — digests,
    * signatures, the receipt — stays real.
    */
   function buildFakeBun(name: string, revision: string): string {
@@ -171,7 +200,10 @@ public static class FakeBun {
       return 0;
     }
     if (args.Length == 3 && args[1] == "version" && args[2] == "--json" && File.Exists(args[0])) {
-      Console.Out.Write(File.ReadAllText(args[0]));
+      string app = File.ReadAllText(args[0]);
+      int start = app.IndexOf("{", StringComparison.Ordinal);
+      int end = app.LastIndexOf("}", StringComparison.Ordinal);
+      Console.Out.Write(app.Substring(start, end - start + 1));
       return 0;
     }
     Console.Error.Write("fake bun: unexpected invocation\\n");
@@ -216,47 +248,10 @@ public static class FakeBun {
   const SERVER_INSTALLER = 'install-server.ps1';
   const ALL_IN_ONE_INSTALLER = 'install.ps1';
 
-  // The compiled per-host artifacts. This installer never touches them — it places one universal bundle —
-  // but `assembleRelease` publishes the whole signed set, so the fixture provides the whole set.
-  for (const target of RELEASE_TARGETS) {
-    const name = `cosyncing-${target}`;
-    const path = join(artifactDirectory, name);
-    writeFileSync(path, `#!/usr/bin/env bash\n# fixture ${target}\nexit 2\n`);
-    const bytes = readFileSync(path);
-    const evidence: PackageEvidence = {
-      schemaVersion: 1,
-      product: 'cosyncing',
-      artifact: name,
-      version: VERSION,
-      target,
-      sourceCommit: COMMIT,
-      buildDate: BUILD_DATE,
-      size: bytes.byteLength,
-      sha256: sha256(bytes),
-      packaged: true,
-      dirty: false,
-      schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
-      contract: PUBLISHED_BROKER_CONTRACT,
-      cleanCheckout: true,
-      offlineVersionCheck: true,
-      forbiddenContentCheck: true,
-      runner: {
-        os: releaseTargetPlatform(target),
-        arch: releaseTargetArch(target),
-        image: `fixture-${target}`,
-        invocationId: `200${RELEASE_TARGETS.indexOf(target as ReleaseTarget) + 1}`,
-      },
-    };
-    writeFileSync(
-      join(evidenceDirectory, `${name}.evidence.json`),
-      `${JSON.stringify(evidence, null, 2)}\n`,
-    );
-  }
-
-  // The bundle IS the identity JSON, because the fake bun prints the file it is asked to run. The shape
+  // The bundle is valid JavaScript; the fake Bun extracts its identity object. The shape
   // is the one the real `version --json` emits, and the installer checks four fields of it exactly.
   const applicationPath = join(artifactDirectory, RELEASE_JAVASCRIPT_APP_NAME);
-  writeFileSync(applicationPath, `${JSON.stringify({
+  writeFileSync(applicationPath, `#!/usr/bin/env bun\nconsole.log(JSON.stringify(${JSON.stringify({
     schemaVersion: 2,
     product: 'cosyncing',
     binary: 'cosyncing',
@@ -270,7 +265,7 @@ public static class FakeBun {
     dirty: false,
     schemaVersions: PUBLISHED_SCHEMA_VERSIONS,
     contract: PUBLISHED_BROKER_CONTRACT,
-  }, null, 2)}\n`);
+  }, null, 2)}));\n`);
   const applicationBytes = readFileSync(applicationPath);
   const applicationEvidence: JavaScriptPackageEvidence = {
     schemaVersion: 1,
@@ -409,6 +404,7 @@ Compress-Archive -Path $Source -DestinationPath $Destination -Force
     outputDirectory: releaseDirectory,
     ...signing,
   });
+  isolateRenderedRegistry(releaseDirectory);
 
   /** The declaration the elevation refusal hangs off, stubbed below in copies of the rendered script. */
   const ELEVATION_PROBE = 'function Test-ElevatedProcess {';
@@ -487,6 +483,7 @@ Write-Output $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admini
       outputDirectory: output,
       ...signing,
     });
+    isolateRenderedRegistry(output);
     // Freshly rendered, so it needs the same neutralisation the shared release got.
     if (HOST_IS_ELEVATED) {
       for (const name of [SERVER_INSTALLER, ALL_IN_ONE_INSTALLER]) {
@@ -592,6 +589,8 @@ exit $LASTEXITCODE
     const environment: Record<string, string> = {
       COSYNCING_HOME: home,
       LOCALAPPDATA: localAppData,
+      APPDATA: join(root, 'roaming-appdata'),
+      USERPROFILE: join(root, 'user-profile'),
       // Never the operator's own %USERPROFILE%\.bun: an install that placed a runtime there would
       // rewrite the ACLs on a directory this suite does not own.
       BUN_INSTALL: options.bunInstall ?? join(root, `bun-prefix-${caseIndex}`),
@@ -1154,6 +1153,9 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
     check('the desktop client directory passes the product\'s own owner-only inspection',
       inspectOwnerOnlyDirectory(clientRoot).status === 'ok',
       `${inspectOwnerOnlyDirectory(clientRoot).status}/${inspectOwnerOnlyDirectory(clientRoot).problem ?? ''}`);
+    check('the Start Menu shortcut stays inside the fixture roaming profile',
+      existsSync(join(root, 'roaming-appdata', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'cosyncing.lnk'))
+        && allInOne.stdout.includes(join(root, 'roaming-appdata')));
     // `runSupervised` gives the child a redirected stdin, which is the case this branch exists for.
     check('with no console to ask on, the all-in-one stops at setup rather than consenting',
       allInOne.stdout.includes('No console input is attached, so setup was not run')
@@ -1189,8 +1191,21 @@ Invoke-Download -Uri 'https://releases.example/probe' -OutFile '${seamOut}'
         && !/Desktop client|Pairing handoff|Running setup/.test(serverOnly.stdout),
       `${serverOnly.exitCode}: ${serverOnly.stdout.trim().split('\n').slice(-3).join(' | ')}`);
   }
+  const finalUserPath = await runPowerShell({
+    script: userPathReader, arguments: [], stage: 'verify operator PATH after fixtures',
+  });
+  check('installer fixtures preserve the operator user PATH',
+    finalUserPath.exitCode === 0 && finalUserPath.stdout === originalUserPath.stdout);
+  const finalShortcut = operatorShortcut && existsSync(operatorShortcut)
+    ? readFileSync(operatorShortcut) : undefined;
+  check('installer fixtures preserve the operator Start Menu shortcut',
+    originalShortcut ? Boolean(finalShortcut?.equals(originalShortcut)) : finalShortcut === undefined);
 } finally {
+  const cleanup = join(root, 'cleanup-registry.ps1');
+  writeFileSync(cleanup, `$ErrorActionPreference = 'Stop'\n[Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('${fixtureRegistryKey}', $false)\n`);
+  const cleaned = await runPowerShell({ script: cleanup, arguments: [], stage: 'remove fixture registry key' });
   rmSync(root, { recursive: true, force: true });
+  if (cleaned.exitCode !== 0) throw new Error(`fixture registry cleanup failed: ${cleaned.stderr}`);
 }
 
 const failed = results.filter((result) => !result.ok);

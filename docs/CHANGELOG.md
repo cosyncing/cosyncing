@@ -11,6 +11,17 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+- Keep signed broker promotion policy bound to the trusted workflow revision when
+  verifying older candidates. Print shell setup commands with the resolved Bun
+  runtime, including when Bun was downloaded outside `PATH`.
+
+- Prepare signed GitHub releases containing the JavaScript broker, web sidecar,
+  installers and matching desktop clients, with no embedded Bun broker executable
+  or bundled runtime archive. Installers acquire Bun separately when needed.
+  Older bootstrap-js builds, including 0.5.2, require rerunning the new installer
+  after publication; native migration remains unsupported pending acceptance.
+  npm updates retain package-manager ownership.
+
 ## 0.5.2 — 2026-09-12
 
 ### Added

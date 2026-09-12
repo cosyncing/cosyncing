@@ -32,7 +32,7 @@ try {
       publicationEligible: true,
     })}\n`,
   );
-  writeFileSync(join(output, 'cosyncing-linux-x64'), 'stale publishable artifact\n');
+  writeFileSync(join(output, 'cosyncing-app.js'), 'stale publishable artifact\n');
   writeFileSync(
     checkReport,
     `${JSON.stringify({

@@ -354,8 +354,11 @@ function parseManifest(value: unknown): ReleaseManifest {
       || value.channel !== 'stable'
       || typeof value.sourceCommit !== 'string' || !/^[a-f0-9]{7,64}$/.test(value.sourceCommit)
       || typeof value.publishedAt !== 'string' || !Number.isFinite(Date.parse(value.publishedAt))
-      || !Array.isArray(value.artifacts) || value.artifacts.length < 1 || value.artifacts.length > 8
+      || !Array.isArray(value.artifacts) || value.artifacts.length > 8
       || !value.artifacts.every(validReleaseArtifact)
+      // Native-free releases are complete broker/web pairs, never an empty channel entry.
+      || (value.artifacts.length === 0
+        && (value.jsApp === undefined || value.contract === undefined || value.webApp === undefined))
       || ((value.contract === undefined) !== (value.webApp === undefined))
       || (value.contract !== undefined && !validReleaseContract(value.contract))
       || (value.webApp !== undefined && !validReleaseWebSidecar(value.webApp))
@@ -392,7 +395,7 @@ export function verifyReleasePairing(manifest: ReleaseManifest): {
 }
 
 /** Structure and signature only; which artifact class a build may take from it is the caller's decision. */
-function verifySignedManifest(
+export function verifySignedManifest(
   value: unknown,
   trustedKeys: Readonly<Record<string, string>>,
 ): ReleaseManifest {
@@ -1503,7 +1506,7 @@ export function releaseManifestForTests(options: {
   version: string;
   sourceCommit: string;
   publishedAt: string;
-  artifact: ReleaseArtifact;
+  artifact?: ReleaseArtifact;
   keyId: string;
   sign: (payload: Uint8Array) => Uint8Array;
   /** The paired classes a real release always publishes. Omitted by tests exercising a manifest without them. */
@@ -1518,7 +1521,7 @@ export function releaseManifestForTests(options: {
     channel: 'stable',
     sourceCommit: options.sourceCommit,
     publishedAt: options.publishedAt,
-    artifacts: [options.artifact],
+    artifacts: options.artifact ? [options.artifact] : [],
     ...(options.contract ? { contract: options.contract } : {}),
     ...(options.webApp ? { webApp: options.webApp } : {}),
     ...(options.jsApp ? { jsApp: options.jsApp } : {}),

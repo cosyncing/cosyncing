@@ -49,14 +49,15 @@ submit it to npm's staging queue through trusted publishing. Protected
 environment review and a separate interactive npm approval are both required
 before it becomes installable. The client workflows build Android, Linux,
 macOS, and Windows assets into a matching prerelease; stable promotion verifies
-and publishes that exact accepted asset set without rebuilding it. Compiled
-broker binaries use their own draft-release candidate and stable-promotion
-workflows.
+and publishes that exact accepted asset set without rebuilding it. The signed
+GitHub broker lane stages JavaScript, the web sidecar and matching desktop
+clients, then promotes the exact verified asset set without rebuilding.
 
-The compiled-release workflows are intentionally unusable until the legal and
-signing prerequisites in
-[broker release and signing](../release/broker-release-signing.md) are met.
-Source CI and local package tests do not satisfy that approval gate.
+The JavaScript lane retains protected signing and acceptance prerequisites in
+[broker release and signing](../release/broker-release-signing.md). Its asset
+policy rejects compiled brokers and bundled Bun archives. Future embedded-runtime
+broker distribution still requires the separate legal approval; source CI and
+local package tests do not satisfy that gate.
 
 CI job logs follow the repository's GitHub retention setting. The main,
 nightly, and client-release gates upload `output/check` verification evidence

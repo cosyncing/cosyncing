@@ -93,7 +93,7 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
 
   broker-web-pair:
-    name: built broker and /app/ parity
+    name: built JavaScript broker and /cosy/ parity
     needs: changes
     if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
@@ -127,14 +127,14 @@ jobs:
           BUILD_DATE="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%S.000Z)"
           VERSION="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
           mkdir -p output/candidate
-          bun run scripts/broker/build-broker.ts \
-            --target bun-linux-x64 \
-            --outfile output/candidate/cosyncing-linux-x64 \
+          bun run scripts/broker/build-broker-bundle.ts \
+            --distribution bootstrap-js \
+            --outfile output/candidate/cosyncing-app.js \
             --commit "$COMMIT" --build-date "$BUILD_DATE" \
-            --require-clean --minify --no-alias
+            --require-clean --minify
           bun run client:build:web
           bun run release:verify-pair -- \
-            --broker output/candidate/cosyncing-linux-x64 \
+            --broker output/candidate/cosyncing-app.js --bun "$(command -v bun)" \
             --web-dir apps/client/build/web \
             --commit "$COMMIT" --version "$VERSION"
 

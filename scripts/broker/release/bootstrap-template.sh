@@ -38,6 +38,21 @@ fail() {
   exit 1
 }
 
+# A copied command must survive spaces and apostrophes and must not depend on Bun being on PATH.
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+print_setup_command() {
+  printf '  '
+  shell_quote "$BUN_BIN"
+  printf ' '
+  shell_quote "$APPLICATION"
+  printf ' setup\n'
+}
+
 [ "$(id -u)" -ne 0 ] || fail 'refusing a root install; run this as the target user'
 
 for command in curl openssl base64 uname stat mktemp awk sed tar; do
@@ -455,8 +470,8 @@ adopt_npm_application() {
 
   if [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; then
     printf 'cosyncing install: replacing an npm install needs your answer and no terminal is attached.\n' >&2
-    printf 'Rerun this installer from a terminal, or stay on npm with:\n  npm update -g cosyncing\n  %s setup\n' \
-      "$APPLICATION" >&2
+    printf 'Rerun this installer from a terminal, or stay on npm with:\n  npm update -g cosyncing\n' >&2
+    print_setup_command >&2
     exit 1
   fi
 
@@ -611,7 +626,8 @@ if [ "$INSTALL_MODE" != all ]; then
     [ -d "$SUPERSEDED" ] && [ ! -L "$SUPERSEDED" ] && [ "$SUPERSEDED" != "$WEB_ROOT" ] || continue
     printf 'A previous web client is still at %s. setup moves the service to the new one,\nafter which that directory can be removed.\n' "$SUPERSEDED"
   done
-  printf 'PATH was not changed. Run setup with the absolute command:\n  %s setup\n' "$APPLICATION"
+  printf 'PATH was not changed. Run setup with the absolute command:\n'
+  print_setup_command
   exit 0
 fi
 
@@ -801,7 +817,8 @@ fi
 setup_with_terminal() { "$BUN_BIN" "$APPLICATION" setup; }
 
 if [ ! -t 1 ] && [ ! -t 2 ] && { [ ! -r /dev/tty ] || ! ( : < /dev/tty ) 2>/dev/null; }; then
-  printf '\nNo terminal is attached, so setup was not run. Finish with:\n  %s setup\n' "$APPLICATION"
+  printf '\nNo terminal is attached, so setup was not run. Finish with:\n'
+  print_setup_command
   exit 0
 fi
 
@@ -815,8 +832,8 @@ else
   setup_with_terminal < /dev/tty || SETUP_STATUS=$?
 fi
 if [ "$SETUP_STATUS" -ne 0 ]; then
-  printf 'cosyncing install: setup did not complete; the broker files are installed. Rerun:\n  %s setup\n' \
-    "$APPLICATION" >&2
+  printf 'cosyncing install: setup did not complete; the broker files are installed. Rerun:\n' >&2
+  print_setup_command >&2
   exit 1
 fi
 

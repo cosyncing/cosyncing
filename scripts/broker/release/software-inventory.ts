@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { PRODUCT_IDENTITY } from '../../../packages/typescript/protocol/src/product.ts';
+import { MINIMUM_BUN_RUNTIME_VERSION } from '../../../packages/typescript/broker/src/runtime/application-identity.ts';
 
 const ROOT = resolve(import.meta.dir, '../../..');
 const BUN_LICENSE_PATH = join(ROOT, 'docs/legal/bun-1.3.8-LICENSE.md');
@@ -40,6 +41,13 @@ export interface CompiledSoftwareInventory {
       packages: string[];
     };
   };
+}
+
+export interface JavaScriptSoftwareInventory extends Omit<CompiledSoftwareInventory, 'format'> {
+  format: 'cosyncing-javascript-software-inventory';
+  scope: 'Broker JavaScript dependency closure; Flutter dependencies retain their notices inside each web/client archive';
+  externalRuntime: { name: 'Bun'; minimumVersion: string; bundled: false; acquisition: 'https://github.com/oven-sh/bun/releases' };
+  releaseArtifacts: Array<{ name: string; kind: 'javascript-broker' | 'flutter-web' | 'flutter-desktop' }>;
 }
 
 export interface SpdxSoftwareBom {
@@ -176,13 +184,19 @@ function pinnedBunLicenseText(): string {
  * misstate what is being distributed. Removing the embedded runtime does not remove the ordinary obligation
  * to carry notices for the JavaScript dependencies that ARE bundled, which is what this emits.
  */
-export function createJavaScriptThirdPartyNotices(inventory: CompiledSoftwareInventory): string {
+export function createJavaScriptThirdPartyNotices(inventory: CompiledSoftwareInventory | JavaScriptSoftwareInventory): string {
   const lines = [
-    `Third-party notices for the cosyncing ${inventory.version} npm package`,
+    `Third-party notices for the cosyncing ${inventory.version} JavaScript distribution`,
     '',
     'This package contains one self-contained JavaScript application bundle. It does not',
     'contain the Bun runtime, JavaScriptCore, or WebKit; Bun is installed separately by the',
-    'operator and is not redistributed here.',
+    'operator or bootstrap installer and is not redistributed here.',
+    ...(inventory.format === 'cosyncing-javascript-software-inventory' ? [
+      '',
+      'The web sidecar retains Flutter dependency notices in app/assets/NOTICES.',
+      'Matching desktop client archives retain their own Flutter and plugin licence files.',
+      'The broker dependency inventory below does not enumerate those Flutter dependencies.',
+    ] : []),
     '',
     'Bundled npm dependency closure',
     '==============================',
@@ -326,9 +340,27 @@ function spdxPackageId(name: string): string {
   return `SPDXRef-Package-${name.replace(/[^A-Za-z0-9.-]+/g, '-')}`;
 }
 
+export function createJavaScriptSoftwareInventory(options: {
+  version: string;
+  sourceCommit: string;
+  generatedAt: string;
+  releaseArtifacts: JavaScriptSoftwareInventory['releaseArtifacts'];
+}): JavaScriptSoftwareInventory {
+  return {
+    ...createCompiledSoftwareInventory(options),
+    format: 'cosyncing-javascript-software-inventory',
+    scope: 'Broker JavaScript dependency closure; Flutter dependencies retain their notices inside each web/client archive',
+    externalRuntime: {
+      name: 'Bun', minimumVersion: MINIMUM_BUN_RUNTIME_VERSION, bundled: false,
+      acquisition: 'https://github.com/oven-sh/bun/releases',
+    },
+    releaseArtifacts: options.releaseArtifacts,
+  };
+}
+
 /** Render the compiled broker inventory as a deterministic SPDX 2.3 SBOM. */
 export function createSpdxSoftwareBom(
-  inventory: CompiledSoftwareInventory,
+  inventory: CompiledSoftwareInventory | JavaScriptSoftwareInventory,
 ): SpdxSoftwareBom {
   const packageIds = new Map(
     inventory.packages.map((item) => [item.name, spdxPackageId(item.name)]),
@@ -347,7 +379,7 @@ export function createSpdxSoftwareBom(
       created: inventory.generatedAt,
       creators: ['Tool: cosyncing-release-assembler'],
     },
-    packages: inventory.packages.map((item) => ({
+    packages: [...inventory.packages.map((item) => ({
       SPDXID: packageIds.get(item.name),
       name: item.name,
       versionInfo: item.version,
@@ -362,13 +394,26 @@ export function createSpdxSoftwareBom(
         referenceLocator:
           `pkg:npm/${encodeURIComponent(item.name).replace('%2F', '/')}@${item.version}`,
       }],
-    })),
+    })), ...(inventory.format === 'cosyncing-javascript-software-inventory'
+      ? inventory.releaseArtifacts.map((item) => ({
+        SPDXID: spdxPackageId(item.name), name: item.name, versionInfo: inventory.version,
+        downloadLocation: 'NOASSERTION', filesAnalyzed: false,
+        licenseConcluded: 'NOASSERTION', licenseDeclared: 'NOASSERTION', copyrightText: 'NOASSERTION',
+        comment: item.kind === 'javascript-broker'
+          ? 'JavaScript bundle; broker dependency closure is enumerated separately. Bun is an external runtime, not bundled.'
+          : 'Flutter archive; dependency notices remain inside this asset. This SBOM does not enumerate its dependency closure.',
+      })) : [])],
     relationships: [
       {
         spdxElementId: 'SPDXRef-DOCUMENT',
         relationshipType: 'DESCRIBES',
         relatedSpdxElement: rootId,
       },
+      ...(inventory.format === 'cosyncing-javascript-software-inventory'
+        ? inventory.releaseArtifacts.map((item) => ({
+          spdxElementId: 'SPDXRef-DOCUMENT', relationshipType: 'DESCRIBES' as const,
+          relatedSpdxElement: spdxPackageId(item.name),
+        })) : []),
       ...inventory.packages.flatMap((item) =>
         item.dependencies.map((dependency) => {
           const dependencyId = packageIds.get(dependency);

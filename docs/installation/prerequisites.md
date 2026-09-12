@@ -1,7 +1,7 @@
 # Installation prerequisites
 
-cosyncing requires Bun to run the broker and npm to install and update the
-package. Tokdash is an optional but strongly recommended quota integration.
+cosyncing requires Bun to run the JavaScript broker. The npm installation path
+also requires npm to acquire and update the package. Tokdash is an optional but strongly recommended quota integration.
 No VPN, proxy, tunnel, or mesh product is required for local operation.
 
 The broker listens only on `127.0.0.1`. Cross-device access is an independent
@@ -29,9 +29,11 @@ Windows ARM64 is not a qualified broker host yet, and the broker refuses it —
 including an x64 process running under ARM64 emulation, which reports itself as
 x64, so the broker asks Windows what the underlying machine is.
 
-You can skip this step on Windows if you install cosyncing with
-[its own installer](script-install.md): `install.ps1` installs a digest-pinned
-Bun for you when the host has none new enough.
+You can skip preinstalling Bun when using the signed-release
+[cosyncing installers](script-install.md). Both shell and PowerShell templates
+reuse a suitable Bun or download a digest-pinned runtime directly from upstream.
+The native-free release path must be published before the live one-liner acquires
+it. Bun is installed separately; its runtime is not a cosyncing release asset.
 
 Open a new login shell, then verify the selected executable:
 
@@ -40,7 +42,7 @@ type -a bun
 bun --version
 ```
 
-## Required on the broker host: npm and Node.js
+## Required for the npm installation path: npm and Node.js
 
 Install a current Node.js release, which includes npm. npm owns the acquisition
 package and its updates; cosyncing itself still runs with Bun.
