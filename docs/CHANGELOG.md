@@ -11,6 +11,8 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+## 0.5.2 — 2026-09-12
+
 ### Added
 
 - One command installs the broker and the desktop client. `install.sh` and
@@ -48,9 +50,10 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
   this year, and all time, read from the host's Tokdash, with an activity
   heatmap, top projects, a working-hours profile, and export cards. The broker
   serves it read-only at `/api/tokdash/report`; project names are shown to the
-  owner only. This raises the broker contract to revision 20, so clients 0.5.1
-  and earlier need the next client release before they can use a broker that
-  carries it.
+  owner only. This raises the broker contract to revision 20, which a client
+  needs before it can show the report. It does not move the minimum accepted
+  client revision, which stays at 17, so a 0.5.0 or 0.5.1 client keeps working
+  against this broker and simply does not offer the report until you update it.
 - Artifact downloads resume. The broker answers `Range` on artifact downloads,
   so any client that speaks it — `curl -C -`, a download manager — can resume
   one. The app pulls an artifact in 512 KiB chunks instead of buffering the whole
