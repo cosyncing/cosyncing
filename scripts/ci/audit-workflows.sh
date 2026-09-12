@@ -120,6 +120,21 @@ rg -Fq -- '--broker output/staging/cosyncing-app.js --bun "$(command -v bun)"' "
 rg -Fq 'test "$(git rev-parse "client-v$VERSION^{commit}")" = "$(git rev-parse HEAD)"' "$workflow_dir/broker-release.yml"
 rg -q 'environment: broker-release-candidate' "$workflow_dir/broker-release.yml"
 rg -q 'environment: broker-production' "$workflow_dir/broker-release-promote.yml"
+for fragment in \
+  'ref: ${{ github.workflow_sha }}' \
+  'test "$WORKFLOW_REF" = cosyncing/cosyncing/.github/workflows/broker-release-promote.yml@refs/heads/main' \
+  'test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"' \
+  'git show "$CANDIDATE_COMMIT:package.json"' \
+  '--version "$CANDIDATE_VERSION" --commit "$CANDIDATE_COMMIT"'; do
+  rg -Fq -- "$fragment" "$workflow_dir/broker-release-promote.yml" || {
+    echo "ERROR: broker promotion must bind policy to the trusted workflow and identity to the candidate: $fragment" >&2
+    exit 1
+  }
+done
+if rg -n 'git (checkout|switch|reset)|ref:.*inputs\.tag' "$workflow_dir/broker-release-promote.yml"; then
+  echo 'ERROR: broker promotion must never replace the trusted workflow checkout with candidate code.' >&2
+  exit 1
+fi
 if rg -n 'build-broker|client:build|gh release upload' "$workflow_dir/broker-release-promote.yml"; then
   echo 'ERROR: broker promotion must not rebuild or replace accepted assets.' >&2
   exit 1

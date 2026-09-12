@@ -23,7 +23,11 @@ release or repair the live one-liner before candidate publication and promotion.
    or a bundled Bun archive is an allowed publication input or output.
 6. The protected promotion workflow checks the expected tag version and source
    commit, trusted public keys, signatures, digests, provenance and exact asset
-   set. It promotes accepted bytes without rebuilding or replacing assets.
+   set. Dispatch it from `main`: it checks out `github.workflow_sha` and runs
+   that workflow revision's policy and dependencies. The candidate tag supplies
+   version/commit data only; its verifier and package scripts are never executed.
+   It promotes accepted bytes without rebuilding or replacing assets, including
+   when the candidate is older than the workflow revision.
 
 The `broker-release-candidate` environment stores signing material and the key
 identifier. `broker-production` stores only trusted public keys. Secrets never
@@ -73,12 +77,14 @@ signatures fail closed. Native-target verification remains available for legacy
 manifests and tests; no fake native descriptor represents JavaScript.
 
 This is an extension to the manifest's accepted shapes, **not backward
-compatibility with every schema-1 reader**. Published 0.5.2 installer-owned
-brokers reject an empty native list before selecting `jsApp`. Those installations
-must rerun the new release's installer, followed by `setup` if using the server
-installer, to acquire the updated parser. Earlier native installer builds also
-cannot select a JS upgrade and require reinstallation. Do not delete state or
-edit receipts by hand. See [installer migration](../installation/script-install.md#migrating-older-installer-owned-brokers).
+compatibility with every schema-1 reader**. Published 0.5.2 bootstrap-js brokers
+reject an empty native list before selecting `jsApp`. Those installations must
+rerun the new release's installer, followed by `setup` if using the server
+installer, to acquire the updated parser. Native installations with schema-1
+receipts are refused by both installers. Native-to-JavaScript migration remains
+unsupported pending an accepted state-preserving procedure; rerunning the
+installer is not that procedure. Do not delete state or edit receipts by hand.
+See [installer migration](../installation/script-install.md#migrating-older-installer-owned-brokers).
 
 New `bootstrap-js` builds retain the signed self-update path, recorded runtime,
 installation receipt, versioned web sidecar and health-checked rollback. The

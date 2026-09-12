@@ -1011,7 +1011,7 @@ try {
     installedReceipt.trim().replaceAll('\n', ' | '));
   check('bootstrap never edits shell startup files and prints the absolute setup command',
     readFileSync(join(home, '.bashrc'), 'utf8') === '# preserve\n'
-      && install.stdout.includes(`${binary} setup`) && install.stdout.includes('PATH was not changed'));
+      && install.stdout.includes(`'${binary}' setup`) && install.stdout.includes('PATH was not changed'));
   check('a capable openssl reports the signature as verified, not merely checked',
     /Release signature: verified/.test(install.stdout)
       && /Artifact digests: matched/.test(install.stdout),
@@ -1223,7 +1223,7 @@ try {
   // and say so rather than passing --yes on the operator's behalf.
   check('with no terminal the all-in-one stops at setup instead of consenting for the operator',
     allInOne.stdout.includes('No terminal is attached, so setup was not run')
-      && allInOne.stdout.includes(`${join(allInOneHome, '.cosyncing', 'bin', 'cosyncing')} setup`)
+      && allInOne.stdout.includes(`'${join(allInOneHome, '.cosyncing', 'bin', 'cosyncing')}' setup`)
       && !allInOne.stdout.includes('fixture setup completed')
       && !existsSync(join(allInOneHome, '.cosyncing', 'client-pairing.json')),
     allInOne.stdout.trim().split('\n').slice(-3).join(' | '));
@@ -1760,6 +1760,55 @@ exec /usr/bin/openssl "$@"
       && bunInstall.stdout.includes('Installing the pinned Bun')
       && bunInstall.stdout.includes(`Bun runtime: installed by this script (${MINIMUM_BUN_RUNTIME_VERSION}`),
     `${bunInstall.exitCode}: ${bunInstall.stdout.trim().split('\n').slice(-4).join(' | ')} ${bunInstall.stderr.trim().slice(0, 160)}`);
+
+  // A fresh shell has no Bun command at all. Execute the printed command unchanged, under both POSIX sh
+  // and bash, with spaces and apostrophes in the runtime and application paths.
+  const noBunPath = join(root, 'tools-without-bun');
+  mkdirSync(noBunPath);
+  for (const name of ['bash', 'sh', 'id', 'openssl', 'base64', 'uname', 'stat', 'mktemp', 'awk', 'sed',
+    'tar', 'gzip', 'sha256sum', 'wc', 'tr', 'sort', 'head', 'grep', 'mkdir', 'chmod', 'dirname', 'cp', 'mv',
+    'rm', 'unzip', 'readlink', 'ln', 'rmdir', 'cat', 'basename', 'env', 'setsid']) {
+    const executable = Bun.which(name);
+    if (!executable) throw new Error(`fresh-host fixture requires ${name}`);
+    symlinkSync(executable, join(noBunPath, name));
+  }
+  writeFakeCurl(join(noBunPath, 'curl'));
+  for (const installer of ['install-server.sh', 'install.sh']) {
+    const freshHome = join(root, `fresh host's ${installer}`);
+    mkdirSync(freshHome);
+    const freshEnvironment = {
+      PATH: noBunPath, HOME: freshHome, FAKE_RELEASE_ROOT: bunInstallRelease,
+      BUN_INSTALL: join(freshHome, "Bun's runtime"),
+      COSYNCING_HOME: join(freshHome, "broker's state"), LANG: 'C.UTF-8',
+    };
+    const absent = await run(['sh', '-c', 'command -v bun'], { env: freshEnvironment });
+    const fresh = await run(['sh', join(bunInstallRelease, installer)], { env: freshEnvironment });
+    const printed = fresh.stdout.trim().split('\n').at(-1)?.trim() ?? '';
+    check(`${installer} downloads Bun outside PATH and prints its absolute setup command`,
+      absent.exitCode !== 0 && fresh.exitCode === 0 && fresh.stdout.includes('Installing the pinned Bun')
+        && printed.endsWith(' setup'), `${fresh.exitCode}: ${fresh.stderr.trim().slice(0, 180)}`);
+    for (const shell of ['sh', 'bash']) {
+      const setup = await run([shell, '-c', printed], { env: freshEnvironment });
+      check(`${installer} printed setup runs in ${shell} with quoted paths and no Bun on PATH`,
+        setup.exitCode === 0 && setup.stdout.trim() === 'fixture setup completed', setup.stderr.trim());
+    }
+  }
+
+  const nativeHome = join(root, 'compiled-receipt-home');
+  const nativeState = join(nativeHome, '.cosyncing');
+  mkdirSync(join(nativeState, 'bin'), { recursive: true, mode: 0o700 });
+  const nativeFiles = new Map([
+    [join(nativeState, 'bin/cosyncing'), 'native executable fixture'],
+    [join(nativeState, 'bootstrap-receipt'), 'schemaVersion=1\nproduct=cosyncing\n'],
+    [join(nativeState, 'settings.json'), '{"preserveState":true}\n'],
+  ]);
+  for (const [path, bytes] of nativeFiles) writeFileSync(path, bytes, { mode: 0o600 });
+  const nativeRefusal = await run(['sh', join(releaseDirectory, 'install-server.sh')], {
+    env: { PATH: `${fakeBin}:${process.env.PATH}`, HOME: nativeHome, FAKE_RELEASE_ROOT: releaseDirectory },
+  });
+  check('schema-1 native installation is refused without replacing its application, receipt or state',
+    nativeRefusal.exitCode !== 0 && nativeRefusal.stderr.includes('this path holds a compiled cosyncing install')
+      && [...nativeFiles].every(([path, bytes]) => readFileSync(path, 'utf8') === bytes), nativeRefusal.stderr.trim());
 
   // One host target is not one binary: musl and pre-AVX2 hosts need a different build of the same release.
   // A build that cannot run here is the wrong candidate, not a failed install.

@@ -214,10 +214,11 @@ DER `SEQUENCE` for `openssl dgst -verify`. See
 
 ## Migrating older installer-owned brokers
 
-Published 0.5.2's updater rejects a manifest with an empty native artifact list,
-even when `jsApp` and the web metadata are valid. A native-free release therefore
-cannot be installed by that build's self-updater. Earlier native installer builds
-also require reinstallation to change distribution kind.
+### Older bootstrap-js installations (receipt schema 2)
+
+Published 0.5.2's bootstrap-js updater rejects a manifest with an empty native
+artifact list, even when `jsApp` and the web metadata are valid. A native-free
+release therefore cannot be installed by that build's self-updater.
 
 After the new release is published and accepted, rerun its version-specific
 `install.sh` or `install.ps1`. For a broker-only host, use `install-server.sh` or
@@ -230,6 +231,22 @@ This acquires the new parser. Subsequent `bootstrap-js` updates can consume the
 native-free signed channel with the existing runtime and health-checked rollback.
 The manifest still says schema 1, but older parsers do not accept its new empty-
 native-list shape. This has no effect on the broker/client wire contract.
+
+### Compiled native installations (receipt schema 1)
+
+Native-to-JavaScript migration is **unsupported pending physical acceptance**.
+Both installers refuse schema-1 receipts: rerunning them over the native
+installation does not migrate it. Its service invokes an executable directly
+and must be removed before installing a JavaScript broker with a separate runtime.
+
+Do not delete state, edit the receipt to schema 2, or copy JavaScript over the
+native executable. A supported procedure still needs to prove a backup and
+restore of the state home, removal of only the old service and owned installation
+files, fresh installation and setup against the preserved state, and recovery
+if setup fails. Until that procedure is accepted, keep the existing installation
+and arrange a maintainer-assisted migration in a maintenance window.
+
+### npm installations
 
 For npm-owned (`bun-js`) installations, keep using `npm update --global cosyncing`
 followed by `cosyncing setup`; do not use self-update as a migration mechanism.

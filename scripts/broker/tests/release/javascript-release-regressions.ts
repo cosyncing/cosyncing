@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promotionPolicyRegression } from './promotion-policy-regression.ts';
 import { sign } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -154,4 +155,5 @@ export function javaScriptReleaseRegressions(options: ReleaseAssemblyOptions): v
   assert.equal(Bun.spawnSync([...cli, '--version', options.version, '--commit', options.sourceCommit]).exitCode, 0);
   assert.notEqual(Bun.spawnSync([...cli, '--version', '99.0.0', '--commit', options.sourceCommit]).exitCode, 0);
   console.log('PASS  promotion verifies detached signatures and contract provenance while accepting matching Flutter desktop archives');
+  promotionPolicyRegression(options, root);
 }
