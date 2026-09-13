@@ -24,6 +24,11 @@ async function freePort(): Promise<number> {
   return (addr as any).port;
 }
 
+async function drainStderr(stream: ReadableStream<Uint8Array> | undefined): Promise<string> {
+  if (!stream) return '';
+  return await new Response(stream).text().catch(() => '');
+}
+
 async function waitHealthy(base: string): Promise<void> {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
@@ -66,8 +71,31 @@ async function startBroker(
     stdout: 'ignore',
     stderr: 'pipe',
   });
+  // Drained from the moment the child exists, and never awaited on the healthy path.
+  //
+  // This suite reaches a healthy broker in under a second on a green run and burned the whole 15 s
+  // budget on two Windows CI runs, reporting only "broker did not become healthy". It could not report
+  // anything else: the broker's exit code and its stderr were both discarded here, so every occurrence
+  // was undiagnosable and the cause is still unknown. That is what this changes -- the failure now
+  // carries the child's exit status and the tail of what it said, so the next occurrence names its own
+  // cause instead of being guessed at. A bind that lost the `freePort` race would say EADDRINUSE here.
+  //
+  // Draining is also just correct: Bun buffers a piped stream internally rather than stalling the
+  // child (measured), but nothing should hold an unread pipe open for the life of a test process.
+  const stderrText = drainStderr(broker.stderr);
   const base = `http://127.0.0.1:${port}`;
-  await waitHealthy(base);
+  try {
+    await waitHealthy(base);
+  } catch (error) {
+    // The child is killed FIRST so the drain can finish: it resolves at end-of-stream, which a live
+    // broker never reaches. Reporting its exit code and last output is what makes the next occurrence
+    // name its own cause instead of being diagnosed by guesswork from a generic timeout.
+    broker.kill();
+    const [exitCode, text] = await Promise.all([broker.exited, stderrText]);
+    const tail = text.trim().split('\n').slice(-8).join('\n');
+    throw new Error(`${error instanceof Error ? error.message : String(error)} `
+      + `(broker exit=${exitCode})${tail ? `:\n${tail}` : ' with no stderr'}`);
+  }
   return { broker, base };
 }
 

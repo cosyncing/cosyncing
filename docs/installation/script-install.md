@@ -18,17 +18,16 @@ receipt, and stops. It starts no service, changes no `PATH`, and edits no shell 
 the right installer for a headless box, for a configuration-managed host, and for anywhere you want the
 files and the service to be two decisions.
 
-## Publication status
-
-The native-free signed release path is prepared in source. The live download
-URLs below acquire it only after a new candidate is published and promoted;
-merging this change does not change an existing 0.5.2 release or the live installer.
+## What a release carries
 
 The release carries JavaScript and the web sidecar, plus matching Flutter desktop
 clients. It carries no compiled native broker and no Bun runtime archive. You do
 not need to preinstall Bun: both installers reuse a suitable runtime or download
 the pinned runtime directly from upstream. The broker still runs under that
 separate Bun installation.
+
+0.5.3 is the first release published this way, and the first broker release of
+any kind. Before it the one-liner below had no release to resolve against.
 
 ## The one-liner
 
