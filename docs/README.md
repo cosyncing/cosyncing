@@ -19,6 +19,7 @@
 - [Contract synchronization](protocol/contract-sync.md)
 - [Adapter support and evidence](protocol/adapter-support.md)
 - [Installation prerequisites](installation/prerequisites.md)
+- [One-command installation: Linux, macOS and Windows](installation/script-install.md)
 - [Supported agents: versions and installation](supported_agents/README.md)
 - [Build and test](development/build-test.md)
 - [Fork-based development](development/fork-workflow.md)

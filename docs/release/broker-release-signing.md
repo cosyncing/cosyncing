@@ -1,8 +1,8 @@
 # Broker release and signing
 
 The signed GitHub release distributes the broker as JavaScript with a separate
-web sidecar. This source change prepares that path; it does not publish a
-release or repair the live one-liner before candidate publication and promotion.
+web sidecar. The short installer URLs on `cosyncing.com` serve copies of the
+accepted stable release's scripts.
 
 1. After matching Flutter clients have been released and physically accepted,
    a new `broker-vX.Y.Z` tag on accepted public `main` creates a draft release.
@@ -28,12 +28,39 @@ release or repair the live one-liner before candidate publication and promotion.
    version/commit data only; its verifier and package scripts are never executed.
    It promotes accepted bytes without rebuilding or replacing assets, including
    when the candidate is older than the workflow revision.
+7. Refresh the four website installer copies after stable promotion, using the
+   procedure below. Verify the short URLs after the website deploys.
 
 The `broker-release-candidate` environment stores signing material and the key
 identifier. `broker-production` stores only trusted public keys. Secrets never
 enter PR jobs. Private keys use restrictive permissions in runner temporary
 storage and are never cached or uploaded. The PR gate may still compile native
 brokers for ephemeral testing; it does not upload them.
+
+## Website installer publication
+
+The generated installers are version-specific: they embed the version, release
+download base, public keys, and artifact digests. Do not copy templates, replace
+their download base with `latest`, or hand-edit rendered scripts.
+
+After each stable broker promotion, in the
+[website repository](https://github.com/cosyncing/cosyncing.github.io):
+
+1. Run `python3 scripts/sync-installers.py` from its root. It downloads all four
+   scripts from GitHub's current stable broker release and records their source
+   in `installers.json`. It downloads all four before replacing any local copy.
+2. Review the four scripts and `installers.json`, commit them together, and push
+   through the website's publication procedure. Signing private keys are never
+   needed; the scripts already contain their intended public trust anchors.
+3. After GitHub Pages deploys, confirm all four `https://cosyncing.com/<name>`
+   URLs return script text matching the promoted release assets. An HTML page,
+   stale version, or missing endpoint means website publication is incomplete.
+
+The website refresh is a separate step from broker promotion. Until it deploys,
+the short URLs still install the previous mirrored version. GitHub's
+`releases/latest/download/<name>` URLs remain the direct fallback. To restore
+an earlier accepted website mirror, restore all four scripts and their
+`installers.json` from the same reviewed website commit.
 
 ## Final asset inventory
 

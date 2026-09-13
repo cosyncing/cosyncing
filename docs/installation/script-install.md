@@ -1,9 +1,9 @@
 # Installing with cosyncing's own installer
 
-npm is the documented default and remains so; see [Install](../../README.md#install). This page
-documents the alternative: cosyncing publishes its own installers beside every signed release. Use them
-when you want cosyncing without Node.js and npm on the host, or when you want the release's signature
-checked before anything is placed.
+Install cosyncing with one command on Linux, Apple Silicon macOS, or Windows x64.
+The installers check the release signature and acquire Bun when needed; Node.js
+and npm are not required. If you prefer package-manager ownership, use the
+[npm installation](../../README.md#npm) instead.
 
 Each release publishes four installers, rendered from two templates in one step:
 
@@ -32,20 +32,36 @@ any kind. Before it the one-liner below had no release to resolve against.
 ## The one-liner
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/cosyncing/cosyncing/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
 ```
 
 ```powershell
-powershell -NoProfile -c "irm https://github.com/cosyncing/cosyncing/releases/latest/download/install.ps1 | iex"
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
-`releases/latest/download/<name>` uses GitHub's latest-release pointer. Broker
-promotion sets that pointer to the accepted signed broker release; client
-promotion preserves it with `--latest=false`. Installer-owned
-brokers use the signed channel; npm installations use their package manager. Swap `install.sh` for `install-server.sh` (or `install.ps1` for
-`install-server.ps1`) for the broker-only install. Where this page writes `<base>`, a specific release's
-own download base works too, and is what to use when you mean a particular version.
+The website serves unchanged copies of the accepted stable release's installers.
+Each script pins its release version, download URLs, public keys and artifact
+digests; the website copies are refreshed after every stable broker promotion.
+They do not discover a newer release by themselves.
+
+For a broker-only install, use `https://cosyncing.com/install-server.sh` or
+`https://cosyncing.com/install-server.ps1`. These place files without running setup:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install-server.sh | sh
+```
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install-server.ps1 | iex"
+```
+
+GitHub also serves the originals at
+`https://github.com/cosyncing/cosyncing/releases/latest/download/<name>`.
+Broker promotion advances that pointer; client promotion preserves it.
+For a particular version, replace `<base>` below with
+`https://github.com/cosyncing/cosyncing/releases/download/broker-v<version>`.
+Installer-owned brokers use the signed update channel; npm installations use
+their package manager.
 
 ## What the all-in-one does
 
@@ -73,7 +89,7 @@ set, where a GUI is a package nothing can start.
 ## Linux and macOS
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL <base>/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
 ```
 
 Supported hosts are Linux x64, Linux arm64, and Apple Silicon macOS. Intel macOS is refused by name.
@@ -87,7 +103,7 @@ cannot load an Ed25519 key at all. A signature that *fails* is always fatal. Onl
 ## Windows x64
 
 ```powershell
-powershell -NoProfile -c "irm <base>/install.ps1 | iex"
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
 ```
 
 Run it in an ordinary PowerShell window, as the user who will own the broker. An elevated install is

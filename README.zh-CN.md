@@ -90,8 +90,9 @@ Claude Code 在另一客户端继续使用“观察/接管”流程，OpenCode �
 
 ## 前置要求
 
-服务器需要 [Bun](https://bun.sh) 1.3.8 或更高版本来运行 cosyncing，并需要 Node.js/npm 来安装和
-更新。Broker 默认只允许本机访问。跨设备使用需要由操作者单独配置代理、隧道、VPN、Mesh 网络或
+服务器使用 [Bun](https://bun.sh) 1.3.8 或更高版本运行。一键安装脚本会按需安装 Bun；
+只有 npm 安装方式需要 Node.js/npm。Broker 默认只允许本机访问。跨设备使用需要由操作者单独
+配置代理、隧道、VPN、Mesh 网络或
 其他[连接方式](docs/connectivity/README.md)（英文）。
 私有连接可先看 [Tailscale Serve](docs/connectivity/tailscale-serve.md)；自建 Mesh 可看
 [WireGuard 或 EasyTier](docs/connectivity/wireguard-easytier.md)。运行 `cosyncing setup` 后，也可以把
@@ -112,7 +113,27 @@ Apple Silicon macOS 与 Windows x64。ARM64 Windows 尚未通过认证，Broker 
 setup 前只安装你要使用的智能体；详见[智能体安装与 PATH
 预检](docs/supported_agents/README.md#preflight)（英文）。
 
-安装当前发行版：
+一条命令安装当前发行版：
+
+Linux / Apple Silicon macOS：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
+```
+
+Windows x64 (PowerShell):
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
+```
+
+脚本会验证发行版，安装 Broker 和受支持的桌面客户端，然后交互式运行 setup 并完成客户端配对。
+无图形界面的 Linux 和 Linux arm64 只安装服务端。脚本会按需安装 Bun，无需预装 Node.js/npm。
+仅安装服务端、无人值守安装和签名通道更新请见[安装指南](docs/installation/script-install.md)（英文）。
+
+### npm
+
+如果偏好 npm，请先安装 Bun 和 Node.js/npm，再运行：
 
 ```bash
 npm install --global cosyncing
@@ -142,6 +163,8 @@ cosy setup
 ```
 
 `cosy update` 会报告这条由包管理器负责的更新路径；它不会代替用户运行 npm，也不会修改全局包。
+
+### setup 完成后
 
 `cosy pair --broker-url https://cosy.example.com` 会把客户端可访问的源地址放进一张五分钟内有效、
 一次性的配对二维码；该地址不会被持久化或探测。如果客户端已经知道 Broker 地址，可以省略此参数，

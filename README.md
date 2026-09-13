@@ -100,8 +100,9 @@ version-checked. See [supported-agent setup](docs/supported_agents/README.md) fo
 
 ## Prerequisites
 
-The server requires [Bun](https://bun.sh) 1.3.8 or newer to run cosyncing and Node.js/npm to install
-and update it. The broker is local-only by default. Cross-device use requires a proxy, tunnel, VPN,
+The server runs with [Bun](https://bun.sh) 1.3.8 or newer. The one-command installers acquire it
+when needed; only the npm installation path requires Node.js/npm. The broker is local-only by
+default. Cross-device use requires a proxy, tunnel, VPN,
 mesh network, or another [operator-owned connectivity method](docs/connectivity/README.md).
 For a simple private route, see [Tailscale Serve](docs/connectivity/tailscale-serve.md); for a
 self-managed overlay, see [WireGuard or EasyTier](docs/connectivity/wireguard-easytier.md). After
@@ -124,7 +125,29 @@ yet, and the broker refuses it — including an x64 process running under ARM64 
 Before setup, install only the agents you use; see [agent setup and PATH
 preflight](docs/supported_agents/README.md#preflight).
 
-Install the current release:
+Install the current release with one command:
+
+Linux / Apple Silicon macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
+```
+
+Windows x64 (PowerShell):
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
+```
+
+The installer verifies the release, installs the broker and a supported desktop client, then
+runs interactive setup and pairs the client. Headless Linux and Linux arm64 receive the server
+without a desktop client. Bun is acquired when needed; Node.js/npm are not required. See the
+[installer guide](docs/installation/script-install.md) for broker-only commands, unattended
+installation and signed-channel updates.
+
+### npm
+
+If you prefer npm, preinstall Bun and Node.js/npm, then install:
 
 ```bash
 npm install --global cosyncing
@@ -147,11 +170,6 @@ of it. It copies the broker to `~/.cosyncing/bin/cosyncing`, installs a user ser
 copy with your Bun, and prints your broker URL. The broker refuses to start until setup has
 committed.
 
-cosyncing also publishes its own installer beside every signed release — `install.sh` for Linux and
-macOS, `install.ps1` for Windows x64 — for hosts where you would rather not add Node.js and npm. Both
-verify the release signature before placing anything. See
-[installing with cosyncing's own installer](docs/installation/script-install.md).
-
 To update, let npm replace the global package, then re-run setup so cosyncing copies the new
 application into its managed service and reconciles the installation:
 
@@ -162,6 +180,8 @@ cosy setup
 
 `cosy update` reports this package-manager-owned update path; it does not run npm or modify the
 global package.
+
+### After setup
 
 `cosy pair --broker-url https://cosy.example.com` includes that client-reachable origin in a
 five-minute, one-use QR code. The URL is not persisted or probed. Omit the flag for an

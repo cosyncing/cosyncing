@@ -11,6 +11,13 @@ available from [GitHub Releases](https://github.com/cosyncing/cosyncing/releases
 
 ## Unreleased
 
+### Added
+
+- Short installer URLs at `cosyncing.com/install.sh` and
+  `cosyncing.com/install.ps1`, plus their `install-server` variants. The website
+  mirrors the accepted stable release's scripts; install instructions now use
+  these URLs across all five README and website languages.
+
 ## 0.5.3 — 2026-09-12
 
 ### Added
