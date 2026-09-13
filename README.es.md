@@ -101,8 +101,9 @@ Consulta la [configuración de agentes compatibles](docs/supported_agents/README
 
 ## Requisitos previos
 
-El servidor necesita [Bun](https://bun.sh) 1.3.8 o posterior para ejecutar cosyncing, y Node.js/npm
-para instalarlo y actualizarlo. El broker es local por omisión. Para usarlo entre dispositivos hace
+El servidor usa [Bun](https://bun.sh) 1.3.8 o posterior. Los instaladores de un solo comando lo
+instalan cuando hace falta; solo la instalación mediante npm requiere Node.js/npm.
+El broker es local por omisión. Para usarlo entre dispositivos hace
 falta un proxy, un túnel, una VPN, una red mallada u otro
 [método de conectividad gestionado por ti](docs/connectivity/README.md). Para una ruta privada
 sencilla, mira [Tailscale Serve](docs/connectivity/tailscale-serve.md); para una red superpuesta que
@@ -125,7 +126,29 @@ está homologado y el broker lo rechaza, incluido un proceso x64 emulado sobre A
 Antes de configurar, instala solo los agentes que uses; consulta
 [configuración de agentes y comprobación del PATH](docs/supported_agents/README.md#preflight).
 
-Instala la versión actual:
+Instala la versión actual con un solo comando:
+
+Linux / macOS con Apple Silicon:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
+```
+
+Windows x64 (PowerShell):
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
+```
+
+El instalador verifica la versión, instala el broker y un cliente de escritorio compatible,
+y después ejecuta la configuración interactiva y empareja el cliente. Linux sin entorno gráfico
+y Linux arm64 reciben solo el servidor. Bun se instala si hace falta; no se requiere Node.js/npm.
+Consulta la [guía del instalador](docs/installation/script-install.md) para instalar solo el servidor,
+realizar una instalación desatendida o actualizar mediante el canal firmado.
+
+### npm
+
+Si prefieres npm, instala primero Bun y Node.js/npm y después ejecuta:
 
 ```bash
 npm install --global cosyncing
@@ -158,6 +181,8 @@ cosy setup
 
 `cosy update` informa de esta vía de actualización, que pertenece al gestor de paquetes; no ejecuta
 npm ni modifica el paquete global.
+
+### Después de configurar
 
 `cosy pair --broker-url https://cosy.example.com` incluye ese origen accesible por el cliente en un
 código QR de un solo uso válido cinco minutos. La URL no se guarda ni se comprueba. Omite el

@@ -32,8 +32,7 @@ x64, so the broker asks Windows what the underlying machine is.
 You can skip preinstalling Bun when using the signed-release
 [cosyncing installers](script-install.md). Both shell and PowerShell templates
 reuse a suitable Bun or download a digest-pinned runtime directly from upstream.
-The native-free release path must be published before the live one-liner acquires
-it. Bun is installed separately; its runtime is not a cosyncing release asset.
+Bun is installed separately; its runtime is not a cosyncing release asset.
 
 Open a new login shell, then verify the selected executable:
 

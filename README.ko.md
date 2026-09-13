@@ -98,8 +98,9 @@ Broker가 소유한 `agy` 자식 프로세스를 통해 조작합니다. 두 클
 
 ## 사전 요구 사항
 
-서버를 실행하려면 [Bun](https://bun.sh) 1.3.8 이상이 필요하고, 설치와 업데이트에는 Node.js/npm을
-사용합니다. Broker는 기본적으로 로컬 전용입니다. 여러 기기에서 쓰려면 프록시, 터널, VPN, 메시
+서버는 [Bun](https://bun.sh) 1.3.8 이상으로 실행됩니다. 한 줄 설치 스크립트가 필요할 때 Bun을
+설치합니다. Node.js/npm은 npm 설치 방식을 선택할 때만 필요합니다.
+Broker는 기본적으로 로컬 전용입니다. 여러 기기에서 쓰려면 프록시, 터널, VPN, 메시
 네트워크 등 [운영자가 관리하는 연결 방법](docs/connectivity/README.md)이 필요합니다. 간단한 사설
 경로로는 [Tailscale Serve](docs/connectivity/tailscale-serve.md)를, 직접 운영하는 오버레이로는
 [WireGuard 또는 EasyTier](docs/connectivity/wireguard-easytier.md)를 참고하세요. `cosyncing setup`
@@ -122,7 +123,28 @@ Linux와 macOS 명령, WSL 관련 참고 사항, Tokdash 설정은
 설정 전에 실제로 쓰는 에이전트만 설치하세요.
 [에이전트 설정과 PATH 사전 점검](docs/supported_agents/README.md#preflight)을 참고하세요.
 
-현재 릴리스를 설치합니다:
+명령 한 줄로 현재 릴리스를 설치합니다:
+
+Linux / Apple Silicon macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
+```
+
+Windows x64 (PowerShell):
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
+```
+
+설치 스크립트는 릴리스를 검증하고 Broker와 지원되는 데스크톱 클라이언트를 설치한 다음,
+대화형 setup과 클라이언트 페어링을 진행합니다. GUI가 없는 Linux와 Linux arm64에는 서버만
+설치합니다. 필요할 때 Bun을 설치하므로 Node.js/npm을 미리 설치할 필요가 없습니다.
+서버만 설치하기, 무인 설치, 서명된 업데이트는 [설치 안내](docs/installation/script-install.md)를 참고하세요.
+
+### npm
+
+npm을 선호한다면 Bun과 Node.js/npm을 먼저 설치한 다음 실행하세요:
 
 ```bash
 npm install --global cosyncing
@@ -155,6 +177,8 @@ cosy setup
 
 `cosy update`는 이 패키지 관리자 기반 업데이트 절차를 안내할 뿐, npm을 실행하거나 전역 패키지를
 바꾸지 않습니다.
+
+### 설정 후
 
 `cosy pair --broker-url https://cosy.example.com`은 클라이언트가 접근할 수 있는 해당 주소를 5분간
 유효한 일회용 QR 코드에 포함합니다. 이 URL은 저장되지도, 접속 확인이 이뤄지지도 않습니다.

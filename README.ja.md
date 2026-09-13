@@ -101,8 +101,9 @@ Claude Code のセッションは引き継ぐまで読み取り専用で開き�
 
 ## 前提条件
 
-サーバーの実行には [Bun](https://bun.sh) 1.3.8 以降が必要で、インストールと更新には Node.js/npm を
-使います。Broker は既定でローカル専用です。複数端末で使うには、プロキシ、トンネル、VPN、
+サーバーは [Bun](https://bun.sh) 1.3.8 以降で動作します。ワンコマンドインストーラーが必要に応じて
+Bun を導入します。Node.js/npm が必要なのは npm でインストールする場合だけです。
+Broker は既定でローカル専用です。複数端末で使うには、プロキシ、トンネル、VPN、
 メッシュネットワーク、その他の
 [運用者が管理する接続方法](docs/connectivity/README.md) が必要です。手軽なプライベート経路には
 [Tailscale Serve](docs/connectivity/tailscale-serve.md)、自前のオーバーレイには
@@ -126,7 +127,28 @@ ARM64 の Windows はまだ認定されておらず、Broker は実行を拒否�
 セットアップの前に、使うエージェントだけをインストールしてください。
 [エージェントのセットアップと PATH の事前確認](docs/supported_agents/README.md#preflight) を参照。
 
-現在のリリースをインストールします:
+現在のリリースをコマンド 1 つでインストールします:
+
+Linux / Apple Silicon macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://cosyncing.com/install.sh | sh
+```
+
+Windows x64 (PowerShell):
+
+```powershell
+powershell -NoProfile -c "irm https://cosyncing.com/install.ps1 | iex"
+```
+
+インストーラーはリリースを検証し、Broker と対応するデスクトップクライアントを導入してから、
+対話式の setup とクライアントのペアリングを行います。ヘッドレス Linux と Linux arm64 には
+サーバーのみを導入します。Bun は必要に応じて取得するため、Node.js/npm の事前導入は不要です。
+サーバーのみの導入、非対話インストール、署名付き更新は[インストールガイド](docs/installation/script-install.md)を参照してください。
+
+### npm
+
+npm を使う場合は、Bun と Node.js/npm を先に導入してから実行します:
 
 ```bash
 npm install --global cosyncing
@@ -159,6 +181,8 @@ cosy setup
 
 `cosy update` は、このパッケージマネージャー主導の更新手順を案内するだけです。npm を実行したり
 グローバルパッケージを変更したりはしません。
+
+### セットアップ後
 
 `cosy pair --broker-url https://cosy.example.com` は、クライアントから到達できるそのオリジンを、
 5 分間有効・1 回限りの QR コードに含めます。この URL は保存も疎通確認もされません。クライアントが
